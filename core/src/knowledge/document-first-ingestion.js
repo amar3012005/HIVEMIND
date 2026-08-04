@@ -3039,18 +3039,44 @@ Every item must include a non-empty content field and one or more valid support_
             //   "3.2 Method"  -> level 2 (dot depth)   |   "INTRODUCTION" -> level 1
             // Guarded: short line, no terminal period, at least one letter run.
             if (!heading) {
-              for (const raw of text.split('\n').slice(0, 4)) {
+              const _lines = text.split('\n');
+              // Window widened 4 -> 8: on fast-pdf output a page marker and blank lines often
+              // precede the heading, so a 4-line window missed it entirely.
+              for (let _li = 0; _li < Math.min(_lines.length, 8); _li += 1) {
+                const raw = _lines[_li];
                 const line = raw.trim();
-                if (!line || line.length > 90 || /[.:;,]$/.test(line) || !/\p{L}{3}/u.test(line)) continue;
+                if (!line || line.length > 90 || /[.;,]$/.test(line) || !/\p{L}{3}/u.test(line)) continue;
+                // A trailing colon is a heading marker ("Zusammenfassung:"), not a disqualifier —
+                // the old guard rejected it along with sentence punctuation. Strip it and continue.
+                const _bare = line.replace(/:$/, '').trim();
+                if (!_bare || !/\p{L}{3}/u.test(_bare)) continue;
                 const numbered = line.match(/^(\d+(?:\.\d+)*)[.)]?\s+(\p{Lu}[^\n]{2,80})$/u);
                 if (numbered) {
                   heading = line.slice(0, 500);
                   level = numbered[1].split('.').length;
                   break;
                 }
-                const letters = line.replace(/[^\p{L}]/gu, '');
-                if (letters.length >= 6 && letters === letters.toUpperCase() && line.split(/\s+/).length <= 9) {
-                  heading = line.slice(0, 500); level = 1; break;
+                const letters = _bare.replace(/[^\p{L}]/gu, '');
+                if (letters.length >= 6 && letters === letters.toUpperCase() && _bare.split(/\s+/).length <= 9) {
+                  heading = _bare.slice(0, 500); level = 1; break;
+                }
+                // TITLE CASE / ISOLATED SHORT LINE — the style most real documents actually use
+                // ("Executive Summary", "Marktumfeld und Wettbewerb"). Neither numbered nor ALL-CAPS,
+                // so both tiers above miss it, which is why corpus coverage sat at 993/3744 (27%).
+                // The discriminator is STRUCTURAL, not lexical: a heading is isolated — the next line
+                // is blank (or it is the last line). A sentence of similar length is not. That keeps
+                // the rule deterministic and avoids treating ordinary short sentences as headings.
+                const _next = (_lines[_li + 1] ?? '').trim();
+                const _isolated = _next === '' || _li === _lines.length - 1;
+                if (_isolated && _bare.length <= 80) {
+                  const words = _bare.split(/\s+/).filter(Boolean);
+                  const capped = words.filter((w) => /^[\p{Lu}\d]/u.test(w)).length;
+                  // >=60% of words start capitalised (or one long capitalised word), and it does not
+                  // read as a sentence fragment (no lowercase-only opener).
+                  if (words.length >= 1 && words.length <= 12 && capped / words.length >= 0.6
+                      && /^\p{Lu}/u.test(_bare)) {
+                    heading = _bare.slice(0, 500); level = 2; break;
+                  }
                 }
               }
             }

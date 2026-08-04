@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveWorkResultTodo } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo } from '../../src/hq-runtime/native-engine.js';
+
+test('first-life admin check-in always declares its immutable playbook identity', () => {
+  assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
+    id: 'operations.browser-admin-checkin-to-status',
+    version: 1,
+  });
+});
 
 test('HQ work-result reconciliation never reads a missing work order or result', () => {
   assert.equal(resolveWorkResultTodo({ order: null, result: null }), null);

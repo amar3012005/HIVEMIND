@@ -86,6 +86,31 @@ function statusArtifact(context, key, campaign, extra = {}) {
   };
 }
 
+function campaignActivityMarker(campaign, launch) {
+  const actions = asArray(campaign?.actions).map((action) => ({
+    id: action.id,
+    channel: action.channel,
+    status: action.status,
+    scheduled_at: action.scheduledAt || action.scheduled_at || null,
+    payload: asObject(action.payload),
+    assets: asArray(action.assets).map((asset) => ({
+      id: asset.id,
+      status: asset.status,
+      kind: asset.kind,
+      content_url: asset.content_url || null,
+      metadata: asObject(asset.metadata),
+    })),
+  }));
+  return {
+    id: `campaign-launch:${campaign.id}:${launch.approval_id}`,
+    kind: 'campaign_launch',
+    headline: 'Campaign launch scheduled',
+    note: `${actions.length} verified action${actions.length === 1 ? '' : 's'} entered the governed campaign schedule.`,
+    occurred_at: launch.launched_at || new Date().toISOString(),
+    campaign: { id: campaign.id, name: campaign.name, status: campaign.status, actions },
+  };
+}
+
 export function createCampaignRuntimeAdapter({ prisma } = {}) {
   if (!prisma) throw new Error('runtime_campaign_prisma_required');
   return {
@@ -143,7 +168,14 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
         try {
           const launched = await approveCampaign({ prisma, orgId: context.orgId, userId, id });
           const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
-          return { artifacts: [statusArtifact(context, 'campaign_launch_status', campaign, { outcome: 'launched', approval_id: launched.approval.id, action_count: launched.launch.action_count })] };
+          const launch = {
+            outcome: 'launched', approval_id: launched.approval.id,
+            action_count: launched.launch.action_count, launched_at: launched.launch.launched_at,
+          };
+          return { artifacts: [statusArtifact(context, 'campaign_launch_status', campaign, {
+            ...launch,
+            activity_marker: campaignActivityMarker(campaign, launch),
+          })] };
         } catch (error) {
           const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
           return { artifacts: [statusArtifact(context, 'campaign_launch_status', campaign, { outcome: 'blocked', reason: String(error?.message || error).slice(0, 1000) })], warnings: [String(error?.message || error)] };

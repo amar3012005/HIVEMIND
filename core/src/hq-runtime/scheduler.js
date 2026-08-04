@@ -141,6 +141,11 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
       const trigger = run.trigger && typeof run.trigger === 'object' ? run.trigger : {};
       if (!trigger.runtime_id || !trigger.runtime_epoch) return;
       const accepted = artifactCountSummary(artifacts);
+      const activityMarkers = (artifacts || []).flatMap((artifact) => {
+        const single = artifact?.data?.activity_marker;
+        const many = artifact?.data?.activity_markers;
+        return [...(single && typeof single === 'object' ? [single] : []), ...(Array.isArray(many) ? many : [])];
+      });
       await appendHqEvent({
         prisma,
         runtimeId: trigger.runtime_id,
@@ -164,6 +169,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
           phase,
           artifact_refs: (artifacts || []).map((artifact) => artifact.id),
           artifact_counts: accepted.counts,
+          activity_markers: activityMarkers,
           verdict: verdict || null,
         },
         evidenceRefs: (artifacts || []).map((artifact) => artifact.id),

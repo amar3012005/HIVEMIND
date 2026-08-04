@@ -73,6 +73,8 @@ test('Gmail adapter verifies drafts, sends once, records runtime correlation, an
   assert.equal(inserts.length, 1);
   assert.equal(JSON.parse(inserts[0].at(-1)).runtime_playbook_run_id, 'run-1');
   assert.equal(first.artifacts[0].data.correlation_ref, 'thread-1');
+  assert.equal(first.artifacts[0].data.activity_marker.kind, 'email_sent');
+  assert.equal(first.artifacts[0].data.activity_marker.message.to, 'lead@example.test');
   assert.equal(second.artifacts[0].data.provider_receipt_id, 'message-1');
   const monitored = await adapter.monitor({ inputs: { 'artifacts.delivery_receipt': first.artifacts } }, context());
   assert.equal(monitored.artifacts[0].data.subscription_ref, 'gmail-thread:thread-1');
@@ -145,6 +147,8 @@ test('TARA Outreach adapter starts one exact authorized call and retains its pro
   assert.equal(result.artifacts[0].data.input_ref, contract.id);
   assert.equal(result.artifacts[0].data.provider_receipt_id, 'call-leg-1');
   assert.equal(result.artifacts[0].data.correlation_ref, 'session-1');
+  assert.equal(result.artifacts[0].data.activity_marker.kind, 'call_started');
+  assert.equal(result.artifacts[0].data.activity_marker.call.phone, '+49123456789');
   const monitored = await adapter.monitor({
     config: { input_key: 'call_receipt', output_key: 'call_subscription' },
     inputs: { 'artifacts.call_receipt': result.artifacts },

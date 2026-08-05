@@ -264,6 +264,52 @@ function durableEntities(entities) {
     .slice(0, 8);
 }
 
+// Build a regex that matches `quote` inside the section tolerant of the
+// formatting drift a model introduces while copying verbatim — the dominant one,
+// measured on real German uploads, being a hard line-wrap re-rendered as a space
+// ("...klein und\nergänzt..." vs "...klein und ergänzt..."). Byte-exact
+// `content.includes(quote)` returns false on that pair and the fact was dropped
+// with no log line. This tolerates whitespace runs (\s+) and the interchangeable
+// Unicode dash/quote variants; it can only MERGE characters that already exist,
+// never invent a match, so an ungrounded (hallucinated) quote still fails to
+// match and is still rejected — the grounding guarantee is intact.
+function driftTolerantQuotePattern(quote) {
+  const DASH = '[-\\u2010-\\u2015\\u2212]';
+  const SQUOTE = "['\\u2018\\u2019\\u201A\\u201B\\u2032]";
+  const DQUOTE = '["\\u201C\\u201D\\u201E\\u201F\\u2033]';
+  let out = '';
+  let inWs = false;
+  for (const ch of String(quote)) {
+    if (/\s/u.test(ch)) { if (!inWs) { out += '\\s+'; inWs = true; } continue; }
+    inWs = false;
+    if (ch === '­') continue; // soft hyphen: strip
+    if (/[-‐-―−]/u.test(ch)) out += DASH;
+    else if (/['‘’‚‛′]/u.test(ch)) out += SQUOTE;
+    else if (/["“”„‟″]/u.test(ch)) out += DQUOTE;
+    else out += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return out;
+}
+
+// Locate a model source_quote inside the section. Returns { start, quote } where
+// `start` is the RAW offset into `content` and `quote` is the ACTUAL bytes at that
+// span (so citations point at real document text, not the model's re-wrapped copy),
+// or { start: -1 } when the quote is genuinely absent (ungrounded → drop it).
+export function locateSourceQuote(content, quote) {
+  if (typeof content !== 'string' || typeof quote !== 'string') return { start: -1, quote };
+  const exact = content.indexOf(quote);
+  if (exact !== -1) return { start: exact, quote }; // fast path, no repair needed
+  let pattern;
+  try { pattern = driftTolerantQuotePattern(quote); } catch { return { start: -1, quote }; }
+  if (!pattern || pattern.length < 4) return { start: -1, quote };
+  let match = null;
+  try { match = new RegExp(pattern, 'iu').exec(content); } catch { return { start: -1, quote }; }
+  if (match && typeof match.index === 'number' && match[0]) {
+    return { start: match.index, quote: match[0] }; // repair to real bytes from the section
+  }
+  return { start: -1, quote };
+}
+
 export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportance = 0) {
   const threshold = Number.isFinite(Number(minImportance))
     ? Math.max(0, Math.min(1, Number(minImportance)))
@@ -274,32 +320,45 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
       ? Math.max(0.1, Math.min(1, Number(rated.toFixed(3))))
       : 0.55;
   };
-  return (Array.isArray(rawFacts) ? rawFacts : [])
-    .filter((item) => item && typeof item.f === 'string' && item.f.trim().length >= 4
-      && DURABLE_EXTRACT_TYPES.includes(item.memory_type)
-      && typeof item.source_quote === 'string' && item.source_quote.length >= 4
-      && content.includes(item.source_quote)
-      && !isStructuredSourceNoise(item.f)
-      && !isStructuredSourceNoise(item.source_quote)
-      // The source remains recallable even when its claim is not durable enough.
-      && normalizedImportance(item.importance) >= threshold)
-    .slice(0, maxFacts)
-    .map((item) => {
-      const start = content.indexOf(item.source_quote);
-      const rated = Number(item.importance);
-      return {
-        t: durableTitle(item.t, item.f),
-        f: item.f.trim(),
-        memory_type: item.memory_type,
-        source_quote: item.source_quote,
-        source_start: start,
-        source_end: start + item.source_quote.length,
-        importance: normalizedImportance(rated),
-        entities: durableEntities(item.entities),
-        rels: (Array.isArray(item.rels) ? item.rels : [])
-          .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
-      };
+  const arr = Array.isArray(rawFacts) ? rawFacts : [];
+  // Per-condition drop counters. The old single AND-ed .filter() dropped facts
+  // with no record of WHICH condition fired — "0 facts" had seven silent causes.
+  // Name the cause so a future zero-fact window is diagnosable from one log line.
+  const drop = { shape: 0, type: 0, short_quote: 0, quote_absent: 0, noise: 0, low_importance: 0 };
+  let repaired = 0;
+  const out = [];
+  for (const item of arr) {
+    if (out.length >= maxFacts) break;
+    if (!item || typeof item.f !== 'string' || item.f.trim().length < 4) { drop.shape += 1; continue; }
+    if (!DURABLE_EXTRACT_TYPES.includes(item.memory_type)) { drop.type += 1; continue; }
+    if (typeof item.source_quote !== 'string' || item.source_quote.length < 4) { drop.short_quote += 1; continue; }
+    if (isStructuredSourceNoise(item.f) || isStructuredSourceNoise(item.source_quote)) { drop.noise += 1; continue; }
+    const loc = locateSourceQuote(content, item.source_quote);
+    if (loc.start === -1) { drop.quote_absent += 1; continue; } // ungrounded → reject (anti-hallucination)
+    if (loc.quote !== item.source_quote) repaired += 1;
+    // The source remains recallable even when its claim is not durable enough.
+    if (normalizedImportance(item.importance) < threshold) { drop.low_importance += 1; continue; }
+    out.push({
+      t: durableTitle(item.t, item.f),
+      f: item.f.trim(),
+      memory_type: item.memory_type,
+      source_quote: loc.quote,
+      source_start: loc.start,
+      source_end: loc.start + loc.quote.length,
+      importance: normalizedImportance(Number(item.importance)),
+      entities: durableEntities(item.entities),
+      rels: (Array.isArray(item.rels) ? item.rels : [])
+        .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
     });
+  }
+  const dropped = arr.length - out.length;
+  if (dropped > 0 || repaired > 0) {
+    console.log(`[kb-normalize] in=${arr.length} kept=${out.length} repaired=${repaired} `
+      + `dropped=${dropped}{quote_absent:${drop.quote_absent} type:${drop.type} `
+      + `short_quote:${drop.short_quote} noise:${drop.noise} shape:${drop.shape} `
+      + `low_importance:${drop.low_importance}}`);
+  }
+  return out;
 }
 
 export function resolveEvidenceSegment(sourceQuote, segments, fallbackId = null) {

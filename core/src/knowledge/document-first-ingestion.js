@@ -4267,6 +4267,7 @@ Every item must include a non-empty content field and one or more valid support_
         console.log(`[kb-promote-timing] extract=${_msExtract}ms curate=${_msCurate}ms `
           + `windows=${uWindows.length} conc=${uConc} candidates=${extractedCandidates.length} curated=${curated.length}`);
         const uFacts = [];
+        let _docRelWritten = 0; // P5 coverage: doc-level relationship edges written
         const extraEvidenceLinks = [];
         // Persist with BOUNDED CONCURRENCY. This loop was sequential — 27 claims x
         // (embed + entity pass + writes) = promote 325s of a 398s ingest.
@@ -4369,15 +4370,29 @@ Every item must include a non-empty content field and one or more valid support_
         if (uFacts.length >= 2 && String(process.env.KB_DOC_RELATIONS ?? 'true').toLowerCase() !== 'false') {
           try {
             const _relList = uFacts.map((m, idx) => `${idx}: ${String(m.content || '').slice(0, 200)}`).join('\n');
-            const _relParsed = await chatCompletionWithFallback({
-              models: [process.env.KB_UNIFIED_MODEL || 'deepseek/deepseek-v4-flash-0731',
-                ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean)],
-              temperature: 0, max_tokens: llmProfile('kb-doc-relations').maxTokens, json_mode: true, feature: 'kb-doc-relations',
-              messages: [
-                { role: 'system', content: 'You link facts extracted from ONE document. Given numbered facts, output JSON {"edges":[{"from":<idx>,"to":<idx>,"type":"Updates"|"Extends"|"Contradicts"|"Derives"}]}. Updates: from REPLACES to (newer value of the same attribute). Extends: from adds detail to to. Contradicts: they cannot both hold. Derives: from is an inference implied by to. Only edges you are CONFIDENT of — an empty list is a good answer. Never invent facts.' },
-                { role: 'user', content: `Document: ${docTitle}\nFacts:\n${_relList}` },
-              ],
-            });
+            // P5 explicit retry: the relations proposer is the one relationship
+            // pass with no retry — a transient LLM/provider hiccup dropped ALL
+            // doc-level edges (only the intra-window PartOf survived). Retry once
+            // before giving up; chatCompletionWithFallback still rotates models
+            // within each attempt.
+            let _relParsed = null;
+            for (let _relTry = 0; _relTry < 2; _relTry += 1) {
+              try {
+                _relParsed = await chatCompletionWithFallback({
+                  models: [process.env.KB_UNIFIED_MODEL || 'deepseek/deepseek-v4-flash-0731',
+                    ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean)],
+                  temperature: 0, max_tokens: llmProfile('kb-doc-relations').maxTokens, json_mode: true, feature: 'kb-doc-relations',
+                  messages: [
+                    { role: 'system', content: 'You link facts extracted from ONE document. Given numbered facts, output JSON {"edges":[{"from":<idx>,"to":<idx>,"type":"Updates"|"Extends"|"Contradicts"|"Derives"}]}. Updates: from REPLACES to (newer value of the same attribute). Extends: from adds detail to to. Contradicts: they cannot both hold. Derives: from is an inference implied by to. Only edges you are CONFIDENT of — an empty list is a good answer. Never invent facts.' },
+                    { role: 'user', content: `Document: ${docTitle}\nFacts:\n${_relList}` },
+                  ],
+                });
+                break;
+              } catch (e) {
+                if (_relTry === 1) throw e;
+                console.warn(`[kb-relations] proposer transient failure — retrying once: ${e.message}`);
+              }
+            }
             const _edges = (Array.isArray(_relParsed?.edges) ? _relParsed.edges : [])
               .filter((e) => Number.isInteger(e?.from) && Number.isInteger(e?.to)
                 && e.from !== e.to && uFacts[e.from] && uFacts[e.to]
@@ -4395,6 +4410,7 @@ Every item must include a non-empty content field and one or more valid support_
                 _written += 1;
               } catch { /* dup/FK tolerated */ }
             }
+            _docRelWritten = _written;
             console.log(`[kb-relations] doc=${String(documentId).slice(0, 8)} facts=${uFacts.length} proposed=${Array.isArray(_relParsed?.edges) ? _relParsed.edges.length : 0} valid=${_edges.length} written=${_written}`);
           } catch (error) {
             console.warn(`[kb-relations] 5b pass failed (non-fatal): ${error.message}`);
@@ -4523,7 +4539,7 @@ Every item must include a non-empty content field and one or more valid support_
               + `check parse tier, segment count, and the curator cap`);
           }
         } catch { /* observability must never break ingest */ }
-        return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent, coverage: curated._coverage || null };
+        return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent, coverage: { ...(curated._coverage || {}), relations_written: _docRelWritten, memories_promoted: uFacts.length } };
       }
 
       let factObjs = [];

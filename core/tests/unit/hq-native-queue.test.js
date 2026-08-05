@@ -13,7 +13,7 @@ test('HQ dispatch cannot bypass the checkpointed playbook executor', async () =>
 test('authority decisions are resolved only from playbook data and organization policy', () => {
   const stage = { authority_gate: 'opaque-gate', authority_policy_key: 'opaque-policy' };
   assert.deepEqual(resolveAuthorityDecision(stage, { gate_overrides: { 'opaque-policy': 'manual' } }), {
-    gate: 'opaque-gate', policyKey: 'opaque-policy', preference: 'manual', autoGrant: false,
+    gate: 'opaque-gate', policyKey: 'opaque-policy', preference: 'manual', autoGrant: false, manualOnly: false,
   });
   assert.equal(resolveAuthorityDecision(stage, { gate_overrides: { 'opaque-policy': 'auto' } }).autoGrant, true);
   assert.equal(resolveAuthorityDecision({}, { gate_overrides: { 'opaque-policy': 'auto' } }).autoGrant, false);

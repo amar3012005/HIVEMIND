@@ -425,6 +425,34 @@ function payloadOf(org, rec) {
 // Map preserves insertion order; re-inserting on access implements LRU eviction (evict oldest key).
 const ctxCache = new Map();
 
+/**
+ * Compact every shard that is ALREADY OPEN in this process (Phase A maintenance).
+ *
+ * Deliberately does not open a shard just to compact it: opening takes the per-open
+ * shard lock and would collide with live traffic for no benefit — a slot nobody has
+ * touched is not accruing garbage. Callers sweep periodically; whatever is hot gets
+ * compacted, the rest waits until it is next opened.
+ *
+ * @param {(orgId:string)=>boolean} [allow] optional per-org gate (e.g. "only if snapshotted")
+ * @returns {{attempted:number,compacted:number,failed:number,reclaimed:number}}
+ */
+export function compactOpenShards(allow = null) {
+  const out = { attempted: 0, compacted: 0, failed: 0, reclaimed: 0 };
+  for (const [orgId, ctx] of ctxCache) {
+    if (!ctx?.amr || typeof ctx.amr.compact !== 'function') continue;
+    if (allow && !allow(orgId)) continue;
+    out.attempted += 1;
+    try {
+      out.reclaimed += ctx.amr.compact() || 0;
+      out.compacted += 1;
+    } catch (e) {
+      out.failed += 1;
+      console.warn(`[shard-compact] org=${String(orgId).slice(0, 8)} failed: ${e.message}`);
+    }
+  }
+  return out;
+}
+
 // SINGLE-FLIGHT, keyed by org. The shard lock is per-OPEN, not per-process, so two
 // `MnemeStore.open()` calls for the same shard collide even inside ONE process — and the loser
 // reports "shard is locked by another process", which reads like a competing container and is not.

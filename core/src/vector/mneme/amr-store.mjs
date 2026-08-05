@@ -79,6 +79,25 @@ export class AmrMemoryStore {
 
   liveCount() { return this.store.liveCount(); }
 
+  /**
+   * Reclaim dead bytes in the slot (Phase A). The native engine is append-only:
+   * deletes tombstone and `rewriteText` appends a new text blob, so `.txt`/`.edg`
+   * grow forever. `compact()` exists in the Rust core but had ZERO call sites —
+   * measured consequence: 4.2 MB of `shard.vec` for 11 live memories.
+   *
+   * SAFETY: flush first so nothing in flight is lost, and drop the derived caches
+   * afterwards — compaction rewrites the slot, so cached slot ids (the reverse-edge
+   * index and the edge tally) can no longer be trusted and must be rebuilt lazily.
+   * @returns {number} value reported by the engine (bytes reclaimed)
+   */
+  compact() {
+    this.store.flush();
+    const reclaimed = this.store.compact();
+    this._revEdges = null;
+    this._edgeCount = null;
+    return Number(reclaimed) || 0;
+  }
+
   // ── point reads ─────────────────────────────────────────────────────────────────────────────
   _recAt(slot) {
     try { return JSON.parse(this.store.slotText(slot)); } catch { return null; }

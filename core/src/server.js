@@ -24217,6 +24217,32 @@ if (shouldStartHttpServer()) {
     setTimeout(_runReconcile, 90000).unref(); // first pass ~90s post-boot (after warm-up)
     console.log(`[embed-reconciler] drift-guard worker mounted (every ${_reconEveryMs / 60000}min, full sweep every 20 ticks)`);
   }
+
+  // `.amr` shard maintenance (ICARUS Phase A). The shard is the SOLE copy of an
+  // org's memories and NOTHING backed it up — a dead box meant that org's memory
+  // was gone for good. It also never ran the engine's own compact(), so append-only
+  // growth was unbounded (measured: 4.2 MB of shard.vec for 11 live memories).
+  // Snapshot ALWAYS precedes compaction, and only slots snapshotted in the same
+  // pass are compacted — compaction rewrites data, so it never touches an unbacked
+  // slot. Backup defaults ON; compaction is OPT-IN (MNEME_COMPACT_ENABLED).
+  if (String(process.env.MNEME_MAINTENANCE_ENABLED ?? 'true').toLowerCase() !== 'false') {
+    const _maintEveryMs = Math.max(300000, Number(process.env.MNEME_MAINTENANCE_INTERVAL_MS || 60 * 60 * 1000));
+    let _maintBusy = false;
+    const _runMaint = async () => {
+      if (_maintBusy) return; // no overlap — a long sweep skips the next tick
+      _maintBusy = true;
+      try {
+        const { runShardMaintenanceOnce } = await import('./vector/mneme/shard-maintenance.js');
+        await runShardMaintenanceOnce({});
+      } catch (e) {
+        console.warn('[shard-maintenance] tick failed:', e?.message?.slice(0, 160));
+      } finally { _maintBusy = false; }
+    };
+    setInterval(_runMaint, _maintEveryMs).unref();
+    setTimeout(_runMaint, 120000).unref(); // first pass ~2min post-boot
+    console.log(`[shard-maintenance] worker mounted (every ${_maintEveryMs / 60000}min, `
+      + `backup=${process.env.MNEME_BACKUP_ENABLED ?? 'true'} compact=${process.env.MNEME_COMPACT_ENABLED ?? 'false'})`);
+  }
   });
 } else {
   console.log(`[runtime] HTTP server disabled for role=${RUNTIME_ROLE}`);

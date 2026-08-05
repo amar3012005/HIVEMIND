@@ -214,8 +214,23 @@ export async function remoteKbDoc(orgId, doc) {
   catch (e) { console.warn(`[mneme/remote] kb-doc failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteKbSegment(orgId, segment, vector) {
-  try { const out = await _call(orgId, '/v1/kb-segment', { segment, vector }); return out?.ok ? true : null; }
-  catch (e) { console.warn(`[mneme/remote] kb-segment failed org=${orgId}: ${e.message}`); return null; }
+  // Retry transient aborts/timeouts. Under a 4-parallel batch the embed provider
+  // saturates (measured: 29.8s embeds → the segment write to the agent exceeds
+  // TIMEOUT_MS → "This operation was aborted") and the segment was dropped with
+  // NO reconciler backstop — evidence silently missing. The agent upserts a
+  // segment by its stable id, so a retry is idempotent (no duplicate rows).
+  const attempts = Math.max(1, Number(process.env.KB_SEGMENT_WRITE_ATTEMPTS || 3));
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const out = await _call(orgId, '/v1/kb-segment', { segment, vector });
+      if (out?.ok) return true;
+      lastErr = new Error('agent returned ok=false');
+    } catch (e) { lastErr = e; }
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+  }
+  console.warn(`[mneme/remote] kb-segment failed org=${orgId} after ${attempts} attempts: ${lastErr?.message}`);
+  return null;
 }
 export async function remoteKbRecall(orgId, vector, opts = {}) {
   // Return NULL on failure, [] on a genuine empty. Returning [] for both made a DEAD AGENT

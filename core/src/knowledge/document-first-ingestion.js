@@ -2201,11 +2201,16 @@ Every item must include a non-empty content field and one or more valid support_
               || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731'],
             temperature: 0.2, max_tokens: llmProfile('kb-doc-summary').maxTokens, feature: 'kb-doc-summary',
             messages: [
-              { role: 'system', content: 'Write ONE self-contained paragraph stating what this document establishes. '
-                + 'Use only the supplied facts. Name the subjects explicitly — never "the document", "this file", '
-                + 'a filename, or a count of memories. Preserve figures, units, dates and proper nouns verbatim. '
-                + 'Where the facts enumerate a set (supported brands, covered regions, required steps), keep the '
-                + 'FULL enumeration in one sentence rather than naming one example. No preamble, no markdown.' },
+              { role: 'system', content: 'Write ONE self-contained paragraph, in the SAME LANGUAGE as the supplied '
+                + 'facts, stating what those facts establish. Use ONLY the supplied facts — do not add, infer, or '
+                + 'TRANSLATE (a German fact stays German). Name the real subjects that appear in the facts (people, '
+                + 'organisations, products, places). NEVER invent an umbrella subject out of the document title or '
+                + 'filename: do not write "the <Title> project/initiative/document establishes…" when no such named '
+                + 'entity appears in the facts — state what the facts say directly. Forbidden openers: "the document", '
+                + '"this file", a filename, a document title, or a count of memories. Preserve figures, units, dates '
+                + 'and proper nouns verbatim — never re-spell a name or reformat a number. Where the facts enumerate '
+                + 'a set (supported brands, covered regions, required steps), keep the FULL enumeration in one '
+                + 'sentence rather than naming one example. No preamble, no markdown.' },
               { role: 'user', content: childFacts.slice(0, 30).join('\n') },
             ],
           });

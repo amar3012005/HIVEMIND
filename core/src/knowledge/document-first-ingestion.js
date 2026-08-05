@@ -84,8 +84,13 @@ export const LLM_PROFILES = {
   'kb-document-curator':  { envModel: 'KB_UNIFIED_MODEL',         maxTokens: 4000 },
   'kb-doc-summary':       { envModel: 'KB_UNIFIED_MODEL',         maxTokens: 900 },
   'kb-doc-relations':     { envModel: 'KB_UNIFIED_MODEL',         maxTokens: 2000 },
-  // Output scales with the batch: ~220 tokens per {subject, predicate, qualifiers} plus headroom.
-  'v5-claim-structuring': { envModel: 'CLAIM_STRUCTURING_MODEL',  maxTokens: (n) => Math.min(8000, 400 + (n || 1) * 220) },
+  // Output scales with the batch. Sized for the MOST VERBOSE plausible model, never the
+  // current one: measured live, deepseek needs ~300-350 tokens/claim (gpt-oss ~155), so
+  // 400 + n*220 truncated EVERY deepseek batch (n=5 hit the 1500 cap, n=9 hit 2380, both
+  // finish=length -> unparseable JSON -> fallback storm on every ingest, 2026-08-05).
+  // 600 + n*420 keeps deepseek inside budget; the batch is capped (see CLAIM_BATCH_MAX)
+  // so the 8000 ceiling is always reachable.
+  'v5-claim-structuring': { envModel: 'CLAIM_STRUCTURING_MODEL',  maxTokens: (n) => Math.min(8000, 600 + (n || 1) * 420) },
   'v5-claim-structuring-single': { envModel: 'CLAIM_STRUCTURING_MODEL', maxTokens: 2500 },
 };
 
@@ -130,6 +135,20 @@ export function segmentHeading(segment) {
     if (p) return p;
   }
   return null;
+}
+
+// Deterministic count of a window's fact-bearing sentences (digits/units/proper
+// nouns). Used to FLOOR the per-window extraction ask — a flat chars/1k rate
+// under-asks on dense windows and the model delivers conservatively under
+// whatever ceiling it is given (told 5 over a 12-fact window -> exactly 5,
+// measured live), so the missing facts exist in NO layer. Also used to report
+// the shortfall. Language-neutral: no word lists, just scripts and symbols.
+export function estimateFactBearingSentences(content) {
+  const sentences = String(content || '')
+    .split(/(?<=[.!?])\s+/).map((x) => x.trim()).filter((x) => x.length >= 25);
+  const factBearing = sentences.filter((x) =>
+    /\d/.test(x) || /\b(?:kW|kWh|EUR|€|%|Mio|Nr\.)\b/i.test(x) || /\s\p{Lu}\p{Ll}{2,}/u.test(x)).length;
+  return { sentences: sentences.length, factBearing };
 }
 
 export function markdownFromHeadedChunks(chunks) {
@@ -616,19 +635,25 @@ subject+predicate identify the claim across paraphrases and languages. Keep valu
 Return ONLY JSON: {"claims":[{"i":<the memory's number>,"subject":"<canonical English noun phrase of what the claim is ABOUT>","predicate":"<canonical English relation/attribute, lowercased, e.g. has_launch_date, rated_power, is_partner_of>","qualifiers":{"<key>":"<value>"}}, ...]}.
 Emit one entry per input memory, using its exact number in "i". subject+predicate identify the claim across paraphrases and languages (normalize to English + lowercase). qualifiers holds scope/conditions/owner/time as key-value. Keep values short. For a memory with nothing durable, return empty strings for subject and predicate.`;
     (async () => {
+      // Sub-batch so the profile budget (600 + n*420, capped 8000) is always reachable:
+      // 17 x 420 = 7740 < 8000. One 24-claim batch would need >10k completion with the
+      // verbose model — a guaranteed finish=length truncation, i.e. a guaranteed
+      // fallback. Numbering restarts per sub-batch; "i" maps within the batch only.
+      const BATCH_MAX = Math.max(1, Number(process.env.CLAIM_STRUCTURING_BATCH_MAX || 17));
+      for (let b = 0; b < targets.length; b += BATCH_MAX) {
+      const batch = targets.slice(b, b + BATCH_MAX);
       try {
-        const numbered = targets
+        const numbered = batch
           .map((m, idx) => `${idx + 1}. ${String(m.content).slice(0, 800)}`)
           .join('\n\n');
         const parsed = await chatCompletionWithFallback({
           models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
             || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
             .split(',').map((x) => x.trim()).filter(Boolean)],
-          // Scales with the batch: ~120 tokens per claim object plus headroom. The old per-memory cap
-          // of 800 became a 100% truncation the moment the model changed (deepseek emits far more
-          // tokens than gpt-oss for the same task), so this is sized from the batch, not from one model.
+          // Scales with the sub-batch and sized for the most verbose plausible model
+          // (deepseek ~300-350/claim vs gpt-oss ~155, measured) — see LLM_PROFILES.
           temperature: 0,
-          max_tokens: llmProfile('v5-claim-structuring', { batchSize: targets.length }).maxTokens,
+          max_tokens: llmProfile('v5-claim-structuring', { batchSize: batch.length }).maxTokens,
           json_mode: true, feature: 'v5-claim-structuring',
           messages: [{ role: 'system', content: system }, { role: 'user', content: numbered }],
         });
@@ -640,7 +665,7 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
           // guessed — writing a claim onto the WRONG memory would corrupt supersession, which keys on
           // (subject, predicate). Silence is recoverable; a mis-assigned claim identity is not.
           const idx = Number(row?.i) - 1;
-          const m = Number.isInteger(idx) && idx >= 0 && idx < targets.length ? targets[idx] : null;
+          const m = Number.isInteger(idx) && idx >= 0 && idx < batch.length ? batch[idx] : null;
           if (!m) continue;
           const subj = typeof row?.subject === 'string' ? row.subject.trim().slice(0, 500) : '';
           const pred = typeof row?.predicate === 'string' ? row.predicate.trim().toLowerCase().slice(0, 500) : '';
@@ -661,9 +686,9 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
         // re-requested individually. The 1-call win holds in the common case; correctness does not
         // depend on the batch being complete.
         const covered = new Set(structured);
-        const missed = targets.filter((m) => !covered.has(m.id));
+        const missed = batch.filter((m) => !covered.has(m.id));
         if (missed.length) {
-          this.logger.warn?.(`[v5-claim-structuring] batch covered ${applied}/${targets.length}`
+          this.logger.warn?.(`[v5-claim-structuring] batch covered ${applied}/${batch.length}`
             + ` — re-requesting ${missed.length} individually (batch likely capped)`);
           let mi = 0;
           const CONC = Number(process.env.CLAIM_STRUCTURING_CONCURRENCY || 4);
@@ -699,7 +724,7 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
           });
           await Promise.all(workers);
         }
-        this.logger.info?.(`[v5-claim-structuring] ${targets.length} memories → ${applied} structured`
+        this.logger.info?.(`[v5-claim-structuring] ${batch.length} memories → ${applied} structured`
           + ` (1 batch call${missed.length ? ` + ${missed.length} backfill` : ''})`);
       } catch (err) {
         // Batch threw outright — fall back to the per-memory path for EVERYTHING rather than leaving
@@ -707,11 +732,11 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
         this.logger.warn?.(`[v5-claim-structuring] batch call failed (${err.message}) — falling back to per-memory`);
         let fi = 0;
         const CONC = Number(process.env.CLAIM_STRUCTURING_CONCURRENCY || 4);
-        const workers = Array.from({ length: Math.min(CONC, targets.length) }, async () => {
+        const workers = Array.from({ length: Math.min(CONC, batch.length) }, async () => {
           while (true) {
             const k = fi++;
-            if (k >= targets.length) return;
-            const m = targets[k];
+            if (k >= batch.length) return;
+            const m = batch[k];
             try {
               const one = await chatCompletionWithFallback({
                 models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
@@ -736,6 +761,7 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
           }
         });
         await Promise.all(workers);
+      }
       }
     })();
   }
@@ -1432,20 +1458,17 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           compact: degraded,
         });
         if (claims.length > best.length) best = claims;
-        const _sentences = String(window?.content || '')
-          .split(/(?<=[.!?])\s+/).map((x) => x.trim()).filter((x) => x.length >= 25);
-        const _factBearing = _sentences.filter((x) =>
-          /\d/.test(x) || /\b(?:kW|kWh|EUR|€|%|Mio|Nr\.)\b/i.test(x) || /\s\p{Lu}\p{Ll}{2,}/u.test(x)).length;
+        const { sentences: _sentencesLen, factBearing: _factBearing } = estimateFactBearingSentences(window?.content);
         const _capacity = Math.max(1, Math.min(maxFacts, _factBearing));
         if (best.length < Math.ceil(_capacity * 0.5)) {
           this.logger.warn?.(`[kb-unified] EXTRACTION SHORTFALL: kept ${best.length} facts from a window `
-            + `holding ${_factBearing}/${_sentences.length} fact-bearing sentences (capacity≈${_capacity}) `
+            + `holding ${_factBearing}/${_sentencesLen} fact-bearing sentences (capacity≈${_capacity}) `
             + `— single pass, no re-ask. Those facts are absent from the MEMORY lane; the verbatim `
             + `text is still in segments, so evidence recall can answer them and synthesis cannot. `
             + `If this fires often, change the MODEL or the prompt — re-sampling cannot fix it.`);
         } else if (claims.length < expected) {
           this.logger.info?.(`[kb-unified] ${claims.length} facts (capacity≈${_capacity} from `
-            + `${_factBearing}/${_sentences.length} fact-bearing sentences) — plausible, single pass`);
+            + `${_factBearing}/${_sentencesLen} fact-bearing sentences) — plausible, single pass`);
         }
         return best;
       } catch (error) {
@@ -4024,6 +4047,10 @@ Every item must include a non-empty content field and one or more valid support_
         // costs the user no perceived latency — unlike query-time synthesis, which
         // is what makes cognee's search 6.6-28s against our 0.26-0.70s.
         const UWMAX = Number(process.env.KB_UNIFIED_WINDOW_MAX_FACTS || 10);
+        // Hard ceiling for density-floored asks. The floor (measured fact-bearing
+        // sentences) may exceed UWMAX on dense windows; the hard cap keeps a
+        // pathological window (e.g. a 40-row table) from claiming the whole budget.
+        const UWHARD = Number(process.env.KB_UNIFIED_WINDOW_HARD_MAX_FACTS || 24);
         let uWindows = targets;
         try {
           const { chunkText } = await import('./document-chunker.js');
@@ -4039,7 +4066,14 @@ Every item must include a non-empty content field and one or more valid support_
             // importance both trace back to here.
             heading: segmentHeading(promotableSegments[Math.min(i, promotableSegments.length - 1)]),
             page: promotableSegments[Math.min(i, promotableSegments.length - 1)]?.startPage || null,
-            maxFacts: Math.max(1, Math.min(UWMAX, Math.round((content.length / 1000) * UFPK))),
+            // Floor the ask at the window's MEASURED fact count, not just its length.
+            // Measured live: a 735-char doc with ~12 fact-bearing sentences across 3
+            // sections was assigned maxFacts=5 by the flat rate and the model returned
+            // exactly 5 — the other 7 facts existed in no layer. Over-asking is safe:
+            // unused grants refund into factBudget and the curator dedups downstream.
+            maxFacts: Math.max(1, Math.min(UWHARD, Math.max(
+              Math.min(UWMAX, Math.round((content.length / 1000) * UFPK)),
+              estimateFactBearingSentences(content).factBearing))),
             scope: metadata.scope, visibility: metadata.visibility,
             primary_team_id: metadata.primary_team_id || null,
             project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],

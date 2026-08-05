@@ -290,9 +290,22 @@ export function chunkText(text, options = {}) {
     if (currentChunk.length + section.length > targetSize && currentChunk.length >= minSize) {
       chunks.push({ text: currentChunk.trim(), index: chunkIndex++ });
 
-      // Overlap: carry last N chars into next chunk
+      // Overlap: carry last N chars into next chunk.
+      // `slice(-overlapSize)` lands wherever the count says — measured live: the next
+      // segment began "val from Martina Berger", i.e. mid-word inside "approval".
+      // Overlap is DUPLICATED content (the previous chunk holds it whole), so moving
+      // the seam forward to a sentence/word boundary is lossless. A segment that
+      // starts mid-word poisons embeddings and citations with a fragment.
       if (overlapSize > 0 && currentChunk.length > overlapSize) {
-        currentChunk = currentChunk.slice(-overlapSize) + '\n' + section;
+        let tail = currentChunk.slice(-overlapSize);
+        const sentenceSeam = tail.match(/[.!?]["')\]]*\s+\S/);
+        if (sentenceSeam && sentenceSeam.index > 0) {
+          tail = tail.slice(sentenceSeam.index + sentenceSeam[0].length - 1);
+        } else {
+          const wordSeam = tail.match(/\s/);
+          if (wordSeam && wordSeam.index > 0) tail = tail.slice(wordSeam.index + 1);
+        }
+        currentChunk = tail + '\n' + section;
       } else {
         currentChunk = section;
       }

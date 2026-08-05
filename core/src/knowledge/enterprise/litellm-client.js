@@ -216,7 +216,43 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`[enterprise-extract] LiteLLM chat error ${res.status}: ${text}`);
+    // SOME PROVIDERS MANDATE REASONING. We send `reasoning: {enabled:false}` on the openrouter path
+    // because every reasoning model otherwise blows the token budget deliberating and returns
+    // truncated, unparseable JSON. But gpt-oss-120b on google-vertex REJECTS the field outright:
+    //   HTTP 400 "Reasoning is mandatory for this endpoint and cannot be disabled."
+    // That model is COGNITION_WRITER_MODEL, HYPER_SYNTH_MODEL and a member of
+    // KB_UNIFIED_FALLBACK_MODELS, so a blanket flag broke three live paths at once — caught by
+    // calling all three configured models through this client after deploy, not by reading the diff.
+    // Retry ONCE without the field rather than maintaining a hardcoded allow-list of models that
+    // support it: the provider tells us, and that answer stays correct as providers change.
+    if (res.status === 400 && body.reasoning && /reasoning/i.test(text)) {
+      console.warn(`[enterprise-extract] ${model} rejects reasoning:{enabled:false} — retrying without it`);
+      const { reasoning: _dropped, ...bodyNoReasoning } = body;
+      const ctrl2 = new AbortController();
+      const timer2 = setTimeout(() => ctrl2.abort(), TIMEOUT_MS);
+      try {
+        // Same target and headers as the original call — they are built inline above, so they are
+        // repeated here rather than referenced. (`url`/`headers` do not exist as variables; assuming
+        // they did would have been a runtime ReferenceError that `node --check` cannot see.)
+        const res2 = await fetch(`${route.base}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(route.key ? { Authorization: `Bearer ${route.key}` } : {}),
+          },
+          body: JSON.stringify(bodyNoReasoning),
+          signal: ctrl2.signal,
+        });
+        if (res2.ok) { res = res2; } else {
+          const t2 = await res2.text();
+          throw new Error(`[enterprise-extract] LiteLLM chat error ${res2.status} (after reasoning retry): ${t2}`);
+        }
+      } finally {
+        clearTimeout(timer2);
+      }
+    } else {
+      throw new Error(`[enterprise-extract] LiteLLM chat error ${res.status}: ${text}`);
+    }
   }
 
   const json = await res.json();

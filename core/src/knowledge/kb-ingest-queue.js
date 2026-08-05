@@ -404,18 +404,25 @@ export class KbIngestQueue {
       // and the job went to status 'indexed', progress 100. The caller already
       // holds its 202 {success:true}, so NOTHING anywhere said the upload produced
       // nothing — the user waits for memories that will never arrive.
-      // Zero promoted memories is ALSO a failure, not just a missing document.
-      // Measured: a 39.6 MB PDF whose parse chain fully collapsed —
-      //   groq-vision failed: spawnSync convert ENOENT   (ImageMagick absent)
-      //   Docling async polling timeout after 120000ms
-      //   falling back to fast-pdf
-      // — produced a document whose entire retained content was page markers
-      // ("-- 1 of 19 --") and ZERO memories, and still logged ✓ promoted=0.
-      // A document the user can never recall from is a failed ingest.
-      if (!result?.documentId || Number(result?.promotedCount || 0) === 0) {
+      // A doc is a FAILURE only when NOTHING is recallable: no document, or a
+      // document with neither memories NOR evidence segments (parse fully
+      // collapsed — e.g. a PDF whose only retained content was page markers).
+      //
+      // A document WITH evidence segments but ZERO memories is NOT a failure —
+      // it is an evidence-only (degraded) success. This honors commit e8300bcf's
+      // owner invariant ("even if memories fail, the context is inside
+      // evidences"): the segments are committed, embedded and fully searchable,
+      // so evidence recall answers them; only synthesis-from-memory is reduced.
+      // Marking it 'failed' here (the old `promotedCount === 0` gate) contradicted
+      // that fix and made the user re-upload a doc that WAS ingested — the
+      // duplicate-row source the commit itself named. `Solvis_Branding_Skizze`
+      // (6 segments, 0 memories) is exactly this case.
+      const _promoted = Number(result?.promotedCount || 0);
+      const _segs = Number(result?.segmentCount || 0);
+      if (!result?.documentId || (_promoted === 0 && _segs === 0)) {
         const reason = !result?.documentId
           ? 'ingest produced no document (empty or unreadable content)'
-          : 'ingest produced no memories — the document could not be parsed into recallable content';
+          : 'ingest produced no recallable content — the document could not be parsed into memories or evidence';
         try {
           this.tracker?.updateJob(trackerJobId, { status: 'failed', progress: 100, error: reason });
         } catch { /* noop */ }
@@ -425,8 +432,9 @@ export class KbIngestQueue {
         const failed = Object.assign(new Error(reason), { code: 'NO_RECALLABLE_CONTENT' });
         await this.jobStore?.fail(trackerJobId, orgId, failed);
         try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
-        return { documentId: result?.documentId || null, segmentCount: result?.segmentCount || 0, promotedCount: 0, error: reason };
+        return { documentId: result?.documentId || null, segmentCount: _segs, promotedCount: 0, error: reason };
       }
+      const _evidenceOnly = _promoted === 0 && _segs > 0;
       try {
         const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
         this.tracker?.updateJob(trackerJobId, {
@@ -436,9 +444,9 @@ export class KbIngestQueue {
       } catch { /* noop */ }
       if (this.jobStore) await this.jobStore.complete(trackerJobId, orgId, userId, result);
       else { try { this.recordUsage?.(orgId, result); } catch { /* legacy accounting */ } }
-      this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, coverage: result.coverage || null, filename });
+      this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, evidenceOnly: _evidenceOnly, coverage: result.coverage || null, filename });
       this._counters.processed++;
-      this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}`);
+      this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}${_evidenceOnly ? ' (evidence-only: 0 memories, segments searchable)' : ''}`);
       try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };
     } catch (error) {

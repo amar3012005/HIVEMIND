@@ -1,12 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
     id: 'operations.browser-admin-checkin-to-status',
     version: 1,
   });
+});
+
+test('optional first-life check-in never freezes the company: unverified/terminated runs proceed to planning', () => {
+  // A run still in progress holds planning (administrator may add context).
+  assert.equal(adminCheckinDisposition('WAITING_EVENT'), 'wait');
+  assert.equal(adminCheckinDisposition('ACTIVE'), 'wait');
+  assert.equal(adminCheckinDisposition('WAITING_AUTHORITY'), 'wait');
+  // A completed run proceeds with its captured status.
+  assert.equal(adminCheckinDisposition('COMPLETED'), 'proceed');
+  // The regression: an exhausted/terminated optional check-in must proceed
+  // (previously it moved the runtime to BLOCKED forever → wake-loop).
+  assert.equal(adminCheckinDisposition('NEEDS_INTERVENTION'), 'proceed_unverified');
+  assert.equal(adminCheckinDisposition('TERMINATED'), 'proceed_unverified');
+  assert.equal(adminCheckinDisposition('FAILED'), 'proceed_unverified');
+  // Defensive: unknown/absent status must never block; wait rather than freeze.
+  assert.equal(adminCheckinDisposition(null), 'wait');
+  assert.equal(adminCheckinDisposition('nEeDs_InTeRvEnTiOn'), 'proceed_unverified');
 });
 
 test('HQ work-result reconciliation never reads a missing work order or result', () => {

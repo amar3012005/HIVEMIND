@@ -34,6 +34,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 /** Files that constitute a slot. `shard.lock` is deliberately NOT copied. */
 const SHARD_FILES = ['shard.amr', 'shard.vec', 'shard.txt', 'shard.edg'];
@@ -78,8 +79,25 @@ export function snapshotShardsOnce({
       fs.mkdirSync(dst, { recursive: true, mode: 0o700 });
       let bytes = 0;
       for (const f of present) {
-        fs.copyFileSync(path.join(src, f), path.join(dst, f));
-        try { bytes += fs.statSync(path.join(dst, f)).size; } catch { /* size is best-effort */ }
+        const from = path.join(src, f);
+        const to = path.join(dst, f);
+        // `shard.vec` is SPARSE — 4 MB apparent, almost nothing allocated. A plain
+        // fs.copyFileSync FILLS THE HOLES: measured on prod, 5.4 MB of live slots
+        // produced 35 MB per snapshot (6.5x), which then multiplies by the retention
+        // count. Node has no sparse-aware copy, and COPYFILE_FICLONE only helps on
+        // CoW filesystems (the box is ext4, where it just throws). GNU cp does know
+        // how to detect holes, so use it when present and fall back to the plain
+        // copy everywhere else — correctness never depends on cp existing.
+        let copied = false;
+        if (process.platform === 'linux') {
+          try { execFileSync('cp', ['--sparse=always', from, to], { stdio: 'ignore' }); copied = true; }
+          catch { /* no GNU cp (or it failed) — fall through to the portable copy */ }
+        }
+        if (!copied) fs.copyFileSync(from, to);
+        // Count ALLOCATED bytes (blocks*512), not apparent size, so the log reports the
+        // real footprint rather than the sparse illusion.
+        try { const st = fs.statSync(to); bytes += (st.blocks != null ? st.blocks * 512 : st.size); }
+        catch { /* size is best-effort */ }
       }
       // Write the manifest LAST: its presence is what marks a snapshot complete, so a
       // half-copied dir (process killed mid-sweep) is never mistaken for a restore point.

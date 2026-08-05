@@ -3136,6 +3136,27 @@ Every item must include a non-empty content field and one or more valid support_
     // Step 3: single segment (whole record body) — adapter could split later.
     // Remote orgs: build in-memory segment object (no central DB write); _embedSegments
     // will push it to the agent via amrKbSegment when callerOrgId is remote.
+    // Denormalise scope onto the connector/atomic segment too (mirrors the
+    // document-upload path), so evidence from this path is scope-filterable and
+    // self-describing on central + .amr alike.
+    // Scope fields arrive either as opts.* (the ingest envelope: scope/projectId/
+    // primaryTeamId) or inside opts.metadata.* (connector callers) — read both.
+    const _sScope = opts.scope || metadata.scope || null;
+    const _sProj = opts.projectId || metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]) || null;
+    const _sTeam = opts.primaryTeamId || metadata.primary_team_id || null;
+    const _cScopeKey = _sTeam ? `team:${_sTeam}`
+      : _sProj ? `project:${_sProj}`
+        : (_sScope === 'organization') ? `org:${orgId}` : `personal:${userId}`;
+    const _cScopeMeta = {
+      scope: _sScope
+        || (_cScopeKey.startsWith('project:') ? 'project'
+          : _cScopeKey.startsWith('team:') ? 'team'
+            : _cScopeKey.startsWith('org:') ? 'organization' : 'personal'),
+      scope_key: _cScopeKey,
+      project_id: _sProj,
+      team_id: _sTeam,
+      document_title: title || metadata.documentTitle || null,
+    };
     let segments;
     if (orgIsRemote(orgId)) {
       const segment = {
@@ -3148,7 +3169,7 @@ Every item must include a non-empty content field and one or more valid support_
         contentHash: crypto.createHash('sha256').update(content).digest('hex'),
         wordCount: content.split(/\s+/).filter(Boolean).length,
         previousSegmentId: null,
-        metadata: { providerKey, sourceId },
+        metadata: { providerKey, sourceId, ..._cScopeMeta },
         createdAt: new Date().toISOString(),
       };
       segments = [segment];
@@ -3167,7 +3188,7 @@ Every item must include a non-empty content field and one or more valid support_
           contentHash: crypto.createHash('sha256').update(content).digest('hex'),
           wordCount: content.split(/\s+/).filter(Boolean).length,
           startPage: null, endPage: null,
-          metadata: { providerKey, sourceId },
+          metadata: { providerKey, sourceId, ..._cScopeMeta },
         },
       });
       segments = [segment];

@@ -18277,7 +18277,13 @@ exit \$RC
           break;
 
         case '/api/memories/delete-all':
-          if (req.method === 'DELETE') {
+          // Accept POST as well as DELETE: the "clear all" action is a full-org
+          // erase (memories AND evidence segments AND documents), and clients that
+          // POST to it must get the same evidence-clearing purge, not a no-op. For
+          // .amr this routes to amrPurge → /v1/purge (memories + knowledge_segments
+          // + documents + Qdrant collection). Scoped to clear-all only — prune and
+          // per-item deletes are unaffected.
+          if (req.method === 'DELETE' || req.method === 'POST') {
             // Clear only data owned by this authenticated workspace identity.
             // Audit entries deliberately survive as immutable compliance history.
             // A remote agent is an org-level data plane, so its complete purge is

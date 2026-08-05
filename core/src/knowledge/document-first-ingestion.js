@@ -2652,12 +2652,13 @@ Every item must include a non-empty content field and one or more valid support_
       }
     }
     let _msEmbed = 0;
+    let _evEmbedCov = null; // P1b/P3: evidence-embed coverage {total,embedded,failed,healed}
     if (_segmentsNeedEmbed) {
       // Step 5: Embed segments.
       // Central path: store vector in Qdrant + update DB row (vectorStored=true).
       // Remote path: embed and push segment + vector to the agent via amrKbSegment.
       const _tEmbed = Date.now();
-      await this._embedSegments(segments, orgId);
+      _evEmbedCov = await this._embedSegments(segments, orgId);
       _msEmbed = Date.now() - _tEmbed;
     }
     const _msSeg = Date.now() - _tSeg;
@@ -2819,6 +2820,7 @@ Every item must include a non-empty content field and one or more valid support_
       rejected: 0,
       highValueCoverage: _cands > 0 ? Number((_promotedOk / _cands).toFixed(3)) : 1,
     };
+    coverage.evidence_embed = _evEmbedCov; // segments embedded/failed/healed (P3 no-silent-partial)
     return {
       documentId: knowledgeDoc.id,
       segmentCount: segments.length,
@@ -3066,7 +3068,7 @@ Every item must include a non-empty content field and one or more valid support_
     }
 
     // Step 4: embed segment — pass orgId so _embedSegments routes to agent for remote.
-    await this._embedSegments(segments, orgId);
+    const _evEmbedC = await this._embedSegments(segments, orgId);
 
     // Step 5: promote memories
     const promoted = await this._promoteMemories({
@@ -3090,6 +3092,7 @@ Every item must include a non-empty content field and one or more valid support_
       candidateCount: promoted.candidates.length,
       promotedCount: promoted.memories.length,
       promotedMemoryIds: promoted.memories.map(m => m.id).filter(Boolean),
+      coverage: { evidence_embed: _evEmbedC || null },
     };
   }
 
@@ -3825,6 +3828,16 @@ Every item must include a non-empty content field and one or more valid support_
     const _vectorRows = [];       // central: collected for one batched upsert
     const _embeddedIds = [];      // central: for one updateMany
     let _failed = 0;
+    const _failedSegs = [];       // P1b: segments that did NOT embed → ingest-time heal below
+    const _remotePayload = (segment) => ({
+      id: segment.id, userId: segment.userId, documentId: segment.documentId,
+      content: segment.content, contentHash: segment.contentHash,
+      segmentType: segment.segmentType, segmentIndex: segment.segmentIndex,
+      previousSegmentId: segment.previousSegmentId || null,
+      startPage: segment.startPage || null, endPage: segment.endPage || null,
+      wordCount: segment.wordCount || null, metadata: segment.metadata || {},
+      createdAt: segment.createdAt || new Date().toISOString(),
+    });
     let _qi = 0;
     await Promise.all(Array.from({ length: Math.min(_conc, segments.length) }, async () => {
       while (_qi < segments.length) {
@@ -3833,15 +3846,14 @@ Every item must include a non-empty content field and one or more valid support_
         try {
           const embedding = await this.embeddingService.embed(segment.content);
           if (_isRemote) {
-            await amrKbSegment(segOrgId, {
-              id: segment.id, userId: segment.userId, documentId: segment.documentId,
-              content: segment.content, contentHash: segment.contentHash,
-              segmentType: segment.segmentType, segmentIndex: segment.segmentIndex,
-              previousSegmentId: segment.previousSegmentId || null,
-              startPage: segment.startPage || null, endPage: segment.endPage || null,
-              wordCount: segment.wordCount || null, metadata: segment.metadata || {},
-              createdAt: segment.createdAt || new Date().toISOString(),
-            }, Array.isArray(embedding) ? embedding : []);
+            // remoteKbSegment returns true | null (null = failed after its own
+            // retries). It was AWAITED but the result IGNORED — so a segment that
+            // failed all retries was silently dropped from the evidence store with
+            // no count and no heal. Capture the failure so the ingest-time heal
+            // below re-embeds it.
+            const _ok = await amrKbSegment(segOrgId, _remotePayload(segment),
+              Array.isArray(embedding) ? embedding : []);
+            if (!_ok) { _failed += 1; _failedSegs.push({ segment, segOrgId }); }
           } else {
             _vectorRows.push({
               orgId: segment.orgId,
@@ -3859,6 +3871,7 @@ Every item must include a non-empty content field and one or more valid support_
           }
         } catch (error) {
           _failed += 1;
+          _failedSegs.push({ segment, segOrgId });
           console.error(`[DocumentFirstIngestion] Failed to embed segment ${segment.id}:`, error.message);
         }
       }
@@ -3895,8 +3908,41 @@ Every item must include a non-empty content field and one or more valid support_
         console.error(`[DocumentFirstIngestion] vectorStored updateMany failed: ${error.message}`);
       }
     }
+    // ── P1b INGEST-TIME HEAL ──────────────────────────────────────────────────
+    // Re-embed segments that failed the first pass ONCE more. Transient embed /
+    // agent hiccups (the common case, incl. the amr segment-write abort under
+    // load) heal here. A segment that fails even this is reported in the returned
+    // coverage (P3) so the job never silently ships partial evidence.
+    let _healed = 0;
+    if (_failedSegs.length) {
+      const _healRows = [];
+      for (const { segment, segOrgId } of _failedSegs) {
+        try {
+          const emb = await this.embeddingService.embed(segment.content);
+          if (orgIsRemote(segOrgId)) {
+            const ok = await amrKbSegment(segOrgId, _remotePayload(segment), Array.isArray(emb) ? emb : []);
+            if (ok) _healed += 1;
+          } else {
+            const collectionName = PER_TENANT ? await resolveCollectionForOrg(segment.orgId) : legacyEvidence;
+            const point = { id: segment.id, vector: emb, payload: {
+              segment_id: segment.id, document_id: segment.documentId, user_id: segment.userId,
+              org_id: segment.orgId, segment_type: segment.segmentType, layer: 'evidence',
+              content_preview: segment.content.slice(0, 200) } };
+            if (typeof this.embeddingService.storeVectors === 'function') await this.embeddingService.storeVectors({ collectionName, points: [point] });
+            else await this.embeddingService.storeVector({ collectionName, id: point.id, vector: point.vector, payload: point.payload });
+            _healRows.push(segment.id); _healed += 1;
+          }
+        } catch (e) { console.warn(`[kb-embed] heal failed seg=${segment.id}: ${e.message}`); }
+      }
+      if (_healRows.length) {
+        try { await this.db.knowledgeSegment.updateMany({ where: { id: { in: _healRows } }, data: { vectorStored: true } }); }
+        catch (e) { console.warn(`[kb-embed] heal vectorStored update failed: ${e.message}`); }
+      }
+    }
+    const _finalFailed = Math.max(0, _failed - _healed);
     console.log(`[kb-embed] n=${segments.length} concurrency=${_conc} remote=${_isRemote} `
-      + `failed=${_failed} ms=${Date.now() - _tEmb} ms_per_segment=${segments.length ? Math.round((Date.now() - _tEmb) / segments.length) : 0}`);
+      + `failed=${_finalFailed} healed=${_healed} ms=${Date.now() - _tEmb} ms_per_segment=${segments.length ? Math.round((Date.now() - _tEmb) / segments.length) : 0}`);
+    return { total: segments.length, embedded: segments.length - _finalFailed, failed: _finalFailed, healed: _healed };
   }
 
   /**

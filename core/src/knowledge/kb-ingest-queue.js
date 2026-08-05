@@ -446,7 +446,16 @@ export class KbIngestQueue {
       else { try { this.recordUsage?.(orgId, result); } catch { /* legacy accounting */ } }
       this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, evidenceOnly: _evidenceOnly, coverage: result.coverage || null, filename });
       this._counters.processed++;
-      this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}${_evidenceOnly ? ' (evidence-only: 0 memories, segments searchable)' : ''}`);
+      // P3 no-silent-partial: if any evidence segment did NOT embed even after the
+      // ingest-time heal, say so LOUD. The doc still indexes (evidence-only stays a
+      // success), but a partial-embed must never be reported as fully clean.
+      const _ee = result?.coverage?.evidence_embed;
+      if (_ee && Number(_ee.failed) > 0) {
+        this.logger.warn?.(`[kb-queue] ⚠ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} `
+          + `PARTIAL EMBED: ${_ee.failed}/${_ee.total} segments un-embedded after heal — recall will miss them until reconciled`);
+      }
+      const _eeStr = _ee ? ` embed=${_ee.embedded}/${_ee.total}${_ee.healed ? ` healed=${_ee.healed}` : ''}${_ee.failed ? ` FAILED=${_ee.failed}` : ''}` : '';
+      this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}${_eeStr}${_evidenceOnly ? ' (evidence-only: 0 memories, segments searchable)' : ''}`);
       try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };
     } catch (error) {

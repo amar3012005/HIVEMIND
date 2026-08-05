@@ -67,6 +67,20 @@ export function resolveWorkResultTodo({ order, result }) {
   };
 }
 
+// The first-life browser check-in is OPTIONAL: it may briefly hold planning
+// while an administrator adds current context, but it must never freeze the
+// company. A run still in progress waits; a run that exhausted verification
+// (NEEDS_INTERVENTION) or terminated proceeds without a status; a completed run
+// proceeds with the captured status. Returning BLOCKED forever on an optional
+// check-in that produced no source-backed `user_current_status` was the cause
+// of the wake-loop where first-life planning never ran.
+export function adminCheckinDisposition(status) {
+  const s = String(status || '').trim().toUpperCase();
+  if (s === 'COMPLETED') return 'proceed';
+  if (s === 'NEEDS_INTERVENTION' || s === 'TERMINATED' || s === 'FAILED') return 'proceed_unverified';
+  return 'wait';
+}
+
 export function specialistWorkObjective(todo, skillId) {
   return String(todo?.objective || todo?.title || '').trim();
 }
@@ -396,23 +410,37 @@ export class NativeHqEngine {
           adminRun = await this.runtimePlaybooks.execute(adminRun.id, runtime.orgId);
         }
       }
-      if (adminRun && String(adminRun.status) !== 'COMPLETED') {
+      const adminDisposition = adminRun ? adminCheckinDisposition(adminRun.status) : 'proceed';
+      if (adminRun && adminDisposition === 'wait') {
         const alreadyShown = await prisma.hqRuntimeEvent.findFirst({
           // Runtime events are epoch-bounded by their parent Runtime reset. The
           // event table itself intentionally carries no runtimeEpoch column.
           where: { runtimeId: runtime.id, eventType: 'decision_required', details: { path: ['admin_checkin_run_id'], equals: adminRun.id } },
         }).catch(() => null);
-        const needsAttention = String(adminRun.status) === 'NEEDS_INTERVENTION';
         if (!alreadyShown) await event(prisma, runtime, cycle, {
-          eventType: needsAttention ? 'blocked' : 'decision_required',
-          title: needsAttention ? 'Internal check-in needs attention' : 'A brief internal check-in is available',
-          summary: needsAttention
-            ? 'Runtime retained the browser conversation but could not yet verify a source-backed current-status record. It will not form the first operating plan from an incomplete check-in.'
-            : 'You can speak with Runtime in this browser before it forms the first operating plan, or skip this check-in and continue from the evidence already collected.',
+          eventType: 'decision_required',
+          title: 'A brief internal check-in is available',
+          summary: 'You can speak with Runtime in this browser before it forms the first operating plan, or skip this check-in and continue from the evidence already collected.',
           details: { admin_checkin_run_id: adminRun.id, first_life_policy: { id: firstLifePolicy.policy_id, version: firstLifePolicy.version } },
         });
-        await move(needsAttention ? 'BLOCKED' : 'WAITING', { blockedReason: needsAttention ? 'admin_checkin_status_unverified' : null, currentCycleId: null, nextWakeAt: null });
-        return { transition: needsAttention ? 'ADMIN_CHECKIN_NEEDS_ATTENTION' : 'WAIT_FOR_ADMIN_CHECKIN', run_id: adminRun.id };
+        await move('WAITING', { blockedReason: null, currentCycleId: null, nextWakeAt: null });
+        return { transition: 'WAIT_FOR_ADMIN_CHECKIN', run_id: adminRun.id };
+      }
+      if (adminRun && adminDisposition === 'proceed_unverified') {
+        // The optional check-in exhausted verification without a source-backed
+        // status. It must NOT freeze the company: note it once and continue to
+        // first-life planning from the established baseline (planning already
+        // treats a missing user_current_status as null evidence).
+        const alreadyNoted = await prisma.hqRuntimeEvent.findFirst({
+          where: { runtimeId: runtime.id, eventType: 'observation', details: { path: ['admin_checkin_unverified_run_id'], equals: adminRun.id } },
+        }).catch(() => null);
+        if (!alreadyNoted) await event(prisma, runtime, cycle, {
+          eventType: 'observation',
+          title: 'Internal check-in did not add a verified status',
+          summary: 'Runtime retained the browser conversation but could not verify a source-backed current-status record. The check-in is optional, so I will form the first operating plan from the established baseline and treat this check-in as closed.',
+          details: { admin_checkin_unverified_run_id: adminRun.id, admin_checkin_status: String(adminRun.status), first_life_policy: { id: firstLifePolicy.policy_id, version: firstLifePolicy.version } },
+        });
+        // fall through — do not block, do not return; planning runs below.
       }
     }
 

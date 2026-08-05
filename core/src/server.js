@@ -11913,15 +11913,34 @@ exit \$RC
             try {
               const existing = await knowledgeUploadJobStore.findDuplicate({ orgId, scopeKey, checksum });
               if (existing?.status === 'ready') {
-                return jsonResponse(res, {
-                  duplicate: true,
-                  status: 'existing',
-                  message: 'Already in your knowledge base — skip the upload or force a re-ingest.',
-                  job_id: existing.id,
-                  existing_document_id: existing.documentId || null,
-                  existing_title: existing.filename || null,
-                  promoted_count: existing.promotedCount ?? null,
-                });
+                // A 'ready' job row PERSISTS after the user deletes the document,
+                // so trusting the job alone reported "Already in your knowledge
+                // base" for a file that no longer exists — blocking a legitimate
+                // re-upload forever. Verify the document is still LIVE in
+                // knowledge_documents (hard delete, no soft-delete flag) before
+                // calling it a duplicate. Indexed PK lookup, tenant-scoped, quick.
+                let docLives = false;
+                if (existing.documentId && prisma?.knowledgeDocument) {
+                  try {
+                    docLives = !!(await prisma.knowledgeDocument.findFirst({
+                      where: { id: existing.documentId, orgId }, select: { id: true },
+                    }));
+                  } catch { docLives = false; }
+                }
+                if (docLives) {
+                  return jsonResponse(res, {
+                    duplicate: true,
+                    status: 'existing',
+                    message: 'Already in your knowledge base — skip the upload or force a re-ingest.',
+                    job_id: existing.id,
+                    existing_document_id: existing.documentId || null,
+                    existing_title: existing.filename || null,
+                    promoted_count: existing.promotedCount ?? null,
+                  });
+                }
+                // Stale 'ready' job whose document was deleted — not a live
+                // duplicate. Fall through to allow the upload rather than block it.
+                return jsonResponse(res, { duplicate: false, in_progress: false, stale_job: existing.id });
               }
               // In flight for this tenant — uploading again would just queue a
               // second copy behind the first.

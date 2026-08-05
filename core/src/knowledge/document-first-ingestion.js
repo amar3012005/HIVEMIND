@@ -364,9 +364,16 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
 export function resolveEvidenceSegment(sourceQuote, segments, fallbackId = null) {
   const quote = String(sourceQuote || '').trim();
   if (!quote) return fallbackId;
-  const exact = (Array.isArray(segments) ? segments : []).find((segment) =>
+  const list = Array.isArray(segments) ? segments : [];
+  // Same byte-exact bug as normalizeUnifiedClaims: a quote spanning a re-wrapped
+  // line failed to bind to its segment. Exact fast-path first; then the
+  // whitespace/unicode-tolerant locate so evidence still binds under formatting drift.
+  const exact = list.find((segment) =>
     typeof segment?.content === 'string' && segment.content.includes(quote));
-  return exact?.id || fallbackId;
+  if (exact) return exact.id || fallbackId;
+  const drift = list.find((segment) =>
+    typeof segment?.content === 'string' && locateSourceQuote(segment.content, quote).start !== -1);
+  return drift?.id || fallbackId;
 }
 
 // Canonical V5 Phase 4 — coverage-aware curation ledger. Attaches (non-breaking,
@@ -3565,6 +3572,20 @@ Every item must include a non-empty content field and one or more valid support_
           if (!_pageMarks.length) {
             for (const m of String(src).matchAll(/--\s*(\d+)\s+of\s+\d+\s*--/g)) {
               _pageMarks.push({ at: m.index, page: Number(m[1]) });
+            }
+          }
+          // Third fallback: form-feed (\f, ASCII 12) page breaks. pdf-parse / pdfjs text
+          // extraction inserts these at page boundaries when neither Docling HTML comments
+          // nor "-- N of M --" markers are present — the fast-pdf/vision tiers that left
+          // start_page=null (P6). Page 1 begins at offset 0; each \f starts the next page.
+          // A tier that emits no page signal at all (some OCR) still yields no marks and is
+          // logged honestly below rather than guessed.
+          if (!_pageMarks.length && String(src).indexOf('\f') !== -1) {
+            _pageMarks.push({ at: 0, page: 1 });
+            const _s = String(src);
+            let _pg = 1;
+            for (let i = 0; i < _s.length; i += 1) {
+              if (_s[i] === '\f') { _pg += 1; _pageMarks.push({ at: i, page: _pg }); }
             }
           }
           const _pageAt = (off) => {

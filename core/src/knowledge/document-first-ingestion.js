@@ -1213,8 +1213,10 @@ Output the JSON object and nothing else.`;
    * json_schema on gpt-oss-120b + salvage; per-window bounded; caps on facts/entities/rels.
    * @returns {Promise<Array<{t,f,entities:string[],rels:Array<{to:number,type:string}>}>>}
    */
-  async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '', compact = false } = {}) {
-    const model = process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
+  async _extractUnified(window, { entityContext = '', maxFacts = 8, docTitle = '', compact = false, model: modelOverride = null } = {}) {
+    // modelOverride lets the reliability layer ESCALATE a shortfall window to a
+    // stronger model (P2) — distinct from re-sampling the same model at temp 0.
+    const model = modelOverride || process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
     const content = (window.content || '').slice(0, 6000);
     if (content.trim().length < 40) {
       // Heuristic fallback: sentence-split facts, no entities/rels — never blocks.
@@ -1460,12 +1462,30 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         if (claims.length > best.length) best = claims;
         const { sentences: _sentencesLen, factBearing: _factBearing } = estimateFactBearingSentences(window?.content);
         const _capacity = Math.max(1, Math.min(maxFacts, _factBearing));
+        // P2 ESCALATION — a USABLE, fact-bearing window that the fast extractor
+        // under-delivered gets ONE pass on a STRONGER model. This is NOT the rejected
+        // same-model re-sample (identical at temp 0): a different, stronger model
+        // captures what the fast one missed. Guarded: input usable, real capacity
+        // (>=2 fact-bearing), not already escalated, and the escalation model differs
+        // from the primary. Union — keep whichever set is larger. Off via
+        // KB_EXTRACT_ESCALATION_MODEL='' (disable) — default gpt-oss-120b.
+        const _escModel = process.env.KB_EXTRACT_ESCALATION_MODEL ?? 'openai/gpt-oss-120b';
+        const _primaryModel = options.model || process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || '';
+        if (best.length < Math.ceil(_capacity * 0.5)
+            && !_inputUnusable && _capacity >= 2 && !options._escalated
+            && _escModel && _escModel !== _primaryModel) {
+          try {
+            const _esc = await this._extractUnified(window, { ...options, maxFacts, compact: false, model: _escModel, _escalated: true });
+            if (Array.isArray(_esc) && _esc.length > best.length) best = _esc;
+            this.logger.info?.(`[kb-unified] escalated shortfall → ${_escModel}: now ${best.length} facts (capacity≈${_capacity})`);
+          } catch (e) { this.logger.warn?.(`[kb-unified] escalation to ${_escModel} failed: ${e.message}`); }
+        }
         if (best.length < Math.ceil(_capacity * 0.5)) {
           this.logger.warn?.(`[kb-unified] EXTRACTION SHORTFALL: kept ${best.length} facts from a window `
             + `holding ${_factBearing}/${_sentencesLen} fact-bearing sentences (capacity≈${_capacity}) `
-            + `— single pass, no re-ask. Those facts are absent from the MEMORY lane; the verbatim `
+            + `— escalation exhausted. Those facts are absent from the MEMORY lane; the verbatim `
             + `text is still in segments, so evidence recall can answer them and synthesis cannot. `
-            + `If this fires often, change the MODEL or the prompt — re-sampling cannot fix it.`);
+            + `If this fires often, change the MODEL or the prompt.`);
         } else if (claims.length < expected) {
           this.logger.info?.(`[kb-unified] ${claims.length} facts (capacity≈${_capacity} from `
             + `${_factBearing}/${_sentencesLen} fact-bearing sentences) — plausible, single pass`);

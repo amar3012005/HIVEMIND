@@ -11698,7 +11698,33 @@ Write the persona now.`;
     try {
       event = await billingMod.constructEvent({ rawBody: raw, signature: sig });
     } catch (err) {
-      console.warn('[stripe-webhook] signature verification failed:', err.message);
+      // SELF-DIAGNOSING FAILURE. "No signatures found matching the expected signature" has three
+      // very different causes and the bare message distinguishes none of them, so every occurrence
+      // used to require a from-scratch investigation:
+      //   (a) the raw body never arrived (something upstream consumed the stream) -> len === 0
+      //   (b) the header is missing or malformed                                  -> no t=/v1=
+      //   (c) the configured whsec_ belongs to a DIFFERENT Stripe endpoint        -> body+header fine
+      // (c) is the common one — every Stripe endpoint (dashboard endpoint, `stripe listen`, a second
+      // environment) has its own signing secret, and they are indistinguishable at a glance.
+      // Emit the facts that separate them. NEVER log the secret or the body: only a length, the
+      // header's own timestamp skew, and a short fingerprint of the secret so two deployments can be
+      // compared without either being disclosed.
+      const _len = Buffer.isBuffer(raw) ? raw.length : -1;
+      const _t = /(^|,)t=(\d+)/.exec(String(sig || ''));
+      const _skewSec = _t ? Math.abs(Math.floor(Date.now() / 1000) - Number(_t[2])) : null;
+      let _fp = 'none';
+      try {
+        const _sec = process.env.STRIPE_WEBHOOK_SECRET || '';
+        if (_sec) _fp = (await import('crypto')).createHash('sha256').update(_sec).digest('hex').slice(0, 8);
+      } catch { /* fingerprint is best-effort */ }
+      const _cause = _len === 0 ? 'BODY EMPTY — the request stream was consumed before this handler'
+        : !/(^|,)v1=/.test(String(sig || '')) ? 'HEADER MALFORMED — no v1= scheme in stripe-signature'
+        : (_skewSec != null && _skewSec > 300) ? `TIMESTAMP SKEW ${_skewSec}s — replay or clock drift`
+        : 'SECRET MISMATCH — body and header look valid, so STRIPE_WEBHOOK_SECRET is very likely from a different Stripe endpoint';
+      console.warn(`[stripe-webhook] signature verification failed: ${err.message}`);
+      console.warn(`[stripe-webhook] diagnosis: ${_cause} `
+        + `(raw_bytes=${_len} sig_header=${sig ? 'present' : 'MISSING'} `
+        + `skew_s=${_skewSec ?? 'n/a'} secret_fp=${_fp} livemode_key=${String(process.env.STRIPE_SECRET_KEY || '').startsWith('sk_live') ? 'yes' : 'no'})`);
       return jsonResponse(res, { error: 'invalid signature' }, 400);
     }
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);

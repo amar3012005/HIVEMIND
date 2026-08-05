@@ -436,18 +436,50 @@ const ctxCache = new Map();
  * @param {(orgId:string)=>boolean} [allow] optional per-org gate (e.g. "only if snapshotted")
  * @returns {{attempted:number,compacted:number,failed:number,reclaimed:number}}
  */
-export function compactOpenShards(allow = null) {
-  const out = { attempted: 0, compacted: 0, failed: 0, reclaimed: 0 };
-  for (const [orgId, ctx] of ctxCache) {
-    if (!ctx?.amr || typeof ctx.amr.compact !== 'function') continue;
-    if (allow && !allow(orgId)) continue;
+const lastCompacted = new Map(); // orgId -> epoch ms of the last successful compaction
+
+/**
+ * Compact the given slots, newest-garbage-first, bounded per pass.
+ *
+ * The first cut only compacted shards ALREADY in ctxCache, on the theory that a slot
+ * nobody opens is not accruing garbage. True for ONGOING growth — but it left HISTORIC
+ * garbage stranded forever, and in practice it fired ZERO times in an hour of production:
+ * whatever was open at the tick simply never lined up. A maintenance job that never runs
+ * is worse than none, because it reads as covered.
+ *
+ * So: open through getCtx — the SAME single-flighted, LRU-managed path live traffic uses,
+ * so this cannot double-open a shard or race the per-open lock. Only slots that were
+ * snapshotted this pass are eligible (never compact unbacked data), at most `max` per
+ * pass, and each slot at most once per `cooldownMs`, so write amplification stays bounded.
+ *
+ * @param {string[]} orgIds  slots eligible for compaction (already snapshotted)
+ * @returns {Promise<{attempted:number,compacted:number,failed:number,reclaimed:number,skipped:number}>}
+ */
+export async function compactShards(orgIds = [], {
+  max = Number(process.env.MNEME_COMPACT_MAX_PER_PASS || 2),
+  cooldownMs = Number(process.env.MNEME_COMPACT_COOLDOWN_MS || 24 * 60 * 60 * 1000),
+  logger = console,
+} = {}) {
+  const out = { attempted: 0, compacted: 0, failed: 0, reclaimed: 0, skipped: 0 };
+  const now = Date.now();
+  // Already-open slots first — they cost nothing to reach.
+  const open = []; const cold = [];
+  for (const o of orgIds) (ctxCache.has(o) ? open : cold).push(o);
+
+  for (const orgId of [...open, ...cold]) {
+    if (out.attempted >= max) break;
+    if (now - (lastCompacted.get(orgId) || 0) < cooldownMs) { out.skipped += 1; continue; }
     out.attempted += 1;
     try {
+      // eslint-disable-next-line no-await-in-loop
+      const ctx = await getCtx(orgId);
+      if (typeof ctx?.amr?.compact !== 'function') { out.failed += 1; continue; }
       out.reclaimed += ctx.amr.compact() || 0;
+      lastCompacted.set(orgId, now);
       out.compacted += 1;
     } catch (e) {
       out.failed += 1;
-      console.warn(`[shard-compact] org=${String(orgId).slice(0, 8)} failed: ${e.message}`);
+      logger.warn?.(`[shard-compact] org=${String(orgId).slice(0, 8)} failed: ${e.message}`);
     }
   }
   return out;

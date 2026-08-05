@@ -154,15 +154,16 @@ export async function runShardMaintenanceOnce({ logger = console } = {}) {
     return out;
   }
   try {
-    const { compactOpenShards } = await import('./embedded-agent.mjs');
-    // ctxCache is keyed by orgId; the slot dir is the sanitised org id.
-    const sanitise = (o) => String(o).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-    out.compact = compactOpenShards((orgId) => backedUp.has(sanitise(orgId)));
+    const { compactShards } = await import('./embedded-agent.mjs');
+    // Slot dirs ARE the sanitised org ids, so they round-trip straight back to getCtx.
+    out.compact = await compactShards([...backedUp], { logger });
     const c = out.compact;
-    if (c.attempted) {
-      logger.info?.(`[shard-compact] attempted=${c.attempted} compacted=${c.compacted} `
-        + `failed=${c.failed} reclaimed=${c.reclaimed}`);
-    }
+    // Log EVERY pass, including a no-op one. The previous version only logged when
+    // something was attempted, so a job that never fired looked identical to a job
+    // that had nothing to do — which is exactly how it went unnoticed for an hour.
+    logger.info?.(`[shard-compact] eligible=${backedUp.size} attempted=${c.attempted} `
+      + `compacted=${c.compacted} failed=${c.failed} skipped_cooldown=${c.skipped} `
+      + `reclaimed=${c.reclaimed}`);
   } catch (e) {
     logger.warn?.(`[shard-compact] pass failed: ${e.message}`);
   }

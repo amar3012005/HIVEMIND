@@ -168,6 +168,28 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
     body.response_format = { type: 'json_object' };
   }
 
+  // REASONING OFF FOR STRUCTURED EXTRACTION. Benchmarked 2026-08-05 against the real
+  // kb-unified-extract prompt on a real 2445-char German evidence window, one call per model:
+  //
+  //   model                      default            reasoning:{enabled:false}
+  //   deepseek-v4-flash-0731     finish=length, 0 facts   ->  valid JSON, 7 facts, 1648 out_tok
+  //   qwen3.7-flash              finish=length, 0 facts   ->  valid JSON, 8 facts, 1543 out_tok
+  //   tencent/hy3-preview        finish=length, 0 facts   ->  valid JSON, 7 facts, 1342 out_tok
+  //
+  // Every reasoning model BLEW the token cap thinking and returned truncated, unparseable JSON —
+  // the same silent-fallback-storm failure the gpt-oss-20b swap caused. With reasoning disabled they
+  // emit ~1300-1600 output tokens and parse cleanly. This is the fix for the cap, not a bigger cap:
+  // gemini finishes the identical task in 1262 tokens, so a budget that fits the WORK is being
+  // consumed by deliberation we do not want here — extraction is transcription, not reasoning.
+  //
+  // NOTE `reasoning: { effort: 'minimal' }` does NOT disable it — measured 5362 and 5150 reasoning
+  // tokens on deepseek and qwen respectively. Only `enabled: false` zeroes it.
+  // Providers that MANDATE reasoning reject the field (gpt-oss-120b on google-vertex returns
+  // HTTP 400 "Reasoning is mandatory for this endpoint"), so this is opt-out via env.
+  if (route.provider === 'openrouter' && process.env.LLM_DISABLE_REASONING !== 'false') {
+    body.reasoning = { enabled: false };
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 

@@ -139,11 +139,42 @@ export function snapshotShardsOnce({
  * @returns {Promise<{backup:object,compact:object|null}>}
  */
 export async function runShardMaintenanceOnce({ logger = console } = {}) {
-  const out = { backup: null, compact: null };
+  const out = { backup: null, mirror: null, compact: null };
 
   out.backup = isOn('MNEME_BACKUP_ENABLED', 'true')
     ? snapshotShardsOnce({ logger })
     : { slots: 0, snapped: 0, pruned: 0, failed: 0, bytes: 0, orgs: [] };
+
+  // ── SQL-mirror backfill ───────────────────────────────────────────────────
+  // /v1/lexical (the lexical half of hybrid recall) runs Postgres FTS over the
+  // `memories` mirror, not the shard. /v1/write mirrors new records, but memories
+  // written before that mirror existed were never backfilled — measured on prod,
+  // 6 of 7 amr_embedded orgs had ZERO mirror rows against shards holding real data,
+  // so those tenants were silently running vector-only recall. Additive and
+  // idempotent (ON CONFLICT DO NOTHING), so it is safe to run on every pass.
+  if (isOn('MNEME_MIRROR_BACKFILL_ENABLED', 'true') && (out.backup.orgs || []).length) {
+    out.mirror = { orgs: 0, inserted: 0, failed: 0 };
+    try {
+      const { backfillSqlMirror } = await import('./embedded-agent.mjs');
+      for (const org of out.backup.orgs) {
+        // eslint-disable-next-line no-await-in-loop
+        const r = await backfillSqlMirror(org, { logger });
+        out.mirror.orgs += 1;
+        out.mirror.inserted += r.inserted;
+        out.mirror.failed += r.failed;
+        if (r.inserted || r.failed) {
+          logger.info?.(`[mirror-backfill] org=${String(org).slice(0, 8)} shard=${r.shard} `
+            + `existing=${r.existing} inserted=${r.inserted} failed=${r.failed}`);
+        }
+      }
+      if (out.mirror.inserted || out.mirror.failed) {
+        logger.info?.(`[mirror-backfill] orgs=${out.mirror.orgs} inserted=${out.mirror.inserted} `
+          + `failed=${out.mirror.failed} — lexical recall restored for backfilled rows`);
+      }
+    } catch (e) {
+      logger.warn?.(`[mirror-backfill] pass failed: ${e.message}`);
+    }
+  }
 
   if (!isOn('MNEME_COMPACT_ENABLED', 'false')) return out;
 

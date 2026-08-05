@@ -436,6 +436,72 @@ const ctxCache = new Map();
  * @param {(orgId:string)=>boolean} [allow] optional per-org gate (e.g. "only if snapshotted")
  * @returns {{attempted:number,compacted:number,failed:number,reclaimed:number}}
  */
+/**
+ * Backfill the SQL mirror (`memories`) from the shard for one org.
+ *
+ * WHY: `/v1/lexical` — the lexical half of hybrid recall — runs Postgres FTS over the
+ * `memories` mirror, NOT over the shard. `/v1/write` mirrors each new record, but any
+ * memory written before that mirror existed was never backfilled. Measured on prod:
+ * 6 of 7 amr_embedded orgs had ZERO mirror rows while their shards held real data
+ * (38, 24, 12 memories), so those tenants were silently running VECTOR-ONLY recall —
+ * the same silent-partial shape as the Qdrant embedding drift the embed-reconciler fixes.
+ *
+ * SAFETY: strictly additive. `ON CONFLICT (id) DO NOTHING` — it can only insert rows the
+ * mirror is missing, never overwrite a live row, so it cannot clobber the provenance the
+ * two-phase write path carefully merges. Bounded per call.
+ *
+ * @returns {Promise<{shard:number,existing:number,inserted:number,failed:number}>}
+ */
+export async function backfillSqlMirror(orgId, { max = 2000, logger = console } = {}) {
+  const out = { shard: 0, existing: 0, inserted: 0, failed: 0 };
+  const ctx = await getCtx(orgId);
+  if (!ctx?.amr || !pg) return out;
+
+  // Stream the shard so a large slot never materialises in JS heap.
+  const records = [];
+  let from = 0;
+  for (;;) {
+    const page = ctx.amr.store.recordsPage(from, 500);
+    for (const row of (page.rows || [])) {
+      try { const r = JSON.parse(row.text); if (r?.id) records.push(r); } catch { /* skip unparseable slot */ }
+    }
+    if (page.nextSlot === 4294967295 || records.length >= max) break;
+    from = page.nextSlot;
+  }
+  out.shard = records.length;
+  if (!records.length) return out;
+
+  const { rows: have } = await pg.query('SELECT id::text FROM memories WHERE org_id=$1', [ctx.org]);
+  const known = new Set(have.map((h) => h.id));
+  out.existing = known.size;
+
+  for (const r of records) {
+    if (known.has(String(r.id))) continue;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await pg.query(
+        `INSERT INTO memories (id, org_id, user_id, content, title, tags, memory_type, is_latest, layer,
+           cognitive_layer_role, confidence, created_at, valid_from, valid_to, document_date, project,
+           project_ids, metadata, scope, primary_team_id, recall_count, strength, vector_synced)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12::timestamptz,now()),$13,$14,$15,$16,$17,
+                 $18::jsonb,$19,$20::uuid,coalesce($21::int,0),coalesce($22::real,1.0),true)
+         ON CONFLICT (id) DO NOTHING`,
+        [r.id, ctx.org, r.user_id || null, r.content || null, r.title || null, r.tags || [],
+          r.memory_type || null, r.is_latest ?? true, r.layer || 'memory', r.cognitive_layer_role || null,
+          r.confidence ?? null, r.created_at || null, r.valid_from || null, r.valid_to || null,
+          r.document_date || null, r.project || null, r.project_ids || [],
+          JSON.stringify(r.metadata || {}), r.scope || null, r.primary_team_id || null,
+          r.recall_count ?? 0, r.strength ?? 1.0],
+      );
+      out.inserted += 1;
+    } catch (e) {
+      out.failed += 1;
+      if (out.failed <= 3) logger.warn?.(`[mirror-backfill] org=${String(orgId).slice(0, 8)} id=${r.id}: ${e.message}`);
+    }
+  }
+  return out;
+}
+
 const lastCompacted = new Map(); // orgId -> epoch ms of the last successful compaction
 
 /**

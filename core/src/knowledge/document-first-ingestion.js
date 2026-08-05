@@ -2805,6 +2805,13 @@ Every item must include a non-empty content field and one or more valid support_
       candidateCount: _cands,
       promotedCount: promoted.memories.length,
       promotedMemoryIds: promoted.memories.map(m => m.id),
+      // REAL page count so the durable kbPages meter settles true pages, not
+      // `Math.max(1, result.pages ?? 1)` = always 1. parseResult.metadata.pages
+      // is the docling page-array length (PDFs, office decks); fall back to the
+      // count of DISTINCT pages actually segmented, then 1 for text/csv.
+      pages: Number(parseResult?.metadata?.pages)
+        || new Set(segments.map((s) => s.startPage).filter((p) => p != null && p > 0)).size
+        || 1,
       coverage,
       timings: { parse: _msParse, segment: _msSeg, embed: _msEmbed, promote: _msPromote },
     };

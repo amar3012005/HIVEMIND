@@ -38,7 +38,7 @@ export class KnowledgeUploadService {
     }
 
     if (this.planEnforcer) {
-      const estimatedPages = Math.max(1, Math.ceil(file.data.length / 50_000));
+      const estimatedPages = await this._estimatePages(file, validation);
       const limit = await this.planEnforcer.checkLimit(orgId, 'kbPages', estimatedPages);
       if (!limit.allowed) return { ok: false, status: limit.status || 402, body: {
         error: 'quota_reached', metric: 'kbPages', estimated_pages: estimatedPages,
@@ -103,5 +103,38 @@ export class KnowledgeUploadService {
     }
     await this.jobStore.updateOwned(job.id, orgId, { queueJobId: queued.queue_job_id });
     return { ok: true, job: await this.jobStore.findOwned(job.id, { orgId, userId }) };
+  }
+
+  /**
+   * Estimate how many plan "pages" an upload consumes, per media kind — never
+   * by raw bytes. The old value `Math.ceil(file.data.length / 50_000)` is a
+   * byte heuristic with no basis in the plan's unit: a 3 MB image was billed
+   * as ~62 pages (and 402'd a Free org that was well within a 1-page image's
+   * allowance), while a 500 KB markdown file billed as 10. The durable
+   * counter (settled after ingest) uses the REAL parsed page count; this
+   * pre-admit estimate only needs to be accurate enough to not false-block.
+   *
+   * - image            → 1  (an image is one thing = one page, by definition)
+   * - pdf              → real page count (cheap header/count read, same lib the
+   *                      parser uses); fall back to 1 if it cannot be read
+   * - other documents  → 1  at admit (office/text pages aren't knowable before
+   *                      parsing; the durable counter settles the real value)
+   */
+  async _estimatePages(file, validation) {
+    const kind = validation?.kind;
+    const ext = String(file?.filename || '').split('.').pop()?.toLowerCase();
+    if (kind === 'image' || String(file?.contentType || '').toLowerCase().startsWith('image/')) {
+      return 1;
+    }
+    if (kind === 'document' && ext === 'pdf' && Buffer.isBuffer(file?.data)) {
+      try {
+        const { PDFParse } = await import('pdf-parse');
+        const parser = new PDFParse({ data: file.data });
+        const info = await parser.getInfo();
+        const total = Number(info?.total || info?.pages?.length || 0);
+        if (Number.isFinite(total) && total > 0) return total;
+      } catch { /* fall through to 1 */ }
+    }
+    return 1;
   }
 }

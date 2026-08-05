@@ -2695,6 +2695,22 @@ Every item must include a non-empty content field and one or more valid support_
     // Step 4: Create segments from parsed structure (idempotent — re-uploads
     // of identical content reuse existing segments).
     // Remote orgs: _createSegments returns in-memory objects (no DB); no re-query needed.
+    // Scope + crucial doc metadata to denormalise onto EVERY segment, so evidence
+    // self-describes its scope (personal/project/team/organization) — recall,
+    // chat scope lenses, and citation display then apply the same scope to
+    // memories AND evidence without a document join, and the .amr/byod agent
+    // (which stores segments without central's document-tag join) stays scoped too.
+    const _segDocScope = {
+      scope: metadata.scope
+        || (_scopeKey.startsWith('project:') ? 'project'
+          : _scopeKey.startsWith('team:') ? 'team'
+            : _scopeKey.startsWith('org:') ? 'organization' : 'personal'),
+      scopeKey: _scopeKey,
+      scopeTag: _scopeTag,
+      projectId: metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]) || null,
+      teamId: metadata.primary_team_id || null,
+      documentTitle: metadata.documentTitle || metadata.filename || null,
+    };
     const _tSeg = Date.now();
     let segments;
     let _segmentsNeedEmbed = false; // true only when segments were freshly created this request
@@ -2704,7 +2720,8 @@ Every item must include a non-empty content field and one or more valid support_
         documentId: knowledgeDoc.id,
         userId,
         orgId,
-        parseResult
+        parseResult,
+        docScope: _segDocScope,
       });
       _segmentsNeedEmbed = segments.length > 0;
     } else {
@@ -2717,9 +2734,27 @@ Every item must include a non-empty content field and one or more valid support_
           documentId: knowledgeDoc.id,
           userId,
           orgId,
-          parseResult
+          parseResult,
+          docScope: _segDocScope,
         });
         _segmentsNeedEmbed = segments.length > 0;
+      }
+    }
+    // Defence in depth: stamp scope onto ANY segment a non-semantic tier
+    // (fast-pdf / vision / table / enterprise) or the remote in-memory path
+    // built without it, so every returned segment self-carries scope before
+    // embedding + write-to-agent. Never overwrites a scope already set.
+    for (const _s of (segments || [])) {
+      if (_s && typeof _s === 'object') {
+        const md = (_s.metadata && typeof _s.metadata === 'object') ? _s.metadata : {};
+        if (md.scope == null) {
+          _s.metadata = {
+            ...md,
+            scope: _segDocScope.scope, scope_key: _segDocScope.scopeKey,
+            project_id: _segDocScope.projectId, team_id: _segDocScope.teamId,
+            document_title: _segDocScope.documentTitle,
+          };
+        }
       }
     }
     let _msEmbed = 0;
@@ -3508,7 +3543,7 @@ Every item must include a non-empty content field and one or more valid support_
    * headings, paragraphs, tables). Fallback: sliding window.
    * @private
    */
-  async _createSegments({ documentId, userId, orgId, parseResult }) {
+  async _createSegments({ documentId, userId, orgId, parseResult, docScope = {} }) {
     const remote = orgIsRemote(orgId);
     const hybridChunks = parseResult?.metadata?.hybridChunks;
     const hasChunks = Array.isArray(hybridChunks) && hybridChunks.length > 0;
@@ -3700,7 +3735,10 @@ Every item must include a non-empty content field and one or more valid support_
               segmentIndex, previousSegmentId, depth: _hstack.length, startOffset, endOffset,
               startPage, endPage,
               wordCount: text.split(/\s+/).length,
-              metadata: { heading, heading_path: headingPath, page: startPage, source: 'semantic_chunk' },
+              metadata: { heading, heading_path: headingPath, page: startPage, source: 'semantic_chunk',
+                scope: docScope.scope || null, scope_key: docScope.scopeKey || null,
+                project_id: docScope.projectId || null, team_id: docScope.teamId || null,
+                document_title: docScope.documentTitle || null },
             };
             if (remote) {
               const segment = { id: crypto.randomUUID(), ...base, createdAt: new Date().toISOString() };

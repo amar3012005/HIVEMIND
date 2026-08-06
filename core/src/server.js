@@ -11902,6 +11902,105 @@ exit \$RC
         // is O(1) and cannot be used to smuggle content past validation. Scoped by
         // the caller's org exactly like findDuplicate on the upload path, so it can
         // never reveal whether ANOTHER tenant holds that checksum.
+        // List ingest jobs for this org, newest first — DISCOVERABILITY.
+        // A job that exhausted its attempts was recorded as failed/dead and then
+        // never surfaced anywhere: no endpoint listed it, so a document could be
+        // permanently un-ingested with nobody informed. Defaults to the terminal
+        // failure states because that is the case an operator needs to find.
+        case '/api/knowledge/jobs':
+          if (req.method === 'GET') {
+            if (!knowledgeUploadJobStore || !prisma) return jsonResponse(res, { error: 'job store unavailable' }, 503);
+            const wanted = String(url.searchParams.get('status') || 'failed,dead')
+              .split(',').map((s) => s.trim()).filter(Boolean)
+              .filter((s) => ['queued', 'processing', 'ready', 'failed', 'dead', 'cancelled'].includes(s));
+            const lim = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50));
+            try {
+              const rows = await prisma.knowledgeIngestJob.findMany({
+                where: { orgId, ...(wanted.length ? { status: { in: wanted } } : {}) },
+                orderBy: { createdAt: 'desc' },
+                take: lim,
+                select: {
+                  id: true, filename: true, status: true, stage: true, progress: true,
+                  checksum: true, documentId: true, errorCode: true, errorMessage: true,
+                  createdAt: true, updatedAt: true, processingVersion: true,
+                },
+              });
+              // Say up front whether each one can actually be replayed. Without this
+              // the UI would offer Retry on jobs whose bytes are gone.
+              const jobs = rows.map((j) => ({
+                ...j,
+                replayable: !!kbIngestQueue?.rawFilePath({ orgId, checksum: j.checksum, filename: j.filename }),
+              }));
+              return jsonResponse(res, { jobs, count: jobs.length, statuses: wanted });
+            } catch (e) {
+              return jsonResponse(res, { error: 'job_list_failed', message: e.message }, 500);
+            }
+          }
+          break;
+
+        // Replay a terminally-failed ingest from its RETAINED bytes.
+        //
+        // Re-uploading the same file already retries (upload-service resets a
+        // failed/dead/cancelled job and re-enqueues with processingVersion+1), so
+        // this deliberately reuses that exact state machine rather than inventing a
+        // second one — it only removes the need to send the bytes again.
+        //
+        // Terminal failures retain their raw file now; anything that failed before
+        // that, or aged past KB_RAW_RETENTION_HOURS, answers 409 raw_file_unavailable
+        // instead of enqueueing a job that would die on a missing file.
+        case '/api/knowledge/jobs/retry':
+          if (req.method === 'POST') {
+            if (!knowledgeUploadJobStore || !kbIngestQueue) return jsonResponse(res, { error: 'job store unavailable' }, 503);
+            const jobId = String(body?.job_id || body?.jobId || '').trim();
+            if (!jobId) return jsonResponse(res, { error: 'job_id is required' }, 400);
+            try {
+              const job = await knowledgeUploadJobStore.findOwned(jobId, { orgId });
+              if (!job) return jsonResponse(res, { error: 'job_not_found' }, 404);
+              if (!['failed', 'dead', 'cancelled'].includes(job.status)) {
+                // Never restart something that is live or already succeeded — that
+                // would duplicate a document or interrupt an in-flight ingest.
+                return jsonResponse(res, {
+                  error: 'job_not_retryable', status: job.status,
+                  message: `Only failed, dead or cancelled jobs can be replayed (this one is "${job.status}").`,
+                }, 409);
+              }
+              const filePath = kbIngestQueue.rawFilePath({ orgId, checksum: job.checksum, filename: job.filename });
+              if (!filePath) {
+                return jsonResponse(res, {
+                  error: 'raw_file_unavailable', job_id: job.id, filename: job.filename,
+                  message: 'The original bytes are no longer on disk (the job failed before raw-file '
+                    + 'retention, or passed the retention window). Re-upload the file to ingest it.',
+                }, 409);
+              }
+              const processingVersion = (job.processingVersion || 1) + 1;
+              await knowledgeUploadJobStore.updateOwned(job.id, orgId, {
+                status: 'queued', stage: 'queued', progress: 0, processingVersion,
+                attempt: 0, errorCode: null, errorMessage: null, completedAt: null,
+              });
+              const queued = await kbIngestQueue.enqueue({
+                userId: job.userId || userId, orgId,
+                filename: job.filename, contentType: job.contentType, checksum: job.checksum,
+                filePath, trackerJobId: job.id, processingVersion,
+                metadata: { ...(job.metadata || {}), replay_of_version: job.processingVersion || 1 },
+              });
+              if (queued?.backpressure) {
+                await knowledgeUploadJobStore.fail(job.id, orgId,
+                  Object.assign(new Error('Ingestion queue is saturated.'), { code: 'QUEUE_SATURATED' }));
+                return jsonResponse(res, { error: 'queue_saturated', retry_after: 30 }, 429);
+              }
+              await knowledgeUploadJobStore.updateOwned(job.id, orgId, { queueJobId: queued?.queue_job_id });
+              console.log(`[knowledge/jobs/retry] replaying ${job.filename} job=${job.id} org=${String(orgId).slice(0, 8)} v${processingVersion}`);
+              return jsonResponse(res, {
+                success: true, job_id: job.id, status: 'queued',
+                processing_version: processingVersion, filename: job.filename,
+              });
+            } catch (e) {
+              console.error('[knowledge/jobs/retry] failed:', e.message);
+              return jsonResponse(res, { error: 'retry_failed', message: e.message }, 500);
+            }
+          }
+          break;
+
         case '/api/knowledge/upload/precheck':
           if (req.method === 'POST') {
             if (!knowledgeUploadJobStore) return jsonResponse(res, { error: 'job store unavailable' }, 503);

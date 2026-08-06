@@ -389,6 +389,26 @@ export class KbIngestQueue {
   }
 
   /** Persist raw bytes durably; returns the stored path. */
+  /**
+   * Where persistFile() put (or would put) the raw bytes for a job.
+   *
+   * Exposed so replay does not re-derive the layout: the path formula lives here,
+   * next to the writer, and nowhere else. A second copy in the route would drift
+   * the moment either changes — which is exactly how the sweeper was first written
+   * against a flat directory that never existed.
+   *
+   * Returns null when the bytes are gone. Terminal failures retain them now, but
+   * anything that failed BEFORE that change, or aged past
+   * KB_RAW_RETENTION_HOURS, has nothing to replay and the caller must say so
+   * rather than enqueue a job that will die on a missing file.
+   */
+  rawFilePath({ orgId, checksum, filename }) {
+    if (!orgId || !checksum || !filename) return null;
+    const safe = String(filename).replace(/[/\\]/g, '_');
+    const p = path.join(KB_STORE_DIR, String(orgId), String(checksum), safe);
+    try { return fs.existsSync(p) ? p : null; } catch { return null; }
+  }
+
   persistFile({ orgId, checksum, filename, fileBuffer }) {
     const dir = path.join(KB_STORE_DIR, orgId, checksum);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

@@ -23,17 +23,21 @@ const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
 // VISION MODEL ON THE OPENROUTER LEG — decided on PIPELINE evidence, not API probes.
 //
-// Llama-4-Scout is the tempting choice: it is the same model the Groq path uses and
-// it is 2-3x faster. Direct API probes with the real OCR prompt favoured it on
-// latency (927ms vs 2248ms). But the only measurement that reflects the product is
-// the pipeline, and there it consistently lost on the thing that matters:
+// Llama-4-Scout is the tempting choice: same model as the Groq path, and 2-3x
+// faster (direct probes with the real OCR prompt: 927ms vs 2248ms). It is not the
+// default because of how much of the page each model actually READS, measured
+// in-pipeline on the same scanned PDF:
 //
-//   in-pipeline, same scanned PDF        chars   memories
-//   google/gemini-2.5-flash-lite          605       4
-//   meta-llama/llama-4-scout          231, 237      0, 0   (two runs)
+//   google/gemini-2.5-flash-lite     605 chars   (repeatable)
+//   meta-llama/llama-4-scout     231, 237 chars  (two runs)
 //
-// Zero promotable memories twice. Fewer characters means fewer grounded claims, and
-// evidence-only is a worse outcome than 1.5s of extra latency.
+// Gemini transcribes ~2.6x more of the page, and OCR text is the ONLY input the
+// rest of ingestion has — everything downstream is bounded by it.
+//
+// Deliberately NOT decided on memory counts, though it is tempting: the same 605
+// chars produced 4 memories on one run and 0 on another, so promoted-memory count
+// is too noisy to compare models with. Extracted characters are stable and
+// reproducible; that is the metric this choice rests on.
 //
 // A second finding worth keeping: OpenRouter's upstream for Scout VARIES per call
 // (observed Groq on one probe, DeepInfra on the next), so Scout's output quality is

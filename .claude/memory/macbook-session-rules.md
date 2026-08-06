@@ -18,13 +18,25 @@ git push --force-with-lease origin <your-branch>
 own branch name in the meantime, which a bare `--force` would silently clobber.
 Never rebase or force-push anything that isn't your own feature branch.
 
-## 2. `singulance-main` is the only deployable ref — full stop
-You never deploy from your laptop directly. Your branch merges via PR, and
-deployment happens from the box against a clean `singulance-main` checkout. If
-you're tempted to `ssh` in and push a fix straight to a running container: don't.
-That's the exact class of incident that produced the "deploy only named commits"
+## 2. `singulance-main` is the only deployable ref — you can trigger a deploy, never bypass this
+You can deploy core/control-plane from your laptop with:
+```
+scripts/deploy-remote.sh core      # or: control
+```
+This is safe **because of what it refuses to do**, not despite it: it SSHes in and
+does everything — resolve ref, build, tag, health-gate, record — on the box, from
+a disposable worktree of a commit it has verified is an ancestor of
+`origin/singulance-main`. Nothing is built or run against your laptop's copy of
+the repo. If the ref you name isn't merged, it refuses outright.
+
+**Do not use `scripts/remote-deploy.sh` for core or control.** It predates this
+rule and contradicts it: it `rsync --delete`s your laptop's raw working tree —
+dirty or not, no commit resolution — straight onto the server and restarts. That
+is the exact class of incident that produced the "deploy only named commits"
 rule in `CLAUDE.md` — prod was once found running a dirty working tree that
-existed in no committed branch anywhere, unreproducible.
+existed in no committed branch anywhere, unreproducible. `remote-deploy.sh`'s
+`SERVER_PATH` (`/opt/HIVEMIND`) also no longer matches where the box actually
+runs from (`/root/hivemind`) — it is stale as well as unsafe.
 
 ## 3. Assume the box has moved. It has.
 Before starting any session: `git fetch origin && git log origin/singulance-main -5`.

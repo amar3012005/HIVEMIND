@@ -1225,11 +1225,37 @@ const TOOL_HANDLERS = {
         : await ctx.persistentMemoryEngine.ingestMemory(routed);
     }
     const id = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
+    // SURFACE A CONTRADICTION THE SAVE JUST DETECTED.
+    // graph-engine records every edge it wrote in `edgesCreated`, including
+    // Contradicts, but this handler dropped the whole array — so a save that
+    // KNEW it conflicted with an existing memory still answered "saved" and the
+    // user found out never. Returning the conflicting memories (hydrated to a
+    // short snippet, so the answer can name the thing rather than an id) lets the
+    // reply say "saved — note this may conflict with <X>". Only Contradicts is
+    // surfaced: Updates/Extends are normal evolution and would be noise.
+    let conflicts;
+    try {
+      const _c = (saved?.edgesCreated || []).filter((e) => e?.type === 'Contradicts' && e?.to);
+      if (_c.length) {
+        const _store = ctx.persistentMemoryEngine?.store;
+        const _hydrated = _store?.getMemories ? await _store.getMemories(_c.map((e) => e.to)) : null;
+        conflicts = _c.slice(0, 3).map((e) => {
+          const m = _hydrated?.get?.(e.to);
+          return {
+            memory_id: e.to,
+            title: m?.title || null,
+            snippet: String(m?.content || '').slice(0, 160) || null,
+            reasoning: e.reasoning || null,
+          };
+        });
+      }
+    } catch { /* a failed hydrate must never fail the save */ }
     return {
       saved: true,
       id,
       title: args.title,
       operation: saved?.operation || null,
+      ...(conflicts?.length ? { conflicts } : {}),
       childCount: saved?.childIds?.length ?? null,
       scope,
       project_id: resolvedProjectId,

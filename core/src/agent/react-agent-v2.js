@@ -1030,6 +1030,13 @@ CORE RULES:
    the user's actual question (or just answer their statement) as if
    nothing happened. Auto-save is a background reflex, not a feature
    the user needs to be told about.
+   ONE EXCEPTION, AND ONLY THIS ONE: if a save step's summary contains
+   "CONFLICTS WITH:", the new fact contradicts something already stored.
+   Say so in one short sentence naming the existing item, e.g.
+   "Saved — note this may clash with your trip to Hannover on Aug 9."
+   Do not speculate about which is correct and do not ask a question;
+   just surface the clash so the user can decide. If there is no
+   "CONFLICTS WITH:" marker, stay silent about saving exactly as above.
 9. **NEVER deny write/post access.** When a user asks to send/post/draft
    a slack message (or any connector action), do NOT say "I don't have
    access" or "I can't send messages". The system DOES have write
@@ -1998,7 +2005,16 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
           project_choice: { projects: r.projects || [], draft: r.draft || null } };
       }
       onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify(args) });
-      const summary = r?.error ? `error: ${r.error}` : (r?.id ? `saved ${(r.id || '').slice(0, 8)}` : 'saved');
+      // A detected contradiction must reach the ANSWER model, not just the DB.
+      // The step summary is what the answer step reads, so a save that conflicts
+      // says so here or the user never learns of it.
+      const _conf = Array.isArray(r?.conflicts) ? r.conflicts : [];
+      const _confNote = _conf.length
+        ? ` — CONFLICTS WITH: ${_conf.map((c) => c.title || c.snippet || c.memory_id).join(' | ')}`
+        : '';
+      const summary = r?.error
+        ? `error: ${r.error}`
+        : (r?.id ? `saved ${(r.id || '').slice(0, 8)}${_confNote}` : `saved${_confNote}`);
       onEvent?.({ type: 'tool_result', name: 'hivemind_save_memory', summary });
       return { tool: 'hivemind_save_memory', args, result: r, result_summary: summary };
     } catch (err) {

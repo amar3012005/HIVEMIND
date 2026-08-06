@@ -190,3 +190,50 @@ metrics usable, not by hiding them behind an `allow()`. Operators should alarm o
   original**, by direction, on real data — not just unit-tested against its author's
   reading of it.
 - Do not add a CI gate you have not personally watched pass.
+
+---
+
+## 8. Memory-engine item 2 — documents into the slot (`6a619764`, live)
+
+Scope clarified by the owner: meetings, TARA history and leads **stay in Postgres**. Only the
+memory engine is being moved. Measured against that scope, the engine is already further along
+than it looked — **8 of 34 routes run with zero Postgres and zero Qdrant**, and they are the
+entire memory *read* path (`recall`, `graph`, `hydrate`, `list`, `stats`, `mem-edges`,
+`mem-relationships`, `by-tags`).
+
+Item 2 writes `knowledge_documents` into the slot as layer-3 records: the shard-side half of the
+access join, and the input `doc-access.mjs` gates against. Additive; nothing reads it yet.
+
+Three decisions where the obvious version was wrong:
+
+1. **Authoritative, not denormalised.** Copying title + grants onto each segment is the shortcut.
+   It is also a leak: scope-key grants change (shared → un-shared) and per-segment copies keep
+   answering with the OLD grants. One record per document, rewritten by the same upsert.
+2. **Layer 3, excluded structurally.** `insert_layered` takes a `u8`, so 0/1/2 was convention, not
+   a format limit. Document records carry a zero-vector placeholder, so they *rank* last — but
+   ranking is not a guarantee, and an over-fetched pool on a 23-segment corpus returns them
+   regardless. All three recall paths exclude the layer explicitly, **including `mneme-recall`'s
+   all-layer lane** — which recalls every layer deliberately (cross-layer recall is a feature) and
+   was therefore precisely the lane that would have served them as fake memories.
+3. **Lifecycle routed — and it exposed a pre-existing bug.** `kb-doc-delete` removed segments from
+   Postgres and Qdrant but left them in the shard's evidence layer. Harmless ONLY because the
+   access join drops rows whose document is deleted — which stops being true the moment the shard
+   serves reads. Fourth lifecycle this delete has needed (after derivations, evidence links, grids).
+
+**Verified live**: doc backfill `{pg:7, written:7, failed:0}`; recall returns 60 candidates with
+**0 document-layer leaked**, layers `{memory:38, evidence:22}` intact, and opt-in reads all 7 back.
+
+### Mistake repeated
+`isNonRecallable` was first written inside `amr-store.mjs`, which loads the native binding at
+module scope — so its test could not run off-box. That is the *same* trap that hid the kb-recall
+crash, repeated within hours of writing it down. Moved to a binding-free `layers.mjs`. Writing an
+invariant into a journal does not stop you from violating it; only making the wrong thing hard does.
+
+### Item 1 (drop the write mirror) — corrected estimate
+Called "small" earlier; it is not. Two findings:
+- The stale comment on `/v1/lexical` claims the shard index "cannot express" layer/temporal
+  filters. **Untrue** — `_passesFilter` handles `known_at` and the valid-at snapshot, and the shard
+  union already receives the same filter object. That half is done.
+- But the mirror has a **second reader**: `countDerivedMemories`, backing the "N memories from this
+  document" count on the KB list. It must be ported to `findByTags` + a metadata scan before the
+  mirror can be retired.

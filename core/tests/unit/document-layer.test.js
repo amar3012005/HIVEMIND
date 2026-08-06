@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isNonRecallable, DOCUMENT_LAYER } from '../../src/vector/mneme/layers.mjs';
+import { isNonRecallable, isMetadataLayer, DOCUMENT_LAYER } from '../../src/vector/mneme/layers.mjs';
 
 // The `document` layer holds a document's owner, scope-key grants and title so the slot can
 // answer "who may see this" without Postgres. Those records are gating METADATA, not content.
@@ -43,4 +43,33 @@ test('the entity layer is metadata too — same exclusion, no second rule', () =
   // And adding it must not have widened the rule onto content layers.
   assert.equal(isNonRecallable({ layer: 'memory' }, {}), false);
   assert.equal(isNonRecallable({ layer: 'evidence' }, {}), false);
+});
+
+test('isMetadataLayer gates the SQL mirror — the write-path guard, untested until it leaked', () => {
+  // This is the predicate /v1/write uses to decide whether a record may be mirrored into
+  // hm.memories. It matters more than the recall-side exclusions: /v1/lexical runs Postgres FTS
+  // over that table and does NOT go through them, which is how entity records reached a user's
+  // recall as memories. A row that is never mirrored cannot leak through any future SQL reader.
+  assert.equal(isMetadataLayer('document'), true);
+  assert.equal(isMetadataLayer('entity'), true);
+
+  // Content layers MUST still mirror — over-matching here silently empties the lexical lane,
+  // which fails in the opposite direction and just as quietly.
+  assert.equal(isMetadataLayer('memory'), false);
+  assert.equal(isMetadataLayer('evidence'), false);
+  assert.equal(isMetadataLayer('cognitive'), false);
+
+  // An absent layer defaults to memory (see layerIdOf) and must therefore mirror.
+  assert.equal(isMetadataLayer(undefined), false);
+  assert.equal(isMetadataLayer(null), false);
+  assert.equal(isMetadataLayer(''), false);
+});
+
+test('every metadata layer is BOTH non-recallable and non-mirrored', () => {
+  // The two guards must not drift apart: a layer excluded from recall but still mirrored is
+  // exactly the leak that shipped, and the reverse would hide content from the lexical lane.
+  for (const layer of ['document', 'entity']) {
+    assert.equal(isMetadataLayer(layer), true, `${layer} must not be mirrored`);
+    assert.equal(isNonRecallable({ layer }, {}), true, `${layer} must not be recalled`);
+  }
 });

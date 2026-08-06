@@ -1161,6 +1161,7 @@ transaction_time = when the system LEARNED the fact (system clock); valid_time =
           valid_time: { type: 'string', description: 'ISO timestamp — when the fact was true in the world.' },
           memory_query: { type: 'string', description: 'Optional semantic filter on the time-traveled set (e.g. "supplier contract").' },
           file_path: { type: 'string', description: 'Optional file:<path> tag filter (code use).' },
+          limit: { type: 'integer', description: 'Max memories to return (default 20, max 200).' },
           project: { type: 'string' },
           project_id: { type: 'string' },
         }
@@ -3517,6 +3518,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         const txTime = args.transaction_time || null;
         const validTime = args.valid_time || null;
         const query = args.memory_query || args.file_path || 'workspace memory';
+        const atLimit = Math.max(1, Math.min(200, Number(args.limit) || 20));
         const res = await apiClient.post('/api/recall', {
           query_context: query,
           mode: 'explain',
@@ -3529,9 +3531,15 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           ...(txTime ? { transaction_at: txTime } : {}),
           ...(validTime ? { valid_at: validTime } : {}),
           ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
+          limit: atLimit,
           project_id: args.project_id || null,
         });
-        const polished = polishMemories(res.memories || []);
+        // Cap the response. An as-of query legitimately matches everything whose
+        // validity window covers that instant, which on a real corpus is hundreds
+        // of full memory rows — measured 443 memories / 3.1MB, enough to blow up
+        // the calling agent's context and make the tool unusable in practice. The
+        // documented contract is a default of 20.
+        const polished = polishMemories(res.memories || []).slice(0, atLimit);
         const hint = (polished.length === 0 && txTime)
           ? `No memories exist at transaction_time=${txTime}${args.file_path ? ` for file ${args.file_path}` : ''}. The system may not have learned anything by that time, or the file did not yet exist. Try a later timestamp or omit the filter.`
           : null;

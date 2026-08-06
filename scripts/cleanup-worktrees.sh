@@ -1,166 +1,106 @@
 #!/usr/bin/env bash
-# cleanup-worktrees.sh
+# cleanup-worktrees.sh — remove stale detached worktrees used by build/release/experiment sessions.
 #
-# Remove stale detached/temporary worktrees created by CI/release helpers and
-# development sessions.
-#
-# Safety:
-# - keeps active paths
-# - skips dirty worktrees
-# - supports dry-run
-# - prunes git worktree metadata after removals
-#
-# Env vars:
-#   WORKTREE_CLEANUP_AGE_HOURS (default: 12)
-#   WORKTREE_CLEANUP_DRY_RUN (default: 0)
-#   WORKTREE_CLEANUP_INCLUDE_TMP (default: 0)  # include /tmp/opencode/*
+# Safe by default:
+# - only checks candidate paths
+# - skips active mounts/process references
+# - skips dirty git trees
+# - logs every skip with reason
+# - prunes git worktree metadata from canonical parents
 
 set -euo pipefail
 
-PARENT_ROOTS=(/root/hivemind-main /root/hivemind /root/hivemind-next)
-AGE_HOURS="${WORKTREE_CLEANUP_AGE_HOURS:-12}"
-DRY_RUN="${WORKTREE_CLEANUP_DRY_RUN:-0}"
-INCLUDE_TMP="${WORKTREE_CLEANUP_INCLUDE_TMP:-0}"
-NOW="$(date +%s)"
-AGE_SECONDS=$((AGE_HOURS*3600))
-
+ROOT_DIR="/root"
+AGE_HOURS="${WORKTREE_CLEANUP_AGE_HOURS:-168}"   # 7 days
+INCLUDE_FROZEN="${WORKTREE_CLEANUP_INCLUDE_FROZEN:-0}"
 CANDIDATE_PREFIXES=(
-  /root/builds/prod-/
-  /root/builds/recall-/
-  /root/releases/
-  /root/hivemind-build-
-  /root/hivemind-release-
-  /root/hivemind-recall-
-  /root/hivemind-frozen
+  "${ROOT_DIR}/hivemind-build-"
+  "${ROOT_DIR}/hivemind-release-"
+  "${ROOT_DIR}/hivemind-recall-"
+  "${ROOT_DIR}/hivemind-security-build"
+  "${ROOT_DIR}/hivemind-fe-reconcile"
+  "${ROOT_DIR}/builds/prod-"
+  "${ROOT_DIR}/builds/core-"
+  "${ROOT_DIR}/builds/ingest-"
+  "${ROOT_DIR}/builds/test-"
+  "${ROOT_DIR}/builds/hyper-deploy-"
+  "${ROOT_DIR}/hivemind-recall-candidate"
+  "${ROOT_DIR}/releases/"
 )
-if [ "$INCLUDE_TMP" = "1" ]; then
-  CANDIDATE_PREFIXES+=(/tmp/opencode/)
+
+if [ "$INCLUDE_FROZEN" = "1" ]; then
+  CANDIDATE_PREFIXES+=("${ROOT_DIR}/hivemind-frozen")
 fi
 
-# Active mount check (containers and live shell references)
-ACTIVE_MOUNTS=$(docker ps -q | xargs -r docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | tr ' ' '\n' | sort -u)
+echo "=== cleanup-worktrees $(date -u +%FT%TZ) ==="
+
+targets=()
+for pref in "${CANDIDATE_PREFIXES[@]}"; do
+  if [[ "$pref" == */ ]]; then
+    shopt -s nullglob
+    for d in ${pref}*; do
+      [ -d "$d" ] && targets+=("$d")
+    done
+    shopt -u nullglob
+  else
+    [ -d "$pref" ] && targets+=("$pref")
+  fi
+done
+
+# Active mounted paths from running containers
+ACTIVE_MOUNTS="$(docker ps -q | xargs -r docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null | tr ' ' '\n' | sort -u)"
 
 is_active() {
   local path="$1"
-  if echo "$ACTIVE_MOUNTS" | grep -Fqx "$path"; then
+  if echo "$ACTIVE_MOUNTS" | grep -Fxq "$path"; then
     return 0
   fi
-  if ps -eo args | grep -Fq "$path" | grep -Ev 'rg|bash|grep' >/dev/null 2>&1; then
+  if ps -eo args | grep -F "$path" | grep -Ev 'rg|bash|grep' >/dev/null 2>&1; then
     return 0
   fi
   return 1
-}
-
-list_candidates() {
-  local candidates=()
-  local p
-  for pref in "${CANDIDATE_PREFIXES[@]}"; do
-  if [ -d "$pref" ] && [[ "$pref" == */ ]]; then
-      shopt -s nullglob
-      for d in ${pref}*; do
-        [ -d "$d" ] || continue
-        candidates+=("$d")
-      done
-      shopt -u nullglob
-    elif [ -d "$pref" ]; then
-      candidates+=("$pref")
-    fi
-  done
-
-  for p in "${candidates[@]}"; do
-    echo "$p"
-  done
-}
-
-is_worktree_dirty() {
-  local path="$1"
-  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    if [ -n "$(git -C "$path" status --short)" ]; then
-      return 0
-    fi
-  fi
-  return 1
-}
-
-path_is_registered() {
-  local path="$1"
-  local parent
-  local wt
-  for parent in "${PARENT_ROOTS[@]}"; do
-    [ -d "$parent/.git" ] || continue
-    while read -r wt; do
-      if [ "$wt" = "worktree $path" ]; then
-        return 0
-      fi
-    done < <(git -C "$parent" worktree list --porcelain | awk '/^worktree/{print $2}')
-  done
-  return 1
-}
-
-remove_path() {
-  local path="$1"
-  if [ "$DRY_RUN" = "1" ]; then
-    echo "DRY-RUN remove: $path"
-    return
-  fi
-
-  if path_is_registered "$path"; then
-    for parent in "${PARENT_ROOTS[@]}"; do
-      if git -C "$parent" worktree list --porcelain | grep -q "^worktree $path$"; then
-        git -C "$parent" worktree remove --force "$path" >/dev/null 2>&1 || true
-        return
-      fi
-    done
-  fi
-
-  python3 - "$path" <<'PY'
-import shutil, sys
-shutil.rmtree(sys.argv[1])
-PY
 }
 
 removed=0
 kept=0
 
-echo "=== cleanup-worktrees ==="
-echo "threshold=${AGE_HOURS}h dry-run=${DRY_RUN} include_tmp=${INCLUDE_TMP}"
-
-while read -r d; do
-  [ -z "$d" ] && continue
-
-  if [ ! -d "$d" ]; then
+for d in "${targets[@]}"; do
+  # Keep only directories older than threshold
+  if ! [[ $(stat -c %Y "$d") -lt $(( $(date +%s) - (AGE_HOURS*3600) )) ]]; then
+    echo "keep (too recent): $d"
+    kept=$((kept+1))
     continue
   fi
 
   if is_active "$d"; then
-    echo "keep (active): $d"
+    echo "keep (active ref): $d"
     kept=$((kept+1))
     continue
   fi
 
-  age=$((NOW - $(stat -c %Y "$d")))
-  if [ "$age" -lt "$AGE_SECONDS" ]; then
-    echo "keep (too new): $d"
-    kept=$((kept+1))
-    continue
+  if git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ -n "$(git -C "$d" status --short)" ]; then
+      echo "keep (dirty): $d"
+      kept=$((kept+1))
+      continue
+    fi
   fi
 
-  if is_worktree_dirty "$d"; then
-    echo "keep (dirty): $d"
-    kept=$((kept+1))
-    continue
-  fi
-
-  remove_path "$d"
-  removed=$((removed+1))
   echo "remove: $d"
-
-done < <(list_candidates | sort -u)
-
-for parent in "${PARENT_ROOTS[@]}"; do
-  [ -d "$parent/.git" ] && git -C "$parent" worktree prune >/dev/null 2>&1 || true
+  rm -rf "$d"
+  removed=$((removed+1))
+  
+  # clean stale git worktree metadata from known parents
+  if [ -d /root/hivemind-main/.git ]; then
+    git -C /root/hivemind-main worktree prune >/dev/null 2>&1 || true
+  fi
+  if [ -d /root/hivemind-next/.git ]; then
+    git -C /root/hivemind-next worktree prune >/dev/null 2>&1 || true
+  fi
+  if [ -d /root/hivemind/.git ]; then
+    git -C /root/hivemind worktree prune >/dev/null 2>&1 || true
+  fi
 done
 
-echo "kept=$kept"
-echo "removed=$removed"
-echo "=== done ==="
+echo "kept=$kept removed=$removed"
+echo "=== end $(date -u +%FT%TZ) ==="

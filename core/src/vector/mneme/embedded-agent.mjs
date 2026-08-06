@@ -731,19 +731,47 @@ function routesFor(ctx) {
         args.push(snapshot); conds.push(`(valid_from IS NULL OR valid_from<=$${args.length}::timestamptz)`);
         args.push(snapshot); conds.push(`(valid_to IS NULL OR valid_to>$${args.length}::timestamptz)`);
       }
-      args.push(b.limit || 10);
+      const lim = Number(b.limit) || 10;
+      args.push(lim);
       const { rows } = await db().query(
         `SELECT id, content, title, tags, memory_type, layer, cognitive_layer_role, is_latest, created_at, user_id,
                 project, project_ids, scope, primary_team_id, document_date, valid_from, valid_to,
                 ts_rank(content_tsv, to_tsquery('simple',$2)) AS score
          FROM memories WHERE ${conds.join(' AND ')} ORDER BY score DESC LIMIT $${args.length}`, args);
-      return { results: rows.map((m) => ({ id: m.id, score: Number(m.score) || 0, payload: {
+      const results = rows.map((m) => ({ id: m.id, score: Number(m.score) || 0, payload: {
         memory_id: m.id, org_id: org, user_id: m.user_id, content: m.content, title: m.title, tags: m.tags,
         project: m.project || null, project_ids: m.project_ids || [], scope: m.scope || null,
         primary_team_id: m.primary_team_id || null,
         memory_type: m.memory_type, layer: m.layer, cognitive_layer_role: m.cognitive_layer_role,
         is_latest: m.is_latest, created_at: m.created_at, document_date: m.document_date,
-        valid_from: m.valid_from, valid_to: m.valid_to } })) };
+        valid_from: m.valid_from, valid_to: m.valid_to } }));
+
+      // ── IN-SHARD LEXICAL, UNIONED ────────────────────────────────────────────
+      // The Postgres FTS above is the better-ranked lane, so it goes first. But it
+      // reads the SQL mirror, and a slot whose mirror is thin or absent gets NOTHING
+      // from it — which is exactly how 6 of 7 .amr orgs ended up silently running
+      // vector-only recall. The shard's own lane needs no mirror, so union it in to
+      // top up the candidate pool. Strictly additive: dedup by id and never drop a
+      // Postgres hit, so this can only widen the pool the reranker then scores.
+      try {
+        const seen = new Set(results.map((r) => r.id));
+        for (const h of amr.lexical(b.text, f, lim)) {
+          if (results.length >= lim) break;
+          if (!h?.id || seen.has(h.id)) continue;
+          seen.add(h.id);
+          const p = h.payload || {};
+          results.push({ id: h.id, score: h.score, payload: {
+            memory_id: h.id, org_id: org, user_id: p.user_id || null, content: p.content, title: p.title,
+            tags: p.tags || [], project: p.project || null, project_ids: p.project_ids || [],
+            scope: p.scope || null, primary_team_id: p.primary_team_id || null,
+            memory_type: p.memory_type, layer: p.layer, cognitive_layer_role: p.cognitive_layer_role,
+            is_latest: p.is_latest, created_at: p.created_at, document_date: p.document_date,
+            valid_from: p.valid_from, valid_to: p.valid_to } });
+        }
+      } catch (e) {
+        console.warn(`[embedded-agent] shard lexical lane failed org=${org}: ${e.message} — Postgres results still returned`);
+      }
+      return { results };
     },
 
     // Hydrate full rows by id (content stays on-box until requested).

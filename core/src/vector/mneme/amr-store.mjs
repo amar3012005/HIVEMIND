@@ -40,6 +40,25 @@ const DONE = 0xFFFFFFFF; // recordsPage sentinel
 // 2^53 so the low microseconds round — acceptable for valid_from anchors.
 const dateToNs = (d) => (d ? new Date(d).getTime() * 1e6 : 0);
 
+/**
+ * Fold + tokenize text for the in-shard lexical lane.
+ *
+ * Language-neutral on purpose: no stop-word list, no stemmer, no per-language rules —
+ * those are exactly the brittle, language-specific logic this codebase keeps removing.
+ * Expanding the German umlauts before stripping diacritics matters: `ü`→`ue` is how a
+ * German reader writes it without the umlaut, whereas a bare diacritic strip gives `u`
+ * and silently changes the word. Both then survive NFKD for every other alphabet.
+ */
+function tokenizeFolded(text) {
+  if (!text) return [];
+  return String(text)
+    .toLowerCase()
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
 export class AmrMemoryStore {
   constructor({ dataRoot, org, dim }) {
     this.org = org;
@@ -194,7 +213,13 @@ export class AmrMemoryStore {
     const HNSW_MIN = Number(process.env.MNEME_HNSW_MIN || 50000);
     if (n > HNSW_MIN) { try { this.store.enableHnsw(); } catch { /* already built */ } }
     const vec = vector instanceof Float32Array ? vector : Float32Array.from(vector);
-    const hits = this.store.recall(vec, Math.min(limit * 4, 200));
+    // Over-fetch before filtering: _passesFilter drops candidates AFTER the engine
+    // returns them, so a hard 200 ceiling meant a wide request (RERANK_POOL is 150)
+    // could come back short whenever filtering bit — starving the cross-encoder of
+    // the pool it is supposed to rank. Scale the over-fetch with the request and only
+    // cap it well above the widest lane.
+    const OVERFETCH_MAX = Number(process.env.MNEME_RECALL_OVERFETCH_MAX || 1000);
+    const hits = this.store.recall(vec, Math.min(Math.max(limit * 4, 200), OVERFETCH_MAX));
     const out = [];
     for (const h of hits) {
       let rec; try { rec = JSON.parse(h.text); } catch { continue; }
@@ -265,17 +290,59 @@ export class AmrMemoryStore {
   }
 
   // ── lexical — streaming token-overlap scorer, O(K) resident ────────────────────────────────
+  /**
+   * IN-SHARD LEXICAL LANE — a wide CANDIDATE GENERATOR, not a ranker.
+   *
+   * This is what lets one `.amr` slot answer hybrid recall by itself, with no Postgres
+   * FTS behind it. It deliberately optimises RECALL, not precision: it hands the caller
+   * a wide pool (150 wide / 40 deep) and the existing cross-encoder rerank + fusion
+   * decide the final order. Trying to reproduce `ts_rank` here would be the wrong job.
+   *
+   * The old version scored pure substring hits on raw text, which missed the cases that
+   * actually matter in a German corpus — measured: `Artikelnummer` returned ZERO rows
+   * while 29 documents contained `Art.-Nr.`, and `Ladesäulen` missed `Ladesäule`.
+   * Three cheap, language-neutral rules fix that without a stemmer or a dictionary:
+   *
+   *   1. FOLD  — lowercase, expand German umlauts (ä→ae, ö→oe, ü→ue, ß→ss), strip the
+   *              remaining diacritics, drop punctuation. `Art.-Nr.` → ['art','nr'].
+   *   2. PREFIX — a query token matches a doc token when either is a prefix of the other
+   *              (min 3 chars). This is what catches BOTH `Artikelnummer`⊃`art` and the
+   *              inflections a stemmer would normally handle (`Ladesäulen`/`Ladesäule`,
+   *              `Teillast`/`Teillastbetrieb`) — no per-language rules.
+   *   3. SUBSTRING — last-resort fallback so compounds still hit.
+   *
+   * Scores are ordering hints for the pool only. Work is bounded per record so a wide
+   * scan stays predictable.
+   */
   lexical(text, filter = {}, limit = 10) {
-    const q = String(text || '').toLowerCase().split(/\W+/).filter(Boolean);
+    const q = tokenizeFolded(text);
     if (!q.length) return [];
-    const top = []; // bounded top-K, ascending by score
+    const MAX_CHARS = Number(process.env.MNEME_LEXICAL_SCAN_CHARS || 8000);
+    const top = []; // bounded min-heap-ish: index 0 is the weakest kept candidate
     for (const { rec } of this._scan()) {
       if (rec.deleted_at) continue;
       if (!this._passesFilter(rec, filter)) continue;
-      const hay = `${rec.title || ''} ${rec.content || ''}`.toLowerCase();
+      const raw = `${rec.title || ''} ${rec.content || ''}`.slice(0, MAX_CHARS);
+      const docTokens = tokenizeFolded(raw);
+      if (!docTokens.length) continue;
+      const docSet = new Set(docTokens);
+      const joined = docTokens.join(' ');
+
       let score = 0;
-      for (const t of q) if (t && hay.includes(t)) score += 1;
+      for (const t of q) {
+        if (docSet.has(t)) { score += 1; continue; }               // exact
+        let hit = 0;
+        if (t.length >= 3) {
+          for (const d of docSet) {
+            if (d.length < 3) continue;
+            if (d.startsWith(t) || t.startsWith(d)) { hit = 0.6; break; } // prefix, either way
+          }
+        }
+        if (!hit && t.length >= 4 && joined.includes(t)) hit = 0.4;  // substring fallback
+        score += hit;
+      }
       if (score === 0) continue;
+
       const item = { id: rec.id, score: score / q.length, payload: rec };
       if (top.length < limit) {
         top.push(item); top.sort((a, b) => a.score - b.score);

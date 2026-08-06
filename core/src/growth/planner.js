@@ -221,16 +221,48 @@ For initial_full return 2-4 ranked, genuinely evidenced queue items. Do not crea
 		effect_class describes the complete lifecycle's eventual effect, not the authority of the current planning phase. Use external whenever reaching requested_terminal_outcome requires any state change outside Runtime's persisted internal artifacts. Use internal only when persisted internal evidence or preparation fully satisfies every acceptance criterion. State that distinction briefly in effect_basis, and set external_action_requested to exactly (effect_class == 'external'). For initial_full, the first queue item must bind one supplied available_lifecycle by exact playbook_id, version, owner_room_tag, and one exact supported_actions value. Other proposals may use null playbook fields when no supplied lifecycle directly implements them; never invent a lifecycle or action identifier. All initial queue items still begin in PREPARE authority: they may research and persist internal deliverables, but may not make an external change. The selected playbook, not this planner, resolves capabilities and exact authority gates. Treat unavailable evidence as an explicit gap and do not block unrelated safe preparation.`;
   const user = JSON.stringify({ objective: String(objective || '').slice(0, 4000), mode, aspects: selected, autonomy_mode: autonomyMode || context.active_goal?.autonomy_mode || 'MANUAL_REVIEW', available_lifecycles: lifecycleCatalog, context });
   await progress('planning', mode === 'initial_full' ? 'Assessing the complete company growth system.' : `Reviewing ${selected.join(', ')} for the next operating decision.`);
-  const response = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, temperature: 0.1, max_completion_tokens: mode === 'initial_full' ? 16000 : 8000, reasoning_effort: 'low', response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
-  }, { timeoutMs: 120000 });
-  if (!response?.ok) throw new Error(`growth_plan_model_failed:${response?.status || 'unknown'}`);
-  const body = await response.json();
-  const extracted = extractJson(body?.choices?.[0]?.message?.content);
-  let preparedPlan = completeGrowthPlanAssessments(normalizeGrowthPlanEvidence(extracted, context), context, selected);
-  if (mode === 'initial_full') preparedPlan = applyFirstLifePolicy(preparedPlan, context, await loadFirstLifePolicy());
-  const plan = validatePlan(compilePrepareQueue(preparedPlan), context, mode, selected, lifecycleCatalog);
+  // Bounded retry WITH the validator's own reason fed back. validatePlan enforces a
+  // strict contract (every queue item needs an available room_tag, a matching
+  // constraint_id, non-empty acceptance_criteria, effect_class + effect_basis; and the
+  // recommended item must bind an available lifecycle by exact playbook_id, version,
+  // owner_room_tag and one supported_actions value). A single miss threw the WHOLE HQ
+  // cycle away — and the scheduler then retried the identical prompt blind, so it failed
+  // the same way and the runtime looped on "HQ cycle failed safely"
+  // (observed: growth_plan_queue_item_invalid, growth_plan_recommended_lifecycle_binding_required).
+  // Re-asking the model with the exact rejection lets it self-correct instead of burning
+  // a whole cycle per attempt. Only contract errors are retried; anything else rethrows.
+  const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
+  const MAX_PLAN_ATTEMPTS = 3;
+  let body = null;
+  let plan = null;
+  for (let attempt = 1; attempt <= MAX_PLAN_ATTEMPTS; attempt += 1) {
+    const response = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, temperature: 0.1, max_completion_tokens: mode === 'initial_full' ? 16000 : 8000, reasoning_effort: 'low', response_format: { type: 'json_object' }, messages }),
+    }, { timeoutMs: 120000 });
+    if (!response?.ok) throw new Error(`growth_plan_model_failed:${response?.status || 'unknown'}`);
+    body = await response.json();
+    const raw = body?.choices?.[0]?.message?.content || '';
+    try {
+      const extracted = extractJson(raw);
+      let preparedPlan = completeGrowthPlanAssessments(normalizeGrowthPlanEvidence(extracted, context), context, selected);
+      if (mode === 'initial_full') preparedPlan = applyFirstLifePolicy(preparedPlan, context, await loadFirstLifePolicy());
+      plan = validatePlan(compilePrepareQueue(preparedPlan), context, mode, selected, lifecycleCatalog);
+      break;
+    } catch (error) {
+      const reason = String(error?.message || error);
+      if (!reason.startsWith('growth_plan_') || attempt === MAX_PLAN_ATTEMPTS) throw error;
+      console.warn(`[growth-plan] contract rejected (attempt ${attempt}/${MAX_PLAN_ATTEMPTS}): ${reason} — re-asking with the reason`);
+      await progress('planning', 'The first draft did not satisfy the operating contract. I am correcting it against the exact rule it missed.');
+      messages.push({ role: 'assistant', content: String(raw).slice(0, 12000) });
+      messages.push({ role: 'user', content:
+        `Your plan was REJECTED by the contract validator with: ${reason}\n`
+        + 'Fix ONLY what that rule requires and return the COMPLETE corrected JSON again.\n'
+        + '- growth_plan_queue_item_invalid: every operating_queue item needs id, title, objective, a room_tag that exists in context.available_rooms, a constraint_id matching one of your constraints[].id, a non-empty acceptance_criteria array, effect_class of exactly "internal" or "external", and a non-empty effect_basis.\n'
+        + '- growth_plan_recommended_lifecycle_binding_required: the queue item whose id equals stage.queue_item_id MUST copy one entry from available_lifecycles exactly — same playbook_id, same playbook_version, its room_tag equal to that lifecycle owner_room_tag, and requested_action equal to one of that lifecycle supported_actions. Never invent these values.\n'
+        + 'Return JSON only.' });
+    }
+  }
   plan.report_markdown = renderGrowthPlanReport(plan);
   await progress('governance', 'Validated evidence references, aspect coverage, stage bounds, and specialist ownership.');
 

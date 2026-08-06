@@ -475,10 +475,22 @@ export class EvidenceRetrievalService {
    * @param {number} params.evidenceLimit
    * @returns {Promise<{memories: Array, evidence: Array}>}
    */
-  async retrieveHybrid({ query, userId, orgId, memoryLimit = 5, evidenceLimit = 5 }) {
+  async retrieveHybrid({
+    query, userId, orgId, memoryLimit = 5, evidenceLimit = 5,
+    // Scope lens, forwarded to the evidence branch. Without these the hybrid
+    // endpoint returned org-wide evidence under a personal/project lens — the
+    // exact case retrieveEvidence's own scope handling exists to prevent.
+    // The memory branch below is already user_id-filtered in its Qdrant filter,
+    // which is narrower than a scope lens; it is left alone here deliberately
+    // rather than half-converting a function its own comment calls a placeholder.
+    projectId = null, accessContext = null, scopeFilter = null,
+  }) {
     const [memories, evidence] = await Promise.all([
       this._retrieveCanonicalMemories({ query, userId, orgId, limit: memoryLimit }),
-      this.retrieveEvidence({ query, userId, orgId, limit: evidenceLimit })
+      this.retrieveEvidence({
+        query, userId, orgId, limit: evidenceLimit,
+        projectId, accessContext, scopeFilter,
+      })
     ]);
 
     return {

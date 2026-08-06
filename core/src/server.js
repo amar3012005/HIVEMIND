@@ -23743,11 +23743,24 @@ ${injectionText}`;
             if (!evidenceRetrieval) {
               return jsonResponse(res, { error: 'Evidence retrieval not enabled. Set ENABLE_EVIDENCE_RECALL=true' }, 501);
             }
-            const { query, limit, documentId } = body;
+            const { query, limit, documentId, scope: _evScope, projectId: _evProject } = body;
             if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
             try {
+              // SCOPE THE EVIDENCE LENS, same as the memory lane.
+              // This route passed only {query,userId,orgId,limit,documentId}, so it was
+              // org-scoped but NOT tier-scoped: a personal-lens caller could receive
+              // segments drawn from organization or project documents. retrieveEvidence
+              // has accepted projectId/accessContext/scopeFilter all along — the main
+              // recall path (recall-router.js) already passes them; only these direct
+              // endpoints did not. accessContext is passed even when the caller names no
+              // lens, so the result is bounded by what this user can actually read
+              // instead of by the whole org.
+              const _evAccess = await buildAccessContext(userId, orgId);
               const results = await evidenceRetrieval.retrieveEvidence({
-                query, userId, orgId, limit: limit || 10, documentId
+                query, userId, orgId, limit: limit || 10, documentId,
+                projectId: _evProject || null,
+                accessContext: _evAccess || null,
+                scopeFilter: _evScope || null,
               });
               return jsonResponse(res, { success: true, mode: 'evidence', results, count: results.length });
             } catch (err) {
@@ -23763,11 +23776,17 @@ ${injectionText}`;
             if (!evidenceRetrieval) {
               return jsonResponse(res, { error: 'Evidence retrieval not enabled. Set ENABLE_EVIDENCE_RECALL=true' }, 501);
             }
-            const { query, memoryLimit, evidenceLimit } = body;
+            const { query, memoryLimit, evidenceLimit, scope: _hyScope, projectId: _hyProject } = body;
             if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
             try {
+              // Same lens as /api/evidence/search — a hybrid answer that scopes its
+              // memories but not its evidence is still a leak.
+              const _hyAccess = await buildAccessContext(userId, orgId);
               const result = await evidenceRetrieval.retrieveHybrid({
-                query, userId, orgId, memoryLimit: memoryLimit || 5, evidenceLimit: evidenceLimit || 5
+                query, userId, orgId, memoryLimit: memoryLimit || 5, evidenceLimit: evidenceLimit || 5,
+                projectId: _hyProject || null,
+                accessContext: _hyAccess || null,
+                scopeFilter: _hyScope || null,
               });
               return jsonResponse(res, {
                 success: true, mode: 'hybrid',

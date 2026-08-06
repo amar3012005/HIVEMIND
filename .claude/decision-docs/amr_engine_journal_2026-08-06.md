@@ -237,3 +237,35 @@ Called "small" earlier; it is not. Two findings:
 - But the mirror has a **second reader**: `countDerivedMemories`, backing the "N memories from this
   document" count on the KB list. It must be ported to `findByTags` + a metadata scan before the
   mirror can be retired.
+
+---
+
+## 9. CORRECTION — "relations never reach the shard" was WRONG (`0d683e1a`)
+
+Claimed, on the basis of a live upload, that KB-ingest relationships were landing only in
+Postgres: `[kb-relations] written=2`, `hm.relationships` = 9 rows, and the org's
+**`shard.edg` = 0 bytes**. Shipped `0d683e1a` to "fix" it.
+
+**The premise was false.** `EDGE_SLOTS = 4`: the first four typed edges per memory are stored
+**inline in the slot header's 32-byte adjacency region**, and `.edg` is only the *overflow*
+region beyond that. An org whose memories each have ≤4 edges has a legitimately empty `.edg`.
+File size was never evidence of edge count.
+
+Verified through the live API afterwards: relationships come back, and their ids are
+`e:<from>:<to>:PartOf` — the shard's synthesized edge-id form. Postgres rows carry real UUIDs.
+The edges were in the slot the entire time.
+
+**What actually gave it away**: the warning added in the same commit fired **zero** times. If
+the org had been unresolved — the whole basis of the diagnosis — it would have fired on every
+edge. The instrument built to confirm the theory refuted it instead, one deploy later.
+
+`0d683e1a` is therefore **not a bug fix**; its commit message overstates. What it does is still
+correct and worth keeping: the ingest call sites pass `org_id` explicitly instead of relying on
+AsyncLocalStorage surviving a worker boundary (same value, no behaviour change), and an
+unresolvable org is now audible. Kept, relabelled here rather than by rewriting pushed history.
+
+**Lesson, and it is the same one as §0 in a new costume**: a proxy measurement is not the
+measurement. `.edg` bytes proxied for "edges exist" the way top-10 overlap proxied for "the
+lanes agree". Both were read as conclusive; both were about the artefact, not the property.
+Ask the system for the property directly — here, one API call for the actual relationships,
+which was available the whole time and would have cost less than the investigation did.

@@ -510,6 +510,99 @@ export async function backfillSqlMirror(orgId, { max = 2000, logger = console } 
   return out;
 }
 
+/**
+ * Backfill EVIDENCE into the shard from Postgres + Qdrant (B4 step 1b).
+ *
+ * The kb-segment dual-write only fires on NEW ingests, so a slot starts with none of
+ * its historical evidence — and the shard cannot be read-compared against the current
+ * lane, let alone serve it, until it holds the same segments. This is the mirror image
+ * of backfillSqlMirror (which pushed shard→Postgres for memories): here Postgres holds
+ * the content and Qdrant the vector, and both go into the slot.
+ *
+ * SAFETY: additive and idempotent. amr.write() upserts by id, segments already in the
+ * shard are skipped, and NO read path consults shard evidence yet beyond the
+ * access-gated union. Postgres and Qdrant remain the source of truth.
+ *
+ * @returns {Promise<{pg:number,already:number,written:number,novector:number,failed:number}>}
+ */
+export async function backfillEvidenceToShard(orgId, { max = 500, logger = console } = {}) {
+  const out = { pg: 0, already: 0, written: 0, novector: 0, failed: 0 };
+  const ctx = await getCtx(orgId);
+  if (!ctx?.amr || !pg) return out;
+
+  const { rows } = await pg.query(
+    `SELECT s.id::text AS id, s.document_id::text AS document_id, s.user_id::text AS user_id,
+            s.content, s.segment_index, s.segment_type, s.start_page, s.end_page, s.word_count,
+            s.metadata, s.created_at,
+            coalesce(d.metadata->>'title', d.filename) AS doc_title
+       FROM knowledge_segments s JOIN knowledge_documents d ON d.id = s.document_id
+      WHERE s.org_id=$1 AND d.deleted_at IS NULL
+      ORDER BY s.created_at DESC LIMIT $2`, [ctx.org, max]);
+  out.pg = rows.length;
+  if (!rows.length) return out;
+
+  // Only fetch vectors for segments the shard is actually missing.
+  const missing = rows.filter((r) => {
+    try { return ctx.amr.store.findById(r.id) < 0; } catch { return true; }
+  });
+  out.already = rows.length - missing.length;
+  if (!missing.length) return out;
+
+  // Qdrant holds the evidence vectors; pull them in one retrieve rather than per-row.
+  const vectors = new Map();
+  try {
+    const qr = await qFetch(`/collections/${ctx.qcoll}/points`, {
+      method: 'POST',
+      body: JSON.stringify({ ids: missing.map((m) => m.id), with_vector: true, with_payload: false }),
+    });
+    if (qr.ok) {
+      const j = await qr.json();
+      for (const p of (j?.result || [])) {
+        const v = Array.isArray(p.vector) ? p.vector : p.vector?.default;
+        if (Array.isArray(v)) vectors.set(String(p.id), v);
+      }
+    }
+  } catch (e) {
+    logger.warn?.(`[evidence-backfill] vector fetch failed org=${String(orgId).slice(0, 8)}: ${e.message}`);
+  }
+
+  for (const r of missing) {
+    const vec = vectors.get(String(r.id));
+    // A segment with no vector would be dead weight in the slot: recallLayer could never
+    // return it. Skip rather than write an unsearchable record — the embed reconciler
+    // owns re-embedding, and the next pass will pick it up once a vector exists.
+    if (!vec) { out.novector += 1; continue; }
+    try {
+      const meta = r.metadata || {};
+      ctx.amr.write({
+        id: r.id,
+        userId: r.user_id || null,
+        content: r.content || null,
+        title: meta.heading || r.doc_title || null,
+        layer: 'evidence',
+        memoryType: 'evidence_segment',
+        createdAt: r.created_at || null,
+        tags: [`doc-id:${r.document_id}`],
+        metadata: {
+          document_id: r.document_id,
+          segment_index: r.segment_index ?? 0,
+          segment_type: r.segment_type || 'chunk',
+          start_page: r.start_page ?? null,
+          end_page: r.end_page ?? null,
+          word_count: r.word_count ?? null,
+          heading: meta.heading ?? null,
+          heading_path: meta.heading_path ?? null,
+        },
+      }, Float32Array.from(vec));
+      out.written += 1;
+    } catch (e) {
+      out.failed += 1;
+      if (out.failed <= 3) logger.warn?.(`[evidence-backfill] seg=${r.id}: ${e.message}`);
+    }
+  }
+  return out;
+}
+
 const lastCompacted = new Map(); // orgId -> epoch ms of the last successful compaction
 
 /**

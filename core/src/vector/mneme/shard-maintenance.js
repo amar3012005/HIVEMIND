@@ -139,7 +139,7 @@ export function snapshotShardsOnce({
  * @returns {Promise<{backup:object,compact:object|null}>}
  */
 export async function runShardMaintenanceOnce({ logger = console } = {}) {
-  const out = { backup: null, mirror: null, compact: null };
+  const out = { backup: null, mirror: null, evidence: null, compact: null };
 
   out.backup = isOn('MNEME_BACKUP_ENABLED', 'true')
     ? snapshotShardsOnce({ logger })
@@ -170,6 +170,27 @@ export async function runShardMaintenanceOnce({ logger = console } = {}) {
       if (out.mirror.inserted || out.mirror.failed) {
         logger.info?.(`[mirror-backfill] orgs=${out.mirror.orgs} inserted=${out.mirror.inserted} `
           + `failed=${out.mirror.failed} — lexical recall restored for backfilled rows`);
+      }
+
+      // Evidence, the other direction: Postgres+Qdrant -> shard. The kb-segment
+      // dual-write only covers NEW ingests, so without this a slot never holds its
+      // historical evidence and can never be read-compared against the current lane.
+      // Additive and idempotent; no read path depends on it yet.
+      if (isOn('MNEME_EVIDENCE_BACKFILL_ENABLED', 'true')) {
+        const { backfillEvidenceToShard } = await import('./embedded-agent.mjs');
+        let ev = { written: 0, novector: 0, failed: 0, already: 0 };
+        for (const org of out.backup.orgs) {
+          // eslint-disable-next-line no-await-in-loop
+          const r = await backfillEvidenceToShard(org, { logger }).catch(() => null);
+          if (!r) continue;
+          ev.written += r.written; ev.novector += r.novector;
+          ev.failed += r.failed; ev.already += r.already;
+        }
+        out.evidence = ev;
+        if (ev.written || ev.failed || ev.novector) {
+          logger.info?.(`[evidence-backfill] written=${ev.written} already=${ev.already} `
+            + `no_vector=${ev.novector} failed=${ev.failed}`);
+        }
       }
     } catch (e) {
       logger.warn?.(`[mirror-backfill] pass failed: ${e.message}`);

@@ -126,6 +126,45 @@ Recorded because the pattern matters more than any single item.
 
 ---
 
+## 3b. B4 completed — evidence into the shard (all three steps, measured)
+
+| step | what | result |
+|---|---|---|
+| 1 | dual-write evidence on new ingest | live, reads untouched |
+| 1b | backfill historical evidence (Postgres+Qdrant → shard) | **23/23 written, 0 failed, 0 missing vectors** |
+| 2 | read-compare both lanes on real embeddings | **top-10 overlap 1.00** (6 samples, 51 hits per lane) |
+| 3 | shard evidence lane wired into `/v1/kb-recall` | live |
+
+**Step 3 is deliberately the conservative form.** The shard contributes **candidate ids
+only**; access control and hydration are untouched — every id still passes the
+`knowledge_documents` join with `appendDocumentAccess`, so a shard candidate the caller
+may not see is dropped exactly as a Qdrant one is.
+
+That choice matters because the overlap test is **weak evidence**: 22 segments means
+top-10 covers nearly half the corpus, so 1.00 is easy to achieve. The design is built so
+correctness does **not** depend on that number being representative — if the shard lane
+ever produced garbage candidates, Postgres still decides what the caller sees. Do not
+"simplify" this later by having the shard serve rows directly without the access join.
+
+Side effect worth keeping: Qdrant is no longer a single point of failure for evidence.
+`if (!qr.ok) return { results: [] }` meant a failed search silently killed evidence
+recall; it now falls through to the shard lane and logs.
+
+**Not verified end-to-end:** an authenticated `/v1/kb-recall` call through the live route.
+External probes cannot open the shard (the server holds the per-open lock), so this was
+verified by code invariant (both the access join and the hydrate remain) plus the SQL
+behaviour (owner 12 / non-owner 0) rather than by a real request.
+
+### Scope-key investigation — NOT a defect
+
+Documents missing `scope-key:*` tags looked like a live bug. Measured by date:
+Aug-4 4/4 tagged, Aug-3 12/12, Aug-2 and earlier 0/8. The stamping fix landed ~Aug 3;
+new documents are correct. Older ones fall back to owner-only via the `d.user_id` arm —
+it **fails closed**, nothing is exposed. Backfilling would WIDEN access, so it needs
+explicit owner intent and was deliberately left alone.
+
+---
+
 ## 4. Deliberately NOT done (and why)
 
 - **Evidence lexical union.** Evidence access is gated by the document join
@@ -133,7 +172,7 @@ Recorded because the pattern matters more than any single item.
   not yet carry that scope reliably, so unioning shard evidence would **bypass the access
   check and leak segments across scopes**. Left on Postgres rather than ship a quiet
   data-exposure path. Unblocked by the access-control port (§5).
-- **B4 steps 2–3** — read-compare on real embeddings, then flipping `/v1/kb-recall` to the
+- ~~B4 steps 2–3~~ — DONE, see §3b.
   shard. Dual-write is live so the comparison data is accumulating.
 - **B7/B8** — entities into the shard, then retiring the mirrors. Gated on the above.
 - **A3/A4/A5/A7** — Python binding, reproducible public benchmark, framework integrations,

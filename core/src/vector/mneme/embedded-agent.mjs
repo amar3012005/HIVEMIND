@@ -24,6 +24,7 @@
 // Amr-store: reuses the ALREADY-PORTED v2 streaming AmrMemoryStore (./amr-store.mjs) — not
 // reimplemented here.
 import { AmrMemoryStore } from './amr-store.mjs';
+import { emitKbResults } from './kb-hit-merge.mjs';
 
 const DIM = Number(process.env.EMBEDDING_DIMENSION || 1024);
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
@@ -1201,7 +1202,13 @@ function routesFor(ctx) {
       if (b.documentId) filter.must.push({ key: 'document_id', match: { value: b.documentId } });
       else if (documentIds.length) filter.must.push({ key: 'document_id', match: { any: documentIds } });
       const kbLimit = Number(b.limit) || 20;
-      const hitIds = [];
+      // id -> score, INSERTION-ORDERED. This must not be a bare id list: the result set is
+      // built from these entries, so the score has to survive alongside the id. An earlier
+      // version collected ids here and then mapped over the Qdrant response variable to get
+      // scores back — but that variable is block-scoped to the try below, so the return threw
+      // ReferenceError on every recall that found anything. A Map also drops the O(n^2)
+      // `includes` scan the id list needed to dedupe.
+      const hits = new Map();
       // Lane A — Qdrant. No longer fatal on its own: a failure used to return an empty
       // result set, so evidence recall died with Qdrant. The shard lane below can now
       // carry it.
@@ -1212,7 +1219,7 @@ function routesFor(ctx) {
           const j = await qr.json();
           for (const h of (j.result || [])) {
             const id = h.payload?.segment_id || h.id;
-            if (id && !hitIds.includes(id)) hitIds.push(id);
+            if (id && !hits.has(id)) hits.set(id, h.score);
           }
         }
       } catch (e) {
@@ -1235,13 +1242,14 @@ function routesFor(ctx) {
             const docId = h.payload?.metadata?.document_id;
             if (wantDoc && String(docId) !== String(wantDoc)) continue;
             if (wantDocs && !wantDocs.has(String(docId))) continue;
-            if (h.id && !hitIds.includes(h.id)) hitIds.push(h.id);
+            if (h.id && !hits.has(h.id)) hits.set(h.id, h.score);
           }
         } catch (e) {
           console.warn(`[embedded-agent] kb-recall shard lane failed org=${org}: ${e.message} — Qdrant results still returned`);
         }
       }
-      if (!hitIds.length) return { results: [] };
+      if (!hits.size) return { results: [] };
+      const hitIds = [...hits.keys()];
       const conds = ['s.org_id=$1', 'd.org_id=$1', 'd.deleted_at IS NULL', 's.id = ANY($2::uuid[])'];
       const args = [org, hitIds];
       appendDocumentAccess(conds, args, 'd', org, b.access);
@@ -1253,11 +1261,10 @@ function routesFor(ctx) {
         args,
       );
       const allowed = new Map(rows.map((row) => [row.segment_id, row]));
-      return { results: (j.result || []).map((h) => {
-        const id = h.payload?.segment_id || h.id;
-        const row = allowed.get(id);
-        return row ? { ...row, score: h.score } : null;
-      }).filter(Boolean) };
+      // Emit in candidate order (Qdrant first, then shard-only additions), keeping only the ids
+      // the access join returned. Pure + unit-tested in kb-hit-merge.mjs — see that module for
+      // why this step does not live inline any more.
+      return { results: emitKbResults(hits, allowed) };
     },
 
     '/v1/kb-lexical': async (b) => {

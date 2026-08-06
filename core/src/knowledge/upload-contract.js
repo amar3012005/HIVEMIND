@@ -11,21 +11,29 @@ export const KB_UPLOAD_LIMITS = Object.freeze({
 // place a format can actually be turned off; blocking in the FE alone hides the
 // button while every API path stays open.
 //
-// TEMPORARILY WITHDRAWN: pptx, ppt, doc, xls.
-// These are the only accepted formats with no working parser. They have no seam
-// handler (KB_SEAM_FORMATS covers docx/html/md/txt) and no direct tier, so they
-// fall through to Docling — which measured, on this deployment, 479s returning
-// chunks=0 for a real .pptx and a full 600s convert timeout on another. Zero of
-// the 83 documents ingested to date used any of them successfully. Accepting an
-// upload that cannot be parsed is worse than refusing it: the user waits through
-// three retry attempts before a failure they could have been told about instantly.
+// pptx RESTORED 2026-08-06 — the reason it was withdrawn has been fixed.
 //
-// Restore them together with a working path (conversion to PDF, then the proven
-// fast-pdf tier) — see .claude/decision-docs/kb_failproof_plan.md. Refusing here
-// does NOT remove Docling from the system: a text-less PDF still falls back to it,
-// which is why the parse timeout is bounded separately.
+// It was pulled because a real .pptx measured 479s returning chunks=0 and another
+// hit the full 600s convert timeout. That cause is known and already addressed:
+// docling issued ONE VISION CALL PER SLIDE IMAGE, serially, because picture
+// descriptions were on. FORMAT_PROFILES (server.js) now sets pptx pics:false
+// behind KB_PPTX_PICTURE_DESC, and the timeout went with it — but this allow-list
+// was never revisited, so a fixed format stayed refused.
+//
+// Re-measured on the SAME file named in the old comment ("Nutzen und Vorteile des
+// Leo.pptx", 20.9MB, 21 slides) against docling-serve 1.25.0 on SINGULANCE:
+//   12.4s processing, 100% word recall vs a python-pptx reference, zero errors.
+// A second real deck (15 slides, 18.5MB): 0.20s, 100/100 text runs, 15/15 slides
+// carrying page_no provenance. Both via the async path the adapter already uses.
+//
+// STILL WITHDRAWN: ppt, doc, xls (legacy binary). Docling parses OOXML natively
+// via python-pptx/python-docx/openpyxl — verified present in hm-docling — but the
+// binary formats need LibreOffice, and `command -v soffice` in that container
+// returns nothing. They remain unparseable here, so refusing is still correct.
+// OpenDocument (odt/ods/odp) is untested on this deployment; do not add it on the
+// strength of a FORMAT_PROFILES entry alone — that is how pptx got stuck.
 export const KB_EXTENSIONS = Object.freeze({
-  document: ['pdf', 'docx', 'xlsx', 'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm'],
+  document: ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm'],
   image: ['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp', 'gif'],
   audio: ['mp3', 'wav', 'm4a', 'flac', 'ogg'],
 });

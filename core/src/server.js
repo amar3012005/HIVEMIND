@@ -2072,6 +2072,40 @@ if (process.env.DOCLING_URL) {
             console.warn(`[docling-adapter] fallback fast-pdf also failed: ${fbErr.message}`);
           }
         }
+        // EMPTY EXTRACTION IS A FAILURE, NOT A SUCCESS — for every format, not just PDF.
+        //
+        // The fallback ladder above is gated on `ext === 'pdf'`, so a PDF that comes
+        // back empty retries through vision and fast-pdf. Every OTHER format had no
+        // such path AND no guard: docling would answer HTTP 200 / status success with
+        // a near-empty body, that body would flow on to chunking and embedding, and
+        // the document would finish marked `ready` while holding nothing. Recall
+        // cannot return what was never extracted, and nothing anywhere said so — a
+        // green tick over an empty document is worse than a visible failure.
+        //
+        // Measured on this deployment: a 3-page image-only PDF returned 46 chars
+        // (three `<!-- image -->` markers and nothing else), and 104 chars even with
+        // do_ocr=true. That case is caught by the PDF branch. The same shape on a
+        // pptx/docx/xlsx — a deck of pure images, a docx of scanned pages — was not.
+        //
+        // There is no vision fallback for those formats (it needs a render step that
+        // does not exist), so the honest outcome is to FAIL LOUDLY: surface an error
+        // the queue can retry and the user can see, instead of silently indexing
+        // nothing. Same 200-char floor as parseFailed above, so the two agree.
+        if (parseFailed) {
+          const _why = parseResult?.error
+            ? String(parseResult.error).slice(0, 160)
+            : `docling returned ${usableChars} chars and ${usableChunks} chunks`;
+          console.warn(`[docling-adapter] EMPTY EXTRACTION ${filename} (.${ext}) — ${_why}. `
+            + `Failing the parse instead of indexing an empty document.`);
+          return {
+            ...parseResult,
+            hybridChunks: chunkResult?.chunks || [],
+            chunkerError: chunkResult?.error || null,
+            error: parseResult?.error
+              || `empty extraction: docling produced ${usableChars} chars for .${ext} `
+                 + `(floor 200). Nothing was indexed.`,
+          };
+        }
         return {
           ...parseResult,
           hybridChunks: chunkResult?.chunks || [],

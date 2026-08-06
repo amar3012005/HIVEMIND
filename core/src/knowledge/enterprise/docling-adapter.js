@@ -106,23 +106,43 @@ export function injectPageMarkersFromProv(markdown, doc) {
     if (!page || !txt) continue;
     const key = Number(page);
     const bbox = prov.bbox || {};
-    const entry = { b: Number(bbox.b ?? 0), l: Number(bbox.l ?? 0), txt };
-    const cur = byPage.get(key);
-    if (!cur || entry.b < cur.b || (entry.b === cur.b && entry.l < cur.l)) byPage.set(key, entry);
+    if (!byPage.has(key)) byPage.set(key, []);
+    byPage.get(key).push({ b: Number(bbox.b ?? 0), l: Number(bbox.l ?? 0), txt });
   }
   if (byPage.size < 2) return markdown;
+  // Visual order within each page: `b` ASC is the true top-down top edge (see the
+  // coord_origin note above), `l` ASC breaks ties left-to-right.
+  for (const [k, list] of byPage) {
+    list.sort((x, y) => (x.b - y.b) || (x.l - y.l));
+    byPage.set(k, { all: list.map(i => i.txt) });
+  }
 
   // Resolve each page's anchor to an offset, scanning forward so a repeated
   // string (a footer, a slide number) cannot pull a later page backwards.
   const marks = [];
   let cursor = 0;
   for (const page of [...byPage.keys()].sort((a, b) => a - b)) {
-    const anchor = byPage.get(page).txt.split('\n')[0].trim();
-    if (anchor.length < 3) continue;
-    const at = markdown.indexOf(anchor, cursor);
-    if (at < 0) continue;
-    marks.push({ at, page });
-    cursor = at + anchor.length;
+    const cands = byPage.get(page).all;
+    // Try each of the page's texts, topmost first, until one resolves AT OR AFTER
+    // the cursor. The first text is usually the best anchor, but not always: a
+    // slide whose top line repeats an earlier slide's (a section header, a footer,
+    // a recurring title) has already been consumed by the forward scan, and keying
+    // only on that one text dropped 3 of 15 slides on the reference deck. Later
+    // texts on the same slide are just as valid an anchor — the marker only has to
+    // land somewhere inside the page's own content.
+    let placed = false;
+    for (const cand of cands) {
+      const anchor = cand.split('\n')[0].trim();
+      if (anchor.length < 3) continue;
+      const at = markdown.indexOf(anchor, cursor);
+      if (at < 0) continue;
+      marks.push({ at, page });
+      cursor = at + anchor.length;
+      placed = true;
+      break;
+    }
+    // Unresolvable page: leave it out. A guessed page number is worse than null.
+    if (!placed) continue;
   }
   if (marks.length < 2) return markdown;
 

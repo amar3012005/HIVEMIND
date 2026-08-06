@@ -3,14 +3,18 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260806-7e1b07b9
+release_id: prod-20260806-0a677a89   # core; FE prod-20260806-8a0e73b1-single
 host: singulance
-deployed_at_utc: 2026-08-06T05:30:00Z          # core image build; FE image 2026-08-06T03:49:43Z
+deployed_at_utc: 2026-08-06T16:55:00Z          # runtime observed, not build time
 parent:
   branch: singulance-main
-  sha: 7e1b07b9d117022e63282f8db620fd28291b9f3b
+  sha: 0a677a890b9b                             # RUNNING core. Recorded from
+  # `docker inspect hm-core --format '{{.Config.Image}}'`, NOT from a build log —
+  # see changes[] below: the release script reports success over a container that
+  # is still on the previous image. singulance-main had already advanced past this
+  # (ff7dc7ef) when this was written; the ledger records what RUNS, not what merged.
 frontend:
-  sha: 42c6703d1851b42e6aa742984a2b4cfe2e07109f  # Da-vinci main
+  sha: 7f51e7d554f57f0651603328c73265c171d15ead  # Da-vinci main (image tag prod-20260806-8a0e73b1-single)
 runtime:
   VERSION: prod-20260806-7e1b07b9
   env_change: |
@@ -23,14 +27,48 @@ runtime:
     was returning HTTP 400 "Reasoning is mandatory" at the time. Applied in
     /root/hivemind/.env only, NOT in the repo. Backup: .env.bak-modelswap-*.
 images:
-  core: hivemind/core-api:prod-20260806-7e1b07b9d117
+  core: hivemind/core-api:prod-20260806-0a677a890b9b
   control: hivemind/control-plane:sha-556d95ec5                          # unchanged
   employees: hivemind/employees:prod-20260804-runtime-campaign-86f70547  # unchanged
   tara_deepgram: hivemind/tara-deepgram:sha-bf7af3ca                     # unchanged
   byod_agent: hivemind/hm-agent:sha-a95090c2                             # unchanged
-  frontend_single: hivemind/fe:prod-20260806-e0be490e8888-single
+  frontend_single: hivemind/fe:prod-20260806-8a0e73b1-single
+  docling: ghcr.io/docling-project/docling-serve@sha256:69f7c33dab7067be28d88bfe61b7be08e53c4f87d5571378001f853d9b95c34e  # PINNED BY DIGEST (was :latest)
 migration: none
 changes:
+  - KB PIPELINE, 2026-08-06 late session. pptx RESTORED to KB_EXTENSIONS (server) and
+    ACCEPTED_EXTS (FE). It was withdrawn after a real .pptx measured 479s / chunks=0;
+    that cause — one serial vision call per slide image — was already fixed by
+    FORMAT_PROFILES pptx pics:false and never revisited here. Re-measured on the SAME
+    file named in the old comment: 12.4s, 100% word recall. ppt/doc/xls stay refused
+    (legacy binary, need LibreOffice; `command -v soffice` in hm-docling is empty).
+    The FE picker no longer offers .ppt/.xls it would then reject.
+  - EMPTY EXTRACTION now fails for EVERY format, not just pdf. Docling answers
+    200/success with a near-empty body on an image-only document (measured: 46 chars,
+    three `<!-- image -->`; 104 chars even with do_ocr=true). Non-pdf formats had no
+    fallback AND no guard, so the document finished `ready` holding nothing. Same
+    200-char floor as parseFailed, which already requires usableChunks === 0.
+  - SLIDE CITATIONS. Docling emits no page break for pptx even with
+    md_page_break_placeholder set; the page lives in texts[].prov[0].page_no, which
+    only arrives when to_formats includes json — and the adapter sent no to_formats.
+    Now requests md AND json for slide formats (json alone returns md_content: null)
+    and INSERTS `<!-- page N -->`, the marker the segment writer already parses.
+    Trap: prov.bbox reports coord_origin BOTTOMLEFT with b < t, which reads y-up and
+    is not — bbox `b` equals the true top-down `top` (verified against python-pptx).
+    Sorting by `t` returns every slide upside-down while looking plausible.
+    Measured live: with_page 0/9 -> 6/9, "no start_page on ANY segment" gone,
+    parseText unchanged at 5009 chars.
+  - hm-docling PINNED BY DIGEST off mutable :latest. Rollback pointer recorded
+    BEFORE recreate at /root/.last-docling-rollback.
+  - NOT CHANGED, because measurement showed they were already correct: the async
+    submit/poll path (useAsync = smart || >4MB), the task-vanished/OOM guard, the
+    per-format profiles, and the provider-rejects-reasoning retry. Four earlier
+    "findings" against these were artefacts of benchmarking with a standalone sync
+    harness instead of reading the production path first.
+  - REVERTED same session: DOCLING_SERVE_MAX_NUM_PAGES / MAX_FILE_SIZE (inert — the
+    docling service has no env_file, its config is inline in compose) and
+    KB_QUEUE_CONCURRENCY 6->3 (contradicted a measured tuning note: the serial point
+    is the sidecar, not the queue). .env diffed identical to its pre-change backup.
   - KB GROUNDING (the session's main find). normalizeUnifiedClaims gated facts on a
     BYTE-EXACT content.includes(source_quote), so any quote spanning a hard line-wrap
     ("klein und\nergaenzt" vs "klein und ergaenzt") was discarded with no log line.

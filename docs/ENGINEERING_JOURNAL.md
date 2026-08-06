@@ -371,3 +371,61 @@ or uncommitted changes as completed work.
   Docling can be deleted; instrument cross-doc linking, which produced 63 edges on
   one document and 0 on another with the same code. SECURITY: a live GitHub PAT is
   embedded in `/opt/HIVEMIND/core`'s git remote URL and needs rotating.
+
+## 2026-08-06 (late) — KB formats, slide citations, and a deploy that lies
+
+Committed: `e51c4c83` (pptx restored + empty-extraction guard for all formats),
+`8a0e73b1` (FE gitlink -> Da-vinci `7f51e7d`, client-side pptx accept),
+`a6441e71` (page markers from docling provenance). All pushed to
+`origin/singulance-main`.
+
+Accepted release: core **running** `hivemind/core-api:prod-20260806-0a677a890b9b`
+(a parallel session's build, which contains `a6441e71` — verified by ancestry AND
+by grepping the running container), FE `hivemind/fe:prod-20260806-8a0e73b1-single`,
+`hm-docling` pinned by digest `sha256:69f7c33d…` off mutable `:latest`.
+`singulance-main` had already advanced to `ff7dc7ef` when this was written; the
+ledger records what RUNS.
+
+Verified end-to-end on production, not from logs: real 15-slide pptx uploaded
+through `/api/knowledge/upload` -> docling -> 9 segments -> memories -> embedded ->
+recall returned a cited memory. `with_page` went 0/9 -> 6/9 and the
+`no start_page on ANY segment` warning disappeared; `parseText` stayed 5009 chars,
+so no content regression. Delete cascade re-verified twice (21 and 16 memories,
+no orphans); content-hash dedup correctly refused the same bytes under a new
+filename. Both test documents were deleted afterwards.
+
+THE FINDING THAT MATTERS: `release-singulance.sh` reports success over a container
+still running the previous image. The compose files hardcode image tags and
+nothing reads `${VERSION}`, so the script builds `core-api:<RID>`, bumps `VERSION=`
+in `.env`, and `docker compose up -d` recreates the container **from the old tag** —
+the env change alone is enough to force a recreate, so the log reads
+`Recreated / Started` and the health check passes. Hit twice today; caught only by
+`docker exec … grep` for a string from the diff. Until the script is fixed, the
+compose tag must be updated by hand after every build (procedure in
+`.claude/decision-docs/KB_PIPELINE_ARCHITECTURE.md` §9.1).
+
+Four earlier "findings" this session were WRONG and are recorded so nobody
+re-litigates them: the async submit/poll path, the task-vanished/OOM guard, the
+empty-extraction fallback for PDF, and the reasoning-retry were all already
+implemented. They looked missing because the benchmark used a standalone sync
+harness instead of the production path. Read `docling-adapter.js` before
+"fixing" docling. Likewise `DOCLING_SERVE_MAX_NUM_PAGES`/`MAX_FILE_SIZE` were
+added and reverted (the docling service has no `env_file`; its config is inline in
+compose) and `KB_QUEUE_CONCURRENCY` 6->3 was reverted (a measured note says the
+serial point is the sidecar, not the queue). `.env` diffed identical to backup.
+
+Corrections to earlier journal entries: the prior "next steps" item about routing
+`pptx` through LibreOffice->PDF is unnecessary — docling parses OOXML natively via
+python-pptx/python-docx/openpyxl (100% word recall, 0.2-12.4s). Only legacy binary
+`ppt/doc/xls` need LibreOffice, and it would go in the **docling** image, not core.
+Cross-doc linking is NOT uninstrumented: `[kb-unified]` and `[kb-hybrid-rel]`
+already emit facts/pairs/edges counters (`40 gray-zone pairs -> 12 edges`).
+The claimed GitHub PAT in `/opt/HIVEMIND/core`'s git remote does not exist on
+SINGULANCE — that path has no `.git` at all, and every clone on the box has a
+tokenless remote. The Groq key printed in session output is still worth rotating.
+
+Next: fix `release-singulance.sh` to update the compose tag and to compare commits
+rather than 8-char tag strings in its acceptance gate (it prints a false FATAL);
+decide an owner for the 1M/day governance token pool, which is stopping dreaming
+partway through the day for two orgs; improve the pptx anchor so the 3 of 15
+slides that find no unique anchor get a page instead of `null`.

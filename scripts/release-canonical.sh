@@ -112,6 +112,18 @@ if printf '%s\n' "${SVCS[@]}" | grep -qx frontend; then
   [ -n "$CUR" ] && { docker tag "$CUR" hivemind/fe:rollback-single; ROLLBACK[frontend]="$CUR"; }
   echo "[build] frontend → $FTAG"; ( cd "$REL" && build_cmd frontend "$FTAG" ) >/dev/null
   docker tag "$FTAG" hivemind/fe:latest-single
+  # docker-compose.next.yml's single-profile `frontend:` service pins a LITERAL
+  # image tag (unlike frontend-b2b/b2c, which use ${NEXT_VERSION}) — bump it here
+  # or every subsequent build is silently discarded and --force-recreate just
+  # restarts the same stale image. Root-caused 2026-08-06 after two by-hand fixes
+  # to this same line; fail loudly instead of leaving the next person to rediscover it.
+  if grep -q 'image: hivemind/fe:sha-[0-9a-f]\+$' "$NEXT"; then
+    sed -i "s#image: hivemind/fe:sha-[0-9a-f]\+#image: $FTAG#" "$NEXT"
+    echo "[pin] $NEXT frontend → $FTAG"
+  else
+    echo "FATAL: expected 'image: hivemind/fe:sha-<hex>' under frontend: in $NEXT, not found — fix the pin by hand and re-run, do not deploy blind" >&2
+    exit 1
+  fi
   ( cd "$NEXT_REPO" && NEXT_VERSION=latest docker compose -p hivemind-next -f "$NEXT" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null )
 fi
 

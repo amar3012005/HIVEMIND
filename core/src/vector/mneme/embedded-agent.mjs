@@ -463,7 +463,15 @@ export async function backfillSqlMirror(orgId, { max = 2000, logger = console } 
   for (;;) {
     const page = ctx.amr.store.recordsPage(from, 500);
     for (const row of (page.rows || [])) {
-      try { const r = JSON.parse(row.text); if (r?.id) records.push(r); } catch { /* skip unparseable slot */ }
+      try {
+        const r = JSON.parse(row.text);
+        // MEMORY LAYER ONLY. The shard also holds evidence (layer 1) and cognitive
+        // (layer 2) records — evidence arrives via the kb-segment dual-write. Mirroring
+        // those into `memories` would file evidence segments AS memories, and the lexical
+        // lane reads that table, so they would surface in recall as first-class memories.
+        // The mirror exists to back the memory lane; evidence has its own store.
+        if (r?.id && (r.layer || 'memory') === 'memory') records.push(r);
+      } catch { /* skip unparseable slot */ }
     }
     if (page.nextSlot === 4294967295 || records.length >= max) break;
     from = page.nextSlot;

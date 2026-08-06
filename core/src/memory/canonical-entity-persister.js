@@ -17,6 +17,7 @@
 
 import { EntityResolver } from './entity-resolver.js';
 import {normalizeEntity, entityMatchVariants } from './entity-normalize.js';
+import { orgIsRemote, amrWrite, amrAddEdge } from '../vector/mneme/driver.js';
 
 // V5 Phase 10 — cached per-org ontology loader (opt-in enterprise config).
 const _ontoCache = new Map(); // orgId → { value, expiresAt }
@@ -257,6 +258,43 @@ export async function persistCanonicalLinks({
           out.skipped += 1;
           logger.warn?.(`[canonical-entities] link failed ${memoryId} → ${entityId}: ${err.message}`);
         }
+      }
+      // ── Entity residency: mirror into the org's .amr slot ────────────────────────────────
+      // canonical_entities is a CENTRAL table with no per-org equivalent, so for an .amr tenant
+      // the memories lived in their own file while the ENTITY NAMES sat in our database. That is
+      // a residency gap, not a tidiness one: "your memory is one file you own" was not true of
+      // the entity graph.
+      //
+      // The entity becomes a layer-4 record (metadata, structurally non-recallable — see
+      // layers.mjs) and each link becomes the shard's own `Mentions` edge, which is exactly what
+      // memory→entity means. No new edge type and no new route: the slot already models this.
+      //
+      // Best-effort and last: Postgres above stays authoritative and nothing reads the shard copy
+      // yet, so a failure here must never cost a link the user would otherwise have.
+      try {
+        if (!orgIsRemote(organizationId)) return;
+        const ent = await prisma.canonicalEntity.findUnique({
+          where: { id: entityId },
+          select: { id: true, canonicalName: true, entityType: true, aliases: true },
+        }).catch(() => null);
+        if (!ent) return;
+        await amrWrite(organizationId, {
+          id: ent.id,
+          content: ent.canonicalName || null,
+          title: ent.canonicalName || null,
+          layer: 'entity',
+          memoryType: 'canonical_entity',
+          // Carry the slug the hop-0 lane already matches on, so an in-slot entity is reachable
+          // by the same key the tag path uses.
+          tags: [`entity-slug:${normalizeEntity(ent.canonicalName || '')}`],
+          metadata: { entity_type: ent.entityType || null, aliases: Array.isArray(ent.aliases) ? ent.aliases : [] },
+        }, null);
+        for (const memoryId of memoryIds) {
+          amrAddEdge({ fromId: memoryId, toId: ent.id, type: 'Mentions', confidence: confidence ?? 1.0, orgId: organizationId });
+        }
+      } catch (e) {
+        logger.warn?.(`[canonical-entities] shard mirror failed for ${entityId}: ${e.message} `
+          + '— Postgres links are authoritative and unaffected');
       }
     };
 

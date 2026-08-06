@@ -576,6 +576,89 @@ export async function backfillDocsToShard(orgId, { max = 2000, logger = console 
   return out;
 }
 
+/**
+ * Backfill provenance (`memory_evidence_links`) into the slot as `Derives` edges.
+ *
+ * The dual-write in `/v1/kb-provenance` only covers new ingests. Without this, the slot's graph
+ * answers "what supersedes what" but not "where did this claim come from" for anything ingested
+ * before — which is the half of the graph the Evidence tab is built on.
+ *
+ * Idempotent in effect (a repeated edge is the same edge) and skips links whose endpoints have no
+ * slot yet, reporting the skip rather than counting it as written.
+ *
+ * @returns {Promise<{pg:number,written:number,skipped:number}>}
+ */
+export async function backfillProvenanceToShard(orgId, { max = 5000, logger = console } = {}) {
+  const out = { pg: 0, written: 0, skipped: 0 };
+  const ctx = await getCtx(orgId);
+  if (!ctx?.amr || !pg) return out;
+  const { rows } = await pg.query(
+    `SELECT memory_id::text AS memory_id, segment_id::text AS segment_id, confidence
+       FROM memory_evidence_links
+      WHERE org_id=$1 AND segment_id IS NOT NULL LIMIT $2`, [ctx.org, max]);
+  out.pg = rows.length;
+  for (const r of rows) {
+    try {
+      if (ctx.amr.addEdge({ fromId: r.memory_id, toId: r.segment_id, type: 'Derives', confidence: r.confidence ?? 1.0 })) out.written += 1;
+      else out.skipped += 1;
+    } catch { out.skipped += 1; }
+  }
+  if (out.written || out.skipped) {
+    logger.info?.(`[provenance-backfill] org=${String(ctx.org).slice(0, 8)} pg=${out.pg} `
+      + `written=${out.written} skipped_no_slot=${out.skipped}`);
+  }
+  return out;
+}
+
+/**
+ * Backfill `canonical_entities` (a CENTRAL table with no per-org equivalent) into the slot as
+ * layer-'entity' records, plus a `Mentions` edge per existing link. Until this runs, an `.amr`
+ * tenant's memories are in their own file while their entity graph's names are in ours.
+ *
+ * @returns {Promise<{entities:number,written:number,edges:number,skipped:number}>}
+ */
+export async function backfillEntitiesToShard(orgId, { max = 5000, logger = console } = {}) {
+  const out = { entities: 0, written: 0, edges: 0, skipped: 0 };
+  const ctx = await getCtx(orgId);
+  if (!ctx?.amr || !pg) return out;
+  let rows = [];
+  try {
+    // canonical_entities is CENTRAL, so it is addressed schema-qualified rather than through the
+    // hm search_path this pool defaults to.
+    ({ rows } = await pg.query(
+      `SELECT e.id::text AS id, e.canonical_name, e.entity_type, e.aliases
+         FROM hivemind.canonical_entities e WHERE e.organization_id=$1 LIMIT $2`, [ctx.org, max]));
+  } catch (e) { logger.warn?.(`[entity-backfill] read failed: ${e.message}`); return out; }
+  out.entities = rows.length;
+  for (const e of rows) {
+    try {
+      ctx.amr.write({
+        id: e.id,
+        content: e.canonical_name || null,
+        title: e.canonical_name || null,
+        layer: 'entity',
+        memoryType: 'canonical_entity',
+        tags: [`entity-slug:${String(e.canonical_name || '').toLowerCase().trim()}`],
+        metadata: { entity_type: e.entity_type || null, aliases: Array.isArray(e.aliases) ? e.aliases : [] },
+      }, null);
+      out.written += 1;
+    } catch { out.skipped += 1; continue; }
+    try {
+      const { rows: links } = await pg.query(
+        'SELECT memory_id::text AS memory_id, confidence FROM hivemind.memory_entity_links WHERE entity_id=$1::uuid', [e.id]);
+      for (const l of links) {
+        if (ctx.amr.addEdge({ fromId: l.memory_id, toId: e.id, type: 'Mentions', confidence: l.confidence ?? 1.0 })) out.edges += 1;
+        else out.skipped += 1;
+      }
+    } catch { /* links are best-effort; the entity record still landed */ }
+  }
+  if (out.written || out.edges) {
+    logger.info?.(`[entity-backfill] org=${String(ctx.org).slice(0, 8)} entities=${out.entities} `
+      + `written=${out.written} mentions_edges=${out.edges} skipped=${out.skipped}`);
+  }
+  return out;
+}
+
 export async function backfillEvidenceToShard(orgId, { max = 500, logger = console } = {}) {
   const out = { pg: 0, already: 0, written: 0, novector: 0, failed: 0 };
   const ctx = await getCtx(orgId);
@@ -1656,6 +1739,34 @@ function routesFor(ctx) {
              d.confidence ?? null, JSON.stringify(d.metadata || {})]);
           derived += 1;
         } catch (e) { console.warn(`[kb-provenance] derivation failed mem=${d.memory_id}: ${e.message}`); }
+      }
+
+      // ── Provenance residency: the same links as typed edges IN the slot ──────────────────
+      // A memory and the evidence segment it came from are BOTH already shard records, so
+      // "this claim derives from that segment" is expressible as the slot's own `Derives` edge.
+      // No new edge type, no new region — the graph the shard already carries just gains the
+      // provenance it was missing, which is what made the Evidence tab a Postgres-only feature.
+      //
+      // The SQL rows above stay authoritative and keep the fields an edge cannot hold
+      // (`excerpt`, `link_type`, per-link confidence). This is deliberately the lossy-but-useful
+      // half: the excerpt is recoverable from the segment record itself, so nothing is lost that
+      // the slot cannot reconstruct.
+      //
+      // Best-effort: provenance already succeeded above; an edge failure must not undo it.
+      if (String(process.env.MNEME_PROVENANCE_EDGES ?? 'true').toLowerCase() !== 'false') {
+        let edged = 0;
+        let skipped = 0;
+        for (const l of links) {
+          if (!l?.memory_id || !l?.segment_id) continue;
+          try {
+            // Counts only what actually landed: addEdge is a no-op when either endpoint has no
+            // slot yet (a segment whose dual-write has not run), and a counter that treats that
+            // as success would report provenance the slot does not hold.
+            if (amr.addEdge({ fromId: l.memory_id, toId: l.segment_id, type: 'Derives', confidence: l.confidence ?? 1.0 })) edged += 1;
+            else skipped += 1;
+          } catch { skipped += 1; }
+        }
+        if (edged || skipped) console.log(`[kb-provenance] org=${String(org).slice(0, 8)} shard_derives_edges=${edged} skipped_no_slot=${skipped}`);
       }
       return { ok: true, linked, derived };
     },

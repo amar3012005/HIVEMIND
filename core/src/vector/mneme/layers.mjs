@@ -20,8 +20,16 @@
  */
 
 export const DOCUMENT_LAYER = 'document';
+export const ENTITY_LAYER = 'entity';
 
-const LAYER_ID = { memory: 0, evidence: 1, cognitive: 2, [DOCUMENT_LAYER]: 3 };
+/**
+ * Layers that are METADATA, not content. Same rule for all of them: never a recall candidate
+ * unless named explicitly. Adding a layer here is what makes it safe — the alternative is
+ * remembering to skip it at each of the three recall sites, which is not a property that holds.
+ */
+const METADATA_LAYERS = new Set([DOCUMENT_LAYER, ENTITY_LAYER]);
+
+const LAYER_ID = { memory: 0, evidence: 1, cognitive: 2, [DOCUMENT_LAYER]: 3, [ENTITY_LAYER]: 4 };
 
 /** Slot-header layer id for a record's layer name. Unknown/absent → memory (0). */
 export function layerIdOf(layer) {
@@ -44,5 +52,6 @@ export function layerIdOf(layer) {
  * @returns {boolean}
  */
 export function isNonRecallable(rec, filter = {}) {
-  return rec?.layer === DOCUMENT_LAYER && filter?.layer !== DOCUMENT_LAYER;
+  const layer = rec?.layer;
+  return METADATA_LAYERS.has(layer) && filter?.layer !== layer;
 }

@@ -409,10 +409,16 @@ export class AmrMemoryStore {
   }
 
   // ── relationships (native typed OUT-edges + lazy reverse index for IN) ─────────────────────
+  /**
+   * @returns {boolean} true when the edge was written; false when either endpoint has no slot
+   *   in this shard. It returns rather than throws (a missing endpoint is normal during a
+   *   two-phase ingest), but callers that COUNT edges must not count a no-op as a success —
+   *   which is only possible if the outcome is reported.
+   */
   addEdge(rel) {
     const from = this.store.findById(rel.fromId);
     const to = this.store.findById(rel.toId);
-    if (from < 0 || to < 0) return;
+    if (from < 0 || to < 0) return false;
     const et = REL_TYPE[rel.type] || 1;
     this.store.addEdge(from, to, et, Math.max(1, Math.min(255, Math.round((rel.confidence ?? 1) * 255))));
     this.store.flush();
@@ -422,6 +428,7 @@ export class AmrMemoryStore {
       s.add(from);
       this._edgeCount = (this._edgeCount ?? 0) + 1;
     }
+    return true;
   }
 
   _ensureRevEdges() {

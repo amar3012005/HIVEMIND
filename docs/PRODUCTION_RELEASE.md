@@ -3,116 +3,139 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260720-bc40fcaa
+release_id: prod-20260806-47d0122f
 host: singulance
-deployed_at_utc: 2026-07-20T16:00:04Z
+deployed_at_utc: 2026-08-06T04:34:26Z          # core image build; FE image 2026-08-06T03:49:43Z
 parent:
   branch: singulance-main
-  sha: 72609f5593ff445cc84b60ed6fc5c2cbb07012e0
+  sha: 47d0122fe50cff417fe92fbb739d986aff6bb62a
 frontend:
-  sha: 4efdd809510f4c467dea03c2ad6e3cb092865948   # FULL reconciled FE: main(29) + singulance-hyper mobile/chat parity + per-account storage + profile button + participants crash fix
+  sha: a60762b2b9ead565f6354096fbbab1053ddeb00b  # Da-vinci main — upload scope modal org tier selectable
 runtime:
-  VERSION: prod-20260720-bc40fcaa
-  NEXT_VERSION: prod-20260720-b3ca804a             # frontend unchanged
-  env_change: CEREBRAS_API_KEY added post-deploy → synthesis routes Cerebras-direct
-              (api.cerebras.ai) instead of gpt-oss via OpenRouter. Core recreated (same
-              image, new env). Key is in /root/hivemind/.env only, NOT in the repo.
-              OpenRouter sort=throughput remains the fallback path if the Cerebras key is absent.
-              PROFILE FLAGS enabled: PROFILE_DREAM_ENABLED, PROFILE_DREAM_APPLY,
-              ENABLE_PROFILE_DREAM_CRON, PERSONA_ROUTER_ENABLED = true (activates
-              the previously-dark user/org profile subsystem + persona injection).
+  VERSION: prod-20260806-47d0122f
+  env_change: |
+    MEMORY_PROCESSOR_MODEL and ENTERPRISE_EXTRACTION_MODEL moved off
+    deepseek/deepseek-v4-flash-0731 to google/gemini-2.5-flash-lite (deepseek
+    truncated small-JSON calls: finish=length, which triggered a fallback call
+    every time). KB_UNIFIED_FALLBACK_MODELS deliberately left TWO-FAMILY
+    (deepseek,gpt-oss-120b) so one provider outage cannot take out extraction —
+    a single-member gpt-oss chain was considered and rejected because gpt-oss
+    was returning HTTP 400 "Reasoning is mandatory" at the time. Applied in
+    /root/hivemind/.env only, NOT in the repo. Backup: .env.bak-modelswap-*.
 images:
-  core: sha256:359e941d542e3c524959693a69abf47b278df093877548b97ea43fddec4f4920
-  control: sha256:830031290c1b4bc60fc95cf607fb08352b53e25e6f49d319f7a5f438e90639e4       # unchanged
-  employees: sha256:237d7346d9239f7677517010d81bf244d95f0812a260a285bacc732815690c29     # unchanged
-  tara_deepgram: sha256:cf7c25e26e872010b4f443b30dcfbedfb4b52cb100c42e70c25c842f41010876 # unchanged
-  frontend_single: sha256:f7a2dc6d81ad99d6e3f4b742cc1e4cdf07e18cbdf0bd8eef18d39c2500e67341 # prod-20260720-4efdd809-single
+  core: hivemind/core-api:sha-47d0122
+  control: hivemind/control-plane:sha-556d95ec5                          # unchanged
+  employees: hivemind/employees:prod-20260804-runtime-campaign-86f70547  # unchanged
+  tara_deepgram: hivemind/tara-deepgram:sha-bf7af3ca                     # unchanged
+  byod_agent: hivemind/hm-agent:sha-a95090c2                             # unchanged
+  frontend_single: hivemind/fe:prod-20260806-c024cd5700a3-single
 migration: none
 changes:
-  - Progressive 6-tool router added, FLAG-GATED (CHAT_ROUTER=progressive, default OFF/current
-    planner live). One Cerebras-direct call → adapter → existing plan/gatherEvidence/synthesis.
-    Deployed DARK. Live A/B (default vs flag-ON scratch container) — progressive faster on every
-    case + fixed the direct-math→recall bug (391 in 0.62s vs wrong+3.1s). Not yet flipped.
-  - FRONTEND rebuilt + deployed: Da-vinci origin/main (29 commits ahead of prior gitlink
-    1702fa72 — mobile chat rebuild, HyperAgents room/brochure reports, outreach/leads,
-    live-listen) + profile Rebuild button. Image prod-20260720-62654d4c-single deployed to
-    BOTH FE containers (hm-fe :8088, hivemind-next-frontend-1 :2388) via direct immutable-tag
-    recreate (NEXT_VERSION untouched — shared with core/control/employees). Served-bundle
-    verified (main.0ddd5cd2.js live on next.singulancelabs.com (fully reconciled FE: merged claude/singulance-hyper for latest mobile+chat parity + claude-chat shared module + per-account browser storage); fixed a prod room-render crash "(s||[]).find is not a function" (TurnView participants normalized to array)). FE rollback: rollback-<ts>-single.
-  - PROFILE subsystem activated (was fully built but dark): 4 flags on; ProfileDreamer
-    LLM-extracts grounded user+org facts from memories; onboarding mirrors company →
-    org-scoped profile facts; new get_user_profile chat tool (caller-scoped, no id from
-    model) + 'profile' planner op. Backfill applied (canary: 10 facts incl company=Solvis
-    GmbH). Live: profile chat EN grounded; tenant-isolation verified (other tenant → 0).
-  - Source-explain / full reconstruction FIXED. Two combined root causes — (1) explicit-source
-    hydration was wrapped in withTimeout at CREATION but awaited after hop1/hop2/RRF/boost, so a
-    ~50ms hydration always resolved to {timed_out} and fell back to document-lead boilerplate;
-    (2) hydration vector-anchored on the raw NL query (filename + question words) so windows landed
-    on the cover page, not the entity. Now: raw promise + fresh-clock timeout at the await, and
-    anchor on the planner's named entities.
-  - Compare / relation per-entity lanes switched from mode:fact (no evidence expansion) to
-    mode:explain, limit 5->8, so each entity pulls its document evidence. "Compare X and Y" no
-    longer reports both absent when each exists.
-  - Chat latency 26-60s (growing/runaway) -> 2.5-7.7s (stable). (1) Qdrant ensureCollection was
-    guarded by a scalar collectionReady, invalidated on every multi-tenant switch, re-running
-    createPayloadIndex(wait:true) per query -> Set (once per collection per process). (2) OpenRouter
-    default routing for openai/gpt-oss-120b landed on 7-15s backends (DekaLLM/WandB/Parasail) ->
-    provider.sort=throughput selects Cerebras/Groq at ~0.5-1s. (3) reasoning_effort=low on grounded
-    synthesis (medium for full).
-  - Every canonical memory now carries the ingest-time (known_at) timestamp: content-body suffix
-    (YYYY-MM-DDTHH:MMZ), metadata.recorded_at, ts:YYYY-MM-DD tag, entity first/last-seen via
-    CanonicalEntity.createdAt/updatedAt. Idempotent on re-ingest. No migration.
-  - Removed proven-dead legacy planner/router (planStep, planPrompt, ROUTER_TOOLS, routerPlan);
-    kept callJsonLLM. Added trace.phases per-step latency instrumentation.
-  - TEMPORAL wired end-to-end: new 'timeline' planner operation; needs_time_travel derived from
-    parsed time fields (was hardcoded false); gatherEvidence dispatches hivemind_diff (range;
-    "since X" -> to=now) / hivemind_at (valid_at,known_at) / hivemind_timeline (full history);
-    hivemind_timeline resolves by memory_id via the MemoryVersion ledger. SECURITY: memory_id
-    path authorizes the anchor + every related row via getMemoryScoped (cross-tenant reads
-    refused, probe-verified); hivemind_diff removed rows rendered [REMOVED/SUPERSEDED] so
-    superseded values are never asserted as current.
+  - KB GROUNDING (the session's main find). normalizeUnifiedClaims gated facts on a
+    BYTE-EXACT content.includes(source_quote), so any quote spanning a hard line-wrap
+    ("klein und\nergaenzt" vs "klein und ergaenzt") was discarded with no log line.
+    This produced "EXTRACTION SHORTFALL: kept 0 facts from a window holding 14/15
+    fact-bearing sentences" and was long misattributed to the extraction model —
+    model benchmarks scoring "verbatim quote ratio" were in fact scoring this filter.
+    Replaced with locateSourceQuote(): whitespace/dash/quote-variant tolerant, recovers
+    the real offset AND repairs source_quote to the actual section bytes. Normalization
+    can only merge characters that already exist, so a hallucinated quote still fails
+    and is still rejected — the grounding guarantee is unchanged. Added per-condition
+    drop counters ([kb-normalize] in/kept/repaired/dropped{...}) because seven AND-ed
+    conditions meant "0 facts" had seven silent causes.
+  - The identical byte-exact gate in resolveEvidenceSegment fixed the same way, so a
+    re-wrapped quote still binds evidence to its segment.
+  - start_page: added a form-feed (\f) page-boundary fallback for fast-pdf/vision tiers
+    that emit neither Docling "<!-- page N -->" nor "-- N of M --" markers. A tier with
+    no page signal still yields null and is logged honestly rather than guessed.
+  - UPLOAD PRECHECK: a knowledge_ingest_jobs row with status=ready OUTLIVES its document
+    (hard delete, no soft-delete flag), so re-uploading a since-deleted file was blocked
+    forever as "Already in your knowledge base". Precheck now confirms the document still
+    exists before reporting a duplicate; a stale ready job returns duplicate:false with
+    stale_job:<id>. Dedup stays DB-authoritative and fails open toward allowing.
+  - EVIDENCE SCOPE: every knowledge_segment now carries scope / scope_key / project_id /
+    team_id / document_title in metadata, on BOTH segment paths (the semantic upload path
+    and ingestConnectorRecord, which serves /api/ingest/source). Scope lenses therefore
+    apply the same filter to memories AND evidence on central and .amr alike, without
+    needing a document join the remote agent does not have.
+  - DOC SUMMARY prompt: stopped coining an umbrella entity out of the filename ("The
+    WrapTest DE project establishes...") and pinned same-language output.
+  - MCP BI-TEMPORAL: hivemind_at / hivemind_diff posted a NESTED time:{valid_at,known_at}
+    that /api/recall never reads (it reads body.valid_at / body.transaction_at), so the
+    filter was silently dropped — hivemind_at returned the entire corpus (356 memories /
+    1.7MB) while looking like a working snapshot, and hivemind_diff compared two
+    unfiltered sets. Now sent top-level with the route's real key (transaction_at), and
+    capped by the documented limit (default 20, max 200).
+  - CHAT BI-TEMPORAL: routing was already correct, but hivemind_context is a `strict`
+    tool whose every property is required, so the model satisfied the schema with null
+    dates; plan.time came out null and every diff question fell through gatherEvidence's
+    dispatch to a version-chain walk. Added extractMessageDates() — a deterministic
+    ISO + English/German month-name parser used ONLY when the model supplies no usable
+    date. A model-supplied date is never overridden; when nothing parses the value stays
+    null and behaviour is byte-identical. The bi-temporal ENGINE is untouched.
+  - FRONTEND: the upload scope modal gated the "Entire organization" tier on user.role,
+    which bootstrap never populates (org membership is exposed as org.role / user.orgRole;
+    control-plane emits orgRole: membership.role). isOrgAdmin was therefore false for
+    EVERY user including owners, so the tier rendered opacity-50/cursor-not-allowed and
+    could not be clicked, and queueFilesForUpload silently defaulted admins to 'personal'.
+  - ALSO IN THIS RELEASE, FROM A PARALLEL SESSION (see acceptance.not_verified):
+    .amr recall parity work — B5 graph-expansion + update-chain revival, SQL-mirror
+    lexical backfill, dual-write of evidence into the shard, sparse-aware shard
+    snapshots, and an in-shard lexical lane.
 acceptance:
-  public: [core_health_ok]
+  public: [core_health_200, api_health_200, next_hivemind_200, singulancelabs_200]
+  runtime: [core_healthy, restarts_0, oom_false, exit_0, fresh_fatal_errors_0]
   authenticated:
-    - fact_recall_200_grounded_cited
-    - source_explain_200_grounded_correct         # was: falsely reported entity absent — FIXED
-    - full_reconstruction_200_grounded_correct    # was: falsely reported entity absent — FIXED
-    - relation_200_honest_no_edge_vs_comention
-    - compare_200_both_entities_found             # was: reported both absent — FIXED
-    - german_fact_source_relation_correct_in_de   # no English routing gate
-    - temporal_range_200_dispatches_hivemind_diff  # "changed since 2025" — honest no-change answer
-    - temporal_asof_200_valid_at_recall            # "as of 2026-06-01" — correct as-of description
-    - temporal_history_200_dispatches_hivemind_timeline
-    - profile_populated_10_facts_incl_company        # dreamer backfill wrote real facts
-    - profile_chat_tool_grounded_en                  # get_user_profile routed + grounded
-    - profile_tenant_isolation_other_tenant_zero     # no cross-tenant profile leak
-  latency_observed:                                  # after CEREBRAS_API_KEY added (synthesis → Cerebras-direct)
-    fact: 2.25-3.25s      # target p95 1.5s — close; ~950ms planner + ~800ms recall + ~500ms synth floor
-    explain: 3.65s        # target p95 3s — met/near
-    full: 5.46s
-    compare: 3.8-6.2s     # flaky: grounded 6-10 sources most runs, occasional thin recall
-    relation: 2.5-5.8s
-    german: 4.7s
-    note: answer_step dropped ~11s → 452-658ms once synthesis routed Cerebras-direct (warm 276-318ms).
-  fresh_fatal_errors: 0
-  runtime: [core_healthy, exit_0, restarts_0, oom_false]
-  known_gaps:
-    - Latency above the aggressive p95 targets (fact 1.5s / chat 4s). No longer runaway; residual
-      variance is in-answerStep DB work + occasional slow OpenRouter backend despite throughput sort.
-    - Temporal now wired end-to-end (timeline op → hivemind_diff/_at/_timeline; tenant-scoped
-      memory_id resolution; [REMOVED/SUPERSEDED] marking). Remaining niggle: terse tag-only test
-      memories still rank low in semantic recall, and the predecessor→successor Updates EDGE is
-      still not written by the update path (only isLatest flags).
+    - kb_ingest_wrapped_german_doc_5_facts_kept_no_shortfall
+    - kb_recall_returns_wrapped_sentence_facts
+    - upload_precheck_stale_ready_job_returns_duplicate_false   # verified on the real blocked file
+    - evidence_segment_scope_stamped_personal_project_org       # 3 uploads, correct scope_key each
+    - recall_scope_filter_personal_returns_only_personal
+    - recall_scope_filter_organization_returns_only_org
+    - recall_scope_filter_project_fails_closed_when_not_member
+    - mcp_hivemind_at_ancient_date_returns_zero                 # was: whole corpus
+    - mcp_hivemind_at_bounded_output                            # was: 1.7-3.1MB
+    - chat_range_question_dispatches_hivemind_diff              # was: hivemind_timeline
+    - chat_pointintime_question_dispatches_hivemind_at
+    - chat_german_nonISO_range_dispatches_hivemind_diff
+    - chat_nontemporal_regression_zero_temporal_leak            # greeting/recall/source/projects/relation
+    - fe_scope_modal_orgRole_derivation_present_in_served_bundle
+  not_verified:                                  # recorded honestly; NOT accepted by this session
+    - amr_recall_parity_lanes                    # parallel session's work; the only .amr org this
+                                                 # session could use was emptied for testing, and the
+                                                 # remaining .amr orgs are other tenants' workspaces
+                                                 # whose memory content was deliberately not read
+    - fe_scope_modal_click_through               # proven at API + served-bundle level only; needs a
+                                                 # logged-in browser session
+known_gaps:
+  - Disk at 92% (26G free of 301G). Not urgent but the next few image builds will bite;
+    rollback images accumulate (10+ core rollback tags present).
+  - /root/.quickdeploy-last-sha still reads f172bb75 — release-singulance.sh does not
+    update that marker, so it is NOT a reliable source of current runtime truth. Use the
+    container image label instead.
+  - The hosted MCP connector used from Claude points at a DIFFERENT host than singulance,
+    which still runs the pre-fix hivemind_at / hivemind_diff.
+  - Facts are translated DE->EN at extraction despite an explicit no-translate instruction
+    in the prompt (evidence/source_quote stays in the source language). Owner decision:
+    leave as-is.
+  - fail2ban locked the owner's IP out of port 22 on 2026-08-06 after rapid automated SSH
+    during this session's deploys (HTTPS unaffected — the sshd jail rejects port 22 only).
+    Unbanned. Tailscale (singulance-engine 100.81.115.51) is the out-of-band route; adding
+    100.64.0.0/10 to fail2ban ignoreip is proposed but NOT applied.
 rollback:
-  core: hivemind/core-api:rollback-20260720T164750Z   # -> prior release e41b46b1
-  control: hivemind/control-plane:stable
-  employees: hivemind/employees:stable
-  tara_deepgram: hivemind/tara-deepgram:stable
-  frontend_single: hivemind/fe:stable-single
-  immediate_timestamped: 20260720T164750Z
+  core: hivemind/core-api:rollback-20260806-042921
+  frontend_single: hivemind/fe:rollback-20260806-042921-single
+  control: hivemind/control-plane:sha-556d95ec5      # unchanged this release
+  employees: hivemind/employees:prod-20260804-runtime-campaign-86f70547
+  tara_deepgram: hivemind/tara-deepgram:sha-bf7af3ca
+  git: revert 9ac8203b..47d0122f; frontend gitlink back to d9fbb8316a67fae368138b430d83374876803f5c
 aliases:
-  stable: prod-20260720-72609f55
-  latest: prod-20260720-72609f55
+  stable: prod-20260806-47d0122f
+  latest: prod-20260806-47d0122f
 ```
 
-No customer email, connector action, telephone call, or write operation was triggered during release acceptance. The disposable SECURITY_E2E_20260720 test memories (177de683, 65c9ca7b) were intentionally retained as the temporal fixture and NOT deleted.
+No customer email, connector action, telephone call, or write operation was triggered during
+release acceptance. The eight disposable test documents created for scope and grounding
+verification (WrapTest DE, WrapTest DE v2, ScopeTest x3, ScopeV2 x3 on org 1380251c) WERE
+deleted afterwards, together with their 28 memories, and zero residual recall hits were
+confirmed.

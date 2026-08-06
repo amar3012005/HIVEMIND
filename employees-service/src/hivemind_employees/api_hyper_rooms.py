@@ -1274,6 +1274,59 @@ def _build_harness_quality_check(
     }
 
 
+def _runtime_phase_report(*, user_message: str, contract: Dict[str, Any], result: Dict[str, Any],
+                          room_goal: str = "", gaps: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Readable report for a Runtime-driven (HQ work-order) phase.
+
+    Runtime phases return machine artifacts to Core's predicate engine, but the user
+    still needs to SEE what the Room concluded. Render the phase's own summary plus a
+    compact, human-readable rendering of each persisted artifact — no second model call,
+    nothing invented: every line comes from what the Room already produced.
+    """
+    artifacts = [a for a in (contract.get("artifacts") or []) if isinstance(a, dict)]
+    parts: List[str] = []
+    summary = str(contract.get("summary") or "").strip()
+    if summary:
+        parts.append(summary)
+    for artifact in artifacts:
+        key = str(artifact.get("key") or "artifact")
+        data = artifact.get("data")
+        parts.append(f"\n## {key.replace('_', ' ').title()}")
+        if isinstance(data, dict):
+            for field, value in data.items():
+                if value in (None, "", [], {}):
+                    continue
+                label = str(field).replace("_", " ").title()
+                if isinstance(value, (list, tuple)):
+                    rendered = "\n".join(
+                        f"- {v if not isinstance(v, dict) else '; '.join(f'{k}: {x}' for k, x in v.items())}"
+                        for v in value[:12])
+                    parts.append(f"**{label}**\n{rendered}")
+                elif isinstance(value, dict):
+                    rendered = "\n".join(f"- {k}: {v}" for k, v in list(value.items())[:12])
+                    parts.append(f"**{label}**\n{rendered}")
+                else:
+                    parts.append(f"**{label}** — {str(value)[:1200]}")
+        elif data:
+            parts.append(str(data)[:2000])
+    if gaps:
+        parts.append("\n## Open gaps\n" + "\n".join(f"- {g}" for g in gaps[:8]))
+    body = "\n\n".join(p for p in parts if p).strip() or "The Room returned no readable content for this phase."
+    sources = [s for s in (result.get("sources") or []) if isinstance(s, dict)][:8]
+    return {
+        "t": "final_report",
+        "title": str(contract.get("title") or user_message or "Runtime work order")[:200],
+        "template": "runtime_phase",
+        "status": "complete" if not gaps else "gaps",
+        "verdict": None,
+        "room_goal": room_goal or "",
+        "evidence": [],
+        "sources": sources,
+        "markdown": body,
+        "summary": (summary or body)[:4000],
+    }
+
+
 def _build_final_report(
     *,
     user_message: str,
@@ -3307,6 +3360,15 @@ async def _orchestrate_single_agent(
         }
         _PLAN_BY_TURN[req.turn_id] = {"verification": verdict, "room_phase_result": contract}
         await _emit({"t": "verify", **verdict})
+        # A Runtime-driven phase is still real Room work the user must be able to READ.
+        # This branch previously emitted only verify+seal and returned, so an HQ work
+        # order produced discussion + "Verified" and no report at all. Emit the same
+        # readable final_report the normal Room path emits, built from the phase's own
+        # summary/artifacts, before sealing.
+        await _emit(_runtime_phase_report(
+            user_message=req.user_message or "", contract=contract, result=result,
+            room_goal=req.room_goal or "", gaps=gaps,
+        ))
         await _emit({
             "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
             "duration_ms": int((time.time() - started) * 1000), "engine": "single-room-phase",
@@ -3339,6 +3401,11 @@ async def _orchestrate_single_agent(
         }
         _PLAN_BY_TURN[req.turn_id] = {"verification": verdict, "runtime_stage_result": contract}
         await _emit({"t": "verify", **verdict})
+        # Same as the room-phase branch: a Runtime stage is still readable Room work.
+        await _emit(_runtime_phase_report(
+            user_message=req.user_message or "", contract=contract, result=result,
+            room_goal=req.room_goal or "", gaps=gaps,
+        ))
         await _emit({
             "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
             "duration_ms": int((time.time() - started) * 1000), "engine": "single-runtime-stage",

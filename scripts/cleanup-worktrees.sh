@@ -25,7 +25,8 @@ NOW="$(date +%s)"
 AGE_SECONDS=$((AGE_HOURS*3600))
 
 CANDIDATE_PREFIXES=(
-  /root/builds/prod-
+  /root/builds/prod-/
+  /root/builds/recall-/
   /root/releases/
   /root/hivemind-build-
   /root/hivemind-release-
@@ -54,7 +55,7 @@ list_candidates() {
   local candidates=()
   local p
   for pref in "${CANDIDATE_PREFIXES[@]}"; do
-    if [ -d "$pref" ] && [[ "$pref" == */ ]]; then
+  if [ -d "$pref" ] && [[ "$pref" == */ ]]; then
       shopt -s nullglob
       for d in ${pref}*; do
         [ -d "$d" ] || continue

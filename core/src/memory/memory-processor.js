@@ -67,6 +67,21 @@ FACT_SENTENCES:
 
 Rules:
 - RELATIONSHIP: ADD/UPDATE/EXTEND/DERIVE/NOOP
+  ADD     = a new fact. Use this by DEFAULT, including when the new fact is
+            INCOMPATIBLE with an existing one.
+  UPDATE  = the SAME fact with a new value, and the user signalled a change
+            ("now", "moved to", "actually", "no longer").
+  EXTEND  = adds detail to an existing fact that stays TRUE. Sharing a topic,
+            a date or a person is NOT enough.
+  DERIVE  = a conclusion drawn from other memories.
+  NOOP    = an exact duplicate that adds nothing.
+  There is deliberately NO "contradicts" option here: incompatibility is decided
+  downstream by the contradiction detector, which can only run when you return
+  ADD. Returning EXTEND for an incompatible fact SILENCES that check.
+  So: two commitments in the same time window that cannot both hold — a trip to
+  Dubai and a trip to Hannover on the same day, two meetings at one hour, one
+  person in two places — are ADD, never EXTEND. They do not extend each other;
+  they compete, and something downstream needs to notice.
 - PRIORITY: HIGH/MEDIUM/LOW
 - OBSERVATION: One sentence summary with 🔴/🟡/🟢. Write TRIVIAL if nothing noteworthy.
 - ENTITIES: Names of people, companies, products, places, technologies. Write NONE if empty.

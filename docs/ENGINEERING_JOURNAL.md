@@ -308,3 +308,66 @@ or uncommitted changes as completed work.
   but not yet click-verified in a logged-in session; the hosted MCP connector
   used from Claude points at a different host that still runs the pre-fix
   `hivemind_at`/`hivemind_diff`.
+
+## 2026-08-06 UTC - Ingestion fail-proofing, scope routing, and the last silent data-loss path
+
+- State: Committed; Accepted release for the changes listed here (verified live
+  on `singulance`). The release also carries a parallel session's `.amr` and
+  welcome-tour work that this entry does NOT vouch for.
+- Owner: Claude (Fable workflow)
+- Branch: `fix/kb-quote-ws-normalize` -> `singulance-main`
+- Base / commit: `9e16bdd6` -> `7e1b07b9` (39 commits; frontend `Da-vinci` -> `42c6703`)
+- Scope:
+  - P0.1 REPLAY. Dead jobs were unrecoverable AND invisible: `_process` unlinked
+    the raw file on the final attempt, so the module's own "raw file kept for
+    replay" promise was false, and no endpoint listed a failed job. Terminal
+    failures now retain their bytes, bounded by a sweeper that walks the real
+    `KB_STORE_DIR/<org>/<checksum>/<file>` layout — a flat readdir, my first
+    attempt, would have swept nothing. Added `GET /api/knowledge/jobs` with a
+    `replayable` flag and `POST /api/knowledge/jobs/retry`, reusing
+    upload-service's existing retry state machine rather than inventing a second.
+  - P0.2 SEGMENT RECONCILER — the last silent data-loss path. The reconciler
+    guarded memories only; a segment whose ingest-time heal also failed stayed in
+    Postgres with `vector_stored=false`, permanently unsearchable while the
+    document looked healthy. `healUnembeddedSegments()` reuses `_embedSegments`
+    (per-tenant collections, batched upsert, remote `.amr` path) and rides the
+    existing drift-guard tick. Measured 1 of 2096 segments affected.
+  - P1.3 DUPLICATE INGESTION. The BullMQ worker ran on the default 30s
+    `lockDuration` while real ingests take 30-134s, so a lapsed lock could
+    re-deliver a job and ingest the same document twice. Now equals the job budget.
+  - P1.4 was already fixed (`7bcc1def`) — found before re-implementing it.
+  - SCOPE. The upload modal collapsed every non-personal scope to `organization`
+    and passed the project via `containerTag`, which the upload route ignores, so
+    project uploads were stored org-wide. It now sends the tier the user picked
+    plus the project UUID. A stale `activeProjectId` from localStorage caused
+    `scope_not_found` (surfacing as a 404) and is now validated against loaded
+    projects. Duplicates are checked PER SCOPE, so one file may live in My Space
+    and in a project but not twice in one scope, and deleting a document no longer
+    blocks re-uploading it.
+  - FORMATS. `pptx/ppt/doc/xls` withdrawn from `KB_EXTENSIONS` — no seam handler
+    and no direct tier, so they fell through to Docling (measured 479s returning
+    chunks=0, and a 600s convert timeout). Refused instantly instead.
+  - VISION. Both providers returned `content || empty` on HTTP 200, so an empty
+    reply counted as SUCCESS and the ladder never reached the configured
+    OpenRouter fallback — the single cause of the scanned-PDF failures, not the
+    model choice.
+  - QUALITY. Facts are selected by salience rather than array position; table rows
+    merge into one contextual memory (a 5-page budget went from 31 memories
+    averaging 154 chars to 17-20 averaging ~235); `governanceAgentState` upserts.
+- Verification: `node --check` on every changed file; unit assertions for the
+  grounding locate (9/9), page mapping (6/6), date extractor (9/9), routing guard
+  (9/9), salience selection (6/6) and the raw-file sweeper (8/8, proving what it
+  does NOT delete). Live: a real 2.5MB customer PDF uploaded to a project landed
+  `scope_type=project` with document, memories and segments all carrying the
+  project scope; the same file was accepted into a second scope and refused in the
+  same one; re-upload after delete succeeded; `pptx` returned 415 instantly;
+  delete verified across seven tables, all zero.
+- Production: deployed to `singulance`; core `prod-20260806-7e1b07b9d117`,
+  frontend `prod-20260806-e0be490e8888-single`. restarts=0, oom=false, no fatals.
+- Rollback: `hivemind/core-api:rollback-20260806-100604`,
+  `hivemind/fe:rollback-20260806-100604-single`.
+- Next: verify the vision ladder on a genuine scanned PDF (mechanism fixed, not yet
+  observed succeeding); route `pptx/odt/rtf/epub` through LibreOffice -> PDF so
+  Docling can be deleted; instrument cross-doc linking, which produced 63 edges on
+  one document and 0 on another with the same code. SECURITY: a live GitHub PAT is
+  embedded in `/opt/HIVEMIND/core`'s git remote URL and needs rotating.

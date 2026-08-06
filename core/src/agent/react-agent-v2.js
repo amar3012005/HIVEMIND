@@ -2343,20 +2343,71 @@ export async function runReactAgentV2({
           const label = c.title || String(c.snippet || '').slice(0, 90) || c.id;
           return `${i + 1}. ${label}`;
         });
+        // NO CANDIDATES IS NOT A QUESTION — IT IS A NEW FACT.
+        //
+        // With several matches, asking which one is right. With ZERO matches there
+        // is nothing to disambiguate, and the old copy ("Name it more specifically
+        // and I will update it") threw the user's statement away. Measured:
+        // "SINGULANCE is the new name of Davinci AI" — a durable, declarative fact
+        // about a rename — produced needs_memory_choice with an empty candidate
+        // list and was never persisted. The next recall still answered "Davinciai
+        // (DaVinci AI) is developing…" from 5 stale memories, because the
+        // correction was never stored anywhere.
+        //
+        // A statement the user asserts is worth keeping whether or not it happens
+        // to match an existing row. Save it as a new memory and let the engine's
+        // own relationship pass do what it already does — Updates / Supersedes /
+        // Contradicts against the memories that mention the old name. That is
+        // strictly better than discarding it: worst case the graph holds one extra
+        // fact, best case the rename propagates.
+        //
+        // Only for update intents (the user asserted something). Ambiguous matches
+        // still ask, and nothing here deletes or overwrites.
+        let savedFallback = null;
+        if (!cands.length && intentDecision.operation === 'update' && String(message || '').trim().length > 8) {
+          try {
+            const _stmt = String(message).trim();
+            const saveRes = await dispatchTool('hivemind_save_memory', {
+              title: _stmt.split(/[.!?\n]/)[0].slice(0, 80) || 'Statement',
+              content: _stmt,
+              memory_type: 'decision',
+              tags: ['source:chat', 'update-fallback'],
+              _original_content: message,
+              // Scope MUST be forwarded the same way the normal save path does it.
+              // Omitting it drops the memory into the caller's default scope
+              // instead of the project they are working in — a silent
+              // cross-scope write, which is exactly the class of bug the scope
+              // stamping on segments exists to prevent.
+              ...(ctx.projectId ? { project_id: ctx.projectId, scope: 'project' } : {}),
+            }, ctx);
+            if (saveRes && !saveRes.error) savedFallback = saveRes;
+          } catch (saveErr) {
+            // Never let the fallback turn a soft outcome into a hard failure —
+            // the disambiguation reply below still goes out.
+            console.warn(`[update-fallback] save failed: ${saveErr.message}`);
+          }
+        }
         const ask = cands.length
           ? `That matches ${cands.length} memories — which one should I change?\n${lines.join('\n')}`
-          : 'I could not tell which memory you meant. Name it more specifically and I will update it.';
-        onEvent?.({ type: 'tool_completed', name: toolName, status: 'needs_input', result });
+          : (savedFallback
+            ? 'I could not find an existing memory to update, so I saved that as a new one and linked it to what I already know.'
+            : 'I could not tell which memory you meant. Name it more specifically and I will update it.');
+        // A saved fallback is a COMPLETED turn, not a pending question. Reporting
+        // needs_input/success:false there would leave the FE waiting for a choice
+        // the user does not need to make, and would mark a turn that did persist
+        // the fact as a failure.
+        onEvent?.({ type: 'tool_completed', name: toolName, status: savedFallback ? 'ok' : 'needs_input', result });
         onEvent?.({ type: 'finish', text: ask });
-        onEvent?.({ type: 'turn_completed', grounded: false, operation: intentDecision.operation, success: false });
+        onEvent?.({ type: 'turn_completed', grounded: false, operation: intentDecision.operation, success: Boolean(savedFallback) });
         return {
           response: ask,
           sources: [],
-          steps: [{ tool: toolName, args: toolArgs, result_summary: 'needs_memory_choice' }],
+          steps: [{ tool: toolName, args: toolArgs, result_summary: savedFallback ? 'update_unresolved_saved_new' : 'needs_memory_choice' }],
           evidence_used: [], confidence: 0,
-          gaps: ['needs_memory_choice'],
-          needs_memory_choice: true,
+          gaps: savedFallback ? [] : ['needs_memory_choice'],
+          needs_memory_choice: !savedFallback,
           candidates: cands,
+          action_result_saved: savedFallback ? (savedFallback.memoryId || savedFallback.id || true) : null,
           usage: sumUsage(usages), trace: finalizeTrace(trace, usages),
           assistant_name: plan.assistant_name_intent || assistantName || null,
           action_result: null,

@@ -90,22 +90,71 @@ esac; done
 # Env bump (backed up) + one-at-a-time recreates with health gates.
 cp "$ENV" "$ENV.bak-$RID"; cp "$NEXTENV" "$NEXTENV.bak-$RID"
 sed -i "s/^VERSION=.*/VERSION=$RID/" "$ENV"; sed -i "s/^NEXT_VERSION=.*/NEXT_VERSION=$RID/" "$NEXTENV"
-recreate() { # svc composefile project envfile container profile
+# THE COMPOSE FILES HARDCODE IMAGE TAGS. Nothing reads $VERSION for the core or
+# frontend image, so bumping VERSION= in .env and running `compose up -d` recreates
+# the container FROM THE OLD TAG — and because the env changed, compose really does
+# recreate it, so the log reads "Recreated / Started", the health gate passes, and
+# the OLD CODE keeps running. Observed twice on 2026-08-06: this script printed
+# "PROMOTED" over a container that did not contain the commit being released, and
+# it was caught only by grepping the running container for a string from the diff.
+#
+# settag() rewrites the image line for ONE service before its recreate, scoped with
+# awk to that service's block. Never use a bare `sed s|image: hivemind/fe|...|`:
+# docker-compose.next.yml has -b2b and -b2c services ABOVE `frontend:` whose image
+# lines match that pattern first, so a plain sed retags the wrong service.
+settag() { # composefile service newimage
+  local f="$1" svc="$2" img="$3"
+  [ -f "$f" ] || { echo "FATAL: compose file $f missing"; exit 1; }
+  cp "$f" "$f.bak-$RID"
+  awk -v svc="  $svc:" -v img="$img" '
+    $0 == svc { inblk = 1; print; next }
+    inblk && /^  [a-zA-Z0-9_-]+:/ { inblk = 0 }
+    inblk && $0 ~ /^[[:space:]]*image:[[:space:]]/ { sub(/image:.*/, "image: " img); inblk = 0; print; next }
+    { print }
+  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  grep -qF "image: $img" "$f" || { echo "FATAL: settag did not apply $img to $svc in $f"; cp "$f.bak-$RID" "$f"; exit 1; }
+  echo "$svc → compose image set to $img"
+}
+
+recreate() { # svc composefile project envfile container profile expected_image
   docker compose ${6:+--profile $6} ${2:+-f $2} ${3:+-p $3} --env-file "$4" config -q
   docker compose ${6:+--profile $6} ${2:+-f $2} ${3:+-p $3} --env-file "$4" up -d --no-deps --force-recreate "$1" >/dev/null
   for i in $(seq 1 45); do S=$(docker inspect "$5" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null); [ "$S" = healthy ] && break; sleep 4; done
   echo "$1 → ${S:-unknown}"; [ "${S:-}" = healthy ] || { echo "FATAL: $1 unhealthy — restore $ENV.bak-$RID + rollback-$TS"; exit 1; }
+  # HEALTH IS NOT IDENTITY. A healthy container running last week's image passes
+  # every check above. Assert what is actually running before claiming a release.
+  if [ -n "${7:-}" ]; then
+    RUN=$(docker inspect "$5" --format '{{.Config.Image}}' 2>/dev/null)
+    [ "$RUN" = "$7" ] || { echo "FATAL: $1 is running '$RUN', expected '$7' — the compose image tag did not take. Restore $ENV.bak-$RID + rollback-$TS"; exit 1; }
+    echo "$1 → image verified $RUN"
+  fi
 }
 cd /root/hivemind
+HZ=infra/docker-compose.hetzner.yml
 for s in "${SERVICES[@]}"; do case "$s" in
-  core)          recreate core infra/docker-compose.hetzner.yml "" "$ENV" hm-core ;;
-  control-plane) recreate control-plane infra/docker-compose.hetzner.yml "" "$ENV" hm-control ;;
-  employees)     recreate employees infra/docker-compose.hetzner.yml "" "$ENV" hm-employees ;;
-  tara-deepgram) recreate tara-deepgram infra/docker-compose.hetzner.yml "" "$ENV" tara-deepgram ;;
+  core)          settag "$HZ" core          "hivemind/core-api:$RID"
+                 recreate core "$HZ" "" "$ENV" hm-core "" "hivemind/core-api:$RID" ;;
+  control-plane) settag "$HZ" control-plane "hivemind/control-plane:$RID"
+                 recreate control-plane "$HZ" "" "$ENV" hm-control "" "hivemind/control-plane:$RID" ;;
+  employees)     settag "$HZ" employees     "hivemind/employees:$RID"
+                 recreate employees "$HZ" "" "$ENV" hm-employees "" "hivemind/employees:$RID" ;;
+  tara-deepgram) settag "$HZ" tara-deepgram "hivemind/tara-deepgram:$RID"
+                 recreate tara-deepgram "$HZ" "" "$ENV" tara-deepgram "" "hivemind/tara-deepgram:$RID" ;;
   fe) cd /root/hivemind-next
-      docker compose -p hivemind-next -f infra/docker-compose.next.yml --env-file "$NEXTENV" --profile single config -q
-      docker compose -p hivemind-next -f infra/docker-compose.next.yml --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null
-      sleep 4; docker ps --format '{{.Image}}' | grep -q "fe:$RID-single" && echo "frontend → running $RID" || { echo FATAL: frontend not on $RID; exit 1; }
+      NF=infra/docker-compose.next.yml
+      settag "$NF" frontend "hivemind/fe:$RID-single"
+      docker compose -p hivemind-next -f "$NF" --env-file "$NEXTENV" --profile single config -q
+      docker compose -p hivemind-next -f "$NF" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null
+      sleep 4
+      # WAS: `docker ps --format '{{.Image}}' | grep -q "fe:$RID-single"`. Two bugs.
+      # It grepped EVERY running container rather than this one, and $RID carries an
+      # 8-char SHA while tags in use are 12-char, so it printed
+      # "FATAL: frontend not on <RID>" after a SUCCESSFUL build — training everyone
+      # to ignore a fatal. Ask the container what it is running instead.
+      FRUN=$(docker inspect hivemind-next-frontend-1 --format '{{.Config.Image}}' 2>/dev/null)
+      [ "$FRUN" = "hivemind/fe:$RID-single" ] \
+        && echo "frontend → image verified $FRUN" \
+        || { echo "FATAL: frontend is running '$FRUN', expected 'hivemind/fe:$RID-single'"; exit 1; }
       cd /root/hivemind ;;
 esac; done
 # Mutable discovery aliases move only after all named-service health gates pass.

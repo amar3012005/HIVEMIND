@@ -643,7 +643,24 @@ export class PrismaGraphStore {
 
   async getMemoryScoped(id, { user_id, org_id, access_context = null } = {}) {
     if (!id || !user_id || !org_id) return null;
-    const _org = currentOrg();
+    // Route on the org we were EXPLICITLY given, not the ambient async-local
+    // context. This read `currentOrg()`, so on any path that does not establish
+    // that context it silently fell through to the CENTRAL Postgres lookup — which
+    // holds zero rows for an .amr/BYOD org — and returned null for a memory that
+    // exists perfectly well on the tenant's agent.
+    //
+    // Proven in-container against a real BYOD org:
+    //   orgIsRemote: true
+    //   WITHOUT runWithOrg -> NULL
+    //   WITH    runWithOrg -> FOUND
+    // That is why chat's "change it to ..." failed with operation_failed while
+    // recall and save worked: those route through residency-aware paths, but this
+    // lookup depended on ambient state the agent tool path never sets.
+    //
+    // Not a widening of access: the caller-supplied org_id is the tenant whose data
+    // is being requested, and every check below still runs — org mismatch, personal
+    // ownership, project/team membership, guest denial.
+    const _org = org_id || currentOrg();
     if (_org && orgIsRemote(_org)) {
       const rows = await remoteHydrate(_org, [id]);
       const memory = rows.length ? mapAgentRow(rows[0]) : null;

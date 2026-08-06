@@ -32,6 +32,27 @@ const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-
 // (the body is model/temperature/max_tokens/messages, and this parser calls fetch
 // directly rather than the shared client that injects reasoning_effort for
 // gpt-oss), so there is nothing to disable.
+// Llama-4-Scout on the OpenRouter leg too, so the model is identical whichever
+// provider serves. MEASURED head-to-head — same rendered page, same OCR prompt,
+// same max_tokens, back to back:
+//   meta-llama/llama-4-scout       547 chars   757ms   (OpenRouter -> Groq)
+//   google/gemini-2.5-flash-lite   380 chars  2402ms   (OpenRouter -> Google)
+// Scout reads more of the page and is ~3x faster.
+//
+// The decisive detail: OpenRouter routes Scout to GROQ upstream, so this gets
+// Groq-class latency through OpenRouter's billing while the direct Groq account is
+// restricted for overdue payment (every direct Groq call returns HTTP 400, which
+// is why VISION_OPENROUTER_PRIMARY=true is set in production).
+//
+// An earlier in-pipeline comparison appeared to show the opposite (237 vs 605
+// chars). That test was not controlled — different runs, and the synthetic probe
+// behind it used a blank image and a "reply OK" prompt rather than the OCR prompt.
+// The controlled test above is the one to trust; if a real corpus ever disagrees,
+// HIVEMIND_VISION_OR_MODEL overrides this without a deploy.
+//
+// Scout is not a reasoning model and no `reasoning` field is sent on this path
+// (body is model/temperature/max_tokens/messages, via a direct fetch rather than
+// the shared client that injects reasoning_effort for gpt-oss).
 const OPENROUTER_VISION_MODEL = process.env.HIVEMIND_VISION_OR_MODEL || process.env.GROQ_VISION_OR_MODEL || 'meta-llama/llama-4-scout';
 const CONCURRENCY = Number(process.env.GROQ_VISION_CONCURRENCY || 8);
 const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 200);

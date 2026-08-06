@@ -235,3 +235,76 @@ or uncommitted changes as completed work.
   `tara-grok` using `TARA_GROK_DEPLOYMENT.md`.
 - Next: review, merge, apply the additive migration, provision scoped secrets,
   then use the runbook's single-service canary sequence.
+
+## 2026-08-06 UTC - KB grounding, evidence scope, and bi-temporal hand-off
+
+- State: Committed; Accepted release for the changes listed here (verified live
+  on `singulance`). The wider release `47d0122f` also carries a parallel
+  session's `.amr` work that this entry does NOT vouch for.
+- Owner: Claude (Fable workflow)
+- Branch: `fix/kb-quote-ws-normalize` -> `singulance-main`
+- Base / commit: `c615e4a3` -> `9ac8203b`, `91f7de36`, `dc27db94`, `72ca0a83`,
+  `3dd12bee`, `b154c460`, `18309611`, `befb025f`, `c024cd57`, `2447e610`
+  (frontend `Da-vinci` `d9fbb83` -> `a60762b`)
+- Scope:
+  - KB grounding: `content.includes(source_quote)` demanded byte-exact equality,
+    so any quote spanning a re-wrapped line was discarded silently. This was the
+    real cause of "kept 0 facts from a window holding 14/15 fact-bearing
+    sentences" — long misattributed to the extraction model. Added a
+    whitespace/unicode-tolerant locate that repairs the quote to the real
+    section bytes, plus per-condition drop counters so a future zero-fact window
+    names its cause. Same fix applied to evidence-segment binding.
+  - Upload precheck: a `ready` ingest job outlives its document, so a
+    since-deleted file was reported "Already in your knowledge base" forever.
+    Precheck now confirms the document still exists.
+  - Evidence scope: every segment carries `scope`/`scope_key`/`project_id`/
+    `team_id`/`document_title` (both the semantic-upload and
+    `ingestConnectorRecord` paths), so scope lenses apply to memories AND
+    evidence on central and `.amr` alike.
+  - Doc-summary prompt: stopped inventing an umbrella entity out of the
+    filename ("The WrapTest DE project establishes...") and pinned same-language
+    output.
+  - MCP bi-temporal: `hivemind_at`/`hivemind_diff` posted a nested
+    `time:{...}` that `/api/recall` never reads, so the filter was dropped —
+    `hivemind_at` returned the whole corpus (356 memories / 1.7MB) while looking
+    correct, and `hivemind_diff` compared two unfiltered sets. Sent top-level
+    with the route's real key (`transaction_at`), and capped output with the
+    documented `limit` (default 20).
+  - Chat bi-temporal: routing was already correct, but `hivemind_context` is a
+    `strict` tool whose every property is required, so the model satisfied the
+    schema with null dates; `plan.time` came out null and every diff question
+    fell through to a version-chain walk. Added a deterministic
+    ISO/English/German date extractor used ONLY when the model supplies no date.
+    The bi-temporal engine itself is untouched.
+  - FE: the upload scope modal gated the org tier on `user.role`, which bootstrap
+    never populates (role is `org.role` / `user.orgRole`), so the tier was
+    unselectable for every user including owners.
+- Verification: `node --check` on every changed file; 9/9 grounding assertions
+  (newline + smart-quote drift recovered, hallucinated quote still rejected),
+  9/9 page/segment assertions, 9/9 date-extractor assertions (ISO, `Aug 4,
+  2026`, bare `Aug 4`, `4. August 2026`, `15. Marz 2026`, dedup, no false
+  positives). Live: three documents uploaded at personal/project/organization
+  each stored the right `scope_key`, and `scope_filter` recall returned only the
+  matching tier (project failed closed). Live chat traces show
+  `hivemind_diff` for a range question and `hivemind_at` for a point-in-time
+  question, with a read-only regression pass (greeting, recall, source
+  discovery, projects, relation) showing zero temporal leak. The precheck fix
+  was verified on the real blocked file, flipping `duplicate:true` to
+  `duplicate:false` with `stale_job`.
+- Production: deployed to `singulance`; core ran through
+  `prod-20260806-2447e610058e`, frontend `prod-20260806-c024cd5700a3`. Live core
+  is now `sha-47d0122` (a later parallel-session deploy that carries these
+  commits).
+- Env (not in repo): `MEMORY_PROCESSOR_MODEL` and
+  `ENTERPRISE_EXTRACTION_MODEL` moved off `deepseek-v4-flash-0731` to
+  `google/gemini-2.5-flash-lite`; `KB_UNIFIED_FALLBACK_MODELS` deliberately left
+  two-family (`deepseek,gpt-oss-120b`) so one provider outage cannot take out
+  extraction.
+- Rollback: revert the listed commits; frontend gitlink back to `d9fbb83`.
+- Next: `docs/PRODUCTION_RELEASE.md` still records `prod-20260720-bc40fcaa` and
+  needs whoever verifies the FULL `47d0122f` release to update it — this entry
+  deliberately does not claim acceptance for the `.amr` changes it did not
+  verify. Open items: the upload scope modal is proven at API and bundle level
+  but not yet click-verified in a logged-in session; the hosted MCP connector
+  used from Claude points at a different host that still runs the pre-fix
+  `hivemind_at`/`hivemind_diff`.

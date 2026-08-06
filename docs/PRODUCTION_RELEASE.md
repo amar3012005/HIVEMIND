@@ -3,16 +3,16 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260806-47d0122f
+release_id: prod-20260806-9e16bdd6
 host: singulance
-deployed_at_utc: 2026-08-06T04:34:26Z          # core image build; FE image 2026-08-06T03:49:43Z
+deployed_at_utc: 2026-08-06T05:30:00Z          # core image build; FE image 2026-08-06T03:49:43Z
 parent:
   branch: singulance-main
-  sha: 47d0122fe50cff417fe92fbb739d986aff6bb62a
+  sha: 9e16bdd68054d2c2d4e60e94f3df4b456321af3f
 frontend:
   sha: a60762b2b9ead565f6354096fbbab1053ddeb00b  # Da-vinci main — upload scope modal org tier selectable
 runtime:
-  VERSION: prod-20260806-47d0122f
+  VERSION: prod-20260806-9e16bdd6
   env_change: |
     MEMORY_PROCESSOR_MODEL and ENTERPRISE_EXTRACTION_MODEL moved off
     deepseek/deepseek-v4-flash-0731 to google/gemini-2.5-flash-lite (deepseek
@@ -23,7 +23,7 @@ runtime:
     was returning HTTP 400 "Reasoning is mandatory" at the time. Applied in
     /root/hivemind/.env only, NOT in the repo. Backup: .env.bak-modelswap-*.
 images:
-  core: hivemind/core-api:sha-47d0122
+  core: hivemind/core-api:prod-20260806-9e16bdd68054
   control: hivemind/control-plane:sha-556d95ec5                          # unchanged
   employees: hivemind/employees:prod-20260804-runtime-campaign-86f70547  # unchanged
   tara_deepgram: hivemind/tara-deepgram:sha-bf7af3ca                     # unchanged
@@ -78,6 +78,15 @@ changes:
     control-plane emits orgRole: membership.role). isOrgAdmin was therefore false for
     EVERY user including owners, so the tier rendered opacity-50/cursor-not-allowed and
     could not be clicked, and queueFilesForUpload silently defaulted admins to 'personal'.
+  - CHAT ROUTING: respond_directly was answering WORKSPACE questions from model
+    parameters on compound input. Measured: "What changed in my knowledge between
+    Aug 4 and Aug 6 2026? Was the Gmail pipeline working on August 1st?" selected
+    respond_directly with ZERO tool calls — first inventing workspace facts, later
+    refusing with "my training only includes data up to June 2024". The same question
+    asked one clause at a time routed correctly, so it was a routing miss on compound
+    input, not a capability gap. Added a deterministic guard: only when reason=general,
+    only when a REAL date parses, and only when the message reads as a question about
+    state. clarification / safety_refusal are never overridden.
   - ALSO IN THIS RELEASE, FROM A PARALLEL SESSION (see acceptance.not_verified):
     .amr recall parity work — B5 graph-expansion + update-chain revival, SQL-mirror
     lexical backfill, dual-write of evidence into the shard, sparse-aware shard
@@ -99,6 +108,9 @@ acceptance:
     - chat_pointintime_question_dispatches_hivemind_at
     - chat_german_nonISO_range_dispatches_hivemind_diff
     - chat_nontemporal_regression_zero_temporal_leak            # greeting/recall/source/projects/relation
+    - chat_compound_temporal_dispatches_hivemind_diff           # was: 0 tools, answered from model params
+    - chat_respond_directly_still_owns_greeting_and_arithmetic  # 17*23=391, no tools
+    - chat_statement_with_date_not_diverted                     # "let's meet on August 5" -> no tools
     - fe_scope_modal_orgRole_derivation_present_in_served_bundle
   not_verified:                                  # recorded honestly; NOT accepted by this session
     - amr_recall_parity_lanes                    # parallel session's work; the only .amr org this
@@ -108,8 +120,9 @@ acceptance:
     - fe_scope_modal_click_through               # proven at API + served-bundle level only; needs a
                                                  # logged-in browser session
 known_gaps:
-  - Disk at 92% (26G free of 301G). Not urgent but the next few image builds will bite;
-    rollback images accumulate (10+ core rollback tags present).
+  - Disk was 92% mid-session but the release script prunes superseded rollback images as
+    it goes; measured 69% (90G free of 301G) after the final deploy. No manual pruning
+    was performed, so every current rollback path is intact.
   - /root/.quickdeploy-last-sha still reads f172bb75 — release-singulance.sh does not
     update that marker, so it is NOT a reliable source of current runtime truth. Use the
     container image label instead.
@@ -120,18 +133,21 @@ known_gaps:
     leave as-is.
   - fail2ban locked the owner's IP out of port 22 on 2026-08-06 after rapid automated SSH
     during this session's deploys (HTTPS unaffected — the sshd jail rejects port 22 only).
-    Unbanned. Tailscale (singulance-engine 100.81.115.51) is the out-of-band route; adding
-    100.64.0.0/10 to fail2ban ignoreip is proposed but NOT applied.
+    Unbanned, and /etc/fail2ban/jail.local now sets ignoreip = 127.0.0.1/8 ::1
+    100.64.0.0/10 so the operator's authenticated Tailscale range cannot trip the sshd
+    jail. jail.conf untouched; public-internet protection verified still active
+    (a fresh attacker was banned immediately after the reload). Tailscale
+    (singulance-engine 100.81.115.51) remains the out-of-band route.
 rollback:
-  core: hivemind/core-api:rollback-20260806-042921
-  frontend_single: hivemind/fe:rollback-20260806-042921-single
+  core: hivemind/core-api:rollback-20260806-052930
+  frontend_single: hivemind/fe:rollback-20260806-052930-single
   control: hivemind/control-plane:sha-556d95ec5      # unchanged this release
   employees: hivemind/employees:prod-20260804-runtime-campaign-86f70547
   tara_deepgram: hivemind/tara-deepgram:sha-bf7af3ca
   git: revert 9ac8203b..47d0122f; frontend gitlink back to d9fbb8316a67fae368138b430d83374876803f5c
 aliases:
-  stable: prod-20260806-47d0122f
-  latest: prod-20260806-47d0122f
+  stable: prod-20260806-9e16bdd6
+  latest: prod-20260806-9e16bdd6
 ```
 
 No customer email, connector action, telephone call, or write operation was triggered during

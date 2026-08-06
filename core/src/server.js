@@ -8289,19 +8289,32 @@ exit \$RC
                         ? `\n\nTopics: ${parsed.topics.slice(0, 12).join(', ')}` : '';
                       const pid = await ensureTaraMemoryProject(tOrg, tUser);
                       const fullTranscript = turns.map(t => `You: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
+                      // The first "Talk to Runtime" admin check-in is a runtime_operator call.
+                      // Tag its transcript `Admin_feedback` (org-scoped, org-wide) so ANY
+                      // Company Room director can ground on the administrator's own words —
+                      // status, what they sell, sales, niche, go-to-market — later.
+                      const _isAdminCheckin = await prisma.taraVoiceSession
+                        .findFirst({ where: { sessionId: String(body.session_id) }, select: { snapshot: true } })
+                        .then((s) => s?.snapshot?.interaction_profile === 'runtime_operator')
+                        .catch(() => false);
                       await taraCanonicalSave({
                         id: crypto.randomUUID(),
                         user_id: tUser,
                         org_id: tOrg,
                         project: 'tara-memory',  // reserved admin-only project (hidden from Workspace Admin)
                         project_ids: pid ? [pid] : [],
-                        scope: 'project',
+                        scope: _isAdminCheckin ? 'organization' : 'project',
                         content: `TARA call (${call.mode || 'external'}, ${turns.length} turns): ${parsed.summary}${kp}${tp}\n\n--- Transcript ---\n${fullTranscript.slice(0, 38000)}`,
-                        title: `TARA Call Log — ${new Date(call.startedAt).toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
-                        tags: ['tara-call-log', 'tara-transcript', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`],
+                        title: _isAdminCheckin
+                          ? `Admin_feedback — first Runtime check-in — ${new Date(call.startedAt).toISOString().slice(0, 10)}`
+                          : `TARA Call Log — ${new Date(call.startedAt).toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
+                        tags: [
+                          ...(_isAdminCheckin ? ['Admin_feedback', 'admin-checkin'] : []),
+                          'tara-call-log', 'tara-transcript', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`,
+                        ],
                         memory_type: 'event',
                         document_date: new Date().toISOString(),
-                        metadata: { session_id: body.session_id, call_id: call.id, turns: turns.length, sentiment: parsed.sentiment || null, node_color: 'teal' },
+                        metadata: { session_id: body.session_id, call_id: call.id, turns: turns.length, sentiment: parsed.sentiment || null, node_color: 'teal', admin_feedback: _isAdminCheckin },
                       });
                     } catch (e3) { console.warn('[tara/call-log] memory save failed:', e3.message); }
                   }

@@ -3648,7 +3648,46 @@ Every item must include a non-empty content field and one or more valid support_
               _pageMarks.push({ at: m.index, page: Number(m[1]) });
             }
           }
-          // Third fallback: form-feed (\f, ASCII 12) page breaks. pdf-parse / pdfjs text
+          // AUTHORITATIVE SOURCE — the parser already knows the page.
+          //
+          // Every tier that can paginate emits hybridChunks as
+          // { text, headings, page }, built from the PDF's own page structure
+          // (fast-pdf splits on the real page markers to form pageBlocks). Re-deriving
+          // pages by sniffing markers out of the FLATTENED text is lossy: the split that
+          // produced those chunks can consume the markers, so `src` may carry none at
+          // all — measured live on a 12-page upload that produced 21 correctly-paged
+          // chunks and still logged `with_page=0/44`, leaving citations unable to name a
+          // page. Map the parser's own assignment onto text offsets instead.
+          //
+          // Guard: require MORE THAN ONE distinct page. A single page means the parser
+          // hit its own `pageBlocks.length === 0` fallback and labelled the whole
+          // document page 1; stamping that on every segment would FABRICATE citations
+          // pointing at a page nobody verified. An honest null beats a confident wrong
+          // page, so in that case we fall through and leave the page unset.
+          if (!_pageMarks.length && Array.isArray(hybridChunks) && hybridChunks.length) {
+            const _pages = new Set(hybridChunks
+              .map((c) => Number(c?.page))
+              .filter((p) => Number.isFinite(p) && p > 0));
+            if (_pages.size > 1) {
+              const _s = String(src);
+              let _pcur = 0;
+              for (const c of hybridChunks) {
+                const _pg = Number(c?.page);
+                const _anchor = String(c?.text || '').trim().slice(0, 60);
+                if (!Number.isFinite(_pg) || _pg <= 0 || _anchor.length < 12) continue;
+                let _at = _s.indexOf(_anchor, _pcur);
+                if (_at < 0) _at = _s.indexOf(_anchor); // wrap once — chunks may overlap
+                if (_at < 0) continue;
+                _pageMarks.push({ at: _at, page: _pg });
+                _pcur = _at + 1;
+              }
+              _pageMarks.sort((a, b) => a.at - b.at);
+              if (_pageMarks.length) {
+                console.log(`[segments] page map from parser chunks: ${_pageMarks.length} anchors across ${_pages.size} pages`);
+              }
+            }
+          }
+          // Fallback: form-feed (\f, ASCII 12) page breaks. pdf-parse / pdfjs text
           // extraction inserts these at page boundaries when neither Docling HTML comments
           // nor "-- N of M --" markers are present — the fast-pdf/vision tiers that left
           // start_page=null (P6). Page 1 begins at offset 0; each \f starts the next page.

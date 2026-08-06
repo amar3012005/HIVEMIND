@@ -6,8 +6,26 @@ export const KB_UPLOAD_LIMITS = Object.freeze({
   audio: { minBytes: 1, maxBytes: 50 * 1024 * 1024 },
 });
 
+// ACCEPTED FORMATS — the single server-side allowlist. Every entry point checks
+// here (HTTP upload, connectors, Slack file ingest, MCP), so this is the only
+// place a format can actually be turned off; blocking in the FE alone hides the
+// button while every API path stays open.
+//
+// TEMPORARILY WITHDRAWN: pptx, ppt, doc, xls.
+// These are the only accepted formats with no working parser. They have no seam
+// handler (KB_SEAM_FORMATS covers docx/html/md/txt) and no direct tier, so they
+// fall through to Docling — which measured, on this deployment, 479s returning
+// chunks=0 for a real .pptx and a full 600s convert timeout on another. Zero of
+// the 83 documents ingested to date used any of them successfully. Accepting an
+// upload that cannot be parsed is worse than refusing it: the user waits through
+// three retry attempts before a failure they could have been told about instantly.
+//
+// Restore them together with a working path (conversion to PDF, then the proven
+// fast-pdf tier) — see .claude/decision-docs/kb_failproof_plan.md. Refusing here
+// does NOT remove Docling from the system: a text-less PDF still falls back to it,
+// which is why the parse timeout is bounded separately.
 export const KB_EXTENSIONS = Object.freeze({
-  document: ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm'],
+  document: ['pdf', 'docx', 'xlsx', 'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm'],
   image: ['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp', 'gif'],
   audio: ['mp3', 'wav', 'm4a', 'flac', 'ogg'],
 });

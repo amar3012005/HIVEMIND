@@ -3705,6 +3705,12 @@ Every item must include a non-empty content field and one or more valid support_
             if (!_pageMarks.length || off == null) return null;
             let page = null;
             for (const mk of _pageMarks) { if (mk.at <= off) page = mk.page; else break; }
+            // Text BEFORE the first anchor belongs to the first anchored page —
+            // nothing can sit earlier than the document's first page. Without this
+            // the leading segment came back null even on a fully mapped document
+            // (measured: with_page=7/8, the miss being segment 0). This is not a
+            // guess: the first mark is the earliest page the parser identified.
+            if (page === null && off < _pageMarks[0].at) page = _pageMarks[0].page;
             return page;
           };
           // running cursor so repeated text does not resolve to the first occurrence

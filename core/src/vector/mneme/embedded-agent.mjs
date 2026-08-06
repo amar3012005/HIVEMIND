@@ -1057,6 +1057,22 @@ function routesFor(ctx) {
       await ensureQdrant(qcoll).catch(() => {});
       return { ok: true, shard_deleted: shardDeleted };
     },
+    // Entity-hop0's TAG path (B7). That lane finds memories carrying `entity:<slug>`
+    // tags, and it asked the CENTRAL memories table — which holds no rows for an .amr
+    // org, so the tag half of hop-0 was dead for them. (The link half already worked:
+    // memory_entity_links is central and getMemories hydrates through the agent.)
+    // The shard carries those tags — amrUpdateTags resyncs them after deferred entity
+    // linking precisely so recalled candidates keep them — so the scan belongs here.
+    '/v1/by-tags': async (b) => {
+      const tags = Array.isArray(b.tags) ? b.tags.filter(Boolean) : [];
+      if (!tags.length) return { ids: [] };
+      const cap = Math.min(Number(b.limit) || 200, 2000);
+      const wantLatest = b.is_latest !== false;
+      const rows = amr.findByTags(tags, cap * 4)
+        .filter((r) => (wantLatest ? r.is_latest !== false : true))
+        .slice(0, cap);
+      return { ids: rows.map((r) => r.id).filter(Boolean) };
+    },
     '/v1/mem-edges': async (b) => {
       const ids = Array.isArray(b.ids) ? b.ids.filter(Boolean) : [];
       if (!ids.length) return {};

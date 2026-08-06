@@ -25,6 +25,7 @@
 // link · 40 total candidates · ~125 ms deadline.
 
 import { normalizeEntity } from './entity-normalize.js';
+import { orgIsRemote, amrFindByTags } from '../vector/mneme/driver.js';
 
 export const HOP0_MAX_QUERY_TOKENS = 8;
 export const HOP0_MAX_ENTITIES = 12;
@@ -242,7 +243,17 @@ export async function resolveEntityRecallCandidates({
     //    b) link path (cross-system registry): MemoryEntityLink rows.
     const tagVariants = [...new Set(tagRegistry.map((m) => `entity:${m.slug}`))];
     const [tagIdRows, linkRows] = await Promise.all([
-      (tagVariants.length && client.memory?.findMany)
+      // TAG PATH. For an `.amr`/BYOD org this asked the CENTRAL memories table, which
+      // holds none of their rows — so the tag half of hop-0 returned nothing for them
+      // while the link half (memory_entity_links, central) kept working. Silent, as
+      // usual: a lane that finds less, not one that errors. The shard carries the
+      // `entity:<slug>` tags (amrUpdateTags resyncs them after deferred entity
+      // linking), so route the scan there instead.
+      (tagVariants.length && orgIsRemote(org_id))
+        ? (amrFindByTags(org_id, tagVariants, HOP0_MAX_CANDIDATES, is_latest !== false) || Promise.resolve([]))
+            .then((ids) => (Array.isArray(ids) ? ids.map((id) => ({ id })) : []))
+            .catch(() => [])
+        : (tagVariants.length && client.memory?.findMany)
         ? client.memory.findMany({
             where: {
               orgId: org_id,

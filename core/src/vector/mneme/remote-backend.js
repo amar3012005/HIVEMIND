@@ -290,6 +290,12 @@ export async function remoteKbDocDetail(orgId, documentId, access) {
 }
 
 // Per-memory edge counts for remote org — returns { <id>: {in, out} } or {} on failure.
+// Entity-hop0 TAG path: memory ids carrying any of `tags`, scanned in the shard.
+export async function remoteFindByTags(orgId, tags, limit, isLatest) {
+  try { const out = await _call(orgId, '/v1/by-tags', { tags, limit, is_latest: isLatest }); return Array.isArray(out?.ids) ? out.ids : []; }
+  catch (e) { console.warn(`[mneme/remote] by-tags failed org=${orgId}: ${e.message}`); return []; }
+}
+
 export async function remoteMemEdges(orgId, ids) {
   try { return await _call(orgId, '/v1/mem-edges', { ids }); }
   catch (e) { console.warn(`[mneme/remote] mem-edges failed org=${orgId}: ${e.message}`); return {}; }

@@ -363,7 +363,7 @@ Use save for an explicit save request, OR for any durable fact the user ASSERTS 
 For implicit durable facts, use save only at confidence >= 0.80. For save/update, choose project_id only from the authorized project catalog below; if no project clearly fits, leave project_id null. Never invent a project id.
 For update, provide either the exact memory UUID from conversation context or a precise target_query; never put an entity name in id. update.content must be the complete replacement claim, including the exact subject and new value. Downstream code resolves authorized latest memories and refuses ambiguity.
 When the prior assistant requested a project choice, resolve it through continuation instead of copying the prior prompt text.
-Use scope_filter=personal for questions specifically about the user. Writes require approval. Never broaden organization or project scope.
+Use scope_filter=personal for questions specifically about the user. Saving a NEW fact is additive and needs no permission — never reply "would you like me to save this?"; just emit the save and acknowledge that you stored it. Only a destructive write (delete) needs approval, and that is enforced in code by a server-issued one-time token, not by asking here. Never broaden organization or project scope.
 For direct conversational replies, supply direct_response in the user's language.
 For connector operations, supply failure_response in the user's language for a safe execution failure. For connector_write also supply acknowledgement.
 Authorized projects:\n${JSON.stringify((projectCatalog || []).slice(0, 24))}\nAvailable tool groups:\n${JSON.stringify(catalog)}`;

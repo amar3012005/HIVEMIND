@@ -372,9 +372,18 @@ export function adaptToDecision(tool, args, message, language) {
       // If any of those fail, behaviour is byte-identical to before.
       const _reason = String(args?.reason || 'general');
       if (_reason === 'general') {
+        const _msg = String(message || '');
         const _dates = extractMessageDates(message);
-        const _asksAboutState = /\b(what|which|was|were|did|does|do|status|change|changed|changes|happened|happen|know|knowledge|update|updated)\b/i.test(String(message || ''));
-        if (_dates.length >= 1 && _asksAboutState) {
+        // NEVER divert a WRITE into a read. The first version of this guard listed
+        // 'change' and 'update' as state questions, but those are memory MUTATION
+        // verbs: "change it to Aug 25th" carries a date AND that verb, so a
+        // respond_directly pick would have been rewritten into a temporal recall and
+        // the user's edit would have vanished with a confident-looking answer.
+        // Note the word boundaries are deliberate — \bchange\b does not match
+        // "changed"/"changes", so "what changed between A and B" is still a question.
+        const _isWriteIntent = /\b(save|remember|store|note|add|create|change|update|set|rename|correct|delete|remove|forget)\b/i.test(_msg);
+        const _asksAboutState = /\b(what|which|was|were|did|does|do|status|happened|happen|know|knowledge)\b/i.test(_msg);
+        if (!_isWriteIntent && _dates.length >= 1 && _asksAboutState) {
           const _time = _dates.length >= 2
             ? { valid_at: null, known_at: null, range: { start: _dates[0], end: _dates[_dates.length - 1] } }
             : { valid_at: _dates[_dates.length - 1], known_at: null, range: null };

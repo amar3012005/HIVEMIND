@@ -3626,6 +3626,71 @@ Every item must include a non-empty content field and one or more valid support_
    * headings, paragraphs, tables). Fallback: sliding window.
    * @private
    */
+  /**
+   * P0.2 — heal evidence segments that never got a vector.
+   *
+   * The embed-reconciler guards MEMORIES only. Segments had exactly one safety
+   * net: the single ingest-time re-embed in _embedSegments. When that also failed
+   * — a transient embed outage, an agent write aborting under load, or the worker
+   * dying between the segment insert and the vector upsert — nothing ever tried
+   * again. The row sits in Postgres with vectorStored=false, so the document looks
+   * complete and healthy in every UI while its evidence is permanently
+   * unsearchable. That was the last silent data-loss path in ingestion.
+   *
+   * Deliberately reuses _embedSegments rather than reimplementing embedding:
+   * per-tenant collection resolution, the batched upsert, the vectorStored flip,
+   * the remote .amr path and the heal-once retry all live there, and a second copy
+   * would drift the moment either changed.
+   *
+   * vectorStored=false is the authoritative signal: it is set only AFTER a
+   * successful upsert, so a false negative costs one idempotent re-embed while a
+   * false positive cannot occur.
+   */
+  async healUnembeddedSegments({ limit = 200, sinceHours = null, logger = console } = {}) {
+    const stats = { candidates: 0, healed: 0, failed: 0, orgs: 0 };
+    if (!this.db?.knowledgeSegment) return stats;
+    let rows = [];
+    try {
+      rows = await this.db.knowledgeSegment.findMany({
+        where: {
+          vectorStored: false,
+          ...(sinceHours ? { createdAt: { gt: new Date(Date.now() - sinceHours * 3600 * 1000) } } : {}),
+        },
+        orderBy: { createdAt: 'desc' },
+        take: Math.max(1, Math.min(2000, Number(limit) || 200)),
+      });
+    } catch (err) {
+      logger.warn?.(`[segment-reconciler] scan failed: ${err.message}`);
+      return stats;
+    }
+    stats.candidates = rows.length;
+    if (!rows.length) return stats;
+
+    // Group by org: _embedSegments resolves the collection per org, and mixing
+    // tenants in one call would land evidence in the wrong collection.
+    const byOrg = new Map();
+    for (const r of rows) {
+      if (!byOrg.has(r.orgId)) byOrg.set(r.orgId, []);
+      byOrg.get(r.orgId).push(r);
+    }
+    stats.orgs = byOrg.size;
+    for (const [orgId, segs] of byOrg) {
+      try {
+        const cov = await this._embedSegments(segs, orgId);
+        stats.healed += Number(cov?.embedded || 0) + Number(cov?.healed || 0);
+        stats.failed += Number(cov?.failed || 0);
+      } catch (err) {
+        stats.failed += segs.length;
+        logger.warn?.(`[segment-reconciler] org=${String(orgId).slice(0, 8)} heal threw: ${err.message}`);
+      }
+    }
+    if (stats.candidates > 0) {
+      logger.warn?.(`[segment-reconciler] pass done: orgs=${stats.orgs} candidates=${stats.candidates} `
+        + `healed=${stats.healed} failed=${stats.failed}`);
+    }
+    return stats;
+  }
+
   async _createSegments({ documentId, userId, orgId, parseResult, docScope = {} }) {
     const remote = orgIsRemote(orgId);
     const hybridChunks = parseResult?.metadata?.hybridChunks;

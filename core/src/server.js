@@ -24350,6 +24350,19 @@ if (shouldStartHttpServer()) {
         const { reconcileEmbeddingsOnce } = await import('./memory/embed-reconciler.js');
         const fullSweep = _reconTicks % 20 === 0; // ~hourly full sweep at 3min cadence
         await reconcileEmbeddingsOnce({ prisma, qdrantClient, fullSweep, sinceHours: 72 });
+        // P0.2 — the SEGMENT lane. The pass above guards memories only; an evidence
+        // segment whose ingest-time heal also failed had nothing left to retry it,
+        // so it stayed in Postgres with vectorStored=false — permanently
+        // unsearchable while the document looked complete. Rides the same tick and
+        // the same no-overlap guard. Recent-window on normal ticks, whole backlog
+        // on the full sweep, both bounded so a large backlog drains over several
+        // passes instead of stalling one.
+        if (documentFirstIngestion?.healUnembeddedSegments) {
+          await documentFirstIngestion.healUnembeddedSegments({
+            limit: fullSweep ? 500 : 100,
+            sinceHours: fullSweep ? null : 72,
+          });
+        }
       } catch (e) {
         console.warn('[embed-reconciler] tick failed:', e?.message?.slice(0, 160));
       } finally { _reconBusy = false; }

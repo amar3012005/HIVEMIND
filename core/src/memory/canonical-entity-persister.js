@@ -275,7 +275,11 @@ export async function persistCanonicalLinks({
         if (!orgIsRemote(organizationId)) return;
         const ent = await prisma.canonicalEntity.findUnique({
           where: { id: entityId },
-          select: { id: true, canonicalName: true, entityType: true, aliases: true },
+          // Prisma field names verified against schema.prisma: the type field is `entityKind`
+          // (@map entity_kind) and `normalizedName` is the slug the entity lanes already match
+          // on. `entityType` does not exist — selecting it throws, and the catch below would
+          // have swallowed that into a silent "no entities in the slot".
+          select: { id: true, canonicalName: true, entityKind: true, normalizedName: true, aliases: true },
         }).catch(() => null);
         if (!ent) return;
         await amrWrite(organizationId, {
@@ -286,8 +290,8 @@ export async function persistCanonicalLinks({
           memoryType: 'canonical_entity',
           // Carry the slug the hop-0 lane already matches on, so an in-slot entity is reachable
           // by the same key the tag path uses.
-          tags: [`entity-slug:${normalizeEntity(ent.canonicalName || '')}`],
-          metadata: { entity_type: ent.entityType || null, aliases: Array.isArray(ent.aliases) ? ent.aliases : [] },
+          tags: [`entity-slug:${ent.normalizedName || normalizeEntity(ent.canonicalName || '')}`],
+          metadata: { entity_kind: ent.entityKind || null, aliases: Array.isArray(ent.aliases) ? ent.aliases : [] },
         }, null);
         for (const memoryId of memoryIds) {
           amrAddEdge({ fromId: memoryId, toId: ent.id, type: 'Mentions', confidence: confidence ?? 1.0, orgId: organizationId });

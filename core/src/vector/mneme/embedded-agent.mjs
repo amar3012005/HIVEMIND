@@ -626,7 +626,10 @@ export async function backfillEntitiesToShard(orgId, { max = 5000, logger = cons
     // canonical_entities is CENTRAL, so it is addressed schema-qualified rather than through the
     // hm search_path this pool defaults to.
     ({ rows } = await pg.query(
-      `SELECT e.id::text AS id, e.canonical_name, e.entity_type, e.aliases
+      // Column names verified against the live schema: the entity's type column is
+      // `entity_kind`, and `normalized_name` is the slug the entity lanes already match on —
+      // reusing it rather than re-deriving one keeps the in-slot key identical to the tag key.
+      `SELECT e.id::text AS id, e.canonical_name, e.entity_kind, e.normalized_name, e.aliases
          FROM hivemind.canonical_entities e WHERE e.organization_id=$1 LIMIT $2`, [ctx.org, max]));
   } catch (e) { logger.warn?.(`[entity-backfill] read failed: ${e.message}`); return out; }
   out.entities = rows.length;
@@ -638,8 +641,8 @@ export async function backfillEntitiesToShard(orgId, { max = 5000, logger = cons
         title: e.canonical_name || null,
         layer: 'entity',
         memoryType: 'canonical_entity',
-        tags: [`entity-slug:${String(e.canonical_name || '').toLowerCase().trim()}`],
-        metadata: { entity_type: e.entity_type || null, aliases: Array.isArray(e.aliases) ? e.aliases : [] },
+        tags: [`entity-slug:${e.normalized_name || String(e.canonical_name || '').toLowerCase().trim()}`],
+        metadata: { entity_kind: e.entity_kind || null, aliases: Array.isArray(e.aliases) ? e.aliases : [] },
       }, null);
       out.written += 1;
     } catch { out.skipped += 1; continue; }

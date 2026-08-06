@@ -919,6 +919,51 @@ function routesFor(ctx) {
         if (!qr.ok) return { ok: false, error: `qdrant seg upsert ${qr.status}` };
         await db().query('UPDATE knowledge_segments SET vector_synced=true WHERE id=$1', [s.id]);
       }
+
+      // ── B4 step 1: DUAL-WRITE evidence into the shard (layer 1) ──────────────
+      // Evidence currently lives OUTSIDE the slot — content in Postgres, vector in
+      // Qdrant — so an `.amr` tenant is not actually self-contained: half the engine
+      // is external. The shard has supported this the whole time (insertLayered with
+      // layer=1, recallLayer to read it back); nothing wrote to it.
+      //
+      // This is deliberately a DUAL-write, not a cutover: Postgres and Qdrant remain
+      // the source of truth and every read path is untouched, so this cannot change
+      // recall behaviour. It exists so the shard accumulates the evidence needed to
+      // read-compare against the current lane before anything is switched over.
+      // Carries the doc/scope fields the eventual shard-side hydrate + access check
+      // will need, so the record is self-sufficient when reads do move.
+      //
+      // amr.write() is an UPSERT (findById → merge), so a re-ingest of the same
+      // segment id updates in place rather than appending a duplicate. Non-fatal by
+      // design: the authoritative writes above already succeeded.
+      if (String(process.env.MNEME_EVIDENCE_DUAL_WRITE ?? 'true').toLowerCase() !== 'false') {
+        try {
+          amr.write({
+            id: s.id,
+            userId: s.userId || null,
+            content: s.content || null,
+            title: s.metadata?.heading || s.metadata?.heading_path || null,
+            layer: 'evidence',
+            memoryType: 'evidence_segment',
+            scope: s.metadata?.scope || null,
+            createdAt: s.createdAt || null,
+            tags: [`doc-id:${s.documentId}`],
+            metadata: {
+              document_id: s.documentId,
+              segment_index: s.segmentIndex ?? 0,
+              segment_type: s.segmentType || 'chunk',
+              start_page: s.startPage ?? null,
+              end_page: s.endPage ?? null,
+              word_count: s.wordCount ?? null,
+              heading: s.metadata?.heading ?? null,
+              heading_path: s.metadata?.heading_path ?? null,
+            },
+          }, Array.isArray(b.vector) ? Float32Array.from(b.vector) : null);
+        } catch (e) {
+          console.warn(`[kb-segment] shard dual-write failed seg=${s.id} org=${org}: ${e.message} `
+            + '— evidence IS in Postgres/Qdrant and fully searchable; only the shard copy is behind');
+        }
+      }
       return { ok: true };
     },
 

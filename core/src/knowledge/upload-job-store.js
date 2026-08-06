@@ -128,7 +128,25 @@ export class KnowledgeUploadJobStore {
   async progress(jobId, orgId, stage, progress, extra = {}) {
     await this._model().updateMany({
       where: { id: jobId, orgId, status: { notIn: [...TERMINAL] } },
-      data: { stage, progress: Math.max(0, Math.min(100, Number(progress) || 0)), ...extra },
+      data: {
+        // A job that is REPORTING A STAGE is being worked on, so `status` must say
+        // so. This wrote stage+progress but never touched status, which therefore
+        // stayed 'queued' from creation until the terminal write. Measured on a live
+        // ingest: stage went parsing(10) -> promoting(80) while status sat at
+        // 'queued' the whole time, so every consumer that reads status — the upload
+        // row, which falls back to the status label whenever a poll frame omits
+        // stage, and any API client — was told the document was still waiting for a
+        // worker while it was actively being extracted.
+        //
+        // This is also the documented contract: queued -> processing -> done.
+        // The where-clause already excludes TERMINAL, so a finished, failed or
+        // cancelled job can never be dragged back into 'processing'. `extra` is
+        // spread last so an explicit caller-supplied status still wins.
+        status: 'processing',
+        stage,
+        progress: Math.max(0, Math.min(100, Number(progress) || 0)),
+        ...extra,
+      },
     });
   }
 

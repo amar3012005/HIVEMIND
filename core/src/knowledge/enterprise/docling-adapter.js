@@ -61,6 +61,81 @@ export function collapseLetterSpacing(s) {
 }
 
 /**
+ * Inject `<!-- page N -->` markers into markdown using Docling's own provenance.
+ *
+ * Docling paginates PDFs in the markdown itself, but for PPTX it emits NO page
+ * break at all — measured on a real 15-slide deck with production parameters
+ * (md_page_break_placeholder set): zero markers, and the segment writer logged
+ * `no start_page on ANY segment — citations cannot name a page`, with_page=0/9.
+ * The information is not missing, only unused: the JSON body carries
+ * texts[].prov[0].page_no for every item (102/102 on that deck, 15/15 slides).
+ *
+ * This does NOT rebuild the markdown — rebuilding would drop tables and any
+ * structure the exporter produced. It only INSERTS a marker immediately before
+ * the first text of each page, leaving every original byte in place and in order.
+ *
+ * Ordering note: `prov.bbox` reports coord_origin BOTTOMLEFT and `b < t` in every
+ * box, which reads as y-up — it is not. Verified against python-pptx on the same
+ * deck: bbox `b` equals the true top-down `top` ("The Problem" b=878383 /
+ * pptx top=878383; "The result:" b=9480043 / top=9480043). Sorting by `t`
+ * yields every slide upside-down while still looking plausible. Sort by `b` ASC.
+ *
+ * Fabrication guard: a marker is written only where the page's first text is
+ * actually located in the markdown, and the whole thing is abandoned unless at
+ * least two DISTINCT pages resolve — a single marker would label the entire
+ * document page 1, which is worse than the honest null we already emit.
+ */
+export function injectPageMarkersFromProv(markdown, doc) {
+  if (!markdown || typeof markdown !== 'string') return markdown;
+  // Already paginated by the exporter (PDF) — never double-mark.
+  if (/<!--\s*page\s+\d+\s*-->/i.test(markdown)) return markdown;
+  // docling-serve nests the parsed body under `json_content` when json is one of
+  // to_formats; some callers hand us the inner object directly. Accept both rather
+  // than assuming — reading the wrong level returns undefined and this whole
+  // function degrades to a silent no-op, which is exactly how the md_content /
+  // markdown field mix-up made every docling parse look empty once before.
+  const texts = Array.isArray(doc?.texts) ? doc.texts
+    : (Array.isArray(doc?.json_content?.texts) ? doc.json_content.texts : null);
+  if (!texts || texts.length === 0) return markdown;
+
+  const byPage = new Map();
+  for (const t of texts) {
+    const prov = Array.isArray(t?.prov) ? t.prov[0] : null;
+    const page = prov?.page_no;
+    const txt = typeof t?.text === 'string' ? t.text.trim() : '';
+    if (!page || !txt) continue;
+    const key = Number(page);
+    const bbox = prov.bbox || {};
+    const entry = { b: Number(bbox.b ?? 0), l: Number(bbox.l ?? 0), txt };
+    const cur = byPage.get(key);
+    if (!cur || entry.b < cur.b || (entry.b === cur.b && entry.l < cur.l)) byPage.set(key, entry);
+  }
+  if (byPage.size < 2) return markdown;
+
+  // Resolve each page's anchor to an offset, scanning forward so a repeated
+  // string (a footer, a slide number) cannot pull a later page backwards.
+  const marks = [];
+  let cursor = 0;
+  for (const page of [...byPage.keys()].sort((a, b) => a - b)) {
+    const anchor = byPage.get(page).txt.split('\n')[0].trim();
+    if (anchor.length < 3) continue;
+    const at = markdown.indexOf(anchor, cursor);
+    if (at < 0) continue;
+    marks.push({ at, page });
+    cursor = at + anchor.length;
+  }
+  if (marks.length < 2) return markdown;
+
+  let out = '';
+  let prev = 0;
+  for (const m of marks) {
+    out += markdown.slice(prev, m.at) + `\n<!-- page ${m.page} -->\n`;
+    prev = m.at;
+  }
+  return out + markdown.slice(prev);
+}
+
+/**
  * Parse a file with the Docling sidecar.
  *
  * @param {string} filePath — absolute temp path
@@ -81,6 +156,19 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
 
   // Docling expects "files" (plural) on both /v1/convert/file and /v1/chunk/hybrid/file
   formData.append('files', new Blob([fs.readFileSync(filePath)]), filename);
+
+  // SLIDE FORMATS NEED THE JSON BODY TO BE CITABLE.
+  // Docling paginates PDF markdown itself, but emits no page break whatsoever for
+  // PPTX — measured with md_page_break_placeholder set: zero markers, and every
+  // segment landed with start_page=null. The page IS known, in
+  // texts[].prov[0].page_no, which only appears when json is requested. Ask for
+  // BOTH: requesting json alone returns md_content: null (verified), which would
+  // blank the parse. Restricted to slide formats so no other format pays the
+  // payload — docx/xlsx report no page_no at all, so json would buy them nothing.
+  if (ext === '.pptx' || ext === '.ppt') {
+    formData.append('to_formats', 'md');
+    formData.append('to_formats', 'json');
+  }
 
   // Smart-extract mode unlocks Docling's rich features: OCR, table structure,
   // code/formula/chart enrichment, picture classification.
@@ -239,7 +327,10 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
       // so every PDF silently fell through to fast-pdf (letter-spaced) or vision. Verified
       // by calling /v1/convert/file directly: md_len 28237, text_len 0 on an 11-page PDF.
       return {
-        markdown: collapseLetterSpacing(data.md_content || doc.md_content || data.markdown || doc.markdown || ''),
+        // Page markers come from prov when the exporter emitted none (PPTX). No-op
+        // for PDF, which paginates its own markdown.
+        markdown: injectPageMarkersFromProv(
+          collapseLetterSpacing(data.md_content || doc.md_content || data.markdown || doc.markdown || ''), doc),
         text: collapseLetterSpacing(data.text_content || doc.text_content || data.md_content || doc.md_content || data.text || doc.text || ''),
         json: doc,
         tables: extractTablesFromDocling(doc),
@@ -267,9 +358,9 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
     // PYTHON methods that never exist across HTTP, so it always fell to data.markdown —
     // a field docling-serve does not send. md_content / text_content are the real ones.
     return {
-      markdown: collapseLetterSpacing(typeof doc.export_to_markdown === 'function'
+      markdown: injectPageMarkersFromProv(collapseLetterSpacing(typeof doc.export_to_markdown === 'function'
         ? doc.export_to_markdown() || ''
-        : (data.md_content || doc.md_content || data.markdown || '')),
+        : (data.md_content || doc.md_content || data.markdown || '')), doc),
       text: collapseLetterSpacing(typeof doc.export_to_text === 'function'
         ? doc.export_to_text() || ''
         : (data.text_content || doc.text_content || data.md_content || doc.md_content || data.text || '')),

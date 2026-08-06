@@ -93,11 +93,15 @@ cross-encoder of the pool it exists to rank. Now scales with the request, capped
 | memory vector | **shard** (`shard.vec`, HNSW/brute-force) |
 | memory lexical | Postgres FTS **+ shard union** (shard alone suffices when the mirror is thin) |
 | graph / 2-hop / update-chain | **shard** (`shard.edg`) |
-| evidence vector + lexical | Postgres + Qdrant (**shard dual-write accumulating**) |
+| evidence vector | Qdrant **+ shard lane** (`recall` on the evidence layer) — see §3b |
+| evidence lexical | Postgres FTS **+ access-gated shard union** |
+| evidence access control + hydration | **Postgres, deliberately** (`appendDocumentAccess`) |
 | entities | central Postgres |
 
-A slot answers **vector + lexical + graph from its own file**; Postgres is now a ranking
-assist rather than a hard dependency for memories.
+A slot answers **vector + lexical + graph, for BOTH memories and evidence, from its own
+file**. What remains in Postgres is authority, not retrieval: it decides *who may see a
+row* and hydrates it. That split is intentional — see §3b for why the shard must not
+serve evidence rows directly.
 
 ---
 

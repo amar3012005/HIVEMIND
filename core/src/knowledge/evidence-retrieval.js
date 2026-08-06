@@ -114,9 +114,19 @@ export class EvidenceRetrievalService {
     if (scopeFilter === 'personal') {
       // Owned by the caller, or explicitly tagged personal to them. Untagged documents
       // are owner-only elsewhere, so they belong here and nowhere else.
+      //
+      // The owner branch must exclude every NON-personal scope, not just the org one.
+      // Excluding orgTags alone let the caller's OWN project documents through: a
+      // project document carries `scope-key:project:<id>` and no org tag, so
+      // `NOT hasSome(orgTags)` was true and `userId` matched the uploader. Measured
+      // live against /api/evidence/search with scope=personal: 8 results, 4 of them
+      // project-scoped — the lens returned exactly what it exists to exclude.
+      // projectTags/teamTags come from the caller's own accessContext, which is the
+      // only set that could leak into their view in the first place.
+      const nonPersonalTags = [...orgTags, ...projectTags, ...teamTags];
       return { ...base, OR: [
         { tags: { has: `scope-key:personal:${userId}` } },
-        { AND: [{ userId }, { NOT: { tags: { hasSome: orgTags } } }] },
+        { AND: [{ userId }, { NOT: { tags: { hasSome: nonPersonalTags } } }] },
       ] };
     }
     if (scopeFilter) console.warn(`[EvidenceRetrieval] unknown scopeFilter '${scopeFilter}' — using full accessible set`);

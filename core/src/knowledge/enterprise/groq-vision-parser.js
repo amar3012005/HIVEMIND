@@ -225,7 +225,26 @@ async function visionOcrPage(imagePath, pageNum) {
     throw new Error(`OpenRouter vision ${orRes.status}: ${(await orRes.text().catch(() => '')).slice(0, 200)}`);
   };
 
-  const order = orFirst ? [tryOR, tryGroq] : [tryGroq, tryOR];
+  // AN EMPTY PAGE IS A FAILURE, NOT A RESULT.
+  // Both providers return `content || ''` on HTTP 200, so a model answering with
+  // nothing was a SUCCESSFUL return — the loop below returns on the first
+  // non-throwing call, so the second provider never got its turn. Measured on a
+  // text-less PDF: Groq/llama-4-scout replied 200 with empty content, that ''
+  // propagated out as the OCR result, the caller logged "groq-vision failed:
+  // empty" and fell through to Docling, which then burned the parse budget. The
+  // configured OpenRouter fallback (gemini-2.5-flash-lite) was never called for
+  // the one case it exists to cover.
+  //
+  // Treating empty as a throw makes the ladder mean what it says: try the next
+  // provider, and only give up when BOTH have actually produced nothing.
+  const nonEmpty = async (fn, label) => {
+    const out = await fn();
+    if (!String(out || '').trim()) throw new Error(`${label} vision returned empty content`);
+    return out;
+  };
+  const order = orFirst
+    ? [() => nonEmpty(tryOR, 'OpenRouter'), () => nonEmpty(tryGroq, 'Groq')]
+    : [() => nonEmpty(tryGroq, 'Groq'), () => nonEmpty(tryOR, 'OpenRouter')];
   let lastErr = null;
   for (const fn of order) {
     try { return await fn(); } catch (e) { lastErr = e; }

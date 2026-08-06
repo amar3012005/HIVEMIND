@@ -25,6 +25,7 @@
 // reimplemented here.
 import { AmrMemoryStore } from './amr-store.mjs';
 import { emitKbResults } from './kb-hit-merge.mjs';
+import { isMetadataLayer } from './layers.mjs';
 
 const DIM = Number(process.env.EMBEDDING_DIMENSION || 1024);
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
@@ -941,6 +942,16 @@ function routesFor(ctx) {
       const r = b.record || {};
       if (!r.id) return { ok: false, error: 'record.id required' };
       amr.write(r, Array.isArray(b.vector) ? b.vector : undefined);
+      // METADATA LAYERS ARE NOT MEMORIES — do not mirror them into hm.memories.
+      //
+      // The shard's recall paths exclude `document`/`entity` structurally, but the SQL mirror
+      // is a FOURTH read path: /v1/lexical runs Postgres FTS over this table and never saw
+      // that rule. Measured in production the moment entities began mirroring — a recall for
+      // "Korrindale Werke Anselm Brogaard" returned 31 results of which 2 were
+      // memory_type='canonical_entity', i.e. bare entity names rendered to the user as
+      // memories. Excluding at the recall sites was not enough; the write is where it belongs,
+      // because a row that is never mirrored cannot leak through any future SQL reader either.
+      if (isMetadataLayer(r.layer)) return { ok: true };
       // SQL MIRROR — ported verbatim from the external agent's /v1/write.
       // The embedded agent wrote ONLY to the AMR shard, while the external agent also inserts
       // into hm.memories. Same endpoint, different persistence — which is why hm.memories held
@@ -1032,7 +1043,11 @@ function routesFor(ctx) {
       const f = b.filter || {};
       const tsQuery = lexicalTsQuery(b.text);
       if (!tsQuery) return { results: [] };
-      const conds = ['org_id=$1', 'deleted_at IS NULL', "content_tsv @@ to_tsquery('simple',$2)"];
+      // Defence in depth: /v1/write no longer mirrors metadata layers, but rows written before
+      // that guard are still in this table, and a future SQL reader would inherit the same trap.
+      // The shard lanes exclude these structurally; the SQL lane must say so explicitly.
+      const conds = ['org_id=$1', 'deleted_at IS NULL', "content_tsv @@ to_tsquery('simple',$2)",
+        "(layer IS NULL OR layer NOT IN ('document','entity'))"];
       const args = [org, tsQuery];
       if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
       if (f.layer) { args.push(f.layer); conds.push(`layer=$${args.length}`); }

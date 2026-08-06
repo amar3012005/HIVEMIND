@@ -51,6 +51,11 @@ export function layerIdOf(layer) {
  * @param {object} [filter]
  * @returns {boolean}
  */
+/** True when a layer name is metadata (document/entity) rather than content. */
+export function isMetadataLayer(layer) {
+  return METADATA_LAYERS.has(layer);
+}
+
 export function isNonRecallable(rec, filter = {}) {
   const layer = rec?.layer;
   return METADATA_LAYERS.has(layer) && filter?.layer !== layer;

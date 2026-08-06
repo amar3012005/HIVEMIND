@@ -1510,6 +1510,17 @@ export class PrismaGraphStore {
     // RESIDENCY: remote-org edges live on the agent (no central memory rows to FK to). Push the typed
     // edge to the agent and skip the central upsert. Managed/personal → central upsert below.
     const _remoteOrg = edge.org_id || currentOrg();
+    // A relationship written with NO resolvable org silently takes the central branch. For an
+    // .amr org that means the edge lands in Postgres and never reaches the slot — measured on a
+    // real ingest: 9 rows in hm.relationships, shard.edg still 0 bytes, and not one warning. The
+    // async ingest worker is exactly where AsyncLocalStorage is least reliable, so callers there
+    // pass org_id explicitly; this makes the remaining gap audible instead of silent. Never throw
+    // — a lost edge must not fail an ingest — but never let it pass unnoticed either.
+    if (!_remoteOrg) {
+      console.warn('[graph-store] createRelationship with no resolvable org '
+        + `(from=${String(edge.from_id).slice(0, 8)} type=${edge.type}) — routing CENTRAL. `
+        + 'If this org is .amr, the edge will NOT reach its shard: pass org_id at the call site.');
+    }
     if (orgIsRemote(_remoteOrg)) {
       amrAddEdge({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: _remoteOrg });
       return mapRelationshipRecord({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });

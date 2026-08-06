@@ -1150,6 +1150,7 @@ Output the JSON object and nothing else.`;
         if (t.memoryId) {
           try {
             await this.memoryGraphEngine.store.createRelationship({
+              org_id: orgId, // residency: worker context may not carry the org — see createRelationship
               id: crypto.randomUUID(), from_id: factId, to_id: t.memoryId,
               type: 'Derives', confidence: 0.9,
               metadata: { created_by: 'kb_distill_v2', document_id: documentId },
@@ -1763,6 +1764,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         if (!toId || toId === fromId) continue;
         try {
           await this.memoryGraphEngine.store.createRelationship({
+            org_id: orgId, // residency: worker context may not carry the org — see createRelationship
             id: crypto.randomUUID(), from_id: fromId, to_id: toId, type: rel.type,
             confidence: rel.type === 'Derives' ? 0.6 : 0.85,
             metadata: { created_by: 'kb_unified_v2', document_id: documentId, intra_window: true,
@@ -1852,6 +1854,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         for (const [peerId, n] of ranked.slice(0, MAX_EDGES_PER_FACT)) {
           try {
             await store.createRelationship({
+              org_id: orgId, // residency: worker context may not carry the org — see createRelationship
               id: crypto.randomUUID(), from_id: f.id, to_id: peerId, type: 'Mentions',
               confidence: Math.min(0.9, 0.6 + n * 0.1),
               metadata: { created_by: 'kb_algo_link_v1', document_id: documentId, shared_entities: n },
@@ -2403,6 +2406,7 @@ Every item must include a non-empty content field and one or more valid support_
       // Connectivity fallback: a Mentions edge to the nearest neighbour (cheap graph link).
       if (top.score >= RELATE_MIN && this.memoryGraphEngine.store?.createRelationship) {
         await this.memoryGraphEngine.store.createRelationship({
+          org_id: orgId, // residency: worker context may not carry the org — see createRelationship
           id: crypto.randomUUID(), from_id: rec.factId, to_id: top.id,
           type: 'Mentions', confidence: Number(top.score.toFixed(2)),
           metadata: { created_by: 'kb_enrich', kind: 'semantic_related', document_id: documentId },
@@ -4718,6 +4722,7 @@ Every item must include a non-empty content field and one or more valid support_
             for (const e of _edges) {
               try {
                 await this.memoryGraphEngine.store.createRelationship({
+                  org_id: orgId, // residency: worker context may not carry the org — see createRelationship
                   id: crypto.randomUUID(), from_id: uFacts[e.from].id, to_id: uFacts[e.to].id, type: e.type,
                   confidence: e.type === 'Derives' ? 0.6 : 0.8,
                   metadata: { created_by: 'kb_doc_relations_5b', document_id: documentId,
@@ -5212,6 +5217,7 @@ Every item must include a non-empty content field and one or more valid support_
           const createPartOf = async (childId) => {
             try {
               await this.memoryGraphEngine.store.createRelationship({
+                org_id: orgId, // residency: worker context may not carry the org — see createRelationship
                 id: crypto.randomUUID(),
                 from_id: childId,
                 to_id: docParentId,
@@ -5224,6 +5230,7 @@ Every item must include a non-empty content field and one or more valid support_
             } catch (err) {
               try {
                 await this.memoryGraphEngine.store.createRelationship({
+                  org_id: orgId, // residency: worker context may not carry the org — see createRelationship
                   id: crypto.randomUUID(),
                   from_id: childId,
                   to_id: docParentId,

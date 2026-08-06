@@ -21,7 +21,18 @@ import crypto from 'crypto';
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
 const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
-const OPENROUTER_VISION_MODEL = process.env.HIVEMIND_VISION_OR_MODEL || process.env.GROQ_VISION_OR_MODEL || 'google/gemini-2.5-flash-lite';
+// Llama-4-Scout on BOTH providers, so the model is the same whichever one serves.
+// Groq is the fast path (measured 120ms) but that account is currently restricted
+// for overdue payment — every Groq call returns HTTP 400 — which is why
+// VISION_OPENROUTER_PRIMARY=true is set in production and OpenRouter answers
+// first. Pointing OpenRouter at Scout too means vision behaves identically now and
+// after the Groq account is restored; only the latency changes.
+//
+// Scout is not a reasoning model and no `reasoning` field is sent on this path
+// (the body is model/temperature/max_tokens/messages, and this parser calls fetch
+// directly rather than the shared client that injects reasoning_effort for
+// gpt-oss), so there is nothing to disable.
+const OPENROUTER_VISION_MODEL = process.env.HIVEMIND_VISION_OR_MODEL || process.env.GROQ_VISION_OR_MODEL || 'meta-llama/llama-4-scout';
 const CONCURRENCY = Number(process.env.GROQ_VISION_CONCURRENCY || 8);
 const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 200);
 const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for the rasteriser

@@ -5,10 +5,13 @@ import { RUNTIME_OPERATOR_PROMPT } from './config-store.js';
 const PROVIDERS = new Set(['deepgram', 'grok']);
 const GROK_MODEL = 'grok-voice-think-fast-1.0';
 const RUNTIME_OPERATOR_PROVIDER = 'grok';
-// The live xAI roster does not offer a Barry voice. Rex is a supported,
-// multilingual, professional voice and is pinned only for the Runtime-admin
-// interaction profile so a normal organization voice policy is untouched.
-const RUNTIME_OPERATOR_VOICE_ID = 'rex';
+// Runtime-admin check-in voice. Overridable via TARA_RUNTIME_OPERATOR_VOICE_ID so it
+// can be pointed at a preferred voice (e.g. 'zenith') the moment that voice actually
+// exists in the live xAI grok roster — WITHOUT a code change. Default 'rex' (a supported,
+// multilingual, professional voice). NOTE: the live grok roster is eve/ara/rex/sal/leo;
+// 'zenith' is NOT currently offered by xAI, so setting it would fall back at the adapter.
+// Pinned only for the Runtime-admin profile; normal org voice policy is untouched.
+const RUNTIME_OPERATOR_VOICE_ID = (process.env.TARA_RUNTIME_OPERATOR_VOICE_ID || 'rex').trim().toLowerCase() || 'rex';
 const RUNTIME_OPERATOR_MAX_DURATION_SECONDS = 180;
 const GROK_VOICES = [
   ['eve', 'Eve', 'feminine', 'Clear, warm and conversational'],

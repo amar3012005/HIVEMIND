@@ -1184,11 +1184,47 @@ function routesFor(ctx) {
       const documentIds = Array.isArray(b.documentIds) ? [...new Set(b.documentIds.filter(Boolean))] : [];
       if (b.documentId) filter.must.push({ key: 'document_id', match: { value: b.documentId } });
       else if (documentIds.length) filter.must.push({ key: 'document_id', match: { any: documentIds } });
-      const qr = await qFetch(`/collections/${qcoll}/points/search`, { method: 'POST', body: JSON.stringify({
-        vector: b.vector, limit: Number(b.limit) || 20, with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
-      if (!qr.ok) return { results: [] };
-      const j = await qr.json();
-      const hitIds = (j.result || []).map((h) => h.payload?.segment_id || h.id).filter(Boolean);
+      const kbLimit = Number(b.limit) || 20;
+      const hitIds = [];
+      // Lane A — Qdrant. No longer fatal on its own: a failure used to return an empty
+      // result set, so evidence recall died with Qdrant. The shard lane below can now
+      // carry it.
+      try {
+        const qr = await qFetch(`/collections/${qcoll}/points/search`, { method: 'POST', body: JSON.stringify({
+          vector: b.vector, limit: kbLimit, with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
+        if (qr.ok) {
+          const j = await qr.json();
+          for (const h of (j.result || [])) {
+            const id = h.payload?.segment_id || h.id;
+            if (id && !hitIds.includes(id)) hitIds.push(id);
+          }
+        }
+      } catch (e) {
+        console.warn(`[embedded-agent] kb-recall qdrant lane failed org=${org}: ${e.message} — falling back to the shard lane`);
+      }
+
+      // Lane B — the shard's own evidence layer (B4 step 3). Measured at top-10
+      // overlap 1.00 against lane A on real embeddings before being wired in.
+      //
+      // This adds CANDIDATES ONLY. Access control and hydration are untouched: every
+      // id below still goes through the same knowledge_documents join with
+      // appendDocumentAccess, so a shard candidate the caller may not see is dropped
+      // exactly as a Qdrant one would be. That is what makes this safe to enable
+      // without porting the scope rules into the shard.
+      if (String(process.env.MNEME_KB_RECALL_SHARD_LANE ?? 'true').toLowerCase() !== 'false') {
+        try {
+          const wantDoc = b.documentId || null;
+          const wantDocs = documentIds.length ? new Set(documentIds.map(String)) : null;
+          for (const h of amr.recall(Float32Array.from(b.vector), kbLimit, { layer: 'evidence' })) {
+            const docId = h.payload?.metadata?.document_id;
+            if (wantDoc && String(docId) !== String(wantDoc)) continue;
+            if (wantDocs && !wantDocs.has(String(docId))) continue;
+            if (h.id && !hitIds.includes(h.id)) hitIds.push(h.id);
+          }
+        } catch (e) {
+          console.warn(`[embedded-agent] kb-recall shard lane failed org=${org}: ${e.message} — Qdrant results still returned`);
+        }
+      }
       if (!hitIds.length) return { results: [] };
       const conds = ['s.org_id=$1', 'd.org_id=$1', 'd.deleted_at IS NULL', 's.id = ANY($2::uuid[])'];
       const args = [org, hitIds];

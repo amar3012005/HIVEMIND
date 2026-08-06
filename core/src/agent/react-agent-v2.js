@@ -2324,6 +2324,44 @@ export async function runReactAgentV2({
       const [toolName, toolArgs] = mutationTool;
       onEvent?.({ type: 'tool_started', name: toolName, arguments: toolArgs });
       const result = await dispatchTool(toolName, toolArgs, ctx);
+      // DISAMBIGUATION IS NOT A FAILURE.
+      // The memory tools answer { updated:false, needs_memory_choice:true,
+      // candidates:[...] } when a target_query matches several memories — a
+      // request for the user to pick, deliberately NOT an error. Every other
+      // failure path carries an `error` string; this one does not, so it fell
+      // through to the generic branch below and rendered as
+      // "That change could not be completed. (operation_failed)" — the fallback
+      // used when result.error is empty. The candidates were computed, then
+      // thrown away.
+      //
+      // Measured: "replace TARA with TARAXHIVE" against 5 memories mentioning
+      // TARA, and "change it to Aug 25th" — both ambiguous, both reported to the
+      // user as an opaque failure they could not act on.
+      if (result?.needs_memory_choice) {
+        const cands = (result.candidates || []).slice(0, 5);
+        const lines = cands.map((c, i) => {
+          const label = c.title || String(c.snippet || '').slice(0, 90) || c.id;
+          return `${i + 1}. ${label}`;
+        });
+        const ask = cands.length
+          ? `That matches ${cands.length} memories — which one should I change?\n${lines.join('\n')}`
+          : 'I could not tell which memory you meant. Name it more specifically and I will update it.';
+        onEvent?.({ type: 'tool_completed', name: toolName, status: 'needs_input', result });
+        onEvent?.({ type: 'finish', text: ask });
+        onEvent?.({ type: 'turn_completed', grounded: false, operation: intentDecision.operation, success: false });
+        return {
+          response: ask,
+          sources: [],
+          steps: [{ tool: toolName, args: toolArgs, result_summary: 'needs_memory_choice' }],
+          evidence_used: [], confidence: 0,
+          gaps: ['needs_memory_choice'],
+          needs_memory_choice: true,
+          candidates: cands,
+          usage: sumUsage(usages), trace: finalizeTrace(trace, usages),
+          assistant_name: plan.assistant_name_intent || assistantName || null,
+          action_result: null,
+        };
+      }
       const succeeded = !result?.error && result?.updated !== false && result?.deleted !== false && result?.set !== false;
       onEvent?.({ type: 'tool_completed', name: toolName, status: succeeded ? 'ok' : 'error', result });
       // TERMINAL: every write returns a server-owned confirmation here and never

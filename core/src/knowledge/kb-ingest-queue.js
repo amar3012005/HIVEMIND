@@ -184,6 +184,63 @@ export class KbIngestQueue {
     this.redis.on('error', () => {});
     this.logger.info?.(`[kb-queue] ready on redis://${host}:${port}/${db} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
     this._startStaleJobReaper();
+    this._startRawFileSweeper();
+  }
+
+  /**
+   * Bound the retained raw-upload files.
+   *
+   * Terminal failures now KEEP their bytes so a dead job can be replayed (before
+   * this, the module promised "raw file kept for replay" while unlinking on the
+   * final attempt, so replay was impossible). Retention without a bound is a disk
+   * leak — this box was measured at 92% full earlier today — so anything older
+   * than KB_RAW_RETENTION_HOURS is removed on a slow tick.
+   *
+   * Deliberately time-based rather than status-based: reading job status per file
+   * would couple the sweeper to the DB, and a file older than the retention window
+   * is past the point where a human would still be retrying it.
+   */
+  _startRawFileSweeper() {
+    const hours = Number(process.env.KB_RAW_RETENTION_HOURS || 168); // 7 days
+    const everyMs = Number(process.env.KB_RAW_SWEEP_INTERVAL_MS || 60 * 60 * 1000);
+    if (!(hours > 0)) return;
+    const sweep = () => {
+      try {
+        // persistFile() writes KB_STORE_DIR/<orgId>/<checksum>/<filename>, so this
+        // walks exactly two levels — a flat readdir would sweep nothing.
+        if (!KB_STORE_DIR || !fs.existsSync(KB_STORE_DIR)) return;
+        const cutoff = Date.now() - hours * 3600 * 1000;
+        let removed = 0; let kept = 0;
+        for (const org of fs.readdirSync(KB_STORE_DIR)) {
+          const orgDir = path.join(KB_STORE_DIR, org);
+          let checksums = [];
+          try {
+            if (!fs.statSync(orgDir).isDirectory()) continue;
+            checksums = fs.readdirSync(orgDir);
+          } catch { continue; }
+          for (const sum of checksums) {
+            const sumDir = path.join(orgDir, sum);
+            try {
+              if (!fs.statSync(sumDir).isDirectory()) continue;
+              let emptied = true;
+              for (const name of fs.readdirSync(sumDir)) {
+                const p = path.join(sumDir, name);
+                const st = fs.statSync(p);
+                if (!st.isFile()) { emptied = false; continue; }
+                if (st.mtimeMs < cutoff) { fs.unlinkSync(p); removed += 1; } else { kept += 1; emptied = false; }
+              }
+              if (emptied) fs.rmdirSync(sumDir); // drop the now-empty checksum dir
+            } catch { /* raced with the worker or another node — skip */ }
+          }
+          try { if (!fs.readdirSync(orgDir).length) fs.rmdirSync(orgDir); } catch { /* non-empty */ }
+        }
+        if (removed) this.logger.info?.(`[kb-queue] raw-file sweep: removed ${removed} file(s) older than ${hours}h, ${kept} retained for replay`);
+      } catch (err) {
+        this.logger.warn?.(`[kb-queue] raw-file sweep failed: ${err.message}`);
+      }
+    };
+    this._rawSweepTimer = setInterval(sweep, everyMs);
+    this._rawSweepTimer.unref?.();
   }
 
   /**
@@ -431,7 +488,9 @@ export class KbIngestQueue {
         this.logger.warn?.(`[kb-queue] ✗ ${filename} org=${orgId.slice(0, 8)} doc=${result?.documentId || 'none'} — ${reason}`);
         const failed = Object.assign(new Error(reason), { code: 'NO_RECALLABLE_CONTENT' });
         await this.jobStore?.fail(trackerJobId, orgId, failed);
-        try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
+        // Retain for replay (see the terminal-failure path below) — a document that
+        // produced no recallable content is exactly the case a user wants to retry
+        // after a parser or model fix. Bounded by _sweepRawFiles().
         return { documentId: result?.documentId || null, segmentCount: _segs, promotedCount: 0, error: reason };
       }
       const _evidenceOnly = _promoted === 0 && _segs > 0;
@@ -462,7 +521,13 @@ export class KbIngestQueue {
       const finalAttempt = job.attemptsMade + 1 >= (job.opts?.attempts || ATTEMPTS);
       if (finalAttempt) {
         await this.jobStore?.fail(trackerJobId, orgId, error);
-        try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
+        // RETAIN the raw bytes on terminal failure. This used to unlink here, which
+        // made the module's own "raw file kept for replay" promise false: a job that
+        // exhausted its attempts had nothing left to replay FROM, so a dead document
+        // was unrecoverable and the user was never told. Keeping the file is what
+        // makes a retry endpoint possible at all.
+        // Disk is bounded by _sweepRawFiles() below, not by deleting on failure.
+        this.logger.warn?.(`[kb-queue] retaining raw file for replay: ${filePath} (job ${trackerJobId} dead: ${error?.message})`);
       }
       throw error;
     } finally {

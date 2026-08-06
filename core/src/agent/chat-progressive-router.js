@@ -86,6 +86,7 @@ ALWAYS classify answer_type on every hivemind_context call, by MEANING in the us
 Use use_connector whenever Gmail, email, Google Docs, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
 Use use_campaign whenever the user asks to create, run, start, inspect, improve, pause, or check an AI campaign. Starting a campaign creates its dedicated Campaign Room; it does not publish. Use intent=write for create, regenerate, or pause and intent=read for list, status, or metrics.
 Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". operation=diff for "what changed between date A and B". operation=temporal for "what was true / known on date D".
+DATES ARE MANDATORY on those two operations: with operation=diff you MUST fill range_start and range_end, and with operation=temporal you MUST fill valid_at (or known_at when the user asks what was KNOWN/recorded rather than what was true). Emit them as ISO yyyy-mm-dd, converting whatever the user wrote ("Aug 4", "4. August 2026", "last Tuesday"). Leaving these null turns a change question into a plain history walk and answers the wrong question.
 Examples:
 - "How are A and B related?", "Wie hangen A und B zusammen?", and Arabic equivalents => hivemind_context operation=relation_between.
 - "What was the previous launch date?" / "What did the price used to be?" => hivemind_context operation=timeline.
@@ -113,6 +114,55 @@ const s = (v, n = 2000) => (typeof v === 'string' ? v.slice(0, n) : null);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const uuid = (v) => (typeof v === 'string' && UUID_RE.test(v.trim()) ? v.trim() : null);
 const iso = (v) => (typeof v === 'string' && !Number.isNaN(new Date(v).getTime()) ? v : null);
+
+// ── Deterministic temporal backstop ──────────────────────────────────────────
+// The router is asked for range_start/range_end on a diff and valid_at on a
+// point-in-time question, but hivemind_context is a `strict` tool whose every
+// property is required, so the model satisfies the schema by emitting nulls.
+// Measured on the live router: "What changed between 2026-08-04 and 2026-08-06?"
+// routed correctly to operation=diff yet returned null dates, so `time` came out
+// null and gatherEvidence's dispatch (react-agent-v2.js: t.range?.start →
+// hivemind_diff, else valid_at → hivemind_at, else hivemind_timeline) fell
+// through to hivemind_timeline. The trace proves it: tool_calls were
+// hivemind_recall + hivemind_timeline, and the answer described a single date
+// instead of a delta. A prompt instruction alone cannot fix this — the model
+// already had one — so dates are also extracted from the raw message in code.
+//
+// Language-neutral by construction: ISO dates carry no language, and the month
+// names cover the two languages this product actually ships in. Anything not
+// recognised simply yields no dates and the existing behaviour is unchanged.
+const MONTHS = {
+  jan: 1, january: 1, januar: 1, feb: 2, february: 2, februar: 2, mar: 3, march: 3, marz: 3, märz: 3,
+  apr: 4, april: 4, may: 5, mai: 5, jun: 6, june: 6, juni: 6, jul: 7, july: 7, juli: 7,
+  aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10, october: 10, okt: 10, oktober: 10,
+  nov: 11, november: 11, dec: 12, december: 12, dez: 12, dezember: 12,
+};
+const pad = (n) => String(n).padStart(2, '0');
+// Returns ASCENDING unique ISO yyyy-mm-dd strings found in the text.
+export function extractMessageDates(text, now = new Date()) {
+  const src = String(text || '');
+  if (!src) return [];
+  const found = new Set();
+  // 1. ISO — 2026-08-04 (unambiguous, language-independent).
+  for (const m of src.matchAll(/\b(\d{4})-(\d{2})-(\d{2})\b/g)) {
+    const [, y, mo, d] = m;
+    if (Number(mo) >= 1 && Number(mo) <= 12 && Number(d) >= 1 && Number(d) <= 31) found.add(`${y}-${mo}-${d}`);
+  }
+  // 2. "Aug 4, 2026" / "August 4 2026" / "4. August 2026" / "4 Aug 2026".
+  const names = Object.keys(MONTHS).join('|');
+  const mdY = new RegExp(`\\b(${names})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`, 'gi');
+  const dMY = new RegExp(`\\b(\\d{1,2})\\.?\\s+(${names})\\.?(?:\\s+(\\d{4}))?\\b`, 'gi');
+  const add = (mo, d, y) => {
+    const month = MONTHS[String(mo).toLowerCase()];
+    const day = Number(d);
+    if (!month || !day || day > 31) return;
+    // A bare "Aug 4" means the current year — the year the user is speaking in.
+    found.add(`${y ? Number(y) : now.getUTCFullYear()}-${pad(month)}-${pad(day)}`);
+  };
+  for (const m of src.matchAll(mdY)) add(m[1], m[2], m[3]);
+  for (const m of src.matchAll(dMY)) add(m[2], m[1], m[3]);
+  return [...found].filter((v) => !Number.isNaN(new Date(`${v}T00:00:00Z`).getTime())).sort();
+}
 // A self-referential query ("about me / my company") → the dedicated profile op
 // (the router's hivemind_context enum has no 'profile'; detect it here so the
 // caller-scoped get_user_profile path is preserved, not degraded to recall).
@@ -195,10 +245,32 @@ export function adaptToDecision(tool, args, message, language) {
         return { decision: { ...base, operation: 'profile', queries: [base.query_canonical_en], tool_groups: ['hivemind-recall'] }, usage: null };
       }
       const op = CONTEXT_OP[args?.operation] || 'recall';
-      const time = (iso(args?.valid_at) || iso(args?.known_at) || iso(args?.range_start) || iso(args?.range_end))
+      let time = (iso(args?.valid_at) || iso(args?.known_at) || iso(args?.range_start) || iso(args?.range_end))
         ? { valid_at: iso(args?.valid_at), known_at: iso(args?.known_at),
             range: (iso(args?.range_start) || iso(args?.range_end)) ? { start: iso(args?.range_start), end: iso(args?.range_end) } : null }
         : null;
+      // Backstop (see extractMessageDates): the router routes the OPERATION
+      // correctly but frequently emits null dates, which silently downgraded
+      // every diff to a version-chain walk. Recover the dates from the message
+      // itself. Strictly additive — it runs ONLY when the model supplied no
+      // usable date at all, so a model-provided value is never overridden, and
+      // when no date can be parsed the value stays null and behaviour is
+      // byte-identical to before.
+      const rawOp = String(args?.operation || '');
+      if (!time && (rawOp === 'diff' || rawOp === 'temporal')) {
+        const dates = extractMessageDates(message);
+        if (rawOp === 'diff' && dates.length >= 1) {
+          // Two or more dates → the explicit window. One date → "what changed
+          // since D"; gatherEvidence defaults a missing end to now.
+          time = { valid_at: null, known_at: null,
+            range: { start: dates[0], end: dates.length >= 2 ? dates[dates.length - 1] : null } };
+        } else if (rawOp === 'temporal' && dates.length >= 1) {
+          // Point-in-time: the LAST date named is the instant being asked about
+          // ("what was true on D"), matching hivemind_at's valid_time axis.
+          time = { valid_at: dates[dates.length - 1], known_at: null, range: null };
+        }
+        if (time) console.log(`[chat-router] temporal backstop: op=${rawOp} recovered ${JSON.stringify(time)} from message (model sent null dates)`);
+      }
       return { decision: {
         ...base,
         operation: op,

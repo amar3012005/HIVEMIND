@@ -280,6 +280,17 @@ export class NativeHqEngine {
     const focusedOutcome = capabilityState.todos.find((todo) => (
       todo.context?.execution_mode === 'single_outcome' && todo.status !== 'COMPLETED'
     ));
+    // SEQUENTIAL, single-in-flight: the runtime hands ONE bounded task to a Room, then
+    // sleeps; that Room's result wakes it to dispatch the next. It must NEVER open a
+    // second Room while one is already working. Auto-execute makes every opportunity
+    // READY, so without this guard a burst of wakes could fan out several Rooms at once
+    // (parallel, dangerous). A room is in flight when a todo is RUNNING or a playbook run
+    // is ACTIVE/WAITING. When in flight we neither dispatch nor re-plan — we wait.
+    const roomInFlight = capabilityState.todos.some((todo) => todo.status === 'RUNNING')
+      || (this.runtimePlaybooks ? !!(await prisma.runtimePlaybookRun.findFirst({
+        where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
+        select: { id: true },
+      }).catch(() => null)) : false);
     if (!firstAwakening || readyTodo) await event(prisma, runtime, cycle, {
       eventType: 'queue_checked', title: 'I re-ranked the operating queue',
       summary: readyTodo
@@ -744,7 +755,7 @@ export class NativeHqEngine {
         summary: 'HQ accepted the specialist contribution and will compare stage outcomes at the next measurement checkpoint.',
         workOrderId: order.id,
       });
-    } else if (readyTodo) {
+    } else if (readyTodo && !roomInFlight) {
       await move('DIAGNOSING');
       await move('DELEGATING');
       const skillId = 'specialist-delegation';
@@ -888,6 +899,15 @@ export class NativeHqEngine {
           });
         }
       }
+    } else if (readyTodo && roomInFlight) {
+      // A Room is already working. Do NOT dispatch the next todo and do NOT re-plan —
+      // one steady step at a time. The in-flight Room's result will wake us to continue.
+      await event(prisma, runtime, cycle, {
+        eventType: 'observation',
+        title: 'One task at a time — the current Room is still working',
+        summary: `${readyTodo.title} is queued next, but a specialist Room already owns the active task. I will not open parallel work; I dispatch the next item only when this Room returns its result.`,
+        details: { next_todo_id: readyTodo.id },
+      });
     } else if (!context.evidence.latest_growth_plan && !focusedOutcome) {
       await move('DIAGNOSING');
       const selectedSkill = this.skills.load('growth-constraint-diagnosis');

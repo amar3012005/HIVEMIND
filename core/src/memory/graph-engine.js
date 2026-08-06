@@ -1544,13 +1544,41 @@ export class MemoryGraphEngine {
             // Same-topic by LLM entity definition is the only signal that
             // matters here; everything else just spams edges.
             const baseEntityTags = new Set((baseMemory.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:')));
-            const filteredLatest = baseEntityTags.size > 0
-              ? latestMemories.filter(m => {
-                  const mt = (m.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:'));
-                  for (const t of mt) if (baseEntityTags.has(t)) return true;
-                  return false;
-                })
-              : latestMemories.slice(0, 20); // entity tags missing — keep it bounded
+            // TIME OVERLAP IS ALSO "SAME TOPIC". Entity overlap alone cannot see the
+            // most common personal conflict: two commitments in the same window naming
+            // DIFFERENT entities. "Trip to Dubai next week" (time:2026-08-13) and
+            // "Trip to Hannover on Aug 9" (time:2026-08-09) share no entity tag, so the
+            // filter below excluded them from each other permanently and no contradiction
+            // could ever be raised. Worse, a memory with NO entity tag at all — which is
+            // what the Dubai save actually got — fell to a blind first-20 slice that is
+            // ordered by recency, not by relevance.
+            //
+            // Same-week `time:YYYY-MM-DD` tags are a cheap, precise second signal: they
+            // are already emitted by the extractor, they need no LLM call, and they only
+            // widen the pool for memories that actually coincide in time. The detector
+            // still decides whether anything is a real contradiction — this only makes
+            // sure it is shown the candidates that could be one.
+            const _dayTags = (m) => (m.tags || []).filter(t => typeof t === 'string' && /^time:\d{4}-\d{2}-\d{2}$/.test(t));
+            const _baseDays = _dayTags(baseMemory).map(t => t.slice(5));
+            const _withinDays = (a, b, n = 10) => {
+              const da = Date.parse(a), db = Date.parse(b);
+              return Number.isFinite(da) && Number.isFinite(db) && Math.abs(da - db) <= n * 86400000;
+            };
+            const _entityMatch = (m) => {
+              const mt = (m.tags || []).filter(t => typeof t === 'string' && t.startsWith('entity:'));
+              for (const t of mt) if (baseEntityTags.has(t)) return true;
+              return false;
+            };
+            const _timeMatch = (m) => {
+              if (!_baseDays.length) return false;
+              for (const t of _dayTags(m)) {
+                for (const b of _baseDays) if (_withinDays(t.slice(5), b)) return true;
+              }
+              return false;
+            };
+            const _pool = latestMemories.filter(m => (baseEntityTags.size > 0 && _entityMatch(m)) || _timeMatch(m));
+            // Unchanged fallback when neither signal exists: bounded, recency-ordered.
+            const filteredLatest = _pool.length ? _pool.slice(0, 40) : latestMemories.slice(0, 20);
 
             const contradictions = this.conflictDetector.detectContradictions(
               baseMemory,

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { authorizeKnowledgeScope } from './upload-authorization.js';
 import { safeUploadFilename, uploadError, validateKnowledgeFile } from './upload-contract.js';
+import { countPages } from './page-count.js';
 
 export class KnowledgeUploadService {
   constructor({ prisma, queue, jobStore, planEnforcer, storageReady }) {
@@ -158,19 +159,16 @@ export class KnowledgeUploadService {
    */
   async _estimatePages(file, validation) {
     const kind = validation?.kind;
-    const ext = String(file?.filename || '').split('.').pop()?.toLowerCase();
     if (kind === 'image' || String(file?.contentType || '').toLowerCase().startsWith('image/')) {
       return 1;
     }
-    if (kind === 'document' && ext === 'pdf' && Buffer.isBuffer(file?.data)) {
-      try {
-        const { PDFParse } = await import('pdf-parse');
-        const parser = new PDFParse({ data: file.data });
-        const info = await parser.getInfo();
-        const total = Number(info?.total || info?.pages?.length || 0);
-        if (Number.isFinite(total) && total > 0) return total;
-      } catch { /* fall through to 1 */ }
-    }
-    return 1;
+    // ONE counter for admit and settle. This used to inline a PDF-only count and
+    // return 1 for everything else, so the kbPages limit was unenforceable for
+    // every PPTX/DOCX/XLSX — a 15-slide deck was admitted as "1 page" and later
+    // billed 5 (the count of distinct SEGMENTED pages). countPages reads the real
+    // unit out of the container; null means genuinely unknowable (see that file),
+    // and 1 remains the honest floor for the admit check.
+    const real = await countPages(file?.data, file?.filename);
+    return Number.isFinite(real) && real > 0 ? real : 1;
   }
 }

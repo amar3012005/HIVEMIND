@@ -37,6 +37,7 @@ import { persistCanonicalLinks } from '../memory/canonical-entity-persister.js';
 import { validateSupersedingEdge, computeHubEntitySlugs, relationshipValidatorMode } from '../memory/relationship-semantics.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
+import { countPages } from './page-count.js';
 
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
 // BINARY SNIFF — one definition, used by every tier that might be handed bytes it cannot parse.
@@ -123,6 +124,58 @@ export function llmProfile(feature, opts = {}) {
 // «filename : heading» prefix — an explicit owner requirement — appeared on just 2 of 30 memories
 // even though the segmentation had the structure all along. heading_path is authoritative and
 // inherited; its deepest component IS the heading of that segment ("Kapitel 1 > Preise" -> "Preise").
+/**
+ * Split page markers out of parser markdown.
+ *
+ * Page markers are METADATA and must never reach the chunker. Two things break
+ * when they stay inline:
+ *   1. chunkText() chunks them as CONTENT, so `<!-- page 7 -->` lands inside a
+ *      segment's text and gets embedded and shown as evidence.
+ *   2. Segments resolve their offset by locating a 60-char prefix in the source
+ *      (indexOf). A prefix straddling a marker no longer matches, so the segment
+ *      gets startOffset=null — and _pageAt() returns null for a null offset, so
+ *      that segment can never be cited to a page at all.
+ * Measured on a 15-slide deck when `<!-- page N -->` injection was added:
+ * with_page rose 0/9 -> 6/9 but with_offset FELL 7/9 -> 6/9. The markers bought
+ * pages and cost an offset.
+ *
+ * Returns the text with markers removed plus their positions IN THE CLEANED
+ * STRING, so the page map and the segment offsets share one coordinate system.
+ * Handles both emitters: Docling's `<!-- page N -->` and fast-pdf's `-- N of M --`.
+ *
+ * @param {string} raw
+ * @returns {{ text: string, marks: Array<{at:number, page:number}> }}
+ */
+export function stripPageMarkers(raw) {
+  const input = String(raw || '');
+  if (!input) return { text: '', marks: [] };
+  // One alternation, one pass — two passes would invalidate the first pass's offsets.
+  const RE = /[ \t]*\n?<!--\s*page\s+(\d+)\s*-->[ \t]*\n?|[ \t]*\n?--\s*(\d+)\s+of\s+\d+\s*--[ \t]*\n?/gi;
+  let out = '';
+  let last = 0;
+  const marks = [];
+  for (const m of input.matchAll(RE)) {
+    const page = Number(m[1] ?? m[2]);
+    out += input.slice(last, m.index);
+    // NEVER GLUE TWO WORDS TOGETHER. The pattern deliberately absorbs the newline
+    // on each side of the marker so a stripped marker leaves no blank line — but
+    // on `alpha\n-- 1 of 3 --\nbeta` that removes BOTH newlines and yields
+    // "alphabeta", corrupting the text and every embedding derived from it.
+    // Re-insert a single separator only when the join would otherwise be
+    // word-to-word, so output stays byte-identical wherever whitespace already
+    // separated the two sides.
+    const prevCh = out.slice(-1);
+    const nextCh = input[m.index + m[0].length] || '';
+    if (prevCh && nextCh && !/\s/.test(prevCh) && !/\s/.test(nextCh)) out += '\n';
+    // Position in the CLEANED string: content following the marker begins here.
+    if (Number.isFinite(page) && page > 0) marks.push({ at: out.length, page });
+    last = m.index + m[0].length;
+  }
+  if (!marks.length) return { text: input, marks: [] };
+  out += input.slice(last);
+  return { text: out, marks };
+}
+
 export function segmentHeading(segment) {
   const m = segment?.metadata || {};
   if (m.heading) return String(m.heading);
@@ -2492,6 +2545,11 @@ Every item must include a non-empty content field and one or more valid support_
     const { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
     const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    // TRUE unit count, read straight from the container (slides / sheets / PDF
+    // pages) by the SAME function the pre-admit quota check uses, so what we admit
+    // and what we bill cannot drift apart. null = genuinely unknowable for this
+    // format; the settle below then falls back to its previous evidence chain.
+    const _truePageCount = await countPages(fileBuffer, filename).catch(() => null);
 
     // Step 1: Store raw source artifact — skipped for remote orgs (residency: raw bytes stay on agent).
     let sourceArtifact = { id: crypto.randomUUID() };
@@ -3003,7 +3061,17 @@ Every item must include a non-empty content field and one or more valid support_
       // `Math.max(1, result.pages ?? 1)` = always 1. parseResult.metadata.pages
       // is the docling page-array length (PDFs, office decks); fall back to the
       // count of DISTINCT pages actually segmented, then 1 for text/csv.
-      pages: Number(parseResult?.metadata?.pages)
+      // TRUE unit count first. `metadata.pages` is empty for OOXML, so this used
+      // to fall through to "distinct pages actually segmented" — which counts what
+      // the SEGMENTER happened to attribute, not what the document contains. A real
+      // 15-slide deck settled 5, so the org was billed a third of what it used and
+      // the kbPages limit could not be enforced. countPages reads the container
+      // directly (slides / sheets / PDF pages) and is the same function the
+      // pre-admit check uses, so admit and settle can no longer disagree. The old
+      // chain remains as the fallback for formats it cannot know (plain text, csv,
+      // and docx whose writer left no <Pages>).
+      pages: _truePageCount
+        || Number(parseResult?.metadata?.pages)
         || new Set(segments.map((s) => s.startPage).filter((p) => p != null && p > 0)).size
         || 1,
       coverage,
@@ -3712,8 +3780,12 @@ Every item must include a non-empty content field and one or more valid support_
     // sentence-safe), never mid-word; heading-aware via markdown ##. Falls through to hybrid/fallback
     // if it yields nothing. Same clean units the distill re-windows over → uniform, no mid-word anywhere.
     if (String(process.env.KB_SEMANTIC_SEGMENTS ?? 'true').toLowerCase() !== 'false') {
-      const src = (parseResult.markdown && parseResult.markdown.trim().length > 40)
+      const _srcRaw = (parseResult.markdown && parseResult.markdown.trim().length > 40)
         ? parseResult.markdown : (parseResult.text || '');
+      // Markers out of the CONTENT, into a map. Everything downstream — chunkText,
+      // the prefix anchor, the offset->page lookup — then works on one clean string
+      // in one coordinate system. See stripPageMarkers() for why this matters.
+      const { text: src, marks: _seedPageMarks } = stripPageMarkers(_srcRaw);
       if (src && src.trim().length >= 40) {
         let chunks = [];
         try {
@@ -3753,19 +3825,13 @@ Every item must include a non-empty content field and one or more valid support_
           // the central path being richer.
 
           // offset -> page, from Docling's own `<!-- page N -->` markers in the markdown.
-          const _pageMarks = [];
-          for (const m of String(src).matchAll(/<!--\s*page\s+(\d+)\s*-->/gi)) {
-            _pageMarks.push({ at: m.index, page: Number(m[1]) });
-          }
+          // Already extracted, in cleaned-string coordinates, by stripPageMarkers().
+          const _pageMarks = _seedPageMarks.slice();
           // pdf-parse (the fast-pdf tier) emits `-- N of M --` instead of Docling's HTML
           // comment. Without this, every text-native PDF got start_page=null — measured
           // 0/53 on a paper that fast-pdf handled perfectly otherwise, so citations could
           // not name a page. Same markers the tier already splits on for hybridChunks.
-          if (!_pageMarks.length) {
-            for (const m of String(src).matchAll(/--\s*(\d+)\s+of\s+\d+\s*--/g)) {
-              _pageMarks.push({ at: m.index, page: Number(m[1]) });
-            }
-          }
+          // (fast-pdf's `-- N of M --` is handled by stripPageMarkers too.)
           // AUTHORITATIVE SOURCE — the parser already knows the page.
           //
           // Every tier that can paginate emits hybridChunks as

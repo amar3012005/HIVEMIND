@@ -334,6 +334,7 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   const drop = { shape: 0, type: 0, short_quote: 0, quote_absent: 0, noise: 0, low_importance: 0, capped: 0 };
   let repaired = 0;
   const out = [];
+  const _keptOldIdx = []; // original array position of each kept fact (rel remap below)
   for (let _i = 0; _i < arr.length; _i += 1) {
     const item = arr[_i];
     if (out.length >= maxFacts) { drop.capped = arr.length - _i; break; }
@@ -346,6 +347,7 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
     if (loc.quote !== item.source_quote) repaired += 1;
     // The source remains recallable even when its claim is not durable enough.
     if (normalizedImportance(item.importance) < threshold) { drop.low_importance += 1; continue; }
+    _keptOldIdx.push(_i);
     out.push({
       t: durableTitle(item.t, item.f),
       f: item.f.trim(),
@@ -358,6 +360,25 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
       rels: (Array.isArray(item.rels) ? item.rels : [])
         .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
     });
+  }
+  // REMAP INTRA-WINDOW RELATIONSHIP INDICES.
+  // `rels[].to` is a POSITION in the model's own fact array, and the promoter
+  // resolves it positionally against the SURVIVING facts (idByIdx[rel.to]). Any
+  // fact dropped from the MIDDLE of the array therefore shifts every later fact
+  // down one slot, and each surviving rel silently points at the wrong memory —
+  // a real mis-wiring, not a missing edge. Live logs show this happening:
+  // "in=8 kept=3 dropped=5{quote_absent:2 ...}". A prefix cap alone was safe
+  // (survivors keep their positions), which is why it went unnoticed.
+  // Translate old index -> new index, and drop any rel whose target did not
+  // survive rather than let it resolve to a neighbour.
+  const _newByOld = new Map(_keptOldIdx.map((oldIdx, newIdx) => [oldIdx, newIdx]));
+  let _relsDropped = 0;
+  for (const item of out) {
+    const before = item.rels.length;
+    item.rels = item.rels
+      .map((rel) => ({ ...rel, to: _newByOld.has(rel.to) ? _newByOld.get(rel.to) : -1 }))
+      .filter((rel) => rel.to >= 0);
+    _relsDropped += before - item.rels.length;
   }
   const dropped = arr.length - out.length;
   if (dropped > 0 || repaired > 0) {

@@ -183,6 +183,25 @@ async function ensureSchema() {
     );
     CREATE INDEX IF NOT EXISTS rel_from_idx ON relationships(from_id);
     CREATE INDEX IF NOT EXISTS rel_to_idx   ON relationships(to_id);
+    -- ONE ROW PER LOGICAL EDGE. The table's only unique constraint was the primary key, so a
+    -- caller that supplies a fresh random id (createRelationship does) wrote a NEW row for the
+    -- same (from,to,type) on every re-write. Measured: 12 duplicate Mentions rows in one org,
+    -- pairs created one second apart with distinct ids. Nothing in the slot was affected -- the
+    -- shard edge is keyed by its endpoints -- but anything counting edges from SQL was inflated.
+    --
+    -- Making the id deterministic only fixes callers that OMIT it; the constraint makes
+    -- duplication impossible regardless of what any caller passes, which is the difference
+    -- between fixing today's callers and fixing the table.
+    --
+    -- Collapse first, then constrain: the index cannot be created while duplicates exist. Keep
+    -- the EARLIEST row of each group so the original created_at (and any id already referenced
+    -- elsewhere) survives.
+    DELETE FROM relationships a USING relationships b
+     WHERE a.org_id = b.org_id AND a.from_id = b.from_id AND a.to_id = b.to_id
+       AND a.type IS NOT DISTINCT FROM b.type
+       AND (a.created_at, a.id) > (b.created_at, b.id);
+    CREATE UNIQUE INDEX IF NOT EXISTS rel_edge_uniq
+      ON relationships(org_id, from_id, to_id, type);
     CREATE TABLE IF NOT EXISTS knowledge_documents (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
@@ -1046,8 +1065,10 @@ function routesFor(ctx) {
         // nothing for amr_embedded. Non-fatal: the shard edge is already written above.
         try {
           await db().query(
+            // Conflict on the LOGICAL edge. Conflicting on `id` made every distinct id a new
+            // row, which is exactly how the duplicates arose.
             `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
+             ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET confidence=EXCLUDED.confidence`,
             [rel.id || edgeId(org, rel.fromId, rel.toId, rel.type || 'Mentions'),
              org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
         } catch (e) {
@@ -1144,8 +1165,10 @@ function routesFor(ctx) {
         // nothing for amr_embedded. Non-fatal: the shard edge is already written above.
         try {
           await db().query(
+            // Conflict on the LOGICAL edge. Conflicting on `id` made every distinct id a new
+            // row, which is exactly how the duplicates arose.
             `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
+             ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET confidence=EXCLUDED.confidence`,
             [rel.id || edgeId(org, rel.fromId, rel.toId, rel.type || 'Mentions'),
              org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
         } catch (e) {

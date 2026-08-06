@@ -3,16 +3,16 @@
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
-release_id: prod-20260806-9e16bdd6
+release_id: prod-20260806-7e1b07b9
 host: singulance
 deployed_at_utc: 2026-08-06T05:30:00Z          # core image build; FE image 2026-08-06T03:49:43Z
 parent:
   branch: singulance-main
-  sha: 9e16bdd68054d2c2d4e60e94f3df4b456321af3f
+  sha: 7e1b07b9d117022e63282f8db620fd28291b9f3b
 frontend:
-  sha: a60762b2b9ead565f6354096fbbab1053ddeb00b  # Da-vinci main — upload scope modal org tier selectable
+  sha: 42c6703d1851b42e6aa742984a2b4cfe2e07109f  # Da-vinci main
 runtime:
-  VERSION: prod-20260806-9e16bdd6
+  VERSION: prod-20260806-7e1b07b9
   env_change: |
     MEMORY_PROCESSOR_MODEL and ENTERPRISE_EXTRACTION_MODEL moved off
     deepseek/deepseek-v4-flash-0731 to google/gemini-2.5-flash-lite (deepseek
@@ -23,12 +23,12 @@ runtime:
     was returning HTTP 400 "Reasoning is mandatory" at the time. Applied in
     /root/hivemind/.env only, NOT in the repo. Backup: .env.bak-modelswap-*.
 images:
-  core: hivemind/core-api:prod-20260806-9e16bdd68054
+  core: hivemind/core-api:prod-20260806-7e1b07b9d117
   control: hivemind/control-plane:sha-556d95ec5                          # unchanged
   employees: hivemind/employees:prod-20260804-runtime-campaign-86f70547  # unchanged
   tara_deepgram: hivemind/tara-deepgram:sha-bf7af3ca                     # unchanged
   byod_agent: hivemind/hm-agent:sha-a95090c2                             # unchanged
-  frontend_single: hivemind/fe:prod-20260806-c024cd5700a3-single
+  frontend_single: hivemind/fe:prod-20260806-e0be490e8888-single
 migration: none
 changes:
   - KB GROUNDING (the session's main find). normalizeUnifiedClaims gated facts on a
@@ -87,6 +87,22 @@ changes:
     input, not a capability gap. Added a deterministic guard: only when reason=general,
     only when a REAL date parses, and only when the message reads as a question about
     state. clarification / safety_refusal are never overridden.
+  - INGESTION FAIL-PROOFING (this session, second half). Dead jobs no longer delete
+    the bytes needed to replay them, and a retry endpoint plus GET
+    /api/knowledge/jobs?status=failed,dead make failures discoverable and
+    re-runnable; a raw-file sweeper bounds retention. The BullMQ worker lock was
+    30s against 30-134s jobs, so a lapsed lock could re-deliver a job and ingest
+    the same document twice — lockDuration now equals the job budget. The
+    reconciler heals evidence SEGMENTS as well as memories, closing the last silent
+    data-loss path (a segment whose ingest-time heal failed stayed unsearchable
+    forever). Formats with no working parser (pptx/ppt/doc/xls) are refused at
+    KB_EXTENSIONS instead of failing slowly through Docling. Vision no longer counts
+    an empty 200 as success, so the OpenRouter fallback actually runs. Project-scoped
+    uploads reach their project (the modal collapsed every non-personal scope to
+    organization), duplicates are checked per scope so one file may live in My Space
+    AND a project, and deleting a document no longer blocks re-uploading it. Table
+    rows are merged into one contextual memory: the same 5-page budget went from 31
+    memories averaging 154 chars to 17-20 averaging ~235.
   - ALSO IN THIS RELEASE, FROM A PARALLEL SESSION (see acceptance.not_verified):
     .amr recall parity work — B5 graph-expansion + update-chain revival, SQL-mirror
     lexical backfill, dual-write of evidence into the shard, sparse-aware shard
@@ -111,6 +127,13 @@ acceptance:
     - chat_compound_temporal_dispatches_hivemind_diff           # was: 0 tools, answered from model params
     - chat_respond_directly_still_owns_greeting_and_arithmetic  # 17*23=391, no tools
     - chat_statement_with_date_not_diverted                     # "let's meet on August 5" -> no tools
+    - upload_project_scope_lands_in_project                     # job+doc+memories+segments all scope=project
+    - upload_same_file_second_scope_allowed                     # personal AND project, separate jobs
+    - upload_same_file_same_scope_refused                       # duplicate_document
+    - upload_after_delete_allowed                               # was permanently blocked
+    - unsupported_format_refused_instantly                      # pptx -> 415, no Docling burn
+    - jobs_list_and_retry_endpoints                             # replayable flag; 409 when bytes are gone
+    - delete_leaves_no_trace                                    # 7 tables verified 0 after delete
     - fe_scope_modal_orgRole_derivation_present_in_served_bundle
   not_verified:                                  # recorded honestly; NOT accepted by this session
     - amr_recall_parity_lanes                    # parallel session's work; the only .amr org this
@@ -139,15 +162,15 @@ known_gaps:
     (a fresh attacker was banned immediately after the reload). Tailscale
     (singulance-engine 100.81.115.51) remains the out-of-band route.
 rollback:
-  core: hivemind/core-api:rollback-20260806-052930
-  frontend_single: hivemind/fe:rollback-20260806-052930-single
+  core: hivemind/core-api:rollback-20260806-100604
+  frontend_single: hivemind/fe:rollback-20260806-100604-single
   control: hivemind/control-plane:sha-556d95ec5      # unchanged this release
   employees: hivemind/employees:prod-20260804-runtime-campaign-86f70547
   tara_deepgram: hivemind/tara-deepgram:sha-bf7af3ca
   git: revert 9ac8203b..47d0122f; frontend gitlink back to d9fbb8316a67fae368138b430d83374876803f5c
 aliases:
-  stable: prod-20260806-9e16bdd6
-  latest: prod-20260806-9e16bdd6
+  stable: prod-20260806-7e1b07b9
+  latest: prod-20260806-7e1b07b9
 ```
 
 No customer email, connector action, telephone call, or write operation was triggered during

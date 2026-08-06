@@ -603,6 +603,88 @@ export async function backfillEvidenceToShard(orgId, { max = 500, logger = conso
   return out;
 }
 
+/**
+ * READ-COMPARE the two evidence lanes (B4 step 2) — measurement only, writes nothing.
+ *
+ * The cutover discipline that proved storage parity 1.00 originally is dual-write →
+ * read-compare on REAL embeddings → cutover. This is the middle step: for a sample of
+ * evidence segments it issues the SAME query vector to both lanes —
+ *   A) Qdrant `points/search` filtered to layer 'segment' (what /v1/kb-recall serves today)
+ *   B) the shard's own `recallLayer(..., layer 1)` (what it would serve after cutover)
+ * — and reports top-k overlap.
+ *
+ * Runs INSIDE hm-core on purpose: the shard takes a per-open lock, so an external probe
+ * process cannot read it while the server holds it. This is the only place the
+ * comparison can honestly be made.
+ *
+ * Overlap near 1.0 across a real sample is the evidence needed to flip reads. Anything
+ * lower is a reason NOT to, and says so in the log rather than being averaged away.
+ *
+ * @returns {Promise<{samples:number,qdrant:number,shard:number,overlap:number}|null>}
+ */
+export async function readCompareEvidence(orgId, { samples = 5, topK = 10, logger = console } = {}) {
+  const ctx = await getCtx(orgId);
+  if (!ctx?.amr || !pg) return null;
+
+  const { rows } = await pg.query(
+    `SELECT id::text FROM knowledge_segments WHERE org_id=$1 ORDER BY created_at DESC LIMIT $2`,
+    [ctx.org, samples],
+  );
+  if (!rows.length) return null;
+
+  let qTotal = 0; let sTotal = 0; let overlapSum = 0; let compared = 0;
+  for (const r of rows) {
+    let vec = null;
+    try {
+      const qr = await qFetch(`/collections/${ctx.qcoll}/points`, {
+        method: 'POST',
+        body: JSON.stringify({ ids: [r.id], with_vector: true, with_payload: false }),
+      });
+      if (qr.ok) {
+        const j = await qr.json();
+        const p = (j?.result || [])[0];
+        vec = Array.isArray(p?.vector) ? p.vector : p?.vector?.default;
+      }
+    } catch { /* sample skipped below */ }
+    if (!Array.isArray(vec)) continue;
+
+    // Lane A — Qdrant (today's lane)
+    let qIds = [];
+    try {
+      const qr = await qFetch(`/collections/${ctx.qcoll}/points/search`, {
+        method: 'POST',
+        body: JSON.stringify({
+          vector: vec, limit: topK, with_payload: true,
+          filter: { must: [{ key: 'org_id', match: { value: ctx.org } }, { key: 'layer', match: { value: 'segment' } }] },
+        }),
+      });
+      if (qr.ok) {
+        const j = await qr.json();
+        qIds = (j?.result || []).map((h) => String(h.payload?.segment_id || h.id)).filter(Boolean);
+      }
+    } catch { /* lane A empty */ }
+
+    // Lane B — the shard
+    let sIds = [];
+    try {
+      sIds = ctx.amr.recall(Float32Array.from(vec), topK, { layer: 'evidence' }).map((h) => String(h.id));
+    } catch { /* lane B empty */ }
+
+    if (!qIds.length && !sIds.length) continue;
+    const inter = sIds.filter((id) => qIds.includes(id)).length;
+    const denom = Math.max(qIds.length, 1);
+    overlapSum += inter / denom;
+    qTotal += qIds.length; sTotal += sIds.length; compared += 1;
+  }
+
+  if (!compared) return null;
+  const result = { samples: compared, qdrant: qTotal, shard: sTotal, overlap: Number((overlapSum / compared).toFixed(3)) };
+  logger.info?.(`[evidence-read-compare] org=${String(orgId).slice(0, 8)} samples=${result.samples} `
+    + `qdrant_hits=${result.qdrant} shard_hits=${result.shard} top${topK}_overlap=${result.overlap}`
+    + `${result.overlap < 0.9 ? '  ← BELOW 0.9, do NOT cut over' : ''}`);
+  return result;
+}
+
 const lastCompacted = new Map(); // orgId -> epoch ms of the last successful compaction
 
 /**

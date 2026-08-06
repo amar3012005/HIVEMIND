@@ -191,6 +191,18 @@ export async function runShardMaintenanceOnce({ logger = console } = {}) {
           logger.info?.(`[evidence-backfill] written=${ev.written} already=${ev.already} `
             + `no_vector=${ev.novector} failed=${ev.failed}`);
         }
+
+        // B4 step 2 — read-compare the two evidence lanes on REAL embeddings. Pure
+        // measurement: it writes nothing and changes no behaviour. It exists so the
+        // decision to flip /v1/kb-recall to the shard rests on a measured top-k
+        // overlap rather than on the code looking correct.
+        if (isOn('MNEME_EVIDENCE_READ_COMPARE', 'true')) {
+          const { readCompareEvidence } = await import('./embedded-agent.mjs');
+          for (const org of out.backup.orgs) {
+            // eslint-disable-next-line no-await-in-loop
+            await readCompareEvidence(org, { logger }).catch(() => null);
+          }
+        }
       }
     } catch (e) {
       logger.warn?.(`[mirror-backfill] pass failed: ${e.message}`);

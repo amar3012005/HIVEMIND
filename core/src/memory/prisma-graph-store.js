@@ -3,7 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts } from '../vector/mneme/driver.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrGraph } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
@@ -1318,6 +1318,33 @@ export class PrismaGraphStore {
     const normalizedTypes = relationship_types?.length
       ? relationship_types.map(type => normalizeRelationshipType(type) || type)
       : null;
+
+    // `.amr` / BYOD: edges live in the shard (`shard.edg`), not the central graph this
+    // method queries — so recall's graph-expansion lane (persisted-retrieval) received an
+    // EMPTY list for those tenants and silently skipped the hop. `/v1/graph` already
+    // returns edges in almost this exact shape; it was simply never read from here.
+    if (org_id && orgIsRemote(org_id)) {
+      const g = await amrGraph(org_id, { limit }).catch(() => null);
+      const edges = g?.edges || [];
+      const out = [];
+      for (const e of edges) {
+        if (!e?.from_id || !e?.to_id) continue;
+        const type = normalizeRelationshipType(e.type) || e.type;
+        if (normalizedTypes?.length && !normalizedTypes.includes(type)) continue;
+        out.push({
+          id: e.id || `e:${e.from_id}:${e.to_id}:${type}`,
+          from_id: e.from_id,
+          to_id: e.to_id,
+          type,
+          confidence: e.confidence ?? 1,
+          created_at: null,
+          created_by: null,
+          metadata: {},
+        });
+        if (out.length >= limit) break;
+      }
+      return out;
+    }
     const records = await this.client.relationship.findMany({
       where: {
         type: normalizedTypes?.length ? { in: normalizedTypes } : undefined,
@@ -1331,7 +1358,71 @@ export class PrismaGraphStore {
     return records.map(mapRelationshipRecord);
   }
 
+  /**
+   * Graph expansion for an `.amr` / BYOD org, served from the shard's own typed edges.
+   *
+   * The central path below queries `client.relationship` — the CENTRAL Postgres graph,
+   * which holds NO rows for an org whose memories live on its agent. So graph-expansion,
+   * the Contradicts/Updates rerank indexes, and the update-chain walk were all silently
+   * empty for those tenants: recall ran a strict subset of the hybrid with no error and
+   * no log. The shard has had the edges the whole time (`shard.edg`, exposed as
+   * `/v1/mem-relationships`); nothing was wired to read them.
+   *
+   * Returns the SAME mapRelationshipRecord shape as the central path so every caller
+   * (recall expansion, traverse_graph, stigmergic-cot, faraday) is unchanged.
+   */
+  async _getRelatedMemoriesRemote(memoryId, { maxDepth, minConfidence, relationship, org_id }) {
+    const wantType = relationship ? (normalizeRelationshipType(relationship) || relationship) : null;
+    const visited = new Set([memoryId]);
+    const seenEdges = new Set();
+    const collected = [];
+    let frontier = [memoryId];
+
+    for (let depth = 0; depth < maxDepth && frontier.length; depth += 1) {
+      const next = [];
+      // Bounded fan-out: a hub memory can have hundreds of edges, and each hop is an
+      // agent round trip. Cap the frontier so one dense node cannot stall a recall.
+      for (const id of frontier.slice(0, 25)) {
+        let res = null;
+        try { res = await amrMemRelationships(org_id, id); } catch { res = null; }
+        if (!res) continue;
+        const edges = [
+          ...(res.out || []).map((e) => ({ ...e, from_id: id, to_id: e.target_id })),
+          ...(res.in || []).map((e) => ({ ...e, from_id: e.source_id, to_id: id })),
+        ];
+        for (const e of edges) {
+          if (!e.from_id || !e.to_id) continue;
+          const type = normalizeRelationshipType(e.type) || e.type;
+          if (wantType && type !== wantType) continue;
+          const confidence = e.confidence ?? 1;
+          if (confidence < minConfidence) continue;
+          const edgeId = e.id || `e:${e.from_id}:${e.to_id}:${type}`;
+          if (seenEdges.has(edgeId)) continue;
+          seenEdges.add(edgeId);
+          collected.push({
+            id: edgeId,
+            from_id: e.from_id,
+            to_id: e.to_id,
+            type,
+            confidence,
+            created_at: e.created_at || null,
+            created_by: e.created_by || null,
+            metadata: e.metadata || {},
+          });
+          for (const peer of [e.from_id, e.to_id]) {
+            if (!visited.has(peer)) { visited.add(peer); next.push(peer); }
+          }
+        }
+      }
+      frontier = next;
+    }
+    return collected;
+  }
+
   async getRelatedMemories(memoryId, { maxDepth = 2, minConfidence = 0, relationship = null, user_id, org_id, project, scope = 'personal' } = {}) {
+    if (org_id && orgIsRemote(org_id)) {
+      return this._getRelatedMemoriesRemote(memoryId, { maxDepth, minConfidence, relationship, org_id });
+    }
     const visitedMemoryIds = new Set([memoryId]);
     const visitedEdgeIds = new Set();
     const collected = [];

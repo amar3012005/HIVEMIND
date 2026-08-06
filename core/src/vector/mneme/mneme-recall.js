@@ -100,6 +100,12 @@ export function mnemeSearch(store, vector, filter, limit, scoreThreshold = 0) {
     let rec;
     try { rec = JSON.parse(h.text); } catch { continue; }
     if (!rec || !rec.id) continue;
+    // This lane recalls ALL layers on purpose (memory+evidence cross-layer recall is a feature),
+    // which means it is also the lane that would surface the `document` layer. Those records are
+    // access/title metadata backing the shard-side document gate, not content — they must never
+    // reach the pipeline as if they were memories. Excluded here rather than left to each
+    // caller's filter, because "every caller remembers" is not a property you can rely on.
+    if (rec.layer === 'document') continue;
     if (!matchesFilter(rec, filter)) continue;
     out.push({ id: rec.id, score: h.score, payload: toPayload(rec) });
     if (out.length >= limit) break;

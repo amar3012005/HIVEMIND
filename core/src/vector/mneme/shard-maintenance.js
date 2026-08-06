@@ -139,7 +139,7 @@ export function snapshotShardsOnce({
  * @returns {Promise<{backup:object,compact:object|null}>}
  */
 export async function runShardMaintenanceOnce({ logger = console } = {}) {
-  const out = { backup: null, mirror: null, evidence: null, compact: null };
+  const out = { backup: null, mirror: null, docs: null, evidence: null, compact: null };
 
   out.backup = isOn('MNEME_BACKUP_ENABLED', 'true')
     ? snapshotShardsOnce({ logger })
@@ -176,6 +176,26 @@ export async function runShardMaintenanceOnce({ logger = console } = {}) {
       // dual-write only covers NEW ingests, so without this a slot never holds its
       // historical evidence and can never be read-compared against the current lane.
       // Additive and idempotent; no read path depends on it yet.
+      // Documents -> shard (layer 'document'). These carry each document's owner, scope-key
+      // grants and title: the shard-side half of the knowledge_documents join, and the thing a
+      // shard-side access gate reads. The /v1/kb-doc dual-write only covers new ingests, so
+      // without this pass a gate would have grants for recent documents and none for older ones —
+      // and it fails closed, which would quietly hide a user's own older files.
+      if (isOn('MNEME_DOC_BACKFILL_ENABLED', 'true')) {
+        const { backfillDocsToShard } = await import('./embedded-agent.mjs');
+        let dc = { pg: 0, written: 0, failed: 0 };
+        for (const org of out.backup.orgs) {
+          // eslint-disable-next-line no-await-in-loop
+          const r = await backfillDocsToShard(org, { logger }).catch(() => null);
+          if (!r) continue;
+          dc.pg += r.pg; dc.written += r.written; dc.failed += r.failed;
+        }
+        out.docs = dc;
+        if (dc.written || dc.failed) {
+          logger.info?.(`[doc-backfill] docs=${dc.pg} written=${dc.written} failed=${dc.failed}`);
+        }
+      }
+
       if (isOn('MNEME_EVIDENCE_BACKFILL_ENABLED', 'true')) {
         const { backfillEvidenceToShard } = await import('./embedded-agent.mjs');
         let ev = { written: 0, novector: 0, failed: 0, already: 0 };

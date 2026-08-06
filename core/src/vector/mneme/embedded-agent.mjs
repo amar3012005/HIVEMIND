@@ -529,6 +529,53 @@ export async function backfillSqlMirror(orgId, { max = 2000, logger = console } 
  *
  * @returns {Promise<{pg:number,already:number,written:number,novector:number,failed:number}>}
  */
+/**
+ * Backfill `knowledge_documents` into the shard as layer-'document' records.
+ *
+ * The dual-write in `/v1/kb-doc` only covers documents ingested from now on. Without this, a
+ * shard-side access gate would have grants for RECENT documents and nothing for the rest — and a
+ * gate that silently has no record for a document fails closed, i.e. the user's older documents
+ * simply stop being findable. Additive and idempotent (`amr.write` upserts by id); no read path
+ * consumes these yet.
+ *
+ * @returns {Promise<{pg:number,written:number,failed:number}>}
+ */
+export async function backfillDocsToShard(orgId, { max = 2000, logger = console } = {}) {
+  const out = { pg: 0, written: 0, failed: 0 };
+  const ctx = await getCtx(orgId);
+  if (!ctx?.amr || !pg) return out;
+
+  const { rows } = await pg.query(
+    `SELECT id::text AS id, user_id::text AS user_id, filename, content_type, created_at,
+            coalesce(metadata->>'title', filename) AS title,
+            coalesce(metadata->'tags', '[]'::jsonb) AS tags
+       FROM knowledge_documents
+      WHERE org_id=$1 AND deleted_at IS NULL
+      ORDER BY created_at DESC LIMIT $2`, [ctx.org, max]);
+  out.pg = rows.length;
+
+  for (const r of rows) {
+    try {
+      ctx.amr.write({
+        id: r.id,
+        userId: r.user_id || null,
+        content: null,
+        title: r.title || r.filename || null,
+        layer: 'document',
+        memoryType: 'kb_document',
+        tags: Array.isArray(r.tags) ? r.tags.filter((t) => typeof t === 'string') : [],
+        createdAt: r.created_at || null,
+        metadata: { filename: r.filename || null, content_type: r.content_type || null },
+      }, null);
+      out.written += 1;
+    } catch (e) {
+      out.failed += 1;
+      logger.warn?.(`[doc-backfill] doc=${r.id} org=${String(ctx.org).slice(0, 8)}: ${e.message}`);
+    }
+  }
+  return out;
+}
+
 export async function backfillEvidenceToShard(orgId, { max = 500, logger = console } = {}) {
   const out = { pg: 0, already: 0, written: 0, novector: 0, failed: 0 };
   const ctx = await getCtx(orgId);
@@ -1126,6 +1173,44 @@ function routesFor(ctx) {
            status=EXCLUDED.status, checksum=EXCLUDED.checksum, metadata=EXCLUDED.metadata, deleted_at=NULL`,
         [d.id, org, d.userId || null, d.filename || null, d.contentType || null, d.status || 'ready',
          d.checksum || null, JSON.stringify({ ...(d.metadata || {}), title: d.title || d.filename || null, tags: d.tags || d.metadata?.tags || [] }), d.createdAt || null]);
+
+      // ── Document record into the shard (layer 'document') ────────────────────────────────
+      // The one thing standing between a slot and serving evidence WITHOUT Postgres is the
+      // `knowledge_documents` join: it decides who may see a segment and supplies the title.
+      // This writes that join's right-hand side into the slot, so the shard-side gate
+      // (doc-access.mjs) has something to gate against.
+      //
+      // Authoritative copy, NOT denormalised onto each segment. That distinction is the whole
+      // point: scope-key grants change (a document is shared, then un-shared), and per-segment
+      // copies would keep answering with the OLD grants — a stale access decision, which is a
+      // leak. One record per document, rewritten by this same upsert whenever the doc changes.
+      //
+      // Layer 'document' is excluded from every recall path structurally (see amr-store), so
+      // these can never surface as if they were memories.
+      //
+      // Non-fatal: Postgres above is still the source of truth and every read still goes
+      // through it. Nothing reads this yet.
+      if (String(process.env.MNEME_KB_DOC_DUAL_WRITE ?? 'true').toLowerCase() !== 'false') {
+        try {
+          const meta = d.metadata || {};
+          amr.write({
+            id: d.id,
+            userId: d.userId || null,
+            content: null,
+            title: d.title || meta.title || d.filename || null,
+            layer: 'document',
+            memoryType: 'kb_document',
+            // The scope-key grants ARE the access rule; carrying them verbatim is what lets the
+            // pure predicate reproduce the SQL rather than approximate it.
+            tags: Array.isArray(d.tags) ? d.tags : (Array.isArray(meta.tags) ? meta.tags : []),
+            createdAt: d.createdAt || null,
+            metadata: { filename: d.filename || null, content_type: d.contentType || null },
+          }, null);
+        } catch (e) {
+          console.warn(`[kb-doc] shard doc dual-write failed doc=${d.id} org=${org}: ${e.message} `
+            + '— Postgres row is authoritative and unaffected');
+        }
+      }
       return { ok: true };
     },
 
@@ -1649,6 +1734,18 @@ function routesFor(ctx) {
       if (segIds.length) {
         await qFetch(`/collections/${qcoll}/points/delete`, { method: 'POST', body: JSON.stringify({ points: segIds }) }).catch(() => {});
       }
+
+      // The shard copies must go too — the FOURTH lifecycle this delete has had to route (see the
+      // derivations / evidence-links / grids notes above). Both were being left behind:
+      //   · evidence records — segments deleted from Postgres and Qdrant stayed in the shard's
+      //     evidence layer, so the shard lane kept offering them as candidates. Harmless ONLY
+      //     because the access join drops rows whose document is deleted; the moment the shard
+      //     serves reads itself that becomes served deleted content.
+      //   · the document record — leaving it would strand its scope-key grants in the slot, so a
+      //     shard-side gate would answer from the grants of a document that no longer exists.
+      // Deleting a record that was never written is a no-op, so this is safe on old shards.
+      for (const sid of segIds) { try { amr.remove(sid); } catch { /* absent → nothing to drop */ } }
+      try { amr.remove(doc.id); } catch { /* doc record predates the dual-write */ }
 
       await db().query('UPDATE knowledge_documents SET deleted_at=now() WHERE id=$1 AND org_id=$2', [doc.id, org]);
       return { ok: true, document_id: doc.id, deleted_memories: memIds.length, deleted_segments: segIds.length };

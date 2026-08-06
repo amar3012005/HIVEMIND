@@ -34,6 +34,10 @@ const { MnemeStore } = loadNative();
 
 const REL_TYPE = { Mentions: 1, Updates: 2, Derives: 3, Contradicts: 4, PartOf: 5, Extends: 6 };
 const REL_NAME = [null, 'Mentions', 'Updates', 'Derives', 'Contradicts', 'PartOf', 'Extends'];
+// Layer ids + the document-layer recall exclusion live in their own binding-free module so the
+// rule that decides what a caller may see stays unit-testable. See layers.mjs.
+import { layerIdOf, isNonRecallable, DOCUMENT_LAYER } from './layers.mjs';
+export { DOCUMENT_LAYER, isNonRecallable };
 const PAGE = 2000; // records per native scan page — bounds the JS working set
 const DONE = 0xFFFFFFFF; // recordsPage sentinel
 // Plain number (not BigInt): napi coerces JS number → i64; BigInt throws. ns from ms×1e6 exceeds
@@ -184,7 +188,7 @@ export class AmrMemoryStore {
     const hasVec = vector instanceof Float32Array || Array.isArray(vector);
     if (hasVec) {
       const vec = vector instanceof Float32Array ? vector : Float32Array.from(vector);
-      const layerId = merged.layer === 'evidence' ? 1 : merged.layer === 'cognitive' ? 2 : 0;
+      const layerId = layerIdOf(merged.layer);
       this.store.insertLayered(JSON.stringify(merged), vec, dateToNs(merged.valid_from), layerId);
       if (found) { this._revDropSlot(found.slot); try { this.store.delete(found.slot); } catch { /* ignore */ } }
       this.store.flush();
@@ -195,7 +199,7 @@ export class AmrMemoryStore {
     } else {
       // New record with no vector yet (phase 1 of the 2-phase write) — zero vector placeholder;
       // the vector-bearing phase replaces the slot.
-      const layerId = merged.layer === 'evidence' ? 1 : merged.layer === 'cognitive' ? 2 : 0;
+      const layerId = layerIdOf(merged.layer);
       this.store.insertLayered(JSON.stringify(merged), new Float32Array(this.dim), dateToNs(merged.valid_from), layerId);
       this.store.flush();
     }
@@ -223,6 +227,7 @@ export class AmrMemoryStore {
     const out = [];
     for (const h of hits) {
       let rec; try { rec = JSON.parse(h.text); } catch { continue; }
+      if (isNonRecallable(rec, filter)) continue;
       if (!this._passesFilter(rec, filter)) continue;
       out.push({ id: rec.id, score: h.score, payload: rec });
       if (out.length >= limit) break;
@@ -321,6 +326,7 @@ export class AmrMemoryStore {
     const top = []; // bounded min-heap-ish: index 0 is the weakest kept candidate
     for (const { rec } of this._scan()) {
       if (rec.deleted_at) continue;
+      if (isNonRecallable(rec, filter)) continue;
       if (!this._passesFilter(rec, filter)) continue;
       const raw = `${rec.title || ''} ${rec.content || ''}`.slice(0, MAX_CHARS);
       const docTokens = tokenizeFolded(raw);

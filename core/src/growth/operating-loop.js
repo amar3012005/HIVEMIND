@@ -1,5 +1,19 @@
 const ACTIVE = ['PLANNED', 'ACTIVE', 'MONITORING'];
 
+// Auto-execute: when the org opts into autonomous operation — env HQ_AUTO_EXECUTE=true
+// or the plan's own policy.autonomy_mode=AUTONOMOUS — the committed opportunities are
+// dispatched immediately (status READY, no activation sprint, no per-opportunity Start
+// gate), so the queue drains without a human click. This is what stops the runtime from
+// forming a plan then idling for the whole measurement window with dormant todos. Outward
+// sends (email/calls) stay approval-gated at the connector/governance layer, unchanged —
+// auto-execute only removes the internal Start gate, never the outward-write gate.
+// Default OFF: with the flag unset and no AUTONOMOUS policy, the first-life Start gate is
+// preserved exactly as before.
+export function autoExecuteEnabled(contract = {}) {
+  if (String(process.env.HQ_AUTO_EXECUTE || '').toLowerCase() === 'true') return true;
+  return String(contract?.policy?.autonomy_mode || '').toUpperCase() === 'AUTONOMOUS';
+}
+
 export function evaluateNextGrowthAction({ baseline, stage, delegations = [], now = new Date() }) {
   if (!baseline) return { action: 'inspect', reason: 'No source-backed baseline is available.', priority: 'high' };
   if (!stage) return { action: 'plan', reason: 'No active growth stage exists for the current company position.', priority: 'high' };
@@ -231,7 +245,11 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
         String(hypothesis.expected_signal || ''), String(hypothesis.falsification || ''),
       );
     }
-    const firstLife = contract.first_life && typeof contract.first_life === 'object' ? contract.first_life : null;
+    // Auto-execute nulls the first-life gate → every opportunity commits READY and
+    // dispatches without a Start click (and no activation sprint is projected).
+    const firstLife = autoExecuteEnabled(contract)
+      ? null
+      : (contract.first_life && typeof contract.first_life === 'object' ? contract.first_life : null);
     const recommendedSourceId = String(firstLife?.recommended_todo_source_id || stage.queue_item_id || '');
     const todos = [];
     for (const [index, item] of queue.entries()) {
@@ -257,8 +275,8 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
           constraint_id: item.constraint_id || contract.primary_constraint_id,
           baseline_ref: contract.baseline_ref, growth_plan_cycle_id: hqCycleId || null,
           runtime_epoch: runtime.epoch,
-          activation_sprint_id: item.activation_sprint_id || null,
-          activation_slot: item.activation_slot || null,
+          activation_sprint_id: firstLife ? (item.activation_sprint_id || null) : null,
+          activation_slot: firstLife ? (item.activation_slot || null) : null,
           proposal_source_id: item.id || null,
           first_life_policy_id: item.first_life_policy_id || firstLife?.policy_id || null,
           first_life_policy_version: item.first_life_policy_version || firstLife?.policy_version || null,

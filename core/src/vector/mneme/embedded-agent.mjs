@@ -25,6 +25,7 @@
 // reimplemented here.
 import { AmrMemoryStore } from './amr-store.mjs';
 import { emitKbResults } from './kb-hit-merge.mjs';
+import { isMetadataLayer } from './layers.mjs';
 
 const DIM = Number(process.env.EMBEDDING_DIMENSION || 1024);
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
@@ -576,6 +577,92 @@ export async function backfillDocsToShard(orgId, { max = 2000, logger = console 
   return out;
 }
 
+/**
+ * Backfill provenance (`memory_evidence_links`) into the slot as `Derives` edges.
+ *
+ * The dual-write in `/v1/kb-provenance` only covers new ingests. Without this, the slot's graph
+ * answers "what supersedes what" but not "where did this claim come from" for anything ingested
+ * before — which is the half of the graph the Evidence tab is built on.
+ *
+ * Idempotent in effect (a repeated edge is the same edge) and skips links whose endpoints have no
+ * slot yet, reporting the skip rather than counting it as written.
+ *
+ * @returns {Promise<{pg:number,written:number,skipped:number}>}
+ */
+export async function backfillProvenanceToShard(orgId, { max = 5000, logger = console } = {}) {
+  const out = { pg: 0, written: 0, skipped: 0 };
+  const ctx = await getCtx(orgId);
+  if (!ctx?.amr || !pg) return out;
+  const { rows } = await pg.query(
+    `SELECT memory_id::text AS memory_id, segment_id::text AS segment_id, confidence
+       FROM memory_evidence_links
+      WHERE org_id=$1 AND segment_id IS NOT NULL LIMIT $2`, [ctx.org, max]);
+  out.pg = rows.length;
+  for (const r of rows) {
+    try {
+      if (ctx.amr.addEdge({ fromId: r.memory_id, toId: r.segment_id, type: 'Derives', confidence: r.confidence ?? 1.0 })) out.written += 1;
+      else out.skipped += 1;
+    } catch { out.skipped += 1; }
+  }
+  if (out.written || out.skipped) {
+    logger.info?.(`[provenance-backfill] org=${String(ctx.org).slice(0, 8)} pg=${out.pg} `
+      + `written=${out.written} skipped_no_slot=${out.skipped}`);
+  }
+  return out;
+}
+
+/**
+ * Backfill `canonical_entities` (a CENTRAL table with no per-org equivalent) into the slot as
+ * layer-'entity' records, plus a `Mentions` edge per existing link. Until this runs, an `.amr`
+ * tenant's memories are in their own file while their entity graph's names are in ours.
+ *
+ * @returns {Promise<{entities:number,written:number,edges:number,skipped:number}>}
+ */
+export async function backfillEntitiesToShard(orgId, { max = 5000, logger = console } = {}) {
+  const out = { entities: 0, written: 0, edges: 0, skipped: 0 };
+  const ctx = await getCtx(orgId);
+  if (!ctx?.amr || !pg) return out;
+  let rows = [];
+  try {
+    // canonical_entities is CENTRAL, so it is addressed schema-qualified rather than through the
+    // hm search_path this pool defaults to.
+    ({ rows } = await pg.query(
+      // Column names verified against the live schema: the entity's type column is
+      // `entity_kind`, and `normalized_name` is the slug the entity lanes already match on —
+      // reusing it rather than re-deriving one keeps the in-slot key identical to the tag key.
+      `SELECT e.id::text AS id, e.canonical_name, e.entity_kind, e.normalized_name, e.aliases
+         FROM hivemind.canonical_entities e WHERE e.organization_id=$1 LIMIT $2`, [ctx.org, max]));
+  } catch (e) { logger.warn?.(`[entity-backfill] read failed: ${e.message}`); return out; }
+  out.entities = rows.length;
+  for (const e of rows) {
+    try {
+      ctx.amr.write({
+        id: e.id,
+        content: e.canonical_name || null,
+        title: e.canonical_name || null,
+        layer: 'entity',
+        memoryType: 'canonical_entity',
+        tags: [`entity-slug:${e.normalized_name || String(e.canonical_name || '').toLowerCase().trim()}`],
+        metadata: { entity_kind: e.entity_kind || null, aliases: Array.isArray(e.aliases) ? e.aliases : [] },
+      }, null);
+      out.written += 1;
+    } catch { out.skipped += 1; continue; }
+    try {
+      const { rows: links } = await pg.query(
+        'SELECT memory_id::text AS memory_id, confidence FROM hivemind.memory_entity_links WHERE entity_id=$1::uuid', [e.id]);
+      for (const l of links) {
+        if (ctx.amr.addEdge({ fromId: l.memory_id, toId: e.id, type: 'Mentions', confidence: l.confidence ?? 1.0 })) out.edges += 1;
+        else out.skipped += 1;
+      }
+    } catch { /* links are best-effort; the entity record still landed */ }
+  }
+  if (out.written || out.edges) {
+    logger.info?.(`[entity-backfill] org=${String(ctx.org).slice(0, 8)} entities=${out.entities} `
+      + `written=${out.written} mentions_edges=${out.edges} skipped=${out.skipped}`);
+  }
+  return out;
+}
+
 export async function backfillEvidenceToShard(orgId, { max = 500, logger = console } = {}) {
   const out = { pg: 0, already: 0, written: 0, novector: 0, failed: 0 };
   const ctx = await getCtx(orgId);
@@ -855,6 +942,16 @@ function routesFor(ctx) {
       const r = b.record || {};
       if (!r.id) return { ok: false, error: 'record.id required' };
       amr.write(r, Array.isArray(b.vector) ? b.vector : undefined);
+      // METADATA LAYERS ARE NOT MEMORIES — do not mirror them into hm.memories.
+      //
+      // The shard's recall paths exclude `document`/`entity` structurally, but the SQL mirror
+      // is a FOURTH read path: /v1/lexical runs Postgres FTS over this table and never saw
+      // that rule. Measured in production the moment entities began mirroring — a recall for
+      // "Korrindale Werke Anselm Brogaard" returned 31 results of which 2 were
+      // memory_type='canonical_entity', i.e. bare entity names rendered to the user as
+      // memories. Excluding at the recall sites was not enough; the write is where it belongs,
+      // because a row that is never mirrored cannot leak through any future SQL reader either.
+      if (isMetadataLayer(r.layer)) return { ok: true };
       // SQL MIRROR — ported verbatim from the external agent's /v1/write.
       // The embedded agent wrote ONLY to the AMR shard, while the external agent also inserts
       // into hm.memories. Same endpoint, different persistence — which is why hm.memories held
@@ -946,7 +1043,11 @@ function routesFor(ctx) {
       const f = b.filter || {};
       const tsQuery = lexicalTsQuery(b.text);
       if (!tsQuery) return { results: [] };
-      const conds = ['org_id=$1', 'deleted_at IS NULL', "content_tsv @@ to_tsquery('simple',$2)"];
+      // Defence in depth: /v1/write no longer mirrors metadata layers, but rows written before
+      // that guard are still in this table, and a future SQL reader would inherit the same trap.
+      // The shard lanes exclude these structurally; the SQL lane must say so explicitly.
+      const conds = ['org_id=$1', 'deleted_at IS NULL', "content_tsv @@ to_tsquery('simple',$2)",
+        "(layer IS NULL OR layer NOT IN ('document','entity'))"];
       const args = [org, tsQuery];
       if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
       if (f.layer) { args.push(f.layer); conds.push(`layer=$${args.length}`); }
@@ -1656,6 +1757,34 @@ function routesFor(ctx) {
              d.confidence ?? null, JSON.stringify(d.metadata || {})]);
           derived += 1;
         } catch (e) { console.warn(`[kb-provenance] derivation failed mem=${d.memory_id}: ${e.message}`); }
+      }
+
+      // ── Provenance residency: the same links as typed edges IN the slot ──────────────────
+      // A memory and the evidence segment it came from are BOTH already shard records, so
+      // "this claim derives from that segment" is expressible as the slot's own `Derives` edge.
+      // No new edge type, no new region — the graph the shard already carries just gains the
+      // provenance it was missing, which is what made the Evidence tab a Postgres-only feature.
+      //
+      // The SQL rows above stay authoritative and keep the fields an edge cannot hold
+      // (`excerpt`, `link_type`, per-link confidence). This is deliberately the lossy-but-useful
+      // half: the excerpt is recoverable from the segment record itself, so nothing is lost that
+      // the slot cannot reconstruct.
+      //
+      // Best-effort: provenance already succeeded above; an edge failure must not undo it.
+      if (String(process.env.MNEME_PROVENANCE_EDGES ?? 'true').toLowerCase() !== 'false') {
+        let edged = 0;
+        let skipped = 0;
+        for (const l of links) {
+          if (!l?.memory_id || !l?.segment_id) continue;
+          try {
+            // Counts only what actually landed: addEdge is a no-op when either endpoint has no
+            // slot yet (a segment whose dual-write has not run), and a counter that treats that
+            // as success would report provenance the slot does not hold.
+            if (amr.addEdge({ fromId: l.memory_id, toId: l.segment_id, type: 'Derives', confidence: l.confidence ?? 1.0 })) edged += 1;
+            else skipped += 1;
+          } catch { skipped += 1; }
+        }
+        if (edged || skipped) console.log(`[kb-provenance] org=${String(org).slice(0, 8)} shard_derives_edges=${edged} skipped_no_slot=${skipped}`);
       }
       return { ok: true, linked, derived };
     },

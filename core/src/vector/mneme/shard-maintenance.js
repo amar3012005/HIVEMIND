@@ -139,7 +139,7 @@ export function snapshotShardsOnce({
  * @returns {Promise<{backup:object,compact:object|null}>}
  */
 export async function runShardMaintenanceOnce({ logger = console } = {}) {
-  const out = { backup: null, mirror: null, docs: null, evidence: null, compact: null };
+  const out = { backup: null, mirror: null, docs: null, entities: null, provenance: null, evidence: null, compact: null };
 
   out.backup = isOn('MNEME_BACKUP_ENABLED', 'true')
     ? snapshotShardsOnce({ logger })
@@ -194,6 +194,25 @@ export async function runShardMaintenanceOnce({ logger = console } = {}) {
         if (dc.written || dc.failed) {
           logger.info?.(`[doc-backfill] docs=${dc.pg} written=${dc.written} failed=${dc.failed}`);
         }
+      }
+
+      // Entities + provenance -> slot. These were the last two parts of a user's memory layer
+      // still living only in Postgres: entity NAMES in the central table (a residency gap, not a
+      // tidiness one) and "where did this claim come from" in hm.memory_evidence_links.
+      if (isOn('MNEME_ENTITY_BACKFILL_ENABLED', 'true')) {
+        const { backfillEntitiesToShard, backfillProvenanceToShard } = await import('./embedded-agent.mjs');
+        let ent = { entities: 0, written: 0, edges: 0 };
+        let prov = { pg: 0, written: 0, skipped: 0 };
+        for (const org of out.backup.orgs) {
+          // eslint-disable-next-line no-await-in-loop
+          const e = await backfillEntitiesToShard(org, { logger }).catch(() => null);
+          if (e) { ent.entities += e.entities; ent.written += e.written; ent.edges += e.edges; }
+          // eslint-disable-next-line no-await-in-loop
+          const p = await backfillProvenanceToShard(org, { logger }).catch(() => null);
+          if (p) { prov.pg += p.pg; prov.written += p.written; prov.skipped += p.skipped; }
+        }
+        out.entities = ent;
+        out.provenance = prov;
       }
 
       if (isOn('MNEME_EVIDENCE_BACKFILL_ENABLED', 'true')) {

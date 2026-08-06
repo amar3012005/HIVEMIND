@@ -6,6 +6,10 @@
 // preserves every feature — project-scope, entity, cross-layer (memory+evidence), multi-scope
 // parallel, bi-temporal is_latest, promoted exclusion — because the filter is the pipeline's own.
 
+// Metadata layers (document, entity) are gating/graph structure, NOT content. This lane recalls
+// ALL layers on purpose, so it is the one that would surface them as if they were memories.
+import { isNonRecallable } from './layers.mjs';
+
 // Qdrant payload key (snake) → stored .amr record field (Prisma camel). Unmapped keys pass through.
 const KEY_MAP = {
   org_id: 'orgId', user_id: 'userId', memory_type: 'memoryType', is_latest: 'isLatest',
@@ -105,7 +109,7 @@ export function mnemeSearch(store, vector, filter, limit, scoreThreshold = 0) {
     // access/title metadata backing the shard-side document gate, not content — they must never
     // reach the pipeline as if they were memories. Excluded here rather than left to each
     // caller's filter, because "every caller remembers" is not a property you can rely on.
-    if (rec.layer === 'document') continue;
+    if (isNonRecallable(rec, filter)) continue;
     if (!matchesFilter(rec, filter)) continue;
     out.push({ id: rec.id, score: h.score, payload: toPayload(rec) });
     if (out.length >= limit) break;

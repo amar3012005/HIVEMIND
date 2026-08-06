@@ -269,3 +269,60 @@ measurement. `.edg` bytes proxied for "edges exist" the way top-10 overlap proxi
 lanes agree". Both were read as conclusive; both were about the artefact, not the property.
 Ask the system for the property directly — here, one API call for the actual relationships,
 which was available the whole time and would have cost less than the investigation did.
+
+---
+
+## 10. Entities + provenance into the slot — and the leak that followed
+
+Verified end-to-end through the public endpoint on a real personal org
+(`6946c8a6`, `amr_embedded`), four uploads.
+
+**Routing needs no client hint.** `POST /api/knowledge/upload?async=true` with only an API key
+resolved user → org → `storage_mode: amr_embedded` and wrote to that user's slot every time.
+
+**Provenance** — `memory_evidence_links` become the slot's own `Derives` edges (memory and
+segment are both already shard records, so no new edge type was needed). Wired in
+`/v1/kb-provenance`, the single agent-side route all provenance flows through, rather than at
+three call sites. Backfill: **pg=16 written=16 skipped_no_slot=0**. Live API returns
+`Derives → amr-e2e-test3.txt`.
+
+**Entities** — `canonical_entities` is CENTRAL with no per-org table, so an `.amr` tenant's
+memories were in their file while their entity NAMES were in ours. Now layer-4 records plus
+`Mentions` edges. Verified positively, not by absence of errors:
+`Mentions → 'Anselm Brogaard' type=canonical_entity`, same for `Korrindale Werke` and
+`Marisol Ferreira`.
+
+### Three failures, each caught only by running it
+
+1. **`entityType` does not exist** (`e1b165e7`). The field is `entityKind`. Both the SQL
+   backfill and the Prisma `select` had it wrong, so no entity ever reached a slot. I claimed
+   in the moment that it "failed silently" — **wrong**: Prisma logged a loud `prisma:error` on
+   every call, and the owner saw it in the logs before I did. My `try/catch` swallowed the
+   throw; it did not silence the logger. Do not describe an error as silent without checking
+   whose logger owns it.
+
+2. **The `Mentions` edges I first cited as proof were not mine.** Targets were memory titles
+   ("Projektleiterin von Projekt Nordwind"), i.e. the pre-existing co-mention linker. I nearly
+   reported them as evidence the entity mirror worked. Proof has to name the thing it proves —
+   `type=canonical_entity` is the discriminator, not the edge type.
+
+3. **Entity records leaked into recall** (`bfea045d`). A search returned 31 results of which 2
+   were `memory_type='canonical_entity'` — bare entity names shown to the user as memories.
+
+### The leak is the lesson
+
+`document`/`entity` are excluded structurally from all **three** shard recall paths. The leak
+went through a **fourth** path nobody counted: `/v1/write` also mirrors every record into
+`hm.memories`, and `/v1/lexical` runs Postgres FTS over that table with no layer predicate.
+Excluding at the shard recall sites could never have caught it — the SQL lane does not go
+through them.
+
+Fixed at the **write**: metadata layers are no longer mirrored at all, because a row that is
+never written cannot leak through any *future* SQL reader either. That is the difference
+between fixing the instance and fixing the class. The lexical lane also refuses those layers,
+for rows that predate the guard; 4 already-mirrored rows were purged.
+
+I wrote in `layers.mjs` that "excluding it here, once, is why no caller has to remember to" —
+and then, in the same session, added a caller that bypassed it. **An invariant enforced at N
+call sites holds until someone adds site N+1**, and the someone is usually you, an hour later.
+Enforce at the choke point the data must pass through (the write), not at the readers.

@@ -12008,7 +12008,30 @@ exit \$RC
             if (!/^[a-f0-9]{64}$/.test(checksum)) {
               return jsonResponse(res, { error: 'checksum must be a hex sha256 of the file bytes' }, 400);
             }
-            const scopeKey = String(body?.scope_key || body?.scopeKey || '').trim() || null;
+            // DUPLICATES ARE PER-SCOPE, and the pre-check has to answer the same
+            // question the upload will. The same file legitimately exists in a
+            // user's own space AND in a project — findDuplicate is scope-aware and
+            // the upload path passes scope.scopeKey, but this route only accepted a
+            // pre-built scope_key that the client never sent. With none, the lookup
+            // widens to "anywhere in this org", so uploading a file to a project
+            // was reported as a duplicate because a copy existed in My Space, and
+            // the client skipped it before the scope-aware upload was ever asked.
+            //
+            // Accept the same inputs the upload takes (target_scope + project_id)
+            // and build the key with the same `${scopeType}:${scopeId}` shape
+            // authorizeKnowledgeScope produces, so pre-check and upload agree.
+            let scopeKey = String(body?.scope_key || body?.scopeKey || '').trim() || null;
+            if (!scopeKey) {
+              const _ts = String(body?.target_scope || body?.targetScope || '').trim().toLowerCase();
+              const _pid = String(body?.project_id || body?.projectId || '').trim();
+              const _tid = String(body?.primary_team_id || body?.primaryTeamId || '').trim();
+              if (_ts === 'project' && _pid) scopeKey = `project:${_pid}`;
+              else if (_ts === 'team' && _tid) scopeKey = `team:${_tid}`;
+              else if (_ts === 'organization') scopeKey = `organization:${orgId}`;
+              else if (_ts === 'personal') scopeKey = `personal:${userId}`;
+              // Anything else stays null — the old org-wide answer, which is the
+              // right default when the caller genuinely has no scope in mind.
+            }
             try {
               const existing = await knowledgeUploadJobStore.findDuplicate({ orgId, scopeKey, checksum });
               if (existing?.status === 'ready') {

@@ -56,7 +56,31 @@ export class KnowledgeUploadService {
     // (1).pdf, BundB-Solvis-Budget.pdf and Dachmarke (1).pdf all showed "Failed"
     // while holding 10, 2, 18 and 7 memories respectively.
     // `message` is included because the FE prefers it over the raw error code.
-    if (job?.status === 'ready') return { ok: false, status: 409, body: {
+    // A ready job row OUTLIVES its document. Deleting a document removes the
+    // document, its segments and its memories, but not the ingest job — so this
+    // reported "already in your knowledge base" for a file the user had just
+    // deleted, and there was no way to ingest it again. Verified: deleting
+    // BundB-Solvis-Budget.pdf removed all 31 memories, and the very next upload of
+    // the same bytes came back duplicate_document.
+    //
+    // Confirm the document still exists before claiming the file is present. Same
+    // check the /upload/precheck route already makes; the two must agree or the
+    // pre-flight says "go" and the upload then refuses.
+    let _readyDocLives = false;
+    if (job?.status === 'ready') {
+      if (!job.documentId) {
+        _readyDocLives = false; // ready with no document to point at — nothing to reuse
+      } else if (this.prisma?.knowledgeDocument) {
+        try {
+          _readyDocLives = !!(await this.prisma.knowledgeDocument.findFirst({
+            where: { id: job.documentId, orgId }, select: { id: true },
+          }));
+        } catch { _readyDocLives = true; } // lookup failed — keep the old, safer behaviour
+      } else {
+        _readyDocLives = true;
+      }
+    }
+    if (job?.status === 'ready' && _readyDocLives) return { ok: false, status: 409, body: {
       error: 'duplicate_document',
       duplicate: true,
       message: 'Already in your knowledge base — this exact file was ingested before.',
@@ -64,14 +88,26 @@ export class KnowledgeUploadService {
       status: 'existing', job_id: job.id,
       existing_document_id: job.documentId, actions: ['view_existing', 'reprocess'],
     } };
+    // Ready job whose document is gone: treat it as re-ingestable. Falling through
+    // reuses the existing row via the processingVersion bump below, so the retry
+    // path and this path stay one state machine.
+    const _reingestDeleted = job?.status === 'ready' && !_readyDocLives;
+    if (_reingestDeleted) {
+      console.log(`[upload] re-ingesting ${file.filename}: ready job ${job.id} points at a deleted document`);
+    }
     if (job && job.userId !== userId) {
       return { ok: false, status: 409, body: { error: 'upload_already_processing', status: 'processing' } };
     }
-    if (job && !['failed', 'dead', 'cancelled'].includes(job.status)) {
+    // `_reingestDeleted` must bypass this guard too: 'ready' is not terminal, so
+    // without it a ready-but-deleted job returns existing:true here and the
+    // re-ingest never happens — the branch above would be dead code.
+    if (job && !_reingestDeleted && !['failed', 'dead', 'cancelled'].includes(job.status)) {
       return { ok: true, existing: true, job };
     }
 
     const processingVersion = job ? job.processingVersion + 1 : 1;
+    // A ready-but-deleted job is reset exactly like a failed one, so both paths
+    // share one state machine (see /api/knowledge/jobs/retry).
     if (job) {
       await this.jobStore.updateOwned(job.id, orgId, {
         status: 'queued', stage: 'queued', progress: 0, processingVersion,

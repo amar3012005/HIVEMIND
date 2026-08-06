@@ -397,10 +397,38 @@ async def voice(ws: WebSocket, session_id: str):
     try:
         xai = await _xai_connect(snapshot, _resume_conversation_id(principal))
         await xai.send(json.dumps(_session_update(snapshot)))
-    except Exception:
+    except Exception as exc:
         log.exception("xAI realtime connection failed")
-        await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {"failure_code": "xai_connect_failed"}})
-        await ws.close(code=1011)
+        # A provider refusal used to reach the browser as a bare close(1011) with no
+        # reason, so the call popup simply VANISHED and the user could not tell a dead
+        # credential from a bug. Classify the failure and TELL the browser before
+        # closing. Observed in production: the xAI key was revoked, so every handshake
+        # returned HTTP 403 — the widget disappeared, no turns were persisted, and the
+        # runtime's check-in analysis then had no transcript to ground on.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is None:
+            status = getattr(exc, "status_code", None)
+        auth_failure = status in (401, 403)
+        failure_code = "xai_auth_rejected" if auth_failure else "xai_connect_failed"
+        message = (
+            f"The voice provider rejected this session (HTTP {status}). The xAI credential is "
+            "invalid, expired, or not entitled to the realtime API — this is a configuration "
+            "issue, not a problem with what you said."
+            if auth_failure else
+            "The voice provider could not be reached, so this call could not start."
+        )
+        await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "failed", "payload": {
+            "failure_code": failure_code, "provider": "grok",
+            "provider_status": status, "message": message,
+        }})
+        try:
+            await ws.send_json({
+                "type": "error", "error": failure_code, "provider": "grok",
+                "provider_status": status, "message": message, "fatal": True,
+            })
+        except Exception:  # noqa: BLE001 — the socket may already be gone; never mask the real cause
+            log.warning("could not deliver the provider failure to the browser")
+        await ws.close(code=1011, reason=failure_code[:120])
         return
     await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "started", "payload": {"provider": "grok", "model": config.TARA_GROK_MODEL}})
     max_duration_seconds = int(snapshot.get("max_duration_seconds") or 0)

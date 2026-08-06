@@ -345,7 +345,50 @@ export function adaptToDecision(tool, args, message, language) {
       }, usage: null };
     }
     case 'respond_directly':
-    default:
+    default: {
+      // ── Workspace-knowledge guard on respond_directly ────────────────────
+      // respond_directly is documented as greetings / arithmetic / clarification
+      // / safety only, and its own description says "Never use for workspace
+      // knowledge". The router violates that on COMPOUND questions: measured
+      // live, "What changed in my knowledge between Aug 4 and Aug 6 2026? Was
+      // the Gmail pipeline working on August 1st?" selected respond_directly
+      // with NO tool calls, and the model answered from its own parameters —
+      // first inventing workspace facts outright, later (once grounding
+      // tightened) refusing with "I don't have visibility ... my training only
+      // includes data up to June 2024". Both are wrong: hivemind_diff answers
+      // that question correctly when the same message is asked one clause at a
+      // time. A single-clause temporal question routes fine, so this is a
+      // routing miss on compound input, not a capability gap.
+      //
+      // Deterministic, not another prompt plea. Deliberately NARROW so it
+      // cannot degrade the cases respond_directly legitimately owns:
+      //   - reason must be 'general' — 'clarification' and 'safety_refusal' are
+      //     never overridden, so refusals and questions-back are untouched.
+      //   - the message must contain a REAL parsed date (extractMessageDates
+      //     needs ISO or a month name + day; a bare year like "1969" does not
+      //     match), which greetings and arithmetic do not have.
+      //   - it must also read as a question about state/knowledge, so a plain
+      //     statement like "let's meet on August 5" is NOT diverted.
+      // If any of those fail, behaviour is byte-identical to before.
+      const _reason = String(args?.reason || 'general');
+      if (_reason === 'general') {
+        const _dates = extractMessageDates(message);
+        const _asksAboutState = /\b(what|which|was|were|did|does|do|status|change|changed|changes|happened|happen|know|knowledge|update|updated)\b/i.test(String(message || ''));
+        if (_dates.length >= 1 && _asksAboutState) {
+          const _time = _dates.length >= 2
+            ? { valid_at: null, known_at: null, range: { start: _dates[0], end: _dates[_dates.length - 1] } }
+            : { valid_at: _dates[_dates.length - 1], known_at: null, range: null };
+          console.log(`[chat-router] respond_directly overridden -> grounded temporal recall (dates=${JSON.stringify(_dates)}); the router tried to answer a workspace question from model parameters`);
+          return { decision: {
+            ...base,
+            operation: 'timeline',   // gatherEvidence dispatches _diff/_at from time.*
+            queries: [base.query_canonical_en],
+            recall_mode: 'explain',
+            time: _time,
+            tool_groups: ['hivemind-recall'],
+          }, usage: null };
+        }
+      }
       return { decision: {
         ...base,
         operation: 'direct',
@@ -353,6 +396,7 @@ export function adaptToDecision(tool, args, message, language) {
         direct_response: s(args?.response),
         failure_response: args?.reason === 'safety_refusal' ? s(args?.response) : null,
       }, usage: null };
+    }
   }
 }
 

@@ -12,6 +12,29 @@ import path from 'path';
 
 const DOCLING_URL = process.env.DOCLING_URL || 'http://docling:5001';
 
+// THE PARSER MUST FINISH INSIDE THE JOB THAT OWNS IT.
+//
+// Docling's timeouts were configured independently of the queue's job timeout and
+// exceeded it: smart convert 600s (equal to the WHOLE job budget) plus hybrid
+// chunking 600s, against a 600s KB_QUEUE_JOB_TIMEOUT_MS. So a slow parse could
+// never fail cleanly — the worker was killed mid-parse and the stale-job reaper
+// recorded STALE_ABANDONED ("the worker was lost") with no real cause.
+//
+// Measured on a text-less 8KB PDF: groq-vision returned empty, Docling was used
+// as the fallback, and the job burned 609s before being reaped. Not a crash, not
+// a timeout the user could see — just a document that silently never ingested.
+//
+// Deriving the ceiling from the job budget makes the invariant structural rather
+// than a coincidence of two env vars: raising KB_QUEUE_JOB_TIMEOUT_MS raises this
+// automatically, and no override can push the parser past the job that owns it.
+// The reserve covers everything AFTER parse (measured: promote ~25s, embed ~4s,
+// plus segment writes and relationship passes).
+const JOB_BUDGET_MS = Number(process.env.KB_QUEUE_JOB_TIMEOUT_MS || 600_000);
+const PARSE_CEILING_MS = Math.max(
+  30_000,
+  Number(process.env.DOCLING_PARSE_CEILING_MS || Math.floor(JOB_BUDGET_MS * 0.55)),
+);
+
 /**
  * Collapse letter-spacing artifacts from designed/branded PDFs.
  *
@@ -150,9 +173,12 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
   // Ingest is ASYNCHRONOUS (upload returns 202), so parse duration is invisible
   // to the user while parse QUALITY decides everything downstream — a document is
   // extracted once and recalled forever. Spend the time here, not at query time.
-  const overallTimeout = Number(
-    smart ? (process.env.DOCLING_SMART_TIMEOUT_MS || 600_000)
-          : (process.env.DOCLING_TIMEOUT_MS || 420_000),
+  const overallTimeout = Math.min(
+    Number(
+      smart ? (process.env.DOCLING_SMART_TIMEOUT_MS || 600_000)
+            : (process.env.DOCLING_TIMEOUT_MS || 420_000),
+    ),
+    PARSE_CEILING_MS,
   );
 
   try {
@@ -286,7 +312,13 @@ export async function chunkWithDocling(filePath, filename) {
     const res = await fetch(`${DOCLING_URL}/v1/chunk/hybrid/file`, {
       method: 'POST',
       body: formData,
-      signal: AbortSignal.timeout(Number(process.env.DOCLING_CHUNK_TIMEOUT_MS || 600_000)),
+      // Same ceiling as convert (see PARSE_CEILING_MS): chunking used to allow a
+      // further 600s AFTER a convert that could already consume the entire job
+      // budget, so the two together could reach 1200s inside a 600s job.
+      signal: AbortSignal.timeout(Math.min(
+        Number(process.env.DOCLING_CHUNK_TIMEOUT_MS || 600_000),
+        PARSE_CEILING_MS,
+      )),
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => 'unknown');

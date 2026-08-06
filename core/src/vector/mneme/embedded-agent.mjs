@@ -376,7 +376,10 @@ function lexicalTsQuery(text) {
     .filter((token) => /\p{N}/u.test(token) || token.length >= 3))];
   return tokens.join(' | ');
 }
-function appendDocumentAccess(conds, args, alias, org, access = {}) {
+// Exported ONLY so the access differential harness can drive the real SQL rather than a
+// re-typed copy of it — a harness that compares a predicate against its own paraphrase proves
+// nothing. Not part of the route surface; no caller outside this module and the harness.
+export function appendDocumentAccess(conds, args, alias, org, access = {}) {
   const userId = access.userId || access.user_id || null;
   if (!userId) { conds.push('FALSE'); return; }
   const add = (value) => { args.push(value); return `$${args.length}`; };
@@ -1202,6 +1205,16 @@ function routesFor(ctx) {
       if (b.documentId) filter.must.push({ key: 'document_id', match: { value: b.documentId } });
       else if (documentIds.length) filter.must.push({ key: 'document_id', match: { any: documentIds } });
       const kbLimit = Number(b.limit) || 20;
+      // Both lanes must OVER-FETCH. The access join below removes every id the caller may not
+      // see, and it runs AFTER the lanes have already truncated to their limit — so a lane that
+      // asks for exactly kbLimit returns fewer than kbLimit whenever any candidate is filtered,
+      // even though more allowed segments existed. That is a silent under-return, the same shape
+      // as the 200-cap that was starving the memory reranker. Fetch a pool, let the join filter,
+      // then trim to the contract.
+      const poolLimit = Math.min(
+        Math.max(kbLimit * 4, 50),
+        Number(process.env.MNEME_KB_RECALL_POOL_MAX || 400),
+      );
       // id -> score, INSERTION-ORDERED. This must not be a bare id list: the result set is
       // built from these entries, so the score has to survive alongside the id. An earlier
       // version collected ids here and then mapped over the Qdrant response variable to get
@@ -1209,17 +1222,24 @@ function routesFor(ctx) {
       // ReferenceError on every recall that found anything. A Map also drops the O(n^2)
       // `includes` scan the id list needed to dedupe.
       const hits = new Map();
+      // Per-lane contribution counters. These exist to answer ONE question with data instead of
+      // opinion: can Qdrant be retired for .amr evidence? The lanes run in a fixed order, so the
+      // second lane's count is exactly "candidates the first lane missed". Retiring Qdrant is
+      // only justified once laneA-unique is durably zero on real traffic — a top-k overlap
+      // measured over a 22-segment corpus is far too weak a basis to delete a working store.
+      let laneA = 0;
+      let laneB = 0;
       // Lane A — Qdrant. No longer fatal on its own: a failure used to return an empty
       // result set, so evidence recall died with Qdrant. The shard lane below can now
       // carry it.
       try {
         const qr = await qFetch(`/collections/${qcoll}/points/search`, { method: 'POST', body: JSON.stringify({
-          vector: b.vector, limit: kbLimit, with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
+          vector: b.vector, limit: poolLimit, with_payload: true, score_threshold: b.scoreThreshold ?? 0.0, filter }) });
         if (qr.ok) {
           const j = await qr.json();
           for (const h of (j.result || [])) {
             const id = h.payload?.segment_id || h.id;
-            if (id && !hits.has(id)) hits.set(id, h.score);
+            if (id && !hits.has(id)) { hits.set(id, h.score); laneA += 1; }
           }
         }
       } catch (e) {
@@ -1238,11 +1258,16 @@ function routesFor(ctx) {
         try {
           const wantDoc = b.documentId || null;
           const wantDocs = documentIds.length ? new Set(documentIds.map(String)) : null;
-          for (const h of amr.recall(Float32Array.from(b.vector), kbLimit, { layer: 'evidence' })) {
+          // Same score_threshold as lane A. Without it the lanes disagreed on what counts as a
+          // hit, so the shard could inject candidates Qdrant had deliberately excluded — which
+          // would make any lane-vs-lane comparison meaningless.
+          const minScore = b.scoreThreshold ?? 0.0;
+          for (const h of amr.recall(Float32Array.from(b.vector), poolLimit, { layer: 'evidence' })) {
             const docId = h.payload?.metadata?.document_id;
             if (wantDoc && String(docId) !== String(wantDoc)) continue;
             if (wantDocs && !wantDocs.has(String(docId))) continue;
-            if (h.id && !hits.has(h.id)) hits.set(h.id, h.score);
+            if (typeof h.score === 'number' && h.score < minScore) continue;
+            if (h.id && !hits.has(h.id)) { hits.set(h.id, h.score); laneB += 1; }
           }
         } catch (e) {
           console.warn(`[embedded-agent] kb-recall shard lane failed org=${org}: ${e.message} — Qdrant results still returned`);
@@ -1263,8 +1288,13 @@ function routesFor(ctx) {
       const allowed = new Map(rows.map((row) => [row.segment_id, row]));
       // Emit in candidate order (Qdrant first, then shard-only additions), keeping only the ids
       // the access join returned. Pure + unit-tested in kb-hit-merge.mjs — see that module for
-      // why this step does not live inline any more.
-      return { results: emitKbResults(hits, allowed) };
+      // why this step does not live inline any more. Trim to the caller's limit: the pool was
+      // widened for the access join, not to change the response contract.
+      const results = emitKbResults(hits, allowed).slice(0, kbLimit);
+      // The retirement evidence, recorded per real query rather than per synthetic sample.
+      console.log(`[kb-recall] org=${String(org).slice(0, 8)} pool=${poolLimit} qdrant_new=${laneA} `
+        + `shard_new=${laneB} allowed=${allowed.size} returned=${results.length}`);
+      return { results };
     },
 
     '/v1/kb-lexical': async (b) => {

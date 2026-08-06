@@ -16,6 +16,18 @@
 # its health smoke. Pair with scripts/rollback.sh.
 set -euo pipefail
 
+# GATE: never deploy anything that is not a clean, named commit. On 2026-08-01
+# production was found running code that existed in no committed branch — built
+# from a dirty feature-branch working tree, unreproducible. See CLAUDE.md.
+# IMAGE_TAG below is already required to be a git SHA from CI; this enforces that
+# the tree the SHA came from was actually clean.
+if [ -x "$(dirname "$0")/preflight-deploy.sh" ] && [ "${SKIP_PREFLIGHT:-}" != "1" ]; then
+  "$(dirname "$0")/preflight-deploy.sh" >/dev/null || {
+    echo "[deploy-image] preflight FAILED — refusing to deploy. Fix, or set SKIP_PREFLIGHT=1 to override (logged)." >&2
+    exit 1
+  }
+fi
+
 IMAGE="${IMAGE:-ghcr.io/amar3012005/hivemind-core}"
 IMAGE_TAG="${IMAGE_TAG:?IMAGE_TAG is required (the git sha from CI)}"
 CONTAINERS="${CONTAINERS:-hm-core hm-core-2}"
@@ -61,8 +73,13 @@ net_aliases() { # $1=container $2=network → space-separated aliases
     | grep -vE '^[0-9a-f]{12}$' | grep -v '^$' | tr '\n' ' '
 }
 
-log "pulling immutable artifact $REF"
-docker pull "$REF"
+if [ "${SKIP_IMAGE_PULL:-}" = "1" ]; then
+  docker image inspect "$REF" >/dev/null || { echo "[deploy-image] local artifact missing: $REF" >&2; exit 1; }
+  log "using verified local immutable artifact $REF"
+else
+  log "pulling immutable artifact $REF"
+  docker pull "$REF"
+fi
 
 # 1. Ephemeral smoke against the real env — never route traffic to an unproven image.
 FIRST="${CONTAINERS%% *}"

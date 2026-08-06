@@ -14,6 +14,7 @@ complements (does not replace) HIVEMIND recall and the auto-memory index at
 | [llm-provider-config.md](llm-provider-config.md) | THE canonical LLM config — Cerebras→OpenRouter, gpt-oss-120b, no Groq/llama, the chokepoint |
 | [../decision-docs/recall_final.md](../decision-docs/recall_final.md) | THE recall record — what was broken (drift/2-stacks/determinism/reranker) + every fix + final architecture |
 | [rollback-manifest.md](rollback-manifest.md) | Stable `:stable-20260722` image snapshots for every container + how to roll back |
+| [macbook-session-rules.md](macbook-session-rules.md) | Standing rules for laptop sessions: rebase not merge, never deploy from the laptop, verify anything cross-machine against the box's live state |
 
 Standing rules (from the user, do not violate):
 - **No patchwork, no rebuild** — production-level upgrades only; reuse over rebuild.

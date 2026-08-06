@@ -1053,7 +1053,60 @@ function routesFor(ctx) {
           WHERE ${conds.join(' AND ')} ORDER BY score DESC, s.segment_index ASC LIMIT $${args.length}`,
         args,
       );
-      return { results: rows.map((row) => ({ ...row, score: Number(row.score) || 0 })) };
+      const results = rows.map((row) => ({ ...row, score: Number(row.score) || 0 }));
+
+      // ── IN-SHARD EVIDENCE LEXICAL, ACCESS-GATED ──────────────────────────────
+      // Evidence is dual-written into the shard (layer 'evidence'), so the slot can
+      // answer this lane without the SQL mirror. But evidence access is NOT a property
+      // of the segment — it is gated by scope-key tags on the parent DOCUMENT
+      // (appendDocumentAccess). Returning shard hits directly would bypass that check
+      // and leak segments across scopes.
+      //
+      // So we do not reimplement the scope rules against the shard record: we take the
+      // shard's candidate ids and ask Postgres which of their documents this caller may
+      // actually see, using THE SAME appendDocumentAccess. Correct by construction, and
+      // it fails closed (that helper pushes FALSE when there is no userId).
+      try {
+        const lim = Number(b.limit) || 20;
+        if (results.length < lim) {
+          const seen = new Set(results.map((r) => r.segment_id));
+          const shardHits = amr.lexical(b.text, { layer: 'evidence' }, lim * 2)
+            .filter((h) => h?.id && !seen.has(h.id));
+          if (shardHits.length) {
+            const docIds = [...new Set(shardHits.map((h) => h.payload?.metadata?.document_id).filter(Boolean))];
+            let allowed = new Set();
+            if (docIds.length) {
+              const aConds = ['d.org_id=$1', 'd.deleted_at IS NULL', 'd.id = ANY($2::uuid[])'];
+              const aArgs = [org, docIds];
+              appendDocumentAccess(aConds, aArgs, 'd', org, f.access);
+              const { rows: ok } = await db().query(
+                `SELECT d.id::text AS id FROM knowledge_documents d WHERE ${aConds.join(' AND ')}`, aArgs);
+              allowed = new Set(ok.map((r) => r.id));
+            }
+            for (const h of shardHits) {
+              if (results.length >= lim) break;
+              const m = h.payload?.metadata || {};
+              if (!m.document_id || !allowed.has(String(m.document_id))) continue; // fails closed
+              results.push({
+                segment_id: h.id,
+                document_id: m.document_id,
+                content: h.payload?.content ?? null,
+                score: h.score,
+                title: h.payload?.title ?? m.heading ?? null,
+                start_page: m.start_page ?? null,
+                end_page: m.end_page ?? null,
+                word_count: m.word_count ?? null,
+                segment_type: m.segment_type ?? 'chunk',
+                segment_index: m.segment_index ?? 0,
+                metadata: m,
+              });
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`[embedded-agent] shard evidence lexical failed org=${org}: ${e.message} — Postgres results still returned`);
+      }
+      return { results };
     },
 
     '/v1/kb-hydrate': async (b) => {

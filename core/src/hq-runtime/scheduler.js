@@ -114,11 +114,21 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
       }).catch(() => {});
       const runtime = await getHqRuntime({ prisma, orgId: schedule.org_id }).catch(() => null);
       if (runtime) {
+        // Honest failure summary: only claim an "ambiguous external write" when that is
+        // actually the failure (error.code / message). The old hardcoded text said
+        // "ambiguous external write" for EVERY cycle error — including transient planning
+        // failures that self-resolve on retry — which actively misled diagnosis (the real
+        // cause is in details.error, and no HQ cycle path performs an x-ads write). Reflect
+        // the true reason; nothing external is ever replayed either way.
+        const _msg = String(error?.message || error || '');
+        const _ambiguous = error?.code === 'ambiguous_write' || /ambiguous/i.test(_msg);
         await appendHqEvent({
           prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: cycle.runtimeEpoch, cycleId: cycle.id,
           eventType: 'blocked', title: 'HQ cycle failed safely',
-          summary: 'No ambiguous external write will be replayed. The cycle is retained for inspection and a bounded retry is scheduled.',
-          details: { error: String(error.message || error).slice(0, 1000) },
+          summary: _ambiguous
+            ? 'An ambiguous external provider result was left unreplayed. The cycle is retained for reconciliation and a bounded retry is scheduled.'
+            : 'The cycle hit an error and was retained for inspection; nothing external was replayed and a bounded retry is scheduled.',
+          details: { error: _msg.slice(0, 1000), ambiguous: _ambiguous },
         }).catch(() => {});
         await prisma.hqRuntime.updateMany({
           where: { id: runtime.id, orgId: runtime.orgId, epoch: cycle.runtimeEpoch, state: { not: 'PAUSED' } },

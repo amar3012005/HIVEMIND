@@ -3520,10 +3520,14 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         const res = await apiClient.post('/api/recall', {
           query_context: query,
           mode: 'explain',
-          time: {
-            ...(txTime ? { known_at: txTime } : {}),
-            ...(validTime ? { valid_at: validTime } : {}),
-          },
+          // TOP-LEVEL, not nested under `time`. /api/recall reads body.valid_at /
+          // body.transaction_at (routes/recall.js) and NEVER reads body.time, so the
+          // nested form was silently dropped: every hivemind_at call came back
+          // UNFILTERED (measured: 356 memories / 1.7MB for a single-instant query),
+          // which looks like a working tool but is the whole corpus. `known_at` was
+          // also the wrong key — the route's transaction axis is `transaction_at`.
+          ...(txTime ? { transaction_at: txTime } : {}),
+          ...(validTime ? { valid_at: validTime } : {}),
           ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
           project_id: args.project_id || null,
         });
@@ -3557,7 +3561,10 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         const recallAt = (value) => apiClient.post('/api/recall', {
           query_context: query,
           mode: 'explain',
-          time: { valid_at: value.toISOString() },
+          // Top-level (see hivemind_at above): nested `time` is never read, so BOTH
+          // sides of the diff were the same unfiltered set and added/removed was
+          // recall jitter rather than a temporal delta.
+          valid_at: value.toISOString(),
           ...(tags.length ? { tags } : {}),
         });
         const [a, b] = await Promise.all([recallAt(from), recallAt(to)]);

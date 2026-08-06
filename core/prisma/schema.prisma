@@ -2615,6 +2615,12 @@ model ReferralCampaign {
   onboardingLimits Json      @default("{}") @map("onboarding_limits")
   runwayPlan       String    @default("enterprise") @map("runway_plan") @db.VarChar(50)
   runwayLimits     Json      @default("{}") @map("runway_limits")
+  runwayIntervalMonths Int   @default(1) @map("runway_interval_months")
+  /// 'none' | 'percentage' | 'fixed' — a code carries at most one discount shape.
+  discountKind        String  @default("none") @map("discount_kind") @db.VarChar(20)
+  discountPercent     Int?    @map("discount_percent")
+  discountAmountCents Int?    @map("discount_amount_cents")
+  discountCurrency    String  @default("EUR") @map("discount_currency") @db.VarChar(3)
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   redemptions      ReferralRedemption[]

@@ -29,7 +29,9 @@ import {
   claimReferralOffer,
   getEffectivePlan,
   normalizeLimitOverrides,
+  normalizeReferralCampaignInput,
   normalizeReferralCode,
+  publicReferralCampaign,
   redeemReferral,
 } from './billing/entitlements.js';
 import {
@@ -2875,6 +2877,69 @@ const server = http.createServer(async (req, res) => {
     const promotion = await prisma?.promotion.updateMany({ where: { id: adminPromotionRevoke[1], status: { in: ['draft', 'active'] } }, data: { status: 'revoked' } });
     if (!promotion?.count) return jsonResponse(res, { error: 'Not found' }, 404);
     await audit({ eventType: 'commercial.promotion_revoked', eventCategory: 'billing', action: 'update', resourceType: 'promotion', resourceId: adminPromotionRevoke[1],
+      metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+    return jsonResponse(res, { ok: true });
+  }
+
+  // ─── Platform Commercial: two-phase referral campaigns ────────────────────
+  // A single admin-generated code configures BOTH phases of an enterprise
+  // signup: onboarding (custom duration, default 14 days) and runway
+  // (recurring, monthly by default), plus an optional percentage-off or
+  // fixed-amount-off discount. Distinct from Promotion: this is the model the
+  // signup page's "Partner referral code" field already redeems against
+  // (see claimReferralOffer/activateOffer in billing/entitlements.js).
+  if (pathname === '/admin/api/platform/referral-campaigns' && (req.method === 'GET' || req.method === 'POST')) {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    if (req.method === 'GET') {
+      const campaigns = await prisma.referralCampaign.findMany({ orderBy: { createdAt: 'desc' }, take: 250 });
+      return jsonResponse(res, { referral_campaigns: campaigns.map(publicReferralCampaign) });
+    }
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const normalized = normalizeReferralCampaignInput(body);
+      const campaign = await prisma.referralCampaign.create({
+        data: {
+          code: normalized.code,
+          name: normalized.name,
+          active: normalized.active,
+          maxRedemptions: normalized.maxRedemptions,
+          startsAt: normalized.startsAt,
+          endsAt: normalized.endsAt,
+          onboardingDays: normalized.onboardingDays,
+          onboardingPlan: normalized.onboardingPlan,
+          onboardingLimits: normalized.onboardingLimits,
+          runwayPlan: normalized.runwayPlan,
+          runwayLimits: normalized.runwayLimits,
+          runwayIntervalMonths: normalized.runwayIntervalMonths,
+          discountKind: normalized.discountKind,
+          discountPercent: normalized.discountPercent,
+          discountAmountCents: normalized.discountAmountCents,
+          discountCurrency: normalized.discountCurrency,
+        },
+      });
+      await audit({
+        eventType: 'commercial.referral_campaign_created', eventCategory: 'billing', action: 'create',
+        resourceType: 'referral_campaign', resourceId: campaign.id,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, code: campaign.code, name: campaign.name },
+        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin',
+      });
+      return jsonResponse(res, { referral_campaign: publicReferralCampaign(campaign) }, 201);
+    } catch (error) {
+      if (error?.code === 'P2002') return jsonResponse(res, { error: 'That code is already in use' }, 409);
+      return jsonResponse(res, { error: error.message }, 400);
+    }
+  }
+
+  const adminReferralCampaignRevoke = pathname.match(/^\/admin\/api\/platform\/referral-campaigns\/([0-9a-f-]{36})\/revoke$/i);
+  if (adminReferralCampaignRevoke && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const result = await prisma.referralCampaign.updateMany({ where: { id: adminReferralCampaignRevoke[1], active: true }, data: { active: false } });
+    if (!result?.count) return jsonResponse(res, { error: 'Not found' }, 404);
+    await audit({ eventType: 'commercial.referral_campaign_revoked', eventCategory: 'billing', action: 'update', resourceType: 'referral_campaign', resourceId: adminReferralCampaignRevoke[1],
       metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
     return jsonResponse(res, { ok: true });
   }

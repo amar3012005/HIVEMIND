@@ -51,8 +51,28 @@ export function buildReferralOffer(campaign, now = new Date()) {
     onboarding_limits: normalizeLimitOverrides(campaign.onboardingPlan, campaign.onboardingLimits),
     runway_plan: campaign.runwayPlan,
     runway_limits: normalizeLimitOverrides(campaign.runwayPlan, campaign.runwayLimits),
+    runway_interval_months: Math.max(1, Number(campaign.runwayIntervalMonths) || 1),
+    discount: buildReferralDiscount(campaign),
     quoted_at: now.toISOString(),
   };
+}
+
+/// Each code carries at most one discount shape: a percentage off, or a fixed
+/// amount off (in minor currency units). 'none' means no billing discount —
+/// the code only configures onboarding/runway entitlement phasing.
+export function buildReferralDiscount(campaign) {
+  const kind = String(campaign?.discountKind || 'none');
+  if (kind === 'percentage') {
+    const percent = Number(campaign.discountPercent);
+    if (!Number.isFinite(percent) || percent <= 0 || percent > 100) return { kind: 'none' };
+    return { kind: 'percentage', percent_off: percent };
+  }
+  if (kind === 'fixed') {
+    const amountCents = Number(campaign.discountAmountCents);
+    if (!Number.isFinite(amountCents) || amountCents <= 0) return { kind: 'none' };
+    return { kind: 'fixed', amount_off_cents: amountCents, currency: String(campaign.discountCurrency || 'EUR').toUpperCase() };
+  }
+  return { kind: 'none' };
 }
 
 export async function activateOffer({ tx, orgId, offer, source, now = new Date() }) {
@@ -190,4 +210,100 @@ export async function redeemReferral({ prisma, orgId, userId, code }) {
     }
     return claimReferralOffer({ tx, orgId, userId, offer: buildReferralOffer(campaign, now), now });
   });
+}
+
+/// Validates/shapes an admin-submitted create payload for a two-phase
+/// (onboarding + runway) referral campaign. Throws with a field-named message
+/// on anything invalid rather than silently coercing bad input.
+export function normalizeReferralCampaignInput(input = {}) {
+  const code = normalizeReferralCode(input.code);
+  if (!code) throw new Error('code is required');
+  const name = String(input.name || '').trim().slice(0, 160);
+  if (!name) throw new Error('name is required');
+
+  const onboardingDays = input.onboarding_days === undefined || input.onboarding_days === null || input.onboarding_days === ''
+    ? 14
+    : Number(input.onboarding_days);
+  if (!Number.isFinite(onboardingDays) || onboardingDays < 0 || onboardingDays > 90) {
+    throw new Error('onboarding_days must be between 0 and 90 (default 14)');
+  }
+
+  const runwayIntervalMonths = input.runway_interval_months === undefined || input.runway_interval_months === null || input.runway_interval_months === ''
+    ? 1
+    : Number(input.runway_interval_months);
+  if (!Number.isInteger(runwayIntervalMonths) || runwayIntervalMonths < 1 || runwayIntervalMonths > 12) {
+    throw new Error('runway_interval_months must be an integer between 1 and 12 (default 1 = monthly)');
+  }
+
+  const onboardingPlan = String(input.onboarding_plan || 'enterprise').trim() || 'enterprise';
+  const runwayPlan = String(input.runway_plan || 'enterprise').trim() || 'enterprise';
+
+  const discountKind = String(input.discount_kind || 'none').trim().toLowerCase();
+  if (!['none', 'percentage', 'fixed'].includes(discountKind)) {
+    throw new Error("discount_kind must be one of 'none', 'percentage', 'fixed'");
+  }
+  let discountPercent = null;
+  let discountAmountCents = null;
+  let discountCurrency = String(input.discount_currency || 'EUR').trim().toUpperCase().slice(0, 3) || 'EUR';
+  if (discountKind === 'percentage') {
+    discountPercent = Number(input.discount_percent);
+    if (!Number.isFinite(discountPercent) || discountPercent <= 0 || discountPercent > 100) {
+      throw new Error('discount_percent must be between 1 and 100');
+    }
+    discountPercent = Math.round(discountPercent);
+  } else if (discountKind === 'fixed') {
+    discountAmountCents = Number(input.discount_amount_cents);
+    if (!Number.isFinite(discountAmountCents) || discountAmountCents <= 0) {
+      throw new Error('discount_amount_cents must be a positive integer (minor currency units)');
+    }
+    discountAmountCents = Math.round(discountAmountCents);
+  }
+
+  const maxRedemptions = input.max_redemptions === undefined || input.max_redemptions === null || input.max_redemptions === ''
+    ? null
+    : Number(input.max_redemptions);
+  if (maxRedemptions !== null && (!Number.isFinite(maxRedemptions) || maxRedemptions < 1)) {
+    throw new Error('max_redemptions must be a positive integer, or blank for unlimited');
+  }
+
+  const startsAt = input.starts_at ? new Date(input.starts_at) : null;
+  if (startsAt && Number.isNaN(startsAt.getTime())) throw new Error('starts_at is not a valid date');
+  const endsAt = input.ends_at ? new Date(input.ends_at) : null;
+  if (endsAt && Number.isNaN(endsAt.getTime())) throw new Error('ends_at is not a valid date');
+  if (startsAt && endsAt && endsAt <= startsAt) throw new Error('ends_at must be after starts_at');
+
+  return {
+    code, name,
+    active: input.active === undefined ? true : Boolean(input.active),
+    maxRedemptions,
+    startsAt, endsAt,
+    onboardingDays, onboardingPlan,
+    onboardingLimits: input.onboarding_limits && typeof input.onboarding_limits === 'object' ? input.onboarding_limits : {},
+    runwayPlan,
+    runwayLimits: input.runway_limits && typeof input.runway_limits === 'object' ? input.runway_limits : {},
+    runwayIntervalMonths,
+    discountKind, discountPercent, discountAmountCents, discountCurrency,
+  };
+}
+
+export function publicReferralCampaign(campaign) {
+  return {
+    id: campaign.id,
+    code: campaign.code,
+    name: campaign.name,
+    active: campaign.active,
+    max_redemptions: campaign.maxRedemptions,
+    redemption_count: campaign.redemptionCount,
+    starts_at: campaign.startsAt,
+    ends_at: campaign.endsAt,
+    onboarding_days: campaign.onboardingDays,
+    onboarding_plan: campaign.onboardingPlan,
+    onboarding_limits: campaign.onboardingLimits,
+    runway_plan: campaign.runwayPlan,
+    runway_limits: campaign.runwayLimits,
+    runway_interval_months: campaign.runwayIntervalMonths,
+    discount: buildReferralDiscount(campaign),
+    created_at: campaign.createdAt,
+    updated_at: campaign.updatedAt,
+  };
 }

@@ -2380,7 +2380,15 @@ export async function runReactAgentV2({
               // stamping on segments exists to prevent.
               ...(ctx.projectId ? { project_id: ctx.projectId, scope: 'project' } : {}),
             }, ctx);
-            if (saveRes && !saveRes.error) savedFallback = saveRes;
+            // needs_project_choice carries NO error field but has NOT saved
+            // anything — it is a draft awaiting a scope pick. Counting it as saved
+            // would tell the user their fact was stored when it was not, which is
+            // the same class of lie as the empty-document `ready` state.
+            if (saveRes && !saveRes.error && !saveRes.needs_project_choice) {
+              savedFallback = saveRes;
+            } else if (saveRes?.needs_project_choice) {
+              console.warn('[update-fallback] save returned needs_project_choice — not counting as saved');
+            }
           } catch (saveErr) {
             // Never let the fallback turn a soft outcome into a hard failure —
             // the disambiguation reply below still goes out.

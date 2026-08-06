@@ -9765,20 +9765,14 @@ Write the persona now.`;
           company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
           'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
         ].filter(Boolean).join('\n');
-        if (!task.room_id && task.room_tag) {
-          const domainRows = await prisma.$queryRawUnsafe(
-            `SELECT id, name
-               FROM "hivemind"."hyper_rooms"
-              WHERE org_id = $1::uuid
-                AND room_tag = $2
-                AND archived_at IS NULL
-                AND agent_connectors->>'_domain_home' = 'true'
-              ORDER BY created_at ASC LIMIT 1`,
-            current.session.orgId,
-            String(task.room_tag),
-          ).catch(() => []);
-          if (domainRows?.[0]?.id) task.room_id = domainRows[0].id;
-        }
+        // A task click opens ITS OWN work room, never the shared domain/company
+        // ("_domain_home") room. Binding an unstarted task to the domain-home room
+        // by room_tag (added in 76737eaa) funnelled every task into the one agent
+        // company room instead of provisioning a dedicated per-task workroom — the
+        // intended "click a task → its workroom" behaviour above. We reuse ONLY the
+        // task's own previously-created room (task.room_id, persisted on first open);
+        // otherwise a fresh work room is created below. Do NOT reintroduce a
+        // _domain_home lookup here — it reopens the company room, not a work room.
         if (task.room_id) {
           const existing = await prisma.hyperRoom.findFirst({
             where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },

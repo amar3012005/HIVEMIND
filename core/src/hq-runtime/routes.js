@@ -837,10 +837,40 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         if (['started', 'completed'].includes(decision) && !sessionId) return jsonResponse(res, { error: 'admin_checkin_session_required' }, 400);
         const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
         if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
+        // The analyze_current_status stage is a Room review whose objective is to analyze
+        // "the exact browser-session transcript" and whose predicates demand a SOURCE-BACKED
+        // user_current_status artifact. The event previously carried only a session_id, so
+        // the Room was asked to analyze a conversation it never received — it returned zero
+        // artifacts every attempt and the lifecycle looped on
+        // `has_min_count:user_current_status:0`. Attach the real transcript here so the Room
+        // has the actual source it is required to ground on. Best-effort: a missing transcript
+        // must never break the decision call; the stage then fails honestly on its own terms.
+        let transcript = '';
+        if (decision === 'completed' && sessionId) {
+          try {
+            const call = await prisma.taraCall.findUnique({
+              where: { orgId_sessionId: { orgId, sessionId } }, select: { id: true },
+            });
+            if (call?.id) {
+              const turns = await prisma.taraTurn.findMany({
+                where: { callId: call.id }, orderBy: { seq: 'asc' },
+                select: { userText: true, agentText: true },
+              });
+              transcript = turns
+                .map((t) => `Administrator: ${t.userText || ''}\nRuntime: ${t.agentText || ''}`)
+                .join('\n').trim().slice(0, 12000);
+            }
+          } catch (error) {
+            console.warn('[hq-runtime] admin check-in transcript unavailable:', error.message);
+          }
+        }
         const resumed = await service.resumeEvent(run.id, orgId, {
           id: `admin-checkin:${run.id}:${decision}:${sessionId || 'none'}`,
           type: `admin_checkin.${decision}`,
-          data: { session_id: sessionId, correlation_ref: sessionId, runtime_epoch: runtime.epoch },
+          data: {
+            session_id: sessionId, correlation_ref: sessionId, runtime_epoch: runtime.epoch,
+            ...(transcript ? { transcript, transcript_source: `tara_session:${sessionId}` } : {}),
+          },
         });
         await appendHqEvent({
           prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,

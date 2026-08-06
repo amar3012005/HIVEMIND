@@ -324,11 +324,19 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   // Per-condition drop counters. The old single AND-ed .filter() dropped facts
   // with no record of WHICH condition fired — "0 facts" had seven silent causes.
   // Name the cause so a future zero-fact window is diagnosable from one log line.
-  const drop = { shape: 0, type: 0, short_quote: 0, quote_absent: 0, noise: 0, low_importance: 0 };
+  // `capped` is NOT a rejection — it is the per-window fact cap doing its job.
+  // It still has to be counted: without it the loop breaks at the cap and every
+  // remaining fact lands in `dropped` with all reason counters at zero, which is
+  // what these counters exist to prevent. Observed live on a real upload as
+  // "in=24 kept=9 dropped=15{quote_absent:0 type:0 ... low_importance:0}" — a
+  // number with no explanation, exactly the silent drop this instrumentation was
+  // added to eliminate.
+  const drop = { shape: 0, type: 0, short_quote: 0, quote_absent: 0, noise: 0, low_importance: 0, capped: 0 };
   let repaired = 0;
   const out = [];
-  for (const item of arr) {
-    if (out.length >= maxFacts) break;
+  for (let _i = 0; _i < arr.length; _i += 1) {
+    const item = arr[_i];
+    if (out.length >= maxFacts) { drop.capped = arr.length - _i; break; }
     if (!item || typeof item.f !== 'string' || item.f.trim().length < 4) { drop.shape += 1; continue; }
     if (!DURABLE_EXTRACT_TYPES.includes(item.memory_type)) { drop.type += 1; continue; }
     if (typeof item.source_quote !== 'string' || item.source_quote.length < 4) { drop.short_quote += 1; continue; }
@@ -353,10 +361,15 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   }
   const dropped = arr.length - out.length;
   if (dropped > 0 || repaired > 0) {
+    const _accounted = drop.quote_absent + drop.type + drop.short_quote + drop.noise
+      + drop.shape + drop.low_importance + drop.capped;
     console.log(`[kb-normalize] in=${arr.length} kept=${out.length} repaired=${repaired} `
       + `dropped=${dropped}{quote_absent:${drop.quote_absent} type:${drop.type} `
       + `short_quote:${drop.short_quote} noise:${drop.noise} shape:${drop.shape} `
-      + `low_importance:${drop.low_importance}}`);
+      + `low_importance:${drop.low_importance} capped:${drop.capped}}`
+      // Self-check: if the buckets ever stop summing to the total, the log is
+      // lying about why facts vanished. Say so rather than let it slide.
+      + (_accounted !== dropped ? ` UNACCOUNTED=${dropped - _accounted}` : ''));
   }
   return out;
 }

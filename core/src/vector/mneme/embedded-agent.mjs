@@ -23,6 +23,7 @@
 //
 // Amr-store: reuses the ALREADY-PORTED v2 streaming AmrMemoryStore (./amr-store.mjs) — not
 // reimplemented here.
+import { createHash } from 'node:crypto';
 import { AmrMemoryStore } from './amr-store.mjs';
 import { emitKbResults } from './kb-hit-merge.mjs';
 import { isMetadataLayer } from './layers.mjs';
@@ -411,6 +412,30 @@ export function appendDocumentAccess(conds, args, alias, org, access = {}) {
     if (teamTags.length) clauses.push(`${tags} ?| ${add(teamTags)}::text[]`);
     conds.push(`(${clauses.join(' OR ')})`);
   }
+}
+
+/**
+ * Deterministic uuid for an edge that arrives without one.
+ *
+ * `hm.relationships.id` is `uuid NOT NULL` with no default, so any caller omitting an id made the
+ * mirror INSERT fail its not-null constraint — seen in production as a stream of "relationship
+ * mirror failed … null value in column id". The SHARD edge was never affected: amr.addEdge runs
+ * first, unconditionally, and does not use this id. What was lost is the SQL row that
+ * relations-summary and the central joins read, so those saw an incomplete graph.
+ *
+ * Derived from (org, from, to, type) rather than random, because this table's ONLY unique
+ * constraint is the primary key: a random id would insert a fresh duplicate on every re-write
+ * instead of upserting. Deterministic makes the `ON CONFLICT (id) DO UPDATE` the query already
+ * carries behave as the idempotent upsert it was written to be.
+ *
+ * Shaped as a v5 uuid (sha1 + version/variant bits) so Postgres accepts it as a uuid.
+ */
+function edgeId(org, fromId, toId, type) {
+  const h = createHash('sha1').update(`${org}|${fromId}|${toId}|${type}`).digest();
+  h[6] = (h[6] & 0x0f) | 0x50; // version 5
+  h[8] = (h[8] & 0x3f) | 0x80; // RFC-4122 variant
+  const x = h.subarray(0, 16).toString('hex');
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
 }
 
 // Ported verbatim.
@@ -1023,7 +1048,8 @@ function routesFor(ctx) {
           await db().query(
             `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
-            [rel.id, org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
+            [rel.id || edgeId(org, rel.fromId, rel.toId, rel.type || 'Mentions'),
+             org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
         } catch (e) {
           console.warn(`[embedded-agent] relationship mirror failed ${rel.fromId}->${rel.toId} org=${org}: ${e.message}`);
         }
@@ -1120,7 +1146,8 @@ function routesFor(ctx) {
           await db().query(
             `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
              ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
-            [rel.id, org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
+            [rel.id || edgeId(org, rel.fromId, rel.toId, rel.type || 'Mentions'),
+             org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
         } catch (e) {
           console.warn(`[embedded-agent] relationship mirror failed ${rel.fromId}->${rel.toId} org=${org}: ${e.message}`);
         }

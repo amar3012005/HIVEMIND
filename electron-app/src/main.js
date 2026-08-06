@@ -3,6 +3,7 @@ const path = require('path');
 const { autoUpdater } = require('electron-updater');
 const log = require('electron-log');
 const fs = require('fs');
+const notch = require('./notch');
 
 const isDev = process.env.ELECTRON_IS_DEV === '1';
 // The desktop app is a first-class window onto the live product. file:// builds
@@ -456,6 +457,18 @@ ipcMain.handle('launch-app', () => {
 app.whenReady().then(() => {
   // Cinematic B&W signature intro on every open, then the workspace.
   createSplash();
+
+  // Notch HUD — quick capture, knowledge-base drops and meeting notes, hanging
+  // off the top edge. It resolves the main window lazily (that is where its API
+  // calls execute, using the session already signed in), so it can come up here
+  // without waiting for the splash → workspace handoff. Never fatal: a HUD
+  // failure must not stop the app from opening.
+  try {
+    notch.registerNotchIpc();
+    notch.createNotchWindow({ mainWindowGetter: () => mainWindow, url: APP_URL });
+  } catch (err) {
+    log.warn('[notch] disabled:', err.message);
+  }
 });
 
 app.on('activate', () => {
@@ -468,6 +481,9 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  // The HUD is alwaysOnTop + visible on all workspaces; if it outlives the app
+  // it leaves a black pill stuck over the menu bar until logout.
+  try { notch.destroyNotch(); } catch (_) { /* already gone */ }
 });
 
 // Keep app alive on mac even when all windows closed

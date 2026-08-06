@@ -333,11 +333,21 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   // added to eliminate.
   const drop = { shape: 0, type: 0, short_quote: 0, quote_absent: 0, noise: 0, low_importance: 0, capped: 0 };
   let repaired = 0;
-  const out = [];
-  const _keptOldIdx = []; // original array position of each kept fact (rel remap below)
+  // SELECT THE MOST SALIENT N, NOT THE FIRST N.
+  // This used to `break` at the cap, so it kept whichever facts the model happened
+  // to emit first — document order, not importance — and discarded the rest
+  // unseen (measured: in=24 kept=9, fifteen claims never even evaluated). A cap is
+  // the right lever, because memories are meant to be curated rather than
+  // exhaustive and the full text stays searchable as evidence; but the SELECTION
+  // rule has to be salience or the graph keeps whatever came first.
+  //
+  // Every candidate is now validated, then the survivors are ranked by importance
+  // and the top N taken, then RESTORED TO DOCUMENT ORDER so the narrative reads in
+  // sequence. Safe only because rel indices are remapped below — before that,
+  // changing which facts survive silently mis-wired intra-window relationships.
+  const _valid = [];
   for (let _i = 0; _i < arr.length; _i += 1) {
     const item = arr[_i];
-    if (out.length >= maxFacts) { drop.capped = arr.length - _i; break; }
     if (!item || typeof item.f !== 'string' || item.f.trim().length < 4) { drop.shape += 1; continue; }
     if (!DURABLE_EXTRACT_TYPES.includes(item.memory_type)) { drop.type += 1; continue; }
     if (typeof item.source_quote !== 'string' || item.source_quote.length < 4) { drop.short_quote += 1; continue; }
@@ -347,8 +357,8 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
     if (loc.quote !== item.source_quote) repaired += 1;
     // The source remains recallable even when its claim is not durable enough.
     if (normalizedImportance(item.importance) < threshold) { drop.low_importance += 1; continue; }
-    _keptOldIdx.push(_i);
-    out.push({
+    _valid.push({
+      _oldIdx: _i,
       t: durableTitle(item.t, item.f),
       f: item.f.trim(),
       memory_type: item.memory_type,
@@ -361,6 +371,22 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
         .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
     });
   }
+  // Rank by importance, take the cap, then restore document order.
+  // The importance sort is made STABLE by falling back to the original index, so
+  // an all-equal-importance window (a real case — the extractor often returns a
+  // flat 0.55) degrades to exactly the old prefix behaviour instead of an
+  // arbitrary reshuffle.
+  let _selected = _valid;
+  if (_valid.length > maxFacts) {
+    _selected = _valid
+      .slice()
+      .sort((a, b) => (b.importance - a.importance) || (a._oldIdx - b._oldIdx))
+      .slice(0, maxFacts)
+      .sort((a, b) => a._oldIdx - b._oldIdx);
+    drop.capped = _valid.length - _selected.length;
+  }
+  const _keptOldIdx = _selected.map((x) => x._oldIdx); // for the rel remap below
+  const out = _selected.map(({ _oldIdx, ...fact }) => fact);
   // REMAP INTRA-WINDOW RELATIONSHIP INDICES.
   // `rels[].to` is a POSITION in the model's own fact array, and the promoter
   // resolves it positionally against the SURVIVING facts (idByIdx[rel.to]). Any

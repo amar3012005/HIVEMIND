@@ -120,13 +120,24 @@ export class KbIngestQueue {
     this._orgRunning = new Map();   // orgId -> running count (fairness)
     this._orgPending = new Map();   // orgId -> queued count (backpressure, best-effort)
     this._counters = { processed: 0, failed: 0, dead: 0, delayed_fair: 0, rejected_backpressure: 0 };
+    // DEGRADED MODE FLAG. When Redis is unreachable the queue disables itself and
+    // ingestion runs INLINE in the request: no retry, no DLQ, no cross-node status,
+    // no backpressure. That is a reasonable last resort but it was completely
+    // silent — two WARN lines at startup and nothing afterwards, so an operator
+    // could serve uploads for hours in a mode with none of the durability
+    // guarantees the rest of this file provides. Exposed via stats() so health and
+    // /api/knowledge/status can say so out loud.
+    this.inlineFallback = false;
+    this.inlineFallbackReason = null;
     this._ready = this._init();
   }
 
   async _init() {
     const deps = tryLoadBullMQ();
     if (!deps) {
-      this.logger.warn?.('[kb-queue] bullmq/ioredis unavailable — queue disabled (inline fallback)');
+      this.inlineFallback = true;
+      this.inlineFallbackReason = 'bullmq/ioredis module unavailable';
+      this.logger.warn?.('[kb-queue] DEGRADED: bullmq/ioredis unavailable — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)');
       return;
     }
     const { bullmq, IORedis } = deps;
@@ -153,7 +164,9 @@ export class KbIngestQueue {
       if (!host && attempt < PROBE_ATTEMPTS - 1) await new Promise(r => setTimeout(r, 2000));
     }
     if (!host) {
-      this.logger.warn?.(`[kb-queue] no reachable Redis after ${PROBE_ATTEMPTS} attempts — queue disabled (inline fallback)`);
+      this.inlineFallback = true;
+      this.inlineFallbackReason = `no reachable Redis after ${PROBE_ATTEMPTS} attempts`;
+      this.logger.warn?.(`[kb-queue] DEGRADED: no reachable Redis after ${PROBE_ATTEMPTS} attempts — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)`);
       return;
     }
     this._redisHost = host;
@@ -163,7 +176,24 @@ export class KbIngestQueue {
     };
     this.queue = new bullmq.Queue(QUEUE_NAME, { connection });
     this.worker = new bullmq.Worker(QUEUE_NAME, (job, token) => this._process(job, token), {
-      connection, concurrency: CONCURRENCY,
+      connection,
+      concurrency: CONCURRENCY,
+      // STALL WINDOW MUST EXCEED THE JOB'S OWN TIMEOUT.
+      // These were left at BullMQ's defaults (lockDuration 30s), while real ingests
+      // run 30-134s and the promote phase alone measured 25.4s. BullMQ renews the
+      // lock while the processor runs, but renewal rides the event loop — a long
+      // synchronous stretch (parse, embed batching) can miss it. A lapsed lock makes
+      // BullMQ re-deliver the job to another worker, which would ingest the SAME
+      // document twice: duplicate memories, duplicate edges, double usage billed.
+      //
+      // Sized so a job can never look stalled while it is still inside its own
+      // timeout: past JOB_TIMEOUT_MS it fails honestly instead of being re-run.
+      // Genuinely lost workers (container recreate) are recovered by the separate
+      // stale-job reaper, which marks them STALE_ABANDONED — that is the correct
+      // owner of that case, not lock expiry.
+      lockDuration: JOB_TIMEOUT_MS,
+      stalledInterval: Number(process.env.KB_QUEUE_STALLED_INTERVAL_MS || 60 * 1000),
+      maxStalledCount: Number(process.env.KB_QUEUE_MAX_STALLED || 1),
     });
     this.worker.on('failed', (job, err) => {
       this._counters.failed++;
@@ -539,7 +569,18 @@ export class KbIngestQueue {
   /** Ops surface for /api/knowledge/queue-stats. */
   async stats() {
     await this._ready;
-    if (!this.queue) return { enabled: false, mode: this._readMode() };
+    // Degraded mode is a first-class answer, not an absence. `enabled:false` alone
+    // reads as "queueing is off by config"; inline_fallback says the durability
+    // guarantees are GONE and why.
+    if (!this.queue) {
+      return {
+        enabled: false,
+        mode: this._readMode(),
+        inline_fallback: this.inlineFallback,
+        inline_fallback_reason: this.inlineFallbackReason,
+        degraded: this.inlineFallback,
+      };
+    }
     let counts = {};
     try { counts = await this.queue.getJobCounts('waiting', 'delayed', 'active', 'completed', 'failed'); } catch { /* noop */ }
     return {
@@ -549,7 +590,14 @@ export class KbIngestQueue {
       per_org_running: Object.fromEntries(this._orgRunning),
       per_org_pending: Object.fromEntries(this._orgPending),
       lifetime: { ...this._counters },
-      config: { concurrency: CONCURRENCY, org_concurrency: ORG_CONCURRENCY, attempts: ATTEMPTS, max_depth: MAX_DEPTH, job_timeout_ms: JOB_TIMEOUT_MS },
+      inline_fallback: false,
+      degraded: false,
+      config: {
+        concurrency: CONCURRENCY, org_concurrency: ORG_CONCURRENCY, attempts: ATTEMPTS,
+        max_depth: MAX_DEPTH, job_timeout_ms: JOB_TIMEOUT_MS,
+        lock_duration_ms: JOB_TIMEOUT_MS,
+        raw_retention_hours: Number(process.env.KB_RAW_RETENTION_HOURS || 168),
+      },
     };
   }
 

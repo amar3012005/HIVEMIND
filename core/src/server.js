@@ -10681,11 +10681,21 @@ exit \$RC
               const saveConvKey = `${qChannel}:${askerSlackId || ''}`;
               globalThis._slackPendingSave = globalThis._slackPendingSave || new Map();
 
+              // The agent answers in GitHub-flavored markdown (**bold**,
+              // [text](url), # headers) — Slack's mrkdwn only understands
+              // *bold* (single asterisk), <url|text> links, and has no
+              // headers. Without this conversion every reply showed literal
+              // "**...**" instead of bold text.
+              const toSlackMrkdwn = (text) => String(text || '')
+                .replace(/\*\*(.+?)\*\*/g, '*$1*')
+                .replace(/__(.+?)__/g, '*$1*')
+                .replace(/^#{1,6}\s+(.+)$/gm, '*$1*')
+                .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<$2|$1>');
               const postSlack = async (text) => {
                 try {
                   const bt = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
                   await bridge._call('chat.postMessage',
-                    { channel: qChannel, text, ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) }, bt, 'POST');
+                    { channel: qChannel, text: toSlackMrkdwn(text), ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) }, bt, 'POST');
                 } catch (e) { /* noop */ }
               };
               const resolveProject = async (raw) => {
@@ -10893,12 +10903,37 @@ exit \$RC
                   webIntelligence: globalThis.webIntelligence || null,
                 },
               });
-              let answer = String(result?.response || '').trim() || 'I could not find an answer.';
-              // When a save is deferred for project selection, name the projects
-              // so the user can just reply with one (the agent's continuation
-              // logic + the history below turn that reply into the save).
+              let answer = toSlackMrkdwn(String(result?.response || '').trim() || 'I could not find an answer.');
+              // When a save is deferred for project selection, offer real
+              // clickable buttons (same hm_save_pick action_id/value shape the
+              // explicit "save this" flow above already uses) instead of just
+              // naming the projects in text — typing the project name back
+              // still works too (the history below carries the draft forward).
               const pcProjects = result?.project_choice?.projects;
-              if (Array.isArray(pcProjects) && pcProjects.length) {
+              const pcDraft = result?.project_choice?.draft;
+              let pcBlocks = null;
+              if (Array.isArray(pcProjects) && pcProjects.length && pcDraft) {
+                const mkVal = (pid) => JSON.stringify({
+                  t: String(pcDraft.title || 'Memory').slice(0, 120),
+                  s: String(pcDraft.content || '').slice(0, 1500),
+                  p: pid || null,
+                  u: runUserId,
+                  o: runOrgId || null,
+                }).slice(0, 1999);
+                const buttons = [
+                  ...pcProjects.map((p) => ({
+                    type: 'button',
+                    text: { type: 'plain_text', text: String(p.name || p.slug || p.id).slice(0, 75) },
+                    value: mkVal(p.id),
+                    action_id: `hm_save_pick:${p.id}`,
+                  })),
+                  { type: 'button', text: { type: 'plain_text', text: 'Personal' }, value: mkVal(null), action_id: 'hm_save_pick:personal' },
+                ].slice(0, 25);
+                pcBlocks = [
+                  { type: 'section', text: { type: 'mrkdwn', text: answer } },
+                  { type: 'actions', block_id: 'hm_save_actions', elements: buttons },
+                ];
+              } else if (Array.isArray(pcProjects) && pcProjects.length) {
                 const names = pcProjects.map((p) => p.name || p.slug || p.id).filter(Boolean);
                 if (names.length) answer += `\n\n*Projects:* ${names.join(' · ')} — reply with one (or "personal") to save.`;
               }
@@ -10918,10 +10953,17 @@ exit \$RC
 
               // Reply in the SAME conversation — update the placeholder if we
               // posted one, else post fresh (stay in-thread only if originally
-              // threaded). Never redirect to the app DM.
+              // threaded). Never redirect to the app DM. blocks (project-pick
+              // buttons) take priority over plain text when present — _call
+              // form-encodes, so blocks must be a JSON STRING, not an array.
               if (placeholderTs) {
                 await bridge._call('chat.update',
-                  { channel: qChannel, ts: placeholderTs, text: answer }, botToken, 'POST');
+                  { channel: qChannel, ts: placeholderTs, text: answer, ...(pcBlocks ? { blocks: JSON.stringify(pcBlocks) } : {}) },
+                  botToken, 'POST');
+              } else if (pcBlocks) {
+                await bridge._call('chat.postMessage',
+                  { channel: qChannel, text: answer, blocks: JSON.stringify(pcBlocks), ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) },
+                  botToken, 'POST');
               } else {
                 const threadTs = ev.thread_ts || undefined;
                 await bridge.postMessage(evUserId, qChannel, answer, threadTs ? { threadTs } : {});

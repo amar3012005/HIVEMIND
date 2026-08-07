@@ -879,6 +879,23 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           summary: decision === 'skipped' ? 'Runtime retained the explicit skip and will form the first plan from the baseline evidence.' : decision === 'started' ? 'Runtime will wait for the exact browser conversation before it forms the first plan.' : 'Runtime received the completed browser conversation and is preparing the source-backed internal status record.',
           details: { admin_checkin_run_id: run.id, decision, session_id: sessionId },
         });
+        // SKIP MUST NEVER BLOCK. The run parks in WAITING_EVENT on the NEXT stage while
+        // waiting for admin_checkin.completed (correlated by session_id). A `skipped`
+        // event does not match that wait, so resumeEvent silently ignored it and the
+        // whole Runtime stalled — observed live: status WAITING_EVENT, stage
+        // analyze_current_status, planning never started. A skip is a terminal user
+        // decision, not an event the lifecycle may decline: force the run terminal so
+        // native-engine's adminCheckinDisposition() sees a settled run and proceeds to
+        // the first operating plan from baseline evidence.
+        if (decision === 'skipped') {
+          const after = await prisma.runtimePlaybookRun.findFirst({ where: { id: run.id, orgId }, select: { status: true } }).catch(() => null);
+          if (after && !['COMPLETED', 'TERMINATED'].includes(String(after.status))) {
+            await prisma.runtimePlaybookRun.updateMany({
+              where: { id: run.id, orgId },
+              data: { status: 'TERMINATED', terminalState: 'admin_checkin_skipped', waitingFor: null, completedAt: new Date() },
+            }).catch((error) => console.warn('[hq-runtime] admin check-in skip force-terminate failed:', error.message));
+          }
+        }
         if (['skipped', 'completed'].includes(decision)) {
           await requestWake({ prisma, runtime, triggerType: 'runtime_playbook_result', payload: { run_id: run.id, admin_checkin: true }, key: `first-life-admin-checkin:${run.id}:${decision}` });
           Promise.resolve(wakeScheduler?.()).catch(() => {});

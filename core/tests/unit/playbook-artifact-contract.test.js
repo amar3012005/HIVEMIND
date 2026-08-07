@@ -26,16 +26,14 @@ test('every shipped playbook fixture yields a derivable artifact contract', () =
       const declared = new Set((stage.expected_artifacts || []).map(String));
       for (const check of stage.completion_checks || []) {
         if (!check?.select) continue;
-        // NOTE: at least one shipped fixture uses a comma-joined select
-        // ("input_available,input_missing") which the predicate engine does NOT split —
-        // that check can never resolve to an artifact. Recorded here rather than
-        // asserted, so this suite does not fail on a pre-existing fixture defect while
-        // still covering the single-key contract that the engine actually supports.
-        if (String(check.select).includes(',')) continue;
-        assert.ok(
-          declared.has(String(check.select)),
-          `${name}:${stage.id} — check selects "${check.select}" which is not in expected_artifacts`,
-        );
+        // `select` may be a single key OR an array of keys — selectArtifacts()
+        // supports both, so assert every selector is declared.
+        for (const selector of (Array.isArray(check.select) ? check.select : [check.select])) {
+          assert.ok(
+            declared.has(String(selector)),
+            `${name}:${stage.id} — check selects "${selector}" which is not in expected_artifacts`,
+          );
+        }
       }
       for (const key of Object.keys(artifacts)) {
         assert.equal(typeof artifacts[key].schema, 'object', `${name}:${stage.id}:${key} schema`);

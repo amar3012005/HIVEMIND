@@ -471,6 +471,25 @@ async def voice(ws: WebSocket, session_id: str):
             await xai.send(json.dumps({"type": "conversation.item.create", "item": {"type": "function_call_output", "call_id": event["call_id"], "output": json.dumps(output)}}))
         await xai.send(json.dumps({"type": "response.create"}))
 
+    # Browser sessions persisted NO transcript: the `turn` event Core writes to
+    # hivemind.tara_turns was only emitted by the PSTN bridge, so a 3-minute browser
+    # check-in produced a tara_calls row with ZERO turns. The HQ check-in then had an
+    # empty transcript and its review Room could never produce user_current_status
+    # (has_min_count:user_current_status:0). Mirror the PSTN bridge here so both
+    # providers record the same transcript shape.
+    browser_turn_state: dict = {"seq": 0, "user": ""}
+
+    async def _record_browser_turn(agent_text: str):
+        browser_turn_state["seq"] += 1
+        payload = {"seq": browser_turn_state["seq"],
+                   "user_text": browser_turn_state.get("user") or "",
+                   "agent_text": agent_text or ""}
+        browser_turn_state["user"] = ""
+        try:
+            await emit_event(session_id, {"event_id": str(uuid.uuid4()), "type": "turn", "payload": payload})
+        except Exception:  # noqa: BLE001 — a lost turn must never kill the live call
+            log.warning("browser turn emit failed session=%s seq=%s", session_id, payload["seq"])
+
     async def xai_to_browser():
         nonlocal tool_batch_task, opening_sent
         terminal_event = {"event_id": str(uuid.uuid4()), "type": "completed", "payload": {"provider": "grok"}}
@@ -480,6 +499,14 @@ async def voice(ws: WebSocket, session_id: str):
                     await ws.send_bytes(message)
                     continue
                 event = json.loads(message)
+                _etype = event.get("type")
+                # Caller speech → held until the assistant reply completes the turn.
+                if _etype == "conversation.item.input_audio_transcription.completed":
+                    browser_turn_state["user"] = (
+                        (browser_turn_state.get("user") or "") + " " + str(event.get("transcript") or "")
+                    ).strip()
+                elif _etype == "response.output_audio_transcript.done":
+                    await _record_browser_turn(str(event.get("transcript") or ""))
                 if event.get("type") == "conversation.created":
                     # Capture the id so the NEXT connection can resume this conversation.
                     _remember_conversation(principal, (event.get("conversation") or {}).get("id"))

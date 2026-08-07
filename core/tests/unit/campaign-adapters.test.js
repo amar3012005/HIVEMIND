@@ -173,6 +173,10 @@ test('TARA adapter closes a DNC-denied attempt without calling the provider', as
       async update({ data }) { Object.assign(attempt, data); statuses.push(data.status); return { ...attempt }; },
     },
     dncList: { async findMany() { return [{ phone: '+353123456789' }]; } },
+    // resolveTaraProviderCandidates reads capability state for the failover chain. Without
+    // this the mock threw a TypeError inside provider resolution BEFORE the compliance gate,
+    // so this test reported a DNC failure while never actually exercising DNC at all.
+    capabilityAdapterState: { async findUnique() { return null; }, async upsert() { return {}; } },
   };
   await assert.rejects(() => taraAdapter.execute({
     prisma,
@@ -180,6 +184,49 @@ test('TARA adapter closes a DNC-denied attempt without calling the provider', as
     approval,
     providers: { now: new Date('2026-07-27T10:00:00Z'), async fetch() { providerCalls += 1; throw new Error('must not dial'); } },
   }), { code: 'tara_gate_dnc', outcome: 'BLOCKED' });
-  assert.deepEqual(statuses, ['gated', 'skipped']);
+  // THE POINT OF THIS TEST: a suppressed number must cost zero provider contact. Not zero
+  // dials — zero requests. Provider resolution probes every candidate's /capabilities, so
+  // gating after it leaked 2 outbound requests per suppressed attempt, and made the DNC
+  // verdict depend on whether a provider happened to answer.
   assert.equal(providerCalls, 0);
+  // No attempt row is created either: the block lands before any TARA campaign, contact or
+  // attempt exists, which is why there are no 'gated'/'skipped' transitions to observe. The
+  // suppression is still durable — the BLOCKED outcome is written by the campaign worker to
+  // campaignActionAttempt, campaignAction and campaignEvent.
+  assert.deepEqual(statuses, []);
+});
+
+test('the compliance gate still blocks non-DNC reasons with its full bookkeeping', async () => {
+  const statuses = []; let providerCalls = 0;
+  const attempt = { id: 'attempt-b', status: 'queued', callLegId: null, sessionId: null };
+  const prisma = {
+    taraRuntimeConfig: { async findUnique() { return { defaultProvider: 'deepgram', revision: 1 }; } },
+    taraCampaign: {
+      async findFirst() { return null; },
+      async upsert() { return { id: 'tara-campaign-b', orgId: 'org-a', callingWindow: { days: [1, 2, 3, 4, 5], startHour: 9, endHour: 20 }, caps: { concurrency: 1 }, complianceConfig: {} }; },
+    },
+    taraCampaignContact: {
+      // No recognised lawful basis -> the gate must block at the 'lawful_basis' stage.
+      async upsert() { return { id: 'contact-b', phone: '+353999888777', country: 'IE', timezone: 'Europe/Dublin', lawfulBasis: 'vibes' }; },
+      async update() { return {}; },
+    },
+    taraCallAttempt: {
+      async upsert() { return attempt; },
+      async count() { return 0; },
+      async update({ data }) { Object.assign(attempt, data); statuses.push(data.status); return { ...attempt }; },
+    },
+    dncList: { async findMany() { return []; } },
+    capabilityAdapterState: { async findUnique() { return null; }, async upsert() { return {}; } },
+  };
+  // A reachable provider, so resolution succeeds and the full gate is genuinely reached.
+  const okFetch = async () => { providerCalls += 1; return { ok: true, async json() { return { telephony: true }; } }; };
+  await assert.rejects(() => taraAdapter.execute({
+    prisma,
+    action: action('tara', { to: '+353999888777', opening: 'Hello', lawful_basis: 'consent', country: 'IE', timezone: 'Europe/Dublin' }),
+    approval,
+    providers: { now: new Date('2026-07-27T10:00:00Z'), fetch: okFetch },
+  }), { code: 'tara_gate_lawful_basis', outcome: 'BLOCKED' });
+  // This path DOES keep the durable attempt trail, proving the hoisted DNC check did not
+  // replace or weaken the full gate.
+  assert.deepEqual(statuses, ['gated', 'skipped']);
 });

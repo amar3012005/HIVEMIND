@@ -1320,10 +1320,18 @@ def _runtime_phase_report(*, user_message: str, contract: Dict[str, Any], result
         "status": "complete" if not gaps else "gaps",
         "verdict": None,
         "room_goal": room_goal or "",
+        # Field names MUST match _build_final_report exactly — the report card reads
+        # `content`. Emitting `markdown` made the card mount with an empty body, which is
+        # why a Runtime workload showed no report even though the final_report line WAS
+        # emitted and persisted (verified: report_lines=1 on the last runtime turns).
+        "content": body,
+        "summary": (summary or body)[:4000],
+        "weighted_score": None,
+        "goal_progress": None,
+        "project_memory_hits": 0,
+        "project_scoped": False,
         "evidence": [],
         "sources": sources,
-        "markdown": body,
-        "summary": (summary or body)[:4000],
     }
 
 

@@ -132,6 +132,17 @@ function validatePlan(plan, context, mode, aspects, lifecycleCatalog = []) {
       throw new Error('growth_plan_recommended_lifecycle_binding_required');
     }
   }
+  // No two queue items may bind the SAME lifecycle. Observed in production: "Validate
+  // audience and channel performance" and "Develop go-to-market strategy brief" both
+  // bound marketing form_strategy, so the Marketing Room ran the identical single-stage
+  // playbook twice and produced two marketing_strategy artifacts — duplicated cost, and
+  // neither run satisfied its own distinct stated outcome. One lifecycle produces one
+  // outcome; a second item needing the same lifecycle is the same work, not new work.
+  const boundLifecycles = queue
+    .filter((item) => item?.playbook_id)
+    .map((item) => `${item.playbook_id}@${item.playbook_version}`);
+  const duplicateLifecycle = boundLifecycles.find((key, index) => boundLifecycles.indexOf(key) !== index);
+  if (duplicateLifecycle) throw new Error(`growth_plan_duplicate_lifecycle_binding:${duplicateLifecycle}`);
   plan.constraint = constraints.find((item) => item.id === plan.primary_constraint_id);
   plan.delegation = queue.find((item) => item.id === plan.stage.queue_item_id);
   return plan;
@@ -260,6 +271,7 @@ For initial_full return 2-4 ranked, genuinely evidenced queue items. Do not crea
         + 'Fix ONLY what that rule requires and return the COMPLETE corrected JSON again.\n'
         + '- growth_plan_queue_item_invalid: every operating_queue item needs id, title, objective, a room_tag that exists in context.available_rooms, a constraint_id matching one of your constraints[].id, a non-empty acceptance_criteria array, effect_class of exactly "internal" or "external", and a non-empty effect_basis.\n'
         + '- growth_plan_recommended_lifecycle_binding_required: the queue item whose id equals stage.queue_item_id MUST copy one entry from available_lifecycles exactly — same playbook_id, same playbook_version, its room_tag equal to that lifecycle owner_room_tag, and requested_action equal to one of that lifecycle supported_actions. Never invent these values.\n'
+        + '- growth_plan_duplicate_lifecycle_binding: two queue items bound the SAME playbook_id@version. One lifecycle produces one outcome, so that is the same work twice. Either MERGE those items into a single queue item whose objective covers the whole outcome, or bind the other item to a DIFFERENT available_lifecycle, or leave its playbook_id/playbook_version null when no supplied lifecycle implements it. Never bind one lifecycle twice.\n'
         + 'Return JSON only.' });
     }
   }

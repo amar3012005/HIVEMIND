@@ -1410,6 +1410,21 @@ class Director:
                 "phase_guidance": lifecycle.get("guidance") if is_v2 else phase.get("objective"),
                 "expected_artifacts": expected,
                 "completion_checks": lifecycle.get("completion_checks") if is_v2 else phase.get("completion_checks"),
+                # REPAIR FEEDBACK. Core already ships the exact predicates that rejected
+                # the previous attempt in `unmet`, but nothing here ever read it — so a
+                # retry received the identical instruction and failed identically. That is
+                # why form_strategy failed the same predicate on every attempt until its
+                # objective was hand-edited. Surface the unmet checks (and the attempt
+                # number) so the phase can correct the specific field instead of redoing
+                # the whole turn blind.
+                "unmet_checks": [row for row in (lifecycle.get("unmet") or phase.get("unmet") or []) if row],
+                "attempt": lifecycle.get("attempt") if is_v2 else None,
+                "repair_instruction": (
+                    "A previous attempt was REJECTED by these exact checks. Fix precisely "
+                    "what they name and return the COMPLETE artifact again — do not restart "
+                    "the investigation and do not drop fields that already passed."
+                    if (lifecycle.get("unmet") or phase.get("unmet")) else None
+                ),
                 "execution_config": lifecycle.get("execution_config") if is_v2 else {},
             },
         }

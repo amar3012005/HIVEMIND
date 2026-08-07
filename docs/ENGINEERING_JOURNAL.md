@@ -571,3 +571,65 @@ slides that find no unique anchor get a page instead of `null`.
   session's PR #94). Frontend gitlink back to `d631d6a`.
 - Next: same open item as the prior entry — Composio tools are still not
   merged into the `/chat`/HyperAgents tool registry.
+
+## 2026-08-07 UTC - Composio: real redirect-back, real connected state, tool-list popup
+
+- State: Committed; Accepted release, verified live on `singulance`.
+- Owner: Claude (Fable workflow)
+- Branch: `fe/composio-callback-and-toolkit-detail` -> `Da-vinci main`
+  (`07e35be8`); `feat/composio-callback-detail` -> `singulance-main`
+  (`ff6cddd2`)
+- Scope:
+  - Composio genuinely redirects the browser back to `callback_url` with
+    `?status=success&connected_account_id=...` appended once OAuth
+    completes (confirmed against Composio's docs, not assumed). Both
+    connect flows (curated LinkedIn tile, toolkit browser) switched from
+    `window.open('_blank')` to a full-page redirect so that real
+    redirect-back lands on this same Connectors page instead of stranding
+    in an unwatched tab. A mount-time effect reads the three params once,
+    marks the toolkit connected, then strips them from the URL.
+  - `GET /v1/connectors/composio/toolkits` now also calls
+    `composioService.listConnectedAccounts(orgId)` and annotates each
+    returned toolkit with a real `connected` boolean — state survives a
+    reload instead of only living in local component memory. The frontend
+    sorts connected toolkits to the top (stable sort, within whatever page
+    is currently loaded) and gives them a blue-glass fill + "Connected"
+    badge instead of the plain white card.
+  - New `GET /v1/connectors/composio/toolkits/:slug/tools` — full tool
+    list (name + description, toolkit's own slug prefix stripped for
+    readability) for one toolkit. Backs a new click-a-card detail popup
+    ("what can the agent actually do with this" beyond the tool-count
+    badge), triggered anywhere on the card except the Connect/Request-
+    access controls (`stopPropagation` on those).
+- Verification: `node --check` on the backend file; `esbuild` + `CI=false
+  npm run build` green on every frontend file; direct calls to
+  `getToolkitTools('linkedin')` confirmed the prefix-strip naming logic
+  (an earlier version of it was buggy — greedy regex ate everything but
+  the last word — caught before shipping, not after). `ui-preview`
+  screenshots confirmed sort-to-top + glass styling with mixed
+  connected/available toolkits, and a click-through screenshot of the
+  detail modal showing a real toolkit's tool list. Post-deploy: all three
+  image tags (`hm-core`, `hm-control`, `hivemind-next-frontend-1`) match
+  the release SHA; `docker exec grep` for
+  `getComposioToolkitTools`/`composioToolkitToolsMatch` (core+control) and
+  `onOpenDetail` (frontend bundle) confirmed present in the running
+  containers; the toolkit-tools route returns 401 (session-gated, not
+  404) and the served frontend chunk returns 200 over HTTPS.
+- Deploy note: `/root/hivemind-main` was again mid-use by the concurrent
+  `feat/social-session-crawl` session, this time with a clean working
+  tree (no uncommitted gitlink drift like the prior release) — switched
+  to `singulance-main`, deployed, switched back afterward, verified
+  clean both times. `git submodule update frontend/Da-vinci` is the
+  correct fix whenever the gitlink shows modified after a branch switch
+  on this checkout (plain `git checkout -- frontend/Da-vinci` does NOT
+  update a submodule's checked-out commit, only `git submodule update`
+  or `git -C frontend/Da-vinci checkout <sha>` do).
+- Production: `prod-20260807-ff6cddd24c2d` (core, control-plane, frontend
+  all rebuilt).
+- Rollback: core/control-plane `hivemind/*:prod-20260807-064134925694`
+  tags did not exist for core/control (fe-only release before this one) —
+  rollback is the prior core/control-plane images from release
+  `prod-20260807-a47803b1bff9`. Frontend gitlink back to `9d4f3307`.
+- Next: same open item — Composio tools are still not merged into the
+  `/chat`/HyperAgents tool registry (task 5 from the original integration
+  plan).

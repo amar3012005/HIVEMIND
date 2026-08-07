@@ -1419,10 +1419,21 @@ class Director:
                 # the whole turn blind.
                 "unmet_checks": [row for row in (lifecycle.get("unmet") or phase.get("unmet") or []) if row],
                 "attempt": lifecycle.get("attempt") if is_v2 else None,
+                # The rejected draft ITSELF, not just the verdict. Core now ships it under
+                # `prior_attempt.<key>`; naming it separately makes the carry-forward
+                # explicit rather than something the model has to notice among the inputs.
+                "prior_attempt_draft": {
+                    key[len("prior_attempt."):]: value
+                    for key, value in (inputs or {}).items()
+                    if isinstance(key, str) and key.startswith("prior_attempt.")
+                } if isinstance(inputs, dict) else {},
                 "repair_instruction": (
-                    "A previous attempt was REJECTED by these exact checks. Fix precisely "
-                    "what they name and return the COMPLETE artifact again — do not restart "
-                    "the investigation and do not drop fields that already passed."
+                    "A previous attempt was REJECTED by these exact checks. `prior_attempt_draft` "
+                    "is YOUR OWN previous draft. Copy every populated field of it forward verbatim "
+                    "unless you are actively improving that field, then fix precisely what the "
+                    "unmet checks name and return the COMPLETE artifact again. Do not restart the "
+                    "investigation. Returning fewer populated fields than your previous draft is a "
+                    "failed retry even if the prose is better."
                     if (lifecycle.get("unmet") or phase.get("unmet")) else None
                 ),
                 "execution_config": lifecycle.get("execution_config") if is_v2 else {},
@@ -2427,12 +2438,27 @@ class Director:
             if isinstance(requirement, dict)
         ]
         envelope_criteria = [str(x) for x in (envelope.get("acceptance_criteria") or []) if str(x).strip()][:8]
-        selected_skills = [str(x) for x in (plan.get("method_skills") or []) if str(x).strip()][:4]
+        # A keystone STRATEGY assignment needs more than four method rungs: the ladder is
+        # diagnosis → wedge → positioning → offer → channels → motions → measures, and a
+        # rung is not guessable without the one above it. Capping strategy work at 4 was
+        # part of why the artifact churned instead of converging.
+        expects_strategy = any(
+            "strategy" in str(key).lower()
+            for key in (envelope.get("expected_artifacts") or [])
+        ) or "keystone" in str(envelope.get("objective") or "").lower()
+        skill_budget = 7 if expects_strategy else 4
+        selected_skills = [str(x) for x in (plan.get("method_skills") or []) if str(x).strip()][:skill_budget]
         # HQ Outreach work progressively loads one lifecycle skill around the
         # Director's own selected methods. It describes checkpoint semantics but
         # never prescribes a fixed tool sequence or replaces Room planning.
         if self.room_kind == "outreach" and "outreach-operating-loop" not in selected_skills:
-            selected_skills = [*selected_skills, "outreach-operating-loop"][:4]
+            selected_skills = [*selected_skills, "outreach-operating-loop"][:skill_budget]
+        # Same shape for strategy: pin the lifecycle skill that enforces the MONOTONIC
+        # rule (carry every already-good field forward, spend the retry only on unmet
+        # ones). Without it each attempt rewrote the artifact from scratch and regressed —
+        # attempt 2 produced a full channel_mix, attempt 3 dropped it again.
+        if expects_strategy and "strategy-operating-loop" not in selected_skills:
+            selected_skills = ["strategy-operating-loop", *selected_skills][:skill_budget]
         # The normal Room Director owns decomposition, method selection, and tool
         # selection. HQ changes only the audience and result contract. A bounded
         # HQ assignment is one machine subtask, even if the human-facing planner

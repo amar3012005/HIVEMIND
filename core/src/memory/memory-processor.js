@@ -126,6 +126,14 @@ CRITICAL RULES:
 
   _parseOutput(output, similarMemories, originalContent) {
     const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
+    // What the model was SHOWN and what it ANSWERED. Without this the three
+    // possible causes of a wrong edge — candidate never offered, model judged
+    // badly, parse defaulted — are indistinguishable from the outside.
+    if (String(process.env.MEMORY_PROCESSOR_DEBUG || '').toLowerCase() === 'true') {
+      const _raw = lines.find(l => /^(?:RELATIONSHIP[:\s]+)?(ADD|UPDATE|EXTEND|DERIVE|NOOP)[:\s]/i.test(l)) || '(none)';
+      console.log(`[memory-processor] rel_raw=${JSON.stringify(_raw)} candidates=${similarMemories.length} `
+        + `ids=${similarMemories.slice(0, 5).map(m => String(m.id).slice(0, 8)).join(',')}`);
+    }
 
     // Parse RELATIONSHIP
     let relationship = { action: 'ADD', targetId: null, sourceIds: [], reason: 'default' };
@@ -140,7 +148,25 @@ CRITICAL RULES:
         // Try to match the ID against similar memories
         if (relationship.action === 'UPDATE' || relationship.action === 'EXTEND') {
           const target = similarMemories.find(m => idOrReason.includes(m.id));
-          relationship.targetId = target?.id || similarMemories[0]?.id || null;
+          // NEVER INVENT A TARGET. This used to fall back to `similarMemories[0]`,
+          // so a model that answered "EXTEND" without naming an id had the edge
+          // attached to whichever candidate happened to sort first — usually just
+          // the most recent one. Observed as a chain of Extends between unrelated
+          // same-day memories (Tokyo -> Dubai -> Hannover): none of those were a
+          // judgement about those pairs, they were the first element of a list.
+          //
+          // It also suppressed contradiction detection, which only runs when the
+          // action is ADD and no edge is set. So an unsourced EXTEND both fabricated
+          // a relationship AND silenced the check that would have caught the real
+          // conflict. An unattributable EXTEND/UPDATE is not evidence of anything:
+          // fall back to ADD and let the detector look.
+          if (target?.id) {
+            relationship.targetId = target.id;
+          } else {
+            relationship.action = 'ADD';
+            relationship.targetId = null;
+            relationship.reason = `${relationship.reason || ''} [downgraded: no target id named]`.trim();
+          }
         } else if (relationship.action === 'DERIVE') {
           const idMatches = [...new Set([
             ...similarMemories

@@ -63,7 +63,16 @@ for s in "${SERVICES[@]}"; do case "$s" in
 esac; done
 for img in employees control-plane core-api tara-deepgram byod-broker hm-playwright; do
   docker image inspect "hivemind/$img:$RID" >/dev/null 2>&1 || docker tag "hivemind/$img:$OLD" "hivemind/$img:$RID" 2>/dev/null || true; done
-docker image inspect "hivemind/fe:$RID-single" >/dev/null 2>&1 || docker tag "hivemind/fe:$OLD-single" "hivemind/fe:$RID-single"
+# Carry the previous frontend forward under the new RID so a core-only release
+# leaves a consistent tag set. Under `set -e` this MUST NOT be fatal: if the
+# previous fe image was pruned (another session's release-canonical.sh does
+# prune), the tag fails and the whole run dies AFTER core has already built but
+# BEFORE it is recreated — a core deploy killed by an unrelated frontend image.
+# Hit twice on 2026-08-06; both times the core image existed and had to be
+# rolled out by hand. A missing carry-forward tag is cosmetic, so warn and go on.
+docker image inspect "hivemind/fe:$RID-single" >/dev/null 2>&1 \
+  || docker tag "hivemind/fe:$OLD-single" "hivemind/fe:$RID-single" 2>/dev/null \
+  || echo "warn: no fe:$OLD-single to carry forward — skipping (core release unaffected)"
 # Compose is the runtime source of truth. Pin only the selected service image,
 # under the shared release lock, before its named --no-deps recreation.
 RUNTIME_COMPOSE=/root/hivemind/infra/docker-compose.hetzner.yml

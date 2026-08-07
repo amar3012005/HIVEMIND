@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { campaignCapabilitySnapshot, getCampaignCapabilities } from './capabilities.js';
-import { campaignWorkerEnabled, KNOWN_CHANNELS, OBJECTIVES, requireCampaignsV2 } from './state.js';
+import { campaignWorkerEnabled, KNOWN_CHANNELS, OBJECTIVES, requireCampaignPlanning, requireCampaignsV2 } from './state.js';
 import { buildCampaignDisplayMessage, buildCampaignRoomDispatch } from './contracts.js';
 import { captureCampaignChannelBaseline, pauseCampaignAction, reconcileCampaignAction as reconcileWithAdapter, resumeCampaignAction, syncCampaignActionMetrics } from './adapters/index.js';
 import { DEFAULT_CAMPAIGN_IMAGE_MODEL } from './image-provider.js';
@@ -514,7 +514,7 @@ export function resolveHyperagentsOrganicChannels(requestedChannels, capabilitie
 }
 
 export async function createCampaign({ prisma, userId, orgId, body }) {
-  requireCampaignsV2(orgId);
+  requireCampaignPlanning(orgId);
   const organization = await prisma.organization.findUnique({ where: { id: orgId }, select: { campaignAutonomyMode: true } });
   const defaultMode = organization?.campaignAutonomyMode === 'AUTO' ? 'FULL_AUTO' : 'APPROVE_PLAN_ONCE';
   let input = normalizeCampaignInput({ ...body, autonomy_mode: body?.autonomy_mode || defaultMode });
@@ -631,7 +631,7 @@ export async function createCampaign({ prisma, userId, orgId, body }) {
 }
 
 export async function listCampaigns({ prisma, orgId }) {
-  requireCampaignsV2(orgId);
+  requireCampaignPlanning(orgId);
   return prisma.campaign.findMany({
     where: { orgId, status: { not: 'CANCELLED' } }, orderBy: { createdAt: 'desc' },
     include: { channels: true, runs: { orderBy: { createdAt: 'desc' }, take: 1 }, approvals: { where: { status: 'ACTIVE' }, orderBy: { approvedAt: 'desc' }, take: 1 }, _count: { select: { actions: true } } },
@@ -639,7 +639,7 @@ export async function listCampaigns({ prisma, orgId }) {
 }
 
 export async function getCampaign({ prisma, orgId, userId = null, id }) {
-  requireCampaignsV2(orgId);
+  requireCampaignPlanning(orgId);
   const campaign = await prisma.campaign.findFirst({
     where: { id, orgId }, include: {
       channels: true, runs: { orderBy: { createdAt: 'desc' } },
@@ -686,7 +686,7 @@ export async function getCampaign({ prisma, orgId, userId = null, id }) {
 }
 
 export async function deleteCampaign({ prisma, orgId, userId, id }) {
-  requireCampaignsV2(orgId);
+  requireCampaignPlanning(orgId);
   const campaign = await prisma.campaign.findFirst({ where: { id, orgId, status: { not: 'CANCELLED' } } });
   if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
   await requireCampaignEditor(prisma, campaign, userId);
@@ -715,7 +715,7 @@ async function requireCampaignEditor(prisma, campaign, userId) {
 }
 
 export async function getCampaignSettings({ prisma, orgId }) {
-  requireCampaignsV2(orgId);
+  requireCampaignPlanning(orgId);
   const organization = await prisma.organization.findUnique({
     where: { id: orgId }, select: { campaignAutonomyMode: true },
   });
@@ -724,7 +724,7 @@ export async function getCampaignSettings({ prisma, orgId }) {
 }
 
 export async function updateCampaignSettings({ prisma, orgId, userId, autonomyMode }) {
-  requireCampaignsV2(orgId);
+  requireCampaignPlanning(orgId);
   const membership = await prisma.userOrganization.findUnique({
     where: { userId_orgId: { userId, orgId } }, select: { role: true },
   });
@@ -920,7 +920,7 @@ export function applyCampaignActionEdit(bundle, targetSourceId, patch = {}) {
 }
 
 export async function editCampaignAction({ prisma, orgId, userId, id, actionId, body }) {
-  requireCampaignsV2(orgId);
+  requireCampaignPlanning(orgId);
   const campaign = await prisma.campaign.findFirst({
     where: { id, orgId },
     include: {
@@ -976,7 +976,7 @@ export async function editCampaignAction({ prisma, orgId, userId, id, actionId, 
 }
 
 export async function regenerateCampaign({ prisma, orgId, userId, id, feedback = '' }) {
-  requireCampaignsV2(orgId);
+  requireCampaignPlanning(orgId);
   const campaign = await prisma.campaign.findFirst({ where: { id, orgId } });
   if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
   await requireCampaignEditor(prisma, campaign, userId);

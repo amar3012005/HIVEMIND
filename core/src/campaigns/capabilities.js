@@ -1,5 +1,5 @@
 import { X_AUTH_OAUTH1, X_AUTH_OAUTH2 } from '../x-ads/x-auth-store.js';
-import { campaignChannelExecutionEnabled, campaignExecutionChannels, campaignsV2Enabled, campaignWorkerEnabled } from './state.js';
+import { campaignChannelExecutionEnabled, campaignExecutionChannels, campaignPlanningEnabled, campaignsV2Enabled, campaignWorkerEnabled } from './state.js';
 import { DEFAULT_CAMPAIGN_IMAGE_MODEL } from './image-provider.js';
 import { DAILY_GENERATION_LIMIT } from './image-service.js';
 import { getCampaignConnectionState } from './zernio-execution.js';
@@ -68,6 +68,10 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
     prisma.taraRuntimeConfig.findUnique({ where: { orgId }, select: { defaultProvider: true, revision: true, updatedAt: true } }).catch(() => null),
     getCampaignConnectionState({ prisma, orgId }).catch(() => null),
   ]);
+  // `planning_ready` answers "can this org DRAFT against this channel", so it follows the
+  // runtime, not the outward-publish allowlist. `executable`/`execution_ready` below keep
+  // using the strict per-org gate, so nothing can be sent that could not be sent before.
+  const planningEnabled = campaignPlanningEnabled(orgId);
   const enabled = campaignsV2Enabled(orgId);
   const xConnected = isUnexpired(x, now);
   const xAdsConnected = isUnexpired(xAds, now);
@@ -88,9 +92,9 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
     { id: 'snapchat_ads', reason: 'connect_snapchat_ads' },
   ];
   const nativeChannels = [
-    { id: 'x_organic', planning_ready: enabled, connected: xConnected, executable: enabled && xConnected, execution_ready: enabled && xConnected && campaignChannelExecutionEnabled('x_organic'), reason: xConnected ? null : 'connect_x', execution_reason: campaignChannelExecutionEnabled('x_organic') ? null : 'execution_not_enabled', identity: xConnected ? { id: x.xUserId, username: x.xUsername } : null, evidence: { ...connectionEvidence(x, X_AUTH_OAUTH2, now), adapter_available: true } },
-    { id: 'gmail', planning_ready: enabled, connected: gmailConnected, executable: enabled && gmailConnected, execution_ready: enabled && gmailConnected && campaignChannelExecutionEnabled('gmail'), reason: gmailConnected ? null : 'connect_gmail', execution_reason: campaignChannelExecutionEnabled('gmail') ? null : 'execution_not_enabled', evidence: { ...gmail, status: gmailConnected ? 'connected' : 'not_connected', adapter_available: true } },
-    { id: 'tara', planning_ready: enabled, connected: Boolean(tara), executable: enabled && Boolean(tara), execution_ready: enabled && Boolean(tara) && campaignChannelExecutionEnabled('tara'), reason: tara ? null : 'configure_tara', execution_reason: campaignChannelExecutionEnabled('tara') ? null : 'execution_not_enabled', provider: tara?.defaultProvider || null, evidence: { status: tara ? 'configured' : 'not_configured', scope: 'organization', provider: tara?.defaultProvider || null, revision: tara?.revision || null, verified_at: tara?.updatedAt || null, adapter_available: true } },
+    { id: 'x_organic', planning_ready: planningEnabled, connected: xConnected, executable: enabled && xConnected, execution_ready: enabled && xConnected && campaignChannelExecutionEnabled('x_organic'), reason: xConnected ? null : 'connect_x', execution_reason: campaignChannelExecutionEnabled('x_organic') ? null : 'execution_not_enabled', identity: xConnected ? { id: x.xUserId, username: x.xUsername } : null, evidence: { ...connectionEvidence(x, X_AUTH_OAUTH2, now), adapter_available: true } },
+    { id: 'gmail', planning_ready: planningEnabled, connected: gmailConnected, executable: enabled && gmailConnected, execution_ready: enabled && gmailConnected && campaignChannelExecutionEnabled('gmail'), reason: gmailConnected ? null : 'connect_gmail', execution_reason: campaignChannelExecutionEnabled('gmail') ? null : 'execution_not_enabled', evidence: { ...gmail, status: gmailConnected ? 'connected' : 'not_connected', adapter_available: true } },
+    { id: 'tara', planning_ready: planningEnabled, connected: Boolean(tara), executable: enabled && Boolean(tara), execution_ready: enabled && Boolean(tara) && campaignChannelExecutionEnabled('tara'), reason: tara ? null : 'configure_tara', execution_reason: campaignChannelExecutionEnabled('tara') ? null : 'execution_not_enabled', provider: tara?.defaultProvider || null, evidence: { status: tara ? 'configured' : 'not_configured', scope: 'organization', provider: tara?.defaultProvider || null, revision: tara?.revision || null, verified_at: tara?.updatedAt || null, adapter_available: true } },
   ];
   const merged = new Map(nativeChannels.map((channel) => [channel.id, channel]));
   for (const providerChannel of executionConnections?.channels || []) {
@@ -101,7 +105,7 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
     const providerReady = Boolean(providerChannel.execution_ready) && adapterAvailable;
     const existing = merged.get(channelId);
     merged.set(channelId, {
-      ...(existing || {}), id: channelId, planning_ready: enabled,
+      ...(existing || {}), id: channelId, planning_ready: planningEnabled,
       connected: Boolean(existing?.connected || providerChannel.connected),
       executable: Boolean(existing?.executable || (enabled && providerReady)),
       execution_ready: Boolean(existing?.execution_ready || (enabled && providerReady && campaignChannelExecutionEnabled(channelId))),
@@ -115,7 +119,7 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
   for (const channel of planningOnly) {
     if (merged.has(channel.id)) continue;
     merged.set(channel.id, {
-      ...channel, planning_ready: enabled,
+      ...channel, planning_ready: planningEnabled,
       connected: channel.id === 'x_ads' ? xAdsConnected : false,
       executable: false, execution_ready: false, execution_reason: 'adapter_not_available',
       evidence: channel.evidence || { status: 'not_connected', adapter_available: false },

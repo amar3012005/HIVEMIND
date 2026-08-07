@@ -5774,15 +5774,57 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Composio is not configured on this deployment' }, 503);
     }
     try {
-      const page = await composioService.listToolkits({
-        search: url.searchParams.get('search') || '',
-        cursor: url.searchParams.get('cursor') || null,
-        limit: Math.min(Number(url.searchParams.get('limit')) || 40, 100),
-      });
+      const orgId = current.session.orgId || current.session.org_id;
+      const [page, accounts] = await Promise.all([
+        composioService.listToolkits({
+          search: url.searchParams.get('search') || '',
+          cursor: url.searchParams.get('cursor') || null,
+          limit: Math.min(Number(url.searchParams.get('limit')) || 40, 100),
+        }),
+        orgId ? composioService.listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
+      ]);
+      // Real per-org connection state, not something the FE has to remember
+      // client-side across reloads — the "connected" flag here reflects
+      // whichever of THIS page's toolkits the org actually has an ACTIVE
+      // connected account for, so the frontend can sort them to the top.
+      const connectedToolkits = new Set(accounts.filter((a) => a.status === 'ACTIVE').map((a) => a.toolkit));
+      const toolkits = page.items.map((tk) => ({ ...tk, connected: connectedToolkits.has(tk.slug) }));
       return jsonResponse(res, {
-        toolkits: page.items,
+        toolkits,
         next_cursor: page.nextCursor,
         total_items: page.totalItems,
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 502);
+    }
+  }
+
+  // GET /v1/connectors/composio/toolkits/:slug/tools — full tool list for
+  // one toolkit (name + description per action), for the "what does this
+  // connector actually let the agent do" detail popup on the browse grid.
+  const composioToolkitToolsMatch = pathname.match(/^\/v1\/connectors\/composio\/toolkits\/([a-z0-9_-]+)\/tools$/i);
+  if (composioToolkitToolsMatch && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!composioService.isComposioConfigured()) {
+      return jsonResponse(res, { error: 'Composio is not configured on this deployment' }, 503);
+    }
+    const toolkitSlug = composioToolkitToolsMatch[1].toLowerCase();
+    try {
+      const tools = await composioService.getToolkitTools(toolkitSlug);
+      // Strip the toolkit's own prefix (e.g. "LINKEDIN_") off its tool slugs
+      // for a readable name — "GET_MY_INFO" not the raw "LINKEDIN_GET_MY_INFO".
+      const prefixRe = new RegExp(`^${toolkitSlug}_`, 'i');
+      return jsonResponse(res, {
+        toolkit: toolkitSlug,
+        tools: tools.map((t) => {
+          const rawSlug = t._composio?.slug || t.function?.name || '';
+          return {
+            slug: rawSlug,
+            name: rawSlug.replace(prefixRe, '').replace(/_/g, ' ').trim() || rawSlug,
+            description: t.function?.description || '',
+          };
+        }),
       });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 502);

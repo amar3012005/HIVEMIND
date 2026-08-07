@@ -72,15 +72,18 @@ function documentLeaf(schema, segments) {
  */
 export function deriveStageArtifactContract(stage = {}) {
   const checks = asArray(stage.completion_checks);
+  const selectorsOf = (check) => (Array.isArray(check?.select)
+    ? check.select.map(String)
+    : (check?.select ? [String(check.select)] : []));
   const keys = new Set([...asArray(stage.expected_artifacts).map(String),
-    ...checks.map((check) => String(check?.select || '')).filter(Boolean)]);
+    ...checks.flatMap(selectorsOf)]);
   const out = {};
   for (const key of keys) {
     out[key] = { schema: { type: 'object', properties: {}, required: [] }, requirements: [], minCount: null };
   }
   for (const check of checks) {
-    const key = String(check?.select || '');
-    if (!key || !out[key]) continue;
+   for (const key of selectorsOf(check)) {
+    if (!out[key]) continue;
     const target = out[key];
     const predicate = String(check?.predicate || '');
     const severity = severityOf(check);
@@ -106,6 +109,7 @@ export function deriveStageArtifactContract(stage = {}) {
       continue;
     }
     target.requirements.push(`${severity === 'preferred' ? '(preferred) ' : ''}${predicate}`);
+   }
   }
   return { artifacts: out };
 }

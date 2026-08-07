@@ -1274,6 +1274,83 @@ def _build_harness_quality_check(
     }
 
 
+def _fmt_block(value: Any, indent: str = "") -> str:
+    """Render a strategy value as readable markdown lines (no raw dict/list dumps)."""
+    if value in (None, "", [], {}):
+        return ""
+    if isinstance(value, (list, tuple)):
+        out = []
+        for item in list(value)[:12]:
+            if isinstance(item, dict):
+                head = str(item.get("name") or item.get("segment") or item.get("channel")
+                           or item.get("competitor") or item.get("motion") or item.get("subject")
+                           or item.get("title") or "").strip()
+                rest = "; ".join(f"{k}: {v}" for k, v in item.items()
+                                 if v not in (None, "", [], {}) and str(v) != head)
+                out.append(f"{indent}- **{head}** — {rest}" if head else f"{indent}- {rest}")
+            else:
+                out.append(f"{indent}- {item}")
+        return "\n".join(out)
+    if isinstance(value, dict):
+        lines = []
+        for k, v in list(value.items())[:12]:
+            if v in (None, "", [], {}):
+                continue
+            label = k.replace('_', ' ').title()
+            if isinstance(v, (list, tuple, dict)):
+                # Nested collections get their own sub-bullets — never a raw repr.
+                lines.append(f"{indent}- **{label}**")
+                lines.append(_fmt_block(v, indent + "  "))
+            else:
+                lines.append(f"{indent}- **{label}** — {v}")
+        return "\n".join(line for line in lines if line)
+    return f"{indent}{value}"
+
+
+def _keystone_strategy_markdown(data: Dict[str, Any]) -> str:
+    """The marketing strategy read as the keystone that drives every downstream motion."""
+    sections: List[str] = []
+    if data.get("niche_wedge"):
+        sections.append(f"**The wedge** — {data['niche_wedge']}")
+    if data.get("positioning"):
+        sections.append(f"**Positioning** — {data['positioning']}")
+    for label, field in (("ICP segments (drives prospect discovery)", "audience"),
+                         ("Competitor plan (positioning vs named rivals)", "competitor_plan"),
+                         ("Offer framing", "offer_framing"),
+                         ("Channel mix (drives the campaign)", "channel_mix")):
+        block = _fmt_block(data.get(field))
+        if block:
+            sections.append(f"### {label}\n{block}")
+    motions = data.get("recommended_next_motions")
+    if motions:
+        sections.append("### Next motions — the executable bridge")
+        if isinstance(motions, dict):
+            for lane, title in (("outreach_emails", "Outreach emails (drafted per prospect · approval before send)"),
+                                ("tara_calls", "TARA calls (proposed per warm prospect · approval before dial)"),
+                                ("campaign", "Campaign (awareness motions)")):
+                block = _fmt_block(motions.get(lane), indent="  ")
+                if block:
+                    sections.append(f"**{title}**\n{block}")
+            extra = {k: v for k, v in motions.items()
+                     if k not in ("outreach_emails", "tara_calls", "campaign") and v not in (None, "", [], {})}
+            if extra:
+                sections.append(_fmt_block(extra))
+        else:
+            sections.append(_fmt_block(motions))
+    for label, field in (("Expected outcome", "expected_outcome"), ("Risks", "risks"),
+                         ("Measures", "measures"), ("Dependencies", "dependencies")):
+        block = _fmt_block(data.get(field))
+        if block:
+            sections.append(f"### {label}\n{block}")
+    leftover = {k: v for k, v in data.items() if k not in {
+        "niche_wedge", "positioning", "audience", "competitor_plan", "offer_framing",
+        "channel_mix", "recommended_next_motions", "expected_outcome", "risks",
+        "measures", "dependencies"} and v not in (None, "", [], {})}
+    if leftover:
+        sections.append("### Also recorded\n" + _fmt_block(leftover))
+    return "\n\n".join(sections)
+
+
 def _runtime_phase_report(*, user_message: str, contract: Dict[str, Any], result: Dict[str, Any],
                           room_goal: str = "", gaps: Optional[List[str]] = None) -> Dict[str, Any]:
     """Readable report for a Runtime-driven (HQ work-order) phase.
@@ -1292,6 +1369,14 @@ def _runtime_phase_report(*, user_message: str, contract: Dict[str, Any], result
         key = str(artifact.get("key") or "artifact")
         data = artifact.get("data")
         parts.append(f"\n## {key.replace('_', ' ').title()}")
+        # The marketing strategy is the KEYSTONE: it drives prospect discovery, outreach
+        # email drafts, TARA call proposals and the campaign. Render it in that reading
+        # order — wedge first, then who, then who we beat, then how we reach them, then
+        # the executable motions — so the operator sees the through-line instead of an
+        # alphabet soup of dict keys.
+        if key == "marketing_strategy" and isinstance(data, dict):
+            parts.append(_keystone_strategy_markdown(data))
+            continue
         if isinstance(data, dict):
             for field, value in data.items():
                 if value in (None, "", [], {}):

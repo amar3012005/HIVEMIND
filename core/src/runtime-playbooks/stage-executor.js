@@ -1,6 +1,15 @@
 import crypto, { randomUUID } from 'node:crypto';
 
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'TERMINATED']);
+// A run that exhausted max_attempts is parked in NEEDS_INTERVENTION — by name and by
+// contract it waits for a human/HQ decision. It was NOT in TERMINAL_STATUSES, so every
+// automatic re-entry (onRunState schedules an HQ wake keyed by run.version, which the
+// failure itself just incremented) walked straight back into the stage and re-ran it.
+// max_attempts was honoured inside a single execute(); nothing stopped execute() being
+// called again. Measured: form_strategy reached attempt 10 / checkpoint 15, each
+// iteration burning a full Room turn with live web searches. Halt automatic re-entry;
+// an operator/HQ can still retry deliberately via { allowInterventionRetry: true }.
+const HALTED_STATUSES = new Set(['NEEDS_INTERVENTION']);
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -240,7 +249,7 @@ export class GenericStageExecutor {
     return changed;
   }
 
-  async run(runId, { orgId, event = null } = {}) {
+  async run(runId, { orgId, event = null, allowInterventionRetry = false } = {}) {
     if (!orgId) throw new Error('runtime_executor_org_required');
     // The executor instance is shared by scheduler, callbacks and API requests.
     // A unique invocation owner prevents two calls in the same process from
@@ -259,6 +268,10 @@ export class GenericStageExecutor {
       for (let stepCount = 0; stepCount < this.maxSteps; stepCount += 1) {
         let run = await this.store.loadRun(runId, orgId);
         if (TERMINAL_STATUSES.has(run.status)) return run;
+        // Parked for intervention: never re-enter automatically. Without this the
+        // failure's own version bump scheduled a wake that re-ran the stage, so a
+        // stage could retry indefinitely past max_attempts.
+        if (HALTED_STATUSES.has(run.status) && !allowInterventionRetry) return run;
         const playbook = this.registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
 
         if (run.status === 'WAITING_EVENT') {

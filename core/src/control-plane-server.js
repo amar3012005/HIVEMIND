@@ -5827,6 +5827,19 @@ const server = http.createServer(async (req, res) => {
       // whichever of THIS page's toolkits the org actually has an ACTIVE
       // connected account for, so the frontend can sort them to the top.
       const connectedToolkits = new Set(accounts.filter((a) => a.status === 'ACTIVE').map((a) => a.toolkit));
+      // Slack is native-only (see /connect guard above) — its "connected"
+      // state lives in PlatformIntegration, not Composio's connected_accounts,
+      // so the card would otherwise always read as disconnected even when
+      // the real bot is live.
+      if (prisma) {
+        try {
+          const nativeSlack = await prisma.platformIntegration.findFirst({
+            where: { userId: current.session.userId, platformType: 'slack', isActive: true },
+            select: { id: true },
+          });
+          if (nativeSlack) connectedToolkits.add('slack');
+        } catch { /* best-effort overlay */ }
+      }
       const toolkits = page.items.map((tk) => ({ ...tk, connected: connectedToolkits.has(tk.slug) }));
       return jsonResponse(res, {
         toolkits,

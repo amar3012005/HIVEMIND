@@ -429,3 +429,145 @@ rather than 8-char tag strings in its acceptance gate (it prints a false FATAL);
 decide an owner for the 1M/day governance token pool, which is stopping dreaming
 partway through the day for two orgs; improve the pptx anchor so the 3 of 15
 slides that find no unique anchor get a page instead of `null`.
+
+## 2026-08-07 UTC - Composio connector integration (LIVE-mode toolkits)
+
+- State: Committed; Accepted release, verified live on `singulance`.
+- Owner: Claude (Fable workflow)
+- Branch: `feat/composio-connectors` -> `singulance-main` (frontend
+  `fe/composio-connectors` -> `Da-vinci main`)
+- Base / commit: `ac21aed1` -> `a47803b1` (frontend `Da-vinci` `eee44a86` ->
+  `64ef37ae`)
+- Scope:
+  - New `core/src/connectors/composio/composio-service.js` — Composio wrapper
+    for LIVE/on-demand connectors, complementing Nango. Nango stays the OAuth
+    broker for every INGESTION connector (Gmail sync, Drive index, Slack
+    history — anything with a scheduled batch pull into memories/Qdrant),
+    because Composio has no batch-sync concept at all: every call is a live,
+    on-demand tool execution. Sessions, connect links (with on-demand
+    auth-config auto-provisioning for toolkits with no ops-curated config),
+    tool execution, toolkit catalog browsing (~1,089 toolkits), disconnect.
+    Raw `fetch` against the REST API, no `@composio/core` SDK dependency —
+    same rationale as `nango-service.js`. Every function hand-verified live
+    against the real Composio API (connected accounts, auth configs, connect
+    links, tool execution, toolkit listing, auto-provisioning) before being
+    wired in.
+  - `control-plane-server.js`: `GET /v1/connectors` composio overlay (same
+    connected/needs_reauth/available vocabulary the Nango overlay already
+    uses); `POST /v1/connectors/composio/:toolkit/connect` (OAuth2,
+    redirect-out — Composio hosts its own consent page, not embeddable);
+    `POST .../connect-api-key` (plain API-key toolkits); `GET
+    /v1/connectors/composio/toolkits` (proxied catalog browse/search, hides
+    `COMPOSIO_API_KEY` from the frontend); disconnect route composio branch.
+  - `connectors/catalog.js` (+ frontend mirror): `provider:
+    'nango'|'composio'|'native'` on every entry (additive, verified via
+    plain `diff` — zero deletions); new `linkedin` entry, `mode: ['live']`
+    only (Composio cannot do ingestion sync).
+  - Frontend: LinkedIn tile wired to the new connect flow; new
+    `ComposioToolkitBrowser.jsx` — the full toolkit catalog as a deliberate
+    dark visual island (squared cards, official brand logos, tool/trigger
+    counts, auth-scheme badges, Composio-managed-auth shield, version tag,
+    plug-icon connect button) matching Composio's own dashboard rather than
+    the app's light theme, plus a matching dark Browser Intelligence banner.
+- Verification: `node --check` on every changed backend file; `esbuild` +
+  `CI=false npm run build` green on every changed frontend file; every
+  `composio-service.js` function exercised live against the real Composio
+  project (not mocked) before merge. Post-deploy: image tags on `hm-core`
+  and `hm-control` match the release SHA; `docker exec grep` for
+  distinctive strings from the change (`composio_managed_auth_schemes`,
+  `composioConnectMatch`, `composioToolkit`) confirmed present in BOTH
+  running containers' `/app/src` — not just the image tag. The served
+  frontend bundle (`grep` inside `hivemind-next-frontend-1`'s `/srv`, then
+  fetched that exact chunk over HTTPS) contains `listComposioToolkits`.
+  `GET /v1/connectors/composio/toolkits` and `POST .../connect` return 401
+  (session-gated, not 404) confirming the routes are live.
+- Production: deployed to `singulance` as `prod-20260807-a47803b1bff9`
+  (core, control-plane, frontend all rebuilt and recreated; core-api digest
+  matches the fetched SHA, resolved from GitHub per the fixed
+  `quick-deploy.sh`, not a local clone).
+- Env (not in repo): `COMPOSIO_API_KEY` added to `/root/hivemind/.env`
+  (backed up first to `.env.bak-composio-key-20260807121317`), `hm-core` and
+  `hm-control` recreated via `docker compose --env-file ../.env -f
+  infra/docker-compose.hetzner.yml up -d --no-deps --force-recreate core
+  control-plane` to pick it up. Verified present via `docker exec printenv`
+  on both containers (not printed/logged) before and after; both came back
+  healthy. Before this, every Composio route correctly 503'd
+  ("Composio is not configured on this deployment") rather than crashing —
+  the `isComposioConfigured()` gate worked as designed.
+- Rollback: core `rollback-20260807-000547` (an earlier same-day tag; the
+  running core-api content was verified directly rather than relying on
+  this timestamp matching), control-plane `rollback-20260807-120152`,
+  frontend `rollback-20260807-120152-single`. Revert the listed commits;
+  frontend gitlink back to `eee44a86`. Removing `COMPOSIO_API_KEY` from
+  `.env` and recreating `core`/`control-plane` reverts the env change alone
+  without touching code.
+- Next: task 5 from the original plan (merging Composio's per-org tool list
+  into the `/chat` ReAct router and HyperAgents tool registry, so agents can
+  actually call connected tools mid-conversation, not just connect
+  accounts) is still open — everything shipped this entry is connect/browse
+  infrastructure, not yet wired into agent tool-calling.
+
+## 2026-08-07 UTC - Composio toolkit browser: day-mode redesign, old grid retired
+
+- State: Committed; Accepted release (fe-only), verified live on `singulance`.
+- Owner: Claude (Fable workflow)
+- Branch: `fe/toolkit-browser-daymode` and `fe/remove-old-curated-grid` ->
+  `Da-vinci main` (`048aed47`, `9d4f3307`); gitlink bumps
+  `fe/toolkit-browser-daymode-gitlink` and `fe/remove-curated-grid-gitlink`
+  -> `singulance-main` (`05e03a8e`, `06413492`)
+- Scope:
+  - `ComposioToolkitBrowser.jsx` reverted from an earlier dark-theme
+    exploration back to the app's real light design system (white cards,
+    `#e3e0db` borders, `#117dff` accent, squared corners) — matches the
+    curated grid it sits below rather than being a visual island. Removed
+    the duplicate dark Browser Intelligence banner (the real light-theme
+    one already renders above this section).
+  - New `isSelfServeConnectable()`: a toolkit only gets a working Connect/
+    Add-key button when Composio can actually broker the auth itself (its
+    own managed OAuth app, a plain API key, or no auth). Anything else
+    (an auth scheme Composio lists but has no managed app for — e.g.
+    Salesforce) gets a "Request access" mailto instead of a button that
+    would just 400.
+  - Retired the old category-tab-filtered curated grid
+    (`filteredConnectors.map(renderConnectorCard)`) entirely — it showed
+    the same toolkits twice in two different visual languages once the
+    Composio browser existed. Kept: Browser Intelligence card, the pinned
+    "AI Assistants" grid (ChatGPT/Claude — MCP-client setup, a different
+    concept, not covered by Composio at all), then the Composio browser
+    for everything else. `filteredConnectors`/`renderConnectorCard`/
+    `CONNECTOR_CATEGORIES`/`activeCategory` are kept in the file (the
+    AI-assistants grid still uses `renderConnectorCard`), just unused by
+    the retired section — restoring a management view later is a
+    render-only change.
+  - KNOWN GAP, accepted deliberately: any Nango-connected INGESTION
+    account (Gmail sync, Drive index, Slack history) had its
+    connected/reauth/error status and Disconnect button rendered only in
+    the now-removed grid. That management UI is gone for existing
+    connections; the sync itself is untouched and still runs server-side.
+- Verification: `esbuild` + `CI=false npm run build` green on every commit;
+  `ui-preview` screenshots (light theme, mixed Connect/Add-key/Request-
+  access/No-auth states, real Composio logo URLs) matched intent before
+  each push. Post-deploy: `hivemind-next-frontend-1` image tag matches the
+  release SHA; `docker exec grep` for `isSelfServeConnectable` and
+  `Request access` confirmed present in the running container's `/srv`;
+  that exact served chunk fetched over HTTPS (200) with
+  `Cache-Control: public, max-age=31536000, immutable` — confirming both
+  the new feature AND the separately-fixed static-asset caching are live
+  together.
+- Deploy note: `/root/hivemind-main` (the box's canonical preflight
+  checkout) was mid-use by a concurrent session on `feat/social-session-
+  crawl` with an uncommitted `frontend/Da-vinci` gitlink change pointing
+  *backward* to `fd67a44` (older than canon, unrelated to that session's
+  backend feature — incidental drift, not real work). `git stash` would
+  not touch it (git stash does not include submodule-gitlink-only
+  changes by default); resolved with `git submodule update
+  frontend/Da-vinci` to restore the committed pointer, deployed from
+  `singulance-main`, then switched back to `feat/social-session-crawl`
+  afterward — verified clean, nothing lost.
+- Production: `prod-20260807-064134925694` (frontend only; core/
+  control-plane unchanged this release).
+- Rollback: frontend `hivemind/fe:prod-20260807-3a1714a835c3-single` (the
+  prior release, itself already the fixed-cache one from the parallel
+  session's PR #94). Frontend gitlink back to `d631d6a`.
+- Next: same open item as the prior entry — Composio tools are still not
+  merged into the `/chat`/HyperAgents tool registry.

@@ -593,8 +593,18 @@ export class NativeHqEngine {
           ? run.context.playbook_selection.acceptable_terminal_states : [];
         const terminalMatchesRequest = requestedTerminals.length > 0 && requestedTerminals.includes(run.terminalState);
         const completed = run.status === 'COMPLETED' && terminalMatchesRequest;
+        // A terminal state that ASKS FOR INPUT (campaign_needs_input, *_needs_input) is a
+        // human-in-the-loop request, not a broken lifecycle. It was reported as
+        // "Playbook needs intervention" and then rolled into "retained todo(s) cannot
+        // advance because their exact lifecycle or owner is unavailable" — which is false
+        // and hid an actionable ask: the lifecycle ran correctly and is waiting on the
+        // operator. Classify it separately so the user is asked, not told it broke.
+        const needsUserInput = run.status === 'COMPLETED' && !terminalMatchesRequest
+          && /(^|_)needs_input$/.test(String(run.terminalState || ''));
         const outcomeGap = run.status === 'COMPLETED' && !terminalMatchesRequest
-          ? `Lifecycle reached ${run.terminalState || 'an unspecified terminal state'}, but the requested outcome requires one of: ${requestedTerminals.join(', ') || 'a Director-approved terminal state'}.`
+          ? (needsUserInput
+            ? `The lifecycle completed and is waiting on you: it reached ${run.terminalState}. Provide the missing input (or cancel it) and this work continues — nothing is broken and nothing external was sent.`
+            : `Lifecycle reached ${run.terminalState || 'an unspecified terminal state'}, but the requested outcome requires one of: ${requestedTerminals.join(', ') || 'a Director-approved terminal state'}.`)
           : null;
         await prisma.hqTodo.update({
           where: { id: todo.id },
@@ -616,8 +626,12 @@ export class NativeHqEngine {
           },
         });
         await event(prisma, runtime, cycle, {
-          eventType: completed ? 'decision' : 'blocked',
-          title: completed ? `Completed: ${todo.title}` : `Playbook needs intervention: ${todo.title}`,
+          eventType: completed ? 'decision' : needsUserInput ? 'decision_required' : 'blocked',
+          title: completed
+            ? `Completed: ${todo.title}`
+            : needsUserInput
+              ? `Your input is needed: ${todo.title}`
+              : `Playbook needs intervention: ${todo.title}`,
           summary: completed
             ? `I read the completed lifecycle and accepted ${artifactRefs.length} durable output(s)${artifactSummary ? `: ${artifactSummary}` : ''}. It reached ${run.terminalState} after ${run.completedStageIds.length} checkpointed stage(s). This todo is complete; the next executable queue item can now start.`
             : outcomeGap || 'The lifecycle stopped at a failed predicate or terminal safety condition. Exact unmet checks remain attached to the run.',

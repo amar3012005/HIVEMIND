@@ -211,7 +211,15 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
         runtimeId: trigger.runtime_id,
         orgId: run.orgId,
         runtimeEpoch: trigger.runtime_epoch,
-        idempotencyKey: `runtime-playbook-result:${run.id}:${run.version}`,
+        // Coalesce on the MEANINGFUL transition, not on run.version. version increments on
+        // every update — each stage advance, artifact persist and checkpoint — so a single
+        // lifecycle walking 6 stages minted ~12 distinct keys and therefore ~12 wakes, each
+        // running a full HQ cycle that re-emitted the same narration block. That is the
+        // duplicated "wake / company in view / checked instructions / re-ranked queue"
+        // spam, and it is why a [Sleeping] line was immediately followed by another wake.
+        // Keying on (run, stage, status) collapses those into one wake per real transition;
+        // the wake still reads current state when it fires, so nothing is missed.
+        idempotencyKey: `runtime-playbook-result:${run.id}:${run.currentStageId || 'none'}:${run.status}`,
         triggerType: 'runtime_playbook_result',
         dueAt: new Date(),
         payload: { run_id: run.id, status: run.status, todo_id: trigger.todo_id || null },

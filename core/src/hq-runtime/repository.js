@@ -50,10 +50,19 @@ export async function resetHqForCompanyReplacement({ prisma, orgId }) {
       })).map((row) => row.id) } },
     });
     await tx.hyperWorkOrder.deleteMany({ where: { orgId, hqCycleId: { not: null } } });
+    // Clear EVERY runtime-generated Room turn, not just the two original prefixes.
+    // Checkpointed lifecycle turns are keyed `runtime-stage:<hash>` (room-director.js
+    // turnIdempotencyKey) and dashboard kickoffs `task-kickoff-...`; neither matched the
+    // old filter, so marketing / outreach / campaign Rooms carried their previous
+    // agent work across a reset and never started fresh. Human-authored Room
+    // conversations have no runtime idempotency key and are deliberately preserved —
+    // a reset clears the agent's work, not the user's messages.
     await tx.hyperTurn.deleteMany({
       where: { room: { orgId }, OR: [
         { idempotencyKey: { startsWith: 'hq-wo:' } },
         { idempotencyKey: { startsWith: 'growth-plan:' } },
+        { idempotencyKey: { startsWith: 'runtime-stage:' } },
+        { idempotencyKey: { startsWith: 'task-kickoff-' } },
       ] },
     });
     await tx.growthJournal.deleteMany({ where: { orgId } });

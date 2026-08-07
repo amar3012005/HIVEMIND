@@ -84,7 +84,8 @@
         {
           "predicate": "all_have_nonempty_field",
           "select": "marketing_strategy",
-          "path": "data.recommended_next_motions"
+          "path": "data.recommended_next_motions",
+          "severity": "preferred"
         }
       ],
       "transitions": [

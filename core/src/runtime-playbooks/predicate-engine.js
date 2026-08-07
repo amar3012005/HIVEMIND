@@ -192,17 +192,33 @@ export class PredicateEngine {
       } catch (cause) {
         error = cause instanceof Error ? cause.message : String(cause);
       }
+      // severity: 'required' (default) blocks the stage; 'preferred' degrades to a
+      // recorded gap. Every check used to block, so one missing nice-to-have field
+      // (e.g. data.recommended_next_motions) discarded an otherwise complete strategy
+      // and dead-ended the todo. A stage that satisfies every REQUIRED check must be
+      // able to finish while still reporting what is thin.
+      const severity = String(rawCheck?.severity || 'required').trim().toLowerCase() === 'preferred'
+        ? 'preferred' : 'required';
       return {
         id: checkIdentity(rawCheck, index),
         predicate: check.predicate,
         passed,
+        severity,
         ...(error ? { error } : {}),
       };
     });
+    const unmet = results.filter((result) => !result.passed);
+    const blocking = unmet.filter((result) => result.severity !== 'preferred');
+    const advisory = unmet.filter((result) => result.severity === 'preferred');
     return {
-      passed: results.every((result) => result.passed),
+      // Only REQUIRED failures block. Advisory misses travel as gaps/warnings.
+      passed: blocking.length === 0,
       results,
-      unmet: results.filter((result) => !result.passed),
+      // `unmet` stays the blocking set so existing callers (verdict copy, repair
+      // prompts, event details) keep describing what actually stopped the stage.
+      unmet: blocking,
+      advisory_unmet: advisory,
+      gaps: advisory.map((result) => `${result.predicate}${result.id ? `:${result.id}` : ''} (preferred, not satisfied)`),
     };
   }
 

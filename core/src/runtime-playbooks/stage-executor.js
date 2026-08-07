@@ -438,7 +438,14 @@ export class GenericStageExecutor {
           }
         }
         const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
-        const verdict = { ...combineVerdicts(predicateVerdict, verificationResults), warnings };
+        // A stage may pass on its REQUIRED checks while a 'preferred' one is unmet.
+        // Surface those as warnings/gaps so the outcome is honest ("done, but this is
+        // thin") instead of either a silent pass or a dead-end.
+        const verdict = {
+          ...combineVerdicts(predicateVerdict, verificationResults),
+          warnings: [...warnings, ...(predicateVerdict.gaps || [])],
+          ...(predicateVerdict.advisory_unmet?.length ? { advisory_unmet: predicateVerdict.advisory_unmet } : {}),
+        };
 
         await this.store.appendCheckpoint(runId, orgId, {
           stageId: stage.id,

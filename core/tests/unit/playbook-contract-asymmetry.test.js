@@ -118,3 +118,44 @@ test('channel_mix is typed so the consumer gets organic AND paid, not a sentence
     assert.deepEqual([...cm.properties[lane].items.required].sort(), ['channel', 'rationale']);
   }
 });
+
+test('DELIVERY GUARD: the stage that needs the strict schema actually receives it', async () => {
+  const { roomPhaseEnvelope, runtimeStageEnvelope } = await import('../../src/runtime-playbooks/room-director.js');
+  // The trap: usesRoomPhase() tests the stage's configured contract against the literal
+  // 'room-phase.v1', so a stage configured 'room-phase.v2' takes the runtimeStageEnvelope
+  // path. Shipping the derived contract only inside roomPhaseEnvelope.lifecycle delivered it
+  // to NOBODY — deriving it correctly is worthless if the producer never receives it.
+  let checked = 0;
+  for (const { fixture, stage } of stages()) {
+    const derived = deriveStrictResponseSchema(stage);
+    if (!derived) continue;
+    const config = stage.execution?.config || {};
+    const request = {
+      run_id: 'r', playbook_id: 'p', playbook_version: 1, stage_id: stage.id, objective: stage.objective,
+      expected_artifacts: stage.expected_artifacts, checks: stage.completion_checks,
+      execution_config: config, inputs: {}, runtime_context: {},
+    };
+    const envelope = config.contract === 'room-phase.v1' ? roomPhaseEnvelope(request) : runtimeStageEnvelope(request);
+    const delivered = envelope.strict_response_schema || envelope.lifecycle?.strict_response_schema;
+    assert.ok(delivered, `${fixture}:${stage.id} derives a strict schema but the ${envelope.contract} envelope does not carry it`);
+    assert.equal(delivered.name, derived.name, `${fixture}:${stage.id} delivered a different schema than was derived`);
+    checked += 1;
+  }
+  assert.ok(checked >= 1, 'no stage exercised the delivery path');
+});
+
+test('both envelopes carry the derived contract, so neither path can drift', async () => {
+  const { roomPhaseEnvelope, runtimeStageEnvelope } = await import('../../src/runtime-playbooks/room-director.js');
+  const request = {
+    run_id: 'r', playbook_id: 'p', playbook_version: 1, stage_id: 's',
+    expected_artifacts: ['marketing_strategy'],
+    checks: [{ predicate: 'all_have_nonempty_field', select: 'marketing_strategy', path: 'data.channel_mix' }],
+    execution_config: {}, inputs: {}, runtime_context: {},
+  };
+  const direct = runtimeStageEnvelope(request);
+  assert.ok(direct.artifact_schemas, 'runtime-stage.v1 must carry artifact_schemas');
+  assert.ok('strict_response_schema' in direct, 'runtime-stage.v1 must carry strict_response_schema');
+  const phase = roomPhaseEnvelope({ ...request, execution_config: { contract: 'room-phase.v1' } });
+  assert.ok(phase.lifecycle.artifact_schemas, 'room-phase.v2 must carry artifact_schemas');
+  assert.ok('strict_response_schema' in phase.lifecycle, 'room-phase.v2 must carry strict_response_schema');
+});

@@ -75,6 +75,23 @@ export function runtimeStageEnvelope(request) {
     unmet: asArray(request.unmet),
     adapter_descriptors: asArray(request.adapter_descriptors),
     authority_granted: request.authority_granted === true,
+    // The derived contract belongs on BOTH envelopes. `usesRoomPhase()` tests the stage's
+    // configured contract against the literal 'room-phase.v1', so a stage configured
+    // 'room-phase.v2' — marketing's form_strategy — takes THIS envelope, not roomPhaseEnvelope.
+    // Shipping the schema only inside roomPhaseEnvelope.lifecycle therefore delivered it to
+    // nobody: form_strategy never saw it, and the outreach stages that do get the lifecycle
+    // block expect two artifacts, so strict correctly declines. Top-level here because this
+    // envelope has no lifecycle block, and the producer reads it off the envelope root.
+    ...(() => {
+      try {
+        const stage = { expected_artifacts: asArray(request.expected_artifacts), completion_checks: asArray(request.checks) };
+        return {
+          artifact_requirements: renderArtifactRequirements(stage) || null,
+          artifact_schemas: deriveStageArtifactContract(stage).artifacts,
+          strict_response_schema: deriveStrictResponseSchema(stage),
+        };
+      } catch { return {}; }  // a derivation failure must never block a Room turn
+    })(),
     result_contract: {
       contract: 'runtime-stage-result.v1',
       artifacts: ['id', 'key', 'status', 'data', 'source_refs', 'external_ref'],

@@ -2,7 +2,7 @@ import { getCampaignCapabilities } from './capabilities.js';
 import { approveCampaign, approveCampaignAction, controlCampaign, createCampaign, deleteCampaign, editCampaignAction, getCampaign, getCampaignSettings, listCampaigns, reconcileCampaignAction, regenerateCampaign, retryCampaignAction, syncCampaignMetrics, updateCampaignSettings } from './service.js';
 import { dispatchCampaignRoomSafely } from './dispatcher.js';
 import { processDueCampaignActions } from './worker.js';
-import { campaignWorkerEnabled, requireCampaignsV2 } from './state.js';
+import { campaignWorkerEnabled, requireCampaignPlanning } from './state.js';
 import {
   deleteCampaignAsset, enqueueCampaignImages, getCampaignAssetContent, MAX_UPLOAD_BYTES,
   selectCampaignAsset, uploadCampaignAsset,
@@ -63,7 +63,10 @@ function multipartImage(req, raw) {
 
 export async function handleCampaignRequest({ pathname, method, body, req, res, prisma, userId, orgId, jsonResponse, auditLogger }) {
   try {
-    if (pathname === '/api/campaigns/connections' || pathname.startsWith('/api/campaigns/connections/')) requireCampaignsV2(orgId);
+    // Reading/managing which channels are connected is part of PLANNING — the Room and the
+    // Campaigns UI both need it to explain what is reachable. Actually publishing through a
+    // connection stays behind the strict allowlist inside the service layer.
+    if (pathname === '/api/campaigns/connections' || pathname.startsWith('/api/campaigns/connections/')) requireCampaignPlanning(orgId);
     if (pathname === '/api/campaigns/capabilities' && method === 'GET') {
       return jsonResponse(res, await getCampaignCapabilities({ prisma, userId, orgId }));
     }

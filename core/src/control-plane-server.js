@@ -16,6 +16,8 @@ import { createSignupAdmission, invitationCodeMatches, verifySignupAdmission } f
 import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
+import * as composioService from './connectors/composio/composio-service.js';
+import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
 import { provisionForPlan } from './vector/container-router.js';
 import { SEAM_SCHEMA_VERSION } from './contracts/hyper-seams.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
@@ -2787,11 +2789,29 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       core = [`[${new Date().toISOString()}] [WARN] Core logs unavailable: ${error.message}`];
     }
-    const mixed = [...core.map((line) => ({ line, source: 'core' })), ...controlPlane.map((line) => ({ line, source: 'control' }))]
+    // hm-employees (Python/FastAPI sidecar) — same X-Admin-Token master-key
+    // auth already used for /admin/reload; ring buffer added in log_buffer.py.
+    let employees = [];
+    try {
+      const response = await fetch(`${HYPER_SIDECAR_BASE_URL}/admin/api/logs`, {
+        headers: { 'X-Admin-Token': process.env.HIVEMIND_MASTER_API_KEY || '' },
+      });
+      if (!response.ok) throw new Error(`Employees logs returned ${response.status}`);
+      const snapshot = await response.json();
+      employees = (snapshot.logs || []).map((entry) =>
+        `[${entry.timestamp}] [${String(entry.type || 'info').toUpperCase()}] ${entry.line || ''}`);
+    } catch (error) {
+      employees = [`[${new Date().toISOString()}] [WARN] Employees logs unavailable: ${error.message}`];
+    }
+    const mixed = [
+      ...core.map((line) => ({ line, source: 'core' })),
+      ...controlPlane.map((line) => ({ line, source: 'control' })),
+      ...employees.map((line) => ({ line, source: 'employees' })),
+    ]
       .sort((a, b) => b.line.localeCompare(a.line))
       .slice(0, 250)
       .map(({ line }) => line);
-    return jsonResponse(res, { observed_at: new Date().toISOString(), logs: { mixed, core, control: controlPlane } });
+    return jsonResponse(res, { observed_at: new Date().toISOString(), logs: { mixed, core, control: controlPlane, employees } });
   }
 
   if (pathname === '/admin/api/platform/plans' && (req.method === 'GET' || req.method === 'POST')) {
@@ -5615,6 +5635,47 @@ const server = http.createServer(async (req, res) => {
       console.warn('[v1/connectors] nango overlay failed:', nangoErr.message);
     }
 
+    // Overlay Composio-backed LIVE connectors (org-scoped — Composio's
+    // user_id is the org id, matching the Nango overlay's org-level
+    // convention above). Same status vocabulary the FE merge already
+    // understands: connected / needs_reauth / error / available.
+    if (composioService.isComposioConfigured()) {
+      try {
+        const orgId = current.session.orgId || current.session.org_id;
+        if (orgId) {
+          const composioEntries = COMPOSIO_CONNECTOR_CATALOG.filter((c) => c.provider === 'composio');
+          const accounts = await composioService.listConnectedAccounts(orgId);
+          const knownProviders = new Set(result.map((e) => e.provider));
+          for (const entry of composioEntries) {
+            const rows = accounts.filter((a) => a.toolkit === (entry.composioToolkit || entry.id));
+            const active = rows.find((r) => r.status === 'ACTIVE');
+            const dead = rows.find((r) => r.status === 'EXPIRED' || r.status === 'FAILED');
+            const status = active ? 'connected' : dead ? 'needs_reauth' : 'available';
+            const overlay = {
+              provider: entry.id,
+              label: entry.name,
+              status,
+              account_ref: active?.id || dead?.id || null,
+              last_sync_at: null,
+              last_error: null,
+              is_active: Boolean(active),
+              created_at: (active || dead)?.createdAt || null,
+              source: 'composio',
+            };
+            if (knownProviders.has(entry.id)) {
+              const idx = result.findIndex((e) => e.provider === entry.id);
+              result[idx] = { ...result[idx], ...overlay };
+            } else {
+              result.push(overlay);
+              knownProviders.add(entry.id);
+            }
+          }
+        }
+      } catch (composioErr) {
+        console.warn('[v1/connectors] composio overlay failed:', composioErr.message);
+      }
+    }
+
     const whatsappStatus = await whatsappManager.getStatus(current.session.userId).catch((err) => ({
       paired: false,
       phoneNumber: null,
@@ -5623,6 +5684,109 @@ const server = http.createServer(async (req, res) => {
     result.push(buildWhatsAppConnectorStatus(whatsappStatus));
 
     return jsonResponse(res, { connectors: result });
+  }
+
+  // POST /v1/connectors/composio/:toolkit/connect — start a Composio
+  // managed-auth OAuth flow for one toolkit, org-scoped. Redirect-out flow
+  // (Composio hosts the OAuth consent page; not embeddable) — mirrors how
+  // the existing Nango Connect button already opens a hosted popup/page
+  // rather than an in-app form.
+  const composioConnectMatch = pathname.match(/^\/v1\/connectors\/composio\/([a-z0-9_-]+)\/connect$/i);
+  if (composioConnectMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!composioService.isComposioConfigured()) {
+      return jsonResponse(res, { error: 'Composio is not configured on this deployment' }, 503);
+    }
+    const toolkitSlug = composioConnectMatch[1].toLowerCase();
+    const orgId = current.session.orgId || current.session.org_id;
+    if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const callbackUrl = typeof body.callback_url === 'string' && body.callback_url
+        ? body.callback_url
+        : `${req.headers.origin || ''}/hivemind/app/connectors?composio_connected=${encodeURIComponent(toolkitSlug)}`;
+      // When the FE already knows the toolkit's metadata (browse-the-full-
+      // catalog grid — every card carries its own toolkits.list() result),
+      // it passes it along so a toolkit with no ops-curated auth config yet
+      // gets one auto-provisioned instead of 400ing.
+      const link = await composioService.createConnectLink(toolkitSlug, orgId, {
+        callbackUrl,
+        toolkitMeta: body.toolkit_meta && typeof body.toolkit_meta === 'object' ? {
+          composioManagedAuthSchemes: Array.isArray(body.toolkit_meta.composio_managed_auth_schemes) ? body.toolkit_meta.composio_managed_auth_schemes : [],
+          noAuth: Boolean(body.toolkit_meta.no_auth),
+        } : undefined,
+      });
+      await audit({
+        organizationId: orgId, userId: current.session.userId,
+        eventType: 'connector.composio_connect_started', eventCategory: 'connectors', action: 'create',
+        resourceType: 'composio_connected_account', resourceId: link.connectedAccountId,
+        metadata: { toolkit: toolkitSlug }, ..._reqMeta(req),
+      });
+      return jsonResponse(res, {
+        redirect_url: link.redirectUrl,
+        connected_account_id: link.connectedAccountId,
+        expires_at: link.expiresAt,
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, err.status === 404 ? 404 : 400);
+    }
+  }
+
+  // POST /v1/connectors/composio/:toolkit/connect-api-key — connect a
+  // plain-API-key toolkit (SerpApi, Firecrawl, ...). No redirect: the
+  // caller already has the key, it's forwarded straight to Composio and
+  // never logged/persisted here.
+  const composioApiKeyMatch = pathname.match(/^\/v1\/connectors\/composio\/([a-z0-9_-]+)\/connect-api-key$/i);
+  if (composioApiKeyMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!composioService.isComposioConfigured()) {
+      return jsonResponse(res, { error: 'Composio is not configured on this deployment' }, 503);
+    }
+    const toolkitSlug = composioApiKeyMatch[1].toLowerCase();
+    const orgId = current.session.orgId || current.session.org_id;
+    if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : '';
+      if (!apiKey) return jsonResponse(res, { error: 'api_key is required' }, 400);
+      const result = await composioService.createApiKeyConnection(orgId, toolkitSlug, apiKey);
+      await audit({
+        organizationId: orgId, userId: current.session.userId,
+        eventType: 'connector.composio_connect_started', eventCategory: 'connectors', action: 'create',
+        resourceType: 'composio_connected_account', resourceId: result.id,
+        metadata: { toolkit: toolkitSlug, auth_scheme: 'API_KEY' }, ..._reqMeta(req),
+      });
+      return jsonResponse(res, { connected_account_id: result.id, status: result.status });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 400);
+    }
+  }
+
+  // GET /v1/connectors/composio/toolkits?search=&cursor= — browse Composio's
+  // full toolkit catalog (~1,100 toolkits). Thin proxy so the frontend never
+  // sees COMPOSIO_API_KEY.
+  if (pathname === '/v1/connectors/composio/toolkits' && req.method === 'GET') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!composioService.isComposioConfigured()) {
+      return jsonResponse(res, { error: 'Composio is not configured on this deployment' }, 503);
+    }
+    try {
+      const page = await composioService.listToolkits({
+        search: url.searchParams.get('search') || '',
+        cursor: url.searchParams.get('cursor') || null,
+        limit: Math.min(Number(url.searchParams.get('limit')) || 40, 100),
+      });
+      return jsonResponse(res, {
+        toolkits: page.items,
+        next_cursor: page.nextCursor,
+        total_items: page.totalItems,
+      });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 502);
+    }
   }
 
   const whatsappQrRoute = pathname === '/api/connectors/whatsapp/qr' || pathname === '/v1/connectors/whatsapp/qr';
@@ -5936,10 +6100,25 @@ const server = http.createServer(async (req, res) => {
   if (connectorDisconnectMatch && req.method === 'POST') {
     const current = await requireSession(req, res);
     if (!current) return;
-    if (!connectorStore) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const providerId = connectorDisconnectMatch[1];
 
-    const success = await connectorStore.disconnect(current.session.userId, connectorDisconnectMatch[1]);
-    return jsonResponse(res, { success, provider: connectorDisconnectMatch[1] });
+    // Composio-backed connector — org-scoped, not the legacy userId-scoped
+    // connectorStore path below.
+    const composioEntry = COMPOSIO_CONNECTOR_CATALOG.find((c) => c.provider === 'composio' && c.id === providerId);
+    if (composioEntry) {
+      const orgId = current.session.orgId || current.session.org_id;
+      if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
+      try {
+        const removed = await composioService.disconnectToolkit(orgId, composioEntry.composioToolkit || composioEntry.id);
+        return jsonResponse(res, { success: removed > 0, provider: providerId });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    if (!connectorStore) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const success = await connectorStore.disconnect(current.session.userId, providerId);
+    return jsonResponse(res, { success, provider: providerId });
   }
 
   // POST /v1/connectors/:provider/resync — trigger manual resync
@@ -9765,14 +9944,20 @@ Write the persona now.`;
           company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
           'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
         ].filter(Boolean).join('\n');
-        // A task click opens ITS OWN work room, never the shared domain/company
-        // ("_domain_home") room. Binding an unstarted task to the domain-home room
-        // by room_tag (added in 76737eaa) funnelled every task into the one agent
-        // company room instead of provisioning a dedicated per-task workroom — the
-        // intended "click a task → its workroom" behaviour above. We reuse ONLY the
-        // task's own previously-created room (task.room_id, persisted on first open);
-        // otherwise a fresh work room is created below. Do NOT reintroduce a
-        // _domain_home lookup here — it reopens the company room, not a work room.
+        if (!task.room_id && task.room_tag) {
+          const domainRows = await prisma.$queryRawUnsafe(
+            `SELECT id, name
+               FROM "hivemind"."hyper_rooms"
+              WHERE org_id = $1::uuid
+                AND room_tag = $2
+                AND archived_at IS NULL
+                AND agent_connectors->>'_domain_home' = 'true'
+              ORDER BY created_at ASC LIMIT 1`,
+            current.session.orgId,
+            String(task.room_tag),
+          ).catch(() => []);
+          if (domainRows?.[0]?.id) task.room_id = domainRows[0].id;
+        }
         if (task.room_id) {
           const existing = await prisma.hyperRoom.findFirst({
             where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },

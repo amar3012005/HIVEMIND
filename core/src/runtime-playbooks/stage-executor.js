@@ -47,6 +47,25 @@ function authorityGranted(run, stage) {
   return stage.authority_binding !== 'stage_inputs' || grant.payload?.input_hash === stageAuthorityHash(run, stage);
 }
 
+// On a REPAIR retry the stage must see its OWN rejected draft, not just its upstream
+// inputs. Without this every attempt rewrote the artifact from scratch, so the shape
+// churned instead of converging: form_strategy attempt 2 produced a full channel_mix,
+// attempt 3 dropped it again, attempt 4 lost niche_wedge too. Seven attempts, no
+// monotonic progress. The artifacts ARE already persisted on the run — the stage simply
+// never asked for them. Expose the last draft of each expected artifact under a
+// `prior_attempt.<key>` namespace so the Room can carry forward what already passed and
+// spend the retry only on the unmet fields.
+function priorAttemptInputs(run, stage, attempt) {
+  if (!(attempt > 1)) return {};
+  const grouped = artifactMap(run.artifacts);
+  const resolved = {};
+  for (const key of stage.expected_artifacts || []) {
+    const rows = grouped[key];
+    if (Array.isArray(rows) && rows.length) resolved[`prior_attempt.${key}`] = rows[rows.length - 1];
+  }
+  return resolved;
+}
+
 function resolveInputs(run, stage, activeEvent = null) {
   const grouped = artifactMap(run.artifacts);
   const resolved = {};
@@ -354,7 +373,7 @@ export class GenericStageExecutor {
           runtime_context: asObject(run.context),
           expected_artifacts: stage.expected_artifacts,
           authority_granted: authorityGranted(run, stage),
-          inputs: resolveInputs(run, stage, event),
+          inputs: { ...resolveInputs(run, stage, event), ...priorAttemptInputs(run, stage, attempts[stage.id]) },
           checks: stage.completion_checks,
           unmet: asObject(run.lastVerdict).unmet || [],
           stage_attempts: attempts,
@@ -421,7 +440,7 @@ export class GenericStageExecutor {
               verification.operation || 'verify',
               {
                 artifacts: grouped[verification.select] || [],
-                inputs: resolveInputs(run, stage, event),
+                inputs: { ...resolveInputs(run, stage, event), ...priorAttemptInputs(run, stage, attempts[stage.id]) },
                 checks: stage.completion_checks.filter((check) => check.select === verification.select),
                 config: asObject(verification.config),
               },

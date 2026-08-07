@@ -120,15 +120,41 @@ def resolve_room_kind(task_tag: str, goal: str, message: str) -> str:
     return "general"
 
 
+# A room kind gets its own methods plus the ADJACENT method families it genuinely
+# needs. Without this a `marketing` room (a domain pack) only ever saw the marketing
+# pack + `general`, so the whole strategy/market/business method library was invisible
+# to its Director — and a Director cannot select a skill it is never shown. That is why
+# a keystone strategy assignment fell back to generic evidence-first prose: positioning,
+# beachhead, channel and offer methods existed on disk and were never offered.
+_ADJACENT_KINDS: Dict[str, Tuple[str, ...]] = {
+    "marketing": ("strategy", "market", "business", "outreach"),
+    "campaign": ("marketing", "market", "business"),
+    "seo": ("marketing", "market"),
+    "outreach": ("market", "business", "strategy"),
+    "product": ("strategy", "market"),
+    "fundraising": ("strategy", "business", "market"),
+    "strategy": ("market", "business"),
+}
+
+
 def skill_catalog(room_kind: str) -> List[Tuple[str, str]]:
-    """(name, when) pairs for the kind + the general fallbacks — the ONLY part
-    the planner prompt pays for."""
+    """(name, when) pairs for the kind + adjacent method families + the general
+    fallbacks — the ONLY part the planner prompt pays for."""
     out: List[Tuple[str, str]] = list(domain_skill_catalog(room_kind))
+    seen = {name for name, _ in out}
     for name, (when, _body) in METHOD_SKILLS.get(room_kind, {}).items():
         out.append((name, when))
+        seen.add(name)
+    for adjacent in _ADJACENT_KINDS.get(room_kind, ()):
+        for name, (when, _body) in METHOD_SKILLS.get(adjacent, {}).items():
+            if name not in seen:
+                out.append((name, when))
+                seen.add(name)
     if room_kind != "general":
         for name, (when, _body) in METHOD_SKILLS.get("general", {}).items():
-            out.append((name, when))
+            if name not in seen:
+                out.append((name, when))
+                seen.add(name)
     return out
 
 

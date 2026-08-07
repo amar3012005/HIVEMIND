@@ -1625,8 +1625,49 @@ export async function answerStep({ message, history, evidence, plan, language, a
   const groundedEvidence = sourceFirst
     ? `${evLines ? `DOCUMENT SEGMENTS (${(evidence.evidence || []).length} exact-source passages):\n${evLines}\n\n` : ''}MEMORIES:\n${evidenceLines || '(none)'}`
     : `MEMORIES:\n${evidenceLines || '(none)'}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks):\n${evLines}` : ''}`;
-  const userBlock = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}${chainLines ? `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` : ''}${edgeLines ? `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for verified relation claims):\n${edgeLines}` : ''}${coMentionLines ? `\n\nCO-MENTIONS (${(evidence.co_mentions || []).length} shared-source paths — report as unverified co-mentions, never as typed relationships):\n${coMentionLines}` : ''}${liveLines ? `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` : ''}${capabilityHint}${windowNote}${personaNote}${coverageNote}
+
+  // PHASE 1 — combined evidence budget, priority-ordered truncation.
+  //
+  // Before this, six OPTIONAL sections (synthesis chains, graph edges,
+  // co-mentions, live workspace — document segments and citation registry are
+  // folded into groundedEvidence/kept always) were unconditionally
+  // concatenated whenever non-empty, with no combined cap. Each section has a
+  // carefully-tuned PER-ITEM cap already (the adaptive _contentBudget, the
+  // 520/320/180-char slices above) — none of that changes here. What was
+  // missing is a ceiling on the SUM. A real trace showed 7185 prompt tokens
+  // against 772 completion tokens: 90% of chat's cost is this input block,
+  // not the model's output.
+  //
+  // groundedEvidence (memories + document segments) and the citation registry
+  // are NEVER dropped — they are the ground truth an answer cites and the ID
+  // contract validateChatAnswer checks against; dropping either would trade a
+  // token saving for a grounding regression, which is not the trade this
+  // phase is making. Only the four sections below are subject to the budget,
+  // dropped WHOLE (never mid-string — a partial synthesis chain or a citation
+  // id cut in half is worse than the section being absent), lowest priority
+  // first, until the remainder fits.
+  const EVIDENCE_CHAR_BUDGET = Number(process.env.HIVEMIND_ANSWER_EVIDENCE_CHAR_BUDGET || 12000);
+  const alwaysKept = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
+${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}`;
+  // Highest priority first — this is the drop order, last entry drops first.
+  const optionalSections = [
+    { text: chainLines && `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` },
+    { text: edgeLines && `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for verified relation claims):\n${edgeLines}` },
+    { text: coMentionLines && `\n\nCO-MENTIONS (${(evidence.co_mentions || []).length} shared-source paths — report as unverified co-mentions, never as typed relationships):\n${coMentionLines}` },
+    { text: liveLines && `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` },
+  ].filter((s) => s.text);
+  let _remaining = EVIDENCE_CHAR_BUDGET - alwaysKept.length;
+  const _kept = [];
+  for (const section of optionalSections) {
+    if (section.text.length <= _remaining) { _kept.push(section.text); _remaining -= section.text.length; }
+    // else: drop this whole section. Lower-priority sections after it in the
+    // array are checked independently — a large GRAPH EDGES block being cut
+    // must not also silently cut a small LIVE WORKSPACE block that would
+    // still fit.
+  }
+  const evidenceBlock = alwaysKept + _kept.join('');
+
+  const userBlock = `${evidenceBlock}${capabilityHint}${windowNote}${personaNote}${coverageNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
@@ -1674,9 +1715,19 @@ ${message}`;
   let repairUsage = null;
   if (!validated.claims.length && hasGroundedPacketEvidence(evidence)) {
     const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return the strongest concise synthesis that the evidence supports, then name the specific part of the user's question that remains uncovered. Every sentence must be a grounded claim with one or more IDs from the CITATION REGISTRY. Do not output a blanket absence response while any cited evidence exists.`;
+    // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
+    // stateless API call — it must still see the full evidence in userBlock
+    // (already shrunk by the combined budget above) or it has nothing left to
+    // cite and would fail worse than the draft it's fixing. What it does NOT
+    // need is the draft's own answer-length ceiling: it is reformatting an
+    // already-derived synthesis for citation compliance, not deriving new
+    // content, so a smaller output cap and low reasoning effort are safe
+    // regardless of the original answerMode (a 'full' mode repair does not
+    // need 'medium' reasoning to re-cite the same facts).
+    const repairCap = Math.min(answerCap, Number(process.env.HIVEMIND_REPAIR_MAX_TOKENS || 1500));
     const repaired = await callJsonLLM({
       messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
-      model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning, temperature: 0,
+      model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low', temperature: 0,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;

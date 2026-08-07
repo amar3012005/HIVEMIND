@@ -5,13 +5,14 @@ import { RUNTIME_OPERATOR_PROMPT } from './config-store.js';
 const PROVIDERS = new Set(['deepgram', 'grok']);
 const GROK_MODEL = 'grok-voice-think-fast-1.0';
 const RUNTIME_OPERATOR_PROVIDER = 'grok';
-// Runtime-admin check-in voice. Overridable via TARA_RUNTIME_OPERATOR_VOICE_ID so it
-// can be pointed at a preferred voice (e.g. 'zenith') the moment that voice actually
-// exists in the live xAI grok roster — WITHOUT a code change. Default 'rex' (a supported,
-// multilingual, professional voice). NOTE: the live grok roster is eve/ara/rex/sal/leo;
-// 'zenith' is NOT currently offered by xAI, so setting it would fall back at the adapter.
-// Pinned only for the Runtime-admin profile; normal org voice policy is untouched.
-const RUNTIME_OPERATOR_VOICE_ID = (process.env.TARA_RUNTIME_OPERATOR_VOICE_ID || 'rex').trim().toLowerCase() || 'rex';
+// Runtime-admin check-in voice. Overridable via TARA_RUNTIME_OPERATOR_VOICE_ID.
+// The live xAI roster (GET /v1/tts/voices) carries 26 voices — altair, ara, atlas,
+// carina, castor, celeste, cosmo, eve, helios, helix, iris, kepler, leo, lumen, luna,
+// lux, naksh, orion, perseus, rex, rigel, sal, sirius, ursa, zagan, zenith. The short
+// eve/ara/rex/sal/leo list in GROK_VOICES below is only the offline FALLBACK used when
+// the roster call fails (e.g. an unfunded account 403s), so do not read it as the
+// catalogue. Pinned only for the Runtime-admin profile; org voice policy is untouched.
+const RUNTIME_OPERATOR_VOICE_ID = (process.env.TARA_RUNTIME_OPERATOR_VOICE_ID || 'carina').trim().toLowerCase() || 'carina';
 const RUNTIME_OPERATOR_MAX_DURATION_SECONDS = 180;
 const GROK_VOICES = [
   ['eve', 'Eve', 'feminine', 'Clear, warm and conversational'],

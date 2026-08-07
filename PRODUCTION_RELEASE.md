@@ -150,3 +150,17 @@
 - Live: 20 Hannover consultancies → 9 with real emails (incl. named: Scheiber@rundstedt.de, mh@markus-huebner.com). Recipient resolution now passes.
 - Remaining block is USER-side: org Gmail grant is readonly; send 403s until reconnect grants compose+send.
 - Chain proven: places_search (phones) → impressum (emails) → recipient resolved → Gmail API reached.
+
+## prod-20260807-9d24b7fd — /chat orchestrator: evidence budget + parallel tool calls + compound orchestrator (flag-off)
+- **Date:** 2026-08-08
+- **Parent:** branch `claude/fervent-tesla-7830e1`, SHA `9d24b7fdcfa8e9714ea7b31b74a25ea1b5fe997b`
+- **Frontend:** unchanged
+- **Three independently-revertable phases for /api/chat (runReactAgentV2):**
+  1. **Token efficiency (Phase 1):** combined evidence budget (`HIVEMIND_ANSWER_EVIDENCE_CHAR_BUDGET`, default 12000) with priority-ordered whole-section truncation of the 4 lowest-priority evidence sections; groundedEvidence + citation registry always kept. Cheaper repair pass (`HIVEMIND_REPAIR_MAX_TOKENS`, default 1500, capped to answerCap; reasoning forced low).
+  2. **Parallel tool calls (Phase 2):** independent tool calls in a round run via Promise.all (dependency-aware via prior tool_call_id); order preserved. Both the read loop and runActionSubLoop.
+  3. **Compound orchestrator (Phase 3):** new `compound-orchestrator.js` + `compound_plan` router capability + `compound` operation. Reads via ConnectorRuntime.executeTool; writes via legacy pendingWrite draft flow. **Flag-gated `COMPOUND_ORCHESTRATOR_ENABLED` (default false — OFF at deploy).** draft_created reported as pending, never done.
+- **Tests:** 4/4 compound-orchestrator unit tests; 6/6 chat-intent-decision + chat-router-architecture; synthetic Phase 1 truncation + Phase 2 parallelism tests.
+- **Image:** `hivemind/core-api:prod-20260807-9d24b7fdcfa8` (built). hm-core recreated, healthy.
+- **Acceptance evidence:** public 200 ×4. In-container grep verified all three phase markers in the RUNNING container. Live /api/chat smoke: recall grounded with bounded prompt tokens (5613), temporal routes to clarification, greeting direct (3293 prompt). Compound flag UNSET (off).
+- **Rollback:** tag `hivemind/core-api:prod-20260807-5ca742275da4` in `/root/.last-core-rollback`; compose tag swap + `up -d --no-deps core`.
+- **Untested side effects:** compound orchestrator not exercised live (flag off); no emails/calls placed.

@@ -121,3 +121,55 @@ def test_allowed_urls_read_the_same_brief_keys_as_the_validator():
     if validator:
         for key in ("destination_url", "destinationUrl", "website_url"):
             assert key in validator, f"validator reads {key}; producer must match"
+
+
+def test_preflight_link_policy_overrides_inference():
+    """The runtime decides linkless BEFORE dispatch when no company website is on record.
+    The Room must honour that decision rather than re-deriving it from the brief keys."""
+    from hivemind_employees.hyper.engine import Director
+
+    class Fake:
+        _campaign_allowed_urls = Director._campaign_allowed_urls
+
+    f = Fake()
+    # Explicit linkless wins even if a stray URL is present in the brief.
+    f.campaign_brief = {"brief": {"link_policy": "linkless", "destination_url": "https://leaked.example"}}
+    assert Fake._campaign_allowed_urls(f) == []
+    # Normal case still reads the approved URL.
+    f.campaign_brief = {"brief": {"link_policy": "single_approved_url", "destination_url": "https://singulancelabs.com"}}
+    assert Fake._campaign_allowed_urls(f) == ["https://singulancelabs.com"]
+    # No policy at all: fall back to inference, unchanged behaviour.
+    f.campaign_brief = {"brief": {"website_url": "https://x.example"}}
+    assert Fake._campaign_allowed_urls(f) == ["https://x.example"]
+
+
+def test_deliverable_index_retains_material_outside_the_tail_window():
+    """A worker completed a "Channel Mix Blueprint" and synth still returned channel_mix
+    null. work_results was sliced to the last 12, so an early deliverable the contract
+    required could be dropped before the model ever saw it."""
+    from hivemind_employees.hyper.engine import Director
+
+    class Fake:
+        work_results = [
+            {"title": "Channel Mix Blueprint", "output": {"text": "45-55% organic (SEO/social), 30-35% paid (SEM)"}},
+            *[{"title": f"filler {i}", "output": {"text": f"noise {i}"}} for i in range(15)],
+        ]
+        _material_for_fields = Director._material_for_fields
+        _contract_field_names = Director._contract_field_names
+
+    env = {"strict_response_schema": {"fields": {"required": ["niche_wedge", "channel_mix"],
+                                                 "preferred": ["recommended_next_motions"]}}}
+    fields = Fake._contract_field_names(env)
+    assert fields == ["niche_wedge", "channel_mix", "recommended_next_motions"]
+    material = Fake._material_for_fields(Fake(), fields)
+    hits = material.get("channel_mix") or []
+    assert hits, "the blueprint must be indexed under channel_mix"
+    position = int(hits[0]["work_ref"].split(":")[1])
+    # Must actually exercise the truncation path, or the test proves nothing.
+    assert position <= len(Fake.work_results) - 12
+    assert "organic" in hits[0]["deliverable"]
+
+    # Falls back to artifact_schemas when no strict schema applies.
+    legacy = {"artifact_schemas": {"marketing_strategy": {"schema": {"properties": {"data": {
+        "properties": {"channel_mix": {}, "positioning": {}}, "required": ["channel_mix"]}}}}}}
+    assert set(Fake._contract_field_names(legacy)) == {"channel_mix", "positioning"}

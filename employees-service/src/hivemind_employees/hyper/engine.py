@@ -3418,9 +3418,16 @@ class Director:
             text = str(value or "").strip()
             if text:
                 evidence.append({"id": f"board:{index}", "content": text[:3000]})
-        for index, row in enumerate(self.work_results[-12:], start=1):
-            if not isinstance(row, dict):
-                continue
+        # Keep the LAST 12 deliverables, plus every earlier one whose text serves a field the
+        # contract will be judged on. A required field's material must never be truncated away.
+        contract_fields = self._contract_field_names(envelope)
+        field_material = self._material_for_fields(contract_fields)
+        needed_refs = {hit["work_ref"] for hits in field_material.values() for hit in hits}
+        all_rows = [row for row in self.work_results if isinstance(row, dict)]
+        tail_start = max(0, len(all_rows) - 12)
+        keep = [(position, row) for position, row in enumerate(all_rows, start=1)
+                if position > tail_start or f"work:{position}" in needed_refs]
+        for index, row in keep:
             output = row.get("output") if isinstance(row.get("output"), dict) else {}
             text = str(output.get("text") or row.get("summary") or "").strip()
             if text:
@@ -3453,6 +3460,9 @@ class Director:
                 "stage": stage_contract,
                 "evidence": evidence,
                 "room_work": self.work_results,
+                # The Room's own completed work, indexed BY the field it serves, so a
+                # deliverable that already answers a required field cannot be overlooked.
+                "material_for_required_fields": field_material,
             }, ensure_ascii=False)},
         ]
         # CONSTRAINED DECODING for the contract step. Core derives this schema from the very
@@ -3993,11 +4003,61 @@ class Director:
         return prompt
 
     # ── plan → parallel-gather → synth (the fast path) ────────────────
+    @staticmethod
+    def _contract_field_names(envelope: Dict[str, Any]) -> List[str]:
+        """Fields the stage will actually be judged on, required first then preferred."""
+        strict = envelope.get("strict_response_schema")
+        if isinstance(strict, dict) and isinstance(strict.get("fields"), dict):
+            fields = strict["fields"]
+            return [*(fields.get("required") or []), *(fields.get("preferred") or [])]
+        schemas = envelope.get("artifact_schemas") if isinstance(envelope.get("artifact_schemas"), dict) else {}
+        out: List[str] = []
+        for spec in schemas.values():
+            data = (((spec or {}).get("schema") or {}).get("properties") or {}).get("data") or {}
+            out.extend(str(name) for name in (data.get("properties") or {}))
+        return list(dict.fromkeys(out))
+
+    def _material_for_fields(self, fields: List[str]) -> Dict[str, List[Dict[str, str]]]:
+        """Index the Room's OWN completed deliverables against the contract's fields.
+
+        The failure this removes: a worker completed a "Channel Mix Blueprint" and the synth
+        step still returned channel_mix null. The deliverable reached synth only as an
+        anonymous work:N blob among dozens, and self.work_results was additionally sliced to
+        the last 12 — so material the contract required could be dropped outright before the
+        model ever saw it. Matching is deterministic token overlap on the field name; a false
+        positive merely shows the model one extra deliverable, while a false negative is the
+        bug. No extra model call.
+        """
+        index: Dict[str, List[Dict[str, str]]] = {}
+        rows = [row for row in self.work_results if isinstance(row, dict)]
+        for field in fields:
+            tokens = [tok for tok in str(field).lower().split("_") if len(tok) > 3]
+            if not tokens:
+                continue
+            hits: List[Dict[str, str]] = []
+            for position, row in enumerate(rows, start=1):
+                output = row.get("output") if isinstance(row.get("output"), dict) else {}
+                title = str(row.get("title") or row.get("objective") or "")
+                text = str(output.get("text") or row.get("summary") or "").strip()
+                if not text:
+                    continue
+                haystack = (title + " " + text).lower()
+                if any(tok in haystack for tok in tokens):
+                    hits.append({"work_ref": f"work:{position}", "title": title[:160], "deliverable": text[:3000]})
+            if hits:
+                index[field] = hits[:3]
+        return index
+
     def _campaign_allowed_urls(self) -> List[str]:
         """The exact link set the contract validator will accept, read from the SAME brief
         keys it reads. Derived here so the producer and the checker cannot drift."""
         brief = self.campaign_brief or {}
         payload = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+        # An explicit preflight decision wins over inference. The runtime decides linkless
+        # BEFORE dispatch when the company has no website on record, so the Room is told the
+        # policy instead of discovering it through five rejected actions.
+        if str(payload.get("link_policy") or "") == "linkless":
+            return []
         return [str(value).strip() for value in (
             payload.get("destination_url"), payload.get("destinationUrl"), payload.get("website_url"),
         ) if str(value or "").strip()]

@@ -118,7 +118,17 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
           duration_days: Number(target.duration_days || 7),
           intensity: 'FOCUSED',
           geography: [target.location || baseline?.company?.location].filter(Boolean),
-          ...(destinationUrl ? { destination_url: destinationUrl } : {}),
+          // INPUT PREFLIGHT, decided here rather than discovered by rejection. The contract
+          // validator refuses any URL in final_copy that is not in the brief. When the company
+          // has no website on record the allowed set is EMPTY, so every ordinary CTA the Room
+          // writes ("link in bio", "download the white-paper") rejects the whole contract —
+          // observed as five actions failing with 'contains a URL that was not supplied in the
+          // campaign brief', which reads as a Room defect and is really a missing profile
+          // field. Make the consequence explicit and carry it INTO the brief so the Room is
+          // told the policy up front instead of guessing.
+          ...(destinationUrl
+            ? { destination_url: destinationUrl, link_policy: 'single_approved_url' }
+            : { link_policy: 'linkless', link_policy_reason: 'no company website on record — copy must contain no URL' }),
           success_metrics: ['Impressions', 'Engagements', 'Clicks'],
           audience: { mode: 'existing_first', discover_if_insufficient: false },
           brand_constraints: 'Use only claims directly supported by retained evidence. Prefer the exact evidenced wording GDPR-native; do not substitute compliant, certified, guaranteed, only, always, or never unless the cited evidence uses that exact term.',

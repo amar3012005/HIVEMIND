@@ -480,6 +480,12 @@ export function normalizeCampaignInput(body = {}) {
     brief: {
       offer: cleanText(body.offer, 2000, 'Offer'), cta: cleanText(body.cta, 1000, 'CTA'),
       destination_url: validateDestinationUrl(cleanText(body.destination_url, 2048, 'Destination URL')),
+      // `brief` is a strict whitelist, so an unlisted key is silently dropped. The link
+      // policy has to live here or the preflight decision never reaches the Room and the
+      // Room re-derives it — the drift this whole change exists to remove.
+      link_policy: ['single_approved_url', 'linkless'].includes(String(body.link_policy || ''))
+        ? String(body.link_policy) : null,
+      link_policy_reason: cleanText(body.link_policy_reason, 300, 'Link policy reason'),
       geography: cleanStringList(body.geography, 100, 160, 'Geography'),
       languages: cleanStringList(body.languages, 50, 80, 'Languages'),
       duration_days: durationDays, cadence,

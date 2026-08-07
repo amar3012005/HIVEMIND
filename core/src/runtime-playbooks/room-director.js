@@ -1,7 +1,7 @@
 import crypto, { randomUUID } from 'node:crypto';
 import { employeesSidecarUrl, runtimeRequestJson } from '../runtime-transport/client.js';
 import { recordRuntimeMetric } from '../hq-runtime/runtime-metrics.js';
-import { deriveStageArtifactContract, renderArtifactRequirements } from './artifact-schema.js';
+import { deriveStageArtifactContract, deriveStrictResponseSchema, renderArtifactRequirements } from './artifact-schema.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -105,9 +105,16 @@ export function roomPhaseEnvelope(request) {
       ...(() => {
         try {
           const stage = { expected_artifacts: asArray(request.expected_artifacts), completion_checks: asArray(request.checks) };
+          // `strict_response_schema` is the one-attempt mechanism, not documentation: the
+          // producer feeds it straight to response_format json_schema. Measured on the live
+          // synth model, a TYPED strict schema plus a non-contradictory prompt took the
+          // required-field-null rate from 5/5 to 0/10. Null when strict cannot apply
+          // (multi-key stage, or an artifact key with no registered field shapes) — the
+          // producer then keeps its json_object path rather than guessing a shape.
           return {
             artifact_requirements: renderArtifactRequirements(stage) || null,
             artifact_schemas: deriveStageArtifactContract(stage).artifacts,
+            strict_response_schema: deriveStrictResponseSchema(stage),
           };
         } catch { return {}; }  // a derivation failure must never block a Room turn
       })(),

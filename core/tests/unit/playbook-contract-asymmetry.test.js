@@ -1,0 +1,120 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import { ARTIFACT_FIELD_SHAPES, deriveStageArtifactContract, deriveStrictResponseSchema } from '../../src/runtime-playbooks/artifact-schema.js';
+
+// THE BUG CLASS THIS KILLS: the checker held a contract the producer was never handed.
+// Core derived `artifact_schemas` from its own predicates and the phase spec dropped them,
+// so a Room was told the shape in prose and judged on a predicate. form_strategy returned
+// `channel_mix: null` five attempts running, and the synth prompt even licensed it.
+
+const DIR = new URL('../../src/runtime-playbooks/fixtures/', import.meta.url);
+const FIXTURES = readdirSync(DIR).filter((name) => name.endsWith('.json'))
+  .map((name) => ({ name, doc: JSON.parse(readFileSync(new URL(name, DIR), 'utf8')) }));
+
+const stages = () => FIXTURES.flatMap(({ name, doc }) =>
+  (doc.stages || []).map((stage) => ({ fixture: name, stage })));
+
+test('every shipped fixture stage yields a derivable contract', () => {
+  assert.ok(FIXTURES.length >= 10, `expected the fixture set, saw ${FIXTURES.length}`);
+  for (const { fixture, stage } of stages()) {
+    assert.doesNotThrow(() => deriveStageArtifactContract(stage), `${fixture}:${stage.id}`);
+  }
+});
+
+test('a strict schema, where one applies, obeys every strict-mode invariant', () => {
+  let applied = 0;
+  for (const { fixture, stage } of stages()) {
+    const spec = deriveStrictResponseSchema(stage);
+    if (!spec) continue;  // strict deliberately does not apply — the producer keeps json_object
+    applied += 1;
+    const where = `${fixture}:${stage.id}`;
+    const violations = [];
+    (function walk(node, path) {
+      if (!node || typeof node !== 'object') return;
+      const isObject = node.type === 'object' || (Array.isArray(node.type) && node.type.includes('object'));
+      if (isObject) {
+        // Strict mode forbids free-form objects and demands every property be listed in
+        // `required`; optionality is a nullable union instead.
+        if (node.additionalProperties !== false) violations.push(`${path}: additionalProperties must be false`);
+        const props = Object.keys(node.properties || {});
+        const missing = props.filter((key) => !(node.required || []).includes(key));
+        if (missing.length) violations.push(`${path}: not in required -> ${missing.join(',')}`);
+      }
+      for (const [key, child] of Object.entries(node.properties || {})) walk(child, `${path}.${key}`);
+      if (node.items) walk(node.items, `${path}[]`);
+    })(spec.schema, 'root');
+    assert.deepEqual(violations, [], `${where} strict violations:\n  ${violations.join('\n  ')}`);
+    assert.ok(spec.name, `${where} needs a schema name`);
+  }
+  assert.ok(applied >= 1, 'at least one stage must actually exercise strict output');
+});
+
+test('severity maps onto nullability: required cannot be null, preferred can', () => {
+  for (const { fixture, stage } of stages()) {
+    const spec = deriveStrictResponseSchema(stage);
+    if (!spec) continue;
+    const data = spec.schema.properties.artifacts.items.properties.data;
+    for (const field of spec.fields.required) {
+      const type = data.properties[field]?.type;
+      const nullable = Array.isArray(type) ? type.includes('null') : type === 'null';
+      assert.equal(nullable, false, `${fixture}:${stage.id} required field ${field} must NOT be nullable`);
+      assert.ok((data.required || []).includes(field), `${fixture}:${stage.id} ${field} must be present`);
+    }
+    for (const field of spec.fields.preferred) {
+      const type = data.properties[field]?.type;
+      assert.ok(Array.isArray(type) && type.includes('null'),
+        `${fixture}:${stage.id} preferred field ${field} must be nullable`);
+      // Still listed — strict mode has no true optionality, and the producer should see it.
+      assert.ok((data.required || []).includes(field), `${fixture}:${stage.id} ${field} must be present`);
+    }
+  }
+});
+
+test('ASYMMETRY GUARD: a registered artifact key must type every field its predicates check', () => {
+  // This is the assertion that makes the failure class impossible. If someone adds a
+  // completion_check for a new field on a REGISTERED key without giving it a shape, the
+  // deriver refuses to emit strict output — silently losing the guarantee. Fail here loudly.
+  const unregistered = [];
+  for (const { fixture, stage } of stages()) {
+    const expected = (stage.expected_artifacts || []).map(String);
+    if (expected.length !== 1) continue;
+    const [key] = expected;
+    const shapes = ARTIFACT_FIELD_SHAPES[key];
+    if (!shapes) continue;  // unregistered key: json_object path, nothing to guarantee
+    const { artifacts } = deriveStageArtifactContract(stage);
+    const data = artifacts[key]?.schema?.properties?.data || {};
+    for (const field of Object.keys(data.properties || {})) {
+      if (!shapes[field]) unregistered.push(`${fixture}:${stage.id} -> ${key}.${field}`);
+    }
+    // …and therefore strict output must actually be produced for it.
+    assert.ok(deriveStrictResponseSchema(stage),
+      `${fixture}:${stage.id} has a registered key (${key}) but produced no strict schema`);
+  }
+  assert.deepEqual(unregistered, [],
+    `predicates check fields with no registered shape:\n  ${unregistered.join('\n  ')}`);
+});
+
+test('every registered field declares whether it is authored or evidence_bound', () => {
+  // The prompt used to forbid "fabricating" any field, which silently covered judgement
+  // fields too. The distinction now lives in the schema registry, not in prose.
+  for (const [key, shapes] of Object.entries(ARTIFACT_FIELD_SHAPES)) {
+    for (const [field, entry] of Object.entries(shapes)) {
+      assert.ok(['authored', 'evidence_bound'].includes(entry.kind),
+        `${key}.${field} needs kind authored|evidence_bound, got ${entry.kind}`);
+      assert.ok(entry.schema && typeof entry.schema === 'object', `${key}.${field} needs a schema`);
+    }
+  }
+});
+
+test('channel_mix is typed so the consumer gets organic AND paid, not a sentence', () => {
+  // A predicate can only see "non-empty". With an untyped schema the model returned a STRING
+  // for channel_mix — non-empty, predicate-passing, and useless to the campaign that reads it.
+  const cm = ARTIFACT_FIELD_SHAPES.marketing_strategy.channel_mix.schema;
+  assert.equal(cm.type, 'object');
+  assert.deepEqual([...cm.required].sort(), ['organic', 'paid']);
+  for (const lane of ['organic', 'paid']) {
+    assert.equal(cm.properties[lane].type, 'array');
+    assert.deepEqual([...cm.properties[lane].items.required].sort(), ['channel', 'rationale']);
+  }
+});

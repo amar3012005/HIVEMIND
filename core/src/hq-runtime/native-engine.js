@@ -126,16 +126,33 @@ export function verifySpecialistDelivery({ order, result, resultOutput }) {
   return { accepted: failures.length === 0, failures };
 }
 
+// Internal autonomy is NOT outward-write authority. HQ_AUTO_EXECUTE removes the internal
+// Start gate so the queue drains unattended — it was never meant to publish. But a single
+// historical "Auto" click writes gate_overrides[policy]='auto' on the runtime, which then
+// authorised EVERY future external checkpoint: observed live, a campaign launched 5 real
+// posts ~2 minutes after activation with no human present. Require an explicit opt-in for
+// unattended external writes, defaulting to SAFE. Set
+// HQ_ALLOW_UNATTENDED_EXTERNAL=true to restore standing auto authority.
+function unattendedExternalAllowed() {
+  return String(process.env.HQ_ALLOW_UNATTENDED_EXTERNAL || '').trim().toLowerCase() === 'true';
+}
+
 export function resolveAuthorityDecision(stage, authorityPolicy = {}) {
   const gate = String(stage?.authority_gate || '').trim() || null;
   const policyKey = String(stage?.authority_policy_key || '').trim() || null;
   const manualOnly = stage?.authority_policy_mode === 'manual_only';
+  const storedAuto = !manualOnly && Boolean(gate) && Boolean(policyKey)
+    && resolveAuthorityPreference(authorityPolicy, policyKey) === 'auto';
+  const autoGrant = storedAuto && unattendedExternalAllowed();
   return {
     gate,
     policyKey,
     preference: manualOnly ? 'manual' : resolveAuthorityPreference(authorityPolicy, policyKey),
-    autoGrant: Boolean(!manualOnly && gate && policyKey && resolveAuthorityPreference(authorityPolicy, policyKey) === 'auto'),
+    autoGrant,
     manualOnly,
+    // Distinguish "you asked for auto but this deployment requires a human for outward
+    // writes" from "no auto was ever granted", so the approval copy can say which.
+    autoWithheld: storedAuto && !autoGrant,
   };
 }
 

@@ -5699,6 +5699,16 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'Composio is not configured on this deployment' }, 503);
     }
     const toolkitSlug = composioConnectMatch[1].toLowerCase();
+    // Slack/Slackbot must go through HIVEMIND's native OAuth (/v1/connectors/
+    // slack/start) — Composio's connected_accounts API masks the real Slack
+    // token (returns literal "xoxe..." placeholders), which breaks the
+    // @mention response pipeline with invalid_auth. Block it here so this
+    // dead-end can't be reached from the generic toolkit browser again.
+    if (toolkitSlug === 'slack' || toolkitSlug === 'slackbot') {
+      return jsonResponse(res, {
+        error: 'Slack connects natively — use the Slack tile on the main Connectors page instead of Composio.',
+      }, 400);
+    }
     const orgId = current.session.orgId || current.session.org_id;
     if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
     try {
@@ -5759,6 +5769,35 @@ const server = http.createServer(async (req, res) => {
         metadata: { toolkit: toolkitSlug, auth_scheme: 'API_KEY' }, ..._reqMeta(req),
       });
       return jsonResponse(res, { connected_account_id: result.id, status: result.status });
+    } catch (err) {
+      return jsonResponse(res, { error: err.message }, 400);
+    }
+  }
+
+  // POST /v1/connectors/composio/:toolkit/disconnect — tear down a Composio
+  // connected account for one toolkit, org-scoped. Generic counterpart to
+  // /connect — the toolkit browser lets you connect any of ~1,100 toolkits,
+  // so disconnect has to work for any of them too, not just the ops-curated
+  // catalog entries the older /v1/connectors/:provider/disconnect route covers.
+  const composioDisconnectMatch = pathname.match(/^\/v1\/connectors\/composio\/([a-z0-9_-]+)\/disconnect$/i);
+  if (composioDisconnectMatch && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    if (!composioService.isComposioConfigured()) {
+      return jsonResponse(res, { error: 'Composio is not configured on this deployment' }, 503);
+    }
+    const toolkitSlug = composioDisconnectMatch[1].toLowerCase();
+    const orgId = current.session.orgId || current.session.org_id;
+    if (!orgId) return jsonResponse(res, { error: 'No active organization for this session' }, 400);
+    try {
+      const removed = await composioService.disconnectToolkit(orgId, toolkitSlug);
+      await audit({
+        organizationId: orgId, userId: current.session.userId,
+        eventType: 'connector.composio_disconnected', eventCategory: 'connectors', action: 'delete',
+        resourceType: 'composio_connected_account', resourceId: toolkitSlug,
+        metadata: { toolkit: toolkitSlug, removed }, ..._reqMeta(req),
+      });
+      return jsonResponse(res, { ok: true, removed });
     } catch (err) {
       return jsonResponse(res, { error: err.message }, 400);
     }

@@ -1,6 +1,7 @@
 import crypto, { randomUUID } from 'node:crypto';
 import { employeesSidecarUrl, runtimeRequestJson } from '../runtime-transport/client.js';
 import { recordRuntimeMetric } from '../hq-runtime/runtime-metrics.js';
+import { deriveStageArtifactContract, renderArtifactRequirements } from './artifact-schema.js';
 
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -96,6 +97,20 @@ export function roomPhaseEnvelope(request) {
       guidance: String(request.stage_guidance || '').trim(),
       expected_artifacts: asArray(request.expected_artifacts),
       completion_checks: asArray(request.checks),
+      // GENERATED contract, derived from the very predicates the engine will run, so the
+      // Room is never told one shape in prose while a check demands another. That drift
+      // is the failure class behind form_strategy / prepare_provider_drafts /
+      // prepare_campaign_contract. `artifact_requirements` is plain language for the
+      // prompt; `artifact_schemas` is the machine shape for schema-constrained output.
+      ...(() => {
+        try {
+          const stage = { expected_artifacts: asArray(request.expected_artifacts), completion_checks: asArray(request.checks) };
+          return {
+            artifact_requirements: renderArtifactRequirements(stage) || null,
+            artifact_schemas: deriveStageArtifactContract(stage).artifacts,
+          };
+        } catch { return {}; }  // a derivation failure must never block a Room turn
+      })(),
       unmet: asArray(request.unmet),
       checkpoint_sequence: request.checkpoint_sequence,
       attempt: asObject(request.stage_attempts)[request.stage_id] || 1,

@@ -348,15 +348,62 @@ tags in use are 12-char, so it prints `FATAL: frontend not on <RID>` after a
 
 ## 10. Open
 
-- `release-singulance.sh` does not update the compose tag (§9.1) — every
-  "successful" release is unverified until this is fixed at the source.
-- Governance daily token budget (§7) needs an owner: 1M/day currently stops
-  dreaming partway through the day for two orgs.
-- 3 of 15 slides find no unique anchor and stay `null` (§5.2). Correct-by-design,
-  improvable with an offset-based anchor.
-- `ppt/doc/xls` need LibreOffice in the **docling** image (not core) if they are
-  ever wanted.
+- ~~`release-singulance.sh` does not update the compose tag~~ — **fixed
+  2026-08-07**: `settag()` now rewrites the compose image line per-service before
+  recreate, and `recreate()` asserts `docker inspect --format '{{.Config.Image}}'`
+  matches the RID after the health gate. See §9.1 for the procedure this replaced.
+- ~~Governance daily token budget needs an owner~~ — **superseded 2026-08-07**:
+  the global `__pool__` row was the wrong unit (no `org_id` column on
+  `governance_agent_state`, so it serialised every tenant against one budget).
+  Design for the per-org replacement is in `COGNITION_V2_PLAN.md`; not yet built.
+- 3 of 15 slides find no unique anchor and stay `null` (§5.2). Moot if §11 lands —
+  anydoc carries no page provenance at all, so this only matters while docling
+  still owns pptx.
 - `[enterprise-extract] LLM call with no org context` — unattributed calls,
-  a metering gap.
+  a metering gap. Still open.
 - `/v1/orgs/:id/profile` returns 404; `Profile.jsx` swallows it with
-  `.catch(() => null)`.
+  `.catch(() => null)`. Still open.
+- The `Extends`/`Contradicts` edge classifier under-fires on chat saves — see
+  §5.4. `MEMORY_PROCESSOR_DEBUG=true` is currently ON in production for this
+  investigation; turn it off once the third edge-writer is found.
+
+## 11. `firecrawl/anydoc` — replaces docling for office formats, not for pages
+
+Evaluated 2026-08-07 against the same corpus and ground truth as §2–§4, small and
+large files (`~/anydoc-eval/`, 22 documents). In-process Rust binding, no sidecar,
+no OCR models, no LibreOffice dependency.
+
+| file | anydoc | docling |
+|---|---|---|
+| 92-page / 47MB PDF | **141ms**, 96.6% recall | 128,900ms, 99.0% |
+| 67-page PDF | **212ms**, 95.5% | 147,800ms, 78.3% |
+| 52-page PDF (the one that 504'd on sync) | **148ms**, 95.7% | needed async, 94.6% |
+| 20MB pptx, 17 slides | **37ms**, 100% | 11,800ms |
+| docx / xlsx | 1–6ms, 99–100% | 80ms–2s, 99–100% |
+| 3-page scan | clean `unsupported` (no OCR) | fake `success`, 46 chars |
+
+Recovered both strings docling silently dropped on the reference deck (`Seed
+Deck · August 2026`, `Stabile Temperaturschichtung`) and all five donut figures
+on `BundB-Solvis-Budget.pdf` that fast-pdf had flattened.
+
+**The blocker: zero page/slide markers, on every one of the 22 documents
+tested.** No `<!-- page N -->`, no `-- N of M --`, no slide separator of any
+kind. `toDocument` (where provenance might live in the Rust model) throws
+`Failed to create reference from TypedArray` on every input on macOS arm64,
+including a 19KB docx — not yet tested on Linux/container.
+
+Decision, given quota no longer needs parser page numbers (`countPages()` in
+§4.2 already reads the container directly, independent of any parser):
+- **docx / xlsx / legacy `.doc .ppt .xls .rtf .odt` → anydoc.** docling gives
+  `pages=0`/`texts=0` for these today, so nothing is lost, and this unblocks the
+  legacy binaries KB_EXTENSIONS currently refuses for lack of LibreOffice.
+- **pptx / pdf → keep docling** unless/until §5 citation requirements are
+  formally dropped, in which case anydoc can take these too and the docling
+  sidecar (9GB, 3 workers) is deleted entirely.
+- **scanned PDFs → vision**, unchanged either way.
+
+Not yet built: `hm-extract`, a standalone stateless service wrapping anydoc.
+Contract, seam rationale (parse+chunk moves out at 14% of ingest wall-time;
+promotion — 82% — stays in core because that is where tenant/residency logic
+lives) and test plan are in `~/anydoc-eval/HM_EXTRACT_SPEC.md`, not yet copied
+into this repo.

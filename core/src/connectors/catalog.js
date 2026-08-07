@@ -16,6 +16,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION — Google Workspace ──────────────────────────────────────
   {
     id: 'gmail',
+    provider: 'native',
     name: 'Gmail',
     category: 'email',
     mode: ['ingestion'],
@@ -26,6 +27,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-drive',
+    provider: 'native',
     name: 'Google Drive',
     category: 'files',
     mode: ['ingestion'],
@@ -35,6 +37,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-calendar',
+    provider: 'native',
     name: 'Google Calendar',
     category: 'productivity',
     mode: ['ingestion', 'live'],
@@ -44,6 +47,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-docs',
+    provider: 'native',
     name: 'Google Docs',
     category: 'docs',
     mode: ['ingestion'],
@@ -53,6 +57,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-sheets',
+    provider: 'native',
     name: 'Google Sheets',
     category: 'data',
     mode: ['live'],
@@ -62,6 +67,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-slides',
+    provider: 'native',
     name: 'Google Slides',
     category: 'docs',
     mode: ['ingestion'],
@@ -71,6 +77,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-contacts',
+    provider: 'native',
     name: 'Google Contacts',
     category: 'productivity',
     mode: ['live'],
@@ -80,6 +87,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-tasks',
+    provider: 'native',
     name: 'Google Tasks',
     category: 'productivity',
     mode: ['live'],
@@ -89,6 +97,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-chat',
+    provider: 'native',
     name: 'Google Chat',
     category: 'comms',
     mode: ['live'],
@@ -98,6 +107,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'google-search-console',
+    provider: 'native',
     name: 'Google Search Console',
     category: 'data',
     mode: ['live'],
@@ -109,6 +119,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION / LIVE — Microsoft 365 ──────────────────────────────────
   {
     id: 'microsoft365',
+    provider: 'nango',
     name: 'Microsoft 365',
     category: 'productivity',
     mode: ['ingestion', 'live'],
@@ -121,6 +132,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION / LIVE — Atlassian ──────────────────────────────────────
   {
     id: 'atlassian',
+    provider: 'nango',
     name: 'Atlassian (Jira + Confluence)',
     category: 'project',
     mode: ['ingestion', 'live'],
@@ -133,6 +145,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION / LIVE — Salesforce ─────────────────────────────────────
   {
     id: 'salesforce',
+    provider: 'nango',
     name: 'Salesforce',
     category: 'crm',
     mode: ['ingestion', 'live'],
@@ -145,6 +158,7 @@ export const CONNECTOR_CATALOG = [
   // ── LIVE — Comms ──────────────────────────────────────────────────────
   {
     id: 'slack',
+    provider: 'nango',
     name: 'Slack',
     category: 'comms',
     mode: ['ingestion', 'live'],
@@ -156,6 +170,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION — Docs/Knowledge ───────────────────────────────────────
   {
     id: 'notion',
+    provider: 'nango',
     name: 'Notion',
     category: 'docs',
     mode: ['ingestion', 'live'],
@@ -167,6 +182,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION / LIVE — Code ──────────────────────────────────────────
   {
     id: 'github',
+    provider: 'nango',
     name: 'GitHub',
     category: 'code',
     mode: ['ingestion', 'live'],
@@ -178,6 +194,7 @@ export const CONNECTOR_CATALOG = [
   // ── LIVE — Project ───────────────────────────────────────────────────
   {
     id: 'linear',
+    provider: 'native',
     name: 'Linear',
     category: 'project',
     mode: ['live'],
@@ -189,6 +206,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION / LIVE — CRM/Marketing ─────────────────────────────────
   {
     id: 'hubspot',
+    provider: 'native',
     name: 'HubSpot',
     category: 'crm',
     mode: ['ingestion', 'live'],
@@ -198,6 +216,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'x-account',
+    provider: 'native',
     name: 'X',
     category: 'marketing',
     mode: ['live'],
@@ -208,6 +227,7 @@ export const CONNECTOR_CATALOG = [
   },
   {
     id: 'x-ads',
+    provider: 'native',
     name: 'X Ads',
     category: 'marketing',
     mode: ['live'],
@@ -217,9 +237,23 @@ export const CONNECTOR_CATALOG = [
     setupHint: 'Uses official X OAuth 1.0a and requires Ads API access.',
   },
 
+  // ── LIVE — Composio ──────────────────────────────────────────────────
+  {
+    id: 'linkedin',
+    provider: 'composio',
+    composioToolkit: 'linkedin',
+    name: 'LinkedIn',
+    category: 'marketing',
+    mode: ['live'],
+    authType: 'oauth2',
+    status: 'beta',
+    description: 'Profile, company-page stats, posting and comments, via Composio. No feed/employee scraping — LinkedIn exposes no such API.',
+  },
+
   // ── INGESTION — Database ─────────────────────────────────────────────
   {
     id: 'postgres',
+    provider: 'native',
     name: 'PostgreSQL',
     category: 'database',
     mode: ['ingestion'],
@@ -231,6 +265,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION — Manual ───────────────────────────────────────────────
   {
     id: 'file-upload',
+    provider: 'native',
     name: 'File Upload',
     category: 'files',
     mode: ['ingestion'],
@@ -243,6 +278,7 @@ export const CONNECTOR_CATALOG = [
   // ── INGESTION — Web ──────────────────────────────────────────────────
   {
     id: 'web-crawl',
+    provider: 'native',
     name: 'Web Crawl',
     category: 'web',
     mode: ['ingestion'],

@@ -68,6 +68,17 @@ export const HIGH_TOOLS = [
     parameters: object({
       intent: { type: 'string', enum: ['read', 'write'] }, request: { type: 'string' }, response_language: { type: 'string' },
     }) } },
+  { type: 'function', function: { name: 'compound_plan', strict: true,
+    description: 'Use ONLY when the request requires MULTIPLE sequential steps across different capabilities that a single operation cannot express — e.g. recall knowledge, then create a Doc, then email it. Decompose into ordered subtasks. Each subtask names ONE connector group (tool_groups) and may depend on a prior subtask (depends_on). Never use for a single-step request.',
+    parameters: object({
+      subtasks: { type: 'array', items: object({
+        operation: { type: 'string', description: 'Short label for this step, e.g. recall, create_doc, send_email.' },
+        tool_groups: { type: 'array', items: { type: 'string' }, description: 'Connector group(s) for this step, e.g. ["hivemind-recall"], ["google-docs"], ["gmail"].' },
+        depends_on: { type: ['array', 'null'], items: { type: 'integer' }, description: 'Indices of prior subtasks this step depends on, or null if independent.' },
+        message: { type: 'string', description: 'The instruction for this single step, in the user\'s language, with exact identifiers preserved.' },
+      }) },
+      response_language: { type: 'string' },
+    }) } },
   { type: 'function', function: { name: 'respond_directly', strict: true,
     description: 'Use only for greetings, arithmetic, harmless general conversation, clarification questions, or safety refusals. Never use for workspace knowledge, memory writes, projects, web research or named connected applications.',
     parameters: object({ response: { type: 'string' }, response_language: { type: 'string' }, reason: { type: 'string', enum: ['general', 'clarification', 'safety_refusal'] } }) } },
@@ -342,6 +353,30 @@ export function adaptToDecision(tool, args, message, language) {
         queries: [s(args?.request, 2000) || message],
         connector_provider: 'campaigns',
         tool_groups: ['campaigns'],
+      }, usage: null };
+    }
+    case 'compound_plan': {
+      // Multi-step request — the router decomposed it into ordered subtasks.
+      // The caller (runReactAgentV2) routes this to the compound orchestrator
+      // behind COMPOUND_ORCHESTRATOR_ENABLED. Each subtask is bounded here so
+      // a malformed router output cannot carry unbounded payloads downstream.
+      const raw = Array.isArray(args?.subtasks) ? args.subtasks : [];
+      const subtasks = raw.slice(0, 8).map((st, i) => ({
+        operation: s(st?.operation, 64) || `step_${i + 1}`,
+        tool_groups: Array.isArray(st?.tool_groups)
+          ? st.tool_groups.filter((g) => typeof g === 'string' && g).slice(0, 4).map((g) => s(g, 128))
+          : [],
+        depends_on: Array.isArray(st?.depends_on)
+          ? st.depends_on.filter((d) => Number.isInteger(d) && d >= 0 && d < raw.length).slice(0, 4)
+          : null,
+        message: s(st?.message, 2000) || '',
+      }));
+      return { decision: {
+        ...base,
+        operation: 'compound',
+        queries: [],
+        subtasks,
+        tool_groups: [],
       }, usage: null };
     }
     case 'respond_directly':

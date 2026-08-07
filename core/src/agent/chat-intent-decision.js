@@ -23,6 +23,10 @@ const OPERATIONS = new Set([
   // update_profile: "change MY name/role/company/preferences" — caller-scoped
   // profile WRITE (distinct from rename_assistant which renames HIVE). Terminal.
   'update_profile',
+  // compound: multi-step request decomposed into ordered subtasks by the
+  // progressive router (compound_plan). Executed by the compound orchestrator
+  // behind COMPOUND_ORCHESTRATOR_ENABLED.
+  'compound',
 ]);
 const RECALL_MODES = new Set(['fact', 'explain', 'full']);
 const SCOPES = new Set(['personal', 'project', 'team', 'organization']);

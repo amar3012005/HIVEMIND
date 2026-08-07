@@ -2423,6 +2423,42 @@ export async function runReactAgentV2({
       if (!plan.sub_queries.length) plan.sub_queries = [message];
     }
 
+    // PHASE 3 — compound multi-step orchestrator. Flag-gated (default off).
+    // The progressive router emits operation='compound' with a `subtasks`
+    // array when a request needs multiple sequential steps (e.g. recall →
+    // create a Doc → email it). Executed by compound-orchestrator.js. Reads go
+    // through ConnectorRuntime.executeTool; writes go through the legacy
+    // pendingWrite draft flow. A draft_created result is reported as pending,
+    // never as done.
+    if (intentDecision.operation === 'compound'
+        && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
+        && Array.isArray(intentDecision.subtasks) && intentDecision.subtasks.length > 0) {
+      const { runCompoundOrchestrator } = await import('./compound-orchestrator.js');
+      const compound = await runCompoundOrchestrator({
+        subtasks: intentDecision.subtasks,
+        ctx,
+        apiKey,
+        signal: abortCtrl.signal,
+      });
+      steps.push(...compound.steps);
+      const finalText = compound.summary;
+      onEvent?.({ type: 'finish', text: finalText });
+      onEvent?.({ type: 'turn_completed', grounded: false, operation: 'compound', success: compound.status !== 'error' });
+      return {
+        response: finalText,
+        sources: [],
+        steps,
+        evidence_used: [],
+        confidence: compound.status === 'completed' ? 1.0 : 0.5,
+        gaps: compound.status === 'error' ? ['compound_step_failed'] : [],
+        usage: sumUsage(usages),
+        trace: finalizeTrace(trace, usages),
+        assistant_name: assistantName || null,
+        draft_ids: compound.draftIds,
+        compound_status: compound.status,
+      };
+    }
+
     // The planner classifies direct turns, but user-facing prose always comes
     // from the synthesis model so every chat surface follows one model policy.
     if (intentDecision.operation === 'direct' && plan._direct_answer) {

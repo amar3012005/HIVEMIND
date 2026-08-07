@@ -206,7 +206,16 @@ export class NativeHqEngine {
     await event(prisma, runtime, cycle, { eventType: 'wake', title: firstAwakening ? 'I am here' : 'I am awake', summary: firstAwakening
       ? awakening.narration
       : `I am awake. ${String(trigger.type || 'An event').replaceAll('_', ' ')} moved, so I am reading the company before I touch anything.`, details: firstAwakening ? { stream_id: awakeningStreamId, model_streamed: !awakening.fallback, narration_model: awakening.model, narration_provider: awakening.provider, narration_fallback: awakening.fallback, usage: awakening.usage } : {} });
-    await event(prisma, runtime, cycle, {
+    // NARRATION GATE. A lifecycle walking its stages produces many internal wakes
+    // (runtime_playbook_result / queue_advance). Re-emitting the full "company in view /
+    // checked instructions / re-ranked queue" block on each one produced the duplicated
+    // console spam and made a [Sleeping] line look like it never slept. Narrate the
+    // boilerplate only for the first awakening and for triggers a human would recognise;
+    // internal churn stays silent while real decisions, delegations, blocks, approvals and
+    // sleeps still always emit.
+    const narrateRoutine = firstAwakening || ['user_wake', 'instruction_updated', 'connector_changed',
+      'onboarding_complete', 'user_first_activation', 'checkpoint', 'material_evidence'].includes(String(trigger.type || ''));
+    if (narrateRoutine) await event(prisma, runtime, cycle, {
       eventType: 'context_loaded', title: 'I have the company in view',
       summary: `${String(context.company?.company || context.company?.name || context.company?.profile?.name || 'The company')} has ${context.evidence.baseline ? 'a retained baseline' : 'no current baseline yet'}, ${context.pending_work.length} active work order(s), and ${context.capabilities.connected.length} connected ${context.capabilities.connected.length === 1 ? 'capability' : 'capabilities'}. I will use only what is actually present.`,
       evidenceRefs: [context.evidence.baseline?.id, context.evidence.latest_growth_plan?.id].filter(Boolean),
@@ -217,7 +226,7 @@ export class NativeHqEngine {
     const appliedInstructions = await ingestPendingInstructions({
       prisma, runtime, company: context.company, deferTodos: buildingInitialPlan,
     });
-    if (!appliedInstructions.length && !firstAwakening) await event(prisma, runtime, cycle, {
+    if (!appliedInstructions.length && !firstAwakening && narrateRoutine) await event(prisma, runtime, cycle, {
       eventType: 'instruction_checked', title: 'I checked for new operating instructions',
       summary: 'No unapplied instruction changed the operating queue. I will use the current priorities rather than replaying old work.',
     });
@@ -308,7 +317,10 @@ export class NativeHqEngine {
         where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
         select: { id: true },
       }).catch(() => null)) : false);
-    if (!firstAwakening || readyTodo) await event(prisma, runtime, cycle, {
+    // Only narrate the queue when it actually has something to say — a real next item,
+    // or a human-recognisable trigger. Announcing 'there is no executable todo' on every
+    // internal wake was the other half of the duplicated spam.
+    if (readyTodo || narrateRoutine) await event(prisma, runtime, cycle, {
       eventType: 'queue_checked', title: 'I re-ranked the operating queue',
       summary: readyTodo
         ? `The next executable priority is ${readyTodo.title}. Waiting items remain retained but will not stall safe work behind them.`

@@ -43,9 +43,32 @@ def copy_contains_outcome_claim(copy: Any) -> bool:
     return bool(_NO_CLAIM_OUTCOME_RE.search(str(copy or "")))
 
 
-def campaign_system_contract() -> str:
+def campaign_url_clause(allowed_urls) -> str:
+    """State the EXACT allowed link set, because "never invent URLs" is not checkable.
+
+    The validator rejects any public URL in `final_copy` that is not in the brief's
+    destination_url/website_url. The Room was told the abstract rule ("never invent URLs")
+    but never the allowed SET, so it wrote perfectly normal-looking CTAs — "link to a gated
+    landing page", "download our white-paper" — and every action was rejected. When the
+    company has no website on file the allowed set is EMPTY, and the only correct copy is
+    copy with no link at all. Say that plainly.
+    """
+    urls = [str(value).strip().rstrip("/.,") for value in (allowed_urls or []) if str(value or "").strip()]
+    if not urls:
+        return ("\n- LINK POLICY — the campaign brief supplies NO approved URL. Therefore final_copy must "
+                "contain NO link of any kind: no https:// link, no bare domain, no shortener, no 'link in "
+                "bio' pointing at an invented address. Write the call to action WITHOUT a URL (for example "
+                "'reply to this post', 'DM us', 'comment ACCESS'). A single invented URL rejects the whole "
+                "contract, so a linkless CTA is the correct output here, not a compromise.\n")
+    listed = ", ".join(urls)
+    return (f"\n- LINK POLICY — the ONLY URLs you may place in final_copy are exactly: {listed}. Use one of "
+            "those verbatim or no link at all. Never append a path, query, campaign parameter or shortener to "
+            "them, and never write any other address: any other URL rejects the whole contract.\n")
+
+
+def campaign_system_contract(allowed_urls=None) -> str:
     """Authoritative instruction hierarchy shared by every Campaign Room stage."""
-    return (
+    return campaign_url_clause(allowed_urls) + (
         "\n\nCAMPAIGN ROOM SYSTEM CONTRACT — this overrides generic room/report behavior:\n"
         "- Build one coherent, execution-ready campaign covering objective and strategy, positioning and proof, "
         "audience and exclusions, final channel content, coordinated timeline, safety, and measurement.\n"

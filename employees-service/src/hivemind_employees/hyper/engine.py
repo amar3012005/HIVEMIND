@@ -1410,6 +1410,14 @@ class Director:
                 "phase_guidance": lifecycle.get("guidance") if is_v2 else phase.get("objective"),
                 "expected_artifacts": expected,
                 "completion_checks": lifecycle.get("completion_checks") if is_v2 else phase.get("completion_checks"),
+                # Core DERIVES these from the very predicates it will run, so the Room is
+                # never told one shape in prose while a check demands another. They were
+                # being generated and then dropped here — the Room only ever saw the prose
+                # objective, never the machine contract. That is how `channel_mix` came back
+                # as JSON null five attempts in a row.
+                "artifact_requirements": lifecycle.get("artifact_requirements") if is_v2 else None,
+                "artifact_schemas": lifecycle.get("artifact_schemas") if is_v2 else None,
+                "strict_response_schema": lifecycle.get("strict_response_schema") if is_v2 else None,
                 # REPAIR FEEDBACK. Core already ships the exact predicates that rejected
                 # the previous attempt in `unmet`, but nothing here ever read it — so a
                 # retry received the identical instruction and failed identically. That is
@@ -1468,6 +1476,7 @@ class Director:
         self, messages: List[Dict[str, Any]], *, tools: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None, temp: float = 0.4, force_text: bool = False,
         bucket: str = "director", schema: Optional[Dict[str, Any]] = None,
+        schema_name: str = "gather_plan",
         uncapped: bool = False, json_object: bool = False,
         max_tokens: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
@@ -1494,7 +1503,7 @@ class Director:
             # Structured output (the gather PLAN): a JSON-schema response, NOT native
             # tool-calling — sidesteps the gpt-oss harmony tool-call glitch entirely.
             body["response_format"] = {"type": "json_schema",
-                                       "json_schema": {"name": "gather_plan", "schema": schema, "strict": True}}
+                                       "json_schema": {"name": schema_name, "schema": schema, "strict": True}}
         elif json_object:
             body["response_format"] = {"type": "json_object"}
         # Provider-aware routing: a non-Groq-native model (gemini/claude/deepseek…)
@@ -2242,7 +2251,7 @@ class Director:
         campaign_contract = ""
         if self.room_kind == "campaign":
             from .campaign_contract import campaign_system_contract
-            campaign_contract = campaign_system_contract()
+            campaign_contract = campaign_system_contract(self._campaign_allowed_urls())
         domain_guard = ""
         if self.room_kind == "seo":
             domain_guard = (
@@ -3417,7 +3426,7 @@ class Director:
             if text:
                 evidence.append({"id": f"work:{index}", "content": text[:4000]})
         stage_contract = {key: value for key, value in envelope.items() if key != "inputs"}
-        response = await self._groq([
+        synth_messages = [
             {"role": "system", "content": (
                 _now_block() + "Return JSON only for runtime-stage-result.v1. Use exactly these fields: "
                 "contract, run_id, stage_id, artifacts, gaps, summary. Each artifact has id, key, status, "
@@ -3431,16 +3440,48 @@ class Director:
                 "stage objective are the Room's work product: derive them from the cited input and company "
                 "evidence instead of treating their prior absence as a blocker. This never permits inventing a "
                 "provider action, contact fact, metric, source, or durable identifier. "
-                "If the work is incomplete, return the supported artifacts and exact gaps; do not fabricate "
-                "fields merely to satisfy completion checks.")},
+                "If the work is incomplete, return the supported artifacts and exact gaps. Never fabricate a "
+                "FACT: no invented metric, source, contact detail, durable identifier, provider action or named "
+                "third party. That prohibition covers facts ONLY. A field the stage requires which is a "
+                "judgement — positioning, channel mix, offer framing, recommended motions, measures, risks — is "
+                "the Room's own work product, and withholding it is a failed turn, not caution. Author it from "
+                "the cited evidence and mark a low-confidence call as an assumption to test. A required field "
+                "must never come back as null, an empty string, an empty list or an empty object: if you can "
+                "reason about it at all, write your best judgement; a gap note is not a substitute for a "
+                "required judgement field.")},
             {"role": "user", "content": json.dumps({
                 "stage": stage_contract,
                 "evidence": evidence,
                 "room_work": self.work_results,
             }, ensure_ascii=False)},
-        ], model=self.synth_model, temp=0.1, bucket="synth", force_text=True,
-           json_object=True, uncapped=True, max_tokens=8000)
+        ]
+        # CONSTRAINED DECODING for the contract step. Core derives this schema from the very
+        # predicates it will run; a `required` check becomes a NON-NULLABLE typed field, a
+        # `preferred` check becomes nullable-but-present. Measured on the live synth model:
+        # json_object left the required field null 5/5 times even after the prompt was fixed,
+        # while the typed strict schema returned 0 nulls and 0 wrong shapes in 10 runs.
+        # `strict_response_schema` is null when strict cannot apply (multi-key stage, or an
+        # unregistered artifact key) — then this keeps the original json_object path.
+        strict = envelope.get("strict_response_schema") if isinstance(envelope.get("strict_response_schema"), dict) else None
+        strict_schema = strict.get("schema") if isinstance(strict, dict) and isinstance(strict.get("schema"), dict) else None
+        response = None
+        if strict_schema:
+            response = await self._groq(
+                synth_messages, model=self.synth_model, temp=0.1, bucket="synth", force_text=True,
+                schema=strict_schema, schema_name=str(strict.get("name") or "runtime_stage_result"),
+                uncapped=True, max_tokens=8000)
         parsed = _first_json_object(str((response or {}).get("content") or "")) or {}
+        # The residual failure under strict output is not a null field any more — it is an
+        # empty or unparseable ENVELOPE (measured ~2/10, degenerate repetition or a truncated
+        # object). Retry ONCE on the unconstrained path rather than returning empty artifacts
+        # and letting Core spend a whole extra Room run rediscovering it.
+        if not parsed.get("artifacts"):
+            if strict_schema:
+                log.warning("[hyper-engine] runtime stage %s: strict synth returned no artifact; retrying unconstrained",
+                            envelope.get("stage_id"))
+            response = await self._groq(synth_messages, model=self.synth_model, temp=0.1, bucket="synth",
+                                        force_text=True, json_object=True, uncapped=True, max_tokens=8000)
+            parsed = _first_json_object(str((response or {}).get("content") or "")) or parsed
         allowed_refs = {row["id"] for row in evidence}
         artifacts: List[Dict[str, Any]] = []
         seen_ids = set()
@@ -3467,6 +3508,64 @@ class Director:
                 "source_refs": refs,
                 "external_ref": (str(raw.get("external_ref")) if raw.get("external_ref") is not None else None),
             })
+        # BOUNDED SELF-REPAIR. Core derives `artifact_schemas.<key>.schema.properties.data.required`
+        # from the very predicates it is about to run, so the Room can check its OWN output
+        # before handing it back. Without this, a single null judgement field cost a whole
+        # extra Room run — director + debate + workers + synth, ~18k tokens — to rediscover
+        # what was knowable here for one ~6k synth call. Measured: five consecutive attempts
+        # rejected on nothing but `data.channel_mix` being JSON null.
+        schemas = envelope.get("artifact_schemas") if isinstance(envelope.get("artifact_schemas"), dict) else {}
+        def _missing_required(rows: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+            out: Dict[str, List[str]] = {}
+            for row in rows:
+                spec = schemas.get(str(row.get("key") or "")) or {}
+                required = (((spec.get("schema") or {}).get("properties") or {}).get("data") or {}).get("required") or []
+                payload = row.get("data") if isinstance(row.get("data"), dict) else {}
+                blank = [f for f in required if payload.get(f) in (None, "", [], {})]
+                if blank:
+                    out[str(row.get("key"))] = blank
+            return out
+
+        blanks = _missing_required(artifacts) if schemas else {}
+        if blanks:
+            log.info("[hyper-engine] runtime stage %s: repairing blank required fields %s",
+                          envelope.get("stage_id"), blanks)
+            repair = await self._groq([
+                {"role": "system", "content": (
+                    "Return JSON only: {\"artifacts\":[{\"key\":...,\"data\":{...}}]}. You already produced this "
+                    "artifact but left REQUIRED judgement fields empty. Those fields are the Room's own work "
+                    "product, not facts to look up, so their absence from the evidence is not a reason to omit "
+                    "them. Author each named field now from the evidence already gathered, marking a "
+                    "low-confidence call as an assumption to test. Return the COMPLETE data object for each "
+                    "artifact — every field you already had, verbatim, plus the named ones filled. Do not invent "
+                    "a metric, source, contact detail, identifier, provider action or named third party.")},
+                {"role": "user", "content": json.dumps({
+                    "fill_these_required_fields": blanks,
+                    "your_current_artifacts": [{"key": row.get("key"), "data": row.get("data")} for row in artifacts],
+                    "requirements": {key: (schemas.get(key) or {}).get("requirements") for key in blanks},
+                    "evidence": evidence,
+                }, ensure_ascii=False)},
+            ], model=self.synth_model, temp=0.2, bucket="synth", force_text=True,
+               json_object=True, uncapped=True, max_tokens=6000)
+            repaired = _first_json_object(str((repair or {}).get("content") or "")) or {}
+            by_key = {str(row.get("key")): row for row in (repaired.get("artifacts") or []) if isinstance(row, dict)}
+            for row in artifacts:
+                patch = by_key.get(str(row.get("key")))
+                fixed = patch.get("data") if isinstance(patch, dict) and isinstance(patch.get("data"), dict) else None
+                if not fixed:
+                    continue
+                current = row.get("data") if isinstance(row.get("data"), dict) else {}
+                # MONOTONIC: only ever fill a blank. A repair pass must never overwrite or
+                # drop a field that was already good.
+                for field, value in fixed.items():
+                    if current.get(field) in (None, "", [], {}) and value not in (None, "", [], {}):
+                        current[field] = value
+                row["data"] = current
+            still = _missing_required(artifacts)
+            if still:
+                log.warning("[hyper-engine] runtime stage %s: still blank after repair %s",
+                                 envelope.get("stage_id"), still)
+
         gaps = [str(value).strip() for value in (parsed.get("gaps") or []) if str(value).strip()][:20]
         if not evidence:
             artifacts = []
@@ -3890,10 +3989,19 @@ class Director:
         )
         if self.room_kind == "campaign":
             from .campaign_contract import campaign_system_contract
-            prompt += campaign_system_contract()
+            prompt += campaign_system_contract(self._campaign_allowed_urls())
         return prompt
 
     # ── plan → parallel-gather → synth (the fast path) ────────────────
+    def _campaign_allowed_urls(self) -> List[str]:
+        """The exact link set the contract validator will accept, read from the SAME brief
+        keys it reads. Derived here so the producer and the checker cannot drift."""
+        brief = self.campaign_brief or {}
+        payload = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+        return [str(value).strip() for value in (
+            payload.get("destination_url"), payload.get("destinationUrl"), payload.get("website_url"),
+        ) if str(value or "").strip()]
+
     def _relevant_connector_names(self, all_names: List[str], topic: str) -> List[str]:
         """connection_search: rank registered connector tools by lexical relevance to the
         task and keep the top-K, ALWAYS keeping one entry-point (search/list/fetch/query)

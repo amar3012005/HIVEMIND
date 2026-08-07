@@ -51,6 +51,26 @@ export const taraAdapter = {
     const payload = action.payload || {};
     const { to, opening, lawfulBasis, country, timezone } = validateTaraAction(action);
 
+    // DO-NOT-CALL IS CHECKED FIRST, BEFORE ANY PROVIDER IS CONTACTED.
+    //
+    // The full compliance gate below still evaluates DNC along with lawful basis, country
+    // rules, calling window and caps — but it runs after provider resolution, which probes
+    // each candidate provider's /capabilities over the network. That ordering meant a
+    // suppressed number still produced outbound provider requests (measured: 2 per attempt)
+    // and capability-state writes. Worse, when no provider answered the probe, execute()
+    // threw `tara_provider_unavailable` and the DNC gate was NEVER evaluated at all, so the
+    // suppression was decided by provider availability rather than by the list.
+    //
+    // DNC needs nothing but the phone number and the org's list, so it belongs before all of
+    // it. A block here is still durably recorded: the error carries outcome BLOCKED, which
+    // the campaign worker writes to campaignActionAttempt, campaignAction and campaignEvent.
+    const suppressed = await prisma.dncList.findMany({ where: { orgId: action.campaign.orgId }, select: { phone: true } });
+    if (suppressed.some((row) => row.phone === to)) {
+      throw new CampaignAdapterError('TARA compliance gate blocked the call: phone is on the do-not-call list', {
+        code: 'tara_gate_dnc', outcome: 'BLOCKED', details: { allow: false, stage: 'dnc', reason: 'phone is on the do-not-call list' },
+      });
+    }
+
     const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId: action.campaign.orgId } });
     const providerPolicy = await resolveTaraProviderCandidates({ prisma, orgId: action.campaign.orgId, fetchImpl: providers.fetch || fetch });
     if (!providerPolicy.selected) throw new CampaignAdapterError('No governed TARA provider is currently available', {

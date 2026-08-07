@@ -1033,7 +1033,7 @@ CORE RULES:
    ONE EXCEPTION, AND ONLY THIS ONE: if a save step's summary contains
    "CONFLICTS WITH:", the new fact contradicts something already stored.
    Say so in one short sentence naming the existing item, e.g.
-   "Saved — note this may clash with your trip to Hannover on Aug 9."
+   "Saved — note this
    Do not speculate about which is correct and do not ask a question;
    just surface the clash so the user can decide. If there is no
    "CONFLICTS WITH:" marker, stay silent about saving exactly as above.
@@ -1786,6 +1786,63 @@ function distillHistoryTail(history, message, { perTurnCap = 600 } = {}) {
     });
 }
 
+
+// PHASE 2 — parallel tool-call execution within a round.
+//
+// A single model round emits all tool_calls against the SAME message history,
+// so no call in the round can reference another call's *result* (none have run
+// yet). The only real dependency is when a call's arguments reference a prior
+// round's tool_call_id or a prior tool's result. Independent calls therefore
+// run via Promise.all; a call that references a prior result stays sequential
+// after that result resolves. Results are re-ordered back to the original call
+// order so the assembled messages/steps arrays stay deterministic regardless of
+// completion timing.
+function isDependentCall(args, priorResultIds) {
+  if (!priorResultIds || priorResultIds.size === 0) return false;
+  const blob = JSON.stringify(args || {});
+  for (const id of priorResultIds) {
+    if (blob.includes(id)) return true;
+  }
+  return false;
+}
+
+// Executes a batch of tool calls, running independent ones concurrently.
+// `execute` is `(name, args, ctx) => result`. Returns results in the same
+// order as `calls`. `priorResultIds` is the set of tool_call_ids from earlier
+// rounds whose results are already in the message history.
+async function executeToolCallsInParallel(calls, execute, ctx, priorResultIds) {
+  const results = new Array(calls.length);
+  // Walk in order; a dependent call must wait for the prior result it
+  // references, so it is awaited inline. Independent calls are collected and
+  // fired together.
+  let i = 0;
+  while (i < calls.length) {
+    const call = calls[i];
+    let args = {};
+    try { args = JSON.parse(call.function?.arguments || '{}'); } catch {}
+    if (isDependentCall(args, priorResultIds)) {
+      results[i] = await execute(call, args, ctx);
+      i += 1;
+      continue;
+    }
+    // Collect the maximal run of independent calls and fire them together.
+    const batch = [];
+    const batchIdx = [];
+    while (i < calls.length) {
+      const c = calls[i];
+      let a = {};
+      try { a = JSON.parse(c.function?.arguments || '{}'); } catch {}
+      if (isDependentCall(a, priorResultIds)) break;
+      batch.push({ call: c, args: a });
+      batchIdx.push(i);
+      i += 1;
+    }
+    const batchResults = await Promise.all(batch.map(({ call, args }) => execute(call, args, ctx)));
+    batchResults.forEach((r, k) => { results[batchIdx[k]] = r; });
+  }
+  return results;
+}
+
 async function runToolkitReadLoop({ toolkit, message, history, model, apiKey, ctx, signal, onEvent }) {
   const schemas = toolkit.getJsonSchemas({ readOnlyOnly: true });
   if (schemas.length === 0) return { text: '', steps: [] };
@@ -1815,9 +1872,11 @@ async function runToolkitReadLoop({ toolkit, message, history, model, apiKey, ct
       return { text: final || resultTexts.join('\n\n'), steps };
     }
     messages.push(msg);
-    for (const call of calls) {
-      let args = {};
-      try { args = JSON.parse(call.function?.arguments || '{}'); } catch {}
+    // PHASE 2 — run independent calls in parallel, preserve original order.
+    const priorResultIds = new Set(
+      messages.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)
+    );
+    const results = await executeToolCallsInParallel(calls, async (call, args, ctx) => {
       const name = call.function?.name;
       onEvent?.({ type: 'tool_started', name, tool_call_id: call.id, arguments: args });
       const toolResult = await toolkit.execute(name, args, ctx);
@@ -1870,10 +1929,13 @@ async function runToolkitReadLoop({ toolkit, message, history, model, apiKey, ct
             + `answers, that is a wrong-answer risk, not a formatting detail.`);
         }
       }
+      return { name, args, callId: call.id, toolResult, text };
+    }, ctx, priorResultIds);
+    for (const { name, args, callId, toolResult, text } of results) {
       steps.push({ tool: name, args, result_summary: text.slice(0, 240), raw: toolResult.meta?.raw || null });
       if (text) resultTexts.push(text);
-      onEvent?.({ type: 'tool_completed', name, tool_call_id: call.id, status: toolResult.status, summary: text.slice(0, 240) });
-      messages.push({ role: 'tool', tool_call_id: call.id, content: text });
+      onEvent?.({ type: 'tool_completed', name, tool_call_id: callId, status: toolResult.status, summary: text.slice(0, 240) });
+      messages.push({ role: 'tool', tool_call_id: callId, content: text });
     }
   }
   return { text: resultTexts.join('\n\n'), steps };
@@ -1977,10 +2039,12 @@ RULES:
 
     if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
       messages.push(msg);
-      for (const tc of msg.tool_calls) {
+      // PHASE 2 — run independent calls in parallel, preserve original order.
+      const priorResultIds = new Set(
+        messages.filter((m) => m.role === 'tool').map((m) => m.tool_call_id)
+      );
+      const results = await executeToolCallsInParallel(msg.tool_calls, async (tc, toolArgs, ctx) => {
         const toolName = tc.function?.name;
-        let toolArgs = {};
-        try { toolArgs = JSON.parse(tc.function?.arguments || '{}'); } catch {}
         onEvent?.({ type: 'tool_call', name: toolName, arguments: tc.function?.arguments || '{}' });
         let toolResp;
         try {
@@ -1989,6 +2053,9 @@ RULES:
           toolResp = { content: [{ type: 'text', text: `error: ${err.message}` }], status: 'error' };
         }
         const text = toolResp.content?.[0]?.text || '';
+        return { toolName, toolArgs, callId: tc.id, toolResp, text };
+      }, ctx, priorResultIds);
+      for (const { toolName, toolArgs, callId, toolResp, text } of results) {
         onEvent?.({ type: 'tool_result', name: toolName, summary: text.slice(0, 140) });
         steps.push({ tool: toolName, args: toolArgs, result_summary: text.slice(0, 200) });
         // Capture a deferred-save project choice so the chat UI can render
@@ -2004,7 +2071,7 @@ RULES:
         if (toolResp.status === 'draft_created' && toolResp.meta?.draft_id) {
           draftIds.push(toolResp.meta.draft_id);
         }
-        messages.push({ role: 'tool', tool_call_id: tc.id, content: text });
+        messages.push({ role: 'tool', tool_call_id: callId, content: text });
       }
       continue;
     }

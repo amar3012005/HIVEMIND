@@ -110,10 +110,18 @@ export function buildToolSelectionCards(rawTools) {
 export function resolveSelectedTool(rawTools, selectedName) {
   const wanted = String(selectedName || '').trim().toLocaleLowerCase();
   if (!wanted) return null;
+  const canonical = (value) => String(value || '')
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/^composio[_:-]?/, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const canonicalWanted = canonical(wanted);
   return (rawTools || []).find((tool) => {
     const name = String(tool?.function?.name || tool?.name || '').trim().toLocaleLowerCase();
     const slug = String(tool?._composio?.slug || '').trim().toLocaleLowerCase();
-    return name === wanted || slug === wanted;
+    return name === wanted || slug === wanted
+      || canonical(name) === canonicalWanted || canonical(slug) === canonicalWanted;
   }) || null;
 }
 
@@ -155,7 +163,16 @@ async function selectToolCard({ rawTools, message, apiKey, signal }) {
     const selected = resolveSelectedTool(rawTools, args.tool_name);
     if (selected) return selected;
   }
-  throw new Error('tool-card selector returned an unavailable tool after retry');
+  // Some OpenAI-compatible providers occasionally violate an enum inside a
+  // forced selector tool call. Fall back to the provider-enforced native tool
+  // choice using the real manifests. This is semantic and language-neutral;
+  // it is only paid on selector failure and always resolves back to a manifest
+  // that actually exists, rather than turning a valid connector read into an
+  // intermittent orchestration error.
+  const fallback = await defaultSelectTool({ tools: rawTools, message, apiKey, signal });
+  const selected = resolveSelectedTool(rawTools, fallback?.toolName);
+  if (selected) return selected;
+  throw new Error('tool-card selector returned an unavailable tool after retry and governed fallback');
 }
 
 /**

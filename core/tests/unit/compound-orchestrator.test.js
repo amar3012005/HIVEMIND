@@ -47,6 +47,7 @@ test('tool-card identifiers resolve case-insensitively by function name or Compo
   const tools = [{ function: { name: 'composio_googlecalendar_find_events' }, _composio: { slug: 'GOOGLECALENDAR_FIND_EVENTS' } }];
   assert.equal(resolveSelectedTool(tools, 'COMPOSIO_GOOGLECALENDAR_FIND_EVENTS'), tools[0]);
   assert.equal(resolveSelectedTool(tools, 'googlecalendar_find_events'), tools[0]);
+  assert.equal(resolveSelectedTool(tools, 'composio-googlecalendar-find-events'), tools[0]);
   assert.equal(resolveSelectedTool(tools, 'missing'), null);
 });
 

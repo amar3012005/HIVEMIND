@@ -90,9 +90,6 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
       apiKey: process.env.OPENROUTER_API_KEY,
       wireModel: requested,
       providerPolicy: {
-        // Let OpenRouter choose the measured fastest compatible endpoint. The
-        // Employees Room stack has a separate provider policy; its blacklist
-        // must not leak into these small HQ calls.
         sort: process.env.OPENROUTER_DEEPSEEK_SORT || 'throughput',
         allow_fallbacks: true,
         require_parameters: true,
@@ -128,7 +125,14 @@ export async function chatCompletionFetch(model, options = {}, { fallbackApiKey,
       if (body.max_tokens == null) body.max_tokens = body.max_completion_tokens;
       delete body.max_completion_tokens;
     }
-    body.provider = route.providerPolicy;
+    // Internal callers may narrow a model to workload-specific providers.
+    // Merge instead of replacing so final synthesis can use its benchmarked
+    // order without changing other DeepSeek workloads such as HQ dispatch.
+    const callerProviderPolicy = body.provider || {};
+    body.provider = { ...(route.providerPolicy || {}), ...callerProviderPolicy };
+    if (Array.isArray(callerProviderPolicy.order) && callerProviderPolicy.order.length) {
+      delete body.provider.sort;
+    }
   }
 
   return fetchImpl(route.url, {

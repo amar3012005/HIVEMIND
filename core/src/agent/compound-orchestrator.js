@@ -837,8 +837,13 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   let composioSlugByTool = new Map();
   let composioManifestByTool = new Map();
   if (composioToolkit) {
-    try {
-      const raw = await composioSvc.getToolkitTools(composioToolkit);
+    let discoveryError = null;
+    for (let discoveryAttempt = 0; discoveryAttempt < 2; discoveryAttempt += 1) {
+      try {
+        tools = [];
+        composioSlugByTool = new Map();
+        composioManifestByTool = new Map();
+        const raw = await composioSvc.getToolkitTools(composioToolkit);
       // PROGRESSIVE LOADING: narrow the toolkit's full tool list to only the
       // tools relevant to THIS subtask's operation + message. Composio has no
       // semantic /tools/search on this deployment (probed → 404), so we do a
@@ -860,16 +865,26 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
             apiKey, signal,
           })]
         : raw;
-      tools = relevant.map((t) => ({
-        type: 'function',
-        function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
-      }));
-      for (const t of relevant) {
-        composioSlugByTool.set(t.function.name, t._composio?.slug);
-        composioManifestByTool.set(t.function.name, t);
+        tools = relevant.map((t) => ({
+          type: 'function',
+          function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
+        }));
+        for (const t of relevant) {
+          composioSlugByTool.set(t.function.name, t._composio?.slug);
+          composioManifestByTool.set(t.function.name, t);
+        }
+        discoveryError = null;
+        break;
+      } catch (err) {
+        discoveryError = err;
+        emit({
+          type: 'tool_result', name: 'composio_capability_discovery',
+          status: discoveryAttempt === 0 ? 'retrying' : 'error', summary: err.message,
+        });
       }
-    } catch (err) {
-      return { status: 'error', error: `composio tools failed: ${err.message}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
+    }
+    if (discoveryError) {
+      return { status: 'error', error: `composio tools failed: ${discoveryError.message}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
     }
   }
   if (tools.length === 0) {

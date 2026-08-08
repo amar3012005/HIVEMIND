@@ -24,7 +24,7 @@ class _Connection:
         return _Context()
 
     async def fetchrow(self, _query, _room_id, _org_id):
-        return {"room_journal": [{"turn_id": "prior"}]}
+        return {"room_journal": [{"turn_id": "prior"}, {"turn_id": "current", "status": "running"}]}
 
     async def execute(self, _query, payload, room_id, org_id):
         self.updated = (json.loads(payload), room_id, org_id)

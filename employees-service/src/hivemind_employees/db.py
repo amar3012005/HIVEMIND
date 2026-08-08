@@ -614,6 +614,9 @@ async def append_room_journal_entry(room_id: str, org_id: str, entry: dict, keep
                 if isinstance(raw, str):
                     raw = json.loads(raw)
                 journal = [item for item in raw if isinstance(item, dict)]
+                turn_id = str(entry.get("turn_id") or "").strip()
+                if turn_id:
+                    journal = [item for item in journal if str(item.get("turn_id") or "") != turn_id]
                 journal.append(entry)
                 journal = journal[-max(2, min(20, int(keep or 8))):]
                 await conn.execute(

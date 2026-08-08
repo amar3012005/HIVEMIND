@@ -418,27 +418,32 @@ test('Director may decline every registered playbook instead of forcing a bad fi
   assert.equal(calls.length, 1, 'selection must still use the Director when one playbook is registered');
 });
 
-test('Director sees the complete catalog when the planner suggests a different Room owner', async () => {
+test('Director does not substitute another Room when the selected owner has no lifecycle', async () => {
   const fixture = await loadFixture();
   fixture.metadata = { ...(fixture.metadata || {}), owner_room_tag: 'operator-room' };
   const registry = new RuntimePlaybookRegistry();
   registry.register(fixture);
-  let suppliedCatalog = [];
+  let calls = 0;
   const selector = new DirectorPlaybookSelector({
     registry,
     completionFetch: async (_model, request) => {
-      suppliedCatalog = JSON.parse(request.body).messages[1].content;
+      calls += 1;
       return {
         ok: true,
         async json() { return { choices: [{ message: { content: '{"playbook_id":null,"version":null,"reason":"no lifecycle fit"}' } }] }; },
       };
     },
   });
-  await selector.select({
+  const selected = await selector.select({
     objective: 'Evaluate the requested outcome.',
     context: { request: { owner_room_tag: 'advisory-room' } },
   });
-  assert.equal(suppliedCatalog.includes(fixture.playbook_id), true);
+  assert.deepEqual(selected, {
+    playbook_id: null,
+    version: null,
+    reason: 'no_active_playbook_for_selected_room:advisory-room',
+  });
+  assert.equal(calls, 0);
 });
 
 test('Director validates only the lifecycle durably selected by the planner', async () => {

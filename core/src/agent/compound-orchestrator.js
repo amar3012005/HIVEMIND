@@ -216,6 +216,10 @@ export function rankToolSelectionCards(cards, canonicalOperation = '') {
   }).sort((a, b) => b.score - a.score || a.index - b.index).map(({ card }) => card);
 }
 
+export function buildToolCardSelectionPrompt(cards) {
+  return `Select the one connected-app capability that directly fulfills the requested operation in any language. The supplied capabilities have already been restricted to the planner's required read/write authority. Prefer the tool that produces the requested terminal result over prerequisite or metadata utilities. HIVE-MIND already creates a reviewable approval artifact for every write, so a provider's create-draft capability is not needed merely to preview a write. An email or message addressed to a recipient has send/deliver as its terminal result even when the user describes the preparation as writing or composing; select a provider create-draft capability only when the requested result is specifically to save or create a draft in that provider. Return exactly one tool_name from the supplied enum. Available compact capability cards: ${JSON.stringify(cards)}`;
+}
+
 function resolveMentionedTool(rawTools, text) {
   const haystack = String(text || '').toLocaleLowerCase();
   if (!haystack) return null;
@@ -269,7 +273,7 @@ async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, s
       body: JSON.stringify({
         model: SUBTASK_MODEL,
         messages: [
-          { role: 'system', content: `Select the one connected-app capability that directly fulfills the requested operation in any language. The supplied capabilities have already been restricted to the planner's required read/write authority. Prefer the tool that produces the requested terminal result over prerequisite or metadata utilities. HIVE-MIND already creates a reviewable approval artifact for every write, so a provider's create-draft capability is not needed merely to preview a write; select it only when the requested terminal result is specifically a draft in that provider. Return exactly one tool_name from the supplied enum. Available compact capability cards: ${JSON.stringify(cards)}` },
+          { role: 'system', content: buildToolCardSelectionPrompt(cards) },
           { role: 'user', content: message },
         ],
         tools: [selector], tool_choice: { type: 'function', function: { name: 'select_connector_tool' } },

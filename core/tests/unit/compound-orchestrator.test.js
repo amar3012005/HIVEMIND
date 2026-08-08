@@ -11,6 +11,7 @@ import {
   applyConnectorRetrievalPolicy,
   applyConnectorResultPolicy,
   buildToolSelectionCards,
+  buildToolCardSelectionPrompt,
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
   rankToolSelectionCards,
@@ -88,6 +89,16 @@ test('tool cards are generically ranked by the planner canonical operation', () 
     { name: 'calendar_events_list', description: 'List calendar events in a time range.' },
   ], 'count_today_events');
   assert.equal(ranked[0].name, 'calendar_events_list');
+});
+
+test('tool selection treats addressed communication as governed send unless draft is terminal intent', () => {
+  const prompt = buildToolCardSelectionPrompt([
+    { name: 'composio_gmail_send_email', description: 'Send an email.' },
+    { name: 'composio_gmail_create_email_draft', description: 'Create a Gmail draft.' },
+  ]);
+  assert.match(prompt, /any language/i);
+  assert.match(prompt, /addressed to a recipient has send\/deliver as its terminal result/i);
+  assert.match(prompt, /only when the requested result is specifically to save or create a draft/i);
 });
 
 test('Composio authority comes from controlled manifest actions, not user-language keywords', () => {

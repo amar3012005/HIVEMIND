@@ -72,7 +72,8 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
+import { renderTemplate, sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
+import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
@@ -2877,6 +2878,45 @@ const server = http.createServer(async (req, res) => {
         metadata: { operator: operator.operator, session_id: operator.sessionId, plan_id: plan.id, version: plan.catalogVersion?.version, change: plan.catalogVersion?.action },
         ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
       return jsonResponse(res, { plan }, 201);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 400);
+    }
+  }
+
+  // Manual transactional email is deliberately narrow: platform admins can
+  // render/send approved welcome templates to one recipient at a time. Real
+  // enterprise invitations keep using their secure invitation lifecycle.
+  if (pathname === '/admin/api/platform/email/templates' && req.method === 'GET') {
+    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    return jsonResponse(res, { templates: Object.entries(ADMIN_EMAIL_TEMPLATES).map(([id, label]) => ({ id, label })) });
+  }
+  if (pathname === '/admin/api/platform/email/preview' && req.method === 'POST') {
+    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    try {
+      const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
+        appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
+      });
+      const rendered = renderTemplate(message.templateId, message.vars);
+      return jsonResponse(res, { template_id: message.templateId, subject: rendered.subject, text: rendered.text, html: rendered.html });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 400);
+    }
+  }
+  if (pathname === '/admin/api/platform/email/send' && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    try {
+      const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
+        appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
+      });
+      const delivery = await sendSystemEmail({ templateId: message.templateId, to: message.to, vars: message.vars });
+      await audit({
+        eventType: delivery.ok ? 'commercial.admin_email_sent' : 'commercial.admin_email_delivery_failed',
+        eventCategory: 'billing', action: 'create', resourceType: 'system_email', resourceId: crypto.randomUUID(),
+        metadata: { operator: operator.operator, session_id: operator.sessionId, template_id: message.templateId, recipient_domain: message.to.split('@')[1], provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, safe_error: delivery.error || null },
+        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin',
+      });
+      return jsonResponse(res, { ok: delivery.ok, provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, error: delivery.ok ? null : (delivery.error || 'delivery_failed') }, delivery.ok ? 200 : 502);
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 400);
     }

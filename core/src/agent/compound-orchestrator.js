@@ -28,6 +28,29 @@ const SUBTASK_MODEL = process.env.COMPOUND_SUBTASK_MODEL || process.env.HIVEMIND
 // Max tool-calling rounds per subtask (a subtask is a small, scoped step).
 const SUBTASK_MAX_ROUNDS = 3;
 
+// Router provider name → runtime connector id. The progressive router emits
+// hyphenated provider names (google-docs, google-sheets) but the connector
+// runtime registers underscore ids (google_docs, google_sheets). Mirrors the
+// _RT_MAP in toolkit-factory.js.
+const CONNECTOR_ID_MAP = {
+  gmail: 'gmail',
+  'google-docs': 'google_docs',
+  'google-sheets': 'google_sheets',
+  'google-gemini': 'google_gemini',
+  slack: 'slack',
+  notion: 'notion',
+  github: 'github',
+  linear: 'linear',
+};
+
+// Native HIVEMIND groups are NOT connectors — they are served by the native
+// dispatchTool path (recall, save, etc.), not the connector runtime.
+const NATIVE_HIVEMIND_GROUPS = new Set(['hivemind-recall', 'hivemind-memory-write', 'hivemind-projects']);
+
+function normalizeConnectorIds(groups) {
+  return (groups || []).map((g) => CONNECTOR_ID_MAP[g] || g);
+}
+
 /**
  * Resolve the connector runtime singleton. The server assigns
  * globalThis.__hivemindConnectorRuntime lazily (only when a
@@ -146,6 +169,40 @@ async function defaultSelectTool({ tools, message, apiKey, signal }) {
 }
 
 /**
+ * Run a native HIVEMIND step (recall / save / projects) via the native
+ * dispatchTool path — the same path the rest of /api/chat uses. The connector
+ * runtime has no hivemind-* connectors, so these must NOT go through
+ * runtime.listTools/executeTool. Returns the same shape as runSubtask.
+ */
+async function runNativeHivemindStep({ subtask, ctx, priorOutputs }) {
+  const message = subtask.message || '';
+  const toolName = 'hivemind_recall';
+  const args = {
+    query: message,
+    ...(priorOutputs && Object.keys(priorOutputs).length ? { context: priorOutputs } : {}),
+  };
+  try {
+    // dispatchTool is the canonical native tool dispatcher (same as chat's
+    // recall path). Fall back to ctx._tracedDispatch if present.
+    const dispatch = ctx?._tracedDispatch || ctx?._dispatchTool;
+    if (!dispatch) {
+      return { status: 'error', error: 'native hivemind dispatch unavailable', toolName, args, result: null, draftId: null, outputFields: {} };
+    }
+    const result = await dispatch('hivemind_recall', args, ctx);
+    if (result?.error) {
+      return { status: 'error', error: result.error, toolName, args, result, draftId: null, outputFields: {} };
+    }
+    // Extract a compact text summary + any scalar output fields for downstream
+    // steps (e.g. the doc-creation step can reference recalled facts).
+    const text = result?.content || result?.response || result?.summary || JSON.stringify(result).slice(0, 2000);
+    const outputFields = { recall: String(text).slice(0, 2000) };
+    return { status: 'completed', result, toolName, args, draftId: null, outputFields, error: null };
+  } catch (err) {
+    return { status: 'error', error: err.message, toolName, args, result: null, draftId: null, outputFields: {} };
+  }
+}
+
+/**
  * Run one subtask: scope the model's tool choices to the subtask's connector
  * group, let it pick a tool + args, then dispatch by the tool's manifest.
  *
@@ -153,14 +210,27 @@ async function defaultSelectTool({ tools, message, apiKey, signal }) {
  * status ∈ 'completed' | 'draft_created' | 'error' | 'not_connected' | ...
  */
 async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs, selectTool = defaultSelectTool }) {
-  const runtime = await getRuntime(ctx);
   const toolGroups = Array.isArray(subtask.tool_groups) ? subtask.tool_groups : [];
   const message = subtask.message || '';
 
+  // Native HIVEMIND step (recall / save / projects) — NOT a connector. Run it
+  // through the native dispatchTool path so recall actually reaches the memory
+  // engine. The connector runtime has no hivemind-* connectors. Checked BEFORE
+  // getRuntime so a native step never touches (or lazily initializes) the
+  // connector runtime.
+  if (toolGroups.some((g) => NATIVE_HIVEMIND_GROUPS.has(g))) {
+    return runNativeHivemindStep({ subtask, ctx, priorOutputs });
+  }
+
+  const runtime = await getRuntime(ctx);
+
   // 1. Scope the model's tool choices to this subtask's connector group.
+  //    Normalize router provider names (google-docs) → runtime connector ids
+  //    (google_docs) so listTools actually finds the connector.
+  const connectorIds = normalizeConnectorIds(toolGroups);
   let catalog;
   try {
-    catalog = await runtime.listTools(context, { connectors: toolGroups });
+    catalog = await runtime.listTools(context, { connectors: connectorIds });
   } catch (err) {
     return { status: 'error', error: `listTools failed: ${err.message}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
   }

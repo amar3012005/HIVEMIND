@@ -234,3 +234,60 @@ test('compound orchestrator: independent subtasks run in parallel (fan-out/merge
   // Total should be ~2 sequential hops (parallel pair + merge), not 4.
   assert.ok(elapsed < 900, `fan-out should be ~600ms not ~1200ms (got ${elapsed}ms)`);
 });
+
+test('compound orchestrator: native hivemind-recall step runs via dispatchTool, not connector runtime', async () => {
+  // No connector runtime set — the native path must not touch it.
+  delete globalThis.__hivemindConnectorRuntime;
+  const dispatched = [];
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _toolkit: null,
+    _tracedDispatch: async (name, args) => {
+      dispatched.push({ name, args });
+      return { content: 'Amar leads HIVEMIND, TARA, HYPERAGENTS' };
+    },
+  };
+  const res = await runCompoundOrchestrator({
+    subtasks: [
+      { operation: 'recall', tool_groups: ['hivemind-recall'], depends_on: null, message: 'Recall Amar project details' },
+    ],
+    ctx,
+    apiKey: 'k',
+    signal: null,
+  });
+  assert.equal(res.status, 'completed');
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].name, 'hivemind_recall');
+  assert.ok(dispatched[0].args.query.includes('Amar'), 'recall query passed through');
+});
+
+test('compound orchestrator: normalizes google-docs to google_docs connector id', async () => {
+  const seen = [];
+  const runtime = makeRuntime({
+    tools: [
+      { name: 'google_docs__create', access: 'write', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
+    ],
+    executeImpl: async (name, input) => {
+      seen.push({ name, input });
+      return { status: 'completed', content: [{ type: 'json', data: { doc_id: 'D1' } }], metadata: { connector: 'google_docs', tool: name } };
+    },
+  });
+  // Wrap listTools to capture the connectors arg.
+  const origList = runtime.listTools.bind(runtime);
+  let listConnectors = null;
+  runtime.listTools = async (ctx, opts) => { listConnectors = opts.connectors; return origList(ctx, opts); };
+  globalThis.__hivemindConnectorRuntime = runtime;
+  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _toolkit: null };
+
+  const res = await runCompoundOrchestrator({
+    subtasks: [
+      { operation: 'create_doc', tool_groups: ['google-docs'], depends_on: null, message: 'create doc' },
+    ],
+    ctx,
+    apiKey: 'k',
+    signal: null,
+    selectTool: makeSelector(() => ({ toolName: 'google_docs__create', args: { title: 'X' } })),
+  });
+  assert.equal(res.status, 'completed');
+  assert.deepEqual(listConnectors, ['google_docs'], 'google-docs must normalize to google_docs');
+  assert.equal(seen[0].name, 'google_docs__create');
+});

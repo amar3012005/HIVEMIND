@@ -22,5 +22,7 @@ test('work rooms expose one durable work-plan projection', () => {
   assert.match(source, /hyper-rooms.*work-plan/);
   assert.match(source, /"hyper_work_orders"/);
   assert.match(source, /plan_step_id/);
-  assert.match(source, /status === 'blocked' \? 'needs_attention' : status/);
+  assert.match(source, /status === 'blocked' \? 'needs_attention'/);
+  assert.match(source, /status === 'running' \? 'active'/);
+  assert.match(source, /wo\.wait_for, wo\.handoff/);
 });

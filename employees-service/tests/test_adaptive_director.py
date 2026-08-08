@@ -648,6 +648,44 @@ def test_work_room_turn_plan_runs_dependencies_before_dependent_steps(monkeypatc
     assert "COMPLETED PREREQUISITES" in worker_inputs[1]
 
 
+def test_work_room_waits_without_starting_worker_and_preserves_handoff(monkeypatch):
+    director, events = _director(message="Prepare the decision and wait for confirmation")
+    director.room_mode = "work"
+    director.is_work_room = True
+    calls = []
+
+    async def create(**kwargs):
+        calls.append(("create", kwargs["wait_for"], kwargs["handoff"]))
+        return {"id": "11111111-1111-1111-1111-111111111111", "status": "queued", "attempt": 0}
+
+    async def pause(**kwargs):
+        calls.append(("pause", kwargs["status"], kwargs["wait_for"], kwargs["handoff"]))
+        return True
+
+    async def should_not_run(*_args, **_kwargs):
+        raise AssertionError("a waiting work step must not invoke a worker")
+
+    monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", create)
+    monkeypatch.setattr("hivemind_employees.hyper.engine.pause_hyper_work_order", pause)
+    monkeypatch.setattr(director, "_groq", should_not_run)
+
+    results = asyncio.run(director._run_work_orders({"turn_plan": [{
+        "id": "propose", "depends_on": [], "kind": "decision", "owner_lane": "Strategist",
+        "title": "Propose next move", "objective": "Prepare the evidence-backed recommendation.",
+        "required_evidence": ["company"], "acceptance_criteria": ["Clear recommendation"],
+        "wait": {"kind": "approval", "reason": "A decision is required before work continues.",
+                 "prompt": "Confirm the recommendation.", "resume_key": "recommendation-confirmed"},
+        "handoff": {"owner": "runtime", "objective": "Consider the approved recommendation.",
+                    "rationale": "The proposal affects the operating queue."},
+    }]}))
+
+    assert results[0]["status"] == "waiting_for_approval"
+    assert results[0]["handoff"]["owner"] == "runtime"
+    assert calls[0][0] == "create"
+    assert calls[1][0:2] == ("pause", "waiting_for_approval")
+    assert any(event.get("t") == "work_order" and event.get("status") == "waiting_for_approval" for event in events)
+
+
 def test_post_output_action_uses_global_connected_toolkit(monkeypatch):
     director, _events = _director(
         message="Draft this in Gmail", enabled_connectors=["gmail"],

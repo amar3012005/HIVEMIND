@@ -33,7 +33,12 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..config import get_settings
-from ..db import create_hyper_work_order, start_hyper_work_order, complete_hyper_work_order
+from ..db import (
+    create_hyper_work_order,
+    start_hyper_work_order,
+    complete_hyper_work_order,
+    pause_hyper_work_order,
+)
 from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog, work_skill_catalog
 from .domains import get_domain_pack
 from ..hivemind_client import (
@@ -64,6 +69,36 @@ _CEREBRAS_URL = (os.environ.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai
 _CEREBRAS_DIRECT_MODELS = {m.strip() for m in
     (os.environ.get("HYPER_CEREBRAS_DIRECT_MODELS", "zai-glm-4.7,gpt-oss-120b")).split(",") if m.strip()}
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+
+
+def _normalize_work_step_wait(value: Any) -> Dict[str, Any]:
+    """Keep only a bounded, data-declared pause contract from a Work Room plan."""
+    if not isinstance(value, dict):
+        return {}
+    kind = str(value.get("kind") or "").strip().lower()
+    reason = str(value.get("reason") or "").strip()[:1000]
+    if kind not in {"input", "approval", "capability", "event"} or not reason:
+        return {}
+    prompt = value.get("prompt")
+    resume_key = value.get("resume_key")
+    return {
+        "kind": kind,
+        "reason": reason,
+        "prompt": str(prompt).strip()[:600] if isinstance(prompt, str) and prompt.strip() else None,
+        "resume_key": str(resume_key).strip()[:120] if isinstance(resume_key, str) and resume_key.strip() else None,
+    }
+
+
+def _normalize_work_step_handoff(value: Any) -> Dict[str, Any]:
+    """Persist a proposal for the next owner without invoking that owner."""
+    if not isinstance(value, dict):
+        return {}
+    owner = str(value.get("owner") or "").strip()[:80]
+    objective = str(value.get("objective") or "").strip()[:600]
+    rationale = str(value.get("rationale") or "").strip()[:1000]
+    if not owner or not objective or not rationale:
+        return {}
+    return {"owner": owner, "objective": objective, "rationale": rationale}
 
 # Groq model id → OpenRouter slug. None (or a NO_FALLBACK / unknown bare id) means
 # "no OpenRouter text equivalent" → no fallback, the Groq failure is surfaced.
@@ -3738,6 +3773,8 @@ class Director:
             order_key = f"{step_id}-{str(order.get('kind') or 'analysis')[:20]}"[:80]
             evidence = list(order.get("required_evidence") or [])
             criteria = list(order.get("acceptance_criteria") or [])
+            wait_for = _normalize_work_step_wait(order.get("wait"))
+            handoff = _normalize_work_step_handoff(order.get("handoff"))
             persisted = await create_hyper_work_order(
                 org_id=self.org_id, room_id=self.room_id or "", turn_id=self.turn_id or "",
                 order_key=order_key, kind=str(order.get("kind") or "analysis"),
@@ -3748,8 +3785,31 @@ class Director:
                                 "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps)},
                 plan_step_id=step_id,
                 depends_on=dependencies,
+                wait_for=wait_for,
+                handoff=handoff,
             )
             work_id = str((persisted or {}).get("id") or "")
+            if wait_for:
+                waiting_status = {
+                    "input": "waiting_for_input",
+                    "approval": "waiting_for_approval",
+                    "capability": "waiting_for_capability",
+                    "event": "waiting_for_event",
+                }[wait_for["kind"]]
+                if work_id:
+                    await pause_hyper_work_order(
+                        work_order_id=work_id, org_id=self.org_id, status=waiting_status,
+                        wait_for=wait_for, handoff=handoff,
+                    )
+                result = {
+                    "id": work_id or order_key, "step_id": step_id, "depends_on": dependencies,
+                    "order_key": order_key, "status": waiting_status, "kind": order.get("kind"),
+                    "title": order.get("title"), "owner": owner_name, "owner_slug": owner_slug,
+                    "text": wait_for["reason"], "acceptance_criteria": criteria,
+                    "wait_for": wait_for, "handoff": handoff,
+                }
+                await self.emit({"t": "work_order", **result})
+                return result
             if work_id:
                 await start_hyper_work_order(work_id, self.org_id)
             await self.emit({"t": "work_order", "id": work_id or order_key, "status": "running",
@@ -3843,14 +3903,34 @@ class Director:
                         plan_step_id=step_id, depends_on=dependencies,
                     )
                     work_id = str((persisted or {}).get("id") or step_id)
-                    message = "Dependencies were not completed; this step was not started."
-                    if persisted:
-                        await complete_hyper_work_order(
-                            work_order_id=work_id, org_id=self.org_id, status="blocked", summary=message,
-                            output={}, evidence=[], artifacts=[], usage={}, error=message,
-                        )
+                    waiting_dependencies = [
+                        dependency for dependency in dependencies
+                        if str((completed_by_step.get(dependency) or {}).get("status") or "").startswith("waiting_for_")
+                    ]
+                    if waiting_dependencies:
+                        wait_for = {
+                            "kind": "event",
+                            "reason": "Waiting for prerequisite step: " + ", ".join(waiting_dependencies),
+                            "prompt": None,
+                            "resume_key": None,
+                        }
+                        message = wait_for["reason"]
+                        if persisted:
+                            await pause_hyper_work_order(
+                                work_order_id=work_id, org_id=self.org_id, status="waiting_for_dependency",
+                                wait_for=wait_for,
+                            )
+                        result_status = "waiting_for_dependency"
+                    else:
+                        message = "Dependencies were not completed; this step was not started."
+                        if persisted:
+                            await complete_hyper_work_order(
+                                work_order_id=work_id, org_id=self.org_id, status="blocked", summary=message,
+                                output={}, evidence=[], artifacts=[], usage={}, error=message,
+                            )
+                        result_status = "needs_attention"
                     result = {"id": work_id, "step_id": step_id, "depends_on": dependencies,
-                              "status": "needs_attention", "kind": order.get("kind"), "title": order.get("title"),
+                              "status": result_status, "kind": order.get("kind"), "title": order.get("title"),
                               "text": message}
                     completed_by_step[step_id] = result
                     results.append(result)
@@ -4256,6 +4336,17 @@ class Director:
                     "objective": {"type": "string"},
                     "required_evidence": {"type": "array", "items": {"type": "string"}},
                     "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                    "wait": {"type": ["object", "null"], "properties": {
+                        "kind": {"type": "string", "enum": ["input", "approval", "capability", "event"]},
+                        "reason": {"type": "string"},
+                        "prompt": {"type": ["string", "null"]},
+                        "resume_key": {"type": ["string", "null"]},
+                    }, "required": ["kind", "reason", "prompt", "resume_key"], "additionalProperties": False},
+                    "handoff": {"type": ["object", "null"], "properties": {
+                        "owner": {"type": "string"},
+                        "objective": {"type": "string"},
+                        "rationale": {"type": "string"},
+                    }, "required": ["owner", "objective", "rationale"], "additionalProperties": False},
                 }, "required": ["id", "depends_on", "kind", "owner_lane", "title", "objective", "required_evidence", "acceptance_criteria"], "additionalProperties": False}},
                 "turn_mode": {"type": "string", "enum": ["chat", "task"]},
                 "collaboration_intensity": {"type": "string", "enum": ["light", "standard", "deep"]},
@@ -4416,6 +4507,11 @@ class Director:
                 "For nontrivial work, use turn_plan for up to five bounded steps. Each step has a stable id and "
                 "only names prerequisites that must finish before it can start. Independent steps may run together; "
                 "omit turn_plan for a direct answer. Keep work_orders empty when turn_plan is present. "
+                "Use a step's optional wait only when the step cannot honestly continue without a specific input, "
+                "approval, capability, or external event. State the exact reason, an optional concise prompt, and "
+                "a stable resume key. A wait pauses the same step; it is not a failure or a completed result. "
+                "Use optional handoff only to record a proposed next owner with objective and rationale. A handoff "
+                "never invokes another system or authorizes action. "
                 "A proposed Runtime lifecycle is a recommendation with its evidence and boundary; it is not an "
                 "executed external action.\n"
             )
@@ -4692,6 +4788,8 @@ class Director:
                     "objective": objective,
                     "required_evidence": [str(x)[:160] for x in (row.get("required_evidence") or []) if str(x).strip()][:4],
                     "acceptance_criteria": [str(x)[:180] for x in (row.get("acceptance_criteria") or []) if str(x).strip()][:4],
+                    "wait": _normalize_work_step_wait(row.get("wait")),
+                    "handoff": _normalize_work_step_handoff(row.get("handoff")),
                 })
                 seen_step_ids.add(step_id)
                 if len(turn_plan) == 5:

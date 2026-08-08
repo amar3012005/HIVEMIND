@@ -10219,6 +10219,7 @@ Write the persona now.`;
       const rows = await prisma.$queryRawUnsafe(
         `SELECT wo.id, wo.turn_id, wo.plan_step_id, wo.depends_on, wo.kind, wo.status,
                 wo.title, wo.objective, wo.owner_slug, wo.owner_lane, wo.error,
+                wo.wait_for, wo.handoff,
                 wo.attempt, wo.created_at, wo.started_at, wo.completed_at, wo.updated_at,
                 latest.summary AS latest_summary
            FROM "hivemind"."hyper_work_orders" wo
@@ -10235,14 +10236,19 @@ Write the persona now.`;
       ).catch(() => []);
       const steps = (rows || []).map((row) => {
         const status = String(row.status || 'queued');
+        const projectedStatus = status === 'blocked' ? 'needs_attention'
+          : status === 'running' ? 'active'
+          : status;
         return {
           id: String(row.id), turn_id: row.turn_id ? String(row.turn_id) : null,
           step_id: row.plan_step_id || null,
           depends_on: Array.isArray(row.depends_on) ? row.depends_on : [],
-          status: status === 'blocked' ? 'needs_attention' : status,
+          status: projectedStatus,
           title: row.title, objective: row.objective, kind: row.kind,
           owner: { slug: row.owner_slug || null, lane: row.owner_lane || null },
           attempt: Number(row.attempt || 0), blocker: row.error || null,
+          waiting: row.wait_for && typeof row.wait_for === 'object' ? row.wait_for : null,
+          handoff: row.handoff && typeof row.handoff === 'object' ? row.handoff : null,
           summary: row.latest_summary || null,
           timestamps: { created_at: row.created_at, started_at: row.started_at,
                         completed_at: row.completed_at, updated_at: row.updated_at },

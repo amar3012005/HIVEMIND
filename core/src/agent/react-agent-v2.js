@@ -779,6 +779,12 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
 
   const recallExtras = {
     _structured_intent: true,
+    // Keep a bounded semantic rerank pool when the legacy weighted floor has
+    // no viable rows. This is part of the first structured-chat recall so a
+    // failed fast path cannot consume the deadline before recovery runs. It
+    // is language-neutral, changes no normally viable result set, and avoids
+    // paying for a duplicate recall solely to recover small buried details.
+    semantic_recovery: true,
     // Internal-only delivery mode: ranking still runs on the canonical recall
     // path, but answer synthesis receives the complete authorized rows so its
     // semantic projector can recover details beyond the public 400-char preview.

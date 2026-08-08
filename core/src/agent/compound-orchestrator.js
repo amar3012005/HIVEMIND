@@ -47,8 +47,29 @@ const CONNECTOR_ID_MAP = {
 // dispatchTool path (recall, save, etc.), not the connector runtime.
 const NATIVE_HIVEMIND_GROUPS = new Set(['hivemind-recall', 'hivemind-memory-write', 'hivemind-projects']);
 
+// Canonical runtime tool name → legacy toolkit tool name. The connector runtime
+// registers canonical names (google_docs__create) but the legacy toolkit (which
+// owns the pendingWrite draft-approval flow) registers its own names
+// (gdocs_create). Writes go through the toolkit, so the orchestrator must map
+// the canonical name the model selected to the toolkit name it can execute.
+const TOOLKIT_NAME_MAP = {
+  'google_docs__create': 'gdocs_create',
+  'google_docs__append': 'gdocs_append',
+  'gmail__send': 'gmail_send_email',
+  'gmail__create_draft': 'gmail_create_draft',
+  'gmail__send_draft': 'gmail_send_draft',
+  'slack__post_message': 'slack_post_message',
+  'notion__create_page': 'notion_create_page',
+  'github__create_issue': 'github_create_issue',
+  'linear__create_issue': 'linear_create_issue',
+};
+
 function normalizeConnectorIds(groups) {
   return (groups || []).map((g) => CONNECTOR_ID_MAP[g] || g);
+}
+
+function toolkitNameFor(canonicalName) {
+  return TOOLKIT_NAME_MAP[canonicalName] || canonicalName;
 }
 
 /**
@@ -298,19 +319,22 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // Write requiring approval — hand to the legacy pendingWrite draft flow via
   // the toolkit (which carries the draft-approval middleware). This produces a
   // draft_created result the user must approve; it is NEVER reported as done.
+  // The toolkit registers its OWN tool names (gdocs_create), not the runtime's
+  // canonical names (google_docs__create), so map before dispatching.
   const toolkit = ctx?._toolkit;
   if (!toolkit) {
     return { status: 'error', error: 'write requires approval but no toolkit available', toolName, args, result: null, draftId: null, outputFields: {} };
   }
+  const toolkitName = toolkitNameFor(toolName);
   try {
-    const toolResp = await toolkit.execute(toolName, args, ctx);
+    const toolResp = await toolkit.execute(toolkitName, args, ctx);
     const text = toolResp?.content?.[0]?.text || '';
     const status = toolResp?.status || 'failed';
     const draftId = toolResp?.meta?.draft_id || null;
     return {
       status,
       result: toolResp,
-      toolName,
+      toolName: toolkitName,
       args,
       draftId,
       outputFields: {},

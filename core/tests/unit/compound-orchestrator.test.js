@@ -110,10 +110,11 @@ test('compound orchestrator: dependent subtask receives prior typed output field
   // The overall status is 'pending' (the email is a draft awaiting approval),
   // but the dependency injection must still have happened.
   assert.equal(res.status, 'pending');
-  // The dependent gmail__send call must have received doc_id injected from the
-  // prior docs__create result — NOT re-typed by the model.
-  const sendCall = toolkitCalls.find((c) => c.name === 'gmail__send');
-  assert.ok(sendCall, 'gmail__send should have been called');
+  // The dependent gmail send call must have received doc_id injected from the
+  // prior docs__create result — NOT re-typed by the model. The write goes
+  // through the toolkit, which uses the mapped toolkit name (gmail_send_email).
+  const sendCall = toolkitCalls.find((c) => c.name === 'gmail_send_email');
+  assert.ok(sendCall, 'gmail_send_email should have been called (mapped from gmail__send)');
   assert.equal(sendCall.args.doc_id, 'DOC123', 'doc_id must be injected from prior result');
   assert.equal(sendCall.args.doc_url, 'https://docs/x', 'doc_url must be injected from prior result');
   assert.equal(sendCall.args.to, 'boss@x.com', 'explicit args preserved');

@@ -1252,6 +1252,7 @@ class Director:
         self.runtime_stage = self._parse_runtime_stage_envelope(self.execution_context)
         self.work_order = (self._parse_work_order_envelope(self.execution_context)
                            or self._work_order_from_room_phase(self.room_phase))
+        self.work_room_resume = self._parse_work_room_resume_envelope(self.execution_context)
         # What the turn must DELIVER (answer/decision/email/doc/sheet/notion), derived from the user
         # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
         self.intended_output = str(intended_output or "answer").strip().lower()
@@ -1373,6 +1374,27 @@ class Director:
         except (TypeError, ValueError):
             return None
         return parsed if isinstance(parsed, dict) and parsed.get("contract") == "hq-work-order.v2" else None
+
+    @staticmethod
+    def _parse_work_room_resume_envelope(raw: str) -> Optional[Dict[str, Any]]:
+        """Recognize a control-plane resume envelope without turning it into HQ work.
+
+        The envelope identifies an already-persisted human Work Room step. It is
+        transport metadata only: the Director executes the stored step once and
+        does not re-plan the user's original request or create Runtime work.
+        """
+        if "work-room-resume.v1" not in str(raw or ""):
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(parsed, dict) or parsed.get("contract") != "work-room-resume.v1":
+            return None
+        step = parsed.get("step")
+        if not isinstance(step, dict) or not str(parsed.get("work_order_id") or "").strip():
+            return None
+        return parsed
 
     @staticmethod
     def _parse_runtime_stage_envelope(raw: str) -> Optional[Dict[str, Any]]:
@@ -3775,20 +3797,23 @@ class Director:
             criteria = list(order.get("acceptance_criteria") or [])
             wait_for = _normalize_work_step_wait(order.get("wait"))
             handoff = _normalize_work_step_handoff(order.get("handoff"))
-            persisted = await create_hyper_work_order(
-                org_id=self.org_id, room_id=self.room_id or "", turn_id=self.turn_id or "",
-                order_key=order_key, kind=str(order.get("kind") or "analysis"),
-                title=str(order.get("title") or "Work order"), objective=str(order.get("objective") or ""),
-                owner=owner, selected_skills=list(self.skills_used), required_evidence=evidence,
-                acceptance_criteria=criteria,
-                input_snapshot={"room_kind": self.room_kind, "room_mode": self.room_mode,
-                                "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps)},
-                plan_step_id=step_id,
-                depends_on=dependencies,
-                wait_for=wait_for,
-                handoff=handoff,
-            )
-            work_id = str((persisted or {}).get("id") or "")
+            existing_work_id = str(order.get("_work_order_id") or "").strip()
+            persisted = None
+            if not existing_work_id:
+                persisted = await create_hyper_work_order(
+                    org_id=self.org_id, room_id=self.room_id or "", turn_id=self.turn_id or "",
+                    order_key=order_key, kind=str(order.get("kind") or "analysis"),
+                    title=str(order.get("title") or "Work order"), objective=str(order.get("objective") or ""),
+                    owner=owner, selected_skills=list(self.skills_used), required_evidence=evidence,
+                    acceptance_criteria=criteria,
+                    input_snapshot={"room_kind": self.room_kind, "room_mode": self.room_mode,
+                                    "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps)},
+                    plan_step_id=step_id,
+                    depends_on=dependencies,
+                    wait_for=wait_for,
+                    handoff=handoff,
+                )
+            work_id = existing_work_id or str((persisted or {}).get("id") or "")
             if wait_for:
                 waiting_status = {
                     "input": "waiting_for_input",
@@ -5662,6 +5687,55 @@ class Director:
                 "activity_only": True,
             })
 
+    async def _run_resumed_work_step(self, started_at: float) -> Dict[str, Any]:
+        """Execute one previously-paused Work Room step under its existing ID."""
+        envelope = self.work_room_resume or {}
+        raw_step = envelope.get("step") if isinstance(envelope.get("step"), dict) else {}
+        work_order_id = str(envelope.get("work_order_id") or "").strip()
+        if not raw_step or not work_order_id:
+            raise RuntimeError("invalid work-room resume envelope")
+        step = {
+            "id": str(raw_step.get("id") or "resume")[:80],
+            # The control plane only exposes a step for resume after its prior
+            # dependencies let it reach the persisted wait. Re-checking those
+            # dependencies in a new transport turn would create a second order.
+            "depends_on": [],
+            "kind": str(raw_step.get("kind") or "analysis")[:40],
+            "owner_lane": str(raw_step.get("owner_lane") or "Strategist")[:40],
+            "title": str(raw_step.get("title") or "Resumed work")[:180],
+            "objective": str(raw_step.get("objective") or self.user_message)[:600],
+            "required_evidence": [str(value)[:160] for value in (raw_step.get("required_evidence") or []) if str(value)][:4],
+            "acceptance_criteria": [str(value)[:180] for value in (raw_step.get("acceptance_criteria") or []) if str(value)][:4],
+            "_work_order_id": work_order_id,
+        }
+        resolution = envelope.get("resolution") if isinstance(envelope.get("resolution"), dict) else {}
+        if self.company_brief:
+            self.blackboard.append("COMPANY CONTEXT[authoritative]: " + self.company_brief[:8000])
+        self.blackboard.append("RESUMPTION INPUT[authoritative]: " + json.dumps(resolution, ensure_ascii=False)[:6000])
+        prior_dependencies = [str(value)[:80] for value in (raw_step.get("depends_on") or []) if str(value)][:4]
+        if prior_dependencies:
+            self.blackboard.append("COMPLETED PREREQUISITES[authoritative]: " + json.dumps(prior_dependencies))
+        await self.emit({
+            "t": "work_order", "id": work_order_id, "status": "active", "title": step["title"],
+            "resumed": True, "resume_key": str(envelope.get("resume_key") or "")[:120],
+        })
+        self.work_results = await self._run_work_orders({"turn_plan": [step]})
+        final_text = "\n\n".join(
+            str(row.get("text") or "") for row in self.work_results if isinstance(row, dict)
+        ).strip()
+        return {
+            "cost_tokens": int(self.tokens or 0),
+            "final_text": final_text,
+            "transcript": list(self.transcript),
+            "gather_count": self.gather_count,
+            "io": dict(self.io), "tok_by": dict(self.tok_by),
+            "intended_output": "work_step_resume",
+            "turn_mode": "task",
+            "work_orders": [], "work_results": list(self.work_results),
+            "post_output_actions": [],
+            "duration_ms": int((time.time() - started_at) * 1000),
+        }
+
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
         # Instant feedback from t=0: connector-tool init + the first model call run
@@ -5681,6 +5755,8 @@ class Director:
                 "report_contract": True,
             })
         await self._init_connector_tools()  # register toggled connectors as read tools
+        if self.work_room_resume:
+            return await self._run_resumed_work_step(t0)
         await self._prefetch_runtime_prospects()
         if self.room_kind == "hq" and "growth-stage-context.v1" in self.execution_context:
             self.blackboard.append("GROWTH_CONTEXT[authoritative]: " + self.execution_context[:12000])

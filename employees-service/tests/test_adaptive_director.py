@@ -686,6 +686,55 @@ def test_work_room_waits_without_starting_worker_and_preserves_handoff(monkeypat
     assert any(event.get("t") == "work_order" and event.get("status") == "waiting_for_approval" for event in events)
 
 
+def test_work_room_resume_executes_existing_work_order_once(monkeypatch):
+    director, events = _director(message="Continue the paused work step")
+    director.room_mode = "work"
+    director.is_work_room = True
+    director.company_brief = "Acme provides compliance software."
+    director.work_room_resume = {
+        "contract": "work-room-resume.v1",
+        "work_order_id": "11111111-1111-1111-1111-111111111111",
+        "resume_key": "answer-received",
+        "resolution": {"answer": "Target regulated operators first."},
+        "step": {
+            "id": "recommend", "depends_on": ["evidence"], "kind": "decision", "owner_lane": "Strategist",
+            "title": "Choose next move", "objective": "Select the evidence-backed next move.",
+            "required_evidence": ["company"], "acceptance_criteria": ["One explicit choice"],
+        },
+    }
+    calls = []
+
+    async def start(work_order_id, _org_id):
+        calls.append(("start", work_order_id))
+        return True
+
+    async def complete(**kwargs):
+        calls.append(("complete", kwargs["work_order_id"], kwargs["status"]))
+        return True
+
+    async def worker_call(*_args, **_kwargs):
+        return {"content": "Recommendation: validate the regulated-operator segment first."}
+
+    async def should_not_create(**_kwargs):
+        raise AssertionError("a resumed step must retain its original work-order identity")
+
+    monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", should_not_create)
+    monkeypatch.setattr("hivemind_employees.hyper.engine.start_hyper_work_order", start)
+    monkeypatch.setattr("hivemind_employees.hyper.engine.complete_hyper_work_order", complete)
+    monkeypatch.setattr(director, "_groq", worker_call)
+
+    result = asyncio.run(director._run_resumed_work_step(0.0))
+
+    assert result["work_results"][0]["id"] == "11111111-1111-1111-1111-111111111111"
+    assert result["work_results"][0]["status"] == "completed"
+    assert result["work_results"][0]["depends_on"] == []
+    assert calls == [
+        ("start", "11111111-1111-1111-1111-111111111111"),
+        ("complete", "11111111-1111-1111-1111-111111111111", "completed"),
+    ]
+    assert any(event.get("resumed") is True for event in events)
+
+
 def test_post_output_action_uses_global_connected_toolkit(monkeypatch):
     director, _events = _director(
         message="Draft this in Gmail", enabled_connectors=["gmail"],

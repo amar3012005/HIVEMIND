@@ -10201,6 +10201,7 @@ Write the persona now.`;
     // Phase 7 — resolve a queued connector write (approval card action).
     const roomApproveMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/approve$/);
     const roomWorkPlanMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan$/);
+    const roomWorkPlanResumeMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/resume$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
 
     // GET /v1/hyper-rooms/:id/work-plan — one continuous, durable projection
@@ -10255,6 +10256,108 @@ Write the persona now.`;
         };
       });
       return jsonResponse(res, { room_id: roomId, mode: 'work', steps });
+    }
+
+    // POST /v1/hyper-rooms/:id/work-plan/:workOrderId/resume — resolve an
+    // exact pause and re-run the same durable Work Order. The new HyperTurn is
+    // only an audit/SSE transport envelope; it is explicitly pinned to the old
+    // work-order identity and cannot create a Runtime lifecycle.
+    if (roomWorkPlanResumeMatch && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const [, roomId, workOrderId] = roomWorkPlanResumeMatch;
+      const body = await parseBody(req);
+      const resolution = body?.resolution;
+      if (!resolution || typeof resolution !== 'object' || Array.isArray(resolution)) {
+        return jsonResponse(res, { error: 'resolution object is required' }, 400);
+      }
+      const serializedResolution = JSON.stringify(resolution);
+      if (serializedResolution.length > 8000) {
+        return jsonResponse(res, { error: 'resolution is too large' }, 400);
+      }
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null, roomMode: 'work' },
+      });
+      if (!room) return jsonResponse(res, { error: 'Work Room not found' }, 404);
+      const result = await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRawUnsafe(
+          `SELECT id, turn_id, plan_step_id, depends_on, kind, title, objective,
+                  owner_lane, required_evidence, acceptance_criteria, input_snapshot,
+                  wait_for, handoff, status
+             FROM "hivemind"."hyper_work_orders"
+            WHERE id = $1::uuid AND org_id = $2::uuid AND room_id = $3::uuid
+              AND hq_cycle_id IS NULL
+            FOR UPDATE`,
+          workOrderId, current.session.orgId, roomId,
+        );
+        const order = rows?.[0];
+        if (!order) return { error: 'Work step not found', status: 404 };
+        const status = String(order.status || '');
+        if (!status.startsWith('waiting_for_')) {
+          const snapshot = order.input_snapshot && typeof order.input_snapshot === 'object'
+            ? order.input_snapshot : {};
+          const resumeTurnId = typeof snapshot.resume_turn_id === 'string' ? snapshot.resume_turn_id : null;
+          if ((status === 'queued' || status === 'running') && resumeTurnId) {
+            const existing = await tx.hyperTurn.findFirst({
+              where: { id: resumeTurnId, roomId }, select: { id: true, status: true },
+            });
+            if (existing) return { order, turn: existing, duplicate: true };
+          }
+          return { error: 'Work step is not waiting for a resolution', status: 409 };
+        }
+        const waitFor = order.wait_for && typeof order.wait_for === 'object' ? order.wait_for : {};
+        const last = await tx.hyperTurn.findFirst({ where: { roomId }, orderBy: { seq: 'desc' }, select: { seq: true } });
+        const seq = (last?.seq ?? 0) + 1;
+        const userMessage = String(waitFor.prompt || waitFor.reason || 'Continue the paused work step.').slice(0, 8000);
+        const idempotencyKey = `work-resume:${crypto.createHash('sha256')
+          .update(`${workOrderId}:${serializedResolution}`).digest('hex')}`.slice(0, 64);
+        const existing = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
+        if (existing) return { order, turn: existing, duplicate: true };
+        const turn = await tx.hyperTurn.create({
+          data: { roomId, seq, userMessage, status: 'live', idempotencyKey, lines: [] },
+        });
+        const updated = await tx.$executeRawUnsafe(
+          `UPDATE "hivemind"."hyper_work_orders"
+              SET status = 'queued', wait_for = jsonb_set(COALESCE(wait_for, '{}'::jsonb), '{resolution}', $1::jsonb, true),
+                  input_snapshot = jsonb_set(COALESCE(input_snapshot, '{}'::jsonb), '{resume_turn_id}', to_jsonb($2::text), true),
+                  error = NULL, updated_at = now()
+            WHERE id = $3::uuid AND org_id = $4::uuid AND status = $5`,
+          serializedResolution, turn.id, workOrderId, current.session.orgId, status,
+        );
+        if (!String(updated).endsWith('1')) throw new Error('Work step changed while resuming');
+        return { order, turn, duplicate: false };
+      });
+      if (result.error) return jsonResponse(res, { error: result.error }, result.status);
+      const order = result.order;
+      const waitFor = order.wait_for && typeof order.wait_for === 'object' ? order.wait_for : {};
+      const envelope = {
+        contract: 'work-room-resume.v1',
+        work_order_id: String(order.id),
+        resume_key: waitFor.resume_key || null,
+        resolution,
+        step: {
+          id: order.plan_step_id || `work-${String(order.id).slice(0, 8)}`,
+          depends_on: Array.isArray(order.depends_on) ? order.depends_on : [],
+          kind: order.kind, owner_lane: order.owner_lane || 'Strategist', title: order.title,
+          objective: order.objective,
+          required_evidence: Array.isArray(order.required_evidence) ? order.required_evidence : [],
+          acceptance_criteria: Array.isArray(order.acceptance_criteria) ? order.acceptance_criteria : [],
+        },
+      };
+      if (!result.duplicate) {
+        dispatchHyperRoomTurn({
+          room_id: room.id, turn_id: result.turn.id,
+          user_id: current.session.userId, org_id: current.session.orgId,
+          user_message: result.turn.userMessage, participant_ids: room.participantIds || [],
+          project_id: room.projectId || null, room_goal: room.goal || '', room_mode: 'work', task_tag: 'WORK',
+          execution_context: JSON.stringify(envelope),
+          callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
+        }).catch((error) => console.warn('[work-plan] resume dispatch failed:', error.message));
+      }
+      return jsonResponse(res, {
+        ok: true, work_order_id: String(order.id), turn_id: result.turn.id,
+        status: result.duplicate ? 'resuming' : 'queued', duplicate: Boolean(result.duplicate),
+      }, 202);
     }
 
     // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.

@@ -26,3 +26,10 @@ test('work rooms expose one durable work-plan projection', () => {
   assert.match(source, /status === 'running' \? 'active'/);
   assert.match(source, /wo\.wait_for, wo\.handoff/);
 });
+
+test('a waiting Work Room step resumes under its existing work-order identity', () => {
+  assert.match(source, /roomWorkPlanResumeMatch/);
+  assert.match(source, /contract: 'work-room-resume\.v1'/);
+  assert.match(source, /hq_cycle_id IS NULL/);
+  assert.match(source, /status = 'queued'/);
+});

@@ -29,6 +29,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { fetchBearerFromNango } from '../connectors/mcp/nango-service.js';
+import { renderSingulanceTransactionalEmail } from './templates/singulance-transactional.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -218,7 +219,9 @@ export function renderTemplate(templateId, vars = {}) {
   const text = tpl.text ? fill(tpl.text, ctx, false) : '';
   const inner = tpl.html ? fill(tpl.html, ctx, true) : `<p>${escapeHtml(text)}</p>`;
   const preheader = tpl.preheader ? fill(tpl.preheader, ctx, true) : '';
-  const html = wrapHtml(inner, preheader, ctx);
+  const html = tpl.layout === 'singulance_transactional'
+    ? renderSingulanceTransactionalEmail({ preheader, innerHtml: inner, year: escapeHtml(ctx.year) })
+    : wrapHtml(inner, preheader, ctx);
   return { subject, text, html };
 }
 

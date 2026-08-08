@@ -2714,7 +2714,7 @@ const server = http.createServer(async (req, res) => {
       templateId: 'enterprise_invitation',
       to: invitation.recipientEmail,
       // Sender identity is configured server-side; the browser never supplies it.
-      from: process.env.SYSTEM_EMAIL_FROM || 'Singulance Support <support@singulancelabs.com>',
+      from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
       vars: {
         companyName: invitation.companyName,
         workspaceName: invitation.workspaceName || invitation.companyName,

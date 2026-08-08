@@ -30,7 +30,7 @@ import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js'
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
-import { buildSynthesisSystemPrompt } from './chat-synthesis-prompt.js';
+import { appendGapClarification, buildSynthesisSystemPrompt } from './chat-synthesis-prompt.js';
 import { chooseSynthesisModel, isCandidateSynthesisAcceptable, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
@@ -1843,6 +1843,7 @@ ${message}`;
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
   let answerPayload = parsed;
+  response = appendGapClarification(response, answerPayload.gaps);
   let validated = validateChatAnswer({
     answer: response,
     claims: parsed.claims,
@@ -1872,6 +1873,7 @@ ${message}`;
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;
     response = typeof repaired.parsed.response === 'string' ? repaired.parsed.response.trim() : '';
+    response = appendGapClarification(response, answerPayload.gaps);
     validated = validateChatAnswer({
       answer: response,
       claims: repaired.parsed.claims,

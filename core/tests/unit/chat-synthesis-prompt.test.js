@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildSynthesisSystemPrompt } from '../../src/agent/chat-synthesis-prompt.js';
+import { appendGapClarification, buildSynthesisSystemPrompt } from '../../src/agent/chat-synthesis-prompt.js';
 
 test('fact synthesis loads only the compact grounding and citation contract', () => {
   const prompt = buildSynthesisSystemPrompt({ language: 'es', operation: 'recall', recallMode: 'fact' });
@@ -27,4 +27,15 @@ test('operation modules are disclosed only to the matching synthesis path', () =
   assert.match(buildSynthesisSystemPrompt({ operation: 'connector_read' }), /LIVE CONNECTOR:/);
   assert.match(buildSynthesisSystemPrompt({ operation: 'connector_write' }), /MUTATION:/);
   assert.doesNotMatch(buildSynthesisSystemPrompt({ operation: 'recall' }), /LIVE CONNECTOR:|MUTATION:/);
+});
+
+test('a clarification question emitted in gaps is visible in the final response', () => {
+  assert.equal(
+    appendGapClarification('I found the brand G ROCHER.', ['Which label or image shows the model number?']),
+    'I found the brand G ROCHER.\nWhich label or image shows the model number?',
+  );
+  assert.equal(
+    appendGapClarification('I found the brand. Can you share the label?', ['Which model?']),
+    'I found the brand. Can you share the label?',
+  );
 });

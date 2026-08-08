@@ -106,3 +106,41 @@ test('degraded projection preserves a buried detail in the complete top-ranked m
   assert.match(projected[0].excerpt, /G ROCHER/);
   assert.equal(projected[0].projection, 'rank-preserving-fallback');
 });
+
+test('adaptive projection gives the complete fitting rank-one record to synthesis', async () => {
+  const projector = await import('../../src/agent/memory-evidence-projector.js');
+  const topContent = `${'Context. '.repeat(90)}Late decisive detail: G ROCHER.`;
+  const projected = await projector.projectAdaptiveRankedMemoryEvidence({
+    query: 'What brand is the handbag?',
+    memories: [
+      { id: 'top', content: topContent, tags: ['entity:handbag'] },
+      { id: 'tail', content: 'Unrelated lower-ranked row.', tags: [] },
+    ],
+    totalBudget: 3000,
+    lowerRankBudget: 250,
+    embed: async (texts) => texts.map(() => [1, 0]),
+  });
+
+  assert.equal(projected[0].excerpt, topContent);
+  assert.equal(projected[0].projection, 'complete-rank-one');
+  assert.ok(projected[1].excerpt.length <= 250);
+  assert.ok(projected.reduce((sum, item) => sum + item.excerpt.length, 0) <= 3000);
+});
+
+test('adaptive projection reserves the remaining global budget across lower-ranked memories', async () => {
+  const projector = await import('../../src/agent/memory-evidence-projector.js');
+  const projected = await projector.projectAdaptiveRankedMemoryEvidence({
+    query: 'specific detail',
+    memories: [
+      { id: 'top', content: 'A'.repeat(1800), tags: [] },
+      { id: 'second', content: `specific detail ${'B'.repeat(1000)}`, tags: [] },
+      { id: 'third', content: `specific detail ${'C'.repeat(1000)}`, tags: [] },
+    ],
+    totalBudget: 2400,
+    lowerRankBudget: 700,
+    embed: async (texts) => texts.map(() => [1, 0]),
+  });
+
+  assert.equal(projected[0].excerpt.length, 1800);
+  assert.ok(projected.reduce((sum, item) => sum + item.excerpt.length, 0) <= 2400);
+});

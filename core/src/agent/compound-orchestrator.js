@@ -77,47 +77,53 @@ function composioToolkitFor(groups) {
   return null;
 }
 
-// Verb → tool-name keyword map for local relevance filtering. Maps the
-// subtask's operation (create_doc, send_email, search, ...) to the tool-name
-// keywords that indicate relevance. Keeps each subtask's prompt small.
-const OP_KEYWORDS = {
-  create: ['create', 'insert', 'add', 'new', 'upload', 'import'],
-  send: ['send', 'post', 'reply', 'forward', 'email'],
-  search: ['search', 'list', 'find', 'get', 'fetch', 'read', 'query'],
-  read: ['get', 'read', 'fetch', 'search', 'list', 'find', 'download', 'export'],
-  update: ['update', 'modify', 'edit', 'replace', 'patch', 'append', 'change'],
-  delete: ['delete', 'remove', 'trash', 'move', 'clear'],
-  draft: ['draft', 'create_email_draft'],
-};
+// Provider schemas are often the largest part of a compound prompt. First
+// select by compact, language-agnostic capability cards; only the one selected
+// tool's schema is sent to the argument-generation turn.
+export function buildToolSelectionCards(rawTools) {
+  return (Array.isArray(rawTools) ? rawTools : []).map((tool) => ({
+    name: String(tool?.function?.name || tool?.name || ''),
+    description: String(tool?.function?.description || tool?.description || '').slice(0, 240),
+  })).filter((card) => card.name);
+}
 
-function filterRelevantTools(rawTools, operation, message) {
-  if (!Array.isArray(rawTools) || rawTools.length === 0) return rawTools || [];
-  const op = String(operation || '').toLowerCase();
-  const msg = String(message || '').toLowerCase();
-  // Pick the keyword set from the operation label.
-  let keywords = [];
-  for (const [key, kws] of Object.entries(OP_KEYWORDS)) {
-    if (op.includes(key)) { keywords = keywords.concat(kws); }
-  }
-  // Also derive keywords from the message (e.g. "email", "doc", "search").
-  for (const w of ['send', 'email', 'create', 'doc', 'search', 'list', 'read', 'update', 'delete', 'draft']) {
-    if (msg.includes(w)) keywords.push(w);
-  }
-  if (keywords.length === 0) return rawTools.slice(0, 8); // no signal — keep a small default set
-  const unique = [...new Set(keywords)];
-  const scored = rawTools.map((t) => {
-    const name = String(t.function?.name || t.name || '').toLowerCase();
-    const desc = String(t.function?.description || t.description || '').toLowerCase();
-    let score = 0;
-    for (const k of unique) {
-      if (name.includes(k)) score += 2;
-      else if (desc.includes(k)) score += 1;
-    }
-    return { t, score };
-  });
-  const ranked = scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).map((s) => s.t);
-  // Always keep at least a small set so the model has options; cap at 8.
-  return ranked.length >= 2 ? ranked.slice(0, 8) : rawTools.slice(0, 8);
+async function selectToolCard({ rawTools, message, apiKey, signal }) {
+  const cards = buildToolSelectionCards(rawTools);
+  if (!cards.length) throw new Error('no connector tool cards available');
+  const selector = {
+    type: 'function',
+    function: {
+      name: 'select_connector_tool',
+      description: 'Select exactly one connected-app capability for the user request.',
+      parameters: {
+        type: 'object', additionalProperties: false,
+        properties: { tool_name: { type: 'string', enum: cards.map((card) => card.name) } },
+        required: ['tool_name'],
+      },
+    },
+  };
+  const resp = await chatCompletionFetch(SUBTASK_MODEL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model: SUBTASK_MODEL,
+      messages: [
+        { role: 'system', content: `Select the one connected-app capability that semantically fulfills the user's request in any language. Do not use word matching. Available capability cards: ${JSON.stringify(cards)}` },
+        { role: 'user', content: message },
+      ],
+      tools: [selector], tool_choice: { type: 'function', function: { name: 'select_connector_tool' } },
+      temperature: 0, max_tokens: 120,
+    }),
+    signal,
+  }, { fallbackApiKey: apiKey });
+  if (!resp.ok) throw new Error(`tool-card selector ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  const data = await resp.json();
+  const call = data?.choices?.[0]?.message?.tool_calls?.[0];
+  let args = {};
+  try { args = JSON.parse(call?.function?.arguments || '{}'); } catch {}
+  const selected = rawTools.find((tool) => (tool?.function?.name || tool?.name) === args.tool_name);
+  if (!selected) throw new Error('tool-card selector returned an unavailable tool');
+  return selected;
 }
 
 /**
@@ -197,6 +203,14 @@ function injectDependencies(args, priorOutputs, toolSchema) {
     }
   }
   return next;
+}
+
+function missingRequiredArgs(schema, args) {
+  const required = Array.isArray(schema?.required) ? schema.required : [];
+  return required.filter((name) => {
+    const value = args?.[name];
+    return value == null || (typeof value === 'string' && value.trim() === '');
+  });
 }
 
 /**
@@ -322,7 +336,12 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       // This keeps each subtask's prompt small (a handful of tools, not the
       // whole toolkit) — the exact "don't bloat the prompt" goal, achieved
       // with what actually exists.
-      const relevant = filterRelevantTools(raw, subtask.operation, message);
+      // The production path selects semantically from compact cards, then
+      // supplies exactly one full schema to argument generation. Test
+      // selectors retain the complete local list for deterministic fixtures.
+      const relevant = selectTool === defaultSelectTool
+        ? [await selectToolCard({ rawTools: raw, message, apiKey, signal })]
+        : raw;
       tools = relevant.map((t) => ({
         type: 'function',
         function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
@@ -385,6 +404,16 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       outputFields,
       error: status === 'completed' ? null : (result?.error || status),
     };
+  }
+
+  // A draft is an approval artifact, not a deferred schema validator. Ask for
+  // provider-required information before persisting one, so approval cannot
+  // fail merely because the planner omitted a required field.
+  const missing = missingRequiredArgs(manifestSchema, args);
+  if (missing.length) {
+    const error = `Missing required fields: ${missing.join(', ')}`;
+    emit({ type: 'tool_result', name: toolName, status: 'needs_input', summary: error });
+    return { status: 'needs_input', error, toolName, args, result: null, draftId: null, outputFields: {} };
   }
 
   // Write — create a pendingWrite draft for approval. The draft stores the
@@ -524,6 +553,7 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
   // is reported as pending, never as done.
   const lines = [];
   let anyPending = false;
+  let anyNeedsInput = false;
   let anyError = false;
   for (let i = 0; i < subtasks.length; i++) {
     const st = subtasks[i];
@@ -534,16 +564,28 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
     } else if (r.status === 'draft_created') {
       lines.push(`Step ${i + 1} (${st.operation || 'tool'}): draft created — awaiting your approval`);
       anyPending = true;
+    } else if (r.status === 'needs_input') {
+      lines.push(`Step ${i + 1} (${st.operation || 'tool'}): needs information — ${r.error || 'missing required fields'}`);
+      anyNeedsInput = true;
     } else {
       lines.push(`Step ${i + 1} (${st.operation || 'tool'}): ${r.error || r.status}`);
       anyError = true;
     }
   }
-  const status = anyError ? 'error' : (anyPending ? 'pending' : 'completed');
+  const status = anyError ? 'error' : (anyPending ? 'pending' : (anyNeedsInput ? 'needs_input' : 'completed'));
+  // Preserve canonical recall results verbatim. The short `outputFields.recall`
+  // value is only for dependency injection; it is never the evidence payload
+  // that a final synthesis or client may rely on.
+  const recallResults = results
+    .filter((result, index) => Array.isArray(subtasks[index]?.tool_groups)
+      && subtasks[index].tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group))
+      && result?.result)
+    .map((result) => result.result);
   return {
     steps,
     draftIds,
     summary: lines.join('\n'),
     status,
+    recallResults,
   };
 }

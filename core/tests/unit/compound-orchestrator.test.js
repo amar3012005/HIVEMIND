@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
+import { buildToolSelectionCards, runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
 
 // ── Test harness ─────────────────────────────────────────────────────────────
 // A deterministic tool-selector replaces the model call. The Composio service
@@ -30,11 +30,25 @@ function makeSelector(pick) {
   };
 }
 
+test('compound orchestrator: semantic selection cards omit provider JSON schemas', () => {
+  const cards = buildToolSelectionCards([{
+    function: {
+      name: 'GOOGLEDOCS_CREATE_DOCUMENT',
+      description: 'Create a Google Document from supplied text.',
+      parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+    },
+  }]);
+  assert.deepEqual(cards, [{ name: 'GOOGLEDOCS_CREATE_DOCUMENT', description: 'Create a Google Document from supplied text.' }]);
+  assert.equal(JSON.stringify(cards).includes('parameters'), false);
+  assert.equal(JSON.stringify(cards).includes('required'), false);
+});
+
 test('compound orchestrator: native hivemind-recall step runs via dispatchTool', async () => {
   const dispatched = [];
+  const recallPacket = { content: 'Amar leads HIVEMIND', recall_packet: { citations: [{ id: 'C1' }], sourceSections: [{ segment_id: 'S1', content: 'full evidence' }] } };
   const ctx = {
     userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
-    _tracedDispatch: async (name, args) => { dispatched.push({ name, args }); return { content: 'Amar leads HIVEMIND' }; },
+    _tracedDispatch: async (name, args) => { dispatched.push({ name, args }); return recallPacket; },
   };
   const res = await runCompoundOrchestrator({
     subtasks: [{ operation: 'recall', tool_groups: ['hivemind-recall'], depends_on: null, message: 'Recall Amar' }],
@@ -43,6 +57,7 @@ test('compound orchestrator: native hivemind-recall step runs via dispatchTool',
   assert.equal(res.status, 'completed');
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0].name, 'hivemind_recall');
+  assert.equal(res.recallResults[0], recallPacket, 'full canonical recall result is retained without truncation');
 });
 
 test('compound orchestrator: composio read step executes and reports completed', async () => {
@@ -85,6 +100,29 @@ test('compound orchestrator: composio write creates a pendingWrite draft (never 
   assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
   assert.ok(res.summary.includes('awaiting your approval'));
   assert.ok(!res.summary.includes('done'));
+});
+
+test('compound orchestrator: a write missing a required provider field asks before creating a draft', async () => {
+  const created = [];
+  const composio = makeComposio({
+    tools: [{ name: 'composio_googledocs_create', slug: 'GOOGLEDOCS_CREATE_DOCUMENT', description: 'create document' }],
+    executeImpl: async () => ({ successful: true, data: {}, error: null }),
+  });
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+    prisma: { pendingWrite: { create: async (d) => { created.push(d.data); return { id: 'DRAFT1' }; } } },
+  };
+  const res = await runCompoundOrchestrator({
+    subtasks: [{ operation: 'write', tool_groups: ['google-docs'], depends_on: null, message: 'create a document titled Notes' }],
+    ctx, apiKey: 'k', signal: null, composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_googledocs_create', args: { title: 'Notes' },
+      schema: { type: 'object', properties: { title: { type: 'string' }, text: { type: 'string' } }, required: ['title', 'text'] },
+    })),
+  });
+  assert.equal(res.status, 'needs_input');
+  assert.equal(created.length, 0);
+  assert.match(res.steps[0].summary, /text/i);
 });
 
 test('compound orchestrator: dependent subtask receives prior typed output fields', async () => {

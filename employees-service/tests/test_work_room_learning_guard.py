@@ -22,3 +22,8 @@ def test_runtime_handoff_owner_is_normalized_for_the_control_plane():
         "objective": "Schedule implementation planning",
         "rationale": "The verified work result is ready for HQ review.",
     })["owner"] == "runtime"
+
+
+def test_work_room_verification_uses_the_active_human_message():
+    source = inspect.getsource(api_hyper_rooms._orchestrate_single_agent)
+    assert 'done_txt = req.user_message if (req.room_mode or "").strip().lower() == "work"' in source

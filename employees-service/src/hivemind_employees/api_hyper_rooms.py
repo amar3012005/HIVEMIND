@@ -3559,7 +3559,7 @@ async def _orchestrate_single_agent(
 
     # 2. PLAN — build the plan dict the producer + verifier consume. intended_output +
     # the capability gate were already resolved BEFORE the run (so SYNTH wrote the right format).
-    done_txt = req.room_goal or req.user_message
+    done_txt = req.user_message if (req.room_mode or "").strip().lower() == "work" else (req.room_goal or req.user_message)
     contributions = [
         {"owner": x.get("agent"), "subtask": f"debate round {x.get('round')}",
          "contribution": str(x.get("text") or "")}

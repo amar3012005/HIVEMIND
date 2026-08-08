@@ -4539,6 +4539,8 @@ class Director:
                 "a stable resume key. A wait pauses the same step; it is not a failure or a completed result. "
                 "Use optional handoff only to record a proposed next owner with objective and rationale. A handoff "
                 "never invokes another system or authorizes action. "
+                "When the active human message explicitly requests a handoff, represent that reviewable decision "
+                "as a bounded turn_plan step with handoff metadata rather than an untracked direct answer. "
                 "A proposed Runtime lifecycle is a recommendation with its evidence and boundary; it is not an "
                 "executed external action.\n"
             )

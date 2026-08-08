@@ -37,7 +37,10 @@ export const HIVEMIND_HOSTED_TOOL_CARDS = Object.freeze([
 export function connectedProvidersFromAccounts(accounts = []) {
   return [...new Set((Array.isArray(accounts) ? accounts : [])
     .filter((account) => account?.status === 'ACTIVE')
-    .map((account) => TOOLKIT_TO_PROVIDER[String(account?.toolkit || '').toLowerCase()])
+    .map((account) => {
+      const toolkit = String(account?.toolkit || '').trim().toLowerCase();
+      return TOOLKIT_TO_PROVIDER[toolkit] || toolkit;
+    })
     .filter(Boolean))];
 }
 

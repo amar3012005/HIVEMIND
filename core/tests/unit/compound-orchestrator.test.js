@@ -398,6 +398,30 @@ test('compound orchestrator stops an ambiguous dependent write instead of guessi
   assert.equal(created.length, 0);
   assert.match(result.summary, /Multiple recipient addresses matched/);
   assert.equal(result.steps[2].status, 'needs_input');
+  assert.deepEqual(result.inputRequests[0].options.map((option) => option.value), [
+    'amar@example.com', 'amar.sai@example.edu',
+  ]);
+  assert.ok(result.resumeState, 'paused state is available for server-side continuation storage');
+
+  const resumed = await runCompoundOrchestrator({
+    subtasks: result.resumeState.subtasks,
+    ctx: { ...ctx, _trace: { traceId: 't2' } }, apiKey: 'k', signal: null, composio,
+    resumeState: {
+      ...result.resumeState,
+      choice: { stepIndex: 1, field: 'recipient_email', value: 'amar@example.com' },
+    },
+    selectTool: async ({ message }) => {
+      assert.match(message, /amar@example\.com/);
+      return {
+        toolName: 'composio_gmail_create_email_draft',
+        args: { to: 'amar@example.com', subject: 'Handbag', body: 'Brand is G ROCHER.' },
+        schema: { properties: { to: {}, subject: {}, body: {} }, required: ['to', 'subject', 'body'] },
+      };
+    },
+  });
+  assert.equal(resumed.status, 'pending');
+  assert.equal(created.length, 1, 'resume executes only the blocked dependent write');
+  assert.equal(created[0].data.toolArgs.to, 'amar@example.com');
 });
 
 test('compound orchestrator: independent subtasks run in parallel (fan-out)', async () => {
@@ -447,4 +471,6 @@ test('compound orchestrator: emits tool_call/tool_result SSE events', async () =
   assert.equal(res.status, 'completed');
   assert.equal(events.filter((e) => e.type === 'tool_call').length, 1);
   assert.equal(events.filter((e) => e.type === 'tool_result').length, 1);
+  assert.equal(events.filter((e) => e.type === 'orchestration_plan').length, 1);
+  assert.deepEqual(events.filter((e) => e.type === 'orchestration_step').map((e) => e.phase), ['started', 'completed']);
 });

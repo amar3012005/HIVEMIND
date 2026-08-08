@@ -23049,6 +23049,68 @@ exit \$RC
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
             }
 
+            // Resume a paused compound run from server-owned state. The opaque
+            // token is single-use, tenant-bound, short-lived, and never carries
+            // connector results in the browser. Completed reads are reused, so
+            // choosing an option does not repeat recall or provider executions.
+            if (body?.continuation_token) {
+              const { consumeChatContinuation, createChatContinuation } = await import('./agent/chat-continuation-store.js');
+              const stored = await consumeChatContinuation(body.continuation_token, { userId, orgId });
+              if (!stored) return jsonResponse(res, { error: 'continuation_expired_or_invalid' }, 409);
+              const choice = body?.continuation_response || {};
+              const stepIndex = Number(choice.step_index);
+              const pending = stored.resumeState?.results?.[stepIndex]?.inputRequest;
+              const allowed = pending?.options?.find((option) => option.id === choice.option_id || option.value === choice.value);
+              if (!pending || !allowed) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
+
+              const execute = async (emit) => {
+                const { runCompoundOrchestrator } = await import('./agent/compound-orchestrator.js');
+                const resumeState = {
+                  ...stored.resumeState,
+                  choice: { stepIndex, field: pending.field, value: allowed.value },
+                };
+                const compound = await runCompoundOrchestrator({
+                  subtasks: stored.resumeState.subtasks,
+                  ctx: {
+                    userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
+                    prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
+                    smartIngestRouter, buildRoutedIngestPayloads, accessContext: agentAccessCtx,
+                    webIntelligence: globalThis.webIntelligence || null,
+                    _trace: { traceId: crypto.randomUUID() },
+                  },
+                  apiKey: groqKey, onEvent: emit,
+                  resumeState,
+                });
+                let continuation = null;
+                if (compound.status === 'needs_input' && compound.resumeState && compound.inputRequests?.length) {
+                  const next = await createChatContinuation({
+                    userId, orgId, message: stored.message, language: stored.language,
+                    resumeState: compound.resumeState,
+                  });
+                  continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: compound.inputRequests };
+                  emit?.({ type: 'orchestration_input_required', ...continuation });
+                }
+                return {
+                  response: compound.summary, answer_mode: 'compound', sources: [], citations: [],
+                  steps: compound.steps, grounded: compound.status === 'completed',
+                  confidence: compound.status === 'completed' ? 1 : 0.5,
+                  gaps: compound.status === 'error' ? ['compound_step_failed'] : [], scopes_found: [],
+                  draft_ids: compound.draftIds, compound_status: compound.status,
+                  execution: { status: compound.status, steps: compound.steps, draft_ids: compound.draftIds },
+                  continuation,
+                };
+              };
+              if (wantStream) {
+                res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+                const emit = (evt) => { try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {} };
+                try { emit({ type: 'done', ...(await execute(emit)) }); }
+                catch (error) { emit({ type: 'error', error: error.message }); }
+                try { res.end(); } catch {}
+                return;
+              }
+              return jsonResponse(res, await execute(null));
+            }
+
             // ─── Two-Loop ReAct Agent (default path) ─────────────────────
             // The agent uses Groq tool-calling to pick from ~19 HIVEMIND
             // tools dynamically (recall, save, update, traverse_graph, at,

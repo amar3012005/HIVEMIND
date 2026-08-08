@@ -73,7 +73,12 @@ function normalizeConnectorIds(groups) {
 
 function composioToolkitFor(groups) {
   for (const g of groups || []) {
-    const tk = COMPOSIO_TOOLKIT_MAP[g];
+    // Known aliases preserve the public provider vocabulary. Unknown groups
+    // are already constrained by the tenant's ACTIVE Composio inventory in
+    // the hosted planner, so pass their toolkit slug through unchanged. This
+    // supports newly connected Composio toolkits without a code release.
+    const normalized = String(g || '').trim().toLowerCase();
+    const tk = COMPOSIO_TOOLKIT_MAP[normalized] || normalized;
     if (tk) return tk;
   }
   return null;
@@ -836,6 +841,12 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       args,
       draftId: null,
       outputFields,
+      inputRequest: status === 'needs_input' ? {
+        kind: 'single_choice',
+        prompt: semanticError || 'Choose the value to continue.',
+        field: subtask.output_kind === 'recipient' ? 'recipient_email' : 'value',
+        options: (semanticValidation?.candidates || []).map((value) => ({ id: value, label: value, value })),
+      } : null,
       error: status === 'completed' ? null : (semanticError || result?.error || status),
     };
   }
@@ -929,12 +940,15 @@ async function createComposioDraft(ctx, composioSlug, args, toolName) {
  *   the real service.
  * @returns {Promise<{ steps: Array, draftIds: Array, summary: string, status: string }>}
  */
-export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, selectTool, onEvent, composio }) {
+export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, selectTool, onEvent, composio, resumeState = null }) {
   const context = buildContext(ctx, 'chat');
   const steps = [];
   const draftIds = [];
-  const results = new Array(subtasks.length);
-  const outputs = new Array(subtasks.length); // typed output fields per subtask
+  const emit = onEvent || (() => {});
+  const results = Array.isArray(resumeState?.results)
+    ? [...resumeState.results].slice(0, subtasks.length) : new Array(subtasks.length);
+  const outputs = Array.isArray(resumeState?.outputs)
+    ? [...resumeState.outputs].slice(0, subtasks.length) : new Array(subtasks.length); // typed output fields per subtask
 
   // Topological execution with fan-out: each pass collects every subtask whose
   // depends_on are all done and runs them TOGETHER via Promise.all. Independent
@@ -944,7 +958,38 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
   // result to resolve before it is collected in a later pass. Results are
   // written back by index, so ordering and the draft_created/pending invariant
   // are preserved regardless of completion timing.
-  const done = new Array(subtasks.length).fill(false);
+  const done = Array.isArray(resumeState?.done)
+    ? [...resumeState.done].slice(0, subtasks.length).map(Boolean)
+    : new Array(subtasks.length).fill(false);
+  while (done.length < subtasks.length) done.push(false);
+  if (Number.isInteger(resumeState?.choice?.stepIndex)) {
+    const i = resumeState.choice.stepIndex;
+    if (i >= 0 && i < subtasks.length) {
+      // A paused pass marks blocked dependents as done so the original pass can
+      // terminate. Re-open those non-executed rows before resuming; completed
+      // recalls/provider reads remain done and are never repeated.
+      for (let j = 0; j < subtasks.length; j++) {
+        if (j !== i && ['needs_input', 'blocked', 'blocked_pending'].includes(results[j]?.status)) {
+          results[j] = undefined;
+          outputs[j] = undefined;
+          done[j] = false;
+        }
+      }
+      const field = String(resumeState.choice.field || 'value');
+      const value = resumeState.choice.value;
+      results[i] = { ...(results[i] || {}), status: 'completed', error: null, outputFields: { [field]: value } };
+      outputs[i] = { [field]: value };
+      done[i] = true;
+    }
+  }
+  emit({
+    type: 'orchestration_plan', schema_version: 1, trace_id: ctx?._trace?.traceId || null,
+    total_steps: subtasks.length,
+    steps: subtasks.map((step, index) => ({
+      index, operation: step.operation || 'tool', tool_groups: step.tool_groups || [],
+      status: done[index] ? 'completed' : 'planned',
+    })),
+  });
   let guard = 0;
   while (done.some((d) => !d) && guard < subtasks.length * 2 + 1) {
     guard += 1;
@@ -960,6 +1005,12 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
     // Run the whole ready batch in parallel.
     const batchResults = await Promise.all(ready.map((i) => {
       const st = subtasks[i];
+      emit({
+        type: 'orchestration_step', schema_version: 1, trace_id: ctx?._trace?.traceId || null,
+        step_id: `step-${i + 1}`, index: i, total_steps: subtasks.length,
+        phase: 'started', operation: st.operation || 'tool', tool_groups: st.tool_groups || [],
+        label: st.message || st.operation || 'Working',
+      });
       const deps = Array.isArray(st.depends_on) ? st.depends_on : [];
       const blocking = deps.map((dependency) => ({ dependency, result: results[dependency] }))
         .filter(({ result }) => result?.status !== 'completed');
@@ -990,6 +1041,16 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
         draft_id: r.draftId || null,
       });
       if (r.draftId) draftIds.push(r.draftId);
+      emit({
+        type: 'orchestration_step', schema_version: 1, trace_id: ctx?._trace?.traceId || null,
+        step_id: `step-${i + 1}`, index: i, total_steps: subtasks.length,
+        phase: r.status, operation: subtasks[i].operation || 'tool',
+        tool: r.toolName || null, tool_groups: subtasks[i].tool_groups || [],
+        label: subtasks[i].message || subtasks[i].operation || 'Working',
+        detail: r.error || (r.status === 'completed' ? 'Completed' : r.status),
+        draft_id: r.draftId || null,
+        input_request: r.inputRequest || null,
+      });
     }
   }
 
@@ -1039,6 +1100,9 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
       data: result.result?.data ?? result.outputFields ?? null,
     }];
   });
+  const inputRequests = results.flatMap((result, index) => result?.status === 'needs_input' && result?.inputRequest
+    ? [{ ...result.inputRequest, step_index: index, step_id: `step-${index + 1}` }]
+    : []);
   return {
     steps,
     draftIds,
@@ -1047,5 +1111,7 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
     recallResults,
     readResults,
     synthesisPayload: buildCompoundSynthesisPayload({ recallResults, readResults }),
+    inputRequests,
+    resumeState: status === 'needs_input' ? { subtasks, results, outputs, done } : null,
   };
 }

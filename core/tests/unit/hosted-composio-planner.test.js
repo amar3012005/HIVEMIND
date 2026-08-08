@@ -13,7 +13,7 @@ test('connected provider discovery uses active tenant accounts only', () => {
     { toolkit: 'slack', status: 'EXPIRED' },
     { toolkit: 'gmail', status: 'ACTIVE' },
     { toolkit: 'unmapped', status: 'ACTIVE' },
-  ]), ['gmail', 'google-calendar']);
+  ]), ['gmail', 'google-calendar', 'unmapped']);
 });
 
 test('hosted plan preserves a validated sequential dependency graph', () => {

@@ -43,8 +43,8 @@ test('Cloudflare is the primary transactional provider and reports queued delive
   const body = JSON.parse(request.init.body);
   assert.equal(body.from, 'Singulance Support <support@singulancelabs.com>');
   assert.equal(body.to, 'owner@example.com');
-  assert.match(body.html, /background:#f6821f/);
-  assert.match(body.html, /SINGULANCE/);
+  assert.match(body.html, /background:#117dff/);
+  assert.match(body.html, /HIVEMIND/);
 });
 
 test('a Cloudflare permanent bounce is not retried through another provider', async () => {

@@ -2633,7 +2633,30 @@ export async function runReactAgentV2({
         onEvent,
       });
       steps.push(...compound.steps);
-      const finalText = compound.summary;
+      let finalText = compound.summary;
+      if (compound.status === 'completed' && Array.isArray(compound.readResults) && compound.readResults.length > 0) {
+        try {
+          const boundedResults = JSON.stringify(compound.readResults).slice(0, 16000);
+          const synthesized = await callJsonLLM({
+            messages: [
+              { role: 'system', content: `Return strict JSON {"response":string}. Answer the user's request using only the completed live connector results supplied. Preserve exact counts, dates and names. Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
+              { role: 'user', content: `USER REQUEST:\n${message}\n\nCOMPLETED CONNECTOR RESULTS:\n${boundedResults}` },
+            ],
+            model: requestedAnswerModel,
+            apiKey,
+            maxTokens: 800,
+            signal: abortCtrl.signal,
+            reasoningEffort: 'low',
+            temperature: 0,
+          });
+          if (typeof synthesized.parsed?.response === 'string' && synthesized.parsed.response.trim()) {
+            finalText = synthesized.parsed.response.trim();
+            recordUsage('connector_synthesis', synthesized.usage);
+          }
+        } catch (error) {
+          trace.warnings.push(`connector_synthesis_degraded:${error.message}`);
+        }
+      }
       onEvent?.({ type: 'finish', text: finalText });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'compound', success: compound.status !== 'error' });
       // UNIFIED compound response: retains the normal chat evidence fields

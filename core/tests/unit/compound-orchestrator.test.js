@@ -75,6 +75,12 @@ test('compound orchestrator: composio read step executes and reports completed',
   assert.equal(res.status, 'completed');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].slug, 'GMAIL_SEARCH');
+  assert.deepEqual(res.readResults, [{
+    index: 0,
+    operation: 'search',
+    tool: 'composio_gmail_search',
+    data: { results: ['m1'] },
+  }]);
 });
 
 test('compound orchestrator: composio write creates a pendingWrite draft (never done)', async () => {

@@ -583,11 +583,23 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
       && subtasks[index].tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group))
       && result?.result)
     .map((result) => result.result);
+  const readResults = results.flatMap((result, index) => {
+    if (result?.status !== 'completed' || !result?.result) return [];
+    const groups = Array.isArray(subtasks[index]?.tool_groups) ? subtasks[index].tool_groups : [];
+    if (groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group))) return [];
+    return [{
+      index,
+      operation: subtasks[index]?.operation || 'read',
+      tool: result.toolName || null,
+      data: result.result?.data ?? result.outputFields ?? null,
+    }];
+  });
   return {
     steps,
     draftIds,
     summary: lines.join('\n'),
     status,
     recallResults,
+    readResults,
   };
 }

@@ -2,6 +2,18 @@
 
 ## Completed
 
+### Phase 2: Adaptive, Dependency-Aware Work Plans
+
+Commits: `260d894 hyper: add dependency-aware work room turn plans`,
+`dd64c10 hyper: persist blocked work room plan steps`
+
+- Human Work Room Directors may return a bounded `turn_plan` of stable step IDs and dependencies.
+- Independent steps run concurrently; a dependent step receives completed prerequisite notes.
+- Each step persists its `plan_step_id` and `depends_on` metadata in `hyper_work_orders`.
+- Dependency failures create a durable blocked order and visible `needs_attention` projection instead
+  of disappearing as an in-memory deadlock.
+- Runtime work-order execution remains on its existing single-envelope path.
+
 ### Phase 0: Explicit Room Boundary
 
 Commit: `0eb280b hyper: separate human work rooms from runtime rooms`
@@ -67,17 +79,13 @@ Output: 6/6 passing Core checks; no syntax errors.
 
 ## Remaining Phases
 
-1. Add a Director-owned, small dependency-aware `turn_plan` for human Work Rooms. It must be
-   distinct from chat's compound orchestrator: adaptive Director-selected steps, bounded
-   concurrency for independent read/analysis steps, sequential dependencies, persisted status,
-   and no external writes. Preserve existing `work_orders` compatibility during rollout.
-2. Add generic per-step states and exact waits (`active`, `waiting_for_input`,
+1. Add generic per-step states and exact waits (`active`, `waiting_for_input`,
    `waiting_for_approval`, `waiting_for_capability`, `completed`, `needs_attention`) backed by
    durable records. A Work Room may propose a Runtime lifecycle but cannot advance a Runtime
    playbook.
-3. Add frontend grouping so all work under one human task reads as one continuous Work Room
+2. Add frontend grouping so all work under one human task reads as one continuous Work Room
    timeline; direct answers stay compact; real debate/tool work is visibly attributable.
-4. Add integration coverage for a human task click, a direct answer, an evidence/debate request,
+3. Add integration coverage for a human task click, a direct answer, an evidence/debate request,
    and a proposed Runtime handoff. Then rebase this branch on current `origin/singulance-main`,
    push, merge via PR, apply the manual SQL migration, and release only named services from the
    canonical merge SHA under the release lock.
@@ -95,5 +103,5 @@ Output: 6/6 passing Core checks; no syntax errors.
 
 ## Exact Next Action
 
-Extend the Director plan schema and work-order executor with a bounded dependency-aware
-`turn_plan` for `room_mode == "work"`, preserving existing Runtime work-order semantics.
+Project durable Work Room step states and blockers through the Room API and frontend timeline
+without adding a second lifecycle authority.

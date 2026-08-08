@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildToolSelectionCards, runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
+import { buildCompoundSynthesisPayload, buildToolSelectionCards, runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
 
 // ── Test harness ─────────────────────────────────────────────────────────────
 // A deterministic tool-selector replaces the model call. The Composio service
@@ -41,6 +41,16 @@ test('compound orchestrator: semantic selection cards omit provider JSON schemas
   assert.deepEqual(cards, [{ name: 'GOOGLEDOCS_CREATE_DOCUMENT', description: 'Create a Google Document from supplied text.' }]);
   assert.equal(JSON.stringify(cards).includes('parameters'), false);
   assert.equal(JSON.stringify(cards).includes('required'), false);
+});
+
+test('compound synthesis payload retains complete rank-one recall alongside connector data', () => {
+  const content = `${'context '.repeat(300)}Brand is G ROCHER.`;
+  const payload = buildCompoundSynthesisPayload({
+    recallResults: [{ memories: [{ id: 'm1', title: 'Handbag', content }] }],
+    readResults: [{ operation: 'read', data: { event_count: 2 } }],
+  });
+  assert.equal(payload.recall[0].memories[0].content, content);
+  assert.equal(payload.connectors[0].data.event_count, 2);
 });
 
 test('compound orchestrator: native hivemind-recall step runs via dispatchTool', async () => {

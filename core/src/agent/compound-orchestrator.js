@@ -79,6 +79,24 @@ function composioToolkitFor(groups) {
   return null;
 }
 
+export function buildCompoundSynthesisPayload({ recallResults = [], readResults = [] } = {}) {
+  return {
+    recall: recallResults.map((result) => ({
+      memories: (result?.memories || []).slice(0, 6).map((memory, index) => ({
+        id: memory?.id || null,
+        title: memory?.title || null,
+        content: String(memory?.content || '').slice(0, index === 0 ? 8000 : 1200),
+        tags: Array.isArray(memory?.tags) ? memory.tags.slice(0, 8) : [],
+      })),
+      evidence: (result?.evidence || []).slice(0, 6).map((item) => ({
+        document_title: item?.document_title || item?.document?.title || null,
+        content: String(item?.snippet || item?.content || '').slice(0, 1200),
+      })),
+    })),
+    connectors: readResults,
+  };
+}
+
 // Provider schemas are often the largest part of a compound prompt. First
 // select by compact, language-agnostic capability cards; only the one selected
 // tool's schema is sent to the argument-generation turn.
@@ -601,5 +619,6 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
     status,
     recallResults,
     readResults,
+    synthesisPayload: buildCompoundSynthesisPayload({ recallResults, readResults }),
   };
 }

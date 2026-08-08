@@ -2634,13 +2634,14 @@ export async function runReactAgentV2({
       });
       steps.push(...compound.steps);
       let finalText = compound.summary;
-      if (compound.status === 'completed' && Array.isArray(compound.readResults) && compound.readResults.length > 0) {
+      if (compound.status === 'completed'
+          && ((compound.readResults?.length || 0) > 0 || (compound.recallResults?.length || 0) > 0)) {
         try {
-          const boundedResults = JSON.stringify(compound.readResults).slice(0, 16000);
+          const boundedResults = JSON.stringify(compound.synthesisPayload || {}).slice(0, 28000);
           const synthesized = await callJsonLLM({
             messages: [
-              { role: 'system', content: `Return strict JSON {"response":string}. Answer the user's request using only the completed live connector results supplied. Preserve exact counts, dates and names. Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
-              { role: 'user', content: `USER REQUEST:\n${message}\n\nCOMPLETED CONNECTOR RESULTS:\n${boundedResults}` },
+              { role: 'system', content: `Return strict JSON {"response":string}. Answer every part of the user's request using only the completed HIVE-MIND recall and live connector results supplied. Preserve exact counts, dates and names. Never replace a supplied fact with "unknown". Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
+              { role: 'user', content: `USER REQUEST:\n${message}\n\nCOMPLETED GOVERNED RESULTS:\n${boundedResults}` },
             ],
             model: requestedAnswerModel,
             apiKey,

@@ -198,6 +198,14 @@ export function filterComposioToolsByAuthority(rawTools, canonicalOperation = ''
     .filter((tool) => classifyComposioToolAuthority(tool) === required);
 }
 
+export function filterProviderDraftToolsForTerminalOperation(tools, canonicalOperation = '') {
+  const operationTokens = String(canonicalOperation || '').toLocaleLowerCase()
+    .split(/[^a-z0-9]+/).filter(Boolean);
+  if (operationTokens.includes('draft')) return [...(tools || [])];
+  const terminal = (tools || []).filter((tool) => !composioActionTokens(tool).includes('draft'));
+  return terminal.length ? terminal : [...(tools || [])];
+}
+
 export function rankToolSelectionCards(cards, canonicalOperation = '') {
   const tokens = (value) => new Set(String(value || '').toLocaleLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
@@ -248,8 +256,11 @@ export function resolveSelectedTool(rawTools, selectedName) {
   }) || null;
 }
 
-async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, signal }) {
-  const authorityTools = filterComposioToolsByAuthority(rawTools, canonicalOperation);
+async function selectToolCard({ rawTools, message, canonicalOperation, requiredAuthority, apiKey, signal }) {
+  const authorityTools = filterProviderDraftToolsForTerminalOperation(
+    filterComposioToolsByAuthority(rawTools, requiredAuthority || canonicalOperation),
+    canonicalOperation,
+  );
   const cards = rankToolSelectionCards(buildToolSelectionCards(authorityTools), canonicalOperation);
   const eligibleNames = new Set(cards.map((card) => card.name));
   const eligibleTools = authorityTools.filter((tool) => eligibleNames.has(String(tool?.function?.name || tool?.name || '')));
@@ -818,7 +829,13 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       const canonicalAuthority = ['read', 'write'].includes(subtask?.authority)
         ? subtask.authority : subtask.operation;
       const relevant = selectTool === defaultSelectTool
-        ? [await selectToolCard({ rawTools: raw, message, canonicalOperation: canonicalAuthority, apiKey, signal })]
+        ? [await selectToolCard({
+            rawTools: raw,
+            message,
+            canonicalOperation: subtask.operation,
+            requiredAuthority: canonicalAuthority,
+            apiKey, signal,
+          })]
         : raw;
       tools = relevant.map((t) => ({
         type: 'function',

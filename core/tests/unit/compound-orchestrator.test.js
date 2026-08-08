@@ -14,6 +14,7 @@ import {
   buildToolCardSelectionPrompt,
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
+  filterProviderDraftToolsForTerminalOperation,
   rankToolSelectionCards,
   resolveSelectedTool,
   runCompoundOrchestrator,
@@ -99,6 +100,21 @@ test('tool selection treats addressed communication as governed send unless draf
   assert.match(prompt, /any language/i);
   assert.match(prompt, /addressed to a recipient has send\/deliver as its terminal result/i);
   assert.match(prompt, /only when the requested result is specifically to save or create a draft/i);
+});
+
+test('structured terminal operation excludes provider draft without inspecting user language', () => {
+  const tools = [
+    { function: { name: 'composio_gmail_send_email' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_SEND_EMAIL' } },
+    { function: { name: 'composio_gmail_create_email_draft' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_CREATE_EMAIL_DRAFT' } },
+  ];
+  assert.deepEqual(
+    filterProviderDraftToolsForTerminalOperation(tools, 'email').map((tool) => tool._composio.slug),
+    ['GMAIL_SEND_EMAIL'],
+  );
+  assert.deepEqual(
+    filterProviderDraftToolsForTerminalOperation(tools, 'create_email_draft').map((tool) => tool._composio.slug),
+    ['GMAIL_SEND_EMAIL', 'GMAIL_CREATE_EMAIL_DRAFT'],
+  );
 });
 
 test('Composio authority comes from controlled manifest actions, not user-language keywords', () => {

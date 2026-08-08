@@ -267,6 +267,22 @@ export async function executeTool(orgId, toolSlug, args = {}) {
   };
 }
 
+/**
+ * Translate one bounded natural-language step into the provider tool's current
+ * structured arguments without executing it. This is used only as a
+ * completeness fallback before a governed read or approval draft; it cannot
+ * cause a provider side effect by itself.
+ */
+export async function generateToolInputs(toolSlug, text, { systemPrompt = null } = {}) {
+  const result = await composioPost(`/api/v3.1/tools/execute/${encodeURIComponent(toolSlug)}/input`, {
+    text: String(text || '').slice(0, 14_000),
+    ...(systemPrompt ? { system_prompt: String(systemPrompt).slice(0, 1000) } : {}),
+    version: 'latest',
+  });
+  if (result?.error) throw new Error(typeof result.error === 'string' ? result.error : JSON.stringify(result.error));
+  return result?.arguments && typeof result.arguments === 'object' ? result.arguments : {};
+}
+
 // ---------------------------------------------------------------------------
 // Toolkit catalog browser — Composio's full ~1,100-toolkit catalog (Gmail,
 // Perplexity, SerpApi, Airtable, ...), not just the handful HIVEMIND

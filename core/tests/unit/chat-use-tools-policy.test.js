@@ -23,6 +23,20 @@ test('use_tools true discloses connected and compound capabilities', () => {
   assert.ok(connector.function.parameters.properties.provider.enum.includes('google-tasks'));
 });
 
+test('connection-aware tools disclose only active connector providers', () => {
+  const tools = getProgressiveTools({ useTools: true, connectedProviders: ['gmail', 'slack', 'unknown-provider'] });
+  const connector = tools.find((tool) => tool.function.name === 'use_connector');
+  assert.deepEqual(connector.function.parameters.properties.provider.enum, ['gmail', 'slack']);
+  assert.ok(tools.some((tool) => tool.function.name === 'compound_plan'));
+  assert.ok(tools.some((tool) => tool.function.name === 'hivemind_context'));
+});
+
+test('connection-aware tools omit connector execution when no external account is active', () => {
+  const tools = getProgressiveTools({ useTools: true, connectedProviders: [] });
+  assert.equal(tools.some((tool) => tool.function.name === 'use_connector'), false);
+  assert.ok(tools.some((tool) => tool.function.name === 'hivemind_context'));
+});
+
 test('a malformed connector decision is downgraded when use_tools is false', () => {
   const { decision } = adaptToDecision('use_connector', {
     provider: 'gmail', intent: 'read', request: 'recent mail', response_language: 'en',

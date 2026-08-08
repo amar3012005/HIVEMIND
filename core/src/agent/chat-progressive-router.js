@@ -77,9 +77,12 @@ export const HIGH_TOOLS = [
     parameters: object({
       subtasks: { type: 'array', items: object({
         operation: { type: 'string', description: 'Short label for this step, e.g. recall, create_doc, send_email.' },
+        intent: { type: 'string', enum: ['read', 'write'], description: 'Authority required by this step. Creating drafts, documents, events, messages, updates, or deletions is write; retrieval and lookup is read.' },
+        output_kind: { type: 'string', enum: ['knowledge', 'recipient', 'record', 'document', 'message', 'generic'], description: 'Semantic result contract. Use recipient when this step must uniquely resolve a person/address for a later action; knowledge for HIVE-MIND recall; document/message for those provider artifacts; otherwise record or generic.' },
         tool_groups: { type: 'array', items: { type: 'string' }, description: 'Connector group(s) for this step, e.g. ["hivemind-recall"], ["google-docs"], ["gmail"].' },
         depends_on: { type: ['array', 'null'], items: { type: 'integer' }, description: 'Indices of prior subtasks this step depends on, or null if independent.' },
         message: { type: 'string', description: 'The instruction for this single step, in the user\'s language, with exact identifiers preserved.' },
+        query: { type: ['string', 'null'], description: 'Compact canonical semantic query for retrieval/lookup steps, preserving the entity and requested attributes but excluding workflow verbs and downstream actions. Null for pure action steps.' },
         result_order: { type: 'string', enum: ['provider_default', 'newest', 'oldest'] },
         result_limit: { type: ['integer', 'null'], minimum: 1, maximum: 100 },
         has_explicit_filter: { type: 'boolean' },
@@ -92,14 +95,49 @@ export const HIGH_TOOLS = [
 ];
 
 const EXTERNAL_TOOL_NAMES = new Set(['use_connector', 'use_campaign', 'compound_plan']);
+const CONNECTOR_PROVIDERS = new Set([
+  'gmail', 'google-drive', 'google-docs', 'google-sheets', 'google-calendar',
+  'google-tasks', 'google-gemini', 'slack', 'notion', 'github', 'linear',
+]);
 
 // The initial router prompt stays small: native HIVE-MIND capabilities are
 // always available, while connected apps and compound execution are disclosed
 // only after the caller explicitly opts in for this turn.
-export function getProgressiveTools({ useTools = false } = {}) {
-  return useTools
-    ? HIGH_TOOLS
-    : HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name));
+export function getProgressiveTools({ useTools = false, connectedProviders = null } = {}) {
+  if (!useTools) return HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name));
+  if (!Array.isArray(connectedProviders)) return HIGH_TOOLS;
+
+  const allowed = [...new Set(connectedProviders
+    .map((provider) => String(provider || '').trim().toLowerCase())
+    .filter((provider) => CONNECTOR_PROVIDERS.has(provider)))];
+  return HIGH_TOOLS.flatMap((tool) => {
+    if (tool.function?.name !== 'use_connector') return [tool];
+    if (allowed.length === 0) return [];
+    return [{
+      ...tool,
+      function: {
+        ...tool.function,
+        parameters: {
+          ...tool.function.parameters,
+          properties: {
+            ...tool.function.parameters.properties,
+            provider: { ...tool.function.parameters.properties.provider, enum: allowed },
+          },
+        },
+      },
+    }];
+  });
+}
+
+function getWorkflowPlannerTool() {
+  const compound = HIGH_TOOLS.find((tool) => tool.function?.name === 'compound_plan');
+  return [{
+    ...compound,
+    function: {
+      ...compound.function,
+      description: 'Plan the complete user request as one or more bounded DAG steps. Include prerequisite reads, use exactly one tool group per step, preserve dependencies, and classify each semantic output contract. This plans only; it never executes actions.',
+    },
+  }];
 }
 
 // Token-lean system prompt: rules + a handful of multilingual routing examples
@@ -221,7 +259,7 @@ export function extractMessageDates(text, now = new Date()) {
 // stays recall. "What is my name" already contains the literal "my name".
 const PROFILE_RE = /\b(about me|about my (company|org|organi[sz]ation)|who am i|what do you know about me|what am i called|my name)\b|\bmy(\s+[a-z-]+){0,3}\s+(profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus)\b|\bmy (profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus|company|organi[sz]ation|team|language|location)\b|über mich|was weißt du über mich|wie hei(ß|ss)e ich|mein name|meine (firma|rolle|ziele|strategie|präferenz)|qui suis-je|comment je m'appelle|mon (nom|rôle|objectif|entreprise)|sobre mí|cómo me llamo|mi (nombre|rol|empresa|objetivo)/i;
 
-async function callRouter({ message, history, apiKey, signal, useTools = false }) {
+async function callRouter({ message, history, apiKey, signal, useTools = false, connectedProviders = null, workflowPlanner = false }) {
   const histMsgs = Array.isArray(history)
     ? history.slice(-3).filter((h) => h && (h.role === 'user' || h.role === 'assistant') && h.content)
         .map((h) => ({ role: h.role, content: String(h.content).slice(0, 1200) }))
@@ -229,19 +267,26 @@ async function callRouter({ message, history, apiKey, signal, useTools = false }
   const staticPrompt = getStaticPromptArtifact({
     family: 'chat-progressive-router', version: 'v3', variant: 'capability-contract', build: () => SYSTEM,
   });
+  const connectedPolicy = useTools && Array.isArray(connectedProviders)
+    ? `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it.`
+    : '';
   const dynamicPolicy = useTools
-    ? ''
+    ? connectedPolicy
     : 'Connected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.';
+  const workflowPolicy = workflowPlanner
+    ? 'You are the hosted workflow planner. Call compound_plan exactly once, even for a one-step request. Decompose the complete request; do not answer it and do not select another capability. For every retrieval or lookup step, put a compact semantic retrieval expression in query, preserving entities and requested attributes while removing workflow verbs and later actions. Put null in query for pure action steps.'
+    : '';
   const systemMessages = [
     { role: 'system', content: staticPrompt.value },
     ...(dynamicPolicy ? [{ role: 'system', content: dynamicPolicy }] : []),
+    ...(workflowPolicy ? [{ role: 'system', content: workflowPolicy }] : []),
   ];
   const resp = await chatCompletionFetch(ROUTER_MODEL, {
     method: 'POST',
     // chatCompletionFetch sets Authorization from the resolved route; no header here.
     body: JSON.stringify({
       messages: [...systemMessages, ...histMsgs, { role: 'user', content: message }],
-      tools: getProgressiveTools({ useTools }),
+      tools: workflowPlanner ? getWorkflowPlannerTool() : getProgressiveTools({ useTools, connectedProviders }),
       tool_choice: 'required',
       parallel_tool_calls: false,
       temperature: 0,
@@ -412,6 +457,9 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       const raw = Array.isArray(args?.subtasks) ? args.subtasks : [];
       const subtasks = raw.slice(0, 8).map((st, i) => ({
         operation: s(st?.operation, 64) || `step_${i + 1}`,
+        authority: st?.intent === 'write' ? 'write' : 'read',
+        output_kind: ['knowledge', 'recipient', 'record', 'document', 'message', 'generic'].includes(st?.output_kind)
+          ? st.output_kind : 'generic',
         tool_groups: Array.isArray(st?.tool_groups)
           ? st.tool_groups.filter((g) => typeof g === 'string' && g).slice(0, 4).map((g) => s(g, 128))
           : [],
@@ -419,6 +467,7 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
           ? st.depends_on.filter((d) => Number.isInteger(d) && d >= 0 && d < raw.length).slice(0, 4)
           : null,
         message: s(st?.message, 2000) || '',
+        query: s(st?.query, 500) || null,
         retrieval: {
           result_order: ['newest', 'oldest'].includes(st?.result_order) ? st.result_order : 'provider_default',
           result_limit: Number.isInteger(st?.result_limit) ? Math.max(1, Math.min(100, st.result_limit)) : null,
@@ -517,9 +566,9 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
  * Main entry — mirrors parseChatIntent's { decision, usage } contract so the
  * caller is a drop-in swap under the flag.
  */
-export async function parseChatIntentProgressive({ message, history, language, apiKey, signal, useTools = false }) {
+export async function parseChatIntentProgressive({ message, history, language, apiKey, signal, useTools = false, connectedProviders = null, workflowPlanner = false }) {
   try {
-    const { tool, args, usage } = await callRouter({ message, history, apiKey, signal, useTools });
+    const { tool, args, usage } = await callRouter({ message, history, apiKey, signal, useTools, connectedProviders, workflowPlanner });
     const { decision } = adaptToDecision(tool, args, message, language, { useTools });
     // Diagnostics for the A/B gate (read via trace.intent; harmless downstream).
     decision._router = 'progressive';

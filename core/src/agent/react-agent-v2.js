@@ -2532,18 +2532,59 @@ export async function runReactAgentV2({
     // the 6-tool Cerebras-direct progressive router. The adapter returns the
     // SAME decision shape, so intentDecisionToPlan + everything downstream is
     // unchanged. Default (unset/any other value) = the current parseChatIntent.
-    const intentParsed = process.env.CHAT_ROUTER === 'progressive'
-      ? await (await import('./chat-progressive-router.js')).parseChatIntentProgressive({
+    let intentParsed;
+    if (process.env.CHAT_ROUTER === 'progressive') {
+      if (useTools && process.env.HOSTED_COMPOSIO_PLANNER_ENABLED === 'true') {
+        try {
+          const { planHostedComposioWorkflow } = await import('./hosted-composio-planner.js');
+          const hostedPlan = await planHostedComposioWorkflow({
+            request: message,
+            history,
+            language,
+            apiKey,
+            signal: abortCtrl.signal,
+            orgId: ctx?.orgId,
+          });
+          intentParsed = {
+            decision: {
+              ...hostedPlan._decision,
+              _hosted_planner: true,
+              _hosted_plan_id: hostedPlan.plan_id,
+              _connected_providers: hostedPlan.connected_providers,
+            },
+            usage: hostedPlan.usage,
+          };
+        } catch (hostedPlannerError) {
+          // Explicit compatibility fallback: preserve the pre-existing
+          // progressive planner if connection discovery or hosted planning
+          // fails before any tool has executed. The trace carries the reason;
+          // this is never a silent downgrade.
+          console.warn(`[chat:hosted-planner] fallback: ${hostedPlannerError.message}`);
+          const progressive = await import('./chat-progressive-router.js');
+          intentParsed = await progressive.parseChatIntentProgressive({
+            message, history, language, apiKey, signal: abortCtrl.signal, useTools,
+          });
+          intentParsed.decision = {
+            ...intentParsed.decision,
+            _hosted_planner: false,
+            _hosted_planner_fallback: hostedPlannerError.message,
+          };
+        }
+      } else {
+        intentParsed = await (await import('./chat-progressive-router.js')).parseChatIntentProgressive({
           message, history, language, apiKey, signal: abortCtrl.signal, useTools,
-        })
-      : await parseChatIntent({
-          message, history, language,
-          groupCatalog,
-          projectCatalog,
-          model: INTENT_MODEL,
-          apiKey,
-          signal: abortCtrl.signal,
         });
+      }
+    } else {
+      intentParsed = await parseChatIntent({
+        message, history, language,
+        groupCatalog,
+        projectCatalog,
+        model: INTENT_MODEL,
+        apiKey,
+        signal: abortCtrl.signal,
+      });
+    }
     _pt('intent_parse_ms', _ps);
     let intentDecision = intentParsed.decision;
     // `use_tools` is an authority boundary, not a prompt hint. A legacy or

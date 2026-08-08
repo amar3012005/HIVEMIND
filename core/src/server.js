@@ -22946,6 +22946,37 @@ exit \$RC
         // dispatched below via regex match outside the switch
 
         // ==========================================
+        // COMPOSIO HOSTED PLANNER — plan only, never execute
+        // POST /api/composio/plan
+        // ==========================================
+        case '/api/composio/plan':
+          if (req.method === 'POST') {
+            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
+              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
+            }
+            const request = String(body?.request || body?.message || '').trim();
+            if (!request) return jsonResponse(res, { error: 'request is required' }, 400);
+            const plannerKey = process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY || process.env.CEREBRAS_API_KEY;
+            if (!plannerKey) return jsonResponse(res, { error: 'planner unavailable — no LLM API key configured' }, 503);
+            try {
+              const { planHostedComposioWorkflow } = await import('./agent/hosted-composio-planner.js');
+              const plan = await planHostedComposioWorkflow({
+                request,
+                history: Array.isArray(body?.history) ? body.history : [],
+                language: body?.language || null,
+                apiKey: plannerKey,
+                orgId,
+              });
+              const { _decision, ...publicPlan } = plan;
+              return jsonResponse(res, publicPlan);
+            } catch (error) {
+              console.warn(`[hosted-composio-planner] failed org=${orgId}: ${error.message}`);
+              return jsonResponse(res, { error: 'hosted_planner_failed', detail: error.message }, 502);
+            }
+          }
+          break;
+
+        // ==========================================
         // CHAT — Talk to HIVE (memory-augmented LLM)
         // ==========================================
         case '/api/chat':

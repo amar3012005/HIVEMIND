@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildCompoundSynthesisPayload,
   buildSubtaskArgumentPrompt,
+  buildSubtaskExecutionMessage,
   applyConnectorRetrievalPolicy,
   applyConnectorResultPolicy,
   buildToolSelectionCards,
@@ -11,13 +12,14 @@ import {
   rankToolSelectionCards,
   resolveSelectedTool,
   runCompoundOrchestrator,
+  validateSemanticStepOutput,
 } from '../../src/agent/compound-orchestrator.js';
 
 // ── Test harness ─────────────────────────────────────────────────────────────
 // A deterministic tool-selector replaces the model call. The Composio service
 // is stubbed via the `composio` override so no real API is hit.
 
-function makeComposio({ tools, executeImpl }) {
+function makeComposio({ tools, executeImpl, generateImpl = null }) {
   // tools: [{ name, slug, description }]
   return {
     async getToolkitTools() {
@@ -30,8 +32,21 @@ function makeComposio({ tools, executeImpl }) {
     async executeTool(orgId, slug, args) {
       return executeImpl(slug, args);
     },
+    ...(generateImpl ? { async generateToolInputs(slug, text) { return generateImpl(slug, text); } } : {}),
   };
 }
+
+test('recipient output contract resolves one address and rejects ambiguity', () => {
+  const one = validateSemanticStepOutput('recipient', { contacts: [{ email: 'Only@Example.com' }] });
+  assert.equal(one.status, 'completed');
+  assert.equal(one.outputFields.recipient_email, 'only@example.com');
+
+  const many = validateSemanticStepOutput('recipient', {
+    contacts: [{ email: 'one@example.com' }, { nested: { value: 'two@example.com' } }],
+  });
+  assert.equal(many.status, 'needs_input');
+  assert.deepEqual(many.candidates, ['one@example.com', 'two@example.com']);
+});
 
 function makeSelector(pick) {
   return async ({ message }) => {
@@ -95,6 +110,17 @@ test('argument generation separates relative ordering from provider content filt
   assert.match(prompt, /ordering from content filtering/i);
   assert.match(prompt, /do not copy those ordering words into a provider search query/i);
   assert.match(prompt, /explicit sender, entity, date, or content filters/i);
+});
+
+test('dependent argument generation receives bounded server-verified prior outputs', () => {
+  const message = buildSubtaskExecutionMessage('Create the draft', {
+    recall: 'Brand is G ROCHER and logo is JL.',
+    results: [{ name: 'Amar A' }, { name: 'Amar B' }],
+  });
+  assert.match(message, /SERVER_VERIFIED_PRIOR_OUTPUTS/);
+  assert.match(message, /G ROCHER/);
+  assert.match(message, /Amar A/);
+  assert.ok(message.length < 14_100);
 });
 
 test('structured newest policy removes invented search text and requests a metadata candidate window', () => {
@@ -268,6 +294,37 @@ test('compound orchestrator: a write missing a required provider field asks befo
   assert.match(res.steps[0].summary, /text/i);
 });
 
+test('compound orchestrator: Composio Query Mode completes empty write arguments before drafting', async () => {
+  const created = [];
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send email' }],
+    executeImpl: async () => ({ successful: false, data: null, error: 'must not execute' }),
+    generateImpl: async (slug, text) => {
+      assert.equal(slug, 'GMAIL_SEND_EMAIL');
+      assert.match(text, /G ROCHER/);
+      return { recipient_email: 'amar@example.com', subject: 'Handbag', body: 'The brand is G ROCHER.' };
+    },
+  });
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't-query' },
+    _tracedDispatch: async () => ({ memories: [{ id: 'm1', title: 'Handbag', content: 'The brand is G ROCHER.' }], evidence: [] }),
+    prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'DQUERY' }; } } },
+  };
+  const result = await runCompoundOrchestrator({
+    subtasks: [{ operation: 'recall', authority: 'read', output_kind: 'knowledge', tool_groups: ['hivemind-recall'], message: 'handbag' },
+      { operation: 'email', authority: 'write', output_kind: 'message', tool_groups: ['gmail'], message: 'Email Amar', depends_on: [0] }],
+    ctx, apiKey: 'k', composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_gmail_send_email', args: {},
+      schema: { properties: { recipient_email: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } } },
+    })),
+  });
+  assert.equal(result.status, 'pending');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].toolArgs.recipient_email, 'amar@example.com');
+  assert.match(created[0].toolArgs.body, /G ROCHER/);
+});
+
 test('compound orchestrator: dependent subtask receives prior typed output fields', async () => {
   const calls = [];
   const composio = makeComposio({
@@ -302,6 +359,45 @@ test('compound orchestrator: dependent subtask receives prior typed output field
   assert.ok(draft, 'email draft created');
   assert.equal(draft.toolArgs.documentId, 'DOC123', 'documentId injected from prior result');
   assert.equal(draft.toolArgs.to, 'boss@x.com', 'explicit args preserved');
+});
+
+test('compound orchestrator stops an ambiguous dependent write instead of guessing a recipient', async () => {
+  const created = [];
+  const composio = makeComposio({
+    tools: [
+      { name: 'composio_gmail_search_people', slug: 'GMAIL_SEARCH_PEOPLE', description: 'search contacts' },
+      { name: 'composio_gmail_create_email_draft', slug: 'GMAIL_CREATE_EMAIL_DRAFT', description: 'create draft' },
+    ],
+    executeImpl: async (slug) => slug === 'GMAIL_SEARCH_PEOPLE'
+      ? { successful: true, data: { results: [
+          { name: 'Amar Marvel studios', email: 'amar@example.com' },
+          { name: 'AMAR SAI', email: 'amar.sai@example.edu' },
+        ] }, error: null }
+      : { successful: false, data: null, error: 'write must not execute' },
+  });
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+    _tracedDispatch: async () => ({ memories: [{ id: 'm1', title: 'Handbag', content: 'Brand is G ROCHER. Logo is JL.' }], evidence: [] }),
+    prisma: { pendingWrite: { create: async (data) => { created.push(data); return { id: 'D1' }; } } },
+  };
+  const selector = async ({ message }) => {
+    if (message.includes('Resolve Amar')) {
+      return { toolName: 'composio_gmail_search_people', args: { query: 'Amar' }, schema: { properties: { query: { type: 'string' } } } };
+    }
+    throw new Error(`dependent write must not select a tool: ${message}`);
+  };
+  const result = await runCompoundOrchestrator({
+    subtasks: [
+      { operation: 'recall_handbag', authority: 'read', tool_groups: ['hivemind-recall'], message: 'Recall handbag' },
+      { operation: 'resolve_amar', authority: 'read', output_kind: 'recipient', tool_groups: ['gmail'], depends_on: [0], message: 'Resolve Amar' },
+      { operation: 'draft_email', authority: 'write', tool_groups: ['gmail'], depends_on: [0, 1], message: 'Create the email draft' },
+    ],
+    ctx, apiKey: 'k', signal: null, composio, selectTool: selector,
+  });
+  assert.equal(result.status, 'needs_input');
+  assert.equal(created.length, 0);
+  assert.match(result.summary, /Multiple recipient addresses matched/);
+  assert.equal(result.steps[2].status, 'needs_input');
 });
 
 test('compound orchestrator: independent subtasks run in parallel (fan-out)', async () => {

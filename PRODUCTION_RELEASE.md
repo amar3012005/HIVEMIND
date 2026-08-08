@@ -164,3 +164,13 @@
 - **Acceptance evidence:** public 200 ×4. In-container grep verified all three phase markers in the RUNNING container. Live /api/chat smoke: recall grounded with bounded prompt tokens (5613), temporal routes to clarification, greeting direct (3293 prompt). Compound flag UNSET (off).
 - **Rollback:** tag `hivemind/core-api:prod-20260807-5ca742275da4` in `/root/.last-core-rollback`; compose tag swap + `up -d --no-deps core`.
 - **Untested side effects:** compound orchestrator not exercised live (flag off); no emails/calls placed.
+
+## prod-20260808-d9f497b9 — /chat generalized small-detail evidence delivery
+- **Date:** 2026-08-08
+- **Parent:** branch `claude/fervent-tesla-7830e1`, SHA `d9f497b9`; core image `hivemind/core-api:sha-d9f497b`.
+- **Behavior:** structured chat keeps a bounded multilingual semantic recovery pool only when the ordinary relevance floor has no viable rows; authorized full ranked rows are passed internally to a semantic passage projector. No domain keyword list or language-specific detail rule was added.
+- **Failure safety:** the toolkit now allowlists only the new server-owned recall controls. If semantic projection times out, synthesis receives the complete highest-ranked memory under one global 12,000-character guard, then compact lower-ranked previews; it no longer receives equal prefix truncations that can hide a late fact.
+- **Routing:** a model-selected semantic clarification is grounded through recall before asking the user. Greetings/arithmetic and safety refusals retain the direct path.
+- **Tests:** Linux production-runtime checks passed: 4/4 projector tests, 4/4 toolkit validation/security tests, initial-recall contract, and progressive semantic-fallback contract. Local macOS aggregate remains blocked by the existing missing `singulance-amr` darwin-arm64 binary.
+- **Live acceptance:** tenant-scoped `/api/chat` answered the same buried rank-1 memory detail in English and German as `G ROCHER`, and a separate Spanish small-detail query as dark brown; all were grounded and cited memory `b021510a-c979-47c7-8621-7e3991c9154f`. Projector-timeout runs still answered correctly. Observed prompt tokens: 6,476-7,102; global fallback stays bounded rather than silently removing rank-1 detail.
+- **Deployment proof:** canonical release gate passed; `hm-core` healthy on revision `d9f497b9`; manifest `/root/releases/d9f497b/RELEASE_MANIFEST.20260808T115026Z.json`.

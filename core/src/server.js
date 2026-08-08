@@ -23085,14 +23085,27 @@ exit \$RC
               const choice = body?.continuation_response || {};
               const stepIndex = Number(choice.step_index);
               const pending = stored.resumeState?.results?.[stepIndex]?.inputRequest;
+              if (!pending) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
               const allowed = pending?.options?.find((option) => option.id === choice.option_id || option.value === choice.value);
-              if (!pending || !allowed) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
+              const declaredFields = Array.isArray(pending?.fields) ? pending.fields : [];
+              const submittedValues = choice?.values && typeof choice.values === 'object' && !Array.isArray(choice.values)
+                ? choice.values : {};
+              const fieldValues = Object.fromEntries(declaredFields.map((field) => [
+                field.name,
+                typeof submittedValues[field.name] === 'string' ? submittedValues[field.name].trim() : submittedValues[field.name],
+              ]));
+              const validFields = declaredFields.length > 0 && declaredFields.every((field) => (
+                !field.required || (fieldValues[field.name] != null && String(fieldValues[field.name]).trim() !== '')
+              ));
+              if (!allowed && !validFields) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
 
               const execute = async (emit) => {
                 const { runCompoundOrchestrator } = await import('./agent/compound-orchestrator.js');
                 const resumeState = {
                   ...stored.resumeState,
-                  choice: { stepIndex, field: pending.field, value: allowed.value },
+                  choice: allowed
+                    ? { stepIndex, field: pending.field, value: allowed.value }
+                    : { stepIndex, retryStep: true, values: fieldValues },
                 };
                 const compound = await runCompoundOrchestrator({
                   subtasks: stored.resumeState.subtasks,
@@ -23121,7 +23134,8 @@ exit \$RC
                   confidence: compound.status === 'completed' ? 1 : 0.5,
                   gaps: compound.status === 'error' ? ['compound_step_failed'] : [], scopes_found: [],
                   draft_ids: compound.draftIds, compound_status: compound.status,
-                  execution: { status: compound.status, steps: compound.steps, draft_ids: compound.draftIds },
+                  pending_actions: compound.pendingActions || [],
+                  execution: { status: compound.status, steps: compound.steps, draft_ids: compound.draftIds, pending_actions: compound.pendingActions || [] },
                   continuation,
                 };
               };

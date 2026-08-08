@@ -474,13 +474,13 @@ function missingSemanticWriteArgs(outputKind, schema, args) {
   if (outputKind === 'message') {
     const destinations = relevant(['recipient_email', 'to', 'channel', 'channel_id', 'conversation_id']);
     const content = relevant(['body', 'text', 'message', 'content']);
-    if (destinations.length && !has(destinations)) missing.push('destination');
-    if (content.length && !has(content)) missing.push('message content');
+    if (destinations.length && !has(destinations)) missing.push(destinations[0]);
+    if (content.length && !has(content)) missing.push(content[0]);
   } else if (outputKind === 'document') {
     const titles = relevant(['title', 'name']);
     const content = relevant(['text', 'body', 'content', 'markdown']);
-    if (titles.length && !has(titles)) missing.push('document title');
-    if (content.length && !has(content)) missing.push('document content');
+    if (titles.length && !has(titles)) missing.push(titles[0]);
+    if (content.length && !has(content)) missing.push(content[0]);
   }
   return missing;
 }
@@ -492,6 +492,10 @@ function missingSemanticWriteArgs(outputKind, schema, args) {
  */
 export function buildSubtaskArgumentPrompt() {
   return `You are executing ONE step of a multi-step task in any language. Use ONLY the supplied tools. Choose the single tool that best accomplishes this step and provide its arguments. Distinguish result ordering from content filtering: when the user asks for a relative item such as the latest, oldest, first, or last record, do not copy those ordering words into a provider search query. Preserve any explicit sender, entity, date, or content filters, and request the smallest result set that can answer the ordering question. If prior outputs are supplied, use their grounded values verbatim. If a required identifier or recipient is absent, conflicting, or ambiguous, call report_missing_dependency instead of guessing. Do not invent tool names, identifiers, recipients, links, or facts.`;
+}
+
+export function buildToolInputSystemPrompt() {
+  return 'Generate complete arguments only. Preserve grounded prior outputs and exact identifiers. For content-producing actions, create complete useful final content from all relevant grounded details; never substitute a generic placeholder such as "the details retrieved" or merely refer to prior results. Do not execute the action.';
 }
 
 export function buildSubtaskExecutionMessage(message, priorOutputs = null) {
@@ -790,7 +794,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       const generated = await composioSvc.generateToolInputs(
         composioSlug,
         buildSubtaskExecutionMessage(message, priorOutputs),
-        { systemPrompt: 'Generate complete arguments only. Preserve grounded prior outputs and exact identifiers. Do not execute the action.' },
+        { systemPrompt: buildToolInputSystemPrompt() },
       );
       preparedArgs = { ...(preparedArgs || {}), ...generated };
     } catch (error) {
@@ -874,9 +878,23 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   const missing = missingRequiredArgs(manifestSchema, args);
   const semanticMissing = missingSemanticWriteArgs(subtask.output_kind, manifestSchema, args);
   if (missing.length || semanticMissing.length) {
-    const error = `Missing required fields: ${[...missing, ...semanticMissing].join(', ')}`;
+    const missingFields = [...new Set([...missing, ...semanticMissing])];
+    const error = `Missing required fields: ${missingFields.join(', ')}`;
     emit({ type: 'tool_result', name: toolName, status: 'needs_input', summary: error });
-    return { status: 'needs_input', error, toolName, args, result: null, draftId: null, outputFields: {} };
+    return {
+      status: 'needs_input', error, toolName, args, result: null, draftId: null, outputFields: {},
+      inputRequest: {
+        kind: 'field_input',
+        prompt: 'Add the missing information so I can safely continue this action.',
+        fields: missingFields.map((name) => ({
+          id: name,
+          name,
+          label: String(name).replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()),
+          type: 'text',
+          required: true,
+        })),
+      },
+    };
   }
 
   // Write — create a pendingWrite draft for approval. The draft stores the
@@ -966,6 +984,8 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
     ? [...resumeState.results].slice(0, subtasks.length) : new Array(subtasks.length);
   const outputs = Array.isArray(resumeState?.outputs)
     ? [...resumeState.outputs].slice(0, subtasks.length) : new Array(subtasks.length); // typed output fields per subtask
+  const manualInputs = resumeState?.manualInputs && typeof resumeState.manualInputs === 'object'
+    ? { ...resumeState.manualInputs } : {};
 
   // Topological execution with fan-out: each pass collects every subtask whose
   // depends_on are all done and runs them TOGETHER via Promise.all. Independent
@@ -992,11 +1012,18 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
           done[j] = false;
         }
       }
-      const field = String(resumeState.choice.field || 'value');
-      const value = resumeState.choice.value;
-      results[i] = { ...(results[i] || {}), status: 'completed', error: null, outputFields: { [field]: value } };
-      outputs[i] = { [field]: value };
-      done[i] = true;
+      if (resumeState.choice.retryStep === true) {
+        manualInputs[i] = { ...(manualInputs[i] || {}), ...(resumeState.choice.values || {}) };
+        results[i] = undefined;
+        outputs[i] = undefined;
+        done[i] = false;
+      } else {
+        const field = String(resumeState.choice.field || 'value');
+        const value = resumeState.choice.value;
+        results[i] = { ...(results[i] || {}), status: 'completed', error: null, outputFields: { [field]: value } };
+        outputs[i] = { [field]: value };
+        done[i] = true;
+      }
     }
   }
   emit({
@@ -1040,6 +1067,7 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
       }
       const priorOutputs = {};
       for (const d of deps) Object.assign(priorOutputs, outputs[d] || {});
+      Object.assign(priorOutputs, manualInputs[i] || {});
       return runSubtask({ subtask: st, context, ctx, apiKey, signal, priorOutputs, selectTool, onEvent, composio });
     }));
     // Write results back by index (order preserved).
@@ -1137,13 +1165,33 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
   return {
     steps,
     draftIds,
-    summary: lines.join('\n'),
+    summary: buildCompoundUserSummary({ subtasks, results, status, fallbackLines: lines }),
     status,
     recallResults,
     readResults,
     synthesisPayload: buildCompoundSynthesisPayload({ recallResults, readResults }),
     inputRequests,
     pendingActions,
-    resumeState: status === 'needs_input' ? { subtasks, results, outputs, done } : null,
+    resumeState: status === 'needs_input' ? { subtasks, results, outputs, done, manualInputs } : null,
   };
+}
+
+export function buildCompoundUserSummary({ subtasks = [], results = [], status, fallbackLines = [] } = {}) {
+  const total = subtasks.length;
+  const completed = results.filter((result) => result?.status === 'completed').length;
+  const progress = completed > 0
+    ? `I completed ${completed} of ${total} planned ${total === 1 ? 'step' : 'steps'}. `
+    : '';
+  if (status === 'pending') {
+    const count = results.filter((result) => result?.status === 'draft_created').length;
+    return `${progress}I used the completed results to prepare ${count === 1 ? 'the requested action' : `${count} requested actions`} for your review. I paused before making any external change because your approval is required. Nothing has been sent, published, created, or changed yet. Review the exact details below, then approve to continue or cancel.`;
+  }
+  if (status === 'needs_input') {
+    const needed = results.find((result) => result?.status === 'needs_input')?.error;
+    return `${progress}I paused because continuing safely requires information or a choice from you. ${needed ? `What I still need: ${needed}. ` : ''}The work already completed is retained and will not be repeated. Choose one of the options below so I can resume the remaining steps.`;
+  }
+  if (status === 'error') {
+    return `${progress}I could not finish the remaining work. No unapproved external action was performed. ${fallbackLines.filter((line) => !/: done$/.test(line)).join(' ')}`.trim();
+  }
+  return total > 1 ? `I completed all ${total} requested steps.` : (fallbackLines[0] || 'Done.');
 }

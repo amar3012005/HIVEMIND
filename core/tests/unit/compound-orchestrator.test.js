@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCompoundSynthesisPayload,
+  buildCompoundUserSummary,
   buildSubtaskArgumentPrompt,
   buildSubtaskExecutionMessage,
+  buildToolInputSystemPrompt,
   applyConnectorRetrievalPolicy,
   applyConnectorResultPolicy,
   buildToolSelectionCards,
@@ -272,8 +274,72 @@ test('compound orchestrator: composio write creates a pendingWrite draft (never 
     tool_args: { to: 'boss@x.com' }, status: 'draft', step_index: 0,
   }]);
   assert.match(created[0].argsHash, /^[a-f0-9]{64}$/);
-  assert.ok(res.summary.includes('awaiting your approval'));
+  assert.match(res.summary, /approval is required/i);
+  assert.match(res.summary, /Nothing has been sent/i);
   assert.ok(!res.summary.includes('done'));
+});
+
+test('human-input summaries explain progress, safety pause, and resumability', () => {
+  const pending = buildCompoundUserSummary({
+    subtasks: [{}, {}], status: 'pending',
+    results: [{ status: 'completed' }, { status: 'draft_created' }],
+  });
+  assert.match(pending, /completed 1 of 2/i);
+  assert.match(pending, /Nothing has been sent, published, created, or changed/i);
+
+  const needsInput = buildCompoundUserSummary({
+    subtasks: [{}, {}], status: 'needs_input',
+    results: [{ status: 'completed' }, { status: 'needs_input', error: 'Choose one recipient' }],
+  });
+  assert.match(needsInput, /Choose one recipient/);
+  assert.match(needsInput, /will not be repeated/);
+});
+
+test('tool input policy requires complete grounded content instead of placeholders', () => {
+  const prompt = buildToolInputSystemPrompt();
+  assert.match(prompt, /complete useful final content/);
+  assert.match(prompt, /never substitute a generic placeholder/);
+  assert.match(prompt, /Do not execute/);
+});
+
+test('missing write fields produce a resumable generalized field-input request', async () => {
+  const created = [];
+  const schema = {
+    type: 'object',
+    properties: { recipient_email: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } },
+    required: ['recipient_email', 'subject', 'body'],
+  };
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send' }],
+    executeImpl: async () => ({ successful: false, error: 'must remain approval gated' }),
+  });
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 'field-1' },
+    prisma: { pendingWrite: { create: async (data) => { created.push(data.data); return { id: 'FIELD-DRAFT' }; } } },
+  };
+  const selectTool = makeSelector((message) => ({
+    toolName: 'composio_gmail_send_email', schema,
+    args: message.includes('person@example.com')
+      ? { recipient_email: 'person@example.com', subject: 'Ready', body: 'Complete grounded message.' }
+      : { subject: 'Ready', body: 'Complete grounded message.' },
+  }));
+  const paused = await runCompoundOrchestrator({
+    subtasks: [{ operation: 'send_email', authority: 'write', output_kind: 'message', tool_groups: ['gmail'], message: 'Prepare the email' }],
+    ctx, apiKey: 'k', composio, selectTool,
+  });
+  assert.equal(paused.status, 'needs_input');
+  assert.deepEqual(paused.inputRequests[0].fields.map((field) => field.name), ['recipient_email']);
+
+  const resumed = await runCompoundOrchestrator({
+    subtasks: paused.resumeState.subtasks,
+    ctx: { ...ctx, _trace: { traceId: 'field-2' } }, apiKey: 'k', composio, selectTool,
+    resumeState: {
+      ...paused.resumeState,
+      choice: { stepIndex: 0, retryStep: true, values: { recipient_email: 'person@example.com' } },
+    },
+  });
+  assert.equal(resumed.status, 'pending');
+  assert.equal(created[0].toolArgs.recipient_email, 'person@example.com');
 });
 
 test('compound orchestrator: a write missing a required provider field asks before creating a draft', async () => {

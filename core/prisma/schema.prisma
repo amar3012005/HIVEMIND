@@ -128,6 +128,7 @@ model Organization {
   seoSearchConsoleSnapshots    SeoSearchConsoleSnapshot[] @relation("OrgSeoSearchConsoleSnapshots")
   zernioExecutionProfile       ZernioOrgProfile? @relation("OrgZernioExecutionProfile")
   zernioWebhookEvents          ZernioWebhookEvent[]
+  enterpriseInvitation         EnterpriseInvitation? @relation("RedeemedEnterpriseInvitation")
 
   @@map("organizations")
 }
@@ -2785,6 +2786,48 @@ model PromotionRedemption {
   @@index([promotionId, emailHash])
   @@index([orgId, redeemedAt])
   @@map("promotion_redemptions")
+}
+
+/// Platform-issued B2B onboarding invitation. The access code and activation
+/// link are represented only by keyed digests; the workspace does not exist
+/// until the invited owner redeems it successfully.
+model EnterpriseInvitation {
+  id                   String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyName          String        @map("company_name") @db.VarChar(255)
+  workspaceName        String?       @map("workspace_name") @db.VarChar(255)
+  recipientEmail       String        @map("recipient_email") @db.VarChar(255)
+  recipientEmailHash   String        @map("recipient_email_hash") @db.Char(64)
+  recipientEmailHint   String        @map("recipient_email_hint") @db.VarChar(160)
+  accountType          String        @map("account_type") @db.VarChar(32)
+  hostingMode          String        @map("hosting_mode") @db.VarChar(24)
+  storageMode          String        @map("storage_mode") @db.VarChar(32)
+  onboardingDays       Int           @default(14) @map("onboarding_days")
+  onboardingLimits     Json          @default("{}") @map("onboarding_limits")
+  configSnapshot       Json          @default("{}") @map("config_snapshot")
+  welcomeMessage       String?       @map("welcome_message") @db.Text
+  privateNotes         String?       @map("private_notes") @db.Text
+  status               String        @default("draft") @db.VarChar(24)
+  deliveryStatus       String        @default("not_sent") @map("delivery_status") @db.VarChar(24)
+  lastDeliveryError    String?       @map("last_delivery_error") @db.VarChar(240)
+  accessCodeHash       String        @unique @map("access_code_hash") @db.Char(64)
+  accessCodeHint       String        @map("access_code_hint") @db.VarChar(16)
+  accessCodeVersion    Int           @default(1) @map("access_code_version")
+  linkTokenHash        String        @unique @map("link_token_hash") @db.Char(64)
+  linkVersion          Int           @default(1) @map("link_version")
+  invitationExpiresAt  DateTime      @map("invitation_expires_at") @db.Timestamptz(6)
+  sentAt               DateTime?     @map("sent_at") @db.Timestamptz(6)
+  lastSentAt           DateTime?     @map("last_sent_at") @db.Timestamptz(6)
+  redeemedAt           DateTime?     @map("redeemed_at") @db.Timestamptz(6)
+  redeemedByUserId     String?       @map("redeemed_by_user_id") @db.Uuid
+  orgId                String?       @unique @map("org_id") @db.Uuid
+  revokedAt            DateTime?     @map("revoked_at") @db.Timestamptz(6)
+  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organization         Organization? @relation("RedeemedEnterpriseInvitation", fields: [orgId], references: [id], onDelete: Restrict)
+
+  @@index([recipientEmailHash, status])
+  @@index([status, invitationExpiresAt])
+  @@map("enterprise_invitations")
 }
 
 /// Provider-neutral checkout intent. The browser can request an offer but only

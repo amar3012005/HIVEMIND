@@ -9,17 +9,17 @@
 //
 // Deliberately an ALLOW-LIST, never "any non-empty string": an open gate would
 // let anyone self-provision a paid enterprise workspace with 14 days of full
-// access. The set is a built-in default ('TEST2026') plus anything in the
-// ENTERPRISE_ACCESS_CODES env var (comma-separated), so codes can be added or
-// rotated without a code deploy.
-const DEFAULT_ENTERPRISE_ACCESS_CODES = ['TEST2026'];
+// access. Existing explicit environment codes remain as a short-lived
+// compatibility path while enterprise invitations replace them. A test-only
+// default is allowed outside production, never as a deployed backdoor.
+const DEFAULT_ENTERPRISE_ACCESS_CODES = process.env.NODE_ENV === 'production' ? [] : ['TEST2026'];
 
 /** Canonicalize a code the same way the signup form does (upper, no spaces). */
 export function normalizeEnterpriseAccessCode(value) {
   return String(value || '').trim().toUpperCase().replace(/\s+/g, '');
 }
 
-/** The active allow-list: built-in defaults ∪ ENTERPRISE_ACCESS_CODES env. */
+/** The legacy allow-list: test defaults outside production ∪ explicit env codes. */
 export function enterpriseAccessCodeSet() {
   const fromEnv = String(process.env.ENTERPRISE_ACCESS_CODES || '')
     .split(',')

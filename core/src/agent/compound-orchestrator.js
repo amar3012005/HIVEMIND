@@ -361,8 +361,12 @@ function missingRequiredArgs(schema, args) {
  * connector group and let it pick ONE tool + args. Injectable for tests.
  * Returns { toolName, args, schema } or null on failure.
  */
+export function buildSubtaskArgumentPrompt() {
+  return `You are executing ONE step of a multi-step task in any language. Use ONLY the supplied tools. Choose the single tool that best accomplishes this step and provide its arguments. Distinguish result ordering from content filtering: when the user asks for a relative item such as the latest, oldest, first, or last record, do not copy those ordering words into a provider search query. Preserve any explicit sender, entity, date, or content filters, and request the smallest result set that can answer the ordering question. If a prior step produced fields (doc_id, doc_url, etc.), reuse them verbatim. Do not invent tool names.`;
+}
+
 async function defaultSelectTool({ tools, message, apiKey, signal }) {
-  const sys = `You are executing ONE step of a multi-step task. Use ONLY the supplied tools. Choose the single tool that best accomplishes this step and provide its arguments. If a prior step produced fields (doc_id, doc_url, etc.), reuse them verbatim. Do not invent tool names.`;
+  const sys = buildSubtaskArgumentPrompt();
   const messages = [
     { role: 'system', content: sys },
     { role: 'user', content: message },

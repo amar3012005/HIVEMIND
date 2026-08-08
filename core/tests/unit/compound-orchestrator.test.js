@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCompoundSynthesisPayload,
+  buildSubtaskArgumentPrompt,
   buildToolSelectionCards,
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
@@ -84,6 +85,14 @@ test('generic read operation exposes Gmail fetch but excludes modifying capabili
   ];
   const eligible = filterComposioToolsByAuthority(tools, 'read');
   assert.deepEqual(eligible.map((tool) => tool._composio.slug), ['GMAIL_FETCH_EMAILS']);
+});
+
+test('argument generation separates relative ordering from provider content filters', () => {
+  const prompt = buildSubtaskArgumentPrompt();
+  assert.match(prompt, /any language/i);
+  assert.match(prompt, /ordering from content filtering/i);
+  assert.match(prompt, /do not copy those ordering words into a provider search query/i);
+  assert.match(prompt, /explicit sender, entity, date, or content filters/i);
 });
 
 test('compound synthesis payload retains complete rank-one recall alongside connector data', () => {

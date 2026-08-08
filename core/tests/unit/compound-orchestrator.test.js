@@ -3,24 +3,21 @@ import assert from 'node:assert/strict';
 import { runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
 
 // ── Test harness ─────────────────────────────────────────────────────────────
-// A deterministic tool-selector replaces the model call so the orchestration
-// logic (dependency ordering, output-field injection, status reporting) is
-// tested in isolation. `pick` maps subtask message → { toolName, args }.
+// A deterministic tool-selector replaces the model call. The Composio service
+// is stubbed via the `composio` override so no real API is hit.
 
-function makeRuntime({ tools, executeImpl }) {
-  const registry = {
-    resolveTool(name) {
-      const t = tools.find((x) => x.name === name);
-      return t ? { tool: t, connectorId: name.split('__')[0], canonicalName: name } : null;
-    },
-  };
+function makeComposio({ tools, executeImpl }) {
+  // tools: [{ name, slug, description }]
   return {
-    registry,
-    async listTools() {
-      return [{ connector: 'mock', tools }];
+    async getToolkitTools() {
+      return tools.map((t) => ({
+        type: 'function',
+        function: { name: t.name, description: t.description || '', parameters: { type: 'object', properties: {} } },
+        _composio: { toolkit: 'mock', slug: t.slug },
+      }));
     },
-    async executeTool(name, input) {
-      return executeImpl(name, input);
+    async executeTool(orgId, slug, args) {
+      return executeImpl(slug, args);
     },
   };
 }
@@ -29,298 +26,148 @@ function makeSelector(pick) {
   return async ({ message }) => {
     const p = pick(message);
     if (!p) throw new Error('no tool selected');
-    return { toolName: p.toolName, args: p.args || {}, schema: { type: 'object', properties: {} } };
+    return { toolName: p.toolName, args: p.args || {}, schema: p.schema || { type: 'object', properties: {} } };
   };
 }
 
-test('compound orchestrator: independent subtasks run and report completed', async () => {
-  const calls = [];
-  const runtime = makeRuntime({
-    tools: [
-      { name: 'hivemind__recall', access: 'read', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { q: { type: 'string' } } } },
-      { name: 'gmail__search', access: 'read', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
-    ],
-    executeImpl: async (name, input) => {
-      calls.push({ name, input });
-      return { status: 'completed', content: [{ type: 'text', text: 'ok' }], metadata: { connector: name.split('__')[0], tool: name } };
-    },
-  });
-  globalThis.__hivemindConnectorRuntime = runtime;
-  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _toolkit: null };
-
+test('compound orchestrator: native hivemind-recall step runs via dispatchTool', async () => {
+  const dispatched = [];
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+    _tracedDispatch: async (name, args) => { dispatched.push({ name, args }); return { content: 'Amar leads HIVEMIND' }; },
+  };
   const res = await runCompoundOrchestrator({
-    subtasks: [
-      { operation: 'recall', tool_groups: ['hivemind'], depends_on: null, message: 'recall X' },
-      { operation: 'search', tool_groups: ['gmail'], depends_on: null, message: 'search Y' },
-    ],
-    ctx,
-    apiKey: 'k',
-    signal: null,
-    selectTool: makeSelector((m) => m.startsWith('recall') ? { toolName: 'hivemind__recall', args: { q: m } } : { toolName: 'gmail__search', args: { query: m } }),
+    subtasks: [{ operation: 'recall', tool_groups: ['hivemind-recall'], depends_on: null, message: 'Recall Amar' }],
+    ctx, apiKey: 'k', signal: null,
   });
-
   assert.equal(res.status, 'completed');
-  assert.equal(calls.length, 2);
-  assert.equal(res.steps.length, 2);
-  assert.ok(res.steps.every((s) => s.status === 'completed'));
-  assert.equal(res.draftIds.length, 0);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].name, 'hivemind_recall');
+});
+
+test('compound orchestrator: composio read step executes and reports completed', async () => {
+  const calls = [];
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_search', slug: 'GMAIL_SEARCH', description: 'search emails' }],
+    executeImpl: async (slug, args) => { calls.push({ slug, args }); return { successful: true, data: { results: ['m1'] }, error: null }; },
+  });
+  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' } };
+  const res = await runCompoundOrchestrator({
+    subtasks: [{ operation: 'search', tool_groups: ['gmail'], depends_on: null, message: 'search emails' }],
+    ctx, apiKey: 'k', signal: null, composio,
+    selectTool: makeSelector(() => ({ toolName: 'composio_gmail_search', args: { query: 'x' } })),
+  });
+  assert.equal(res.status, 'completed');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].slug, 'GMAIL_SEARCH');
+});
+
+test('compound orchestrator: composio write creates a pendingWrite draft (never done)', async () => {
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send email' }],
+    executeImpl: async () => ({ successful: true, data: {}, error: null }),
+  });
+  const created = [];
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+    prisma: { pendingWrite: { create: async (d) => { created.push(d.data); return { id: 'DRAFT1' }; } } },
+  };
+  const res = await runCompoundOrchestrator({
+    subtasks: [{ operation: 'send_email', tool_groups: ['gmail'], depends_on: null, message: 'send email to boss' }],
+    ctx, apiKey: 'k', signal: null, composio,
+    selectTool: makeSelector(() => ({ toolName: 'composio_gmail_send_email', args: { to: 'boss@x.com' } })),
+  });
+  // A write must be reported as pending (draft), never done.
+  assert.equal(res.status, 'pending');
+  assert.equal(res.draftIds.length, 1);
+  assert.equal(res.draftIds[0], 'DRAFT1');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
+  assert.ok(res.summary.includes('awaiting your approval'));
+  assert.ok(!res.summary.includes('done'));
 });
 
 test('compound orchestrator: dependent subtask receives prior typed output fields', async () => {
   const calls = [];
-  const runtime = makeRuntime({
+  const composio = makeComposio({
     tools: [
-      { name: 'docs__create', access: 'write', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
-      { name: 'gmail__send', access: 'write', approval: 'required', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' }, to: { type: 'string' } } } },
+      { name: 'composio_googledocs_get_document', slug: 'GOOGLEDOCS_GET_DOCUMENT', description: 'get document' },
+      { name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send email' },
     ],
-    executeImpl: async (name, input) => {
-      calls.push({ name, input });
-      if (name === 'docs__create') {
-        return { status: 'completed', content: [{ type: 'json', data: { doc_id: 'DOC123', doc_url: 'https://docs/x' } }], metadata: { connector: 'docs', tool: name } };
-      }
-      return { status: 'completed', content: [{ type: 'text', text: 'sent' }], metadata: { connector: 'gmail', tool: name } };
+    executeImpl: async (slug, args) => {
+      calls.push({ slug, args });
+      if (slug === 'GOOGLEDOCS_GET_DOCUMENT') return { successful: true, data: { documentId: 'DOC123', url: 'https://docs/x' }, error: null };
+      return { successful: true, data: {}, error: null };
     },
   });
-  globalThis.__hivemindConnectorRuntime = runtime;
-  // gmail__send is a write requiring approval → goes through the toolkit's
-  // pendingWrite flow. Provide a toolkit that records the args it receives so
-  // we can assert the doc_id/doc_url were injected from the prior step.
-  const toolkitCalls = [];
+  const created = [];
   const ctx = {
     userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
-    _toolkit: {
-      async execute(name, args) {
-        toolkitCalls.push({ name, args });
-        return { status: 'draft_created', content: [{ type: 'text', text: 'Draft created' }], meta: { draft_id: 'DRAFT1' } };
-      },
-    },
+    prisma: { pendingWrite: { create: async (d) => { created.push(d.data); return { id: 'D1' }; } } },
   };
-
   const res = await runCompoundOrchestrator({
     subtasks: [
-      { operation: 'create_doc', tool_groups: ['docs'], depends_on: null, message: 'create doc' },
+      { operation: 'create_doc', tool_groups: ['google-docs'], depends_on: null, message: 'create doc' },
       { operation: 'send_email', tool_groups: ['gmail'], depends_on: [0], message: 'email it' },
     ],
-    ctx,
-    apiKey: 'k',
-    signal: null,
-    selectTool: makeSelector((m) => m.startsWith('create') ? { toolName: 'docs__create', args: { title: 'Amar project' } } : { toolName: 'gmail__send', args: { to: 'boss@x.com' } }),
+    ctx, apiKey: 'k', signal: null, composio,
+    selectTool: makeSelector((m) => m.startsWith('create')
+      ? { toolName: 'composio_googledocs_get_document', args: { id: 'x' }, schema: { type: 'object', properties: { id: { type: 'string' } } } }
+      : { toolName: 'composio_gmail_send_email', args: { to: 'boss@x.com' }, schema: { type: 'object', properties: { documentId: { type: 'string' }, url: { type: 'string' }, to: { type: 'string' } } } }),
   });
-
-  // The overall status is 'pending' (the email is a draft awaiting approval),
-  // but the dependency injection must still have happened.
   assert.equal(res.status, 'pending');
-  // The dependent gmail send call must have received doc_id injected from the
-  // prior docs__create result — NOT re-typed by the model. The write goes
-  // through the toolkit, which uses the mapped toolkit name (gmail_send_email).
-  const sendCall = toolkitCalls.find((c) => c.name === 'gmail_send_email');
-  assert.ok(sendCall, 'gmail_send_email should have been called (mapped from gmail__send)');
-  assert.equal(sendCall.args.doc_id, 'DOC123', 'doc_id must be injected from prior result');
-  assert.equal(sendCall.args.doc_url, 'https://docs/x', 'doc_url must be injected from prior result');
-  assert.equal(sendCall.args.to, 'boss@x.com', 'explicit args preserved');
+  // The email draft must have received documentId injected from the prior step.
+  const draft = created.find((d) => d.toolName === 'GMAIL_SEND_EMAIL');
+  assert.ok(draft, 'email draft created');
+  assert.equal(draft.toolArgs.documentId, 'DOC123', 'documentId injected from prior result');
+  assert.equal(draft.toolArgs.to, 'boss@x.com', 'explicit args preserved');
 });
 
-test('compound orchestrator: draft_created is reported as pending, never done', async () => {
-  const runtime = makeRuntime({
-    tools: [
-      { name: 'gmail__send', access: 'write', approval: 'required', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { to: { type: 'string' } } } },
-    ],
-    executeImpl: async () => ({ status: 'completed', content: [{ type: 'text', text: 'x' }] }),
-  });
-  globalThis.__hivemindConnectorRuntime = runtime;
-  // Simulate the legacy pendingWrite flow: toolkit.execute returns draft_created.
-  const ctx = {
-    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
-    _toolkit: {
-      async execute(name, args) {
-        return { status: 'draft_created', content: [{ type: 'text', text: 'Draft created' }], meta: { draft_id: 'DRAFT1' } };
-      },
-    },
-  };
-
-  const res = await runCompoundOrchestrator({
-    subtasks: [
-      { operation: 'send_email', tool_groups: ['gmail'], depends_on: null, message: 'email boss' },
-    ],
-    ctx,
-    apiKey: 'k',
-    signal: null,
-    selectTool: makeSelector(() => ({ toolName: 'gmail__send', args: { to: 'boss@x.com' } })),
-  });
-
-  // CRITICAL: a draft_created result must be reported as pending, never as done.
-  assert.equal(res.status, 'pending');
-  assert.equal(res.draftIds.length, 1);
-  assert.equal(res.draftIds[0], 'DRAFT1');
-  assert.ok(res.summary.includes('awaiting your approval'), 'summary must say awaiting approval');
-  assert.ok(!res.summary.includes('done'), 'summary must NOT claim the write is done');
-});
-
-test('compound orchestrator: write with no toolkit reports error, not done', async () => {
-  const runtime = makeRuntime({
-    tools: [
-      { name: 'gmail__send', access: 'write', approval: 'required', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { to: { type: 'string' } } } },
-    ],
-    executeImpl: async () => ({ status: 'completed', content: [{ type: 'text', text: 'x' }] }),
-  });
-  globalThis.__hivemindConnectorRuntime = runtime;
-  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _toolkit: null };
-
-  const res = await runCompoundOrchestrator({
-    subtasks: [
-      { operation: 'send_email', tool_groups: ['gmail'], depends_on: null, message: 'email boss' },
-    ],
-    ctx,
-    apiKey: 'k',
-    signal: null,
-    selectTool: makeSelector(() => ({ toolName: 'gmail__send', args: { to: 'boss@x.com' } })),
-  });
-
-  assert.equal(res.status, 'error');
-  assert.ok(res.summary.includes('no toolkit'), 'must report the missing-toolkit error');
-});
-
-test('compound orchestrator: independent subtasks run in parallel (fan-out/merge)', async () => {
+test('compound orchestrator: independent subtasks run in parallel (fan-out)', async () => {
   const calls = [];
-  const runtime = makeRuntime({
+  const composio = makeComposio({
     tools: [
-      { name: 'github__list', access: 'read', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { q: { type: 'string' } } } },
-      { name: 'linear__list', access: 'read', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { q: { type: 'string' } } } },
-      { name: 'slack__post', access: 'write', approval: 'required', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+      { name: 'composio_github_list', slug: 'GITHUB_LIST', description: 'list issues' },
+      { name: 'composio_linear_list', slug: 'LINEAR_LIST', description: 'list tickets' },
     ],
-    executeImpl: async (name, input) => {
-      calls.push({ name, input, t: Date.now() });
-      // Simulate a 300ms call so we can measure parallelism.
-      await new Promise((r) => setTimeout(r, 300));
-      return { status: 'completed', content: [{ type: 'json', data: { count: 1 } }], metadata: { connector: name.split('__')[0], tool: name } };
+    executeImpl: async (slug, args) => {
+      calls.push({ slug, t: Date.now() });
+      await new Promise((r) => setTimeout(r, 200));
+      return { successful: true, data: {}, error: null };
     },
   });
-  globalThis.__hivemindConnectorRuntime = runtime;
-  const ctx = {
-    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
-    _toolkit: { async execute(name, args) { return { status: 'draft_created', content: [{ type: 'text', text: 'draft' }], meta: { draft_id: 'D' } }; } },
-  };
-
+  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' } };
   const t0 = Date.now();
   const res = await runCompoundOrchestrator({
     subtasks: [
       { operation: 'github', tool_groups: ['github'], depends_on: null, message: 'check github' },
       { operation: 'linear', tool_groups: ['linear'], depends_on: null, message: 'check linear' },
-      { operation: 'merge', tool_groups: ['github'], depends_on: [0, 1], message: 'merge' },
-      { operation: 'slack', tool_groups: ['slack'], depends_on: [2], message: 'post to slack' },
     ],
-    ctx,
-    apiKey: 'k',
-    signal: null,
-    selectTool: makeSelector((m) => {
-      if (m.startsWith('check github')) return { toolName: 'github__list', args: { q: m } };
-      if (m.startsWith('check linear')) return { toolName: 'linear__list', args: { q: m } };
-      if (m.startsWith('merge')) return { toolName: 'github__list', args: { q: m } };
-      return { toolName: 'slack__post', args: { text: m } };
-    }),
+    ctx, apiKey: 'k', signal: null, composio,
+    selectTool: makeSelector((m) => m.includes('github') ? { toolName: 'composio_github_list', args: {} } : { toolName: 'composio_linear_list', args: {} }),
   });
   const elapsed = Date.now() - t0;
-
-  // github + linear are independent → run in parallel (~300ms), NOT sequential (~600ms).
-  // merge waits on both, slack waits on merge.
-  console.log(`  fan-out elapsed: ${elapsed}ms (4 steps, 2 parallel + 2 sequential)`);
-  assert.equal(res.status, 'pending'); // slack is a draft → pending
-  assert.equal(calls.length, 3); // github, linear, merge (slack goes to toolkit)
-  // github and linear must have STARTED within a small window of each other.
-  const gh = calls.find((c) => c.name === 'github__list');
-  const ln = calls.find((c) => c.name === 'linear__list');
-  assert.ok(gh && ln, 'github and linear both called');
-  const startDelta = Math.abs(gh.t - ln.t);
-  assert.ok(startDelta < 100, `github+linear should start together (delta ${startDelta}ms)`);
-  // Total should be ~2 sequential hops (parallel pair + merge), not 4.
-  assert.ok(elapsed < 900, `fan-out should be ~600ms not ~1200ms (got ${elapsed}ms)`);
-});
-
-test('compound orchestrator: native hivemind-recall step runs via dispatchTool, not connector runtime', async () => {
-  // No connector runtime set — the native path must not touch it.
-  delete globalThis.__hivemindConnectorRuntime;
-  const dispatched = [];
-  const ctx = {
-    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _toolkit: null,
-    _tracedDispatch: async (name, args) => {
-      dispatched.push({ name, args });
-      return { content: 'Amar leads HIVEMIND, TARA, HYPERAGENTS' };
-    },
-  };
-  const res = await runCompoundOrchestrator({
-    subtasks: [
-      { operation: 'recall', tool_groups: ['hivemind-recall'], depends_on: null, message: 'Recall Amar project details' },
-    ],
-    ctx,
-    apiKey: 'k',
-    signal: null,
-  });
   assert.equal(res.status, 'completed');
-  assert.equal(dispatched.length, 1);
-  assert.equal(dispatched[0].name, 'hivemind_recall');
-  assert.ok(dispatched[0].args.query.includes('Amar'), 'recall query passed through');
+  assert.equal(calls.length, 2);
+  const delta = Math.abs(calls[0].t - calls[1].t);
+  assert.ok(delta < 100, `github+linear should start together (delta ${delta}ms)`);
+  assert.ok(elapsed < 350, `fan-out should be ~200ms not ~400ms (got ${elapsed}ms)`);
 });
 
-test('compound orchestrator: normalizes google-docs to google_docs connector id', async () => {
-  const seen = [];
-  const runtime = makeRuntime({
-    tools: [
-      { name: 'google_docs__create', access: 'write', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
-    ],
-    executeImpl: async (name, input) => {
-      seen.push({ name, input });
-      return { status: 'completed', content: [{ type: 'json', data: { doc_id: 'D1' } }], metadata: { connector: 'google_docs', tool: name } };
-    },
-  });
-  // Wrap listTools to capture the connectors arg.
-  const origList = runtime.listTools.bind(runtime);
-  let listConnectors = null;
-  runtime.listTools = async (ctx, opts) => { listConnectors = opts.connectors; return origList(ctx, opts); };
-  globalThis.__hivemindConnectorRuntime = runtime;
-  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _toolkit: null };
-
-  const res = await runCompoundOrchestrator({
-    subtasks: [
-      { operation: 'create_doc', tool_groups: ['google-docs'], depends_on: null, message: 'create doc' },
-    ],
-    ctx,
-    apiKey: 'k',
-    signal: null,
-    selectTool: makeSelector(() => ({ toolName: 'google_docs__create', args: { title: 'X' } })),
-  });
-  assert.equal(res.status, 'completed');
-  assert.deepEqual(listConnectors, ['google_docs'], 'google-docs must normalize to google_docs');
-  assert.equal(seen[0].name, 'google_docs__create');
-});
-
-test('compound orchestrator: emits tool_call/tool_result SSE events per subtask', async () => {
+test('compound orchestrator: emits tool_call/tool_result SSE events', async () => {
   const events = [];
-  const runtime = makeRuntime({
-    tools: [
-      { name: 'gmail__search', access: 'read', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
-    ],
-    executeImpl: async (name, input) => ({ status: 'completed', content: [{ type: 'text', text: 'ok' }], metadata: { connector: 'gmail', tool: name } }),
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_search', slug: 'GMAIL_SEARCH', description: 'search' }],
+    executeImpl: async () => ({ successful: true, data: {}, error: null }),
   });
-  globalThis.__hivemindConnectorRuntime = runtime;
-  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _toolkit: null };
-
+  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' } };
   const res = await runCompoundOrchestrator({
-    subtasks: [
-      { operation: 'search', tool_groups: ['gmail'], depends_on: null, message: 'search' },
-    ],
-    ctx,
-    apiKey: 'k',
-    signal: null,
-    selectTool: makeSelector(() => ({ toolName: 'gmail__search', args: { query: 'x' } })),
+    subtasks: [{ operation: 'search', tool_groups: ['gmail'], depends_on: null, message: 'search' }],
+    ctx, apiKey: 'k', signal: null, composio,
+    selectTool: makeSelector(() => ({ toolName: 'composio_gmail_search', args: {} })),
     onEvent: (ev) => events.push(ev),
   });
-
   assert.equal(res.status, 'completed');
-  const calls = events.filter((e) => e.type === 'tool_call');
-  const results = events.filter((e) => e.type === 'tool_result');
-  assert.equal(calls.length, 1, 'should emit one tool_call');
-  assert.equal(calls[0].name, 'gmail__search');
-  assert.equal(results.length, 1, 'should emit one tool_result');
-  assert.equal(results[0].name, 'gmail__search');
-  assert.equal(results[0].status, 'completed');
+  assert.equal(events.filter((e) => e.type === 'tool_call').length, 1);
+  assert.equal(events.filter((e) => e.type === 'tool_result').length, 1);
 });

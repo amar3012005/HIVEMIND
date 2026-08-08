@@ -47,29 +47,76 @@ const CONNECTOR_ID_MAP = {
 // dispatchTool path (recall, save, etc.), not the connector runtime.
 const NATIVE_HIVEMIND_GROUPS = new Set(['hivemind-recall', 'hivemind-memory-write', 'hivemind-projects']);
 
-// Canonical runtime tool name → legacy toolkit tool name. The connector runtime
-// registers canonical names (google_docs__create) but the legacy toolkit (which
-// owns the pendingWrite draft-approval flow) registers its own names
-// (gdocs_create). Writes go through the toolkit, so the orchestrator must map
-// the canonical name the model selected to the toolkit name it can execute.
-const TOOLKIT_NAME_MAP = {
-  'google_docs__create': 'gdocs_create',
-  'google_docs__append': 'gdocs_append',
-  'gmail__send': 'gmail_send_email',
-  'gmail__create_draft': 'gmail_create_draft',
-  'gmail__send_draft': 'gmail_send_draft',
-  'slack__post_message': 'slack_post_message',
-  'notion__create_page': 'notion_create_page',
-  'github__create_issue': 'github_create_issue',
-  'linear__create_issue': 'linear_create_issue',
+// Router provider name → Composio toolkit slug. The user's live Gmail / Docs /
+// Calendar connections are Composio connections (stored in Composio's
+// connected_accounts, keyed by orgId as user_id) — NOT Nango rows. So connector
+// steps must dispatch through the Composio service (executeTool), not the
+// legacy Nango toolkit (which only sees nangoConnection rows).
+const COMPOSIO_TOOLKIT_MAP = {
+  gmail: 'gmail',
+  'google-docs': 'googledocs',
+  'google-sheets': 'googlesheets',
+  'google-calendar': 'googlecalendar',
+  'google-gemini': 'googlegemini',
+  slack: 'slack',
+  notion: 'notion',
+  github: 'github',
+  linear: 'linear',
 };
 
 function normalizeConnectorIds(groups) {
   return (groups || []).map((g) => CONNECTOR_ID_MAP[g] || g);
 }
 
-function toolkitNameFor(canonicalName) {
-  return TOOLKIT_NAME_MAP[canonicalName] || canonicalName;
+function composioToolkitFor(groups) {
+  for (const g of groups || []) {
+    const tk = COMPOSIO_TOOLKIT_MAP[g];
+    if (tk) return tk;
+  }
+  return null;
+}
+
+// Verb → tool-name keyword map for local relevance filtering. Maps the
+// subtask's operation (create_doc, send_email, search, ...) to the tool-name
+// keywords that indicate relevance. Keeps each subtask's prompt small.
+const OP_KEYWORDS = {
+  create: ['create', 'insert', 'add', 'new', 'upload', 'import'],
+  send: ['send', 'post', 'reply', 'forward', 'email'],
+  search: ['search', 'list', 'find', 'get', 'fetch', 'read', 'query'],
+  read: ['get', 'read', 'fetch', 'search', 'list', 'find', 'download', 'export'],
+  update: ['update', 'modify', 'edit', 'replace', 'patch', 'append', 'change'],
+  delete: ['delete', 'remove', 'trash', 'move', 'clear'],
+  draft: ['draft', 'create_email_draft'],
+};
+
+function filterRelevantTools(rawTools, operation, message) {
+  if (!Array.isArray(rawTools) || rawTools.length === 0) return rawTools || [];
+  const op = String(operation || '').toLowerCase();
+  const msg = String(message || '').toLowerCase();
+  // Pick the keyword set from the operation label.
+  let keywords = [];
+  for (const [key, kws] of Object.entries(OP_KEYWORDS)) {
+    if (op.includes(key)) { keywords = keywords.concat(kws); }
+  }
+  // Also derive keywords from the message (e.g. "email", "doc", "search").
+  for (const w of ['send', 'email', 'create', 'doc', 'search', 'list', 'read', 'update', 'delete', 'draft']) {
+    if (msg.includes(w)) keywords.push(w);
+  }
+  if (keywords.length === 0) return rawTools.slice(0, 8); // no signal — keep a small default set
+  const unique = [...new Set(keywords)];
+  const scored = rawTools.map((t) => {
+    const name = String(t.function?.name || t.name || '').toLowerCase();
+    const desc = String(t.function?.description || t.description || '').toLowerCase();
+    let score = 0;
+    for (const k of unique) {
+      if (name.includes(k)) score += 2;
+      else if (desc.includes(k)) score += 1;
+    }
+    return { t, score };
+  });
+  const ranked = scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).map((s) => s.t);
+  // Always keep at least a small set so the model has options; cap at 8.
+  return ranked.length >= 2 ? ranked.slice(0, 8) : rawTools.slice(0, 8);
 }
 
 /**
@@ -236,10 +283,16 @@ async function runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent }) {
  * Returns { status, result, toolName, args, draftId, outputFields }.
  * status ∈ 'completed' | 'draft_created' | 'error' | 'not_connected' | ...
  */
-async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs, selectTool = defaultSelectTool, onEvent }) {
+async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs, selectTool = defaultSelectTool, onEvent, composio }) {
   const toolGroups = Array.isArray(subtask.tool_groups) ? subtask.tool_groups : [];
   const message = subtask.message || '';
   const emit = onEvent || (() => {});
+  // Composio service functions — injectable for tests; defaults to the real
+  // service (lazy import so tests can pass a stub without hitting the API).
+  const composioSvc = composio || await (async () => {
+    const m = await import('../connectors/composio/composio-service.js');
+    return { getToolkitTools: m.getToolkitTools, executeTool: m.executeTool };
+  })();
 
   // Native HIVEMIND step (recall / save / projects) — NOT a connector. Run it
   // through the native dispatchTool path so recall actually reaches the memory
@@ -250,35 +303,36 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     return runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent });
   }
 
-  const runtime = await getRuntime(ctx);
-
   // 1. Scope the model's tool choices to this subtask's connector group.
-  //    Normalize router provider names (google-docs) → runtime connector ids
-  //    (google_docs) so listTools actually finds the connector.
-  const connectorIds = normalizeConnectorIds(toolGroups);
-  let catalog;
-  try {
-    catalog = await runtime.listTools(context, { connectors: connectorIds });
-  } catch (err) {
-    return { status: 'error', error: `listTools failed: ${err.message}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
-  }
-  const tools = [];
-  for (const group of catalog) {
-    for (const t of group.tools || []) {
-      // Only tools allowed on the chat surface.
-      if (Array.isArray(t.allowedSurfaces) && !t.allowedSurfaces.includes('chat')) continue;
-      tools.push({
+  //    The user's live connections are COMPOSIO connections, so load the tool
+  //    schemas from the Composio service (getToolkitTools) — NOT the legacy
+  //    Nango toolkit or the connector runtime (both key off nangoConnection,
+  //    which is empty for Composio-connected orgs).
+  const composioToolkit = composioToolkitFor(toolGroups);
+  let tools = [];
+  let composioSlugByTool = new Map();
+  if (composioToolkit) {
+    try {
+      const raw = await composioSvc.getToolkitTools(composioToolkit);
+      // PROGRESSIVE LOADING: narrow the toolkit's full tool list to only the
+      // tools relevant to THIS subtask's operation + message. Composio has no
+      // semantic /tools/search on this deployment (probed → 404), so we do a
+      // lightweight local relevance filter on the tool name + description.
+      // This keeps each subtask's prompt small (a handful of tools, not the
+      // whole toolkit) — the exact "don't bloat the prompt" goal, achieved
+      // with what actually exists.
+      const relevant = filterRelevantTools(raw, subtask.operation, message);
+      tools = relevant.map((t) => ({
         type: 'function',
-        function: {
-          name: t.name,
-          description: t.description || '',
-          parameters: t.inputSchema || { type: 'object', properties: {} },
-        },
-      });
+        function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
+      }));
+      for (const t of relevant) composioSlugByTool.set(t.function.name, t._composio?.slug);
+    } catch (err) {
+      return { status: 'error', error: `composio tools failed: ${err.message}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
     }
   }
   if (tools.length === 0) {
-    return { status: 'error', error: `no tools available for connector group(s): ${toolGroups.join(',') || '(none)'}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
+    return { status: 'error', error: `no composio tools available for connector group(s): ${toolGroups.join(',') || '(none)'}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
   }
 
   // 2. Small tool-calling step: pick ONE tool + args for this subtask.
@@ -292,30 +346,35 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     return { status: 'error', error: 'no tool selected', toolName: null, args: null, result: null, draftId: null, outputFields: {} };
   }
   const { toolName, args: rawArgs } = chosen;
+  const composioSlug = composioSlugByTool.get(toolName) || null;
 
-  // 3. Resolve the canonical tool manifest from the runtime registry. Its
-  // inputSchema is the AUTHORITATIVE declaration of which fields the tool
-  // accepts — dependency injection must use it (never the selector's schema,
-  // which may be a loose projection).
-  let manifest = null;
-  try {
-    const resolved = runtime.registry?.resolveTool?.(toolName);
-    manifest = resolved?.tool || null;
-  } catch { /* fall through */ }
-  const manifestSchema = manifest?.inputSchema || chosen.schema || { properties: {} };
+  // 3. Dependency injection uses the chosen tool's schema (authoritative for
+  //    which fields the tool accepts).
+  const manifestSchema = chosen.schema || { properties: {} };
   const args = injectDependencies(rawArgs, priorOutputs, manifestSchema);
-  const access = manifest?.access || 'read';
-  const approval = manifest?.approval || 'never';
 
   // Emit the tool_call event so the FE shows live activity for this step.
   emit({ type: 'tool_call', name: toolName, arguments: JSON.stringify(args) });
 
-  if (access === 'read' || approval === 'never') {
-    // Read (or non-approval write) — execute directly via the runtime.
-    const result = await runtime.executeTool(toolName, args, context);
-    const status = result?.status || 'failed';
-    const outputFields = extractOutputFields(result);
-    emit({ type: 'tool_result', name: toolName, status, summary: (result?.content?.[0]?.text || status).slice(0, 240) });
+  // 4. Dispatch through Composio. Reads execute immediately; writes go through
+  //    the pendingWrite draft-approval flow (never reported as done until the
+  //    user approves and the write actually executes).
+  const composioExecute = composioSvc.executeTool;
+  const orgId = ctx?.orgId;
+  if (!orgId || !composioSlug) {
+    emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'no composio connection' });
+    return { status: 'error', error: 'no composio connection for this step', toolName, args, result: null, draftId: null, outputFields: {} };
+  }
+
+  // Determine read vs write from the tool name (Composio slugs embed the verb).
+  const isWrite = /(create|send|update|delete|insert|append|post|reply|forward|move|trash|label|modify|patch|import|add|remove|copy|replace|unmerge|export)/i.test(composioSlug);
+
+  if (!isWrite) {
+    // Read — execute immediately via Composio.
+    const result = await composioExecute(orgId, composioSlug, args);
+    const status = result?.successful ? 'completed' : 'failed';
+    const outputFields = result?.data && typeof result.data === 'object' ? result.data : {};
+    emit({ type: 'tool_result', name: toolName, status, summary: (result?.error || (result?.successful ? 'completed' : 'failed')).slice(0, 240) });
     return {
       status,
       result,
@@ -323,81 +382,60 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       args,
       draftId: null,
       outputFields,
-      error: status === 'completed' ? null : (result?.content?.[0]?.text || status),
+      error: status === 'completed' ? null : (result?.error || status),
     };
   }
 
-  // Write requiring approval — hand to the legacy pendingWrite draft flow via
-  // the toolkit (which carries the draft-approval middleware). This produces a
-  // draft_created result the user must approve; it is NEVER reported as done.
-  // The toolkit registers its OWN tool names (gdocs_create), not the runtime's
-  // canonical names (google_docs__create), so map before dispatching.
-  const toolkit = await getWriteToolkit(ctx, toolGroups);
-  if (!toolkit) {
-    emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'no toolkit available' });
-    return { status: 'error', error: 'write requires approval but no toolkit available', toolName, args, result: null, draftId: null, outputFields: {} };
+  // Write — create a pendingWrite draft for approval. The draft stores the
+  // Composio slug + args; on approval the write executes via Composio.
+  const draftId = await createComposioDraft(ctx, composioSlug, args, toolName);
+  if (!draftId) {
+    emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'draft creation failed' });
+    return { status: 'error', error: 'write draft creation failed', toolName, args, result: null, draftId: null, outputFields: {} };
   }
-  const toolkitName = toolkitNameFor(toolName);
-  try {
-    const toolResp = await toolkit.execute(toolkitName, args, ctx);
-    const text = toolResp?.content?.[0]?.text || '';
-    const status = toolResp?.status || 'failed';
-    const draftId = toolResp?.meta?.draft_id || null;
-    emit({ type: 'tool_result', name: toolkitName, status, summary: (text || status).slice(0, 240) });
-    return {
-      status,
-      result: toolResp,
-      toolName: toolkitName,
-      args,
-      draftId,
-      outputFields: {},
-      error: status === 'draft_created' ? null : (text || status),
-    };
-  } catch (err) {
-    emit({ type: 'tool_result', name: toolkitName, status: 'error', summary: err.message });
-    return { status: 'error', error: err.message, toolName, args, result: null, draftId: null, outputFields: {} };
-  }
+  emit({ type: 'tool_result', name: toolName, status: 'draft_created', summary: 'draft created — awaiting approval' });
+  return {
+    status: 'draft_created',
+    result: { status: 'draft_created', draft_id: draftId },
+    toolName,
+    args,
+    draftId,
+    outputFields: {},
+    error: null,
+  };
 }
 
-// Cache of per-org toolkits built on-demand for compound write steps. The
-// per-turn ctx._toolkit is built from the router's tool_groups, which is empty
-// for compound decisions, so connector write groups are never registered. This
-// builds a toolkit with exactly the connector groups the write subtasks need.
-const _writeToolkitCache = new Map();
-
 /**
- * Resolve a toolkit that has the given connector groups registered (for the
- * legacy pendingWrite write path). Prefers ctx._toolkit if it already has the
- * group; otherwise builds one via buildToolkitForUser with the needed groups.
+ * Create a pendingWrite draft row for a Composio write. On approval, the
+ * approval handler re-dispatches and executes the Composio tool. Returns the
+ * draft id, or null on failure.
  */
-async function getWriteToolkit(ctx, toolGroups) {
-  const existing = ctx?._toolkit;
-  if (existing) {
-    // If the existing toolkit already has the group's tools, use it.
-    try {
-      const schemas = existing.getJsonSchemas ? existing.getJsonSchemas() : [];
-      const hasGroup = toolGroups.some((g) => schemas.some((s) => (s.function?.name || '').includes(g.replace('-', '_'))));
-      if (hasGroup) return existing;
-    } catch { /* fall through to build */ }
-  }
-  if (!ctx?.prisma || !ctx?.userId || !ctx?.orgId) return existing || null;
-  const cacheKey = `${ctx.orgId}:${ctx.userId}:${toolGroups.join(',')}`;
-  if (_writeToolkitCache.has(cacheKey)) return _writeToolkitCache.get(cacheKey);
+async function createComposioDraft(ctx, composioSlug, args, toolName) {
+  if (!ctx?.prisma) return null;
   try {
-    const { buildToolkitForUser } = await import('./toolkit-factory.js');
-    const tk = await buildToolkitForUser({
-      prisma: ctx.prisma,
-      userId: ctx.userId,
-      orgId: ctx.orgId,
-      persistentMemoryEngine: ctx.persistentMemoryEngine,
-      selectedGroups: toolGroups,
+    const preview = `${toolName}(${JSON.stringify(args).slice(0, 200)})`;
+    const row = await ctx.prisma.pendingWrite.create({
+      data: {
+        userId: ctx.userId,
+        orgId: ctx.orgId || null,
+        provider: 'composio',
+        toolGroup: 'composio',
+        toolName: composioSlug,
+        toolArgs: { ...(args || {}), _composio_slug: composioSlug },
+        argsHash: JSON.stringify(args || {}),
+        projectId: ctx.projectId || null,
+        connectionId: null,
+        traceId: ctx._trace?.traceId || null,
+        idempotencyKey: `composio:${ctx.orgId}:${ctx.userId}:${composioSlug}:${JSON.stringify(args || {})}`,
+        expiresAt: new Date(Date.now() + Number(process.env.CHAT_DRAFT_TTL_MS || 15 * 60_000)),
+        preview,
+        status: 'draft',
+      },
     });
-    tk.resetEquippedTools?.(toolGroups);
-    _writeToolkitCache.set(cacheKey, tk);
-    return tk;
+    return row?.id || null;
   } catch (err) {
-    console.warn(`[compound] write toolkit build failed: ${err.message}`);
-    return existing || null;
+    console.warn(`[compound] composio draft create failed: ${err.message}`);
+    return null;
   }
 }
 
@@ -414,9 +452,12 @@ async function getWriteToolkit(ctx, toolGroups) {
  * @param {Function} [opts.onEvent]  SSE emitter — receives tool_call/tool_result
  *   events per subtask so the FE can stream live activity (matches the desktop
  *   / mobile chat Thinking animation contract).
+ * @param {object} [opts.composio]  override for the Composio service functions
+ *   ({ getToolkitTools, executeTool }) — tests inject a stub; production uses
+ *   the real service.
  * @returns {Promise<{ steps: Array, draftIds: Array, summary: string, status: string }>}
  */
-export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, selectTool, onEvent }) {
+export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, selectTool, onEvent, composio }) {
   const context = buildContext(ctx, 'chat');
   const steps = [];
   const draftIds = [];
@@ -450,7 +491,7 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
       const deps = Array.isArray(st.depends_on) ? st.depends_on : [];
       const priorOutputs = {};
       for (const d of deps) Object.assign(priorOutputs, outputs[d] || {});
-      return runSubtask({ subtask: st, context, ctx, apiKey, signal, priorOutputs, selectTool, onEvent });
+      return runSubtask({ subtask: st, context, ctx, apiKey, signal, priorOutputs, selectTool, onEvent, composio });
     }));
     // Write results back by index (order preserved).
     for (let k = 0; k < ready.length; k++) {

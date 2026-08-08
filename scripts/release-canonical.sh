@@ -97,7 +97,12 @@ MANIFEST="$REL/RELEASE_MANIFEST.$TS.json"
 OVERRIDE="$REL/deploy-override.$TS.yml"
 declare -A ROLLBACK=()
 
-if [ "$DRY" = 1 ]; then echo "[dry-run] validated sha+worktree+compose; skipping build/deploy"; exit 0; fi
+if [ "$DRY" = 1 ]; then
+  "$PRESENCE" complete --session "$RELEASE_SESSION_ID" --result dry_run --summary "release validation passed; no deployment"
+  trap - EXIT
+  echo "[dry-run] validated sha+worktree+compose; skipping build/deploy"
+  exit 0
+fi
 
 # ── build immutable sha images + preserve rollback ─────────────────────────
 echo "services:" > "$OVERRIDE.tmp"

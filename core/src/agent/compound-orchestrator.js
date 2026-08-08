@@ -125,6 +125,31 @@ export function rankToolSelectionCards(cards, canonicalOperation = '') {
   }).sort((a, b) => b.score - a.score || a.index - b.index).map(({ card }) => card);
 }
 
+function toolCardRelevanceScore(card, canonicalOperation) {
+  const tokens = (value) => new Set(String(value || '').toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((token) => token.length >= 3));
+  const intentTokens = tokens(canonicalOperation);
+  const nameTokens = tokens(card?.name);
+  const descriptionTokens = tokens(card?.description);
+  let score = 0;
+  for (const token of intentTokens) {
+    if (nameTokens.has(token)) score += 3;
+    if (descriptionTokens.has(token)) score += 1;
+  }
+  return score;
+}
+
+function resolveMentionedTool(rawTools, text) {
+  const haystack = String(text || '').toLocaleLowerCase();
+  if (!haystack) return null;
+  return (rawTools || []).find((tool) => {
+    const name = String(tool?.function?.name || tool?.name || '').toLocaleLowerCase();
+    const slug = String(tool?._composio?.slug || '').toLocaleLowerCase();
+    return (name && haystack.includes(name)) || (slug && haystack.includes(slug));
+  }) || null;
+}
+
 export function resolveSelectedTool(rawTools, selectedName) {
   const wanted = String(selectedName || '').trim().toLocaleLowerCase();
   if (!wanted) return null;
@@ -144,7 +169,11 @@ export function resolveSelectedTool(rawTools, selectedName) {
 }
 
 async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, signal }) {
-  const cards = rankToolSelectionCards(buildToolSelectionCards(rawTools), canonicalOperation);
+  const rankedCards = rankToolSelectionCards(buildToolSelectionCards(rawTools), canonicalOperation);
+  const relevantCards = rankedCards.filter((card) => toolCardRelevanceScore(card, canonicalOperation) > 0);
+  const cards = relevantCards.length ? relevantCards : rankedCards;
+  const eligibleNames = new Set(cards.map((card) => card.name));
+  const eligibleTools = rawTools.filter((tool) => eligibleNames.has(String(tool?.function?.name || tool?.name || '')));
   if (!cards.length) throw new Error('no connector tool cards available');
   const selector = {
     type: 'function',
@@ -175,11 +204,14 @@ async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, s
     }, { fallbackApiKey: apiKey });
     if (!resp.ok) throw new Error(`tool-card selector ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
     const data = await resp.json();
-    const call = data?.choices?.[0]?.message?.tool_calls?.[0];
+    const modelMessage = data?.choices?.[0]?.message || {};
+    const call = modelMessage?.tool_calls?.[0];
     let args = {};
     try { args = JSON.parse(call?.function?.arguments || '{}'); } catch {}
-    const selected = resolveSelectedTool(rawTools, args.tool_name);
+    const selected = resolveSelectedTool(eligibleTools, args.tool_name);
     if (selected) return selected;
+    const mentioned = resolveMentionedTool(eligibleTools, modelMessage.content);
+    if (mentioned) return mentioned;
   }
   // Some OpenAI-compatible providers occasionally violate an enum inside a
   // forced selector tool call. Fall back to the provider-enforced native tool
@@ -187,7 +219,7 @@ async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, s
   // it is only paid on selector failure and always resolves back to a manifest
   // that actually exists, rather than turning a valid connector read into an
   // intermittent orchestration error.
-  const providerTools = rawTools.map((tool) => ({
+  const providerTools = eligibleTools.map((tool) => ({
     type: 'function',
     function: {
       name: tool?.function?.name,
@@ -196,7 +228,7 @@ async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, s
     },
   }));
   const fallback = await defaultSelectTool({ tools: providerTools, message, apiKey, signal });
-  const selected = resolveSelectedTool(rawTools, fallback?.toolName);
+  const selected = resolveSelectedTool(eligibleTools, fallback?.toolName);
   if (selected) return selected;
   throw new Error('tool-card selector returned an unavailable tool after retry and governed fallback');
 }

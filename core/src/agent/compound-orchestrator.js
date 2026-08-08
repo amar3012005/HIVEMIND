@@ -566,6 +566,24 @@ export function exactGroundedDependencyContent(priorOutputs) {
   return [...new Set(values)].join('\n\n');
 }
 
+export function normalizeCompoundDependencies(subtasks) {
+  const normalized = (Array.isArray(subtasks) ? subtasks : []).map((step) => ({
+    ...step,
+    tool_groups: Array.isArray(step?.tool_groups) ? [...step.tool_groups] : [],
+    depends_on: Array.isArray(step?.depends_on) ? [...new Set(step.depends_on.filter(Number.isInteger))] : [],
+  }));
+  for (let index = 0; index < normalized.length; index += 1) {
+    const step = normalized[index];
+    if (step.authority !== 'write' || step.depends_on.length) continue;
+    const priorReads = normalized.slice(0, index).flatMap((candidate, priorIndex) => {
+      const nativeRead = candidate.tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group));
+      return candidate.authority === 'read' || nativeRead ? [priorIndex] : [];
+    });
+    if (priorReads.length) step.depends_on = priorReads;
+  }
+  return normalized;
+}
+
 /**
  * Default tool-selection step: scope the model's tool choices to the subtask's
  * connector group and let it pick ONE tool + args. Injectable for tests.
@@ -1163,6 +1181,7 @@ async function createComposioDraft(ctx, composioSlug, args, toolName) {
  * @returns {Promise<{ steps: Array, draftIds: Array, summary: string, status: string }>}
  */
 export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, selectTool, onEvent, composio, resumeState = null }) {
+  subtasks = normalizeCompoundDependencies(subtasks);
   const context = buildContext(ctx, 'chat');
   const steps = [];
   const draftIds = [];

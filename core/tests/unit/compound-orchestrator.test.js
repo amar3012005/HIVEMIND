@@ -16,6 +16,7 @@ import {
   filterComposioToolsByAuthority,
   filterProviderDraftToolsForTerminalOperation,
   exactGroundedDependencyContent,
+  normalizeCompoundDependencies,
   rankToolSelectionCards,
   resolveSelectedTool,
   runCompoundOrchestrator,
@@ -394,6 +395,20 @@ test('exact dependency fallback extracts complete grounded content instead of a 
   assert.match(content, /G ROCHER/);
   assert.match(content, /white flower charm/);
   assert.equal(content.includes('memories'), false);
+});
+
+test('plan validation attaches earlier reads to a governed write when planner omits the edge', () => {
+  const normalized = normalizeCompoundDependencies([
+    { operation: 'recall', authority: 'read', tool_groups: ['hivemind-recall'], depends_on: [] },
+    { operation: 'send_email', authority: 'write', tool_groups: ['gmail'], depends_on: [] },
+  ]);
+  assert.deepEqual(normalized[1].depends_on, [0]);
+  const explicit = normalizeCompoundDependencies([
+    { operation: 'recall', authority: 'read', tool_groups: ['hivemind-recall'], depends_on: [] },
+    { operation: 'search', authority: 'read', tool_groups: ['gmail'], depends_on: [] },
+    { operation: 'send_email', authority: 'write', tool_groups: ['gmail'], depends_on: [1] },
+  ]);
+  assert.deepEqual(explicit[2].depends_on, [1], 'explicit planner dependencies remain authoritative');
 });
 
 test('missing write fields produce a resumable generalized field-input request', async () => {

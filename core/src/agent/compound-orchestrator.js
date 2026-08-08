@@ -823,7 +823,24 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
 
   if (!isWrite) {
     // Read — execute immediately via Composio.
-    const rawResult = await composioExecute(orgId, composioSlug, args);
+    let executedArgs = args;
+    let rawResult = await composioExecute(orgId, composioSlug, executedArgs);
+    // Query Mode occasionally lags a provider enum/schema revision. Repair one
+    // failed READ from the provider's concrete validation message. This is
+    // toolkit-agnostic and bounded; writes are never auto-retried.
+    if (!rawResult?.successful && rawResult?.error && typeof composioSvc.generateToolInputs === 'function') {
+      try {
+        const repaired = await composioSvc.generateToolInputs(
+          composioSlug,
+          `${buildSubtaskExecutionMessage(message, priorOutputs)}\n\nThe provider rejected the previous generated arguments with this validation error: ${String(rawResult.error).slice(0, 800)}. Generate corrected arguments that satisfy the current tool schema.`,
+          { systemPrompt: 'Repair the arguments using the provider validation error. Preserve grounded identifiers and intent. Do not execute.' },
+        );
+        const repairedDependencies = injectDependencies(repaired, priorOutputs, manifestSchema);
+        executedArgs = applyConnectorRetrievalPolicy(repairedDependencies, manifestSchema, subtask.retrieval);
+        emit({ type: 'tool_call', name: toolName, retry: 'provider_schema_repair', arguments: JSON.stringify(executedArgs) });
+        rawResult = await composioExecute(orgId, composioSlug, executedArgs);
+      } catch { /* original provider failure remains authoritative */ }
+    }
     const result = rawResult?.data && typeof rawResult.data === 'object'
       ? { ...rawResult, data: applyConnectorResultPolicy(rawResult.data, subtask.retrieval) }
       : rawResult;
@@ -838,7 +855,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       status,
       result,
       toolName,
-      args,
+      args: executedArgs,
       draftId: null,
       outputFields,
       inputRequest: status === 'needs_input' ? {

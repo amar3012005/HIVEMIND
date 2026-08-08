@@ -190,12 +190,18 @@ export async function projectAdaptiveRankedMemoryEvidence({
   const top = memories[0] || null;
   const topContent = String(top?.content || '');
   if (!top || topContent.length > budget) {
-    return projectRankedMemoryEvidence({
+    const projected = await projectRankedMemoryEvidence({
       query,
       memories,
-      perMemoryBudget: Math.max(120, Math.min(lowerRankBudget, budget)),
+      perMemoryBudget: Math.max(120, Math.min(lowerRankBudget, Math.floor(budget / Math.max(1, memories.length)))),
       embed,
     });
+    let remaining = budget;
+    return projected.map((item) => {
+      const excerpt = String(item?.excerpt || '').slice(0, Math.max(0, remaining));
+      remaining = Math.max(0, remaining - excerpt.length);
+      return excerpt === item.excerpt ? item : { ...item, excerpt };
+    }).filter((item) => item.excerpt.length > 0);
   }
   const remaining = Math.max(0, budget - topContent.length);
   const projectedTail = remaining > 0 && memories.length > 1

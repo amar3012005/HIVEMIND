@@ -13,6 +13,9 @@ test('projection cache key is tenant scoped and changes when ranked content chan
   assert.equal(same, buildProjectionCacheKey({ ...base }));
   assert.notEqual(same, buildProjectionCacheKey({ ...base, userId: 'user-b' }));
   assert.notEqual(same, buildProjectionCacheKey({ ...base, memories: [{ id: 'm1', content: 'black' }] }));
+  assert.notEqual(same, buildProjectionCacheKey({ ...base, contextRevision: 2 }));
+  assert.notEqual(same, buildProjectionCacheKey({ ...base, projectorVersion: 'adaptive-v3' }));
+  assert.notEqual(same, buildProjectionCacheKey({ ...base, memories: [{ id: 'm1', content: 'dark brown', tags: ['changed'] }] }));
 });
 
 test('projection cache returns only a live entry for the exact key', async () => {

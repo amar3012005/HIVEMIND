@@ -16,3 +16,11 @@ test('timeline synthesis adds temporal handling without making fact prompts temp
   assert.match(prompt, /TEMPORAL/);
   assert.match(prompt, /superseded/i);
 });
+
+test('operation modules are disclosed only to the matching synthesis path', () => {
+  assert.match(buildSynthesisSystemPrompt({ operation: 'profile' }), /PROFILE:/);
+  assert.match(buildSynthesisSystemPrompt({ operation: 'source_read' }), /SOURCE:/);
+  assert.match(buildSynthesisSystemPrompt({ operation: 'connector_read' }), /LIVE CONNECTOR:/);
+  assert.match(buildSynthesisSystemPrompt({ operation: 'connector_write' }), /MUTATION:/);
+  assert.doesNotMatch(buildSynthesisSystemPrompt({ operation: 'recall' }), /LIVE CONNECTOR:|MUTATION:/);
+});

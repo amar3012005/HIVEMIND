@@ -27,12 +27,13 @@
  */
 
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
-import { buildRecallPacket, validateGroundedClaims } from '../memory/recall-packet.js';
+import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
 import { buildSynthesisSystemPrompt } from './chat-synthesis-prompt.js';
-import { chooseSynthesisModel, shouldOptimizeRecallQuery, summarizeUsage } from './chat-synthesis-policy.js';
+import { chooseSynthesisModel, isCandidateSynthesisAcceptable, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
+import { citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 import {
   chatCompletionFetch,
@@ -1493,11 +1494,15 @@ export async function answerStep({ message, history, evidence, plan, language, a
       scope: ctx?.scopeFilter || plan.scope_filter || '',
       query: _projectionQuery,
       budget: projectionBudget,
+      recallMode,
+      temporalControls: plan?.time || plan?.time_travel || null,
+      contextRevision: ctx?.contextRevision || ctx?.accessContext?.contextRevision || null,
+      projectorVersion: 'adaptive-v2',
       memories: _selectedMemories,
     }) : null;
     if (projectionCacheKey) {
       _projectedMemories = await getSharedChatProjectionCache().get(projectionCacheKey);
-      if (ctx?._trace) ctx._trace.cag = { projection: _projectedMemories ? 'hit' : 'miss', key_version: 1 };
+      if (ctx?._trace) ctx._trace.cag = { phase: 'projection-only', projection: _projectedMemories ? 'hit' : 'miss', key_version: 2 };
     }
     const embed = ctx?._embedEvidence || (async (texts) => {
       const { getEmbedService } = await import('../embeddings/factory.js');
@@ -1549,29 +1554,11 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // Every delivered memory carries its server-owned citation ID inline. This
   // replaces the old duplicate MEMORY + citation-registry representation: the
   // model sees the passage once, together with the only ID it may cite.
-  if (buildChatCitationPacket(evidence.recall_packets || []).citations.length === 0 && _selectedMemories.length > 0) {
-    evidence = {
-      ...evidence,
-      recall_packets: [
-        ...(evidence.recall_packets || []),
-        buildRecallPacket({ facts: _selectedMemories, plan: { mode: recallMode } }),
-      ],
-    };
-  }
+  evidence = { ...evidence, recall_packets: ensureMemoryCitationPackets(evidence.recall_packets || [], _selectedMemories, { mode: recallMode }) };
   const citationPacket = buildChatCitationPacket(evidence.recall_packets || []);
-  const citationIdByMemoryId = new Map(
-    citationPacket.citations
-      .filter((citation) => citation.memory_id)
-      .map((citation) => [citation.memory_id, citation.id]),
-  );
-  const citationIdForMemory = (memory) => citationIdByMemoryId.get(memory?.id)
-    || citationPacket.citations.find((citation) => citation.document_id
-      && citation.document_id === (memory?.document_id || memory?.documentId))?.id
-    || citationPacket.citations[0]?.id
-    || String(memory?.id || '').slice(0, 8);
   const evidenceLines = _projectedMemories.map(({ memory: m, excerpt, tags: projectedTags }) => {
     const id8 = (m.id || '').slice(0, 8);
-    const citationId = citationIdForMemory(m);
+    const citationId = citationIdForMemory(citationPacket.citations, m);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
     const content = String(excerpt || '').replace(/\n/g, ' ');
     const tags = projectedTags.join(', ');
@@ -1598,8 +1585,8 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const rawDate = m.document_date || m.created_at || m.createdAt || m.valid_from;
     const date = rawDate ? new Date(rawDate).toISOString().slice(0, 10) : '?';
     const src = m.source_metadata?.source_platform || m.source_platform || m.memory_type || 'memory';
-    return `${synthTag}{citation_id:${citationId}, rank:${id8 ? _projectedMemories.findIndex((item) => item.memory?.id === m.id) + 1 : '?'} source:${src}, date:${date}}${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}`;
-  }).join('\n');
+    return citationId ? `${synthTag}{citation_id:${citationId}, rank:${id8 ? _projectedMemories.findIndex((item) => item.memory?.id === m.id) + 1 : '?'} source:${src}, date:${date}}${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}` : '';
+  }).filter(Boolean).join('\n');
 
   // Live Workspace block — Gmail / Drive / Calendar fetched in this turn.
   // Fresher than memory snapshots; agent should cite these when the user asks
@@ -1784,10 +1771,21 @@ PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 USER MESSAGE:
 ${message}`;
   if (ctx?._trace) {
+    const seenExcerpts = new Set();
+    const duplicateChars = _projectedMemories.reduce((sum, item) => {
+      const excerpt = String(item?.excerpt || '');
+      if (!excerpt || !seenExcerpts.has(excerpt)) {
+        if (excerpt) seenExcerpts.add(excerpt);
+        return sum;
+      }
+      return sum + excerpt.length;
+    }, 0);
     ctx._trace.evidence_delivery = {
       ranked_chars: _selectedMemories.reduce((sum, memory) => sum + String(memory?.content || '').length, 0),
       delivered_chars: _projectedMemories.reduce((sum, item) => sum + String(item?.excerpt || '').length, 0),
-      duplicate_chars: 0,
+      duplicate_chars: duplicateChars,
+      citation_chars: citationPacket.citations.reduce((sum, citation) => sum + String(citation?.id || '').length, 0),
+      delivery_modes: [...new Set(_projectedMemories.map((item) => item?.projection).filter(Boolean))],
       memories: _projectedMemories.map(({ memory: item, excerpt, projection, selected_passage_indexes }, index) => ({
         rank: index + 1,
         memory_id: item?.id || null,
@@ -3010,6 +3008,7 @@ export async function runReactAgentV2({
     // The answer LLM still receives the user's original message.
     const _dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read'
       || plan.operation === 'relation_between' || plan.operation === 'profile';
+    let queryOptimizerRan = false;
     if (!_dedicatedLane
         && shouldOptimizeRecallQuery({ router: intentDecision._router, canonicalQuery: plan.query_canonical_en })
         && Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
@@ -3018,6 +3017,7 @@ export async function runReactAgentV2({
           message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
         });
         const optimized = optimizedResult.queries;
+        queryOptimizerRan = true;
         recordUsage('query_optimizer', optimizedResult.usage);
         if (optimized.length) {
           plan.query_canonical_en = optimized[0];
@@ -3037,7 +3037,7 @@ export async function runReactAgentV2({
       aggregate: plan.aggregate || null,
     });
     _ps = Date.now();
-    const evidence = await gatherEvidence({
+    let evidence = await gatherEvidence({
       plan,
       ctx,
       onEvent,
@@ -3047,6 +3047,28 @@ export async function runReactAgentV2({
     });
     _pt('gather_evidence_ms', _ps);
     steps.push(...evidence.steps);
+    if (!_dedicatedLane && shouldRetryAfterZeroCoverage({
+      router: intentDecision._router,
+      canonicalQuery: plan.query_canonical_en,
+      coverage: evidence.coverage,
+      alreadyOptimized: queryOptimizerRan,
+    })) {
+      const retryResult = await optimizeRecallQueries({
+        message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
+      });
+      recordUsage('query_optimizer_retry', retryResult.usage);
+      queryOptimizerRan = true;
+      if (retryResult.queries.length) {
+        plan.query_canonical_en = retryResult.queries[0];
+        plan.sub_queries = [...new Set(retryResult.queries)].slice(0, 3);
+        onEvent?.({ type: 'query_optimized', queries: plan.sub_queries, reason: 'zero_coverage_retry' });
+        const retried = await gatherEvidence({
+          plan, ctx, onEvent, deadlineAt: Date.now() + RETRIEVAL_BUDGET_MS,
+        });
+        steps.push(...retried.steps);
+        evidence = retried;
+      }
+    }
     trace.recall = {
       coverage: evidence.coverage,
       escalation_count: evidence.escalation_count,
@@ -3072,27 +3094,41 @@ export async function runReactAgentV2({
         throw error;
       }
     }
+    if (answerModel !== requestedAnswerModel && !isCandidateSynthesisAcceptable(answer)) {
+      trace.model_policy = { ...modelPolicy, fallback_reason: 'candidate_synthesis_validation_failed' };
+      answerModel = requestedAnswerModel;
+      trace.models.synthesis = answerModel;
+      answer = await answerStep({ ...answerInput, model: answerModel });
+    }
     if (modelPolicy.shadow) {
-      const shadowStartedAt = Date.now();
-      try {
-        const shadow = await Promise.race([
-          answerStep({ ...answerInput, model: modelPolicy.shadow }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('shadow_timeout')), Number(process.env.HIVEMIND_DEEPSEEK_SHADOW_TIMEOUT_MS || 5000))),
-        ]);
-        trace.shadow_synthesis = {
+      const servedSummary = {
+        claim_count: answer.claims?.length || 0,
+        citation_count: (answer.claims || []).reduce((sum, claim) => sum + (claim.citation_ids?.length || 0), 0),
+      };
+      scheduleShadowEvaluation({
+        timeoutMs: Number(process.env.HIVEMIND_DEEPSEEK_SHADOW_TIMEOUT_MS || 15000),
+        execute: (shadowSignal) => answerStep({
+          ...answerInput,
+          signal: shadowSignal,
+          ctx: { ...ctx, _trace: { warnings: [] } },
           model: modelPolicy.shadow,
-          ms: Date.now() - shadowStartedAt,
-          valid_json_contract: Array.isArray(shadow.claims),
-          grounded: shadow.grounded === true,
-          claim_count: shadow.claims?.length || 0,
-          citation_count: (shadow.claims || []).reduce((sum, claim) => sum + (claim.citation_ids?.length || 0), 0),
-          served_claim_count: answer.claims?.length || 0,
-          served_citation_count: (answer.claims || []).reduce((sum, claim) => sum + (claim.citation_ids?.length || 0), 0),
-          usage: shadow.usage,
-        };
-      } catch (error) {
-        trace.shadow_synthesis = { model: modelPolicy.shadow, ms: Date.now() - shadowStartedAt, error: error.message || 'shadow_failed' };
-      }
+        }),
+        onResult: (result) => {
+          const shadow = result.answer;
+          console.log('[chat-shadow-evaluation]', JSON.stringify({
+            model: modelPolicy.shadow,
+            ms: result.ms,
+            ok: result.ok,
+            valid_json_contract: result.ok && Array.isArray(shadow?.claims),
+            grounded: shadow?.grounded === true,
+            claim_count: shadow?.claims?.length || 0,
+            citation_count: (shadow?.claims || []).reduce((sum, claim) => sum + (claim.citation_ids?.length || 0), 0),
+            ...servedSummary,
+            usage: shadow?.usage || null,
+            error: result.ok ? null : (result.error?.message || 'shadow_failed'),
+          }));
+        },
+      });
     }
     _pt('answer_step_ms', _ps);
     for (const [stage, usage] of Object.entries(answer.usage_stages || { synthesis: answer.usage })) {

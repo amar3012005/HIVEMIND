@@ -4,6 +4,36 @@ export function shouldOptimizeRecallQuery({ router, canonicalQuery } = {}) {
   return router !== 'progressive' || !String(canonicalQuery || '').trim();
 }
 
+export function shouldRetryAfterZeroCoverage({ router, canonicalQuery, coverage, alreadyOptimized = false } = {}) {
+  return router === 'progressive'
+    && !!String(canonicalQuery || '').trim()
+    && coverage?.evidence_found === false
+    && alreadyOptimized !== true;
+}
+
+export function isCandidateSynthesisAcceptable(answer) {
+  return answer?.grounded === true
+    && typeof answer?.response === 'string'
+    && answer.response.trim().length > 0
+    && Array.isArray(answer?.claims)
+    && answer.claims.length > 0
+    && answer.claims.every((claim) => claim?.grounded === true
+      && Array.isArray(claim?.citation_ids)
+      && claim.citation_ids.length > 0);
+}
+
+export function scheduleShadowEvaluation({ execute, timeoutMs = 5000, onResult = () => {} } = {}) {
+  if (typeof execute !== 'function') return;
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const timer = setTimeout(() => controller.abort(new Error('shadow_timeout')), timeoutMs);
+  void Promise.resolve()
+    .then(() => execute(controller.signal))
+    .then((answer) => onResult({ ok: true, answer, ms: Date.now() - startedAt }))
+    .catch((error) => onResult({ ok: false, error, ms: Date.now() - startedAt }))
+    .finally(() => clearTimeout(timer));
+}
+
 export function chooseSynthesisModel({
   operation,
   recallMode,

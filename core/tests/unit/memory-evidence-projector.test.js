@@ -144,3 +144,15 @@ test('adaptive projection reserves the remaining global budget across lower-rank
   assert.equal(projected[0].excerpt.length, 1800);
   assert.ok(projected.reduce((sum, item) => sum + item.excerpt.length, 0) <= 2400);
 });
+
+test('adaptive projection enforces one global budget when rank one itself needs semantic projection', async () => {
+  const projector = await import('../../src/agent/memory-evidence-projector.js');
+  const projected = await projector.projectAdaptiveRankedMemoryEvidence({
+    query: 'buried detail',
+    memories: [1, 2, 3, 4].map((index) => ({ id: `m${index}`, content: `buried detail ${String(index).repeat(4000)}`, tags: [] })),
+    totalBudget: 1200,
+    lowerRankBudget: 700,
+    embed: async (texts) => texts.map(() => [1, 0]),
+  });
+  assert.ok(projected.reduce((sum, item) => sum + item.excerpt.length, 0) <= 1200);
+});

@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   chooseSynthesisModel,
+  isCandidateSynthesisAcceptable,
+  scheduleShadowEvaluation,
+  shouldRetryAfterZeroCoverage,
   shouldOptimizeRecallQuery,
   summarizeUsage,
 } from '../../src/agent/chat-synthesis-policy.js';
@@ -10,6 +13,29 @@ import {
 test('router canonical query suppresses duplicate query optimization', () => {
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color' }), false);
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: '' }), true);
+});
+
+test('shadow evaluation is scheduled without blocking the served response', async () => {
+  let completed;
+  const result = new Promise((resolve) => { completed = resolve; });
+  const returned = scheduleShadowEvaluation({
+    execute: async () => ({ grounded: true, claims: [] }),
+    onResult: completed,
+  });
+  assert.equal(returned, undefined);
+  assert.equal((await result).ok, true);
+});
+
+test('candidate synthesis must be fully grounded and cited before it can suppress GPT-OSS fallback', () => {
+  assert.equal(isCandidateSynthesisAcceptable({ grounded: true, response: 'G ROCHER', claims: [{ grounded: true, citation_ids: ['P1-C1'] }] }), true);
+  assert.equal(isCandidateSynthesisAcceptable({ grounded: false, response: 'Unavailable', claims: [] }), false);
+  assert.equal(isCandidateSynthesisAcceptable({ grounded: true, response: 'G ROCHER', claims: [{ grounded: true, citation_ids: [] }] }), false);
+});
+
+test('progressive canonical query is rewritten only after first recall has zero coverage', () => {
+  assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: false }), true);
+  assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: true }, alreadyOptimized: false }), false);
+  assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: true }), false);
 });
 
 test('DeepSeek shadow is eligible only for native fact recall and never becomes the served compound model', () => {

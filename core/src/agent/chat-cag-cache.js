@@ -9,16 +9,31 @@ function digest(value) {
   return createHash('sha256').update(String(value || '')).digest('hex');
 }
 
-export function buildProjectionCacheKey({ orgId, userId, projectIds = [], scope, query, budget, memories = [] } = {}) {
+export function buildProjectionCacheKey({
+  orgId, userId, projectIds = [], scope, query, budget, memories = [],
+  recallMode = 'fact', temporalControls = null, contextRevision = null,
+  projectorVersion = 'adaptive-v2',
+} = {}) {
   const payload = {
-    v: 1,
+    v: 2,
     orgId: String(orgId || ''),
     userId: String(userId || ''),
     projectIds: [...projectIds].map(String).sort(),
     scope: String(scope || ''),
     query: String(query || '').normalize('NFKC').toLocaleLowerCase(),
     budget: Number(budget) || 0,
-    memories: memories.map((memory) => ({ id: String(memory?.id || ''), content: digest(memory?.content) })),
+    recallMode: String(recallMode || 'fact'),
+    temporalControls: temporalControls || null,
+    contextRevision: contextRevision == null ? null : String(contextRevision),
+    projectorVersion,
+    memories: memories.map((memory) => ({
+      id: String(memory?.id || ''),
+      fingerprint: digest(JSON.stringify({
+        content: memory?.content || '', title: memory?.title || '', tags: memory?.tags || [],
+        updatedAt: memory?.updated_at || memory?.updatedAt || null,
+        source: memory?.source_metadata || memory?.sourceMetadata || null,
+      })),
+    })),
   };
   return `hm:chat:cag:projection:${digest(JSON.stringify(payload))}`;
 }

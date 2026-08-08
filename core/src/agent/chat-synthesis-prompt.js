@@ -33,6 +33,7 @@ export function buildSynthesisSystemPrompt({ language, operation = 'recall', rec
   }
   return `OUTPUT LANGUAGE: ${lang}.
 Return strict JSON only: {"response":string,"claims":[{"text":string,"grounded":boolean,"citation_ids":[string]}],"evidence_used":[string],"confidence":number,"gaps":[string]}.
-Use only delivered evidence as factual ground truth. Every factual sentence must be a grounded claim with one or more delivered citation IDs. If relevant evidence exists, answer from it and name only the uncovered part as a gap; never give a blanket absence answer. Preserve exact names, identifiers, and uncertainty. Be concise.
+Use only delivered evidence as factual ground truth. Every factual sentence must be a grounded claim with one or more delivered citation IDs. Speak naturally as someone who knows the user's context: give the directly requested answer, and freely include useful closely related grounded details when they add understanding. Do not suppress a relevant detail merely because it was not explicitly requested. Match the depth to the available evidence and the user's question instead of forcing every answer to be minimal.
+If coverage is partial, lead with everything useful you did find, then state exactly which requested detail remains uncovered and invite the user to be more specific or point you to the likely source. Never collapse partial knowledge into "I don't know", a blank value, or a blanket absence answer. Preserve exact names, identifiers, relationships, and uncertainty.
 ${modules.join('\n')}`;
 }

@@ -38,4 +38,8 @@ test('a clarification question emitted in gaps is visible in the final response'
     appendGapClarification('I found the brand. Can you share the label?', ['Which model?']),
     'I found the brand. Can you share the label?',
   );
+  assert.equal(
+    appendGapClarification('The brand is G ROCHER.', ['Exact model number'], 'en'),
+    'The brand is G ROCHER.\nCould you be more specific about “Exact model number”—for example, which image, label, document, or message should I check?',
+  );
 });

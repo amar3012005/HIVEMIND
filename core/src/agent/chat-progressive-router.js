@@ -406,6 +406,21 @@ export function adaptToDecision(tool, args, message, language) {
       //     statement like "let's meet on August 5" is NOT diverted.
       // If any of those fail, behaviour is byte-identical to before.
       const _reason = String(args?.reason || 'general');
+      // A clarification is a semantic admission that the router is unsure; it
+      // is not proof that workspace evidence is absent. Ground it through the
+      // bounded recall path first. If recall also finds nothing, synthesis can
+      // still ask for clarification, but a multilingual routing miss can no
+      // longer bypass stored knowledge. Greetings/arithmetic (`general`) and
+      // safety refusals retain the direct path. No language or domain keywords
+      // are involved in this recovery contract.
+      if (_reason === 'clarification') {
+        return { decision: {
+          ...base,
+          operation: 'recall',
+          queries: [base.query_canonical_en],
+          tool_groups: ['hivemind-recall'],
+        }, usage: null };
+      }
       if (_reason === 'general') {
         const _msg = String(message || '');
         const _dates = extractMessageDates(message);

@@ -217,6 +217,19 @@ verification (WrapTest DE, WrapTest DE v2, ScopeTest x3, ScopeV2 x3 on org 13802
 deleted afterwards, together with their 28 memories, and zero residual recall hits were
 confirmed.
 
+## prod-20260809-d878c42f — final chat synthesis on GPT-OSS-20B Nitro
+
+- Parent SHA: `d878c42fe0b928c91d9362b9bcd31439af362493` on `singulance-main`.
+- Frontend SHA: `e2dc70f437ea26bb919a19e23157670086b1be11` (unchanged by this release).
+- Core image: `hivemind/core-api:sha-d878c42f`, digest `sha256:70c5cec4a3da1a3112d6f7a404a1140ba8acb223727c4abb3b99958bc3211281`.
+- Migration: none.
+- Model policy: default user-facing final synthesis is `openai/gpt-oss-20b:nitro` through OpenRouter. Progressive planning remains `google/gemini-2.5-flash-lite`; compound subtask selection remains its dedicated `cerebras/gpt-oss-120b`. Historical DeepSeek final-synthesis shadow/canary flags can no longer override or duplicate final answers. DeepSeek HQ awakening/dispatch workloads are outside this chat-final policy and unchanged.
+- Compatibility: direct OpenRouter probe returned valid JSON in 401 ms and resolved Nitro to Groq. OpenRouter routing retains prompt-cache keys and does not set a manual provider order/sort that would override the Nitro variant.
+- Tests: 56 focused provider, synthesis-policy, prompt-cache, router, native recall, evidence projection, use-tools, and compound/Composio isolation tests passed.
+- Production acceptance: authenticated English brand recall, German color recall, and `use_tools:true` brand recall all returned 200, grounded answers, and trace model `openai/gpt-oss-20b:nitro`; no compound execution or drafts were created. Observed end-to-end times were 3.576 s, 5.926 s, and 5.392 s respectively. Core healthy, restarts 0, OOM false, and no fresh fatal/panic/uncaught/unhandled/OOM logs.
+- Rollback: `hivemind/core-api:sha-5246cdd7`; manifest `/root/releases/d878c42f/RELEASE_MANIFEST.20260808T192925Z.json`.
+- External side effects: none; no connector write, pending-write approval, email, document, calendar action, campaign, or memory mutation was executed.
+
 ## prod-20260809-0293df4d — progressive chat prompt-prefix caching
 
 - Parent SHA: `0293df4da392b868dfc9cd7f364c84010f5277ba` on `singulance-main`.

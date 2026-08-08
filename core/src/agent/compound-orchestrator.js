@@ -55,9 +55,11 @@ const NATIVE_HIVEMIND_GROUPS = new Set(['hivemind-recall', 'hivemind-memory-writ
 // legacy Nango toolkit (which only sees nangoConnection rows).
 const COMPOSIO_TOOLKIT_MAP = {
   gmail: 'gmail',
+  'google-drive': 'googledrive',
   'google-docs': 'googledocs',
   'google-sheets': 'googlesheets',
   'google-calendar': 'googlecalendar',
+  'google-tasks': 'googletasks',
   'google-gemini': 'googlegemini',
   slack: 'slack',
   notion: 'notion',

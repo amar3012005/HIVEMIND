@@ -13,10 +13,14 @@ test('use_tools false never discloses connected or compound capabilities', () =>
 });
 
 test('use_tools true discloses connected and compound capabilities', () => {
-  const names = getProgressiveTools({ useTools: true }).map((tool) => tool.function.name);
+  const tools = getProgressiveTools({ useTools: true });
+  const names = tools.map((tool) => tool.function.name);
   assert.ok(names.includes('use_connector'));
   assert.ok(names.includes('use_campaign'));
   assert.ok(names.includes('compound_plan'));
+  const connector = tools.find((tool) => tool.function.name === 'use_connector');
+  assert.ok(connector.function.parameters.properties.provider.enum.includes('google-calendar'));
+  assert.ok(connector.function.parameters.properties.provider.enum.includes('google-tasks'));
 });
 
 test('a malformed connector decision is downgraded when use_tools is false', () => {

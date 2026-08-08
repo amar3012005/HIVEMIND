@@ -1895,7 +1895,10 @@ ${message}`;
   }
 
   return {
-    response: validated.answer,
+    // Validation deliberately reconstructs prose from factual claims, which
+    // drops non-factual clarification questions. Re-attach only the bounded
+    // gap question after claims have passed the fail-closed citation check.
+    response: appendGapClarification(validated.answer, answerPayload.gaps, language),
     claims: validated.claims,
     rejected_claims: validated.rejected_claims,
     grounded: validated.grounded,

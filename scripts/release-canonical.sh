@@ -134,8 +134,10 @@ if printf '%s\n' "${SVCS[@]}" | grep -qx frontend; then
   [ -n "$CUR" ] && { docker tag "$CUR" hivemind/fe:rollback-single; ROLLBACK[frontend]="$CUR"; }
   echo "[build] frontend → $FTAG"; ( cd "$REL" && build_cmd frontend "$FTAG" ) >/dev/null
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:frontend"
-  docker tag "$FTAG" hivemind/fe:latest-single
-  ( cd "$NEXT_REPO" && NEXT_VERSION=latest docker compose -p hivemind-next -f "$NEXT" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null )
+  FOVERRIDE="$REL/frontend-override.$TS.yml"
+  printf 'services:\n  frontend:\n    image: %s\n' "$FTAG" > "$FOVERRIDE"
+  docker compose -p hivemind-next -f "$NEXT" -f "$FOVERRIDE" --env-file "$NEXTENV" --profile single config -q
+  ( cd "$NEXT_REPO" && docker compose -p hivemind-next -f "$NEXT" -f "$FOVERRIDE" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null )
 fi
 
 # ── verify: health + image-SHA label + optional canary ─────────────────────
@@ -148,7 +150,7 @@ for s in "${SVCS[@]}"; do
   done
   rev=$(docker inspect "$c" --format '{{ index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)
   ok="✓"; { [ "$st" = healthy ] || [ "$st" = running ]; } || { ok="✗ UNHEALTHY"; FAIL=1; }
-  [ "$rev" = "$SHA" ] || { ok="$ok ✗ label=$rev≠$SHA"; }
+  [ "$rev" = "$SHA" ] || { ok="$ok ✗ label=$rev≠$SHA"; FAIL=1; }
   echo "[verify] $s $c → $st  rev=${rev:0:12}  $ok"
 done
 if [ "$SKIP_CANARY" = 0 ] && [ -n "$CANARY_URL" ]; then

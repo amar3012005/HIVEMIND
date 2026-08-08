@@ -7,6 +7,9 @@ test('fact synthesis loads only the compact grounding and citation contract', ()
   const prompt = buildSynthesisSystemPrompt({ language: 'es', operation: 'recall', recallMode: 'fact' });
   assert.match(prompt, /SPANISH/);
   assert.match(prompt, /citation_ids/);
+  assert.match(prompt, /closely related grounded details/i);
+  assert.match(prompt, /be more specific/i);
+  assert.match(prompt, /Never collapse partial knowledge/i);
   assert.doesNotMatch(prompt, /GRAPH EDGES/i);
   assert.doesNotMatch(prompt, /TEMPORAL/i);
 });

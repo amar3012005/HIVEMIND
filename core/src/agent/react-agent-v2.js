@@ -1217,7 +1217,7 @@ function unavailableEvidenceResponse({ message, evidence, language }) {
       de: `Ich habe ${context || 'etwas Kontext'} dazu gefunden — aber nichts, was deine Frage direkt beantwortet. Wenn du mir das passende Dokument, die Entscheidung oder die Nachricht dazu gibst, verbinde ich es mit dem, was ich schon weiss.`,
       fr: `J'ai trouve ${context || 'du contexte'} a ce sujet — mais rien qui reponde directement a ta question. Partage le document, la decision ou le message concerne et je le relierai a ce que je sais deja.`,
       es: `Encontre ${context || 'algo de contexto'} sobre esto — pero nada que responda directamente a tu pregunta. Compárteme el documento, la decision o el mensaje relacionado y lo conectare con lo que ya se.`,
-      en: `I found ${context || 'some related context'} — but nothing that directly answers your question. Share the document, decision, or message behind it and I'll connect it with what I already know.`,
+      en: `I found ${context || 'some related context'} that may be useful, but the specific detail you asked for is not covered yet. If you tell me which person, project, date, document, or message you mean, I'll narrow it down and connect it with what I already know.`,
     };
     return responses[lang] || responses.en;
   }
@@ -1244,7 +1244,7 @@ function unavailableEvidenceResponse({ message, evidence, language }) {
     de: `Dazu habe ich noch nichts in meinem Gedaechtnis — "${topic}" taucht bisher in keiner Quelle auf. Lade ein Dokument hoch oder erzaehl mir kurz davon, dann merke ich es mir und kann beim naechsten Mal antworten.`,
     fr: `Je n'ai encore rien en memoire a ce sujet — "${topic}" n'apparait dans aucune source pour l'instant. Importe un document ou raconte-le-moi, je m'en souviendrai la prochaine fois.`,
     es: `Todavia no tengo nada en mi memoria sobre eso — "${topic}" no aparece en ninguna fuente. Sube un documento o cuentamelo y lo recordare para la proxima vez.`,
-    en: `I don't have anything in my memory about that yet — "${topic}" doesn't appear in any source so far. Upload a document or just tell me about it, and I'll remember it for next time.`,
+    en: `I couldn't find a matching detail for "${topic}" in the sources I can currently see. If you can be more specific about the person, project, date, document, or message, I'll search that angle; you can also tell me the missing context and I'll remember it.`,
   };
   return responses[lang] || responses.en;
 }
@@ -1853,7 +1853,7 @@ ${message}`;
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
   if (!validated.claims.length && hasGroundedPacketEvidence(evidence)) {
-    const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return the strongest concise synthesis that the evidence supports, then name the specific part of the user's question that remains uncovered. Every sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
+    const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered and invite clarification. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
     // stateless API call — it must still see the full evidence in userBlock
     // (already shrunk by the combined budget above) or it has nothing left to
@@ -2651,7 +2651,7 @@ export async function runReactAgentV2({
           const boundedResults = JSON.stringify(compound.synthesisPayload || {}).slice(0, 28000);
           const synthesized = await callJsonLLM({
             messages: [
-              { role: 'system', content: `Return strict JSON {"response":string}. Answer every part of the user's request using only the completed HIVE-MIND recall and live connector results supplied. Preserve exact counts, dates and names. Never replace a supplied fact with "unknown". Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
+              { role: 'system', content: `Return strict JSON {"response":string}. Answer naturally as HIVE using only the completed HIVE-MIND recall and live connector results supplied. Answer every requested part and include useful closely related grounded details when they add context. If one detail is missing, first explain what the results do establish, then identify only the missing part and invite the user to be more specific; never replace partial knowledge with "unknown", a blank value, or a blanket absence response. Preserve exact counts, dates, names, relationships, and uncertainty. Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
               { role: 'user', content: `USER REQUEST:\n${message}\n\nCOMPLETED GOVERNED RESULTS:\n${boundedResults}` },
             ],
             model: requestedAnswerModel,

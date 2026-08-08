@@ -195,30 +195,36 @@ async function defaultSelectTool({ tools, message, apiKey, signal }) {
  * runtime has no hivemind-* connectors, so these must NOT go through
  * runtime.listTools/executeTool. Returns the same shape as runSubtask.
  */
-async function runNativeHivemindStep({ subtask, ctx, priorOutputs }) {
+async function runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent }) {
   const message = subtask.message || '';
   const toolName = 'hivemind_recall';
   const args = {
     query: message,
     ...(priorOutputs && Object.keys(priorOutputs).length ? { context: priorOutputs } : {}),
   };
+  const emit = onEvent || (() => {});
+  emit({ type: 'tool_call', name: toolName, arguments: JSON.stringify(args) });
   try {
     // dispatchTool is the canonical native tool dispatcher (same as chat's
     // recall path). Fall back to ctx._tracedDispatch if present.
     const dispatch = ctx?._tracedDispatch || ctx?._dispatchTool;
     if (!dispatch) {
+      emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'native dispatch unavailable' });
       return { status: 'error', error: 'native hivemind dispatch unavailable', toolName, args, result: null, draftId: null, outputFields: {} };
     }
     const result = await dispatch('hivemind_recall', args, ctx);
     if (result?.error) {
+      emit({ type: 'tool_result', name: toolName, status: 'error', summary: result.error });
       return { status: 'error', error: result.error, toolName, args, result, draftId: null, outputFields: {} };
     }
     // Extract a compact text summary + any scalar output fields for downstream
     // steps (e.g. the doc-creation step can reference recalled facts).
     const text = result?.content || result?.response || result?.summary || JSON.stringify(result).slice(0, 2000);
     const outputFields = { recall: String(text).slice(0, 2000) };
+    emit({ type: 'tool_result', name: toolName, status: 'completed', summary: String(text).slice(0, 240) });
     return { status: 'completed', result, toolName, args, draftId: null, outputFields, error: null };
   } catch (err) {
+    emit({ type: 'tool_result', name: toolName, status: 'error', summary: err.message });
     return { status: 'error', error: err.message, toolName, args, result: null, draftId: null, outputFields: {} };
   }
 }
@@ -230,9 +236,10 @@ async function runNativeHivemindStep({ subtask, ctx, priorOutputs }) {
  * Returns { status, result, toolName, args, draftId, outputFields }.
  * status ∈ 'completed' | 'draft_created' | 'error' | 'not_connected' | ...
  */
-async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs, selectTool = defaultSelectTool }) {
+async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs, selectTool = defaultSelectTool, onEvent }) {
   const toolGroups = Array.isArray(subtask.tool_groups) ? subtask.tool_groups : [];
   const message = subtask.message || '';
+  const emit = onEvent || (() => {});
 
   // Native HIVEMIND step (recall / save / projects) — NOT a connector. Run it
   // through the native dispatchTool path so recall actually reaches the memory
@@ -240,7 +247,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // getRuntime so a native step never touches (or lazily initializes) the
   // connector runtime.
   if (toolGroups.some((g) => NATIVE_HIVEMIND_GROUPS.has(g))) {
-    return runNativeHivemindStep({ subtask, ctx, priorOutputs });
+    return runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent });
   }
 
   const runtime = await getRuntime(ctx);
@@ -300,11 +307,15 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   const access = manifest?.access || 'read';
   const approval = manifest?.approval || 'never';
 
+  // Emit the tool_call event so the FE shows live activity for this step.
+  emit({ type: 'tool_call', name: toolName, arguments: JSON.stringify(args) });
+
   if (access === 'read' || approval === 'never') {
     // Read (or non-approval write) — execute directly via the runtime.
     const result = await runtime.executeTool(toolName, args, context);
     const status = result?.status || 'failed';
     const outputFields = extractOutputFields(result);
+    emit({ type: 'tool_result', name: toolName, status, summary: (result?.content?.[0]?.text || status).slice(0, 240) });
     return {
       status,
       result,
@@ -321,8 +332,9 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // draft_created result the user must approve; it is NEVER reported as done.
   // The toolkit registers its OWN tool names (gdocs_create), not the runtime's
   // canonical names (google_docs__create), so map before dispatching.
-  const toolkit = ctx?._toolkit;
+  const toolkit = await getWriteToolkit(ctx, toolGroups);
   if (!toolkit) {
+    emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'no toolkit available' });
     return { status: 'error', error: 'write requires approval but no toolkit available', toolName, args, result: null, draftId: null, outputFields: {} };
   }
   const toolkitName = toolkitNameFor(toolName);
@@ -331,6 +343,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     const text = toolResp?.content?.[0]?.text || '';
     const status = toolResp?.status || 'failed';
     const draftId = toolResp?.meta?.draft_id || null;
+    emit({ type: 'tool_result', name: toolkitName, status, summary: (text || status).slice(0, 240) });
     return {
       status,
       result: toolResp,
@@ -341,7 +354,50 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       error: status === 'draft_created' ? null : (text || status),
     };
   } catch (err) {
+    emit({ type: 'tool_result', name: toolkitName, status: 'error', summary: err.message });
     return { status: 'error', error: err.message, toolName, args, result: null, draftId: null, outputFields: {} };
+  }
+}
+
+// Cache of per-org toolkits built on-demand for compound write steps. The
+// per-turn ctx._toolkit is built from the router's tool_groups, which is empty
+// for compound decisions, so connector write groups are never registered. This
+// builds a toolkit with exactly the connector groups the write subtasks need.
+const _writeToolkitCache = new Map();
+
+/**
+ * Resolve a toolkit that has the given connector groups registered (for the
+ * legacy pendingWrite write path). Prefers ctx._toolkit if it already has the
+ * group; otherwise builds one via buildToolkitForUser with the needed groups.
+ */
+async function getWriteToolkit(ctx, toolGroups) {
+  const existing = ctx?._toolkit;
+  if (existing) {
+    // If the existing toolkit already has the group's tools, use it.
+    try {
+      const schemas = existing.getJsonSchemas ? existing.getJsonSchemas() : [];
+      const hasGroup = toolGroups.some((g) => schemas.some((s) => (s.function?.name || '').includes(g.replace('-', '_'))));
+      if (hasGroup) return existing;
+    } catch { /* fall through to build */ }
+  }
+  if (!ctx?.prisma || !ctx?.userId || !ctx?.orgId) return existing || null;
+  const cacheKey = `${ctx.orgId}:${ctx.userId}:${toolGroups.join(',')}`;
+  if (_writeToolkitCache.has(cacheKey)) return _writeToolkitCache.get(cacheKey);
+  try {
+    const { buildToolkitForUser } = await import('./toolkit-factory.js');
+    const tk = await buildToolkitForUser({
+      prisma: ctx.prisma,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      persistentMemoryEngine: ctx.persistentMemoryEngine,
+      selectedGroups: toolGroups,
+    });
+    tk.resetEquippedTools?.(toolGroups);
+    _writeToolkitCache.set(cacheKey, tk);
+    return tk;
+  } catch (err) {
+    console.warn(`[compound] write toolkit build failed: ${err.message}`);
+    return existing || null;
   }
 }
 
@@ -355,9 +411,12 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
  * @param {AbortSignal} opts.signal
  * @param {Function} [opts.selectTool]  override for the per-subtask tool-selection
  *   step (tests inject a deterministic selector; production uses the model).
+ * @param {Function} [opts.onEvent]  SSE emitter — receives tool_call/tool_result
+ *   events per subtask so the FE can stream live activity (matches the desktop
+ *   / mobile chat Thinking animation contract).
  * @returns {Promise<{ steps: Array, draftIds: Array, summary: string, status: string }>}
  */
-export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, selectTool }) {
+export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, selectTool, onEvent }) {
   const context = buildContext(ctx, 'chat');
   const steps = [];
   const draftIds = [];
@@ -391,7 +450,7 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
       const deps = Array.isArray(st.depends_on) ? st.depends_on : [];
       const priorOutputs = {};
       for (const d of deps) Object.assign(priorOutputs, outputs[d] || {});
-      return runSubtask({ subtask: st, context, ctx, apiKey, signal, priorOutputs, selectTool });
+      return runSubtask({ subtask: st, context, ctx, apiKey, signal, priorOutputs, selectTool, onEvent });
     }));
     // Write results back by index (order preserved).
     for (let k = 0; k < ready.length; k++) {

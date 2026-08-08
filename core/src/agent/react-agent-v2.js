@@ -2439,6 +2439,7 @@ export async function runReactAgentV2({
         ctx,
         apiKey,
         signal: abortCtrl.signal,
+        onEvent,
       });
       steps.push(...compound.steps);
       const finalText = compound.summary;

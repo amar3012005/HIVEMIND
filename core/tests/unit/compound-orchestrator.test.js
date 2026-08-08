@@ -292,3 +292,35 @@ test('compound orchestrator: normalizes google-docs to google_docs connector id'
   assert.deepEqual(listConnectors, ['google_docs'], 'google-docs must normalize to google_docs');
   assert.equal(seen[0].name, 'google_docs__create');
 });
+
+test('compound orchestrator: emits tool_call/tool_result SSE events per subtask', async () => {
+  const events = [];
+  const runtime = makeRuntime({
+    tools: [
+      { name: 'gmail__search', access: 'read', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
+    ],
+    executeImpl: async (name, input) => ({ status: 'completed', content: [{ type: 'text', text: 'ok' }], metadata: { connector: 'gmail', tool: name } }),
+  });
+  globalThis.__hivemindConnectorRuntime = runtime;
+  const ctx = { userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _toolkit: null };
+
+  const res = await runCompoundOrchestrator({
+    subtasks: [
+      { operation: 'search', tool_groups: ['gmail'], depends_on: null, message: 'search' },
+    ],
+    ctx,
+    apiKey: 'k',
+    signal: null,
+    selectTool: makeSelector(() => ({ toolName: 'gmail__search', args: { query: 'x' } })),
+    onEvent: (ev) => events.push(ev),
+  });
+
+  assert.equal(res.status, 'completed');
+  const calls = events.filter((e) => e.type === 'tool_call');
+  const results = events.filter((e) => e.type === 'tool_result');
+  assert.equal(calls.length, 1, 'should emit one tool_call');
+  assert.equal(calls[0].name, 'gmail__search');
+  assert.equal(results.length, 1, 'should emit one tool_result');
+  assert.equal(results[0].name, 'gmail__search');
+  assert.equal(results[0].status, 'completed');
+});

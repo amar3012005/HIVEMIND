@@ -30,7 +30,8 @@ import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js'
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
-import { appendGapClarification, buildSynthesisSystemPrompt } from './chat-synthesis-prompt.js';
+import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
+import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
 import { chooseSynthesisModel, isCandidateSynthesisAcceptable, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
@@ -133,7 +134,7 @@ function languageName(code) {
 
 // ── Provider-aware JSON helper ─────────────────────────────────────────
 
-async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy }) {
+async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy, promptCacheKey }) {
   const resp = await chatCompletionFetch(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -151,6 +152,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
       // caller asks. Harmless on non-reasoning providers (ignored field).
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(providerPolicy ? { provider: providerPolicy } : {}),
+      ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     }),
     signal,
   }, { fallbackApiKey: apiKey });
@@ -1262,7 +1264,8 @@ function sourceUnavailableResponse({ evidence, language }) {
 }
 
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '' }) {
-  const sys = buildSynthesisSystemPrompt({ language, operation: plan.operation, recallMode: plan.recall_mode });
+  const synthesisPrompt = buildSynthesisPromptArtifact({ language, operation: plan.operation, recallMode: plan.recall_mode });
+  const sys = synthesisPrompt.prompt;
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
       && Number.isInteger(evidence.aggregate?.count)) {
     const count = evidence.aggregate.count;
@@ -1797,11 +1800,17 @@ ${message}`;
       })),
     };
     ctx._trace.synthesis_prompt = {
-      static_chars: sys.length,
+      static_chars: synthesisPrompt.static_prompt.length,
+      dynamic_system_chars: synthesisPrompt.dynamic_prompt.length,
       evidence_chars: evidenceBlock.length,
       profile_chars: personaNote.length,
       history_chars: tail.reduce((sum, item) => sum + String(item?.content || '').length, 0),
       total_user_chars: userBlock.length,
+      static_prompt_cag: synthesisPrompt.cache,
+      provider_prefix: promptContributionTelemetry({
+        staticPrompt: synthesisPrompt.static_prompt,
+        dynamicPrompt: `${synthesisPrompt.dynamic_prompt}\n${tail.map((item) => String(item?.content || '')).join('\n')}\n${userBlock}`,
+      }),
     };
   }
 
@@ -1839,6 +1848,7 @@ ${message}`;
     messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: userBlock }],
     model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
     providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
+    promptCacheKey: synthesisPrompt.cache.key,
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
@@ -1869,6 +1879,7 @@ ${message}`;
       messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
       model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low',
       providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
+      promptCacheKey: synthesisPrompt.cache.key,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;

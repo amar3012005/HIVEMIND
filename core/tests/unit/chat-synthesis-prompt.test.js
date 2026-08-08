@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { appendGapClarification, buildSynthesisSystemPrompt } from '../../src/agent/chat-synthesis-prompt.js';
+import { appendGapClarification, buildSynthesisPromptArtifact, buildSynthesisSystemPrompt } from '../../src/agent/chat-synthesis-prompt.js';
+import { resetStaticPromptCacheForTests } from '../../src/agent/chat-static-prompt-cache.js';
 
 test('fact synthesis loads only the compact grounding and citation contract', () => {
   const prompt = buildSynthesisSystemPrompt({ language: 'es', operation: 'recall', recallMode: 'fact' });
@@ -19,6 +20,20 @@ test('timeline synthesis adds temporal handling without making fact prompts temp
   const prompt = buildSynthesisSystemPrompt({ language: 'en', operation: 'timeline', recallMode: 'explain' });
   assert.match(prompt, /TEMPORAL/);
   assert.match(prompt, /superseded/i);
+});
+
+test('synthesis keeps an identical cacheable prefix across language and operation changes', () => {
+  resetStaticPromptCacheForTests();
+  const first = buildSynthesisPromptArtifact({ language: 'en', operation: 'recall', recallMode: 'fact' });
+  const second = buildSynthesisPromptArtifact({ language: 'de', operation: 'timeline', recallMode: 'timeline' });
+  assert.equal(first.cache.status, 'miss');
+  assert.equal(second.cache.status, 'hit');
+  assert.equal(first.static_prompt, second.static_prompt);
+  assert.equal(first.cache.fingerprint, second.cache.fingerprint);
+  assert.match(second.dynamic_prompt, /GERMAN/);
+  assert.match(second.dynamic_prompt, /TEMPORAL/);
+  assert.ok(first.prompt.startsWith(first.static_prompt));
+  assert.ok(second.prompt.startsWith(second.static_prompt));
 });
 
 test('operation modules are disclosed only to the matching synthesis path', () => {

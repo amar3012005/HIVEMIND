@@ -63,9 +63,9 @@ test('DeepSeek shadow is eligible only for native fact recall and never becomes 
 
 test('usage summary separates cached and uncached input from per-stage usage', () => {
   const usage = summarizeUsage({
-    router: { prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 80 } },
+    router: { prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 80, cache_write_tokens: 0 } },
     optimizer: { prompt_tokens: 20, completion_tokens: 2 },
-    synthesis: { prompt_tokens: 300, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 200 } },
+    synthesis: { prompt_tokens: 300, completion_tokens: 30, prompt_tokens_details: { cached_tokens: 200, cache_write_tokens: 100 } },
   });
   assert.deepEqual(usage, {
     prompt_tokens: 420,
@@ -73,5 +73,7 @@ test('usage summary separates cached and uncached input from per-stage usage', (
     total_tokens: 462,
     cached_prompt_tokens: 280,
     uncached_prompt_tokens: 140,
+    cache_write_prompt_tokens: 100,
+    cache_hit_ratio: 0.6667,
   });
 });

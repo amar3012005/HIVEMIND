@@ -18,6 +18,7 @@
  */
 
 import { chatCompletionFetch } from '../llm/chat-provider.js';
+import { getStaticPromptArtifact, promptContributionTelemetry } from './chat-static-prompt-cache.js';
 
 // Router model: Cerebras-direct gpt-oss-120b (the hardened synthesis path).
 // Env-overridable for A/B; falls back to the resolved synthesis model.
@@ -218,16 +219,24 @@ async function callRouter({ message, history, apiKey, signal, useTools = false }
     ? history.slice(-3).filter((h) => h && (h.role === 'user' || h.role === 'assistant') && h.content)
         .map((h) => ({ role: h.role, content: String(h.content).slice(0, 1200) }))
     : [];
+  const staticPrompt = getStaticPromptArtifact({
+    family: 'chat-progressive-router', version: 'v2', variant: 'capability-contract', build: () => SYSTEM,
+  });
+  const dynamicPolicy = useTools
+    ? ''
+    : 'Connected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.';
+  const systemPrompt = dynamicPolicy ? `${staticPrompt.value}\n${dynamicPolicy}` : staticPrompt.value;
   const resp = await chatCompletionFetch(ROUTER_MODEL, {
     method: 'POST',
     // chatCompletionFetch sets Authorization from the resolved route; no header here.
     body: JSON.stringify({
-      messages: [{ role: 'system', content: useTools ? SYSTEM : `${SYSTEM}\nConnected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.` }, ...histMsgs, { role: 'user', content: message }],
+      messages: [{ role: 'system', content: systemPrompt }, ...histMsgs, { role: 'user', content: message }],
       tools: getProgressiveTools({ useTools }),
       tool_choice: 'required',
       parallel_tool_calls: false,
       temperature: 0,
       max_tokens: 900,
+      prompt_cache_key: staticPrompt.key,
     }),
     signal,
   }, { fallbackApiKey: apiKey });
@@ -236,7 +245,18 @@ async function callRouter({ message, history, apiKey, signal, useTools = false }
   const call = data.choices?.[0]?.message?.tool_calls?.[0] || null;
   let args = {};
   try { args = call ? JSON.parse(call.function.arguments) : {}; } catch { args = {}; }
-  return { tool: call?.function?.name || null, args, usage: data.usage };
+  const dynamicPrompt = `${dynamicPolicy}\n${histMsgs.map((item) => item.content).join('\n')}\n${message}`;
+  return {
+    tool: call?.function?.name || null,
+    args,
+    usage: {
+      ...(data.usage || {}),
+      hivemind_prompt_cache: {
+        static_prompt_cag: { key: staticPrompt.key, status: staticPrompt.cache, fingerprint: staticPrompt.fingerprint },
+        provider_prefix: promptContributionTelemetry({ staticPrompt: staticPrompt.value, dynamicPrompt }),
+      },
+    },
+  };
 }
 
 /**

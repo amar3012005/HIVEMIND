@@ -1,5 +1,3 @@
-export const DEEPSEEK_SYNTHESIS_MODEL = 'deepseek/deepseek-v4-flash-0731';
-
 export function shouldOptimizeRecallQuery({ router, canonicalQuery } = {}) {
   return router !== 'progressive' || !String(canonicalQuery || '').trim();
 }
@@ -35,21 +33,15 @@ export function scheduleShadowEvaluation({ execute, timeoutMs = 5000, onResult =
 }
 
 export function chooseSynthesisModel({
-  operation,
-  recallMode,
-  useTools = false,
   currentModel,
-  shadowEnabled = false,
-  canaryEnabled = false,
 } = {}) {
-  const eligibleFactRecall = operation === 'recall' && recallMode === 'fact' && useTools !== true;
-  const eligible = eligibleFactRecall && (shadowEnabled || canaryEnabled);
+  // Final synthesis is server-owned. Historical DeepSeek shadow/canary flags
+  // must not silently replace the configured final-answer model or duplicate
+  // a user turn after this policy was promoted to GPT-OSS-20B Nitro.
   return {
-    served: eligibleFactRecall && canaryEnabled ? DEEPSEEK_SYNTHESIS_MODEL : currentModel,
-    // A canary already serves the candidate; never pay for a second identical
-    // shadow call on that same turn.
-    shadow: eligibleFactRecall && shadowEnabled && !canaryEnabled ? DEEPSEEK_SYNTHESIS_MODEL : null,
-    eligible,
+    served: currentModel,
+    shadow: null,
+    eligible: false,
   };
 }
 

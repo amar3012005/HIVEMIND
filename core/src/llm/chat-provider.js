@@ -3,7 +3,7 @@ const CEREBRAS_CHAT_URL = 'https://api.cerebras.ai/v1/chat/completions';
 const OPENROUTER_CHAT_URL = `${(process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '')}/chat/completions`;
 
 export const DEFAULT_CHAT_PLANNER_MODEL = 'google/gemini-2.5-flash-lite';
-export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'cerebras/gpt-oss-120b';
+export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'openai/gpt-oss-20b:nitro';
 export const DEFAULT_HQ_AWAKENING_MODEL = 'deepseek/deepseek-v4-flash-0731';
 export const DEFAULT_HQ_DISPATCH_MODEL = 'deepseek/deepseek-v4-flash-0731';
 
@@ -91,6 +91,24 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
       wireModel: requested,
       providerPolicy: {
         sort: process.env.OPENROUTER_DEEPSEEK_SORT || 'throughput',
+        allow_fallbacks: true,
+        require_parameters: true,
+        data_collection: 'deny',
+      },
+    };
+  }
+
+  if (requested.startsWith('openai/')) {
+    if (!process.env.OPENROUTER_API_KEY) throw new Error('chat_provider_not_configured:openrouter');
+    return {
+      provider: 'openrouter:openai',
+      url: OPENROUTER_CHAT_URL,
+      apiKey: process.env.OPENROUTER_API_KEY,
+      wireModel: requested,
+      // The :nitro model variant owns fastest-provider selection. Do not add
+      // a manual provider order/sort here: that would override the variant's
+      // routing and reduce prompt-cache stickiness.
+      providerPolicy: {
         allow_fallbacks: true,
         require_parameters: true,
         data_collection: 'deny',

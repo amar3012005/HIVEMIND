@@ -2614,12 +2614,7 @@ export async function runReactAgentV2({
       time: recallTime || intentDecision.relation?.time || intentDecision.time,
     });
     const modelPolicy = chooseSynthesisModel({
-      operation: intentDecision.operation,
-      recallMode: plan.recall_mode,
-      useTools,
       currentModel: requestedAnswerModel,
-      shadowEnabled: process.env.HIVEMIND_DEEPSEEK_SHADOW_ENABLED === 'true',
-      canaryEnabled: process.env.HIVEMIND_DEEPSEEK_FACT_CANARY_ENABLED === 'true',
     });
     answerModel = modelPolicy.served;
     trace.models.synthesis = answerModel;

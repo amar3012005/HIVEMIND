@@ -38,26 +38,20 @@ test('progressive canonical query is rewritten only after first recall has zero 
   assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: true }), false);
 });
 
-test('DeepSeek shadow is eligible only for native fact recall and never becomes the served compound model', () => {
-  const shadow = chooseSynthesisModel({
+test('legacy DeepSeek flags cannot override or shadow the configured final synthesis model', () => {
+  const native = chooseSynthesisModel({
     operation: 'recall', recallMode: 'fact', useTools: false,
-    currentModel: 'cerebras/gpt-oss-120b', shadowEnabled: true, canaryEnabled: false,
+    currentModel: 'openai/gpt-oss-20b:nitro', shadowEnabled: true, canaryEnabled: true,
   });
-  assert.equal(shadow.served, 'cerebras/gpt-oss-120b');
-  assert.equal(shadow.shadow, 'deepseek/deepseek-v4-flash-0731');
-
-  const canary = chooseSynthesisModel({
-    operation: 'recall', recallMode: 'fact', useTools: false,
-    currentModel: 'cerebras/gpt-oss-120b', shadowEnabled: true, canaryEnabled: true,
-  });
-  assert.equal(canary.served, 'deepseek/deepseek-v4-flash-0731');
-  assert.equal(canary.shadow, null);
+  assert.equal(native.served, 'openai/gpt-oss-20b:nitro');
+  assert.equal(native.shadow, null);
+  assert.equal(native.eligible, false);
 
   const compound = chooseSynthesisModel({
     operation: 'compound', recallMode: 'fact', useTools: true,
-    currentModel: 'cerebras/gpt-oss-120b', shadowEnabled: true, canaryEnabled: true,
+    currentModel: 'openai/gpt-oss-20b:nitro', shadowEnabled: true, canaryEnabled: true,
   });
-  assert.equal(compound.served, 'cerebras/gpt-oss-120b');
+  assert.equal(compound.served, 'openai/gpt-oss-20b:nitro');
   assert.equal(compound.shadow, null);
 });
 

@@ -11,15 +11,32 @@ import {
   resolveChatCompletionRoute,
 } from '../../src/llm/chat-provider.js';
 
-test('chat model policy uses Gemini Flash-Lite planning and Cerebras 120B synthesis', () => {
+test('chat model policy uses Gemini Flash-Lite planning and GPT-OSS-20B Nitro synthesis', () => {
   assert.equal(DEFAULT_CHAT_PLANNER_MODEL, 'google/gemini-2.5-flash-lite');
-  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'cerebras/gpt-oss-120b');
+  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'openai/gpt-oss-20b:nitro');
 });
 
 test('HQ bounded language tasks use DeepSeek without changing Room synthesis policy', () => {
   assert.equal(DEFAULT_HQ_AWAKENING_MODEL, 'deepseek/deepseek-v4-flash-0731');
   assert.equal(DEFAULT_HQ_DISPATCH_MODEL, 'deepseek/deepseek-v4-flash-0731');
-  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'cerebras/gpt-oss-120b');
+  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'openai/gpt-oss-20b:nitro');
+});
+
+test('GPT-OSS-20B Nitro final synthesis uses OpenRouter variant routing without manual provider order', () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  try {
+    const route = resolveChatCompletionRoute(DEFAULT_CHAT_SYNTHESIS_MODEL);
+    assert.equal(route.provider, 'openrouter:openai');
+    assert.equal(route.wireModel, 'openai/gpt-oss-20b:nitro');
+    assert.equal(route.providerPolicy.sort, undefined);
+    assert.equal(route.providerPolicy.order, undefined);
+    assert.equal(route.providerPolicy.allow_fallbacks, true);
+    assert.equal(route.providerPolicy.data_collection, 'deny');
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
 });
 
 test('DeepSeek HQ requests route directly to OpenRouter throughput selection', () => {
@@ -170,7 +187,7 @@ test('OpenRouter preserves prompt cache keys while Cerebras relies on automatic 
         return new Response('{}', { status: 200 });
       },
     });
-    await chatCompletionFetch(DEFAULT_CHAT_SYNTHESIS_MODEL, {
+    await chatCompletionFetch('cerebras/gpt-oss-120b', {
       method: 'POST',
       body: JSON.stringify({ messages: [], prompt_cache_key: 'hm:synthesis:v1' }),
     }, {

@@ -67,9 +67,16 @@ echo "[lock] acquired"
 "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase locked
 
 # ── fetch + ancestor gate ──────────────────────────────────────────────────
-git -C "$CANON" -c fetch.recurseSubmodules=false fetch origin singulance-main -q
+# /root/hivemind-main can retain a Compose-era local `origin`; production
+# releases always follow the authoritative GitHub canonical branch when it is
+# configured there.
+CANON_REMOTE=origin
+if git -C "$CANON" remote get-url github >/dev/null 2>&1; then
+  CANON_REMOTE=github
+fi
+git -C "$CANON" -c fetch.recurseSubmodules=false fetch "$CANON_REMOTE" singulance-main -q
 FULLSHA=$(git -C "$CANON" rev-parse "$SHA^{commit}" 2>/dev/null) || { echo "FATAL: sha $SHA not found"; exit 1; }
-git -C "$CANON" merge-base --is-ancestor "$FULLSHA" origin/singulance-main \
+git -C "$CANON" merge-base --is-ancestor "$FULLSHA" "$CANON_REMOTE/singulance-main" \
   || { echo "FATAL: $SHA is NOT an ancestor of origin/singulance-main — refusing (unmerged code)"; exit 1; }
 SHORT=$(git -C "$CANON" rev-parse --short "$FULLSHA")
 echo "[gate] $SHORT is on canonical ✓"

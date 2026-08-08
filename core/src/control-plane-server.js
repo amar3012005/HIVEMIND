@@ -80,7 +80,7 @@ import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
 import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
 import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
 import { createHqRuntimeRouteHandler } from './hq-runtime/routes.js';
-import { activateHqAfterOnboarding, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement, scheduleHqWake } from './hq-runtime/repository.js';
+import { activateHqAfterOnboarding, appendHqEvent, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement, scheduleHqWake } from './hq-runtime/repository.js';
 import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { runtimeTransportStats } from './runtime-transport/client.js';
 import { internalFetch } from './internal/internal-fetch.js';
@@ -328,7 +328,7 @@ async function findOrCreateKindRoom(session, hqRoom, kind, message) {
   const room = await createHyperRoomWithinPlan({
     orgId, userId: session.userId, name, template: 'auto',
     participantIds, goal: `${_HQ_KIND_LABEL[kind]} work routed from HQ`,
-    agentConnectors: { _kind: kind },
+    agentConnectors: { _kind: kind }, roomMode: 'runtime',
     permanentLeadId: participantIds.slice().sort()[0] || null,
   });
   return { id: room.id, participantIds, created: true };
@@ -975,6 +975,7 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
               userId: hq.user_id, orgId: hq.org_id,
               name: task.title.slice(0, 120), participantIds,
               template: 'auto', permanentLeadId: participantIds.slice().sort()[0] || null,
+              roomMode: 'runtime',
           });
           roomId = taskRoom.id;
           const goal = `${task.title}\n${task.detail || ''}\nCompany: ${state.company} — ${state.mission || ''}`.slice(0, 2000);
@@ -1003,6 +1004,7 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
           room_id: roomId, turn_id: turn.id, user_id: hq.user_id, org_id: hq.org_id,
           user_message: kickoff, participant_ids: roomRow?.participantIds || [],
           project_id: roomRow?.projectId || null, room_goal: roomRow?.goal || '',
+          room_mode: 'runtime',
           task_tag: `ROOM_${String(task.room_tag || task.tag || 'general').toUpperCase()}`,
           callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
         }).catch((e) => console.warn('[hyper-cycle] sidecar kick failed:', e.message));
@@ -1123,6 +1125,22 @@ function dispatchHyperRoomTurn(body) {
     headers: { 'Content-Type': 'application/json' },
     body: payload,
   });
+}
+
+// A Room's execution boundary is durable data, not an inference from its title
+// or domain tag. Human-facing Work Rooms keep a neutral Director; Company Rooms
+// are invoked by Runtime/playbooks as specialist operators.
+function roomExecutionMode(room) {
+  if (room?.roomMode === 'work' || room?.room_mode === 'work') return 'work';
+  if (room?.roomMode === 'runtime' || room?.room_mode === 'runtime') return 'runtime';
+  return room?.agentConnectors?._domain_home === true ? 'runtime' : 'work';
+}
+
+function roomExecutionTag(room) {
+  if (roomExecutionMode(room) === 'work') return 'WORK';
+  if (room?.agentConnectors?._domain_home === true
+    && String(room.roomTag || room.room_tag || 'general') === 'general') return 'HQ';
+  return `ROOM_${String(room?.roomTag || room?.room_tag || 'general').toUpperCase()}`;
 }
 
 function requestsGrowthStage(message) {
@@ -10228,35 +10246,22 @@ Write the persona now.`;
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
         const task = (company.tasks || []).find((x) => x.id === taskId);
         if (!task) return jsonResponse(res, { error: 'task not found' }, 404);
-        // Optimized kickoff query — the FE posts this as the room's first turn
-        // (idempotency-keyed) so the swarm starts working the task immediately.
+        // Human task clicks always enter a neutral Work Room. The Director decides
+        // whether this turn needs a direct answer, research, debate, an artifact,
+        // or a proposal for a governed Runtime lifecycle.
         const kickoff = [
-          `You are the ${company.company} team. Execute this task now.`,
-          `TASK [${task.tag}]: ${task.title}`,
-          task.detail ? `SCOPE: ${task.detail}` : '',
+          `You are working with the ${company.company} team on a human request.`,
+          `REQUEST: ${task.title}`,
+          task.detail ? `CONTEXT: ${task.detail}` : '',
           company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
-          'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
+          'Choose the smallest useful approach. Answer directly when that satisfies the request. Research, deliberate, create an internal artifact, or propose Runtime work only when the request and evidence require it. Never claim an external action occurred without a provider receipt.',
         ].filter(Boolean).join('\n');
-        if (!task.room_id && task.room_tag) {
-          const domainRows = await prisma.$queryRawUnsafe(
-            `SELECT id, name
-               FROM "hivemind"."hyper_rooms"
-              WHERE org_id = $1::uuid
-                AND room_tag = $2
-                AND archived_at IS NULL
-                AND agent_connectors->>'_domain_home' = 'true'
-              ORDER BY created_at ASC LIMIT 1`,
-            current.session.orgId,
-            String(task.room_tag),
-          ).catch(() => []);
-          if (domainRows?.[0]?.id) task.room_id = domainRows[0].id;
-        }
         if (task.room_id) {
           const existing = await prisma.hyperRoom.findFirst({
             where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },
-            select: { id: true, name: true },
+            select: { id: true, name: true, roomMode: true },
           }).catch(() => null);
-          if (existing) {
+          if (existing?.roomMode === 'work') {
             let created = false;
             const idempotencyKey = `task-kickoff-${row.id}-${task.id}`.slice(0, 64);
             const kickTurn = await prisma.$transaction(async (tx) => {
@@ -10279,7 +10284,7 @@ Write the persona now.`;
                 user_id: current.session.userId, org_id: current.session.orgId,
                 user_message: kickoff, participant_ids: rr?.participantIds || [],
                 project_id: rr?.projectId || null, room_goal: rr?.goal || '',
-                task_tag: `ROOM_${String(task.room_tag || task.tag || 'general').toUpperCase()}`,
+                room_mode: 'work', task_tag: 'WORK',
                 callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
               }).catch((e) => console.warn('[hyper-tasks] domain kickoff dispatch failed:', e.message));
             }
@@ -10290,6 +10295,10 @@ Write the persona now.`;
             ).catch(() => {});
             return jsonResponse(res, { room: existing, task });
           }
+          // A historical task may point at a specialist Company Room. Keep that
+          // reference for audit, but never turn a human click into Runtime work.
+          task.legacy_room_id = task.room_id;
+          task.room_id = null;
         }
         const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
         const taskRoom = await createHyperRoomWithinPlan({
@@ -10298,30 +10307,14 @@ Write the persona now.`;
             name: task.title.slice(0, 120),
             participantIds,
             template: 'auto',
+            roomMode: 'work',
+            roomTag: 'general',
             permanentLeadId: participantIds.slice().sort()[0] || null,
-        });
+          });
         const goal = `${task.title}\n${task.detail || ''}\nCompany: ${company.company} — ${company.mission || ''}`.slice(0, 2000);
         try {
           await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', goal, taskRoom.id);
         } catch { /* goal best-effort */ }
-        // EVENT-DRIVEN outbound: an OUTREACH-tagged task auto-enables the org's
-        // Gmail connector on its room (when connected), so the first turn can
-        // produce a ready-to-send email (compose card) instead of downgrading
-        // to a text answer. Driven by the task's tag — no task is hardcoded.
-        if (String(task.tag || '').toUpperCase() === 'OUTREACH') {
-          try {
-            const g = await prisma.platformIntegration.findFirst({
-              where: { orgId: current.session.orgId, platformType: { in: ['gmail', 'google'] } },
-              select: { id: true },
-            }).catch(() => null);
-            if (g) {
-              await prisma.$executeRawUnsafe(
-                'UPDATE "hivemind"."hyper_rooms" SET "enabled_connectors" = ARRAY[\'gmail\'] WHERE "id" = $1::uuid AND ("enabled_connectors" IS NULL OR cardinality("enabled_connectors") = 0)',
-                taskRoom.id,
-              );
-            }
-          } catch { /* best-effort — room still works as text */ }
-        }
         // Mark the task with its room in the persisted state.
         task.room_id = taskRoom.id;
         task.status = 'active';
@@ -10349,6 +10342,7 @@ Write the persona now.`;
             user_id: current.session.userId, org_id: current.session.orgId,
             user_message: kickoff, participant_ids: roomRow2?.participantIds || [],
             project_id: roomRow2?.projectId || null, room_goal: roomRow2?.goal || goal,
+            room_mode: 'work', task_tag: 'WORK',
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           }).catch((e) => console.warn('[hyper-tasks] kickoff dispatch failed:', e.message));
         } catch (e) { console.warn('[hyper-tasks] kickoff turn create failed:', e.message || e.code || e); }
@@ -10405,7 +10399,281 @@ Write the persona now.`;
     const flybyDecisionCompat = roomTurnMatch && roomTurnMatch[2] && !roomTurnMatch[3] && url.searchParams.get('action') === 'flyby-decision';
     // Phase 7 — resolve a queued connector write (approval card action).
     const roomApproveMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/approve$/);
+    const roomWorkPlanMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan$/);
+    const roomWorkPlanResumeMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/resume$/);
+    const roomWorkPlanHandoffMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/handoff$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
+
+    // GET /v1/hyper-rooms/:id/work-plan — one continuous, durable projection
+    // for a human Work Room. This reads the existing work-order ledger; it never
+    // creates a second workflow authority or derives completion from prose.
+    if (roomWorkPlanMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomWorkPlanMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
+        select: { id: true, roomMode: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      if (room.roomMode !== 'work') return jsonResponse(res, { error: 'Work plan is only available for Work Rooms' }, 409);
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT wo.id, wo.turn_id, wo.plan_step_id, wo.depends_on, wo.kind, wo.status,
+                wo.title, wo.objective, wo.owner_slug, wo.owner_lane, wo.error,
+                wo.wait_for, wo.handoff,
+                wo.attempt, wo.created_at, wo.started_at, wo.completed_at, wo.updated_at,
+                latest.summary AS latest_summary
+           FROM "hivemind"."hyper_work_orders" wo
+           LEFT JOIN LATERAL (
+             SELECT summary
+               FROM "hivemind"."hyper_work_results" result
+              WHERE result.work_order_id = wo.id
+              ORDER BY result.attempt DESC, result.created_at DESC
+              LIMIT 1
+           ) latest ON true
+          WHERE wo.org_id = $1::uuid AND wo.room_id = $2::uuid AND wo.hq_cycle_id IS NULL
+          ORDER BY wo.created_at ASC, wo.plan_step_id ASC NULLS LAST`,
+        current.session.orgId, roomId,
+      ).catch(() => []);
+      const steps = (rows || []).map((row) => {
+        const status = String(row.status || 'queued');
+        const projectedStatus = status === 'blocked' ? 'needs_attention'
+          : status === 'running' ? 'active'
+          : status;
+        return {
+          id: String(row.id), turn_id: row.turn_id ? String(row.turn_id) : null,
+          step_id: row.plan_step_id || null,
+          depends_on: Array.isArray(row.depends_on) ? row.depends_on : [],
+          status: projectedStatus,
+          title: row.title, objective: row.objective, kind: row.kind,
+          owner: { slug: row.owner_slug || null, lane: row.owner_lane || null },
+          attempt: Number(row.attempt || 0), blocker: row.error || null,
+          waiting: row.wait_for && typeof row.wait_for === 'object' ? row.wait_for : null,
+          handoff: row.handoff && typeof row.handoff === 'object' ? row.handoff : null,
+          summary: row.latest_summary || null,
+          timestamps: { created_at: row.created_at, started_at: row.started_at,
+                        completed_at: row.completed_at, updated_at: row.updated_at },
+        };
+      });
+      return jsonResponse(res, { room_id: roomId, mode: 'work', steps });
+    }
+
+    // POST /v1/hyper-rooms/:id/work-plan/:workOrderId/resume — resolve an
+    // exact pause and re-run the same durable Work Order. The new HyperTurn is
+    // only an audit/SSE transport envelope; it is explicitly pinned to the old
+    // work-order identity and cannot create a Runtime lifecycle.
+    if (roomWorkPlanResumeMatch && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const [, roomId, workOrderId] = roomWorkPlanResumeMatch;
+      const body = await parseBody(req);
+      const resolution = body?.resolution;
+      if (!resolution || typeof resolution !== 'object' || Array.isArray(resolution)) {
+        return jsonResponse(res, { error: 'resolution object is required' }, 400);
+      }
+      const serializedResolution = JSON.stringify(resolution);
+      if (serializedResolution.length > 8000) {
+        return jsonResponse(res, { error: 'resolution is too large' }, 400);
+      }
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null, roomMode: 'work' },
+      });
+      if (!room) return jsonResponse(res, { error: 'Work Room not found' }, 404);
+      const result = await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRawUnsafe(
+          `SELECT id, turn_id, plan_step_id, depends_on, kind, title, objective,
+                  owner_lane, required_evidence, acceptance_criteria, input_snapshot,
+                  wait_for, handoff, status
+             FROM "hivemind"."hyper_work_orders"
+            WHERE id = $1::uuid AND org_id = $2::uuid AND room_id = $3::uuid
+              AND hq_cycle_id IS NULL
+            FOR UPDATE`,
+          workOrderId, current.session.orgId, roomId,
+        );
+        const order = rows?.[0];
+        if (!order) return { error: 'Work step not found', status: 404 };
+        const status = String(order.status || '');
+        if (!status.startsWith('waiting_for_')) {
+          const snapshot = order.input_snapshot && typeof order.input_snapshot === 'object'
+            ? order.input_snapshot : {};
+          const resumeTurnId = typeof snapshot.resume_turn_id === 'string' ? snapshot.resume_turn_id : null;
+          if ((status === 'queued' || status === 'running') && resumeTurnId) {
+            const existing = await tx.hyperTurn.findFirst({
+              where: { id: resumeTurnId, roomId }, select: { id: true, status: true },
+            });
+            if (existing) return { order, turn: existing, duplicate: true };
+          }
+          return { error: 'Work step is not waiting for a resolution', status: 409 };
+        }
+        const waitFor = order.wait_for && typeof order.wait_for === 'object' ? order.wait_for : {};
+        const last = await tx.hyperTurn.findFirst({ where: { roomId }, orderBy: { seq: 'desc' }, select: { seq: true } });
+        const seq = (last?.seq ?? 0) + 1;
+        const userMessage = String(waitFor.prompt || waitFor.reason || 'Continue the paused work step.').slice(0, 8000);
+        const idempotencyKey = `work-resume:${crypto.createHash('sha256')
+          .update(`${workOrderId}:${serializedResolution}`).digest('hex')}`.slice(0, 64);
+        const existing = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
+        if (existing) return { order, turn: existing, duplicate: true };
+        const turn = await tx.hyperTurn.create({
+          data: { roomId, seq, userMessage, status: 'live', idempotencyKey, lines: [] },
+        });
+        const updated = await tx.$executeRawUnsafe(
+          `UPDATE "hivemind"."hyper_work_orders"
+              SET status = 'queued', wait_for = jsonb_set(COALESCE(wait_for, '{}'::jsonb), '{resolution}', $1::jsonb, true),
+                  input_snapshot = jsonb_set(COALESCE(input_snapshot, '{}'::jsonb), '{resume_turn_id}', to_jsonb($2::text), true),
+                  error = NULL, updated_at = now()
+            WHERE id = $3::uuid AND org_id = $4::uuid AND status = $5`,
+          serializedResolution, turn.id, workOrderId, current.session.orgId, status,
+        );
+        if (!String(updated).endsWith('1')) throw new Error('Work step changed while resuming');
+        return { order, turn, duplicate: false };
+      });
+      if (result.error) return jsonResponse(res, { error: result.error }, result.status);
+      const order = result.order;
+      const waitFor = order.wait_for && typeof order.wait_for === 'object' ? order.wait_for : {};
+      const envelope = {
+        contract: 'work-room-resume.v1',
+        work_order_id: String(order.id),
+        resume_key: waitFor.resume_key || null,
+        resolution,
+        step: {
+          id: order.plan_step_id || `work-${String(order.id).slice(0, 8)}`,
+          depends_on: Array.isArray(order.depends_on) ? order.depends_on : [],
+          kind: order.kind, owner_lane: order.owner_lane || 'Strategist', title: order.title,
+          objective: order.objective,
+          required_evidence: Array.isArray(order.required_evidence) ? order.required_evidence : [],
+          acceptance_criteria: Array.isArray(order.acceptance_criteria) ? order.acceptance_criteria : [],
+        },
+      };
+      if (!result.duplicate) {
+        dispatchHyperRoomTurn({
+          room_id: room.id, turn_id: result.turn.id,
+          user_id: current.session.userId, org_id: current.session.orgId,
+          user_message: result.turn.userMessage, participant_ids: room.participantIds || [],
+          project_id: room.projectId || null, room_goal: room.goal || '', room_mode: 'work', task_tag: 'WORK',
+          execution_context: JSON.stringify(envelope),
+          callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
+        }).catch((error) => console.warn('[work-plan] resume dispatch failed:', error.message));
+      }
+      return jsonResponse(res, {
+        ok: true, work_order_id: String(order.id), turn_id: result.turn.id,
+        status: result.duplicate ? 'resuming' : 'queued', duplicate: Boolean(result.duplicate),
+      }, 202);
+    }
+
+    // Accept a completed Work Room recommendation into HQ's normal semantic
+    // instruction loop. This does not create a todo, select a playbook, or
+    // grant authority; HQ remains responsible for those later decisions.
+    if (roomWorkPlanHandoffMatch && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const [, roomId, workOrderId] = roomWorkPlanHandoffMatch;
+      const body = await parseBody(req).catch(() => ({}));
+      if (body.decision !== 'accept') return jsonResponse(res, { error: 'decision must be accept' }, 400);
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null, roomMode: 'work' },
+        select: { id: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Work Room not found' }, 404);
+
+      const accepted = await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRawUnsafe(
+          `SELECT wo.id, wo.title, wo.objective, wo.status, wo.handoff,
+                  result.id AS result_id, result.status AS result_status,
+                  result.summary AS result_summary
+             FROM "hivemind"."hyper_work_orders" wo
+             LEFT JOIN LATERAL (
+               SELECT id, status, summary
+                 FROM "hivemind"."hyper_work_results"
+                WHERE work_order_id = wo.id
+                ORDER BY attempt DESC, created_at DESC
+                LIMIT 1
+             ) result ON true
+            WHERE wo.id = $1::uuid AND wo.org_id = $2::uuid
+              AND wo.room_id = $3::uuid AND wo.hq_cycle_id IS NULL
+            FOR UPDATE OF wo`,
+          workOrderId, current.session.orgId, roomId,
+        );
+        const order = rows?.[0];
+        if (!order) return { error: 'Work step not found', status: 404 };
+        if (order.status !== 'completed' || order.result_status !== 'completed') {
+          return { error: 'Only a completed, evidenced work step can be handed to Runtime', status: 409 };
+        }
+        const handoff = order.handoff && typeof order.handoff === 'object' ? order.handoff : {};
+        if (!['runtime', 'hq'].includes(String(handoff.owner || '').trim().toLowerCase())) {
+          return { error: 'This work step has no Runtime handoff', status: 409 };
+        }
+        if (handoff.runtime_instruction_id) {
+          const instruction = await tx.hqInstruction.findFirst({
+            where: { id: String(handoff.runtime_instruction_id), orgId: current.session.orgId },
+          });
+          const runtime = await tx.hqRuntime.findUnique({ where: { orgId: current.session.orgId } });
+          return instruction && runtime ? { order, handoff, instruction, runtime, duplicate: true } : {
+            error: 'The recorded Runtime handoff cannot be resolved', status: 409,
+          };
+        }
+        const runtime = await tx.hqRuntime.findUnique({ where: { orgId: current.session.orgId } });
+        if (!runtime || runtime.state === 'INACTIVE') {
+          return { error: 'HQ Runtime must be active before accepting this handoff', status: 409 };
+        }
+        const instructionBody = String(handoff.objective || order.objective || order.title).trim().slice(0, 5000);
+        if (!instructionBody) return { error: 'Runtime handoff objective is missing', status: 409 };
+        const instruction = await tx.hqInstruction.create({
+          data: {
+            runtimeId: runtime.id,
+            orgId: current.session.orgId,
+            userId: current.session.userId,
+            body: instructionBody,
+            interpreted: {
+              source: 'work_room_handoff', execution_mode: 'single_outcome',
+              work_room_id: roomId, work_order_id: workOrderId,
+              work_result_id: order.result_id, source_summary: order.result_summary || null,
+            },
+          },
+        });
+        const nextHandoff = {
+          ...handoff, status: 'accepted', runtime_instruction_id: instruction.id,
+          work_result_id: order.result_id, accepted_by: current.session.userId,
+          accepted_at: new Date().toISOString(),
+        };
+        await tx.$executeRawUnsafe(
+          `UPDATE "hivemind"."hyper_work_orders"
+              SET handoff = $1::jsonb, updated_at = now()
+            WHERE id = $2::uuid AND org_id = $3::uuid`,
+          JSON.stringify(nextHandoff), workOrderId, current.session.orgId,
+        );
+        await tx.growthJournal.create({
+          data: {
+            orgId: current.session.orgId, actorUserId: current.session.userId,
+            eventType: 'work_room_handoff_accepted',
+            summary: `Accepted the completed Work Room result: ${String(order.title || 'work result').slice(0, 180)}`,
+            evidenceRefs: [`hyper-work-result:${order.result_id}`],
+            decision: { room_id: roomId, work_order_id: workOrderId, instruction_id: instruction.id },
+          },
+        });
+        return { order, handoff: nextHandoff, instruction, runtime, duplicate: false };
+      });
+      if (accepted.error) return jsonResponse(res, { error: accepted.error }, accepted.status);
+      await scheduleHqWake({
+        prisma, runtimeId: accepted.runtime.id, orgId: current.session.orgId,
+        runtimeEpoch: accepted.runtime.epoch,
+        idempotencyKey: `work-room-handoff:${workOrderId}`,
+        triggerType: 'instruction_updated', dueAt: new Date(),
+        payload: { instruction_id: accepted.instruction.id, source: 'work_room_handoff' },
+      });
+      if (!accepted.duplicate) {
+        await appendHqEvent({
+          prisma, runtimeId: accepted.runtime.id, orgId: current.session.orgId,
+          runtimeEpoch: accepted.runtime.epoch, eventType: 'instruction_received',
+          title: 'A completed Work Room result was accepted',
+          summary: 'The handoff is now a durable operating instruction. HQ will classify it semantically before creating any lifecycle.',
+          details: { room_id: roomId, work_order_id: workOrderId, instruction_id: accepted.instruction.id },
+        });
+      }
+      return jsonResponse(res, {
+        ok: true, duplicate: Boolean(accepted.duplicate),
+        instruction_id: accepted.instruction.id, handoff: accepted.handoff,
+      }, accepted.duplicate ? 200 : 202);
+    }
 
     // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.
     // Archive (default) sets archived_at so the room drops to the rail's
@@ -10864,12 +11132,13 @@ Write the persona now.`;
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal, room_tag, room_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
           room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
           room.roomTag = gr?.[0]?.room_tag || 'general';
+          room.roomMode = gr?.[0]?.room_mode || null;
         } catch { room.goal = ''; }
         const turn = await prisma.hyperTurn.findFirst({
           where: { id: turnId, roomId },
@@ -10898,7 +11167,8 @@ Write the persona now.`;
           participant_ids: room.participantIds || [],
           project_id: room.projectId || null,
           room_goal: room.goal || '',
-          task_tag: `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
+          room_mode: roomExecutionMode(room),
+          task_tag: roomExecutionTag(room),
           flyby_decision: decision,
           flyby_spec: flybySpec,
           callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -11195,12 +11465,13 @@ Write the persona now.`;
       if (room) {
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal, room_tag, room_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
           room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
           room.roomTag = gr?.[0]?.room_tag || 'general';
+          room.roomMode = gr?.[0]?.room_mode || null;
         } catch { room.goal = ''; }
       }
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -11229,6 +11500,7 @@ Write the persona now.`;
               user_id: current.session.userId, org_id: current.session.orgId,
               user_message: userMessage, participant_ids: target.participantIds || [],
               project_id: null, room_goal: `${kind} work routed from HQ`,
+              room_mode: 'runtime', task_tag: `ROOM_${String(kind).toUpperCase()}`,
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }).catch((e) => console.warn('[hq-dispatch] kick failed:', e.message));
             // Routing card in the HQ feed so the owner sees where it went.
@@ -11283,8 +11555,8 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
-            task_tag: room.agentConnectors?._domain_home === true && String(room.roomTag || room.room_tag || 'general') === 'general'
-              ? 'HQ' : `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
+            room_mode: roomExecutionMode(room),
+            task_tag: roomExecutionTag(room),
             flyby_decision: decision,
             flyby_spec: flybySpec,
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -11438,7 +11710,8 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
-            task_tag: isHq ? 'HQ' : `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
+            room_mode: roomExecutionMode(room),
+            task_tag: isHq ? 'HQ' : roomExecutionTag(room),
             ...(executionContext ? { execution_context: executionContext } : {}),
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,

@@ -43,9 +43,12 @@ export async function ensureDomainRooms({ prisma, orgId, userId, participantIds 
         : definition.name;
       const existingId = existingByTag.get(definition.key);
       if (existingId) {
-        if (definition.key === 'general') {
-          await tx.hyperRoom.update({ where: { id: existingId }, data: { name: roomName } });
-        }
+        await tx.hyperRoom.update({
+          where: { id: existingId },
+          data: definition.key === 'general'
+            ? { name: roomName, roomMode: 'runtime' }
+            : { roomMode: 'runtime' },
+        });
         rooms.push({ id: existingId, room_tag: definition.key, created: false });
         continue;
       }
@@ -62,6 +65,7 @@ export async function ensureDomainRooms({ prisma, orgId, userId, participantIds 
           participantIds: normalizedParticipants,
           template: 'auto',
           roomTag: definition.key,
+          roomMode: 'runtime',
           permanentLeadId: normalizedParticipants.slice().sort()[0] || null,
           agentConnectors: { _domain_home: true, _domain_version: 1 },
         },

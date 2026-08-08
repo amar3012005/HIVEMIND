@@ -3023,6 +3023,9 @@ model HyperRoom {
   /// Dedicated expertise pack (general plus versioned SEO, marketing, brand, capital, product, design, legal, and research packs).
   /// Orthogonal to template: a SEO room may still collaborate via debate/swarm/etc.
   roomTag            String       @default("general") @map("room_tag") @db.VarChar(40)
+  /// Ownership boundary. Work rooms are human-facing, Director-led workspaces;
+  /// runtime rooms are bounded specialist operators invoked by an HQ playbook.
+  roomMode           String       @default("work") @map("room_mode") @db.VarChar(16)
   permanentLeadId    String?      @map("permanent_lead_id") @db.Uuid
   permanentSkepticId String?      @map("permanent_skeptic_id") @db.Uuid
   /// Per-character connector grants (legacy P2, superseded by enabledConnectors).
@@ -3055,6 +3058,7 @@ model HyperRoom {
   @@index([userId, orgId])
   @@index([archivedAt])
   @@index([projectId])
+  @@index([orgId, roomMode])
   @@map("hyper_rooms")
 }
 
@@ -3071,8 +3075,10 @@ model HyperWorkOrder {
   runtimeEpoch        String?  @map("runtime_epoch") @db.Uuid
   growthDelegationId  String?  @map("growth_delegation_id") @db.Uuid
   orderKey            String   @map("order_key") @db.VarChar(80)
+  planStepId          String?  @map("plan_step_id") @db.VarChar(80)
+  dependsOn           Json     @default("[]") @map("depends_on") @db.JsonB
   kind                String   @db.VarChar(40)
-  status              String   @default("queued") @db.VarChar(20)
+  status              String   @default("queued") @db.VarChar(40)
   title               String   @db.VarChar(180)
   objective           String   @db.Text
   ownerEmployeeId     String?  @map("owner_employee_id") @db.Uuid
@@ -3082,6 +3088,8 @@ model HyperWorkOrder {
   requiredEvidence    Json     @default("[]") @map("required_evidence") @db.JsonB
   acceptanceCriteria  Json     @default("[]") @map("acceptance_criteria") @db.JsonB
   inputSnapshot       Json     @default("{}") @map("input_snapshot") @db.JsonB
+  waitFor             Json     @default("{}") @map("wait_for") @db.JsonB
+  handoff             Json     @default("{}") @db.JsonB
   artifactRefs        Json     @default("[]") @map("artifact_refs") @db.JsonB
   evidenceRefs        Json     @default("[]") @map("evidence_refs") @db.JsonB
   attempt             Int      @default(0)
@@ -3098,6 +3106,7 @@ model HyperWorkOrder {
   @@unique([hqCycleId, orderKey])
   @@index([orgId, roomId, status])
   @@index([turnId])
+  @@index([turnId, planStepId])
   @@index([hqCycleId, status])
   @@index([orgId, runtimeEpoch, status])
   @@index([status, leaseExpiresAt], map: "hyper_work_orders_status_lease_idx")

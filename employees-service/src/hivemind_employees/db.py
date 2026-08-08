@@ -615,6 +615,10 @@ async def create_hyper_work_order(
     required_evidence: list,
     acceptance_criteria: list,
     input_snapshot: Dict[str, Any],
+    plan_step_id: str = "",
+    depends_on: list | None = None,
+    wait_for: Dict[str, Any] | None = None,
+    handoff: Dict[str, Any] | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Create one tenant-scoped work order, idempotently per turn/order key.
 
@@ -630,29 +634,76 @@ async def create_hyper_work_order(
             row = await conn.fetchrow(
                 """
                 INSERT INTO hivemind.hyper_work_orders (
-                  org_id, room_id, turn_id, order_key, kind, title, objective,
+                  org_id, room_id, turn_id, order_key, plan_step_id, depends_on, kind, title, objective,
                   owner_employee_id, owner_slug, owner_lane, selected_skills,
-                  required_evidence, acceptance_criteria, input_snapshot
+                  required_evidence, acceptance_criteria, input_snapshot, wait_for, handoff
                 ) VALUES (
-                  $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7,
-                  NULLIF($8, '')::uuid, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb
+                  $1::uuid, $2::uuid, $3::uuid, $4, NULLIF($5, ''), $6::jsonb, $7, $8, $9,
+                  NULLIF($10, '')::uuid, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb,
+                  $17::jsonb, $18::jsonb
                 )
                 ON CONFLICT (turn_id, order_key) DO UPDATE
                   SET updated_at = now()
                 RETURNING id, status, attempt
                 """,
-                org_id, room_id, turn_id, order_key[:80], kind[:40], title[:180], objective,
+                org_id, room_id, turn_id, order_key[:80], plan_step_id[:80],
+                json.dumps(depends_on or [], ensure_ascii=False), kind[:40], title[:180], objective,
                 str(owner.get("id") or ""), str(owner.get("slug") or "")[:120],
                 str(owner.get("_lane") or owner.get("lane") or "")[:40],
                 json.dumps(selected_skills or [], ensure_ascii=False),
                 json.dumps(required_evidence or [], ensure_ascii=False),
                 json.dumps(acceptance_criteria or [], ensure_ascii=False),
                 json.dumps(input_snapshot or {}, ensure_ascii=False),
+                json.dumps(wait_for or {}, ensure_ascii=False),
+                json.dumps(handoff or {}, ensure_ascii=False),
             )
         return {"id": str(row["id"]), "status": row["status"], "attempt": int(row["attempt"] or 0)} if row else None
     except Exception as exc:  # migration may not have landed yet; never sink a Room turn
         log.info("create_hyper_work_order unavailable (non-fatal): %s", exc)
         return None
+
+
+async def pause_hyper_work_order(
+    *,
+    work_order_id: str,
+    org_id: str,
+    status: str,
+    wait_for: Dict[str, Any],
+    handoff: Dict[str, Any] | None = None,
+) -> bool:
+    """Persist an exact non-terminal wait without manufacturing a result.
+
+    A waiting order remains the owner of its execution identity. A later
+    resumption can claim that same order; it must not look like a failed or
+    completed worker attempt just because a dependency is external.
+    """
+    allowed = {
+        "waiting_for_input", "waiting_for_approval", "waiting_for_capability",
+        "waiting_for_event", "waiting_for_dependency",
+    }
+    if status not in allowed:
+        return False
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE hivemind.hyper_work_orders
+                   SET status = $1, wait_for = $2::jsonb, handoff = $3::jsonb,
+                       error = NULLIF($4, ''), updated_at = now()
+                 WHERE id = $5::uuid AND org_id = $6::uuid
+                   AND status IN ('queued', 'blocked', 'running', 'waiting_for_input',
+                                  'waiting_for_approval', 'waiting_for_capability',
+                                  'waiting_for_event', 'waiting_for_dependency')
+                """,
+                status, json.dumps(wait_for or {}, ensure_ascii=False),
+                json.dumps(handoff or {}, ensure_ascii=False),
+                str((wait_for or {}).get("reason") or "")[:1000], work_order_id, org_id,
+            )
+        return result.endswith("1")
+    except Exception as exc:
+        log.info("pause_hyper_work_order unavailable (non-fatal): %s", exc)
+        return False
 
 
 async def start_hyper_work_order(work_order_id: str, org_id: str) -> bool:

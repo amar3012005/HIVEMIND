@@ -7,6 +7,13 @@ function languageName(language) {
   return LANGUAGE_NAMES[String(language || 'en').slice(0, 2).toLowerCase()] || 'English';
 }
 
+export function appendGapClarification(response, gaps) {
+  const text = String(response || '').trim();
+  if (!text || /[?？؟]\s*$/.test(text) || !Array.isArray(gaps)) return text;
+  const question = gaps.find((gap) => typeof gap === 'string' && /[?？؟]\s*$/.test(gap.trim()));
+  return question ? `${text}\n${question.trim()}` : text;
+}
+
 export function buildSynthesisSystemPrompt({ language, operation = 'recall', recallMode = 'fact' } = {}) {
   const lang = languageName(language).toUpperCase();
   const modules = [];

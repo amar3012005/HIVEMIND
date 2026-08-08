@@ -485,6 +485,49 @@ function missingSemanticWriteArgs(outputKind, schema, args) {
   return missing;
 }
 
+function semanticContentFields(outputKind, schema) {
+  const properties = schema?.properties || {};
+  const preferred = outputKind === 'document'
+    ? ['text', 'body', 'content', 'markdown']
+    : ['body', 'text', 'message', 'content'];
+  return preferred.filter((name) => Object.hasOwn(properties, name));
+}
+
+function normalizedGroundingTokens(value) {
+  return new Set(String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .match(/[\p{L}\p{N}][\p{L}\p{N}_-]{3,}/gu) || []);
+}
+
+/**
+ * Query Mode can occasionally return a syntactically valid but unresolved
+ * template (for example, a bracketed instruction to add the prior details).
+ * Validate the data hand-off structurally and by language-independent token
+ * overlap. This is not tool routing and does not special-case a brand, user
+ * phrase, language, or provider.
+ */
+export function unresolvedGroundedWriteFields(outputKind, schema, args, priorOutputs) {
+  if (!priorOutputs || Object.keys(priorOutputs).length === 0) return [];
+  const priorText = JSON.stringify(priorOutputs);
+  if (priorText.length < 80) return [];
+  const priorTokens = normalizedGroundingTokens(priorText);
+  return semanticContentFields(outputKind, schema).filter((name) => {
+    const value = String(args?.[name] || '').trim();
+    if (!value) return true;
+    // Bracketed prose without a following Markdown link target is an unresolved
+    // template slot regardless of the language used inside the brackets.
+    if (/\[[^\]\n]{4,}\](?!\s*\()/u.test(value) || /\{\{[^}\n]{2,}\}\}/u.test(value)) return true;
+    if (priorText.length < 200) return false;
+    const delivered = normalizedGroundingTokens(value);
+    let overlap = 0;
+    for (const token of delivered) {
+      if (priorTokens.has(token) && ++overlap >= 2) return false;
+    }
+    return true;
+  });
+}
+
 /**
  * Default tool-selection step: scope the model's tool choices to the subtask's
  * connector group and let it pick ONE tool + args. Injectable for tests.
@@ -803,9 +846,34 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     }
   }
   const dependencyArgs = injectDependencies(preparedArgs, priorOutputs, manifestSchema);
-  const args = selectedAuthority === 'read'
+  let args = selectedAuthority === 'read'
     ? applyConnectorRetrievalPolicy(dependencyArgs, manifestSchema, subtask.retrieval)
     : dependencyArgs;
+
+  // Query Mode is the fast primary path. If it returns a template or content
+  // that does not actually carry the server-verified dependency forward, use
+  // the existing scoped tool-call model once as a fail-closed fallback. This
+  // never executes the write; it only prepares arguments for the same governed
+  // pendingWrite approval flow.
+  let unresolvedContent = selectedAuthority === 'write'
+    ? unresolvedGroundedWriteFields(subtask.output_kind, manifestSchema, args, priorOutputs)
+    : [];
+  if (unresolvedContent.length && selectTool === defaultSelectTool) {
+    try {
+      const fallback = await defaultSelectTool({
+        tools,
+        message: buildSubtaskExecutionMessage(message, priorOutputs),
+        apiKey,
+        signal,
+      });
+      if (fallback?.toolName === toolName) {
+        args = injectDependencies({ ...args, ...(fallback.args || {}) }, priorOutputs, manifestSchema);
+        unresolvedContent = unresolvedGroundedWriteFields(subtask.output_kind, manifestSchema, args, priorOutputs);
+      }
+    } catch (error) {
+      emit({ type: 'tool_result', name: toolName, status: 'argument_fallback_failed', summary: error.message });
+    }
+  }
 
   // Emit the tool_call event so the FE shows live activity for this step.
   emit({ type: 'tool_call', name: toolName, arguments: JSON.stringify(args) });
@@ -876,7 +944,10 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // provider-required information before persisting one, so approval cannot
   // fail merely because the planner omitted a required field.
   const missing = missingRequiredArgs(manifestSchema, args);
-  const semanticMissing = missingSemanticWriteArgs(subtask.output_kind, manifestSchema, args);
+  const semanticMissing = [
+    ...missingSemanticWriteArgs(subtask.output_kind, manifestSchema, args),
+    ...unresolvedContent,
+  ];
   if (missing.length || semanticMissing.length) {
     const missingFields = [...new Set([...missing, ...semanticMissing])];
     const error = `Missing required fields: ${missingFields.join(', ')}`;

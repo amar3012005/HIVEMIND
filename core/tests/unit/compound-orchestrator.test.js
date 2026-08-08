@@ -14,6 +14,7 @@ import {
   rankToolSelectionCards,
   resolveSelectedTool,
   runCompoundOrchestrator,
+  unresolvedGroundedWriteFields,
   validateSemanticStepOutput,
 } from '../../src/agent/compound-orchestrator.js';
 
@@ -300,6 +301,33 @@ test('tool input policy requires complete grounded content instead of placeholde
   assert.match(prompt, /complete useful final content/);
   assert.match(prompt, /never substitute a generic placeholder/);
   assert.match(prompt, /Do not execute/);
+});
+
+test('grounded write validation rejects unresolved templates and accepts detailed dependency content', () => {
+  const schema = {
+    type: 'object',
+    properties: {
+      recipient_email: { type: 'string' },
+      body: { type: 'string' },
+    },
+  };
+  const prior = {
+    recall: JSON.stringify({ memories: [{ content: 'The handbag brand is G ROCHER. Its front has a gold JL logo and the bag is dark brown.' }] }),
+  };
+  assert.deepEqual(
+    unresolvedGroundedWriteFields('message', schema, {
+      recipient_email: 'amar@example.com',
+      body: 'Please find the handbag details below: [Add the specific handbag details here].',
+    }, prior),
+    ['body'],
+  );
+  assert.deepEqual(
+    unresolvedGroundedWriteFields('message', schema, {
+      recipient_email: 'amar@example.com',
+      body: 'The handbag is dark brown, is associated with G ROCHER, and has a gold JL logo.',
+    }, prior),
+    [],
+  );
 });
 
 test('missing write fields produce a resumable generalized field-input request', async () => {

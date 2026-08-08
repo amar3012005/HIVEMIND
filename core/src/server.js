@@ -9491,6 +9491,30 @@ exit \$RC
             });
             if (approved.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
             try {
+              // COMPOSIO drafts: the toolName is a Composio slug (e.g.
+              // GOOGLEDOCS_CREATE_DOCUMENT) and the connection lives in
+              // Composio's connected_accounts (keyed by orgId as user_id) —
+              // NOT the legacy toolkit. Execute via the Composio service
+              // directly; the toolkit has no composio group/tool.
+              if (row.provider === 'composio') {
+                const { executeTool: composioExecute } = await import('./connectors/composio/composio-service.js');
+                const slug = row.toolName || row.toolArgs?._composio_slug;
+                const args = { ...(row.toolArgs || {}) };
+                delete args._composio_slug;
+                const result = await composioExecute(orgId, slug, args);
+                const ok = Boolean(result?.successful);
+                const final = await prisma.pendingWrite.update({
+                  where: { id: draftId },
+                  data: { status: ok ? 'sent' : 'failed', sentAt: ok ? new Date() : null, result: result?.data || null, errorMsg: ok ? null : (result?.error || 'composio execution failed') },
+                }).catch(() => null);
+                return jsonResponse(res, {
+                  ok,
+                  status: ok ? 'sent' : 'failed',
+                  tool_status: ok ? 'completed' : 'failed',
+                  text: ok ? JSON.stringify(result?.data || {}).slice(0, 500) : (result?.error || 'composio execution failed'),
+                  draft: final,
+                });
+              }
               const { buildToolkitForUser } = await import('./agent/toolkit-factory.js');
               const groupName = row.toolGroup || row.provider;
               const tk = await buildToolkitForUser({ prisma, userId, orgId, selectedGroups: [groupName] });
@@ -22932,6 +22956,12 @@ exit \$RC
               return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
             }
             let { message, model = null, history = [], stream: wantStream = false, language = null } = body;
+            // ADDITIVE per-turn capability gate (default false). When true,
+            // connected Composio apps / external tools become ELIGIBLE for this
+            // turn (never mandatory — native recall is still preferred when it
+            // is the best answer). Omitted or false keeps the current robust
+            // HIVE-MIND-only path byte-for-byte unchanged.
+            const useTools = body?.use_tools === true;
             // Legacy clients prepended a '[STRICT LANGUAGE: ...]' directive to the
             // message itself — it poisoned recall embeddings ('solvis' → 0 hits
             // because the query was the directive) and echoed back in fallback
@@ -23055,6 +23085,7 @@ exit \$RC
                       assistantName: agentAssistantName, orgName: agentOrgName,
                       language,
                       router: body?.router,
+                      useTools,
                       recallMode: body?.recall_mode,
                       recallSource: body?.source || {
                         document_id: body?.source_document_id,
@@ -23100,6 +23131,7 @@ exit \$RC
                   assistantName: agentAssistantName, orgName: agentOrgName,
                   language,
                   router: body?.router,
+                  useTools,
                   recallMode: body?.recall_mode,
                   recallSource: body?.source || {
                     document_id: body?.source_document_id,

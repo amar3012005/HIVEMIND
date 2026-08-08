@@ -2230,6 +2230,10 @@ export async function runReactAgentV2({
   recallSource,
   recallTime,
   allowGeneralKnowledge = false,
+  // ADDITIVE per-turn capability gate (default false). When true, connected
+  // Composio apps / external tools become ELIGIBLE for this turn. Omitted or
+  // false keeps the current HIVE-MIND-only path unchanged.
+  useTools = false,
 }) {
   if (!apiKey && !process.env.OPENROUTER_API_KEY && !process.env.CEREBRAS_API_KEY) {
     throw new Error('chat provider API key required');
@@ -2432,6 +2436,7 @@ export async function runReactAgentV2({
     // never as done.
     if (intentDecision.operation === 'compound'
         && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
+        && useTools === true
         && Array.isArray(intentDecision.subtasks) && intentDecision.subtasks.length > 0) {
       const { runCompoundOrchestrator } = await import('./compound-orchestrator.js');
       const compound = await runCompoundOrchestrator({
@@ -2445,18 +2450,40 @@ export async function runReactAgentV2({
       const finalText = compound.summary;
       onEvent?.({ type: 'finish', text: finalText });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'compound', success: compound.status !== 'error' });
+      // UNIFIED compound response: retains the normal chat evidence fields
+      // (empty where a compound turn has no recall evidence) so clients can
+      // rely on one shape, and adds a stable `execution` object describing the
+      // multi-step run. `compound_status` / `draft_ids` are kept for backward
+      // compatibility with the earlier reduced payload.
       return {
         response: finalText,
+        answer_mode: 'compound',
         sources: [],
+        citations: [],
+        relationships: [],
+        synthesis_chains: [],
+        evidence_packets: [],
         steps,
         evidence_used: [],
+        claims: [],
+        rejected_claims: [],
+        grounded: compound.status === 'completed',
         confidence: compound.status === 'completed' ? 1.0 : 0.5,
         gaps: compound.status === 'error' ? ['compound_step_failed'] : [],
+        scopes_found: [],
+        project_choice: null,
+        aggregate: null,
+        action_result: null,
+        assistant_name: assistantName || null,
         usage: sumUsage(usages),
         trace: finalizeTrace(trace, usages),
-        assistant_name: assistantName || null,
         draft_ids: compound.draftIds,
         compound_status: compound.status,
+        execution: {
+          status: compound.status,
+          steps: compound.steps,
+          draft_ids: compound.draftIds,
+        },
       };
     }
 

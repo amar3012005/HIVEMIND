@@ -8,6 +8,7 @@ import {
   normalizeEnterpriseInvitationCode,
   normalizeEnterpriseInvitationInput,
   publicEnterpriseInvitationPreview,
+  redeemEnterpriseInvitation,
   unlimitedEnterpriseOnboardingLimits,
 } from '../../src/billing/enterprise-invitation-service.js';
 import { renderTemplate } from '../../src/email/email-service.js';
@@ -55,5 +56,37 @@ describe('EnterpriseInvitationService', () => {
     assert.match(rendered.html, /https:\/\/example\.test\/activate/);
     assert.match(rendered.html, /HM-EXAMPLE/);
     assert.match(rendered.subject, /Example GmbH/);
+  });
+
+  it('redeems only once and binds the resulting unlimited grant to the invited owner', async () => {
+    const now = new Date('2026-08-08T00:00:00.000Z');
+    const recipient = 'owner@example.com';
+    const invitation = {
+      id: '11111111-1111-4111-8111-111111111111', status: 'sent', accessCodeVersion: 1, linkVersion: 1,
+      invitationExpiresAt: new Date('2026-08-22T00:00:00.000Z'), recipientEmailHash: enterpriseInvitationEmailDigest(recipient),
+      onboardingDays: 14, onboardingLimits: unlimitedEnterpriseOnboardingLimits(), accountType: 'enterprise_managed',
+      hostingMode: 'managed', storageMode: 'hybrid', companyName: 'Example', workspaceName: null,
+      recipientEmail: recipient, recipientEmailHint: 'ow***@example.com', deliveryStatus: 'sent', accessCodeHint: 'HM-...',
+      sentAt: now, lastSentAt: now, redeemedAt: null, redeemedByUserId: null, orgId: null, revokedAt: null, createdAt: now, updatedAt: now,
+    };
+    const tx = {
+      enterpriseInvitation: {
+        findUnique: async () => invitation,
+        updateMany: async ({ where, data }) => {
+          if (!where.status.in.includes(invitation.status) || invitation.invitationExpiresAt <= now) return { count: 0 };
+          invitation.status = data.status; return { count: 1 };
+        },
+        update: async ({ data }) => Object.assign(invitation, data),
+      },
+      entitlementGrant: { create: async ({ data }) => ({ id: 'grant-1', ...data }) },
+      entitlementVersion: { create: async ({ data }) => ({ id: 'version-1', ...data }) },
+      organizationEntitlement: { create: async ({ data }) => data },
+      organization: { update: async ({ data }) => data },
+    };
+    const redeemed = await redeemEnterpriseInvitation({ tx, invitationId: invitation.id, method: 'link', version: 1, userId: '22222222-2222-4222-8222-222222222222', userEmail: recipient, orgId: '33333333-3333-4333-8333-333333333333', now });
+    assert.equal(redeemed.grant.source, 'enterprise_invitation');
+    assert.equal(redeemed.entitlementVersion.limits.llmTokensPerMonth, -1);
+    assert.equal(invitation.status, 'redeemed');
+    await assert.rejects(() => redeemEnterpriseInvitation({ tx, invitationId: invitation.id, method: 'link', version: 1, userId: '22222222-2222-4222-8222-222222222222', userEmail: recipient, orgId: '33333333-3333-4333-8333-333333333333', now }), /invitation unavailable/);
   });
 });

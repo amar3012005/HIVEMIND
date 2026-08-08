@@ -1,5 +1,19 @@
 # Current SINGULANCE Production Release
 
+## prod-20260809-5d4e08e3 — generalized inline human input + grounded governed actions
+
+- Parent/Core SHA: `5d4e08e3a333ee516dfc6acc14e5174c91de1aa6` on `singulance-main`; Core image `hivemind/core-api:sha-5d4e08e3`, image ID `sha256:7e92dac2937e1196d7e8f3e4cb6fed78510969405c03ee0839740a15689540cb`.
+- Frontend source SHA: `f864c0a2e2b7064c398c2746f9971333a208607f`; unchanged accepted frontend image `hivemind/fe:sha-96ed8afe`, image ID `sha256:99f01743c53bea6d2d58ecb677c74aa471f7ddaa23dbc44f7943c8e5eeea065d` (parent image revision `96ed8afe`, exact gitlink points to `f864c0a2`).
+- UX: Overview, side-panel Chat, and mobile now render approvals, arbitrary field input, continuation choices, project/save-scope choices, and cancel states directly on the chat background. There are no outer action cards; headings are bold, exact values are visible, and actions use rectangular inline buttons. Pending actions explain what finished, why HIVE-MIND paused, and that nothing external has happened.
+- Generalized continuation: server accepts only declared server-owned fields, validates required values, binds the continuation to tenant/user, resumes the paused step, and retains completed dependencies instead of replaying recall/provider reads.
+- Governed content: Query Mode remains primary. Unresolved templates and dependency-content loss are detected structurally plus by grounded overlap; one scoped synthesis fallback sees the complete bounded recall projection before a compact provider schema; an exact server-verified content fallback prevents evidence from being hidden by schema truncation. Missing data still pauses for inline input.
+- Compound robustness: read/write authority remains separate from semantic operation. Terminal communication selects the provider send capability unless the structured planner operation specifically requests a provider draft. A later write missing its dependency edge inherits prior read/recall steps; capability discovery/selection receives one side-effect-free retry. Provider writes themselves are never auto-retried and remain pending approval.
+- Tests: 42 focused Core tests passed; 3 shared frontend interaction-contract tests passed; frontend production build completed; syntax and `git diff --check` passed.
+- Authenticated acceptance: the handbag-to-email request was run twice with `use_tools:true`. Both completed recall and returned `pending` `composio_gmail_send_email` actions for `amarsai2005@gmail.com`; bodies were 685 and 1,759 characters and both contained `G ROCHER` and `JL`. Drafts `0a80f7c9-4243-48b9-8b45-52b5c72d7224` and `b69feefc-387f-43b1-8327-232ba2737a41` were cancelled; database verification showed `status=cancelled`, `sentAt=null`, and tool `GMAIL_SEND_EMAIL` for both.
+- Runtime acceptance: Core healthy, frontend running, zero restarts; public Core/home/login/Overview all returned 200; frontend served chunk `4676.aa4090dd.chunk.js` contains the inline interaction markers; fresh fatal/panic/uncaught/unhandled/OOM/migration error counts are zero.
+- Migration: none. Rollback Core: `hivemind/core-api:rollback-pre-5d4e08e3-20260808T234149Z`; frontend remains independently rollback-safe from the previous accepted frontend release. Manifest: `/root/releases/5d4e08e3-clean/RELEASE_MANIFEST.20260808T234149Z.json`.
+- Intentionally untested side effect: no Send button was clicked and no email was sent.
+
 ## prod-20260809-68ec3448 — Slack stage progress + exact governed email preview/send
 
 - Parent SHA: `68ec34485ba25687f62371eb51811f3949b412e8` on `singulance-main`.

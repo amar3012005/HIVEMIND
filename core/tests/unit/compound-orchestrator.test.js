@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildCompoundSynthesisPayload,
   buildCompoundUserSummary,
+  buildGroundedWriteFallbackPrompt,
   buildSubtaskArgumentPrompt,
   buildSubtaskExecutionMessage,
   buildToolInputSystemPrompt,
@@ -304,6 +305,9 @@ test('tool input policy requires complete grounded content instead of placeholde
 });
 
 test('grounded write validation rejects unresolved templates and accepts detailed dependency content', () => {
+  assert.match(buildGroundedWriteFallbackPrompt(), /strict JSON/i);
+  assert.match(buildGroundedWriteFallbackPrompt(), /complete, useful content/i);
+  assert.match(buildGroundedWriteFallbackPrompt(), /Do not execute/i);
   const schema = {
     type: 'object',
     properties: {

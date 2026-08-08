@@ -426,7 +426,10 @@ async function createComposioDraft(ctx, composioSlug, args, toolName) {
         projectId: ctx.projectId || null,
         connectionId: null,
         traceId: ctx._trace?.traceId || null,
-        idempotencyKey: `composio:${ctx.orgId}:${ctx.userId}:${composioSlug}:${JSON.stringify(args || {})}`,
+        // Include the traceId so each turn creates a distinct draft (the
+        // idempotency_key column is UNIQUE — a deterministic key collides on a
+        // second identical request). The traceId scopes retries within one turn.
+        idempotencyKey: `composio:${ctx.orgId}:${ctx.userId}:${composioSlug}:${ctx._trace?.traceId || Date.now()}:${JSON.stringify(args || {})}`,
         expiresAt: new Date(Date.now() + Number(process.env.CHAT_DRAFT_TTL_MS || 15 * 60_000)),
         preview,
         status: 'draft',

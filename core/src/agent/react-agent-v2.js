@@ -1853,7 +1853,7 @@ ${message}`;
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
   if (!validated.claims.length && hasGroundedPacketEvidence(evidence)) {
-    const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered and invite clarification. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
+    const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
     // stateless API call — it must still see the full evidence in userBlock
     // (already shrunk by the combined budget above) or it has nothing left to

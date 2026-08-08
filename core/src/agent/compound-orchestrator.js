@@ -543,6 +543,29 @@ export function unresolvedGroundedWriteFields(outputKind, schema, args, priorOut
   });
 }
 
+export function exactGroundedDependencyContent(priorOutputs) {
+  const values = [];
+  const visit = (value, key = '') => {
+    if (typeof value === 'string') {
+      if (key === 'recall') {
+        try { visit(JSON.parse(value)); return; } catch { /* retain raw value */ }
+      }
+      const text = value.trim();
+      if (text.length >= 20) values.push(text);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, key);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      for (const [childKey, child] of Object.entries(value)) visit(child, childKey);
+    }
+  };
+  visit(priorOutputs || {});
+  return [...new Set(values)].join('\n\n');
+}
+
 /**
  * Default tool-selection step: scope the model's tool choices to the subtask's
  * connector group and let it pick ONE tool + args. Injectable for tests.
@@ -941,6 +964,15 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       unresolvedContent = unresolvedGroundedWriteFields(subtask.output_kind, manifestSchema, args, priorOutputs);
     } catch (error) {
       emit({ type: 'tool_result', name: toolName, status: 'argument_fallback_failed', summary: error.message });
+    }
+  }
+  if (unresolvedContent.length) {
+    const exactContent = exactGroundedDependencyContent(priorOutputs);
+    if (exactContent) {
+      args = { ...args };
+      for (const field of unresolvedContent) args[field] = exactContent;
+      if (Object.hasOwn(manifestSchema?.properties || {}, 'is_html')) args.is_html = false;
+      unresolvedContent = unresolvedGroundedWriteFields(subtask.output_kind, manifestSchema, args, priorOutputs);
     }
   }
 

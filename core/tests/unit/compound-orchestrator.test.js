@@ -15,6 +15,7 @@ import {
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
   filterProviderDraftToolsForTerminalOperation,
+  exactGroundedDependencyContent,
   rankToolSelectionCards,
   resolveSelectedTool,
   runCompoundOrchestrator,
@@ -382,6 +383,17 @@ test('grounded fallback payload keeps evidence visible ahead of a compact provid
   assert.equal(parsed.tool_schema.properties.body.type, 'string');
   assert.equal(Object.hasOwn(parsed.tool_schema.properties.body, 'description'), false);
   assert.ok(payload.indexOf('server_verified_prior_outputs') < payload.indexOf('tool_schema'));
+});
+
+test('exact dependency fallback extracts complete grounded content instead of a placeholder', () => {
+  const first = 'The handbag brand is G ROCHER and it has a gold JL logo.';
+  const second = 'The bag is dark brown with a zipper, chain strap, and white flower charm.';
+  const content = exactGroundedDependencyContent({
+    recall: JSON.stringify({ memories: [{ content: first }, { content: second }] }),
+  });
+  assert.match(content, /G ROCHER/);
+  assert.match(content, /white flower charm/);
+  assert.equal(content.includes('memories'), false);
 });
 
 test('missing write fields produce a resumable generalized field-input request', async () => {

@@ -58,11 +58,14 @@ export function summarizeUsage(stages = {}) {
   const prompt_tokens = all.reduce((sum, usage) => sum + (Number(usage.prompt_tokens) || 0), 0);
   const completion_tokens = all.reduce((sum, usage) => sum + (Number(usage.completion_tokens) || 0), 0);
   const cached_prompt_tokens = all.reduce((sum, usage) => sum + (Number(usage.prompt_tokens_details?.cached_tokens) || 0), 0);
+  const cache_write_prompt_tokens = all.reduce((sum, usage) => sum + (Number(usage.prompt_tokens_details?.cache_write_tokens) || 0), 0);
   return {
     prompt_tokens,
     completion_tokens,
     total_tokens: all.reduce((sum, usage) => sum + (Number(usage.total_tokens) || ((Number(usage.prompt_tokens) || 0) + (Number(usage.completion_tokens) || 0))), 0),
     cached_prompt_tokens,
     uncached_prompt_tokens: Math.max(0, prompt_tokens - cached_prompt_tokens),
+    cache_write_prompt_tokens,
+    cache_hit_ratio: prompt_tokens > 0 ? Number((cached_prompt_tokens / prompt_tokens).toFixed(4)) : 0,
   };
 }

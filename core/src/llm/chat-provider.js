@@ -133,6 +133,10 @@ export async function chatCompletionFetch(model, options = {}, { fallbackApiKey,
     if (Array.isArray(callerProviderPolicy.order) && callerProviderPolicy.order.length) {
       delete body.provider.sort;
     }
+  } else {
+    // Cerebras prompt caching is automatic exact-prefix matching. Its API does
+    // not require (or document) OpenRouter's sticky-routing cache key.
+    delete body.prompt_cache_key;
   }
 
   return fetchImpl(route.url, {

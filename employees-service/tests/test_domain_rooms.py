@@ -5,7 +5,9 @@ from hivemind_employees.hyper.skills import (
     default_skill_for,
     load_method_skill,
     resolve_room_kind,
+    resolve_turn_room_kind,
     skill_catalog,
+    work_skill_catalog,
 )
 
 
@@ -35,6 +37,40 @@ def test_explicit_room_tag_wins_over_message_keyword_classification():
 def test_general_rooms_keep_existing_dynamic_classifier():
     assert resolve_room_kind("GENERAL", "", "draft a cold email sequence") == "outreach"
     assert resolve_room_kind("GENERAL", "", "help us prioritize the roadmap") == "strategy"
+
+
+def test_work_rooms_do_not_preclassify_human_requests_from_tags_or_words():
+    assert resolve_turn_room_kind(
+        "work", "ROOM_OUTREACH", "Legacy outreach task", "Draft a product roadmap"
+    ) == "general"
+    assert resolve_turn_room_kind(
+        "work", "ROOM_PRODUCT", "Product task", "Research competitors"
+    ) == "general"
+    # Runtime rooms preserve the playbook-selected specialist contract.
+    assert resolve_turn_room_kind(
+        "runtime", "ROOM_OUTREACH", "", "Research competitors"
+    ) == "outreach"
+
+
+def test_work_room_catalog_supports_progressive_semantic_skill_selection():
+    catalog = dict(work_skill_catalog())
+    assert "positioning-ladder" in catalog
+    assert "opportunity-solution-tree" in catalog
+    assert "prospect-qualification" in catalog
+    assert "evidence-first" in catalog
+    assert len(catalog) == len(work_skill_catalog())
+
+
+def test_work_room_director_stays_neutral_without_losing_method_range():
+    director = Director(
+        user_message="Assess our product direction and decide what to validate next.",
+        user_id="user", org_id="org", project_id=None, participants=[],
+        room_template="auto", room_goal="Legacy outreach task", enabled_connectors=[],
+        emit=lambda event: None, room_kind="general", room_mode="work",
+    )
+    assert director.is_work_room is True
+    assert director.room_kind == "general"
+    assert director.domain_pack is None
 
 
 def test_domain_skills_use_progressive_disclosure():

@@ -154,3 +154,35 @@ test('Gemini planner request uses OpenRouter and preserves required tool paramet
     else process.env.OPENROUTER_API_KEY = prior;
   }
 });
+
+test('OpenRouter preserves prompt cache keys while Cerebras relies on automatic prefix caching', async () => {
+  const priorOpenRouter = process.env.OPENROUTER_API_KEY;
+  const priorCerebras = process.env.CEREBRAS_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  process.env.CEREBRAS_API_KEY = 'cerebras-test';
+  try {
+    await chatCompletionFetch(DEFAULT_CHAT_PLANNER_MODEL, {
+      method: 'POST',
+      body: JSON.stringify({ messages: [], prompt_cache_key: 'hm:planner:v1' }),
+    }, {
+      fetchImpl: async (_url, options) => {
+        assert.equal(JSON.parse(options.body).prompt_cache_key, 'hm:planner:v1');
+        return new Response('{}', { status: 200 });
+      },
+    });
+    await chatCompletionFetch(DEFAULT_CHAT_SYNTHESIS_MODEL, {
+      method: 'POST',
+      body: JSON.stringify({ messages: [], prompt_cache_key: 'hm:synthesis:v1' }),
+    }, {
+      fetchImpl: async (_url, options) => {
+        assert.equal(JSON.parse(options.body).prompt_cache_key, undefined);
+        return new Response('{}', { status: 200 });
+      },
+    });
+  } finally {
+    if (priorOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = priorOpenRouter;
+    if (priorCerebras == null) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = priorCerebras;
+  }
+});

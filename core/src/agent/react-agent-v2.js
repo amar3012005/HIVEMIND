@@ -30,7 +30,8 @@ import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js'
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
-import { appendGapClarification, buildSynthesisSystemPrompt } from './chat-synthesis-prompt.js';
+import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
+import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
 import { chooseSynthesisModel, isCandidateSynthesisAcceptable, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
@@ -133,7 +134,7 @@ function languageName(code) {
 
 // ── Provider-aware JSON helper ─────────────────────────────────────────
 
-async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy }) {
+async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy, promptCacheKey }) {
   const resp = await chatCompletionFetch(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -151,6 +152,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
       // caller asks. Harmless on non-reasoning providers (ignored field).
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(providerPolicy ? { provider: providerPolicy } : {}),
+      ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     }),
     signal,
   }, { fallbackApiKey: apiKey });
@@ -1262,7 +1264,7 @@ function sourceUnavailableResponse({ evidence, language }) {
 }
 
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '' }) {
-  const sys = buildSynthesisSystemPrompt({ language, operation: plan.operation, recallMode: plan.recall_mode });
+  const synthesisPrompt = buildSynthesisPromptArtifact({ language, operation: plan.operation, recallMode: plan.recall_mode });
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
       && Number.isInteger(evidence.aggregate?.count)) {
     const count = evidence.aggregate.count;
@@ -1797,11 +1799,17 @@ ${message}`;
       })),
     };
     ctx._trace.synthesis_prompt = {
-      static_chars: sys.length,
+      static_chars: synthesisPrompt.static_prompt.length,
+      dynamic_system_chars: synthesisPrompt.dynamic_prompt.length,
       evidence_chars: evidenceBlock.length,
       profile_chars: personaNote.length,
       history_chars: tail.reduce((sum, item) => sum + String(item?.content || '').length, 0),
       total_user_chars: userBlock.length,
+      static_prompt_cag: synthesisPrompt.cache,
+      provider_prefix: promptContributionTelemetry({
+        staticPrompt: synthesisPrompt.static_prompt,
+        dynamicPrompt: `${synthesisPrompt.dynamic_prompt}\n${tail.map((item) => String(item?.content || '')).join('\n')}\n${userBlock}`,
+      }),
     };
   }
 
@@ -1836,9 +1844,10 @@ ${message}`;
     // DETERMINISTIC. At 0.1 the model occasionally picked a competing memory
     // (e.g. the Feb "Kommunikation" phase over the 18-Aug "Launch PIA" event)
     // for the same query on different turns — the flakiness users saw.
-    messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: userBlock }],
+    messages: [...synthesisPrompt.messages, ...tail, { role: 'user', content: userBlock }],
     model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
     providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
+    promptCacheKey: synthesisPrompt.cache.key,
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
@@ -1854,7 +1863,7 @@ ${message}`;
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
   if (!validated.claims.length && hasGroundedPacketEvidence(evidence)) {
-    const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
+    const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
     // stateless API call — it must still see the full evidence in userBlock
     // (already shrunk by the combined budget above) or it has nothing left to
@@ -1866,9 +1875,15 @@ ${message}`;
     // need 'medium' reasoning to re-cite the same facts).
     const repairCap = Math.min(answerCap, Number(process.env.HIVEMIND_REPAIR_MAX_TOKENS || 1500));
     const repaired = await callJsonLLM({
-      messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
+      messages: [
+        { role: 'system', content: synthesisPrompt.static_prompt },
+        { role: 'system', content: `${synthesisPrompt.dynamic_prompt}\n${repairInstruction}` },
+        ...tail,
+        { role: 'user', content: userBlock },
+      ],
       model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low',
       providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
+      promptCacheKey: synthesisPrompt.cache.key,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;

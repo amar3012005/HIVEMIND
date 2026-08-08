@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildCompoundSynthesisPayload,
   buildSubtaskArgumentPrompt,
+  applyConnectorRetrievalPolicy,
   buildToolSelectionCards,
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
@@ -93,6 +94,33 @@ test('argument generation separates relative ordering from provider content filt
   assert.match(prompt, /ordering from content filtering/i);
   assert.match(prompt, /do not copy those ordering words into a provider search query/i);
   assert.match(prompt, /explicit sender, entity, date, or content filters/i);
+});
+
+test('structured newest policy removes invented search text and requests one complete record', () => {
+  const schema = { properties: {
+    query: { type: 'string' }, max_results: { type: 'integer' }, verbose: { type: 'boolean' },
+    include_payload: { type: 'boolean' }, ids_only: { type: 'boolean' },
+  } };
+  const args = applyConnectorRetrievalPolicy(
+    { query: 'last email', max_results: 20, verbose: false, include_payload: false, ids_only: true },
+    schema,
+    { result_order: 'newest', result_limit: 1, has_explicit_filter: false },
+  );
+  assert.equal('query' in args, false);
+  assert.equal(args.max_results, 1);
+  assert.equal(args.verbose, true);
+  assert.equal(args.include_payload, true);
+  assert.equal(args.ids_only, false);
+});
+
+test('structured newest policy preserves a real sender/content filter', () => {
+  const schema = { properties: { query: { type: 'string' }, max_results: { type: 'integer' } } };
+  const args = applyConnectorRetrievalPolicy(
+    { query: 'from:alice@example.com' }, schema,
+    { result_order: 'newest', result_limit: 1, has_explicit_filter: true },
+  );
+  assert.equal(args.query, 'from:alice@example.com');
+  assert.equal(args.max_results, 1);
 });
 
 test('compound synthesis payload retains complete rank-one recall alongside connector data', () => {

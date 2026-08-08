@@ -2575,6 +2575,9 @@ export async function runReactAgentV2({
           tool_groups: [intentDecision.connector_provider],
           depends_on: null,
           message: intentDecision.queries?.[0] || message,
+          retrieval: intentDecision.connector_retrieval || {
+            result_order: 'provider_default', result_limit: null, has_explicit_filter: false,
+          },
         }],
         tool_groups: [],
       };

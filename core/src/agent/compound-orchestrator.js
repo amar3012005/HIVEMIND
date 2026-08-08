@@ -348,6 +348,27 @@ function injectDependencies(args, priorOutputs, toolSchema) {
   return next;
 }
 
+/** Apply structured, router-produced retrieval semantics to provider args. */
+export function applyConnectorRetrievalPolicy(args, toolSchema, retrieval = {}) {
+  const next = { ...(args || {}) };
+  const props = toolSchema?.properties || {};
+  if (retrieval?.result_order !== 'newest') return next;
+
+  // Relative ordering is not a content query. Remove model-invented search
+  // text only when the semantic router confirmed there was no actual filter.
+  if (retrieval?.has_explicit_filter !== true && props.query) delete next.query;
+  const requested = Number.isInteger(retrieval?.result_limit)
+    ? Math.max(1, Math.min(100, retrieval.result_limit))
+    : 1;
+  for (const key of ['max_results', 'maxResults', 'limit', 'page_size', 'pageSize']) {
+    if (props[key]) { next[key] = requested; break; }
+  }
+  if (props.verbose) next.verbose = true;
+  if (props.include_payload) next.include_payload = true;
+  if (props.ids_only) next.ids_only = false;
+  return next;
+}
+
 function missingRequiredArgs(schema, args) {
   const required = Array.isArray(schema?.required) ? schema.required : [];
   return required.filter((name) => {
@@ -579,11 +600,20 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   }
   const { toolName, args: rawArgs } = chosen;
   const composioSlug = composioSlugByTool.get(toolName) || null;
+  const selectedManifest = composioManifestByTool.get(toolName);
+  const selectedAuthority = classifyComposioToolAuthority(selectedManifest);
+  if (selectedAuthority === 'unknown') {
+    emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'unknown connector tool authority' });
+    return { status: 'error', error: 'unknown connector tool authority', toolName, args: rawArgs, result: null, draftId: null, outputFields: {} };
+  }
 
   // 3. Dependency injection uses the chosen tool's schema (authoritative for
   //    which fields the tool accepts).
   const manifestSchema = chosen.schema || { properties: {} };
-  const args = injectDependencies(rawArgs, priorOutputs, manifestSchema);
+  const dependencyArgs = injectDependencies(rawArgs, priorOutputs, manifestSchema);
+  const args = selectedAuthority === 'read'
+    ? applyConnectorRetrievalPolicy(dependencyArgs, manifestSchema, subtask.retrieval)
+    : dependencyArgs;
 
   // Emit the tool_call event so the FE shows live activity for this step.
   emit({ type: 'tool_call', name: toolName, arguments: JSON.stringify(args) });
@@ -601,12 +631,6 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // Reuse the same controlled-manifest authority decision used before model
   // selection. This prevents read tools such as GET_LABEL from being mistaken
   // for writes merely because their resource name contains "label".
-  const selectedManifest = composioManifestByTool.get(toolName);
-  const selectedAuthority = classifyComposioToolAuthority(selectedManifest);
-  if (selectedAuthority === 'unknown') {
-    emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'unknown connector tool authority' });
-    return { status: 'error', error: 'unknown connector tool authority', toolName, args, result: null, draftId: null, outputFields: {} };
-  }
   const isWrite = selectedAuthority === 'write';
 
   if (!isWrite) {

@@ -30,3 +30,14 @@ test('a malformed connector decision is downgraded when use_tools is false', () 
   assert.equal(decision.operation, 'recall');
   assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
 });
+
+test('connector router preserves language-independent newest retrieval semantics', () => {
+  const { decision } = adaptToDecision('use_connector', {
+    provider: 'gmail', intent: 'read', request: 'Worum ging es in meiner letzten E-Mail?', response_language: 'de',
+    result_order: 'newest', result_limit: 1, has_explicit_filter: false,
+  }, 'Worum ging es in meiner letzten E-Mail?', 'de', { useTools: true });
+  assert.equal(decision.operation, 'connector_read');
+  assert.deepEqual(decision.connector_retrieval, {
+    result_order: 'newest', result_limit: 1, has_explicit_filter: false,
+  });
+});

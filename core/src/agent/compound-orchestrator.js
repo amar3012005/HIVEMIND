@@ -107,6 +107,16 @@ export function buildToolSelectionCards(rawTools) {
   })).filter((card) => card.name);
 }
 
+export function resolveSelectedTool(rawTools, selectedName) {
+  const wanted = String(selectedName || '').trim().toLocaleLowerCase();
+  if (!wanted) return null;
+  return (rawTools || []).find((tool) => {
+    const name = String(tool?.function?.name || tool?.name || '').trim().toLocaleLowerCase();
+    const slug = String(tool?._composio?.slug || '').trim().toLocaleLowerCase();
+    return name === wanted || slug === wanted;
+  }) || null;
+}
+
 async function selectToolCard({ rawTools, message, apiKey, signal }) {
   const cards = buildToolSelectionCards(rawTools);
   if (!cards.length) throw new Error('no connector tool cards available');
@@ -122,28 +132,30 @@ async function selectToolCard({ rawTools, message, apiKey, signal }) {
       },
     },
   };
-  const resp = await chatCompletionFetch(SUBTASK_MODEL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: SUBTASK_MODEL,
-      messages: [
-        { role: 'system', content: `Select the one connected-app capability that semantically fulfills the user's request in any language. Do not use word matching. Available capability cards: ${JSON.stringify(cards)}` },
-        { role: 'user', content: message },
-      ],
-      tools: [selector], tool_choice: { type: 'function', function: { name: 'select_connector_tool' } },
-      temperature: 0, max_tokens: 120,
-    }),
-    signal,
-  }, { fallbackApiKey: apiKey });
-  if (!resp.ok) throw new Error(`tool-card selector ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
-  const data = await resp.json();
-  const call = data?.choices?.[0]?.message?.tool_calls?.[0];
-  let args = {};
-  try { args = JSON.parse(call?.function?.arguments || '{}'); } catch {}
-  const selected = rawTools.find((tool) => (tool?.function?.name || tool?.name) === args.tool_name);
-  if (!selected) throw new Error('tool-card selector returned an unavailable tool');
-  return selected;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const resp = await chatCompletionFetch(SUBTASK_MODEL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: SUBTASK_MODEL,
+        messages: [
+          { role: 'system', content: `Select the one connected-app capability that semantically fulfills the user's request in any language. Return exactly one tool_name from the supplied enum. Available capability cards: ${JSON.stringify(cards)}` },
+          { role: 'user', content: message },
+        ],
+        tools: [selector], tool_choice: { type: 'function', function: { name: 'select_connector_tool' } },
+        temperature: 0, max_tokens: 120,
+      }),
+      signal,
+    }, { fallbackApiKey: apiKey });
+    if (!resp.ok) throw new Error(`tool-card selector ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+    const data = await resp.json();
+    const call = data?.choices?.[0]?.message?.tool_calls?.[0];
+    let args = {};
+    try { args = JSON.parse(call?.function?.arguments || '{}'); } catch {}
+    const selected = resolveSelectedTool(rawTools, args.tool_name);
+    if (selected) return selected;
+  }
+  throw new Error('tool-card selector returned an unavailable tool after retry');
 }
 
 /**

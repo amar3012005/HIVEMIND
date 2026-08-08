@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCompoundSynthesisPayload, buildToolSelectionCards, runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
+import { buildCompoundSynthesisPayload, buildToolSelectionCards, resolveSelectedTool, runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
 
 // ── Test harness ─────────────────────────────────────────────────────────────
 // A deterministic tool-selector replaces the model call. The Composio service
@@ -41,6 +41,13 @@ test('compound orchestrator: semantic selection cards omit provider JSON schemas
   assert.deepEqual(cards, [{ name: 'GOOGLEDOCS_CREATE_DOCUMENT', description: 'Create a Google Document from supplied text.' }]);
   assert.equal(JSON.stringify(cards).includes('parameters'), false);
   assert.equal(JSON.stringify(cards).includes('required'), false);
+});
+
+test('tool-card identifiers resolve case-insensitively by function name or Composio slug', () => {
+  const tools = [{ function: { name: 'composio_googlecalendar_find_events' }, _composio: { slug: 'GOOGLECALENDAR_FIND_EVENTS' } }];
+  assert.equal(resolveSelectedTool(tools, 'COMPOSIO_GOOGLECALENDAR_FIND_EVENTS'), tools[0]);
+  assert.equal(resolveSelectedTool(tools, 'googlecalendar_find_events'), tools[0]);
+  assert.equal(resolveSelectedTool(tools, 'missing'), null);
 });
 
 test('compound synthesis payload retains complete rank-one recall alongside connector data', () => {

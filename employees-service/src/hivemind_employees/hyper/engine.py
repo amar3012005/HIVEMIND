@@ -3828,9 +3828,30 @@ class Director:
             if not ready:
                 for index, order in pending:
                     step_id = str(order.get("id") or f"work-{index + 1}")[:80]
-                    result = {"id": step_id, "step_id": step_id, "depends_on": list(order.get("depends_on") or []),
+                    dependencies = list(order.get("depends_on") or [])
+                    owner = self._work_order_owner(str(order.get("owner_lane") or "Strategist"))
+                    persisted = await create_hyper_work_order(
+                        org_id=self.org_id, room_id=self.room_id or "", turn_id=self.turn_id or "",
+                        order_key=f"{step_id}-{str(order.get('kind') or 'analysis')[:20]}"[:80],
+                        kind=str(order.get("kind") or "analysis"), title=str(order.get("title") or "Work step"),
+                        objective=str(order.get("objective") or ""), owner=owner,
+                        selected_skills=list(self.skills_used),
+                        required_evidence=list(order.get("required_evidence") or []),
+                        acceptance_criteria=list(order.get("acceptance_criteria") or []),
+                        input_snapshot={"room_kind": self.room_kind, "room_mode": self.room_mode,
+                                        "user_message": self.user_message[:1000], "turn_plan": True},
+                        plan_step_id=step_id, depends_on=dependencies,
+                    )
+                    work_id = str((persisted or {}).get("id") or step_id)
+                    message = "Dependencies were not completed; this step was not started."
+                    if persisted:
+                        await complete_hyper_work_order(
+                            work_order_id=work_id, org_id=self.org_id, status="blocked", summary=message,
+                            output={}, evidence=[], artifacts=[], usage={}, error=message,
+                        )
+                    result = {"id": work_id, "step_id": step_id, "depends_on": dependencies,
                               "status": "needs_attention", "kind": order.get("kind"), "title": order.get("title"),
-                              "text": "Dependencies were not completed; this step was not started."}
+                              "text": message}
                     completed_by_step[step_id] = result
                     results.append(result)
                     await self.emit({"t": "work_order", **result})

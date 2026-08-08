@@ -45,6 +45,18 @@ import {
   normalizePromotionCode,
   redeemPromotion,
 } from './billing/promotion-service.js';
+import {
+  activateEnterpriseRunway,
+  createEnterpriseInvitation,
+  extendEnterpriseInvitation,
+  findEnterpriseInvitationAdmission,
+  getEnterpriseInvitationPreview,
+  markEnterpriseInvitationDelivery,
+  publicEnterpriseInvitation,
+  redeemEnterpriseInvitation,
+  revokeEnterpriseInvitation,
+  rotateEnterpriseInvitationSecrets,
+} from './billing/enterprise-invitation-service.js';
 import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './billing/runway-pricing.js';
 import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './billing/access-codes.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
@@ -2694,6 +2706,36 @@ const server = http.createServer(async (req, res) => {
     a.log(entry).catch(err => console.warn('[audit] log failed:', err.message));
   }
 
+  async function dispatchEnterpriseInvitation({ invitation, token, code = null }) {
+    const base = (process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+    const activationUrl = `${base}/hivemind/login?create=1&enterprise_invite=${encodeURIComponent(token)}`;
+    const selfHosted = invitation.hostingMode === 'self_host';
+    const delivery = await sendSystemEmail({
+      templateId: 'enterprise_invitation',
+      to: invitation.recipientEmail,
+      vars: {
+        companyName: invitation.companyName,
+        workspaceName: invitation.workspaceName || invitation.companyName,
+        recipientEmail: invitation.recipientEmail,
+        hostingLabel: selfHosted ? 'Self-hosted' : 'Managed',
+        hostingExplanation: selfHosted
+          ? 'Your organization operates the memory infrastructure; your deployment is provisioned through the secure setup flow.'
+          : 'Singulance hosts and operates your workspace on managed EU infrastructure.',
+        invitationUrl: activationUrl,
+        accessCode: code || 'Use the secure activation link above.',
+        expiresOn: invitation.invitationExpiresAt.toLocaleDateString('en-GB', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }),
+        welcomeMessage: invitation.welcomeMessage || 'Your HIVEMIND onboarding workspace is ready to set up.',
+        supportEmail: process.env.SYSTEM_EMAIL_SUPPORT || 'support@singulancelabs.com',
+        privacyUrl: process.env.HIVEMIND_PRIVACY_URL || 'https://singulancelabs.com/privacy',
+        termsUrl: process.env.HIVEMIND_TERMS_URL || 'https://singulancelabs.com/terms',
+      },
+    });
+    const recorded = await markEnterpriseInvitationDelivery({
+      prisma, invitationId: invitation.id, delivered: delivery.ok, error: delivery.error || null,
+    });
+    return { delivery, invitation: recorded, activationUrl };
+  }
+
   function _reqMeta(req) {
     const fwd = req.headers?.['x-forwarded-for'];
     const ip = typeof fwd === 'string' ? fwd.split(',')[0].trim() : null;
@@ -2899,6 +2941,103 @@ const server = http.createServer(async (req, res) => {
     await audit({ eventType: 'commercial.promotion_revoked', eventCategory: 'billing', action: 'update', resourceType: 'promotion', resourceId: adminPromotionRevoke[1],
       metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
     return jsonResponse(res, { ok: true });
+  }
+
+  // ─── Platform Commercial: B2B enterprise invitations ───────────────────
+  // Invitations are deliberately distinct from reusable promotions/referrals:
+  // one invited owner, one eventual organization, one onboarding grant.
+  if (pathname === '/admin/api/platform/invitations' && (req.method === 'GET' || req.method === 'POST')) {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    if (req.method === 'GET') {
+      const invitations = await prisma.enterpriseInvitation.findMany({ orderBy: { createdAt: 'desc' }, take: 500 });
+      const orgIds = invitations.map((row) => row.orgId).filter(Boolean);
+      const grants = orgIds.length ? await prisma.entitlementGrant.findMany({ where: { orgId: { in: orgIds } }, orderBy: { startsAt: 'desc' } }) : [];
+      const latestGrant = new Map();
+      for (const grant of grants) if (!latestGrant.has(grant.orgId)) latestGrant.set(grant.orgId, grant);
+      return jsonResponse(res, { invitations: invitations.map((row) => ({
+        ...publicEnterpriseInvitation(row),
+        entitlement: row.orgId && latestGrant.get(row.orgId) ? {
+          grant_id: latestGrant.get(row.orgId).id, source: latestGrant.get(row.orgId).source,
+          status: latestGrant.get(row.orgId).status, ends_at: latestGrant.get(row.orgId).endsAt,
+        } : null,
+      })) });
+    }
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const created = await createEnterpriseInvitation({ prisma, input: body });
+      const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: created.invitation.id } });
+      let sent = null;
+      if (body.send_email !== false) sent = await dispatchEnterpriseInvitation({ invitation: raw, token: created.plaintextToken, code: created.plaintextCode });
+      await audit({ eventType: 'commercial.enterprise_invitation_created', eventCategory: 'billing', action: 'create',
+        resourceType: 'enterprise_invitation', resourceId: created.invitation.id,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, account_type: created.invitation.account_type, delivery_status: sent?.invitation?.delivery_status || 'not_sent' },
+        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      if (sent) await audit({ eventType: sent.delivery.ok ? 'commercial.enterprise_invitation_sent' : 'commercial.enterprise_invitation_delivery_failed', eventCategory: 'billing', action: 'create',
+        resourceType: 'enterprise_invitation', resourceId: created.invitation.id,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, safe_error: sent.delivery.error || null },
+        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { invitation: sent?.invitation || created.invitation, code: created.plaintextCode, ...(sent ? { activation_url: sent.activationUrl, email_dispatch: sent.delivery } : {}) }, 201);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 400);
+    }
+  }
+
+  const adminInvitationDetail = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})$/i);
+  if (adminInvitationDetail && req.method === 'GET') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const invitation = await prisma?.enterpriseInvitation.findUnique({ where: { id: adminInvitationDetail[1] } });
+    if (!invitation) return jsonResponse(res, { error: 'Not found' }, 404);
+    const [auditRows, grants] = await Promise.all([
+      prisma.auditLog.findMany({ where: { resourceType: 'enterprise_invitation', resourceId: invitation.id }, orderBy: { createdAt: 'desc' }, take: 100 }),
+      invitation.orgId ? prisma.entitlementGrant.findMany({ where: { orgId: invitation.orgId }, orderBy: { startsAt: 'desc' }, take: 20 }) : [],
+    ]);
+    return jsonResponse(res, { invitation: publicEnterpriseInvitation(invitation), audit: auditRows, entitlement_grants: grants });
+  }
+
+  const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(send|resend|revoke|extend|rotate-code|code-copied)$/i);
+  if (adminInvitationAction && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const [, invitationId, action] = adminInvitationAction;
+    const body = await parseBody(req).catch(() => ({}));
+    try {
+      if (action === 'revoke') {
+        await revokeEnterpriseInvitation({ prisma, invitationId });
+        await audit({ eventType: 'commercial.enterprise_invitation_revoked', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
+          metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+        return jsonResponse(res, { ok: true });
+      }
+      if (action === 'extend') {
+        const updated = await extendEnterpriseInvitation({ prisma, invitationId, expiresAt: body.invitation_expires_at || body.expires_at });
+        await audit({ eventType: 'commercial.enterprise_invitation_extended', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
+          metadata: { operator: operator.operator, session_id: operator.sessionId, invitation_expires_at: updated.invitationExpiresAt }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+        return jsonResponse(res, { invitation: publicEnterpriseInvitation(updated) });
+      }
+      if (action === 'code-copied') {
+        await audit({ eventType: 'commercial.enterprise_invitation_code_copied', eventCategory: 'billing', action: 'read', resourceType: 'enterprise_invitation', resourceId: invitationId,
+          metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+        return jsonResponse(res, { ok: true });
+      }
+      const rotateCode = action === 'send' || action === 'rotate-code';
+      const rotated = await rotateEnterpriseInvitationSecrets({ prisma, invitationId, rotateCode, rotateLink: action !== 'rotate-code' });
+      if (action === 'rotate-code') {
+        await audit({ eventType: 'commercial.enterprise_invitation_code_rotated', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
+          metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+        return jsonResponse(res, { invitation: rotated.invitation, code: rotated.plaintextCode });
+      }
+      const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: invitationId } });
+      const sent = await dispatchEnterpriseInvitation({ invitation: raw, token: rotated.plaintextToken, code: action === 'send' ? rotated.plaintextCode : null });
+      const sentEvent = action === 'resend' ? 'commercial.enterprise_invitation_resent' : 'commercial.enterprise_invitation_sent';
+      await audit({ eventType: sent.delivery.ok ? sentEvent : 'commercial.enterprise_invitation_delivery_failed', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, safe_error: sent.delivery.error || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { invitation: sent.invitation, ...(action === 'send' ? { code: rotated.plaintextCode } : {}), email_dispatch: sent.delivery });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, /unavailable|not found/i.test(error.message) ? 404 : 400);
+    }
   }
 
   // ─── Platform Commercial: two-phase referral campaigns ────────────────────
@@ -3561,6 +3700,14 @@ const server = http.createServer(async (req, res) => {
     if (envId) opts.idpId = envId;
     else opts.idpHint = h;
   };
+  if (pathname === '/auth/enterprise-invitations/preview' && req.method === 'GET') {
+    if (signupAdmissionLimited(req)) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
+    const preview = await getEnterpriseInvitationPreview({ prisma, token: url.searchParams.get('token') }).catch(() => null);
+    recordSignupAdmissionAttempt(req, Boolean(preview));
+    if (!preview) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 404);
+    return jsonResponse(res, { invitation: preview });
+  }
+
   if (pathname === '/auth/signup-admission' && req.method === 'POST') {
     if (signupAdmissionLimited(req)) {
       return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
@@ -3568,14 +3715,20 @@ const server = http.createServer(async (req, res) => {
     const body = await parseBody(req);
     const accountType = String(body.account_type || '').trim().toLowerCase();
     const code = String(body.invitation_code || body.enterprise_access_code || '').trim();
+    const enterpriseAdmission = accountType === 'enterprise'
+      ? await findEnterpriseInvitationAdmission({ prisma, code, token: body.enterprise_invitation_token || null }).catch(() => null)
+      : null;
+    // The environment allowlist is legacy-only. New B2B workspaces receive an
+    // invitation bound to one recipient and one commercial profile.
     const accepted = accountType === 'personal'
       ? invitationCodeMatches(code, PERSONAL_SIGNUP_INVITATION_CODE)
-      : accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code));
+      : Boolean(enterpriseAdmission) || (accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code)));
     recordSignupAdmissionAttempt(req, accepted);
     if (!accepted) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);
     return jsonResponse(res, {
-      signup_ticket: createSignupAdmission({ accountType, secret: SIGNUP_ADMISSION_SECRET, ttlSeconds: SIGNUP_ADMISSION_TTL_SECONDS }),
+      signup_ticket: createSignupAdmission({ accountType, secret: SIGNUP_ADMISSION_SECRET, enterpriseInvitation: enterpriseAdmission, ttlSeconds: SIGNUP_ADMISSION_TTL_SECONDS }),
       expires_in_seconds: SIGNUP_ADMISSION_TTL_SECONDS,
+      ...(enterpriseAdmission ? { invitation: enterpriseAdmission.preview } : {}),
     });
   }
 
@@ -3940,29 +4093,41 @@ const server = http.createServer(async (req, res) => {
       accountType: requestedPlanInput === 'enterprise' ? 'enterprise' : 'personal',
       secret: SIGNUP_ADMISSION_SECRET,
     });
+    const enterpriseInvitationAdmission = requestedPlanInput === 'enterprise'
+      ? signupAdmission?.enterpriseInvitation || null : null;
     const existingMembershipCount = await prisma.userOrganization.count({ where: { userId: current.session.userId, isActive: true } });
     if (!isAdminAuthorized(req, url) && existingMembershipCount === 0 && !signupAdmission) {
       return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_required' }, 403);
     }
     const enterpriseAccessCode = normalizeEnterpriseAccessCode(body.enterprise_access_code);
     let enterpriseViaAccessCode = false;
+    let enterpriseInvitationProfile = null;
     let requestedPlan;
     if (isAdminAuthorized(req, url)) {
       requestedPlan = requestedPlanInput;
     } else if (requestedPlanInput === 'enterprise') {
-      if (!isValidEnterpriseAccessCode(enterpriseAccessCode)) {
+      if (enterpriseInvitationAdmission) {
+        const invitation = await prisma.enterpriseInvitation.findUnique({ where: { id: enterpriseInvitationAdmission.id } }).catch(() => null);
+        if (!invitation) return jsonResponse(res, { error: 'invitation unavailable', code: 'invalid_enterprise_code' }, 403);
+        enterpriseInvitationProfile = invitation;
+        requestedPlan = 'enterprise';
+      } else if (!isValidEnterpriseAccessCode(enterpriseAccessCode)) {
         // FE maps a 403 here → onboarding_error=invalid_enterprise_code.
         return jsonResponse(res, { error: 'invalid or inactive enterprise access code', code: 'invalid_enterprise_code' }, 403);
+      } else {
+        requestedPlan = 'enterprise';
+        enterpriseViaAccessCode = true;
       }
-      requestedPlan = 'enterprise';
-      enterpriseViaAccessCode = true;
     } else {
       requestedPlan = 'free';
     }
     if (!PLANS[requestedPlan]) {
       return jsonResponse(res, { error: 'invalid plan', valid: Object.keys(PLANS) }, 400);
     }
-    const referralCode = normalizeReferralCode(body.referralCode);
+    const referralCode = normalizeReferralCode(body.referralCode || body.referral_code);
+    if (enterpriseInvitationAdmission && referralCode) {
+      return jsonResponse(res, { error: 'an enterprise invitation cannot be combined with a referral code' }, 400);
+    }
     let referralCampaign = null;
     let signupPromotion = null;
     if (referralCode) {
@@ -3987,7 +4152,11 @@ const server = http.createServer(async (req, res) => {
       ? 'self_host' : 'managed';
     let memoryStorageMode = memoryStorageModeFor(provisionPlan, hostingMode);
     let accountType = provisionPlan === 'enterprise' ? (hostingMode === 'self_host' ? 'enterprise_self_hosted' : 'enterprise_managed') : 'personal';
-    if (signupPromotion) {
+    if (enterpriseInvitationProfile) {
+      hostingMode = enterpriseInvitationProfile.hostingMode;
+      memoryStorageMode = enterpriseInvitationProfile.storageMode;
+      accountType = enterpriseInvitationProfile.accountType;
+    } else if (signupPromotion) {
       hostingMode = signupPromotion.version.hostingMode;
       memoryStorageMode = signupPromotion.version.storageMode;
       accountType = signupPromotion.version.accountType;
@@ -4004,6 +4173,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
     let org;
+    let enterpriseInvitationRedemption = null;
     try {
       const created = await prisma.$transaction(async (tx) => {
         const newOrg = await tx.organization.create({
@@ -4038,16 +4208,30 @@ const server = http.createServer(async (req, res) => {
         if (enterpriseViaAccessCode) {
           await activateOffer({ tx, orgId: newOrg.id, offer: buildStandardOffer('enterprise'), source: 'enterprise_access_code' });
         }
+        let enterpriseInvitation = null;
+        if (enterpriseInvitationAdmission) {
+          const signupUser = await tx.user.findUnique({ where: { id: current.session.userId }, select: { email: true } });
+          enterpriseInvitation = await redeemEnterpriseInvitation({
+            tx,
+            invitationId: enterpriseInvitationAdmission.id,
+            method: enterpriseInvitationAdmission.method,
+            version: enterpriseInvitationAdmission.version,
+            userId: current.session.userId,
+            userEmail: signupUser?.email || '',
+            orgId: newOrg.id,
+          });
+        }
         let promotion = null;
         if (signupPromotion) {
           const signupUser = await tx.user.findUnique({ where: { id: current.session.userId }, select: { email: true } });
           promotion = await redeemPromotion({ prisma, tx, orgId: newOrg.id, userId: current.session.userId, email: signupUser?.email || '', code: referralCode,
             requestId: req.headers['x-request-id'] || null, applyProfile: true });
         }
-        return { org: newOrg, promotion };
+        return { org: newOrg, promotion, enterpriseInvitation };
       });
       org = created.org;
       signupPromotion = created.promotion || signupPromotion;
+      enterpriseInvitationRedemption = created.enterpriseInvitation || null;
     } catch (error) {
       if (needsEmbeddedAmr) {
         try { unregisterEmbeddedAmrOrg(orgId, regFile); }
@@ -4059,6 +4243,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (needsEmbeddedAmr) console.log(`[org-create] .amr-central registered for new personal org ${org.id}`);
+
+    if (enterpriseInvitationRedemption) {
+      await audit({ organizationId: org.id, userId: current.session.userId, eventType: 'commercial.enterprise_invitation_redeemed', eventCategory: 'billing', action: 'create',
+        resourceType: 'enterprise_invitation', resourceId: enterpriseInvitationRedemption.invitation.id,
+        metadata: { onboarding_ends_at: enterpriseInvitationRedemption.onboardingEndsAt, account_type: enterpriseInvitationRedemption.invitation.account_type },
+        ..._reqMeta(req) });
+    }
 
     // Route the org to its Qdrant home by PLAN:
     //   enterprise (paid)  → own collection org_<id> (provisioned now, fire-and-forget)
@@ -4108,6 +4299,12 @@ const server = http.createServer(async (req, res) => {
         memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode)),
         referral: referralOffer ? { code: referralOffer.code, phase: 'pending_payment', offer: referralOffer } : null,
         promotion: signupPromotion?.termsSnapshot || null,
+        enterprise_onboarding: enterpriseInvitationRedemption ? {
+          active: true,
+          ends_at: enterpriseInvitationRedemption.onboardingEndsAt,
+          account_type: enterpriseInvitationRedemption.invitation.account_type,
+          hosting_mode: enterpriseInvitationRedemption.invitation.hosting_mode,
+        } : null,
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
@@ -11725,6 +11922,7 @@ Write the persona now.`;
           const activation = offer.kind === 'referral'
             ? await claimReferralOffer({ tx, orgId, userId, offer })
             : await activateOffer({ tx, orgId, offer, source: 'dummy_checkout' });
+          if (offer.kind === 'runway') await activateEnterpriseRunway({ tx, orgId, offer });
           const confirmed = await tx.billingCheckout.update({
             where: { id: checkout.id },
             data: { status: 'confirmed', confirmedAt: new Date() },
@@ -11771,6 +11969,11 @@ Write the persona now.`;
     // dynamic Stripe subscription, and (on webhook) activate a CUSTOM entitlement
     // matching the scope. This is the post-onboarding path for enterprise orgs.
     if (pathname === '/v1/billing/runway/checkout' && req.method === 'POST') {
+      // This configuration becomes the organization's paid commercial contract.
+      // Members may inspect billing; only the owner can create it.
+      if (!effectiveRoles(callerMem).includes('org_owner')) {
+        return jsonResponse(res, { error: 'organization owner required' }, 403);
+      }
       const body = await parseBody(req).catch(() => ({}));
       const quote = computeRunwayQuote(body);
       if (!(quote.monthlyTotal > 0)) return jsonResponse(res, { error: 'invalid scope configuration' }, 400);
@@ -12115,13 +12318,20 @@ Write the persona now.`;
             const pending = await prisma.billingCheckout.findUnique({ where: { providerRef: obj.id } }).catch(() => null);
             if (pending && pending.orgId === org.id && pending.offer?.kind === 'runway') {
               try {
-                await prisma.$transaction(async (tx) => {
+                const activated = await prisma.$transaction(async (tx) => {
                   await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `billing:checkout:${pending.id}`);
                   const fresh = await tx.billingCheckout.findUnique({ where: { id: pending.id } });
-                  if (fresh?.status !== 'pending') return;
+                  if (fresh?.status !== 'pending') return false;
                   await activateOffer({ tx, orgId: org.id, offer: pending.offer, source: 'stripe_runway' });
+                  await activateEnterpriseRunway({ tx, orgId: org.id, offer: pending.offer });
                   await tx.billingCheckout.update({ where: { id: pending.id }, data: { status: 'confirmed', confirmedAt: new Date() } });
+                  return true;
                 });
+                if (activated) {
+                  const invitation = await prisma.enterpriseInvitation.findFirst({ where: { orgId: org.id, status: 'redeemed' }, select: { id: true } }).catch(() => null);
+                  if (invitation) await audit({ organizationId: org.id, eventType: 'commercial.enterprise_onboarding_to_runway', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitation.id,
+                    metadata: { checkout_id: pending.id, provider: 'stripe' }, actorType: 'system' });
+                }
                 provisionPaidManagedOrg(org.id, 'enterprise')
                   .catch((e) => console.error('[managed-provision] runway post-checkout failed', { orgId: org.id, error: e.message }));
               } catch (e) { console.error('[runway] activation failed', { orgId: org.id, error: e.message }); }

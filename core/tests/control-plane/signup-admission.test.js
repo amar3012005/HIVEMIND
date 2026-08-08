@@ -31,3 +31,14 @@ test('admissions fail closed without a configured signing secret', () => {
   assert.equal(createSignupAdmission({ accountType: 'personal', secret: '' }), null);
   assert.equal(verifySignupAdmission({ ticket: 'anything', accountType: 'personal', secret: '' }), null);
 });
+
+test('enterprise admissions preserve only a signed invitation identity, never a code or link', () => {
+  const ticket = createSignupAdmission({
+    accountType: 'enterprise', secret, now,
+    enterpriseInvitation: { id: '11111111-1111-4111-8111-111111111111', method: 'link', version: 2 },
+  });
+  const decoded = verifySignupAdmission({ ticket, accountType: 'enterprise', secret, now });
+  assert.deepEqual(decoded.enterpriseInvitation, { id: '11111111-1111-4111-8111-111111111111', method: 'link', version: 2 });
+  assert.equal(ticket.includes('recovery-code'), false);
+  assert.equal(createSignupAdmission({ accountType: 'personal', secret, enterpriseInvitation: { id: '11111111-1111-4111-8111-111111111111', method: 'link', version: 1 } }), null);
+});

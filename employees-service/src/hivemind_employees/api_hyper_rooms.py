@@ -3259,7 +3259,9 @@ async def _orchestrate_single_agent(
     if _room_kind == "campaign":
         _evo_mode = "on"
     _evo_playbooks: Dict[str, list] = {}
-    if status == "complete" and _evo_mode in ("on", "evolve", "true", "1", "yes"):
+    # Load prior lessons before execution. Completion is not known yet; the
+    # post-report reflection below is where truthful completion is enforced.
+    if _evo_mode in ("on", "evolve", "true", "1", "yes"):
         try:
             _p_slugs = [str(p.get("slug")) for p in (participants or []) if p.get("slug")]
             _evo_playbooks = await get_employee_playbooks_map(req.org_id, _p_slugs)

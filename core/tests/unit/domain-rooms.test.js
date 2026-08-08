@@ -72,4 +72,6 @@ test('control plane exposes tenant-scoped domain backfill and permanent-room pro
   assert.match(source, /current\.session\.orgId/);
   assert.match(source, /DOMAIN_HOME_ROOM/);
   assert.match(source, /is_domain_home/);
+  assert.match(source, /Company Intelligence Room history is retained as durable company context/);
+  assert.match(source, /data: \{ roomJournal: \[\] \}/);
 });

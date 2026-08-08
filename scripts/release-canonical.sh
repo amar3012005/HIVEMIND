@@ -37,6 +37,8 @@ ENVF="$HDIR/.env"
 NEXT_REPO=/root/hivemind-next
 NEXT="$NEXT_REPO/infra/docker-compose.next.yml"
 NEXTENV="$NEXT_REPO/.env.embedding-canary-runtime"
+PRESENCE="$HDIR/scripts/release-presence.sh"
+RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
 declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=hivemind-next-frontend-1 )
@@ -53,15 +55,28 @@ esac; }
 IFS=',' read -ra SVCS <<< "$SERVICES"
 for s in "${SVCS[@]}"; do [ -n "${CONTAINER[$s]:-}" ] || { echo "FATAL: unknown service '$s'"; exit 2; }; done
 
+# Publish intent before building. A conflicting claim fails before consuming
+# disk or producing an image that would supersede another session's release.
+"$PRESENCE" claim --session "$RELEASE_SESSION_ID" --services "$SERVICES" --sha "$SHA" --phase planning --summary "canonical release requested"
+trap '"$PRESENCE" complete --session "$RELEASE_SESSION_ID" --result failed --summary "release exited before completion" || true' EXIT
+
 # ── serialize with quick-deploy (same lock) ────────────────────────────────
 exec 9>/run/lock/singulance-quick-deploy.lock
 flock -n 9 || { echo "FATAL: another SINGULANCE deployment holds the lock"; exit 1; }
 echo "[lock] acquired"
+"$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase locked
 
 # ── fetch + ancestor gate ──────────────────────────────────────────────────
-git -C "$CANON" -c fetch.recurseSubmodules=false fetch origin singulance-main -q
+# /root/hivemind-main can retain a Compose-era local `origin`; production
+# releases always follow the authoritative GitHub canonical branch when it is
+# configured there.
+CANON_REMOTE=origin
+if git -C "$CANON" remote get-url github >/dev/null 2>&1; then
+  CANON_REMOTE=github
+fi
+git -C "$CANON" -c fetch.recurseSubmodules=false fetch "$CANON_REMOTE" singulance-main -q
 FULLSHA=$(git -C "$CANON" rev-parse "$SHA^{commit}" 2>/dev/null) || { echo "FATAL: sha $SHA not found"; exit 1; }
-git -C "$CANON" merge-base --is-ancestor "$FULLSHA" origin/singulance-main \
+git -C "$CANON" merge-base --is-ancestor "$FULLSHA" "$CANON_REMOTE/singulance-main" \
   || { echo "FATAL: $SHA is NOT an ancestor of origin/singulance-main — refusing (unmerged code)"; exit 1; }
 SHORT=$(git -C "$CANON" rev-parse --short "$FULLSHA")
 echo "[gate] $SHORT is on canonical ✓"
@@ -93,6 +108,7 @@ for s in "${SVCS[@]}"; do
   CUR=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
   if [ -n "$CUR" ]; then docker tag "$CUR" "hivemind/${IMG[$s]}:rollback" && ROLLBACK[$s]="$CUR"; fi
   echo "[build] $s → $TAG"
+  "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "building:$s"
   ( cd "$REL" && build_cmd "$s" "$TAG" ) >/dev/null
   printf '  %s:\n    image: %s\n' "$s" "$TAG" >> "$OVERRIDE.tmp"
 done
@@ -102,6 +118,7 @@ mv "$OVERRIDE.tmp" "$OVERRIDE"
 for s in "${SVCS[@]}"; do
   [ "$s" = frontend ] && continue
   echo "[deploy] $s"
+  "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
   ( cd "$HDIR" && docker compose -f "$HETZNER" -f "$OVERRIDE" --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null )
 done
 
@@ -111,6 +128,7 @@ if printf '%s\n' "${SVCS[@]}" | grep -qx frontend; then
   CUR=$(docker inspect hivemind-next-frontend-1 --format '{{.Config.Image}}' 2>/dev/null || true)
   [ -n "$CUR" ] && { docker tag "$CUR" hivemind/fe:rollback-single; ROLLBACK[frontend]="$CUR"; }
   echo "[build] frontend → $FTAG"; ( cd "$REL" && build_cmd frontend "$FTAG" ) >/dev/null
+  "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:frontend"
   docker tag "$FTAG" hivemind/fe:latest-single
   ( cd "$NEXT_REPO" && NEXT_VERSION=latest docker compose -p hivemind-next -f "$NEXT" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null )
 fi
@@ -141,4 +159,11 @@ fi
   echo "  \"result\": \"$([ $FAIL = 0 ] && echo ok || echo FAILED)\""; echo "}"
 } > "$MANIFEST"
 echo "[manifest] $MANIFEST"
-[ "$FAIL" = 0 ] && echo "RELEASE OK — $SHORT" || { echo "RELEASE FAILED — rollback: hivemind/<img>:rollback"; exit 1; }
+if [ "$FAIL" = 0 ]; then
+  "$PRESENCE" complete --session "$RELEASE_SESSION_ID" --result ok --summary "release verified"
+  trap - EXIT
+  echo "RELEASE OK — $SHORT"
+else
+  echo "RELEASE FAILED — rollback: hivemind/<img>:rollback"
+  exit 1
+fi

@@ -73,7 +73,7 @@ test('compound orchestrator: native hivemind-recall step runs via dispatchTool',
   const dispatched = [];
   const recallPacket = { content: 'Amar leads HIVEMIND', recall_packet: { citations: [{ id: 'C1' }], sourceSections: [{ segment_id: 'S1', content: 'full evidence' }] } };
   const ctx = {
-    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _originalUserMessage: 'What is Amar responsible for?',
     _tracedDispatch: async (name, args) => { dispatched.push({ name, args }); return recallPacket; },
   };
   const res = await runCompoundOrchestrator({
@@ -84,6 +84,8 @@ test('compound orchestrator: native hivemind-recall step runs via dispatchTool',
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0].name, 'hivemind_recall');
   assert.equal(dispatched[0].args._structured_intent, true);
+  assert.equal(dispatched[0].args.query_original, 'What is Amar responsible for?');
+  assert.equal(dispatched[0].args.query_canonical_en, 'Recall Amar');
   assert.equal(dispatched[0].args.semantic_recovery, true);
   assert.equal(dispatched[0].args._include_full_memory_content, true,
     'compound synthesis must receive full authorized recall rows, not public previews');

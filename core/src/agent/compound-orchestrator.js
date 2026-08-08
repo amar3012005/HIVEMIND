@@ -369,6 +369,8 @@ async function runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent }) {
   const toolName = 'hivemind_recall';
   const args = {
     query: message,
+    query_original: ctx?._originalUserMessage || message,
+    query_canonical_en: message,
     // Compound recall must preserve the same retrieval/delivery contract as
     // the native progressive chat lane. These are trusted server controls:
     // they do not change hybrid ranking, but prevent the public 400-character

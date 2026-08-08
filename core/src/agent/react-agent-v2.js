@@ -2438,6 +2438,7 @@ export async function runReactAgentV2({
     _apiKey: apiKey,
     _internalModel: INTERNAL_MODEL,
     _chatUseTools: useTools === true,
+    _originalUserMessage: message,
   };
 
   try {

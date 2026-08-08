@@ -2729,6 +2729,11 @@ const server = http.createServer(async (req, res) => {
     const base = (process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
     const activationUrl = `${base}/hivemind/login?create=1&enterprise_invite=${encodeURIComponent(token)}`;
     const selfHosted = invitation.hostingMode === 'self_host';
+    const storageLabels = {
+      hybrid: 'Managed hybrid company brain',
+      amr_embedded: 'Embedded .amr company brain',
+      byod_amr: 'Self-hosted BYOD agent company brain',
+    };
     const delivery = await sendSystemEmail({
       templateId: 'enterprise_invitation',
       to: invitation.recipientEmail,
@@ -2745,7 +2750,9 @@ const server = http.createServer(async (req, res) => {
         invitationUrl: activationUrl,
         accessCode: code || 'Use the secure activation link above.',
         expiresOn: invitation.invitationExpiresAt.toLocaleDateString('en-GB', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }),
-        welcomeMessage: invitation.welcomeMessage || 'Your HIVEMIND onboarding workspace is ready to set up.',
+        onboardingDays: invitation.onboardingDays || 14,
+        storageLabel: storageLabels[invitation.storageMode] || 'Company brain infrastructure',
+        welcomeMessage: invitation.welcomeMessage || 'Your HIVEMIND AI Operating System is ready to activate.',
         supportEmail: process.env.SYSTEM_EMAIL_SUPPORT || 'support@singulancelabs.com',
         privacyUrl: process.env.HIVEMIND_PRIVACY_URL || 'https://singulancelabs.com/privacy',
         termsUrl: process.env.HIVEMIND_TERMS_URL || 'https://singulancelabs.com/terms',

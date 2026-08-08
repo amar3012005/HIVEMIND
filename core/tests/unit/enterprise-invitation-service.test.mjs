@@ -51,11 +51,14 @@ describe('EnterpriseInvitationService', () => {
       companyName: 'Example GmbH', workspaceName: 'Example HIVEMIND', recipientEmail: 'owner@example.com',
       hostingLabel: 'Managed', hostingExplanation: 'Managed EU infrastructure.', invitationUrl: 'https://example.test/activate',
       accessCode: 'HM-EXAMPLE', expiresOn: '22 August 2026', welcomeMessage: 'Welcome aboard.',
+      onboardingDays: 14, storageLabel: 'Managed hybrid company brain',
       supportEmail: 'support@singulancelabs.com', privacyUrl: 'https://example.test/privacy', termsUrl: 'https://example.test/terms',
     });
     assert.match(rendered.html, /https:\/\/example\.test\/activate/);
     assert.match(rendered.html, /HM-EXAMPLE/);
     assert.match(rendered.subject, /Example GmbH/);
+    assert.match(rendered.html, /AI Operating System/);
+    assert.match(rendered.text, /invitation already applied/);
   });
 
   it('redeems only once and binds the resulting unlimited grant to the invited owner', async () => {

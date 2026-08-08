@@ -358,6 +358,40 @@ async function defaultSelectTool({ tools, message, apiKey, signal }) {
   throw new Error('subtask exceeded tool-selection rounds');
 }
 
+async function rewriteCompoundRecallQuery({ message, canonicalOperation, originalRequest, apiKey, signal }) {
+  const structuralFallback = String(canonicalOperation || '')
+    .split(/[_\s]+/)
+    .slice(1)
+    .join(' ')
+    .trim() || message;
+  try {
+    const resp = await chatCompletionFetch(SUBTASK_MODEL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: SUBTASK_MODEL,
+        messages: [
+          { role: 'system', content: 'Rewrite one zero-coverage memory-recall subtask into one compact, language-independent semantic retrieval query. Preserve entities and requested attributes; remove orchestration verbs and connector-only context. Return strict JSON {"query":string}.' },
+          { role: 'user', content: JSON.stringify({ subtask: message, canonical_operation: canonicalOperation, overall_request: originalRequest }).slice(0, 1600) },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0,
+        max_tokens: 100,
+      }),
+      signal,
+    }, { fallbackApiKey: apiKey });
+    if (!resp.ok) return structuralFallback;
+    const data = await resp.json();
+    const content = data?.choices?.[0]?.message?.content || '';
+    const parsed = JSON.parse(content);
+    return typeof parsed?.query === 'string' && parsed.query.trim()
+      ? parsed.query.trim().slice(0, 160)
+      : structuralFallback;
+  } catch {
+    return structuralFallback;
+  }
+}
+
 /**
  * Run a native HIVEMIND step (recall / save / projects) via the native
  * dispatchTool path — the same path the rest of /api/chat uses. The connector
@@ -369,7 +403,7 @@ async function runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent }) {
   const toolName = 'hivemind_recall';
   const args = {
     query: message,
-    query_original: ctx?._originalUserMessage || message,
+    query_original: message,
     query_canonical_en: message,
     // Compound recall must preserve the same retrieval/delivery contract as
     // the native progressive chat lane. These are trusted server controls:
@@ -390,7 +424,25 @@ async function runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent }) {
       emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'native dispatch unavailable' });
       return { status: 'error', error: 'native hivemind dispatch unavailable', toolName, args, result: null, draftId: null, outputFields: {} };
     }
-    const result = await dispatch('hivemind_recall', args, ctx);
+    let result = await dispatch('hivemind_recall', args, ctx);
+    if (!result?.error && (result?.memories?.length || 0) === 0 && (result?.evidence?.length || 0) === 0) {
+      const rewriteRecall = ctx?._rewriteCompoundRecallQuery || rewriteCompoundRecallQuery;
+      const retryQuery = await rewriteRecall({
+        message,
+        canonicalOperation: subtask.operation,
+        originalRequest: ctx?._originalUserMessage || message,
+        apiKey: ctx?._apiKey,
+        signal: ctx?._signal,
+      });
+      if (retryQuery && retryQuery !== message) {
+        emit({ type: 'query_optimized', queries: [retryQuery], reason: 'compound_zero_coverage_retry' });
+        result = await dispatch('hivemind_recall', {
+          ...args,
+          query: retryQuery,
+          query_canonical_en: retryQuery,
+        }, ctx);
+      }
+    }
     if (result?.error) {
       emit({ type: 'tool_result', name: toolName, status: 'error', summary: result.error });
       return { status: 'error', error: result.error, toolName, args, result, draftId: null, outputFields: {} };

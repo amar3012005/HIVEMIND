@@ -84,12 +84,34 @@ test('compound orchestrator: native hivemind-recall step runs via dispatchTool',
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0].name, 'hivemind_recall');
   assert.equal(dispatched[0].args._structured_intent, true);
-  assert.equal(dispatched[0].args.query_original, 'What is Amar responsible for?');
+  assert.equal(dispatched[0].args.query_original, 'Recall Amar');
   assert.equal(dispatched[0].args.query_canonical_en, 'Recall Amar');
   assert.equal(dispatched[0].args.semantic_recovery, true);
   assert.equal(dispatched[0].args._include_full_memory_content, true,
     'compound synthesis must receive full authorized recall rows, not public previews');
   assert.equal(res.recallResults[0], recallPacket, 'full canonical recall result is retained without truncation');
+});
+
+test('compound recall retries once with a semantic rewrite after zero coverage', async () => {
+  const dispatched = [];
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' }, _originalUserMessage: 'mixed request',
+    _rewriteCompoundRecallQuery: async () => 'handbag brand',
+    _tracedDispatch: async (name, args) => {
+      dispatched.push({ name, args });
+      return dispatched.length === 1
+        ? { memories: [], evidence: [] }
+        : { memories: [{ id: 'm1', content: 'Brand is G ROCHER.' }], evidence: [] };
+    },
+  };
+  const res = await runCompoundOrchestrator({
+    subtasks: [{ operation: 'recall_handbag_brand', tool_groups: ['hivemind-recall'], message: 'Recall handbag brand' }],
+    ctx, apiKey: 'k', signal: null,
+  });
+  assert.equal(res.status, 'completed');
+  assert.equal(dispatched.length, 2);
+  assert.equal(dispatched[1].args.query, 'handbag brand');
+  assert.match(res.synthesisPayload.recall[0].memories[0].content, /G ROCHER/);
 });
 
 test('compound orchestrator: composio read step executes and reports completed', async () => {

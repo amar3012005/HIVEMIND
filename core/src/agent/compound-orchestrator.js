@@ -360,13 +360,58 @@ export function applyConnectorRetrievalPolicy(args, toolSchema, retrieval = {}) 
   const requested = Number.isInteger(retrieval?.result_limit)
     ? Math.max(1, Math.min(100, retrieval.result_limit))
     : 1;
+  const candidateCount = Math.max(requested, 10);
   for (const key of ['max_results', 'maxResults', 'limit', 'page_size', 'pageSize']) {
-    if (props[key]) { next[key] = requested; break; }
+    if (props[key]) { next[key] = candidateCount; break; }
   }
   if (props.verbose) next.verbose = true;
   if (props.include_payload) next.include_payload = true;
   if (props.ids_only) next.ids_only = false;
   return next;
+}
+
+const CONNECTOR_TIME_FIELDS = [
+  'messageTimestamp', 'internalDateTime', 'internalDate', 'timestamp', 'date',
+  'created_at', 'createdAt', 'updated_at', 'updatedAt', 'start_time', 'startTime',
+];
+
+function connectorTimestamp(item) {
+  for (const field of CONNECTOR_TIME_FIELDS) {
+    const value = item?.[field];
+    if (value == null || value === '') continue;
+    const numeric = typeof value === 'number' ? value : Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric < 1e12 ? numeric * 1000 : numeric;
+    const parsed = Date.parse(String(value));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+/** Sort bounded live-provider candidates, then deliver only the requested rows. */
+export function applyConnectorResultPolicy(data, retrieval = {}) {
+  if (!data || !['newest', 'oldest'].includes(retrieval?.result_order)) return data;
+  const requested = Number.isInteger(retrieval?.result_limit)
+    ? Math.max(1, Math.min(100, retrieval.result_limit))
+    : 1;
+  const next = Array.isArray(data) ? [...data] : { ...data };
+  const keys = Array.isArray(next) ? [null] : ['messages', 'items', 'results', 'events', 'files'];
+  for (const key of keys) {
+    const rows = key == null ? next : next[key];
+    if (!Array.isArray(rows) || rows.length === 0) continue;
+    const stamped = rows.map((row, index) => ({ row, index, ts: connectorTimestamp(row) }));
+    if (!stamped.some((entry) => entry.ts != null)) continue;
+    stamped.sort((a, b) => {
+      if (a.ts == null && b.ts == null) return a.index - b.index;
+      if (a.ts == null) return 1;
+      if (b.ts == null) return -1;
+      return retrieval.result_order === 'newest' ? b.ts - a.ts : a.ts - b.ts;
+    });
+    const selected = stamped.slice(0, requested).map((entry) => entry.row);
+    if (key == null) return selected;
+    next[key] = selected;
+    return next;
+  }
+  return data;
 }
 
 function missingRequiredArgs(schema, args) {
@@ -635,7 +680,10 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
 
   if (!isWrite) {
     // Read — execute immediately via Composio.
-    const result = await composioExecute(orgId, composioSlug, args);
+    const rawResult = await composioExecute(orgId, composioSlug, args);
+    const result = rawResult?.data && typeof rawResult.data === 'object'
+      ? { ...rawResult, data: applyConnectorResultPolicy(rawResult.data, subtask.retrieval) }
+      : rawResult;
     const status = result?.successful ? 'completed' : 'failed';
     const outputFields = result?.data && typeof result.data === 'object' ? result.data : {};
     emit({ type: 'tool_result', name: toolName, status, summary: (result?.error || (result?.successful ? 'completed' : 'failed')).slice(0, 240) });

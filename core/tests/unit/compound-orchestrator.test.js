@@ -4,6 +4,7 @@ import {
   buildCompoundSynthesisPayload,
   buildSubtaskArgumentPrompt,
   applyConnectorRetrievalPolicy,
+  applyConnectorResultPolicy,
   buildToolSelectionCards,
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
@@ -107,7 +108,7 @@ test('structured newest policy removes invented search text and requests one com
     { result_order: 'newest', result_limit: 1, has_explicit_filter: false },
   );
   assert.equal('query' in args, false);
-  assert.equal(args.max_results, 1);
+  assert.equal(args.max_results, 10, 'unordered providers need a bounded candidate window before sorting');
   assert.equal(args.verbose, true);
   assert.equal(args.include_payload, true);
   assert.equal(args.ids_only, false);
@@ -120,7 +121,25 @@ test('structured newest policy preserves a real sender/content filter', () => {
     { result_order: 'newest', result_limit: 1, has_explicit_filter: true },
   );
   assert.equal(args.query, 'from:alice@example.com');
-  assert.equal(args.max_results, 1);
+  assert.equal(args.max_results, 10);
+});
+
+test('connector result policy sorts provider candidates and exposes only the requested newest row', () => {
+  const data = { messages: [
+    { subject: 'third', messageTimestamp: '2026-08-08T19:19:09Z' },
+    { subject: 'newest', messageTimestamp: '2026-08-08T19:45:00Z' },
+    { subject: 'second', messageTimestamp: '2026-08-08T19:30:00Z' },
+  ], nextPageToken: 'opaque' };
+  const result = applyConnectorResultPolicy(data, {
+    result_order: 'newest', result_limit: 1, has_explicit_filter: false,
+  });
+  assert.deepEqual(result.messages.map((row) => row.subject), ['newest']);
+  assert.equal(data.messages.length, 3, 'provider receipt is not mutated in place');
+});
+
+test('connector result policy leaves unstructured results unchanged rather than guessing', () => {
+  const data = { messages: [{ subject: 'a' }, { subject: 'b' }] };
+  assert.equal(applyConnectorResultPolicy(data, { result_order: 'newest', result_limit: 1 }), data);
 });
 
 test('compound synthesis payload retains complete rank-one recall alongside connector data', () => {

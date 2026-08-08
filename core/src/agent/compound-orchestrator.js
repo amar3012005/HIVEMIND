@@ -107,6 +107,24 @@ export function buildToolSelectionCards(rawTools) {
   })).filter((card) => card.name);
 }
 
+export function rankToolSelectionCards(cards, canonicalOperation = '') {
+  const tokens = (value) => new Set(String(value || '').toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((token) => token.length >= 3));
+  const intentTokens = tokens(canonicalOperation);
+  if (!intentTokens.size) return [...cards];
+  return cards.map((card, index) => {
+    const nameTokens = tokens(card.name);
+    const descriptionTokens = tokens(card.description);
+    let score = 0;
+    for (const token of intentTokens) {
+      if (nameTokens.has(token)) score += 3;
+      if (descriptionTokens.has(token)) score += 1;
+    }
+    return { card, index, score };
+  }).sort((a, b) => b.score - a.score || a.index - b.index).map(({ card }) => card);
+}
+
 export function resolveSelectedTool(rawTools, selectedName) {
   const wanted = String(selectedName || '').trim().toLocaleLowerCase();
   if (!wanted) return null;
@@ -125,8 +143,8 @@ export function resolveSelectedTool(rawTools, selectedName) {
   }) || null;
 }
 
-async function selectToolCard({ rawTools, message, apiKey, signal }) {
-  const cards = buildToolSelectionCards(rawTools);
+async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, signal }) {
+  const cards = rankToolSelectionCards(buildToolSelectionCards(rawTools), canonicalOperation);
   if (!cards.length) throw new Error('no connector tool cards available');
   const selector = {
     type: 'function',
@@ -147,7 +165,7 @@ async function selectToolCard({ rawTools, message, apiKey, signal }) {
       body: JSON.stringify({
         model: SUBTASK_MODEL,
         messages: [
-          { role: 'system', content: `Select the one connected-app capability that semantically fulfills the user's request in any language. Return exactly one tool_name from the supplied enum. Available capability cards: ${JSON.stringify(cards)}` },
+          { role: 'system', content: `Select the one connected-app capability that directly fulfills the requested operation in any language. Prefer the tool that produces the requested result over prerequisite or metadata utilities. Return exactly one tool_name from the supplied enum. Available capability cards, relevance-ordered against the planner's canonical operation: ${JSON.stringify(cards)}` },
           { role: 'user', content: message },
         ],
         tools: [selector], tool_choice: { type: 'function', function: { name: 'select_connector_tool' } },
@@ -404,7 +422,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
       // supplies exactly one full schema to argument generation. Test
       // selectors retain the complete local list for deterministic fixtures.
       const relevant = selectTool === defaultSelectTool
-        ? [await selectToolCard({ rawTools: raw, message, apiKey, signal })]
+        ? [await selectToolCard({ rawTools: raw, message, canonicalOperation: subtask.operation, apiKey, signal })]
         : raw;
       tools = relevant.map((t) => ({
         type: 'function',

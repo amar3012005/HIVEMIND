@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCompoundSynthesisPayload, buildToolSelectionCards, resolveSelectedTool, runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
+import { buildCompoundSynthesisPayload, buildToolSelectionCards, rankToolSelectionCards, resolveSelectedTool, runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
 
 // ── Test harness ─────────────────────────────────────────────────────────────
 // A deterministic tool-selector replaces the model call. The Composio service
@@ -49,6 +49,14 @@ test('tool-card identifiers resolve case-insensitively by function name or Compo
   assert.equal(resolveSelectedTool(tools, 'googlecalendar_find_events'), tools[0]);
   assert.equal(resolveSelectedTool(tools, 'composio-googlecalendar-find-events'), tools[0]);
   assert.equal(resolveSelectedTool(tools, 'missing'), null);
+});
+
+test('tool cards are generically ranked by the planner canonical operation', () => {
+  const ranked = rankToolSelectionCards([
+    { name: 'calendar_current_date_time', description: 'Get current date and time.' },
+    { name: 'calendar_events_list', description: 'List calendar events in a time range.' },
+  ], 'count_today_events');
+  assert.equal(ranked[0].name, 'calendar_events_list');
 });
 
 test('compound synthesis payload retains complete rank-one recall alongside connector data', () => {

@@ -78,6 +78,31 @@ test('OpenRouter streaming accumulates content deltas and final usage', async ()
   }
 });
 
+test('a workload-specific DeepSeek provider order overrides sorting without affecting the shared route', async () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  try {
+    await chatCompletionFetch(DEFAULT_HQ_AWAKENING_MODEL, {
+      method: 'POST',
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'Synthesize' }],
+        provider: { order: ['baidu', 'digitalocean', 'streamlake'] },
+      }),
+    }, {
+      fetchImpl: async (_url, options) => {
+        const sent = JSON.parse(options.body);
+        assert.deepEqual(sent.provider.order, ['baidu', 'digitalocean', 'streamlake']);
+        assert.equal(sent.provider.sort, undefined);
+        assert.equal(sent.provider.allow_fallbacks, true);
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
+});
+
 test('GPT-OSS synthesis permits provider failover through OpenRouter when no direct Cerebras key exists', () => {
   const priorOpenRouter = process.env.OPENROUTER_API_KEY;
   const priorCerebras = process.env.CEREBRAS_API_KEY;

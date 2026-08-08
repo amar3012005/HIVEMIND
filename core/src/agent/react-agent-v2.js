@@ -133,7 +133,7 @@ function languageName(code) {
 
 // ── Provider-aware JSON helper ─────────────────────────────────────────
 
-async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort }) {
+async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy }) {
   const resp = await chatCompletionFetch(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -150,6 +150,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
       // the job is to WRITE a cited answer. Pass a low/medium effort when the
       // caller asks. Harmless on non-reasoning providers (ignored field).
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      ...(providerPolicy ? { provider: providerPolicy } : {}),
     }),
     signal,
   }, { fallbackApiKey: apiKey });
@@ -1822,6 +1823,13 @@ ${message}`;
   // full reconstruction gets 'medium', everything else 'low'. Env-overridable.
   const answerReasoning = process.env.HIVEMIND_ANSWER_REASONING_EFFORT
     || (answerMode === 'full' ? 'medium' : 'low');
+  const finalSynthesisProviderOrder = String(
+    process.env.OPENROUTER_DEEPSEEK_SYNTHESIS_PROVIDER_ORDER || 'baidu,digitalocean,streamlake',
+  ).split(',').map((value) => value.trim()).filter(Boolean);
+  const finalSynthesisProviderPolicy = String(model || '').startsWith('deepseek/')
+    && finalSynthesisProviderOrder.length
+    ? { order: finalSynthesisProviderOrder }
+    : undefined;
 
   const { parsed, usage } = await callJsonLLM({
     // temperature:0 — grounded synthesis over already-ranked evidence must be
@@ -1829,7 +1837,8 @@ ${message}`;
     // (e.g. the Feb "Kommunikation" phase over the 18-Aug "Launch PIA" event)
     // for the same query on different turns — the flakiness users saw.
     messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: userBlock }],
-    model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning, temperature: 0,
+    model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
+    providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
@@ -1857,7 +1866,8 @@ ${message}`;
     const repairCap = Math.min(answerCap, Number(process.env.HIVEMIND_REPAIR_MAX_TOKENS || 1500));
     const repaired = await callJsonLLM({
       messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
-      model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low', temperature: 0,
+      model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low',
+      providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;

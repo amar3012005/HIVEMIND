@@ -178,3 +178,59 @@ test('compound orchestrator: write with no toolkit reports error, not done', asy
   assert.equal(res.status, 'error');
   assert.ok(res.summary.includes('no toolkit'), 'must report the missing-toolkit error');
 });
+
+test('compound orchestrator: independent subtasks run in parallel (fan-out/merge)', async () => {
+  const calls = [];
+  const runtime = makeRuntime({
+    tools: [
+      { name: 'github__list', access: 'read', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { q: { type: 'string' } } } },
+      { name: 'linear__list', access: 'read', approval: 'never', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { q: { type: 'string' } } } },
+      { name: 'slack__post', access: 'write', approval: 'required', allowedSurfaces: ['chat'], inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+    ],
+    executeImpl: async (name, input) => {
+      calls.push({ name, input, t: Date.now() });
+      // Simulate a 300ms call so we can measure parallelism.
+      await new Promise((r) => setTimeout(r, 300));
+      return { status: 'completed', content: [{ type: 'json', data: { count: 1 } }], metadata: { connector: name.split('__')[0], tool: name } };
+    },
+  });
+  globalThis.__hivemindConnectorRuntime = runtime;
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+    _toolkit: { async execute(name, args) { return { status: 'draft_created', content: [{ type: 'text', text: 'draft' }], meta: { draft_id: 'D' } }; } },
+  };
+
+  const t0 = Date.now();
+  const res = await runCompoundOrchestrator({
+    subtasks: [
+      { operation: 'github', tool_groups: ['github'], depends_on: null, message: 'check github' },
+      { operation: 'linear', tool_groups: ['linear'], depends_on: null, message: 'check linear' },
+      { operation: 'merge', tool_groups: ['github'], depends_on: [0, 1], message: 'merge' },
+      { operation: 'slack', tool_groups: ['slack'], depends_on: [2], message: 'post to slack' },
+    ],
+    ctx,
+    apiKey: 'k',
+    signal: null,
+    selectTool: makeSelector((m) => {
+      if (m.startsWith('check github')) return { toolName: 'github__list', args: { q: m } };
+      if (m.startsWith('check linear')) return { toolName: 'linear__list', args: { q: m } };
+      if (m.startsWith('merge')) return { toolName: 'github__list', args: { q: m } };
+      return { toolName: 'slack__post', args: { text: m } };
+    }),
+  });
+  const elapsed = Date.now() - t0;
+
+  // github + linear are independent → run in parallel (~300ms), NOT sequential (~600ms).
+  // merge waits on both, slack waits on merge.
+  console.log(`  fan-out elapsed: ${elapsed}ms (4 steps, 2 parallel + 2 sequential)`);
+  assert.equal(res.status, 'pending'); // slack is a draft → pending
+  assert.equal(calls.length, 3); // github, linear, merge (slack goes to toolkit)
+  // github and linear must have STARTED within a small window of each other.
+  const gh = calls.find((c) => c.name === 'github__list');
+  const ln = calls.find((c) => c.name === 'linear__list');
+  assert.ok(gh && ln, 'github and linear both called');
+  const startDelta = Math.abs(gh.t - ln.t);
+  assert.ok(startDelta < 100, `github+linear should start together (delta ${startDelta}ms)`);
+  // Total should be ~2 sequential hops (parallel pair + merge), not 4.
+  assert.ok(elapsed < 900, `fan-out should be ~600ms not ~1200ms (got ${elapsed}ms)`);
+});

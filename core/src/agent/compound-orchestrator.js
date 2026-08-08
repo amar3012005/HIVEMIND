@@ -260,31 +260,45 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
   const results = new Array(subtasks.length);
   const outputs = new Array(subtasks.length); // typed output fields per subtask
 
-  // Topological execution: a subtask runs once all its depends_on are done.
+  // Topological execution with fan-out: each pass collects every subtask whose
+  // depends_on are all done and runs them TOGETHER via Promise.all. Independent
+  // subtasks (no depends_on on each other — e.g. "check GitHub AND Linear")
+  // therefore run in parallel, cutting wall-clock latency to ~max(t1,t2) rather
+  // than t1+t2. A subtask that depends on a prior result still waits for that
+  // result to resolve before it is collected in a later pass. Results are
+  // written back by index, so ordering and the draft_created/pending invariant
+  // are preserved regardless of completion timing.
   const done = new Array(subtasks.length).fill(false);
   let guard = 0;
   while (done.some((d) => !d) && guard < subtasks.length * 2 + 1) {
     guard += 1;
-    let progressed = false;
+    // Collect the ready batch (all deps done, not yet run).
+    const ready = [];
     for (let i = 0; i < subtasks.length; i++) {
       if (done[i]) continue;
       const st = subtasks[i];
       const deps = Array.isArray(st.depends_on) ? st.depends_on : [];
-      const depsDone = deps.every((d) => done[d]);
-      if (!depsDone) continue;
-      // Gather prior outputs from dependencies.
+      if (deps.every((d) => done[d])) ready.push(i);
+    }
+    if (ready.length === 0) break; // deadlock or unsatisfiable dependency
+    // Run the whole ready batch in parallel.
+    const batchResults = await Promise.all(ready.map((i) => {
+      const st = subtasks[i];
+      const deps = Array.isArray(st.depends_on) ? st.depends_on : [];
       const priorOutputs = {};
-      for (const d of deps) {
-        Object.assign(priorOutputs, outputs[d] || {});
-      }
-      const r = await runSubtask({ subtask: st, context, ctx, apiKey, signal, priorOutputs, selectTool });
+      for (const d of deps) Object.assign(priorOutputs, outputs[d] || {});
+      return runSubtask({ subtask: st, context, ctx, apiKey, signal, priorOutputs, selectTool });
+    }));
+    // Write results back by index (order preserved).
+    for (let k = 0; k < ready.length; k++) {
+      const i = ready[k];
+      const r = batchResults[k];
       results[i] = r;
       outputs[i] = r.outputFields || {};
       done[i] = true;
-      progressed = true;
       steps.push({
         index: i,
-        operation: st.operation || 'tool',
+        operation: subtasks[i].operation || 'tool',
         tool: r.toolName,
         status: r.status,
         summary: r.error || (r.status === 'completed' ? 'completed' : r.status),
@@ -292,7 +306,6 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
       });
       if (r.draftId) draftIds.push(r.draftId);
     }
-    if (!progressed) break; // deadlock or unsatisfiable dependency
   }
 
   // Build the user-facing summary. CRITICAL: a draft_created / pending result

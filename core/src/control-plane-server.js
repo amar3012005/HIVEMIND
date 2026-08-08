@@ -12,7 +12,13 @@ import {
 } from './auth/api-keys.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
-import { createSignupAdmission, invitationCodeMatches, verifySignupAdmission } from './control-plane/signup-admission.js';
+import {
+  createPersonalInvitationLink,
+  createSignupAdmission,
+  invitationCodeMatches,
+  verifyPersonalInvitationLink,
+  verifySignupAdmission,
+} from './control-plane/signup-admission.js';
 import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
@@ -2726,8 +2732,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   async function dispatchEnterpriseInvitation({ invitation, token, code = null }) {
-    const base = (process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
-    const activationUrl = `${base}/hivemind/login?create=1&enterprise_invite=${encodeURIComponent(token)}`;
+    const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+    const activationUrl = `${base}/hivemind/invite?enterprise_invite=${encodeURIComponent(token)}`;
     const selfHosted = invitation.hostingMode === 'self_host';
     const storageLabels = {
       hybrid: 'Managed hybrid company brain',
@@ -3051,6 +3057,28 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (pathname === '/admin/api/platform/personal-invitation-link' && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const body = await parseBody(req).catch(() => ({}));
+    if (!invitationCodeMatches(String(body.invitation_code || ''), PERSONAL_SIGNUP_INVITATION_CODE)) {
+      return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);
+    }
+    const validityDays = Math.min(90, Math.max(1, Number(body.validity_days || 14)));
+    const token = createPersonalInvitationLink({
+      configuredCode: PERSONAL_SIGNUP_INVITATION_CODE,
+      secret: SIGNUP_ADMISSION_SECRET,
+      ttlSeconds: validityDays * 24 * 60 * 60,
+    });
+    if (!token) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 503);
+    const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+    const invitationUrl = `${base}/hivemind/invite?personal_invite=${encodeURIComponent(token)}`;
+    await audit({ eventType: 'commercial.personal_invitation_link_created', eventCategory: 'billing', action: 'create',
+      resourceType: 'personal_invitation_link', metadata: { operator: operator.operator, session_id: operator.sessionId, validity_days: validityDays },
+      ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+    return jsonResponse(res, { invitation_url: invitationUrl, expires_in_days: validityDays }, 201);
+  }
+
   const adminInvitationDetail = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})$/i);
   if (adminInvitationDetail && req.method === 'GET') {
     const operator = getPlatformAdminSession(req);
@@ -3101,7 +3129,7 @@ const server = http.createServer(async (req, res) => {
       const sentEvent = action === 'resend' ? 'commercial.enterprise_invitation_resent' : 'commercial.enterprise_invitation_sent';
       await audit({ eventType: sent.delivery.ok ? sentEvent : 'commercial.enterprise_invitation_delivery_failed', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
         metadata: { operator: operator.operator, session_id: operator.sessionId, safe_error: sent.delivery.error || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-      return jsonResponse(res, { invitation: sent.invitation, ...(action === 'send' ? { code: rotated.plaintextCode } : {}), email_dispatch: sent.delivery });
+      return jsonResponse(res, { invitation: sent.invitation, activation_url: sent.activationUrl, ...(action === 'send' ? { code: rotated.plaintextCode } : {}), email_dispatch: sent.delivery });
     } catch (error) {
       return jsonResponse(res, { error: error.message }, /unavailable|not found/i.test(error.message) ? 404 : 400);
     }
@@ -3775,6 +3803,18 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { invitation: preview });
   }
 
+  if (pathname === '/auth/personal-invitations/preview' && req.method === 'GET') {
+    if (signupAdmissionLimited(req)) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
+    const admission = verifyPersonalInvitationLink({
+      token: url.searchParams.get('token'),
+      configuredCode: PERSONAL_SIGNUP_INVITATION_CODE,
+      secret: SIGNUP_ADMISSION_SECRET,
+    });
+    recordSignupAdmissionAttempt(req, Boolean(admission));
+    if (!admission) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 404);
+    return jsonResponse(res, { invitation: { account_type: 'personal', invitation_expires_at: new Date(admission.expiresAt * 1000).toISOString() } });
+  }
+
   if (pathname === '/auth/signup-admission' && req.method === 'POST') {
     if (signupAdmissionLimited(req)) {
       return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
@@ -3782,13 +3822,20 @@ const server = http.createServer(async (req, res) => {
     const body = await parseBody(req);
     const accountType = String(body.account_type || '').trim().toLowerCase();
     const code = String(body.invitation_code || body.enterprise_access_code || '').trim();
+    const personalAdmission = accountType === 'personal'
+      ? verifyPersonalInvitationLink({
+        token: body.personal_invitation_token || null,
+        configuredCode: PERSONAL_SIGNUP_INVITATION_CODE,
+        secret: SIGNUP_ADMISSION_SECRET,
+      })
+      : null;
     const enterpriseAdmission = accountType === 'enterprise'
       ? await findEnterpriseInvitationAdmission({ prisma, code, token: body.enterprise_invitation_token || null }).catch(() => null)
       : null;
     // The environment allowlist is legacy-only. New B2B workspaces receive an
     // invitation bound to one recipient and one commercial profile.
     const accepted = accountType === 'personal'
-      ? invitationCodeMatches(code, PERSONAL_SIGNUP_INVITATION_CODE)
+      ? Boolean(personalAdmission) || invitationCodeMatches(code, PERSONAL_SIGNUP_INVITATION_CODE)
       : Boolean(enterpriseAdmission) || (accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code)));
     recordSignupAdmissionAttempt(req, accepted);
     if (!accepted) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);

@@ -107,6 +107,58 @@ export function buildToolSelectionCards(rawTools) {
   })).filter((card) => card.name);
 }
 
+const COMPOSIO_READ_ACTIONS = new Set([
+  'check', 'download', 'fetch', 'find', 'get', 'inspect', 'list', 'read',
+  'retrieve', 'search',
+]);
+const COMPOSIO_WRITE_ACTIONS = new Set([
+  'add', 'append', 'archive', 'batch', 'copy', 'create', 'delete', 'disable',
+  'enable', 'export', 'forward', 'import', 'insert', 'modify', 'move', 'patch',
+  'post', 'remove', 'replace', 'reply', 'restore', 'send', 'stop', 'trash',
+  'unmerge', 'untrash', 'update', 'watch',
+]);
+
+function composioActionTokens(tool) {
+  const toolkit = String(tool?._composio?.toolkit || '').toLocaleLowerCase();
+  let slug = String(tool?._composio?.slug || tool?.function?.name || tool?.name || '')
+    .toLocaleLowerCase()
+    .replace(/^composio[_:-]?/, '');
+  if (toolkit && slug.startsWith(`${toolkit}_`)) slug = slug.slice(toolkit.length + 1);
+  return slug.split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+/**
+ * Classify provider capabilities from their controlled manifest identifier,
+ * never from the user's language. Unknown actions fail closed so a read turn
+ * cannot accidentally execute a side effect.
+ */
+export function classifyComposioToolAuthority(tool) {
+  const tokens = composioActionTokens(tool);
+  if (!tokens.length) return 'unknown';
+  if (COMPOSIO_READ_ACTIONS.has(tokens[0])) return 'read';
+  if (COMPOSIO_WRITE_ACTIONS.has(tokens[0])) return 'write';
+  // Some provider manifests namespace settings before the terminal action,
+  // e.g. GMAIL_SETTINGS_SEND_AS_GET. Only an explicit terminal read verb is
+  // accepted here; ambiguous manifests remain unavailable rather than unsafe.
+  if (COMPOSIO_READ_ACTIONS.has(tokens.at(-1))) return 'read';
+  for (const token of tokens) {
+    if (COMPOSIO_READ_ACTIONS.has(token)) return 'read';
+    if (COMPOSIO_WRITE_ACTIONS.has(token)) return 'write';
+  }
+  return 'unknown';
+}
+
+function authorityForOperation(canonicalOperation = '') {
+  const actions = String(canonicalOperation || '').toLocaleLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  return actions.some((action) => COMPOSIO_WRITE_ACTIONS.has(action) || action === 'write') ? 'write' : 'read';
+}
+
+export function filterComposioToolsByAuthority(rawTools, canonicalOperation = '') {
+  const required = authorityForOperation(canonicalOperation);
+  return (Array.isArray(rawTools) ? rawTools : [])
+    .filter((tool) => classifyComposioToolAuthority(tool) === required);
+}
+
 export function rankToolSelectionCards(cards, canonicalOperation = '') {
   const tokens = (value) => new Set(String(value || '').toLocaleLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
@@ -123,21 +175,6 @@ export function rankToolSelectionCards(cards, canonicalOperation = '') {
     }
     return { card, index, score };
   }).sort((a, b) => b.score - a.score || a.index - b.index).map(({ card }) => card);
-}
-
-function toolCardRelevanceScore(card, canonicalOperation) {
-  const tokens = (value) => new Set(String(value || '').toLocaleLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((token) => token.length >= 3));
-  const intentTokens = tokens(canonicalOperation);
-  const nameTokens = tokens(card?.name);
-  const descriptionTokens = tokens(card?.description);
-  let score = 0;
-  for (const token of intentTokens) {
-    if (nameTokens.has(token)) score += 3;
-    if (descriptionTokens.has(token)) score += 1;
-  }
-  return score;
 }
 
 function resolveMentionedTool(rawTools, text) {
@@ -169,12 +206,11 @@ export function resolveSelectedTool(rawTools, selectedName) {
 }
 
 async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, signal }) {
-  const rankedCards = rankToolSelectionCards(buildToolSelectionCards(rawTools), canonicalOperation);
-  const relevantCards = rankedCards.filter((card) => toolCardRelevanceScore(card, canonicalOperation) > 0);
-  const cards = relevantCards.length ? relevantCards : rankedCards;
+  const authorityTools = filterComposioToolsByAuthority(rawTools, canonicalOperation);
+  const cards = rankToolSelectionCards(buildToolSelectionCards(authorityTools), canonicalOperation);
   const eligibleNames = new Set(cards.map((card) => card.name));
-  const eligibleTools = rawTools.filter((tool) => eligibleNames.has(String(tool?.function?.name || tool?.name || '')));
-  if (!cards.length) throw new Error('no connector tool cards available');
+  const eligibleTools = authorityTools.filter((tool) => eligibleNames.has(String(tool?.function?.name || tool?.name || '')));
+  if (!cards.length) throw new Error(`no ${authorityForOperation(canonicalOperation)} connector tool cards available`);
   const selector = {
     type: 'function',
     function: {
@@ -194,7 +230,7 @@ async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, s
       body: JSON.stringify({
         model: SUBTASK_MODEL,
         messages: [
-          { role: 'system', content: `Select the one connected-app capability that directly fulfills the requested operation in any language. Prefer the tool that produces the requested result over prerequisite or metadata utilities. Return exactly one tool_name from the supplied enum. Available capability cards, relevance-ordered against the planner's canonical operation: ${JSON.stringify(cards)}` },
+          { role: 'system', content: `Select the one connected-app capability that directly fulfills the requested operation in any language. The supplied capabilities have already been restricted to the planner's required read/write authority. Prefer the tool that produces the requested result over prerequisite or metadata utilities. Return exactly one tool_name from the supplied enum. Available compact capability cards: ${JSON.stringify(cards)}` },
           { role: 'user', content: message },
         ],
         tools: [selector], tool_choice: { type: 'function', function: { name: 'select_connector_tool' } },
@@ -494,6 +530,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   const composioToolkit = composioToolkitFor(toolGroups);
   let tools = [];
   let composioSlugByTool = new Map();
+  let composioManifestByTool = new Map();
   if (composioToolkit) {
     try {
       const raw = await composioSvc.getToolkitTools(composioToolkit);
@@ -514,7 +551,10 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         type: 'function',
         function: { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
       }));
-      for (const t of relevant) composioSlugByTool.set(t.function.name, t._composio?.slug);
+      for (const t of relevant) {
+        composioSlugByTool.set(t.function.name, t._composio?.slug);
+        composioManifestByTool.set(t.function.name, t);
+      }
     } catch (err) {
       return { status: 'error', error: `composio tools failed: ${err.message}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
     }
@@ -554,8 +594,16 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     return { status: 'error', error: 'no composio connection for this step', toolName, args, result: null, draftId: null, outputFields: {} };
   }
 
-  // Determine read vs write from the tool name (Composio slugs embed the verb).
-  const isWrite = /(create|send|update|delete|insert|append|post|reply|forward|move|trash|label|modify|patch|import|add|remove|copy|replace|unmerge|export)/i.test(composioSlug);
+  // Reuse the same controlled-manifest authority decision used before model
+  // selection. This prevents read tools such as GET_LABEL from being mistaken
+  // for writes merely because their resource name contains "label".
+  const selectedManifest = composioManifestByTool.get(toolName);
+  const selectedAuthority = classifyComposioToolAuthority(selectedManifest);
+  if (selectedAuthority === 'unknown') {
+    emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'unknown connector tool authority' });
+    return { status: 'error', error: 'unknown connector tool authority', toolName, args, result: null, draftId: null, outputFields: {} };
+  }
+  const isWrite = selectedAuthority === 'write';
 
   if (!isWrite) {
     // Read — execute immediately via Composio.

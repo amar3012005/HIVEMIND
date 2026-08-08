@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCompoundSynthesisPayload, buildToolSelectionCards, rankToolSelectionCards, resolveSelectedTool, runCompoundOrchestrator } from '../../src/agent/compound-orchestrator.js';
+import {
+  buildCompoundSynthesisPayload,
+  buildToolSelectionCards,
+  classifyComposioToolAuthority,
+  filterComposioToolsByAuthority,
+  rankToolSelectionCards,
+  resolveSelectedTool,
+  runCompoundOrchestrator,
+} from '../../src/agent/compound-orchestrator.js';
 
 // ── Test harness ─────────────────────────────────────────────────────────────
 // A deterministic tool-selector replaces the model call. The Composio service
@@ -57,6 +65,25 @@ test('tool cards are generically ranked by the planner canonical operation', () 
     { name: 'calendar_events_list', description: 'List calendar events in a time range.' },
   ], 'count_today_events');
   assert.equal(ranked[0].name, 'calendar_events_list');
+});
+
+test('Composio authority comes from controlled manifest actions, not user-language keywords', () => {
+  const read = { function: { name: 'composio_gmail_fetch_emails' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_FETCH_EMAILS' } };
+  const labelRead = { function: { name: 'composio_gmail_get_label' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_GET_LABEL' } };
+  const labelWrite = { function: { name: 'composio_gmail_add_label_to_email' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_ADD_LABEL_TO_EMAIL' } };
+  assert.equal(classifyComposioToolAuthority(read), 'read');
+  assert.equal(classifyComposioToolAuthority(labelRead), 'read', 'resource noun label must not turn GET into a write');
+  assert.equal(classifyComposioToolAuthority(labelWrite), 'write');
+});
+
+test('generic read operation exposes Gmail fetch but excludes modifying capabilities in any request language', () => {
+  const tools = [
+    { function: { name: 'composio_gmail_add_label_to_email' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_ADD_LABEL_TO_EMAIL' } },
+    { function: { name: 'composio_gmail_fetch_emails' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_FETCH_EMAILS' } },
+    { function: { name: 'composio_gmail_send_email' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_SEND_EMAIL' } },
+  ];
+  const eligible = filterComposioToolsByAuthority(tools, 'read');
+  assert.deepEqual(eligible.map((tool) => tool._composio.slug), ['GMAIL_FETCH_EMAILS']);
 });
 
 test('compound synthesis payload retains complete rank-one recall alongside connector data', () => {

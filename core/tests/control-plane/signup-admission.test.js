@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  createPersonalInvitationLink,
   createSignupAdmission,
   invitationCodeMatches,
+  verifyPersonalInvitationLink,
   verifySignupAdmission,
 } from '../../src/control-plane/signup-admission.js';
 
@@ -30,6 +32,18 @@ test('signup admissions are account-bound, short-lived, and tamper resistant', (
 test('admissions fail closed without a configured signing secret', () => {
   assert.equal(createSignupAdmission({ accountType: 'personal', secret: '' }), null);
   assert.equal(verifySignupAdmission({ ticket: 'anything', accountType: 'personal', secret: '' }), null);
+});
+
+test('personal invitation links are time-bound and invalidated when the shared code rotates', () => {
+  const token = createPersonalInvitationLink({ configuredCode: 'PRIVATE-BETA', secret, ttlSeconds: 60, now });
+  assert.ok(token);
+  assert.deepEqual(
+    verifyPersonalInvitationLink({ token, configuredCode: 'PRIVATE-BETA', secret, now: now + 59_000 }),
+    { accountType: 'personal', expiresAt: Math.floor(now / 1000) + 60 },
+  );
+  assert.equal(verifyPersonalInvitationLink({ token, configuredCode: 'ROTATED', secret, now }), null);
+  assert.equal(verifyPersonalInvitationLink({ token: `${token}x`, configuredCode: 'PRIVATE-BETA', secret, now }), null);
+  assert.equal(verifyPersonalInvitationLink({ token, configuredCode: 'PRIVATE-BETA', secret, now: now + 60_000 }), null);
 });
 
 test('enterprise admissions preserve only a signed invitation identity, never a code or link', () => {

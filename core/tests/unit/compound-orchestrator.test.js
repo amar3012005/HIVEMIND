@@ -4,6 +4,7 @@ import {
   buildCompoundSynthesisPayload,
   buildCompoundUserSummary,
   buildGroundedWriteFallbackPrompt,
+  buildGroundedWriteFallbackPayload,
   buildSubtaskArgumentPrompt,
   buildSubtaskExecutionMessage,
   buildToolInputSystemPrompt,
@@ -332,6 +333,28 @@ test('grounded write validation rejects unresolved templates and accepts detaile
     }, prior),
     [],
   );
+});
+
+test('grounded fallback payload keeps evidence visible ahead of a compact provider schema', () => {
+  const evidence = 'G ROCHER handbag with a gold JL logo. '.repeat(200);
+  const payload = buildGroundedWriteFallbackPayload({
+    message: 'Write the email',
+    args: { recipient_email: 'amar@example.com' },
+    priorOutputs: { recall: evidence },
+    schema: {
+      type: 'object',
+      required: ['recipient_email', 'body'],
+      properties: {
+        recipient_email: { type: 'string', description: 'x'.repeat(20_000) },
+        body: { type: 'string', description: 'y'.repeat(20_000) },
+      },
+    },
+  });
+  const parsed = JSON.parse(payload);
+  assert.equal(parsed.server_verified_prior_outputs.recall, evidence);
+  assert.equal(parsed.tool_schema.properties.body.type, 'string');
+  assert.equal(Object.hasOwn(parsed.tool_schema.properties.body, 'description'), false);
+  assert.ok(payload.indexOf('server_verified_prior_outputs') < payload.indexOf('tool_schema'));
 });
 
 test('missing write fields produce a resumable generalized field-input request', async () => {

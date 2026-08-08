@@ -10844,8 +10844,8 @@ Write the persona now.`;
     }
 
     // DELETE /v1/hyper-rooms/:id/turns — clear the whole discussion (every
-    // turn + its agent activity). Keeps the room. Saved decision memories are
-    // separate and untouched. Tenant-scoped.
+    // turn + its agent activity). Keeps an ordinary Work Room, while permanent
+    // Company Intelligence Rooms retain their operating history. Tenant-scoped.
     if (roomTurnMatch && roomTurnMatch[2] == null && req.method === 'DELETE') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -10855,17 +10855,30 @@ Write the persona now.`;
       // different member (incl. the HQ room) — it 404'd and silently no-op'd.
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
-        select: { id: true },
+        select: { id: true, agentConnectors: true },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      if (room.agentConnectors?._domain_home === true) {
+        return jsonResponse(res, {
+          error: 'Company Intelligence Room history is retained as durable company context.',
+          code: 'DOMAIN_HOME_ROOM',
+        }, 409);
+      }
       try {
-        const result = await prisma.hyperTurn.deleteMany({ where: { roomId } });
-        // Also wipe this room's control-room reports so cleared runs vanish from
-        // HQ too (best-effort; table may not exist on an un-migrated box).
-        await prisma.$executeRawUnsafe(
-          'DELETE FROM "hivemind"."hq_activity" WHERE org_id = $1::uuid AND source_room_id = $2::uuid',
-          current.session.orgId, roomId,
-        ).catch(() => {});
+        const result = await prisma.$transaction(async (tx) => {
+          const deleted = await tx.hyperTurn.deleteMany({ where: { roomId } });
+          await tx.hyperRoom.update({
+            where: { id: roomId },
+            data: { roomJournal: [] },
+          });
+          // Control-room reports are outside the turn relation, so remove them
+          // explicitly. Other turn-owned records cascade from hyper_turns.
+          await tx.$executeRawUnsafe(
+            'DELETE FROM "hivemind"."hq_activity" WHERE org_id = $1::uuid AND source_room_id = $2::uuid',
+            current.session.orgId, roomId,
+          ).catch(() => {});
+          return deleted;
+        });
         return jsonResponse(res, { ok: true, cleared: result.count });
       } catch (err) {
         console.warn('[hyper-rooms] clear discussion failed:', err.message);

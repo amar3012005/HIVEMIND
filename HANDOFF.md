@@ -14,6 +14,19 @@ Commits: `260d894 hyper: add dependency-aware work room turn plans`,
   of disappearing as an in-memory deadlock.
 - Runtime work-order execution remains on its existing single-envelope path.
 
+### Phase 3: Continuous Work Timeline
+
+Commits: `787109a hyper: project durable work room plans`,
+`7ddc29b hyper: wire work plan projection into room timeline`,
+`500c88b hyper: keep work room timeline live`
+
+- `GET /v1/hyper-rooms/:roomId/work-plan` is a tenant-scoped projection over
+  persisted work orders and results. It maps durable blocked orders to the user-facing
+  `needs_attention` state and includes prerequisites, owner, summary, blocker, and timestamps.
+- The Room UI renders one compact Work Plan above its turn transcript and refreshes it once for
+  each unseen persisted `work_order` event. It has no second polling or lifecycle authority.
+- Frontend submodule revision: `211e9ef hyper: refresh work plan from live room events`.
+
 ### Phase 0: Explicit Room Boundary
 
 Commit: `0eb280b hyper: separate human work rooms from runtime rooms`
@@ -103,5 +116,5 @@ Output: 6/6 passing Core checks; no syntax errors.
 
 ## Exact Next Action
 
-Project durable Work Room step states and blockers through the Room API and frontend timeline
-without adding a second lifecycle authority.
+Rebase the isolated branch on the current canonical SHA, run the manual additive SQL migrations,
+then deploy the merged canonical Core, Employees, Control Plane, and frontend images under the release lock.

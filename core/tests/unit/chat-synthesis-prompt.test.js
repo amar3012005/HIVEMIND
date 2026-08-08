@@ -34,6 +34,9 @@ test('synthesis keeps an identical cacheable prefix across language and operatio
   assert.match(second.dynamic_prompt, /TEMPORAL/);
   assert.ok(first.prompt.startsWith(first.static_prompt));
   assert.ok(second.prompt.startsWith(second.static_prompt));
+  assert.deepEqual(first.messages[0], { role: 'system', content: first.static_prompt });
+  assert.deepEqual(second.messages[0], { role: 'system', content: second.static_prompt });
+  assert.notEqual(first.messages[1].content, second.messages[1].content);
 });
 
 test('operation modules are disclosed only to the matching synthesis path', () => {

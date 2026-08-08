@@ -52,7 +52,7 @@ export function buildSynthesisPromptArtifact({ language, operation = 'recall', r
   }
   const stable = getStaticPromptArtifact({
     family: 'chat-synthesis',
-    version: 'v3',
+    version: 'v4',
     variant: 'grounded-json',
     build: () => `Return strict JSON only: {"response":string,"claims":[{"text":string,"grounded":boolean,"citation_ids":[string]}],"evidence_used":[string],"confidence":number,"gaps":[string]}.
 Use only delivered evidence as factual ground truth. Every factual sentence must be a grounded claim with one or more delivered citation IDs. Speak naturally as someone who knows the user's context: give the directly requested answer, and freely include useful closely related grounded details when they add understanding. Do not suppress a relevant detail merely because it was not explicitly requested. Match the depth to the available evidence and the user's question instead of forcing every answer to be minimal.
@@ -61,6 +61,10 @@ If coverage is partial, lead with everything useful you did find, then state exa
   const dynamic = [`OUTPUT LANGUAGE: ${lang}.`, ...modules].filter(Boolean).join('\n');
   return {
     prompt: `${stable.value}\n${dynamic}`,
+    messages: [
+      { role: 'system', content: stable.value },
+      { role: 'system', content: dynamic },
+    ],
     static_prompt: stable.value,
     dynamic_prompt: dynamic,
     cache: { key: stable.key, status: stable.cache, fingerprint: stable.fingerprint },

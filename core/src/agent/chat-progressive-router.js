@@ -220,17 +220,20 @@ async function callRouter({ message, history, apiKey, signal, useTools = false }
         .map((h) => ({ role: h.role, content: String(h.content).slice(0, 1200) }))
     : [];
   const staticPrompt = getStaticPromptArtifact({
-    family: 'chat-progressive-router', version: 'v2', variant: 'capability-contract', build: () => SYSTEM,
+    family: 'chat-progressive-router', version: 'v3', variant: 'capability-contract', build: () => SYSTEM,
   });
   const dynamicPolicy = useTools
     ? ''
     : 'Connected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.';
-  const systemPrompt = dynamicPolicy ? `${staticPrompt.value}\n${dynamicPolicy}` : staticPrompt.value;
+  const systemMessages = [
+    { role: 'system', content: staticPrompt.value },
+    ...(dynamicPolicy ? [{ role: 'system', content: dynamicPolicy }] : []),
+  ];
   const resp = await chatCompletionFetch(ROUTER_MODEL, {
     method: 'POST',
     // chatCompletionFetch sets Authorization from the resolved route; no header here.
     body: JSON.stringify({
-      messages: [{ role: 'system', content: systemPrompt }, ...histMsgs, { role: 'user', content: message }],
+      messages: [...systemMessages, ...histMsgs, { role: 'user', content: message }],
       tools: getProgressiveTools({ useTools }),
       tool_choice: 'required',
       parallel_tool_calls: false,

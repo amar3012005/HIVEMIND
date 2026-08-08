@@ -1265,7 +1265,6 @@ function sourceUnavailableResponse({ evidence, language }) {
 
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '' }) {
   const synthesisPrompt = buildSynthesisPromptArtifact({ language, operation: plan.operation, recallMode: plan.recall_mode });
-  const sys = synthesisPrompt.prompt;
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
       && Number.isInteger(evidence.aggregate?.count)) {
     const count = evidence.aggregate.count;
@@ -1845,7 +1844,7 @@ ${message}`;
     // DETERMINISTIC. At 0.1 the model occasionally picked a competing memory
     // (e.g. the Feb "Kommunikation" phase over the 18-Aug "Launch PIA" event)
     // for the same query on different turns — the flakiness users saw.
-    messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: userBlock }],
+    messages: [...synthesisPrompt.messages, ...tail, { role: 'user', content: userBlock }],
     model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
     providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
     promptCacheKey: synthesisPrompt.cache.key,
@@ -1864,7 +1863,7 @@ ${message}`;
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
   if (!validated.claims.length && hasGroundedPacketEvidence(evidence)) {
-    const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
+    const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
     // stateless API call — it must still see the full evidence in userBlock
     // (already shrunk by the combined budget above) or it has nothing left to
@@ -1876,7 +1875,12 @@ ${message}`;
     // need 'medium' reasoning to re-cite the same facts).
     const repairCap = Math.min(answerCap, Number(process.env.HIVEMIND_REPAIR_MAX_TOKENS || 1500));
     const repaired = await callJsonLLM({
-      messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
+      messages: [
+        { role: 'system', content: synthesisPrompt.static_prompt },
+        { role: 'system', content: `${synthesisPrompt.dynamic_prompt}\n${repairInstruction}` },
+        ...tail,
+        { role: 'user', content: userBlock },
+      ],
       model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low',
       providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
       promptCacheKey: synthesisPrompt.cache.key,

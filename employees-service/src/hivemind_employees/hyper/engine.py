@@ -34,7 +34,7 @@ import httpx
 
 from ..config import get_settings
 from ..db import create_hyper_work_order, start_hyper_work_order, complete_hyper_work_order
-from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog
+from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog, work_skill_catalog
 from .domains import get_domain_pack
 from ..hivemind_client import (
     campaign_create_emulated,
@@ -1183,6 +1183,7 @@ class Director:
         execution_context: str = "",
         intended_output: str = "answer",
         room_kind: str = "",
+        room_mode: str = "runtime",
         room_playbook: Optional[List[str]] = None,
         room_journal: Optional[List[Dict[str, Any]]] = None,
         room_instructions: str = "",
@@ -1226,6 +1227,8 @@ class Director:
         # structured Director below rather than lexical routing.
         self.room_kind = (str(room_kind or "").strip().lower()
                           or resolve_room_kind("", room_goal or "", user_message or ""))
+        self.room_mode = str(room_mode or "runtime").strip().lower()
+        self.is_work_room = self.room_mode == "work"
         self.domain_pack = get_domain_pack(self.room_kind)
         self.campaign_brief = campaign_brief if isinstance(campaign_brief, dict) else {}
         self.skills_used: List[str] = []
@@ -4334,13 +4337,25 @@ class Director:
                 "Select tools because they close a named evidence gap. The toolkit describes preferred "
                 "capabilities, but never claim a connector is available unless it appears in the available list."
             )
+        if self.is_work_room:
+            sysp += (
+                "\n\nWORK ROOM BOUNDARY: This is a human-facing, neutral workspace. "
+                "The ROOM GOAL and any historical task label are context, not a domain assignment. "
+                "First decide whether the active message is best answered directly, needs targeted evidence, "
+                "benefits from independent challenge, needs an internal artifact, or should become a proposed "
+                "Runtime lifecycle. Use the smallest useful approach. Do not manufacture a report, a debate, "
+                "or employee work orders merely because a room exists. Select method skills from the catalog "
+                "by their stated applicability, then load their full bodies only when they improve this request. "
+                "A proposed Runtime lifecycle is a recommendation with its evidence and boundary; it is not an "
+                "executed external action.\n"
+            )
         if self.room_kind == "campaign":
             from .campaign_contract import campaign_system_contract
             sysp += campaign_system_contract()
         # Progressive-disclosure skill catalog: the planner pays only for names +
         # one-liners; a chosen skill's full method body loads during gather.
         if _METHOD_SKILLS_ENABLED:
-            cat = skill_catalog(self.room_kind)
+            cat = work_skill_catalog() if self.is_work_room else skill_catalog(self.room_kind)
             if cat:
                 skill_pick_instruction = (
                     "pick 2-4 METHOD SKILLS" if self.room_kind == "campaign"
@@ -5383,7 +5398,7 @@ class Director:
         needs_debate = bool(plan.get("needs_debate"))
         report_expected = (
             self.response_depth == "operating"
-            or self.intended_output in {"answer", "report", "doc", "notion"}
+            or self.intended_output in {"report", "doc", "notion"}
         )
         opening = (
             "I’ll start by grounding this in the relevant company and market evidence."
@@ -5798,6 +5813,7 @@ async def run_director(
     execution_context: str = "",
     intended_output: str = "answer",
     room_kind: str = "",
+    room_mode: str = "runtime",
     room_playbook: Optional[List[str]] = None,
     room_journal: Optional[List[Dict[str, Any]]] = None,
     room_instructions: str = "",
@@ -5819,7 +5835,7 @@ async def run_director(
         company_brief=company_brief,
         execution_context=execution_context,
         intended_output=intended_output,
-        room_kind=room_kind, room_playbook=room_playbook, room_journal=room_journal,
+        room_kind=room_kind, room_mode=room_mode, room_playbook=room_playbook, room_journal=room_journal,
         room_instructions=room_instructions,
         sender_email=sender_email,
         out_language=out_language,

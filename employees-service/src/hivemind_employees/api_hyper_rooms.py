@@ -1859,6 +1859,9 @@ class RoomTurnRequest(BaseModel):
     # the project HIVEMIND so the room stays about that project.
     project_id: Optional[str] = None
     room_goal: Optional[str] = None
+    # Explicit ownership boundary. Human Work Rooms remain domain-neutral; only
+    # Runtime/Company Rooms use the specialist routing selected by a playbook.
+    room_mode: Optional[str] = None
     # Typed task context. Campaign callers require this to bypass generic report
     # routing; campaign_id/brief are metadata only and never authorize a write.
     task_tag: Optional[str] = None
@@ -3203,8 +3206,8 @@ async def _orchestrate_single_agent(
     swarm — only the executor changes. Reuses _produce_output / _verify_and_emit /
     _register_and_emit_approvals so dead-end, recipient resolution and HITL are intact."""
     conns = [str(c) for c in (enabled_connectors or [])]
-    from .hyper.skills import resolve_room_kind
-    _room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
+    from .hyper.skills import resolve_turn_room_kind
+    _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
     _m_recon = (getattr(req, "agentic_model", None)
                 or os.environ.get("HYPER_MODEL_RECON") or "deepseek/deepseek-v4-flash")
 
@@ -3365,6 +3368,7 @@ async def _orchestrate_single_agent(
             "company_brief": _company_brief, "intended_output": intended_output,
             "execution_context": req.execution_context or "",
             "room_kind": _room_kind,
+            "room_mode": req.room_mode or "runtime",
             "room_playbook": _room_playbook, "room_journal": _room_journal,
             "room_instructions": _room_instructions,
             "sender_email": _sender_email, "out_language": (req.language or ""),
@@ -3918,8 +3922,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         )
         return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
 
-    from .hyper.skills import resolve_room_kind
-    _room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
+    from .hyper.skills import resolve_turn_room_kind
+    _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
     if _room_kind == "campaign":
         try:
             participants = _campaign_primary_roster(participants)
@@ -4289,8 +4293,8 @@ async def post_room_turn(
     # while the verdict is unmet AND the gap is re-plannable, feed the gaps back
     # into the turn message and re-plan, up to a round cap. Same shape as the
     # Claude `/goal` keep-working-toward-the-goal loop.
-    from .hyper.skills import resolve_room_kind
-    room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
+    from .hyper.skills import resolve_turn_room_kind
+    room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
     # Campaign Intelligence already performs its own compile/validate/repair pass.
     # Re-running the general goalkeeper duplicates research, debate and synthesis,
     # burns tokens, and can replace a nearly-complete campaign with a later draft.

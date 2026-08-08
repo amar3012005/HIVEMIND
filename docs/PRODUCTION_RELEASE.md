@@ -1,5 +1,19 @@
 # Current SINGULANCE Production Release
 
+## prod-20260809-8c8e2276 — streamed chat orchestration, generalized Composio planning, resumable choices
+
+- **Deployed:** 2026-08-08T21:56Z UTC (release date 2026-08-09 Asia/Kolkata)
+- **Parent:** `singulance-main` runtime SHA `8c8e2276a6cb5516184f9d47f641483a2ebdceb4`
+- **Frontend source:** `8108fbecef442a57c25b20ca80e4220ca56625e0`; running image `hivemind/fe:prod-20260809-a1829df2-single`, digest `sha256:da57722c1076833d83135f51f027910e16bad058d8763c8e83ee065445884810` (same chat UI source; parent label predates later backend-only fixes).
+- **Core image:** `hivemind/core-api:prod-20260809-8c8e2276`, digest `sha256:6bd8bc2b6d0ab947c03a5f41feebe4e3033f4d7fe8c113836a3fdc4cd2e16697`, healthy with matching OCI revision.
+- **Changes:** canonical `orchestration_plan` / `orchestration_step` SSE events; shared expandable Reasoning timeline with provider logos on Overview and mobile; opaque tenant-bound single-use continuation tokens; choice buttons resume blocked dependencies without replaying completed recall/provider reads; ACTIVE Composio toolkit inventory replaces the closed toolkit allowlist; one provider-error-guided retry for failed reads only; pending-write hashes are bounded SHA-256.
+- **Governance:** `use_tools:false` native path unchanged; writes remain pending approval; read repair never retries writes; continuation state is server-side with a 15-minute TTL and scope check.
+- **Tests:** 33 focused planner/orchestrator policy tests passed; frontend production build compiled (repository-wide pre-existing lint warnings prevent `CI=true` warning-as-error); JS syntax and `git diff --check` passed.
+- **Authenticated acceptance:** tenant `0a1d5b33-…` ran recall + Gmail recipient lookup and received two choices. Choosing `amarsai2005@gmail.com` resumed only step 3 and created draft `f2352fe6-d4b3-47d6-b32c-f200004532b3`; persisted `status=draft`, `sentAt=null`, tool `GMAIL_CREATE_EMAIL_DRAFT`, 64-char args hash. Native handbag recall returned grounded `G ROCHER` with no compound status.
+- **Public checks:** Core health 200, Control health 200, frontend app 200; fresh fatal-pattern count zero for Core and frontend.
+- **Migrations:** none.
+- **Rollback:** Core `hivemind/core-api:rollback`; frontend `hivemind/fe:rollback-single`; env backups `/root/hivemind/.env.bak-prod-20260809-*` and `/root/hivemind-next/.env.embedding-canary-runtime.bak-prod-20260809-*`.
+
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml

@@ -166,6 +166,7 @@ test('empty fast recall is incomplete and escalates once to explain', () => {
       query: plan.user_message,
       mode: 'explain',
       limit: 12,
+      allow_semantic_source_recovery: true,
     },
   });
 });

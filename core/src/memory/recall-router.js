@@ -151,6 +151,10 @@ async function resolveImplicitSource({ evidence, query, ctx, timeoutMs, requireF
   return documentId || title ? { document_id: documentId, title } : null;
 }
 
+export function requireFilenameForImplicitSource(options = {}) {
+  return options.structured_intent === true && options.allow_semantic_source_recovery !== true;
+}
+
 function normalizeTemporalRange(value) {
   if (!value || typeof value !== 'object') return null;
   const start = normalizedIso(value.start);
@@ -1384,7 +1388,7 @@ export class RecallRouter {
         timeoutMs: 250,
         // Structured chat may recover a source only from a literal file
         // artifact. Metadata-token matches stay available to legacy recall.
-        requireFilename: options.structured_intent === true,
+        requireFilename: requireFilenameForImplicitSource(options),
       }) : null,
       withTimeout(
         resolveCanonicalEntities({ prisma: this.prisma, orgId: ctx.orgId, query }),

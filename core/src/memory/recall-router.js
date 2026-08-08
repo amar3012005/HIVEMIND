@@ -687,6 +687,8 @@ async function hop1Memory({ store, query, options, ctx }) {
     alternate_lexical_query: options.alternate_lexical_query || null,
     scope_filter: options.scope_filter || null,
     structured_intent: options.structured_intent === true,
+    semantic_recovery: options.semantic_recovery === true,
+    cross_rerank: options.semantic_recovery === true ? true : null,
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride

@@ -104,7 +104,13 @@ export function chooseRecallEscalation({ plan = {}, coverage = {}, query } = {})
   if (!coverage.evidence_found) {
     return {
       reason: 'empty_anchor_coverage',
-      args: { query, mode: 'explain', limit: 12, allow_semantic_source_recovery: true },
+      args: {
+        query,
+        mode: 'explain',
+        limit: 12,
+        allow_semantic_source_recovery: true,
+        semantic_recovery: true,
+      },
     };
   }
   if (coverage.graph_requested && !coverage.graph_covered) {

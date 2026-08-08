@@ -308,8 +308,8 @@ function collapseNearDuplicates(scored, options = {}) {
   return unique;
 }
 
-function applyRecallRelevanceFloor(scored, options = {}) {
-  const { temporalComparison = false } = options;
+export function applyRecallRelevanceFloor(scored, options = {}) {
+  const { temporalComparison = false, semanticRecovery = false } = options;
   if (scored.length === 0) return [];
 
   // Hard absolute minimum — never return results below these thresholds
@@ -323,7 +323,13 @@ function applyRecallRelevanceFloor(scored, options = {}) {
   );
 
   // If nothing passes hard minimum, return empty — the LLM should say "I don't know"
-  if (viable.length === 0) return [];
+  if (viable.length === 0) {
+    // One bounded recovery attempt may keep a small semantic rerank pool even
+    // when legacy weighted scores miss their hard floor. The caller forces the
+    // multilingual cross-encoder on this pool; no keyword/type heuristic is
+    // re-enabled, and ordinary recall retains the fail-closed empty result.
+    return semanticRecovery ? scored.slice(0, 24) : [];
+  }
 
   // Second pass: relative floor based on top score (quality gradient)
   const topScore = viable[0].score;
@@ -1350,6 +1356,7 @@ async function _recallPersistedMemoriesImpl(store, {
   exact_source = false,
   canonical_entities = [],
   alternate_lexical_query = null,
+  semantic_recovery = false,
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -2010,7 +2017,7 @@ async function _recallPersistedMemoriesImpl(store, {
     ranked.sort((a, b) => b.score - a.score);
   }
 
-  let filtered = applyRecallRelevanceFloor(ranked, { temporalComparison });
+  let filtered = applyRecallRelevanceFloor(ranked, { temporalComparison, semanticRecovery: semantic_recovery });
 
   // SCOPE ENFORCEMENT (universal, post-merge): the chat scope selector (personal/project/team)
   // must actually restrict the delivered set. The per-lane checks (786/1618) run before some

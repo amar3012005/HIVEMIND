@@ -27,3 +27,18 @@ test('structured recall permits semantic source resolution only on the bounded r
     allow_semantic_source_recovery: true,
   }), false);
 });
+
+test('semantic recovery preserves a bounded rerank pool when the ordinary relevance floor is empty', async () => {
+  const retrieval = await import('../../src/memory/persisted-retrieval.js');
+  assert.equal(typeof retrieval.applyRecallRelevanceFloor, 'function');
+  const candidates = Array.from({ length: 30 }, (_, index) => ({
+    memory: { id: `m-${index}` },
+    score: 0.08 - index * 0.001,
+    similarityScore: 0.05,
+  }));
+
+  assert.deepEqual(retrieval.applyRecallRelevanceFloor(candidates), []);
+  const recovered = retrieval.applyRecallRelevanceFloor(candidates, { semanticRecovery: true });
+  assert.equal(recovered.length, 24);
+  assert.equal(recovered[0].memory.id, 'm-0');
+});

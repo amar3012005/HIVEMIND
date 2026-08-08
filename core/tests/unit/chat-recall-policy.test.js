@@ -167,6 +167,7 @@ test('empty fast recall is incomplete and escalates once to explain', () => {
       mode: 'explain',
       limit: 12,
       allow_semantic_source_recovery: true,
+      semantic_recovery: true,
     },
   });
 });

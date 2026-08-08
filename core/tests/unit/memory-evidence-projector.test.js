@@ -92,3 +92,17 @@ test('keeps competing high-relevance identifiers so synthesis can distinguish th
   assert.match(result.excerpt, /not the supplier/);
   assert.ok(result.excerpt.length <= 420);
 });
+
+test('degraded projection preserves a buried detail in the complete top-ranked memory', async () => {
+  const projector = await import('../../src/agent/memory-evidence-projector.js');
+  const buried = 'The associated brand is G ROCHER.';
+  const content = `${'overview '.repeat(420)}\n${buried}`;
+  const projected = projector.projectRankedMemoryFallback([
+    { id: 'top', content, tags: ['entity:handbag'] },
+    { id: 'lower', content: 'lower-ranked context' },
+  ]);
+
+  assert.equal(projected[0].excerpt, content);
+  assert.match(projected[0].excerpt, /G ROCHER/);
+  assert.equal(projected[0].projection, 'rank-preserving-fallback');
+});

@@ -54,6 +54,28 @@ export function segmentMemoryContent(content, { maxChunkChars = CHUNK_CHARS } = 
   return blocks.flatMap((block) => splitLongBlock(block, Math.max(120, maxChunkChars)));
 }
 
+export function projectRankedMemoryFallback(memories = [], { totalBudget = 12000, lowerRankBudget = 320 } = {}) {
+  const budget = Math.max(1000, Number(totalBudget) || 12000);
+  let remaining = budget;
+  return memories.map((memory, index) => {
+    const content = String(memory?.content || '');
+    // On projector degradation, completeness of rank 1 is more valuable than
+    // equal prefix slices across weaker rows. Memory rows are ingestion-bounded;
+    // the global guard prevents an abnormal record from exploding the prompt.
+    const allowance = index === 0
+      ? remaining
+      : Math.min(remaining, Math.max(120, Number(lowerRankBudget) || 320));
+    const excerpt = content.slice(0, allowance);
+    remaining = Math.max(0, remaining - excerpt.length);
+    return {
+      memory,
+      excerpt,
+      tags: Array.isArray(memory?.tags) ? memory.tags.slice(0, 6) : [],
+      projection: 'rank-preserving-fallback',
+    };
+  });
+}
+
 function fitPassages(passages, budget) {
   const kept = [];
   let used = 0;

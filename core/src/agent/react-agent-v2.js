@@ -29,7 +29,7 @@
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { buildRecallPacket, validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
-import { projectRankedMemoryEvidence } from './memory-evidence-projector.js';
+import { projectRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 import {
   chatCompletionFetch,
@@ -1505,21 +1505,18 @@ export async function answerStep({ message, history, evidence, plan, language, a
       };
     }
   } catch (error) {
-    // Availability fallback only. It is explicitly traceable and retains the
-    // old bounded behavior if every semantic embedding provider is down.
+    // Availability fallback only. Preserve the complete highest-ranked row
+    // under one global prompt budget instead of prefix-truncating every row.
     const warning = `evidence_projection_degraded:${error.message}`;
     console.warn(`[answerStep] ${warning}`);
     if (ctx?._trace) {
       if (!Array.isArray(ctx._trace.warnings)) ctx._trace.warnings = [];
       ctx._trace.warnings.push(warning);
-      ctx._trace.evidence_projection = { mode: 'prefix-fallback', memories: _selectedMemories.length };
+      ctx._trace.evidence_projection = { mode: 'rank-preserving-fallback', memories: _selectedMemories.length };
     }
-    _projectedMemories = _selectedMemories.map((memory) => ({
-      memory,
-      excerpt: String(memory?.content || '').slice(0, _contentBudget),
-      tags: Array.isArray(memory?.tags) ? memory.tags.slice(0, 6) : [],
-      projection: 'prefix-fallback',
-    }));
+    _projectedMemories = projectRankedMemoryFallback(_selectedMemories, {
+      totalBudget: Math.min(12000, Math.max(6000, _contentBudget * _selectedMemories.length)),
+    });
   }
   const evidenceLines = _projectedMemories.map(({ memory: m, excerpt, tags: projectedTags }) => {
     const id8 = (m.id || '').slice(0, 8);

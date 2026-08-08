@@ -233,7 +233,7 @@ services:
   # Single production-compatible frontend: current control plane owns login,
   # connector callbacks, Cartesia token minting, and BYOD enrollment.
   frontend:
-    image: hivemind/fe:sha-951d64b4
+    image: hivemind/fe:sha-25cabb5d
     profiles: [single]
     restart: unless-stopped
     ports: ["127.0.0.1:${NEXT_FRONTEND_PORT:-2388}:80"]

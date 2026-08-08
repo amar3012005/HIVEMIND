@@ -915,7 +915,7 @@ async function createComposioDraft(ctx, composioSlug, args, toolName) {
         toolGroup: 'composio',
         toolName: composioSlug,
         toolArgs: { ...(args || {}), _composio_slug: composioSlug },
-        argsHash: JSON.stringify(args || {}),
+        argsHash: createHash('sha256').update(JSON.stringify(args || {})).digest('hex'),
         projectId: ctx.projectId || null,
         connectionId: null,
         traceId: ctx._trace?.traceId || null,

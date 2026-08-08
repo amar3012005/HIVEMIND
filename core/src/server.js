@@ -10896,6 +10896,18 @@ exit \$RC
                   botToken, 'POST');
                 placeholderTs = ph?.ts || null;
               } catch (e) { /* non-fatal: fall back to a fresh post below */ }
+              let progressReporter = null;
+              if (placeholderTs) {
+                const { createSlackProgressReporter } = await import('./connectors/slack-agent-progress.js');
+                progressReporter = createSlackProgressReporter({
+                  minIntervalMs: Number(process.env.SLACK_AGENT_PROGRESS_INTERVAL_MS || 900),
+                  update: async (progressText) => {
+                    await bridge._call('chat.update', {
+                      channel: qChannel, ts: placeholderTs, text: progressText,
+                    }, botToken, 'POST');
+                  },
+                });
+              }
 
               // Per-conversation history so multi-turn flows work — e.g.
               // "save this" → "which project?" → reply names a project → saves —
@@ -10905,28 +10917,41 @@ exit \$RC
               const priorHistory = globalThis._slackHistory.get(convKey) || [];
 
               const accessCtx = await buildAccessContext(runUserId, runOrgId);
-              const result = await runReactAgent({
-                message: effectiveQuestion,
-                history: priorHistory.map((h) => ({ role: h.role, content: h.content })),
-                model: 'openai/gpt-oss-120b',
-                apiKey: groqKey,
-                language: 'en',
-                ctx: {
-                  userId: runUserId,
-                  orgId: runOrgId,
-                  projectId: null,
-                  prisma,
-                  persistentMemoryStore,
-                  persistentMemoryEngine,
-                  evidenceRetrieval,
-                  smartIngestRouter,
-                  buildRoutedIngestPayloads,
-                  ingestRoutedPayload,
-                  ingestCanonicalPayload,
-                  accessContext: accessCtx,
-                  webIntelligence: globalThis.webIntelligence || null,
-                },
-              });
+              let result;
+              try {
+                result = await runReactAgent({
+                  message: effectiveQuestion,
+                  history: priorHistory.map((h) => ({ role: h.role, content: h.content })),
+                  model: 'openai/gpt-oss-120b',
+                  apiKey: groqKey,
+                  language: 'en',
+                  // Slack mentions are a full HIVE chat surface. Connected
+                  // toolkits are eligible, while native recall remains the
+                  // default when it best answers the request.
+                  useTools: process.env.SLACK_CHAT_USE_TOOLS !== 'false',
+                  onEvent: (event) => progressReporter?.onEvent(event),
+                  ctx: {
+                    userId: runUserId,
+                    orgId: runOrgId,
+                    projectId: null,
+                    prisma,
+                    persistentMemoryStore,
+                    persistentMemoryEngine,
+                    evidenceRetrieval,
+                    smartIngestRouter,
+                    buildRoutedIngestPayloads,
+                    ingestRoutedPayload,
+                    ingestCanonicalPayload,
+                    accessContext: accessCtx,
+                    webIntelligence: globalThis.webIntelligence || null,
+                  },
+                });
+              } finally {
+                // Drain every queued Slack update before replacing the same
+                // message with the final answer. Otherwise a delayed progress
+                // write can race and overwrite the completed response.
+                await progressReporter?.stop();
+              }
               let answer = toSlackMrkdwn(String(result?.response || '').trim() || 'I could not find an answer.');
               // When a save is deferred for project selection, offer real
               // clickable buttons (same hm_save_pick action_id/value shape the

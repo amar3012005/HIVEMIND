@@ -267,6 +267,10 @@ test('compound orchestrator: composio write creates a pendingWrite draft (never 
   assert.equal(res.draftIds[0], 'DRAFT1');
   assert.equal(created.length, 1);
   assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
+  assert.deepEqual(res.pendingActions, [{
+    id: 'DRAFT1', provider: 'composio', tool_name: 'composio_gmail_send_email',
+    tool_args: { to: 'boss@x.com' }, status: 'draft', step_index: 0,
+  }]);
   assert.match(created[0].argsHash, /^[a-f0-9]{64}$/);
   assert.ok(res.summary.includes('awaiting your approval'));
   assert.ok(!res.summary.includes('done'));

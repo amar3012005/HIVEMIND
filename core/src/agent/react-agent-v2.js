@@ -2773,11 +2773,13 @@ export async function runReactAgentV2({
         usage: sumUsage(usages),
         trace: finalizeTrace(trace, usages),
         draft_ids: compound.draftIds,
+        pending_actions: compound.pendingActions || [],
         compound_status: compound.status,
         execution: {
           status: compound.status,
           steps: compound.steps,
           draft_ids: compound.draftIds,
+          pending_actions: compound.pendingActions || [],
         },
         continuation,
       };

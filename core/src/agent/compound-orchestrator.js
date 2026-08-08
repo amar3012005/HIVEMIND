@@ -269,7 +269,7 @@ async function selectToolCard({ rawTools, message, canonicalOperation, apiKey, s
       body: JSON.stringify({
         model: SUBTASK_MODEL,
         messages: [
-          { role: 'system', content: `Select the one connected-app capability that directly fulfills the requested operation in any language. The supplied capabilities have already been restricted to the planner's required read/write authority. Prefer the tool that produces the requested result over prerequisite or metadata utilities. Return exactly one tool_name from the supplied enum. Available compact capability cards: ${JSON.stringify(cards)}` },
+          { role: 'system', content: `Select the one connected-app capability that directly fulfills the requested operation in any language. The supplied capabilities have already been restricted to the planner's required read/write authority. Prefer the tool that produces the requested terminal result over prerequisite or metadata utilities. HIVE-MIND already creates a reviewable approval artifact for every write, so a provider's create-draft capability is not needed merely to preview a write; select it only when the requested terminal result is specifically a draft in that provider. Return exactly one tool_name from the supplied enum. Available compact capability cards: ${JSON.stringify(cards)}` },
           { role: 'user', content: message },
         ],
         tools: [selector], tool_choice: { type: 'function', function: { name: 'select_connector_tool' } },
@@ -1120,6 +1120,20 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
   const inputRequests = results.flatMap((result, index) => result?.status === 'needs_input' && result?.inputRequest
     ? [{ ...result.inputRequest, step_index: index, step_id: `step-${index + 1}` }]
     : []);
+  // Return the exact immutable write arguments alongside the draft id. This
+  // lets every chat surface show what approval will execute without a second
+  // LLM call or a race-prone list query. These are the same tenant-scoped
+  // arguments persisted in pendingWrite and re-used by the approval handler.
+  const pendingActions = results.flatMap((result, index) => result?.status === 'draft_created' && result?.draftId
+    ? [{
+        id: result.draftId,
+        provider: 'composio',
+        tool_name: result.toolName,
+        tool_args: result.args || {},
+        status: 'draft',
+        step_index: index,
+      }]
+    : []);
   return {
     steps,
     draftIds,
@@ -1129,6 +1143,7 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
     readResults,
     synthesisPayload: buildCompoundSynthesisPayload({ recallResults, readResults }),
     inputRequests,
+    pendingActions,
     resumeState: status === 'needs_input' ? { subtasks, results, outputs, done } : null,
   };
 }

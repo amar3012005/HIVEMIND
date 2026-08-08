@@ -84,6 +84,17 @@ export const HIGH_TOOLS = [
     parameters: object({ response: { type: 'string' }, response_language: { type: 'string' }, reason: { type: 'string', enum: ['general', 'clarification', 'safety_refusal'] } }) } },
 ];
 
+const EXTERNAL_TOOL_NAMES = new Set(['use_connector', 'use_campaign', 'compound_plan']);
+
+// The initial router prompt stays small: native HIVE-MIND capabilities are
+// always available, while connected apps and compound execution are disclosed
+// only after the caller explicitly opts in for this turn.
+export function getProgressiveTools({ useTools = false } = {}) {
+  return useTools
+    ? HIGH_TOOLS
+    : HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name));
+}
+
 // Token-lean system prompt: rules + a handful of multilingual routing examples
 // (the benchmark's exact prompt — the examples are cheap and materially lift
 // cross-language accuracy; broad example lists live in the eval suite, not here).
@@ -202,7 +213,7 @@ export function extractMessageDates(text, now = new Date()) {
 // stays recall. "What is my name" already contains the literal "my name".
 const PROFILE_RE = /\b(about me|about my (company|org|organi[sz]ation)|who am i|what do you know about me|what am i called|my name)\b|\bmy(\s+[a-z-]+){0,3}\s+(profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus)\b|\bmy (profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus|company|organi[sz]ation|team|language|location)\b|über mich|was weißt du über mich|wie hei(ß|ss)e ich|mein name|meine (firma|rolle|ziele|strategie|präferenz)|qui suis-je|comment je m'appelle|mon (nom|rôle|objectif|entreprise)|sobre mí|cómo me llamo|mi (nombre|rol|empresa|objetivo)/i;
 
-async function callRouter({ message, history, apiKey, signal }) {
+async function callRouter({ message, history, apiKey, signal, useTools = false }) {
   const histMsgs = Array.isArray(history)
     ? history.slice(-3).filter((h) => h && (h.role === 'user' || h.role === 'assistant') && h.content)
         .map((h) => ({ role: h.role, content: String(h.content).slice(0, 1200) }))
@@ -211,8 +222,8 @@ async function callRouter({ message, history, apiKey, signal }) {
     method: 'POST',
     // chatCompletionFetch sets Authorization from the resolved route; no header here.
     body: JSON.stringify({
-      messages: [{ role: 'system', content: SYSTEM }, ...histMsgs, { role: 'user', content: message }],
-      tools: HIGH_TOOLS,
+      messages: [{ role: 'system', content: useTools ? SYSTEM : `${SYSTEM}\nConnected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.` }, ...histMsgs, { role: 'user', content: message }],
+      tools: getProgressiveTools({ useTools }),
       tool_choice: 'required',
       parallel_tool_calls: false,
       temperature: 0,
@@ -234,7 +245,7 @@ async function callRouter({ message, history, apiKey, signal }) {
  * runs intentDecisionToPlan(decision, message) exactly as for the current
  * planner, so ALL downstream behavior is identical.
  */
-export function adaptToDecision(tool, args, message, language) {
+export function adaptToDecision(tool, args, message, language, { useTools = true } = {}) {
   const lang = args?.response_language || language || 'und';
   const base = {
     version: 'chat-progressive.v1',
@@ -332,6 +343,7 @@ export function adaptToDecision(tool, args, message, language) {
       // fetch happened — do NOT set needs_web. TODO: wire hivemind_web_search.
       return { decision: { ...base, operation: 'recall', queries: [s(args?.query, 2000) || message], tool_groups: ['hivemind-recall'] }, usage: null };
     case 'use_connector': {
+      if (!useTools) return { decision: { ...base, operation: 'recall', queries: [message], tool_groups: ['hivemind-recall'] }, usage: null };
       const write = args?.intent === 'write';
       const provider = s(args?.provider, 128);
       return { decision: {
@@ -346,6 +358,7 @@ export function adaptToDecision(tool, args, message, language) {
       }, usage: null };
     }
     case 'use_campaign': {
+      if (!useTools) return { decision: { ...base, operation: 'recall', queries: [message], tool_groups: ['hivemind-recall'] }, usage: null };
       const write = args?.intent === 'write';
       return { decision: {
         ...base,
@@ -356,6 +369,7 @@ export function adaptToDecision(tool, args, message, language) {
       }, usage: null };
     }
     case 'compound_plan': {
+      if (!useTools) return { decision: { ...base, operation: 'recall', queries: [message], tool_groups: ['hivemind-recall'] }, usage: null };
       // Multi-step request — the router decomposed it into ordered subtasks.
       // The caller (runReactAgentV2) routes this to the compound orchestrator
       // behind COMPOUND_ORCHESTRATOR_ENABLED. Each subtask is bounded here so
@@ -463,10 +477,10 @@ export function adaptToDecision(tool, args, message, language) {
  * Main entry — mirrors parseChatIntent's { decision, usage } contract so the
  * caller is a drop-in swap under the flag.
  */
-export async function parseChatIntentProgressive({ message, history, language, apiKey, signal }) {
+export async function parseChatIntentProgressive({ message, history, language, apiKey, signal, useTools = false }) {
   try {
-    const { tool, args, usage } = await callRouter({ message, history, apiKey, signal });
-    const { decision } = adaptToDecision(tool, args, message, language);
+    const { tool, args, usage } = await callRouter({ message, history, apiKey, signal, useTools });
+    const { decision } = adaptToDecision(tool, args, message, language, { useTools });
     // Diagnostics for the A/B gate (read via trace.intent; harmless downstream).
     decision._router = 'progressive';
     decision._router_tool = tool;

@@ -178,3 +178,55 @@ export async function projectRankedMemoryEvidence({
     };
   });
 }
+
+export async function projectAdaptiveRankedMemoryEvidence({
+  query,
+  memories = [],
+  totalBudget = 12000,
+  lowerRankBudget = 700,
+  embed,
+} = {}) {
+  const budget = Math.max(1000, Number(totalBudget) || 12000);
+  const top = memories[0] || null;
+  const topContent = String(top?.content || '');
+  if (!top || topContent.length > budget) {
+    return projectRankedMemoryEvidence({
+      query,
+      memories,
+      perMemoryBudget: Math.max(120, Math.min(lowerRankBudget, budget)),
+      embed,
+    });
+  }
+  const remaining = Math.max(0, budget - topContent.length);
+  const projectedTail = remaining > 0 && memories.length > 1
+    ? await projectRankedMemoryEvidence({
+      query,
+      memories: memories.slice(1),
+      // Allocate the leftover globally rather than giving every tail row the
+      // whole remainder. This keeps the full rank-one guarantee without
+      // silently exceeding the operation's final-evidence budget.
+      perMemoryBudget: Math.max(120, Math.min(
+        lowerRankBudget,
+        Math.floor(remaining / (memories.length - 1)),
+      )),
+      embed,
+    })
+    : [];
+  // The passage projector intentionally has a 120-character minimum to keep
+  // a semantic fragment meaningful. When the rank-one row leaves less than
+  // that per tail row, enforce the *global* contract here instead of allowing
+  // the minimum to inflate the final prompt.
+  let tailRemaining = remaining;
+  const tail = projectedTail.map((item) => {
+    const excerpt = String(item?.excerpt || '').slice(0, Math.max(0, tailRemaining));
+    tailRemaining = Math.max(0, tailRemaining - excerpt.length);
+    return excerpt === item.excerpt ? item : { ...item, excerpt };
+  }).filter((item) => item.excerpt.length > 0);
+  return [{
+    memory: top,
+    excerpt: topContent,
+    tags: Array.isArray(top.tags) ? top.tags.slice(0, 6) : [],
+    selected_passage_indexes: null,
+    projection: 'complete-rank-one',
+  }, ...tail];
+}

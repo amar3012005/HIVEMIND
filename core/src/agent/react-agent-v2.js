@@ -1843,7 +1843,7 @@ ${message}`;
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
   let answerPayload = parsed;
-  response = appendGapClarification(response, answerPayload.gaps);
+  response = appendGapClarification(response, answerPayload.gaps, language);
   let validated = validateChatAnswer({
     answer: response,
     claims: parsed.claims,
@@ -1873,7 +1873,7 @@ ${message}`;
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;
     response = typeof repaired.parsed.response === 'string' ? repaired.parsed.response.trim() : '';
-    response = appendGapClarification(response, answerPayload.gaps);
+    response = appendGapClarification(response, answerPayload.gaps, language);
     validated = validateChatAnswer({
       answer: response,
       claims: repaired.parsed.claims,

@@ -10200,7 +10200,56 @@ Write the persona now.`;
     const flybyDecisionCompat = roomTurnMatch && roomTurnMatch[2] && !roomTurnMatch[3] && url.searchParams.get('action') === 'flyby-decision';
     // Phase 7 — resolve a queued connector write (approval card action).
     const roomApproveMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/approve$/);
+    const roomWorkPlanMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
+
+    // GET /v1/hyper-rooms/:id/work-plan — one continuous, durable projection
+    // for a human Work Room. This reads the existing work-order ledger; it never
+    // creates a second workflow authority or derives completion from prose.
+    if (roomWorkPlanMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomWorkPlanMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
+        select: { id: true, roomMode: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      if (room.roomMode !== 'work') return jsonResponse(res, { error: 'Work plan is only available for Work Rooms' }, 409);
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT wo.id, wo.turn_id, wo.plan_step_id, wo.depends_on, wo.kind, wo.status,
+                wo.title, wo.objective, wo.owner_slug, wo.owner_lane, wo.error,
+                wo.attempt, wo.created_at, wo.started_at, wo.completed_at, wo.updated_at,
+                latest.summary AS latest_summary
+           FROM "hivemind"."hyper_work_orders" wo
+           LEFT JOIN LATERAL (
+             SELECT summary
+               FROM "hivemind"."hyper_work_results" result
+              WHERE result.work_order_id = wo.id
+              ORDER BY result.attempt DESC, result.created_at DESC
+              LIMIT 1
+           ) latest ON true
+          WHERE wo.org_id = $1::uuid AND wo.room_id = $2::uuid AND wo.hq_cycle_id IS NULL
+          ORDER BY wo.created_at ASC, wo.plan_step_id ASC NULLS LAST`,
+        current.session.orgId, roomId,
+      ).catch(() => []);
+      const steps = (rows || []).map((row) => {
+        const status = String(row.status || 'queued');
+        return {
+          id: String(row.id), turn_id: row.turn_id ? String(row.turn_id) : null,
+          step_id: row.plan_step_id || null,
+          depends_on: Array.isArray(row.depends_on) ? row.depends_on : [],
+          status: status === 'blocked' ? 'needs_attention' : status,
+          title: row.title, objective: row.objective, kind: row.kind,
+          owner: { slug: row.owner_slug || null, lane: row.owner_lane || null },
+          attempt: Number(row.attempt || 0), blocker: row.error || null,
+          summary: row.latest_summary || null,
+          timestamps: { created_at: row.created_at, started_at: row.started_at,
+                        completed_at: row.completed_at, updated_at: row.updated_at },
+        };
+      });
+      return jsonResponse(res, { room_id: roomId, mode: 'work', steps });
+    }
 
     // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.
     // Archive (default) sets archived_at so the room drops to the rail's

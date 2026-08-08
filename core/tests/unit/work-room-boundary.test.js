@@ -17,3 +17,10 @@ test('follow-up turns preserve the persisted execution boundary', () => {
   assert.match(source, /task_tag:\s*roomExecutionTag\(room\)/);
   assert.match(source, /roomMode:\s*'runtime'/);
 });
+
+test('work rooms expose one durable work-plan projection', () => {
+  assert.match(source, /hyper-rooms.*work-plan/);
+  assert.match(source, /"hyper_work_orders"/);
+  assert.match(source, /plan_step_id/);
+  assert.match(source, /status === 'blocked' \? 'needs_attention' : status/);
+});

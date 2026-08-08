@@ -112,18 +112,33 @@ export async function planHostedComposioWorkflow({
   const composioSvc = composio || await import('../connectors/composio/composio-service.js');
   const accounts = await composioSvc.listConnectedAccounts(orgId);
   const connectedProviders = connectedProvidersFromAccounts(accounts);
-  const parsed = await parseIntent({
-    message,
-    history,
-    language,
-    apiKey,
-    signal,
-    useTools: true,
-    connectedProviders,
-    workflowPlanner: true,
-  });
-  if (parsed?.decision?._router_error) throw new Error(`hosted_planner_router_failed:${parsed.decision._router_error}`);
-  const steps = decisionToHostedPlan(parsed?.decision, { request: message, connectedProviders });
+  let parsed = null;
+  let steps = null;
+  let attempts = 0;
+  let lastError = null;
+  while (attempts < 2 && !steps) {
+    attempts += 1;
+    parsed = await parseIntent({
+      message,
+      history,
+      language,
+      apiKey,
+      signal,
+      useTools: true,
+      connectedProviders,
+      workflowPlanner: true,
+    });
+    if (parsed?.decision?._router_error) {
+      lastError = new Error(`hosted_planner_router_failed:${parsed.decision._router_error}`);
+      continue;
+    }
+    try {
+      steps = decisionToHostedPlan(parsed?.decision, { request: message, connectedProviders });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!steps) throw lastError || new Error('hosted_planner_failed');
   const fingerprint = createHash('sha256')
     .update(JSON.stringify({ orgId, message, connectedProviders, steps }))
     .digest('hex');
@@ -141,6 +156,7 @@ export async function planHostedComposioWorkflow({
       writes_require_approval: true,
     },
     usage: parsed?.usage || null,
+    planner_attempts: attempts,
     _decision: parsed?.decision,
   };
 }

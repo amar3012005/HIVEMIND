@@ -731,19 +731,31 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
     return { status: 'error', error: `no composio tools available for connector group(s): ${toolGroups.join(',') || '(none)'}`, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
   }
 
-  // 2. Small tool-calling step: pick ONE tool + args for this subtask.
+  // 2. The compact semantic selector above has already picked exactly one
+  // provider capability in production. Composio Query Mode translates this
+  // step's natural-language instruction into that capability's current input
+  // schema, removing a redundant second HIVE-MIND LLM call. Injected test
+  // selectors retain the legacy hook for deterministic coverage.
   let chosen = null;
-  try {
-    const executionTools = priorOutputs && Object.keys(priorOutputs).length
-      ? [...tools, MISSING_DEPENDENCY_TOOL] : tools;
-    chosen = await selectTool({
-      tools: executionTools,
-      message: buildSubtaskExecutionMessage(message, priorOutputs),
-      apiKey,
-      signal,
-    });
-  } catch (err) {
-    return { status: 'error', error: err.message, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
+  if (selectTool === defaultSelectTool && tools.length === 1) {
+    chosen = {
+      toolName: tools[0].function.name,
+      args: {},
+      schema: tools[0].function.parameters || { properties: {} },
+    };
+  } else {
+    try {
+      const executionTools = priorOutputs && Object.keys(priorOutputs).length
+        ? [...tools, MISSING_DEPENDENCY_TOOL] : tools;
+      chosen = await selectTool({
+        tools: executionTools,
+        message: buildSubtaskExecutionMessage(message, priorOutputs),
+        apiKey,
+        signal,
+      });
+    } catch (err) {
+      return { status: 'error', error: err.message, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
+    }
   }
   if (!chosen) {
     return { status: 'error', error: 'no tool selected', toolName: null, args: null, result: null, draftId: null, outputFields: {} };
@@ -768,16 +780,14 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   //    which fields the tool accepts).
   const manifestSchema = chosen.schema || { properties: {} };
   let preparedArgs = rawArgs;
-  if (selectedAuthority === 'write'
-      && missingSemanticWriteArgs(subtask.output_kind, manifestSchema, preparedArgs).length
-      && typeof composioSvc.generateToolInputs === 'function') {
+  if (typeof composioSvc.generateToolInputs === 'function') {
     try {
       const generated = await composioSvc.generateToolInputs(
         composioSlug,
         buildSubtaskExecutionMessage(message, priorOutputs),
         { systemPrompt: 'Generate complete arguments only. Preserve grounded prior outputs and exact identifiers. Do not execute the action.' },
       );
-      preparedArgs = { ...generated, ...(preparedArgs || {}) };
+      preparedArgs = { ...(preparedArgs || {}), ...generated };
     } catch (error) {
       emit({ type: 'tool_result', name: toolName, status: 'needs_input', summary: `tool input generation failed: ${error.message}` });
       return { status: 'needs_input', error: `tool input generation failed: ${error.message}`, toolName, args: preparedArgs, result: null, draftId: null, outputFields: {} };

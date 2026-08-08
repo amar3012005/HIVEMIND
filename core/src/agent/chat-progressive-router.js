@@ -287,10 +287,12 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
     body: JSON.stringify({
       messages: [...systemMessages, ...histMsgs, { role: 'user', content: message }],
       tools: workflowPlanner ? getWorkflowPlannerTool() : getProgressiveTools({ useTools, connectedProviders }),
-      tool_choice: 'required',
+      tool_choice: workflowPlanner
+        ? { type: 'function', function: { name: 'compound_plan' } }
+        : 'required',
       parallel_tool_calls: false,
       temperature: 0,
-      max_tokens: 900,
+      max_tokens: workflowPlanner ? 1400 : 900,
       prompt_cache_key: staticPrompt.key,
     }),
     signal,

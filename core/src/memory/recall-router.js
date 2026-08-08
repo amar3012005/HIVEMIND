@@ -400,6 +400,35 @@ const DREAM_RANK_MULT          = Number(process.env.RECALL_DREAM_MULT || 1.6);
 const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN || 2);
 const KB_DURABLE_MIN_IMPORTANCE = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
 
+export function serializeRecallMemory(m, { includeFullContent = false } = {}) {
+  return {
+    id: m.id,
+    title: m.title,
+    content: typeof m.content === 'string'
+      ? (includeFullContent ? m.content : m.content.slice(0, 400))
+      : '',
+    memory_type: m.memory_type,
+    tags: m.tags,
+    score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
+    created_at: m.created_at,
+    valid_at: m.valid_at,
+    ...(m.source_metadata?.source_type
+      ? { source_metadata: { source_type: m.source_metadata.source_type } }
+      : {}),
+    ...(m.synthesis_confidence != null ? { synthesis_confidence: m.synthesis_confidence } : {}),
+    ...(m.synthesis_revision != null ? { synthesis_revision: m.synthesis_revision } : {}),
+    ...(m.synthesis_cluster_hash ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
+    ...(Array.isArray(m.synthesis_evidence_ids) && m.synthesis_evidence_ids.length
+      ? { synthesis_evidence_ids: m.synthesis_evidence_ids }
+      : {}),
+    ...(m._cross_cluster_boost != null ? {
+      _cross_cluster_boost: Number(m._cross_cluster_boost.toFixed(3)),
+      _cross_cluster_overlap: m._cross_cluster_overlap || 0,
+    } : {}),
+    ...(typeof m.tier === 'number' ? { tier: m.tier } : {}),
+  };
+}
+
 // Legacy KB promotions can receive a strong retrieval score even when their
 // ingestion importance was below today's durable-memory admission threshold.
 // Keep those rows out of normal memory recall without hiding source evidence,
@@ -1786,33 +1815,8 @@ export class RecallRouter {
     });
 
     return {
-      memories: deliverMemories.map((m) => ({
-        id: m.id,
-        title: m.title,
-        content: typeof m.content === 'string' ? m.content.slice(0, 400) : '',
-        memory_type: m.memory_type,
-        tags: m.tags,
-        score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
-        created_at: m.created_at,
-        valid_at: m.valid_at,
-        // Cognition layer signals — agent uses these to prefer synthesis-
-        // tier rows. Pass through when present; null/undefined harmless.
-        ...(m.source_metadata?.source_type
-          ? { source_metadata: { source_type: m.source_metadata.source_type } }
-          : {}),
-        ...(m.synthesis_confidence != null   ? { synthesis_confidence:   m.synthesis_confidence }   : {}),
-        ...(m.synthesis_revision   != null   ? { synthesis_revision:     m.synthesis_revision }     : {}),
-        ...(m.synthesis_cluster_hash         ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
-        ...(Array.isArray(m.synthesis_evidence_ids) && m.synthesis_evidence_ids.length
-          ? { synthesis_evidence_ids: m.synthesis_evidence_ids }
-          : {}),
-        // Expose cross-cluster boost metadata when present (Move 3)
-        ...(m._cross_cluster_boost != null ? {
-          _cross_cluster_boost:   Number(m._cross_cluster_boost.toFixed(3)),
-          _cross_cluster_overlap: m._cross_cluster_overlap || 0,
-        } : {}),
-        // Phase B tier surfaced for hydration tap + UI ("hot"/"thin"/"live")
-        ...(typeof m.tier === 'number' ? { tier: m.tier } : {}),
+      memories: deliverMemories.map((memory) => serializeRecallMemory(memory, {
+        includeFullContent: options.include_full_memory_content === true,
       })),
       evidence: finalEvidence.slice(0, HOP2_DOC_LIMIT).map((e) => ({
         segment_id:       e.segmentId,

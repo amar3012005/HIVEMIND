@@ -4,6 +4,7 @@ import { normalizeAgentRecallMode, TOOL_SCHEMAS } from '../../src/agent/tool-reg
 import { buildEvidencePacket } from '../../src/memory/recall-router.js';
 import {
   buildChatCitationPacket,
+  buildChatCitationSources,
   validateChatAnswer,
 } from '../../src/agent/react-agent-v2.js';
 
@@ -56,4 +57,23 @@ test('chat rejects model-invented citations and keeps opt-in general knowledge v
   }, packets, { allowGeneralKnowledge: true });
   assert.equal(allowed.answer, 'General answer');
   assert.equal(allowed.grounded, false);
+});
+
+test('memory-only citations expose the server-owned memory id and memory evidence type', () => {
+  const sources = buildChatCitationSources([{
+    facts: [{ id: 'memory-1', title: 'Operations note', content: 'The recovery code is ZX-91-Q.' }],
+    citations: [{ id: 'C1', memory_id: 'memory-1', title: 'Operations note' }],
+  }], [{ text: 'The recovery code is ZX-91-Q.', grounded: true, citation_ids: ['P1-C1'] }]);
+
+  assert.deepEqual(sources, [{
+    id: 'memory-1',
+    citation_id: 'P1-C1',
+    segment_id: null,
+    document_id: null,
+    title: 'Operations note',
+    snippet: 'The recovery code is ZX-91-Q.',
+    page: null,
+    source_type: 'memory_evidence',
+    score: null,
+  }]);
 });

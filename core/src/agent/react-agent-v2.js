@@ -27,8 +27,9 @@
  */
 
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
-import { validateGroundedClaims } from '../memory/recall-packet.js';
+import { buildRecallPacket, validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
+import { projectRankedMemoryEvidence } from './memory-evidence-projector.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 import {
   chatCompletionFetch,
@@ -778,6 +779,10 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
 
   const recallExtras = {
     _structured_intent: true,
+    // Internal-only delivery mode: ranking still runs on the canonical recall
+    // path, but answer synthesis receives the complete authorized rows so its
+    // semantic projector can recover details beyond the public 400-char preview.
+    _include_full_memory_content: true,
     ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
     ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
     ...(plan.time?.range ? { date_range: plan.time.range } : {}),
@@ -1121,21 +1126,27 @@ export function buildChatCitationSources(recallPackets = [], claims = []) {
         .filter((section) => section?.segment_id)
         .map((section) => [section.segment_id, section]),
     );
+    const factsById = new Map(
+      (packet?.facts || [])
+        .filter((fact) => fact?.id || fact?.memory_id || fact?.memoryId)
+        .map((fact) => [fact.id || fact.memory_id || fact.memoryId, fact]),
+    );
     for (const citation of (packet?.citations || [])) {
       if (!citation?.id) continue;
       const citationId = `P${packetIndex + 1}-${citation.id}`;
       if (!usedIds.has(citationId) || seen.has(citationId)) continue;
       seen.add(citationId);
       const section = sectionsById.get(citation.segment_id) || {};
+      const fact = factsById.get(citation.memory_id) || {};
       sources.push({
-        id: citation.segment_id || citationId,
+        id: citation.segment_id || citation.memory_id || citationId,
         citation_id: citationId,
         segment_id: citation.segment_id || null,
         document_id: citation.document_id || section.document_id || null,
         title: citation.title || citation.source_label || section.document_title || 'Workspace source',
-        snippet: section.snippet || section.content || citation.snippet || '',
+        snippet: section.snippet || section.content || citation.snippet || fact.content || '',
         page: citation.page ?? section.page ?? null,
-        source_type: citation.source_type || 'document_evidence',
+        source_type: citation.source_type || (citation.memory_id ? 'memory_evidence' : 'document_evidence'),
         score: Number.isFinite(section.score) ? section.score : null,
       });
     }
@@ -1444,21 +1455,71 @@ export async function answerStep({ message, history, evidence, plan, language, a
     .slice(evidenceTopK)
     .filter((m) => m && (m._superseded_predecessor || m._diff_removed))
     .slice(0, 6);
-  // Adaptive per-memory content budget. A flat 240-char slice was too small
-  // for any rich single memory (a KB chunk, a long note, a one-memory meeting
-  // record): everything past char 240 became invisible to synthesis, so the
-  // model answered "the record doesn't include that" about content that WAS
-  // retrieved. When the result set is small (the common case for a specific
-  // question) the whole memory fits with room to spare; when it is large we
-  // tighten per-memory so the total prompt stays bounded (worst case ~5-6k
-  // chars either way). Language/tenant-neutral — pure length policy.
+  // Adaptive per-memory output budget. Selection scans the COMPLETE content
+  // semantically before applying this output cap; it is no longer a prefix
+  // slice. Thus a small fact near the end of a long ranked memory remains
+  // visible while the final synthesis prompt stays bounded.
   const _evCount = _topSlice.length + _flaggedMissed.length;
   const _contentBudget = _evCount <= 4 ? 1400 : (_evCount <= 8 ? 700 : 300);
-  const evidenceLines = [..._topSlice, ..._flaggedMissed].map((m, i) => {
+  const _selectedMemories = [..._topSlice, ..._flaggedMissed];
+  const _projectionQuery = [
+    message,
+    plan?.query_canonical_en,
+    ...(Array.isArray(plan?.sub_queries) ? plan.sub_queries : []),
+  ].filter((value) => typeof value === 'string' && value.trim()).join('\n');
+  let _projectedMemories;
+  try {
+    const embed = ctx?._embedEvidence || (async (texts) => {
+      const { getEmbedService } = await import('../embeddings/factory.js');
+      return getEmbedService().embed(texts);
+    });
+    const timeoutMs = Number(process.env.HIVEMIND_EVIDENCE_PROJECTION_TIMEOUT_MS || 3500);
+    let timer;
+    try {
+      _projectedMemories = await Promise.race([
+        projectRankedMemoryEvidence({
+          query: _projectionQuery,
+          memories: _selectedMemories,
+          perMemoryBudget: _contentBudget,
+          embed,
+        }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('semantic evidence projection timed out')), timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (ctx?._trace) {
+      ctx._trace.evidence_projection = {
+        mode: 'semantic',
+        memories: _selectedMemories.length,
+        input_chars: _selectedMemories.reduce((sum, memory) => sum + String(memory?.content || '').length, 0),
+        output_chars: _projectedMemories.reduce((sum, item) => sum + String(item?.excerpt || '').length, 0),
+      };
+    }
+  } catch (error) {
+    // Availability fallback only. It is explicitly traceable and retains the
+    // old bounded behavior if every semantic embedding provider is down.
+    const warning = `evidence_projection_degraded:${error.message}`;
+    console.warn(`[answerStep] ${warning}`);
+    if (ctx?._trace) {
+      if (!Array.isArray(ctx._trace.warnings)) ctx._trace.warnings = [];
+      ctx._trace.warnings.push(warning);
+      ctx._trace.evidence_projection = { mode: 'prefix-fallback', memories: _selectedMemories.length };
+    }
+    _projectedMemories = _selectedMemories.map((memory) => ({
+      memory,
+      excerpt: String(memory?.content || '').slice(0, _contentBudget),
+      tags: Array.isArray(memory?.tags) ? memory.tags.slice(0, 6) : [],
+      projection: 'prefix-fallback',
+    }));
+  }
+  const evidenceLines = _projectedMemories.map(({ memory: m, excerpt, tags: projectedTags }) => {
     const id8 = (m.id || '').slice(0, 8);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
-    const content = (m.content || '').replace(/\n/g, ' ').slice(0, _contentBudget);
-    const tags = (m.tags || []).slice(0, 3).join(', ');
+    const content = String(excerpt || '').replace(/\n/g, ' ');
+    const tags = projectedTags.join(', ');
     // Synthesis detection: source_metadata.source_type OR tag fallback (FTS path).
     const srcType = m.source_metadata?.source_type || null;
     const memTags = m.tags || [];
@@ -1549,6 +1610,18 @@ export async function answerStep({ message, history, evidence, plan, language, a
     return `  ▶ ${head}\n${evRows}`;
   }).join('\n');
 
+  // Some recall lanes can return ranked memory rows without document segments.
+  // Keep their provenance server-owned by adding the canonical memory-fact
+  // packet only when the router supplied no usable citation at all.
+  if (buildChatCitationPacket(evidence.recall_packets || []).citations.length === 0 && _selectedMemories.length > 0) {
+    evidence = {
+      ...evidence,
+      recall_packets: [
+        ...(evidence.recall_packets || []),
+        buildRecallPacket({ facts: _selectedMemories, plan: { mode: recallMode } }),
+      ],
+    };
+  }
   const citationPacket = buildChatCitationPacket(evidence.recall_packets || []);
   const citationLines = citationPacket.citations.map((citation) =>
     `[${citation.id}] ${citation.source_label || citation.title || 'Workspace source'}${citation.page ? ` p.${citation.page}` : ''}`,
@@ -2261,6 +2334,7 @@ export async function runReactAgentV2({
     },
     failure_mode: null,
     confidence_path: [],
+    warnings: [],
     models: {
       planner: INTENT_MODEL,
       synthesis: answerModel,

@@ -74,6 +74,10 @@ test('compound orchestrator: native hivemind-recall step runs via dispatchTool',
   assert.equal(res.status, 'completed');
   assert.equal(dispatched.length, 1);
   assert.equal(dispatched[0].name, 'hivemind_recall');
+  assert.equal(dispatched[0].args._structured_intent, true);
+  assert.equal(dispatched[0].args.semantic_recovery, true);
+  assert.equal(dispatched[0].args._include_full_memory_content, true,
+    'compound synthesis must receive full authorized recall rows, not public previews');
   assert.equal(res.recallResults[0], recallPacket, 'full canonical recall result is retained without truncation');
 });
 

@@ -364,8 +364,11 @@ export function applyConnectorRetrievalPolicy(args, toolSchema, retrieval = {}) 
   for (const key of ['max_results', 'maxResults', 'limit', 'page_size', 'pageSize']) {
     if (props[key]) { next[key] = candidateCount; break; }
   }
-  if (props.verbose) next.verbose = true;
-  if (props.include_payload) next.include_payload = true;
+  // Ordered discovery is metadata-first: several providers (including Gmail)
+  // return fewer rows in verbose mode, defeating the candidate sort. Metadata
+  // retains subject/sender/time and keeps final synthesis compact.
+  if (props.verbose) next.verbose = false;
+  if (props.include_payload) next.include_payload = false;
   if (props.ids_only) next.ids_only = false;
   return next;
 }

@@ -97,7 +97,7 @@ test('argument generation separates relative ordering from provider content filt
   assert.match(prompt, /explicit sender, entity, date, or content filters/i);
 });
 
-test('structured newest policy removes invented search text and requests one complete record', () => {
+test('structured newest policy removes invented search text and requests a metadata candidate window', () => {
   const schema = { properties: {
     query: { type: 'string' }, max_results: { type: 'integer' }, verbose: { type: 'boolean' },
     include_payload: { type: 'boolean' }, ids_only: { type: 'boolean' },
@@ -109,8 +109,8 @@ test('structured newest policy removes invented search text and requests one com
   );
   assert.equal('query' in args, false);
   assert.equal(args.max_results, 10, 'unordered providers need a bounded candidate window before sorting');
-  assert.equal(args.verbose, true);
-  assert.equal(args.include_payload, true);
+  assert.equal(args.verbose, false);
+  assert.equal(args.include_payload, false);
   assert.equal(args.ids_only, false);
 });
 

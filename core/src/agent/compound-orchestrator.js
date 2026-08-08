@@ -30,10 +30,20 @@ const SUBTASK_MAX_ROUNDS = 3;
 
 /**
  * Resolve the connector runtime singleton. The server assigns
- * globalThis.__hivemindConnectorRuntime at boot (see connectors/runtime/index.js).
+ * globalThis.__hivemindConnectorRuntime lazily (only when a
+ * /api/connectors/runtime/* or /mcp/connectors/* request arrives), so it may
+ * not be present when the chat orchestrator runs. If absent, initialize it
+ * here with the same pattern the server uses (getConnectorRuntime with the
+ * chat ctx's prisma) — the singleton is process-lifetime, so this is cheap and
+ * idempotent.
  */
-function getRuntime() {
-  const rt = globalThis.__hivemindConnectorRuntime;
+async function getRuntime(ctx) {
+  let rt = globalThis.__hivemindConnectorRuntime;
+  if (!rt) {
+    const { getConnectorRuntime } = await import('../connectors/runtime/index.js');
+    rt = getConnectorRuntime({ db: ctx?.prisma, prisma: ctx?.prisma });
+    try { globalThis.__hivemindConnectorRuntime = rt; } catch { /* ignore */ }
+  }
   if (!rt) throw new Error('connector runtime not initialized');
   return rt;
 }
@@ -143,7 +153,7 @@ async function defaultSelectTool({ tools, message, apiKey, signal }) {
  * status ∈ 'completed' | 'draft_created' | 'error' | 'not_connected' | ...
  */
 async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs, selectTool = defaultSelectTool }) {
-  const runtime = getRuntime();
+  const runtime = await getRuntime(ctx);
   const toolGroups = Array.isArray(subtask.tool_groups) ? subtask.tool_groups : [];
   const message = subtask.message || '';
 

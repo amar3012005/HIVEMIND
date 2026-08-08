@@ -25,7 +25,7 @@ Commits: `787109a hyper: project durable work room plans`,
   `needs_attention` state and includes prerequisites, owner, summary, blocker, and timestamps.
 - The Room UI renders one compact Work Plan above its turn transcript and refreshes it once for
   each unseen persisted `work_order` event. It has no second polling or lifecycle authority.
-- Frontend submodule revision: `211e9ef hyper: refresh work plan from live room events`.
+- Frontend submodule revision: `715bcfd hyper: refresh work plan from live room events`, rebased on current frontend `main` (`9491117`).
 
 ### Phase 0: Explicit Room Boundary
 

@@ -1,6 +1,7 @@
 /**
  * System email service — send transactional email as the enterprise HIVEMIND
- * account via the existing Gmail-over-Nango path. No new vendor, no SMTP creds.
+ * account through one provider-neutral transport. Cloudflare Email Sending REST
+ * is preferred when configured; the existing Gmail-over-Nango path is a fallback.
  *
  * Design goals (production):
  *   • One call, few lines, anywhere:  await sendSystemEmail({ templateId, to, vars })
@@ -9,11 +10,17 @@
  *     an email failed). Returns a result object instead.
  *   • Quiet by default — structured one-line logs, no console noise.
  *
- * Fixed sender: a single enterprise Gmail connection in Nango, identified by
+ * Cloudflare Email Sending (primary):
+ *   CLOUDFLARE_EMAIL_API_TOKEN
+ *   CLOUDFLARE_ACCOUNT_ID
+ *   CLOUDFLARE_EMAIL_FROM             (verified sender, defaults to SYSTEM_EMAIL_FROM)
+ *
+ * Gmail-over-Nango (fallback):
  *   SYSTEM_EMAIL_NANGO_CONNECTION_ID  (the connection_id you used when you
  *                                      connected the enterprise mailbox)
  *   SYSTEM_EMAIL_FROM                 (optional "Name <addr>" From header)
- * If the connection id is absent, the service no-ops gracefully (logs once).
+ * If neither provider is configured, the service no-ops gracefully and returns
+ * a safe result to the caller. Provider credentials never leave this module.
  *
  * @module core/src/email/email-service
  */
@@ -32,14 +39,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // the mailbox is connected under a different integration key.
 const GMAIL_PROVIDER = process.env.SYSTEM_EMAIL_NANGO_PROVIDER_KEY || 'gmail';
 const GMAIL_SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send';
+const CLOUDFLARE_SEND_BASE = 'https://api.cloudflare.com/client/v4/accounts';
 const SEND_TIMEOUT_MS = 15_000;
 
-const CONNECTION_ID = process.env.SYSTEM_EMAIL_NANGO_CONNECTION_ID || '';
-const FROM_HEADER = process.env.SYSTEM_EMAIL_FROM || '';
 const APP_URL = process.env.HIVEMIND_APP_URL || 'https://hivemind.davinciai.eu/hivemind/app';
 
 let _templates = null;
-let _warnedNoConnection = false;
+let _warnedNoProvider = false;
 
 function log(level, event, extra = {}) {
   const rec = { svc: 'email', level, event, ...extra };
@@ -80,6 +86,122 @@ function toBase64Url(str) {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
+}
+
+function recipientDomain(to) {
+  return String(to || '').split('@')[1]?.toLowerCase() || 'invalid';
+}
+
+function configuredProviders() {
+  const cloudflare = {
+    token: process.env.CLOUDFLARE_EMAIL_API_TOKEN || '',
+    accountId: process.env.CLOUDFLARE_ACCOUNT_ID || '',
+    from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || '',
+  };
+  const gmail = {
+    connectionId: process.env.SYSTEM_EMAIL_NANGO_CONNECTION_ID || '',
+    from: process.env.SYSTEM_EMAIL_FROM || '',
+  };
+  return {
+    cloudflare: cloudflare.token && cloudflare.accountId && cloudflare.from ? cloudflare : null,
+    gmail: gmail.connectionId ? gmail : null,
+  };
+}
+
+function cloudflareError(payload, fallback) {
+  const detail = Array.isArray(payload?.errors) ? payload.errors[0] : null;
+  return detail?.code ? `cloudflare_${detail.code}` : fallback;
+}
+
+async function sendWithCloudflare({ config, to, from, rendered, templateId }) {
+  const url = `${CLOUDFLARE_SEND_BASE}/${encodeURIComponent(config.accountId)}/email/sending/send`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          to,
+          from: from || config.from,
+          subject: rendered.subject,
+          html: rendered.html,
+          text: rendered.text,
+        }),
+        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+      });
+      const payload = await res.json().catch(() => null);
+      const result = payload?.result || {};
+      const delivered = Array.isArray(result.delivered) && result.delivered.includes(to);
+      const queued = Array.isArray(result.queued) && result.queued.includes(to);
+      const bounced = Array.isArray(result.permanent_bounces) && result.permanent_bounces.includes(to);
+      if (res.ok && (delivered || queued)) {
+        const deliveryStatus = delivered ? 'delivered' : 'queued';
+        log('info', 'sent', { provider: 'cloudflare', templateId, recipientDomain: recipientDomain(to), deliveryStatus });
+        return { ok: true, provider: 'cloudflare', deliveryStatus };
+      }
+      if (bounced) {
+        log('warn', 'permanent_bounce', { provider: 'cloudflare', templateId, recipientDomain: recipientDomain(to) });
+        return { ok: false, provider: 'cloudflare', permanent: true, error: 'permanent_bounce' };
+      }
+      const transient = res.status === 429 || res.status >= 500;
+      const error = cloudflareError(payload, `http_${res.status}`);
+      log(transient && attempt === 0 ? 'warn' : 'error', 'send_failed', {
+        provider: 'cloudflare', templateId, recipientDomain: recipientDomain(to), status: res.status, error, attempt,
+      });
+      if (!transient || attempt === 1) return { ok: false, provider: 'cloudflare', retryable: transient, error };
+    } catch (err) {
+      const retryable = err?.name === 'TimeoutError' || err?.name === 'AbortError' || err instanceof TypeError;
+      log(attempt === 0 && retryable ? 'warn' : 'error', 'send_error', {
+        provider: 'cloudflare', templateId, recipientDomain: recipientDomain(to), error: err?.name || 'request_error', attempt,
+      });
+      if (!retryable || attempt === 1) return { ok: false, provider: 'cloudflare', retryable, error: 'request_failed' };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+  return { ok: false, provider: 'cloudflare', retryable: true, error: 'send_failed' };
+}
+
+async function sendWithGmail({ connectionId, to, from, rendered, templateId }) {
+  const raw = buildRawMessage({
+    to,
+    from,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: rendered.html,
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const bearer = await fetchBearerFromNango(GMAIL_PROVIDER, connectionId);
+      const res = await fetch(GMAIL_SEND_URL, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw }),
+        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+      });
+      const txt = await res.text().catch(() => '');
+      if (res.ok) {
+        let id;
+        try { id = JSON.parse(txt).id; } catch { /* Gmail may omit the id. */ }
+        log('info', 'sent', { provider: 'gmail_nango', templateId, recipientDomain: recipientDomain(to), messageId: id });
+        return { ok: true, provider: 'gmail_nango', messageId: id, deliveryStatus: 'accepted' };
+      }
+      const transient = res.status === 429 || res.status >= 500;
+      log(transient && attempt === 0 ? 'warn' : 'error', 'send_failed', {
+        provider: 'gmail_nango', templateId, recipientDomain: recipientDomain(to), status: res.status, attempt,
+      });
+      if (!transient || attempt === 1) return { ok: false, provider: 'gmail_nango', retryable: transient, error: `http_${res.status}` };
+    } catch (err) {
+      log(attempt === 0 ? 'warn' : 'error', 'send_error', {
+        provider: 'gmail_nango', templateId, recipientDomain: recipientDomain(to), error: err?.name || 'request_error', attempt,
+      });
+      if (attempt === 1) return { ok: false, provider: 'gmail_nango', retryable: true, error: 'request_failed' };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+  return { ok: false, provider: 'gmail_nango', retryable: true, error: 'send_failed' };
 }
 
 /**
@@ -153,15 +275,17 @@ function buildRawMessage({ to, from, subject, text, html }) {
  * @returns {Promise<{ok: boolean, skipped?: boolean, messageId?: string, error?: string}>}
  */
 export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId } = {}) {
-  const sender = connectionId || CONNECTION_ID;
-  if (!sender) {
-    if (!_warnedNoConnection) {
-      log('warn', 'no_sender_connection', { hint: 'set SYSTEM_EMAIL_NANGO_CONNECTION_ID' });
-      _warnedNoConnection = true;
-    }
-    return { ok: false, skipped: true, error: 'no_sender_connection' };
-  }
   if (!to) return { ok: false, skipped: true, error: 'no_recipient' };
+
+  const providers = configuredProviders();
+  const gmail = connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
+  if (!providers.cloudflare && !gmail) {
+    if (!_warnedNoProvider) {
+      log('warn', 'no_provider', { hint: 'set CLOUDFLARE_EMAIL_API_TOKEN/CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_EMAIL_FROM or SYSTEM_EMAIL_NANGO_CONNECTION_ID' });
+      _warnedNoProvider = true;
+    }
+    return { ok: false, skipped: true, error: 'no_email_provider' };
+  }
 
   let rendered;
   try {
@@ -171,45 +295,12 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
     return { ok: false, error: err.message };
   }
 
-  const raw = buildRawMessage({
-    to,
-    from: from || FROM_HEADER || undefined,
-    subject: rendered.subject,
-    text: rendered.text,
-    html: rendered.html,
-  });
-
-  // One retry on transient (429 / 5xx). Token fetched fresh per send attempt.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const bearer = await fetchBearerFromNango(GMAIL_PROVIDER, sender);
-      const res = await fetch(GMAIL_SEND_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${bearer}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ raw }),
-        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-      });
-      const txt = await res.text().catch(() => '');
-      if (res.ok) {
-        let id;
-        try { id = JSON.parse(txt).id; } catch { /* ignore */ }
-        log('info', 'sent', { templateId, to, messageId: id });
-        return { ok: true, messageId: id };
-      }
-      const transient = res.status === 429 || res.status >= 500;
-      log(transient && attempt === 0 ? 'warn' : 'error', 'send_failed', {
-        templateId, to, status: res.status, body: txt.slice(0, 200), attempt,
-      });
-      if (!transient) return { ok: false, error: `http_${res.status}` };
-    } catch (err) {
-      log(attempt === 0 ? 'warn' : 'error', 'send_error', { templateId, to, error: err.message, attempt });
-    }
-    if (attempt === 0) await new Promise((r) => setTimeout(r, 600));
+  if (providers.cloudflare) {
+    const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId });
+    if (cloudflareResult.ok || cloudflareResult.permanent || !gmail) return cloudflareResult;
+    log('warn', 'provider_fallback', { from: 'cloudflare', to: 'gmail_nango', templateId, recipientDomain: recipientDomain(to) });
   }
-  return { ok: false, error: 'send_failed' };
+  return sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId });
 }
 
 /**
@@ -242,8 +333,8 @@ export async function sendSystemEmailBatch(recipients = [], opts = {}) {
       result.sent += 1;
     } else if (res.skipped) {
       result.skipped += 1;
-      if (res.error === 'no_sender_connection') {
-        result.errors.push('no_sender_connection — aborting batch');
+      if (res.error === 'no_email_provider') {
+        result.errors.push('no_email_provider — aborting batch');
         break;
       }
     } else {

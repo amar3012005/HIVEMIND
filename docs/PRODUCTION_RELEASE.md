@@ -216,3 +216,18 @@ release acceptance. The eight disposable test documents created for scope and gr
 verification (WrapTest DE, WrapTest DE v2, ScopeTest x3, ScopeV2 x3 on org 1380251c) WERE
 deleted afterwards, together with their 28 memories, and zero residual recall hits were
 confirmed.
+
+## prod-20260809-0293df4d — progressive chat prompt-prefix caching
+
+- Parent SHA: `0293df4da392b868dfc9cd7f364c84010f5277ba` on `singulance-main`.
+- Frontend SHA: `b68eb71782fbf394c056550b304c7a6a769e7d49` (unchanged).
+- Core image: `hivemind/core-api:sha-0293df4d`, digest `sha256:ceda195e4b075a5993307d52e38a0c246cb5aaee20838a1db2e034a7a0e1422d`.
+- Migration: none.
+- Change: stable router and grounded-synthesis contracts are first-message exact prefixes; OpenRouter receives a stable `prompt_cache_key`; Cerebras remains automatic. A bounded in-process CAG caches versioned static prompt artifacts. Evidence, history, user/profile context, connector results, tool arguments, drafts, approvals, and final answers are not cached by this layer.
+- Telemetry: per-stage cached/uncached/cache-write tokens, aggregate hit ratio, static/dynamic character and estimated-token contribution, and static-prompt CAG hit/miss/fingerprint.
+- Tests: 55 focused chat/recall/evidence/compound tests passed after rebase; 43 focused tests passed after the explicit system-message split. Six broader local files could not load the unavailable macOS ARM `singulance-amr` binary and did not execute; production route acceptance below covers the running Linux image.
+- Production measurement, tenant-scoped read-only `/api/chat`: static CAG was a warm hit after first construction. Provider reuse observed `0..2,048+` cached tokens per turn; cross-language English→German reused `2,048 / 4,664` prompt tokens (43.9%). Router static-prefix hits reached `1,792` tokens; synthesis stable-prefix hits reached `256` tokens. Dynamic evidence-prefix reuse was variable and added up to `1,024` tokens in the measured sample. Provider caching remains opportunistic/ephemeral, not guaranteed per request.
+- Acceptance: handbag brand and color recalls returned grounded answers; German recall returned `G ROCHER`; `use_tools:true` recall returned 200 with no execution, compound status, or drafts; Core and public site health returned 200; Core healthy, restart count 0, OOM false, and no fresh fatal/panic/uncaught/unhandled/OOM logs.
+- Rollback: `hivemind/core-api:sha-66312a29` (also tagged `hivemind/core-api:rollback`); manifest `/root/releases/0293df4d/RELEASE_MANIFEST.20260808T185149Z.json`.
+- Known operational gap: the canonical release script deployed and verified the immutable SHA override but did not refresh the legacy `VERSION`/`NEXT_VERSION` values in `.env`; runtime truth is the container image, OCI revision label, deploy override, and release manifest above.
+- External side effects: none; no connector read/write, pending-write approval, email, document creation, calendar operation, campaign, or memory mutation was executed.

@@ -10626,7 +10626,9 @@ Write the persona now.`;
         const rows = await tx.$queryRawUnsafe(
           `SELECT wo.id, wo.title, wo.objective, wo.status, wo.handoff,
                   result.id AS result_id, result.status AS result_status,
-                  result.summary AS result_summary
+                  result.summary AS result_summary,
+                  COALESCE(resume_turn.status, source_turn.status) AS effective_turn_status,
+                  COALESCE(resume_turn.lines, source_turn.lines) AS effective_turn_lines
              FROM "hivemind"."hyper_work_orders" wo
              LEFT JOIN LATERAL (
                SELECT id, status, summary
@@ -10635,6 +10637,14 @@ Write the persona now.`;
                 ORDER BY attempt DESC, created_at DESC
                 LIMIT 1
              ) result ON true
+             LEFT JOIN "hivemind"."hyper_turns" source_turn ON source_turn.id = wo.turn_id
+             LEFT JOIN "hivemind"."hyper_turns" resume_turn
+               ON resume_turn.id = CASE
+                    WHEN COALESCE(wo.input_snapshot->>'resume_turn_id', '')
+                         ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                    THEN (wo.input_snapshot->>'resume_turn_id')::uuid
+                    ELSE NULL
+                  END
             WHERE wo.id = $1::uuid AND wo.org_id = $2::uuid
               AND wo.room_id = $3::uuid AND wo.hq_cycle_id IS NULL
             FOR UPDATE OF wo`,
@@ -10645,8 +10655,13 @@ Write the persona now.`;
         if (order.status !== 'completed' || order.result_status !== 'completed') {
           return { error: 'Only a completed, evidenced work step can be handed to Runtime', status: 409 };
         }
+        const effectiveLines = Array.isArray(order.effective_turn_lines) ? order.effective_turn_lines : [];
+        const verificationPassed = effectiveLines.some((event) => event?.t === 'verify' && event?.met === true);
+        if (order.effective_turn_status !== 'complete' || !verificationPassed) {
+          return { error: 'The Room turn must complete verification before Runtime handoff', status: 409 };
+        }
         const handoff = order.handoff && typeof order.handoff === 'object' ? order.handoff : {};
-        if (!['runtime', 'hq'].includes(String(handoff.owner || '').trim().toLowerCase())) {
+        if (!['runtime', 'hq', 'hq runtime'].includes(String(handoff.owner || '').trim().toLowerCase())) {
           return { error: 'This work step has no Runtime handoff', status: 409 };
         }
         if (handoff.runtime_instruction_id) {

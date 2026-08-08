@@ -37,6 +37,9 @@ test('a waiting Work Room step resumes under its existing work-order identity', 
 test('a completed Work Room handoff enters HQ as an instruction without bypassing semantic selection', () => {
   assert.match(source, /roomWorkPlanHandoffMatch/);
   assert.match(source, /Only a completed, evidenced work step can be handed to Runtime/);
+  assert.match(source, /The Room turn must complete verification before Runtime handoff/);
+  assert.match(source, /event\?\.t === 'verify' && event\?\.met === true/);
+  assert.match(source, /COALESCE\(resume_turn\.status, source_turn\.status\) AS effective_turn_status/);
   assert.match(source, /source: 'work_room_handoff', execution_mode: 'single_outcome'/);
   assert.match(source, /triggerType: 'instruction_updated'/);
   assert.doesNotMatch(source, /roomWorkPlanHandoffMatch[\s\S]{0,8000}hqTodo\.create/);

@@ -94,6 +94,8 @@ def _normalize_work_step_handoff(value: Any) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     owner = str(value.get("owner") or "").strip()[:80]
+    if owner.lower() in {"runtime", "hq", "hq runtime"}:
+        owner = "runtime"
     objective = str(value.get("objective") or "").strip()[:600]
     rationale = str(value.get("rationale") or "").strip()[:1000]
     if not owner or not objective or not rationale:
@@ -4368,7 +4370,7 @@ class Director:
                         "resume_key": {"type": ["string", "null"]},
                     }, "required": ["kind", "reason", "prompt", "resume_key"], "additionalProperties": False},
                     "handoff": {"type": ["object", "null"], "properties": {
-                        "owner": {"type": "string"},
+                        "owner": {"type": "string", "enum": ["runtime", "hq"]},
                         "objective": {"type": "string"},
                         "rationale": {"type": "string"},
                     }, "required": ["owner", "objective", "rationale"], "additionalProperties": False},

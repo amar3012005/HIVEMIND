@@ -19,6 +19,7 @@
  * Flag-gated by COMPOUND_ORCHESTRATOR_ENABLED (default false) in the caller.
  */
 
+import { createHash } from 'node:crypto';
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 
 // Model used for the per-subtask tool-selection step. Reuses the hardened
@@ -429,7 +430,11 @@ async function createComposioDraft(ctx, composioSlug, args, toolName) {
         // Include the traceId so each turn creates a distinct draft (the
         // idempotency_key column is UNIQUE — a deterministic key collides on a
         // second identical request). The traceId scopes retries within one turn.
-        idempotencyKey: `composio:${ctx.orgId}:${ctx.userId}:${composioSlug}:${ctx._trace?.traceId || Date.now()}:${JSON.stringify(args || {})}`,
+        // Hashed to a fixed 64-char hex so it never exceeds the VarChar(160)
+        // column limit (the raw concatenation with full args was too long).
+        idempotencyKey: createHash('sha256')
+          .update(`composio:${ctx.orgId}:${ctx.userId}:${composioSlug}:${ctx._trace?.traceId || Date.now()}:${JSON.stringify(args || {})}`)
+          .digest('hex'),
         expiresAt: new Date(Date.now() + Number(process.env.CHAT_DRAFT_TTL_MS || 15 * 60_000)),
         preview,
         status: 'draft',

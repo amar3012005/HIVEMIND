@@ -56,3 +56,18 @@ test('enterprise admissions preserve only a signed invitation identity, never a 
   assert.equal(ticket.includes('recovery-code'), false);
   assert.equal(createSignupAdmission({ accountType: 'personal', secret, enterpriseInvitation: { id: '11111111-1111-4111-8111-111111111111', method: 'link', version: 1 } }), null);
 });
+
+test('enterprise admissions accept the invitation service result shape', () => {
+  const secret = 'service-shaped-enterprise-admission-secret';
+  const invitationId = '9c9483bb-3282-4243-a14c-456f0c9bb7b6';
+  const ticket = createSignupAdmission({
+    accountType: 'enterprise',
+    secret,
+    enterpriseInvitation: { invitationId, method: 'link', version: 1 },
+  });
+  assert.ok(ticket);
+  assert.deepEqual(
+    verifySignupAdmission({ ticket, accountType: 'enterprise', secret }).enterpriseInvitation,
+    { id: invitationId, method: 'link', version: 1 },
+  );
+});

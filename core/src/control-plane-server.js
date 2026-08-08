@@ -2713,6 +2713,8 @@ const server = http.createServer(async (req, res) => {
     const delivery = await sendSystemEmail({
       templateId: 'enterprise_invitation',
       to: invitation.recipientEmail,
+      // Sender identity is configured server-side; the browser never supplies it.
+      from: process.env.SYSTEM_EMAIL_FROM || 'Singulance Support <support@singulancelabs.com>',
       vars: {
         companyName: invitation.companyName,
         workspaceName: invitation.workspaceName || invitation.companyName,

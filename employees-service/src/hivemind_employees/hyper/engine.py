@@ -3723,15 +3723,19 @@ class Director:
         for synthesis and verification; the existing producer remains the sole
         path for sending, publishing, or other external writes.
         """
-        orders = [row for row in (plan.get("work_orders") or []) if isinstance(row, dict)]
+        plan_steps = [row for row in (plan.get("turn_plan") or []) if isinstance(row, dict)] if self.is_work_room else []
+        orders = plan_steps or [row for row in (plan.get("work_orders") or []) if isinstance(row, dict)]
         if not orders or not self.participants:
             return []
+        completed_by_step: Dict[str, Dict[str, Any]] = {}
 
         async def execute(index: int, order: Dict[str, Any]) -> Dict[str, Any]:
             owner = self._work_order_owner(str(order.get("owner_lane") or "Strategist"))
             owner_name = str(owner.get("name") or owner.get("slug") or "Director")
             owner_slug = str(owner.get("slug") or "director")
-            order_key = f"work-{index + 1}-{str(order.get('kind') or 'analysis')[:20]}"
+            step_id = str(order.get("id") or f"work-{index + 1}")[:80]
+            dependencies = [str(value)[:80] for value in (order.get("depends_on") or []) if str(value)]
+            order_key = f"{step_id}-{str(order.get('kind') or 'analysis')[:20]}"[:80]
             evidence = list(order.get("required_evidence") or [])
             criteria = list(order.get("acceptance_criteria") or [])
             persisted = await create_hyper_work_order(
@@ -3740,7 +3744,10 @@ class Director:
                 title=str(order.get("title") or "Work order"), objective=str(order.get("objective") or ""),
                 owner=owner, selected_skills=list(self.skills_used), required_evidence=evidence,
                 acceptance_criteria=criteria,
-                input_snapshot={"room_kind": self.room_kind, "user_message": self.user_message[:1000]},
+                input_snapshot={"room_kind": self.room_kind, "room_mode": self.room_mode,
+                                "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps)},
+                plan_step_id=step_id,
+                depends_on=dependencies,
             )
             work_id = str((persisted or {}).get("id") or "")
             if work_id:
@@ -3753,6 +3760,10 @@ class Director:
                              "note": f"{owner_name} — working on {str(order.get('title') or 'the assigned deliverable').lower()}…"})
             persona_name, lane, persona = _persona_fields(owner)
             context = self._work_order_context(evidence)
+            predecessor_notes = [completed_by_step[dependency].get("text", "")
+                                 for dependency in dependencies if dependency in completed_by_step]
+            if predecessor_notes:
+                context += "\n\nCOMPLETED PREREQUISITES:\n" + "\n".join(predecessor_notes)
             prompt = (
                 f"WORK ORDER: {order.get('title')}\nOBJECTIVE: {order.get('objective')}\n"
                 f"ACCEPTANCE CRITERIA:\n" + "\n".join(f"- {item}" for item in criteria) +
@@ -3773,7 +3784,7 @@ class Director:
                 if not text:
                     raise RuntimeError("worker returned no usable result")
                 activity = _work_order_activity(order.get("title"), text)
-                result = {"id": work_id or order_key, "order_key": order_key, "status": "completed",
+                result = {"id": work_id or order_key, "step_id": step_id, "depends_on": dependencies, "order_key": order_key, "status": "completed",
                           "kind": order.get("kind"), "title": order.get("title"), "owner": owner_name,
                           "owner_slug": owner_slug, "text": text, "acceptance_criteria": criteria}
                 self.blackboard.append(f"WORK_RESULT[{owner_name} | {order.get('title')}]:\n{text}")
@@ -3793,7 +3804,7 @@ class Director:
                 return result
             except Exception as exc:  # a worker failure is a visible, bounded result, never a dead Room
                 message = str(exc)[:500]
-                result = {"id": work_id or order_key, "order_key": order_key, "status": "failed",
+                result = {"id": work_id or order_key, "step_id": step_id, "depends_on": dependencies, "order_key": order_key, "status": "failed",
                           "kind": order.get("kind"), "title": order.get("title"), "owner": owner_name,
                           "owner_slug": owner_slug, "text": message, "acceptance_criteria": criteria}
                 await self.emit({"t": "work_order", **result})
@@ -3805,7 +3816,32 @@ class Director:
                     )
                 return result
 
-        return list(await asyncio.gather(*(execute(index, order) for index, order in enumerate(orders))))
+        if not plan_steps:
+            return list(await asyncio.gather(*(execute(index, order) for index, order in enumerate(orders))))
+
+        pending = list(enumerate(orders))
+        results: List[Dict[str, Any]] = []
+        while pending:
+            ready = [(index, order) for index, order in pending
+                     if all(dependency in completed_by_step and completed_by_step[dependency].get("status") == "completed"
+                            for dependency in (order.get("depends_on") or []))]
+            if not ready:
+                for index, order in pending:
+                    step_id = str(order.get("id") or f"work-{index + 1}")[:80]
+                    result = {"id": step_id, "step_id": step_id, "depends_on": list(order.get("depends_on") or []),
+                              "status": "needs_attention", "kind": order.get("kind"), "title": order.get("title"),
+                              "text": "Dependencies were not completed; this step was not started."}
+                    completed_by_step[step_id] = result
+                    results.append(result)
+                    await self.emit({"t": "work_order", **result})
+                break
+            wave = await asyncio.gather(*(execute(index, order) for index, order in ready))
+            for result in wave:
+                completed_by_step[str(result.get("step_id") or result.get("id"))] = result
+                results.append(result)
+            ready_ids = {id(order) for _, order in ready}
+            pending = [(index, order) for index, order in pending if id(order) not in ready_ids]
+        return results
 
     async def _debate(self, topic: str, rounds: int) -> str:
         rounds = max(1, min(self.debate_max_rounds, rounds))
@@ -4190,6 +4226,16 @@ class Director:
                     "required_evidence": {"type": "array", "items": {"type": "string"}},
                     "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                 }, "required": ["kind", "owner_lane", "title", "objective", "required_evidence", "acceptance_criteria"], "additionalProperties": False}},
+                "turn_plan": {"type": "array", "items": {"type": "object", "properties": {
+                    "id": {"type": "string"},
+                    "depends_on": {"type": "array", "items": {"type": "string"}},
+                    "kind": {"type": "string", "enum": ["research", "analysis", "creative", "decision"]},
+                    "owner_lane": {"type": "string", "enum": ["Strategist", "Researcher", "Skeptic", "Builder", "Communicator"]},
+                    "title": {"type": "string"},
+                    "objective": {"type": "string"},
+                    "required_evidence": {"type": "array", "items": {"type": "string"}},
+                    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                }, "required": ["id", "depends_on", "kind", "owner_lane", "title", "objective", "required_evidence", "acceptance_criteria"], "additionalProperties": False}},
                 "turn_mode": {"type": "string", "enum": ["chat", "task"]},
                 "collaboration_intensity": {"type": "string", "enum": ["light", "standard", "deep"]},
                 "response_depth": {"type": "string", "enum": ["direct", "focused", "operating"]},
@@ -4346,6 +4392,9 @@ class Director:
                 "Runtime lifecycle. Use the smallest useful approach. Do not manufacture a report, a debate, "
                 "or employee work orders merely because a room exists. Select method skills from the catalog "
                 "by their stated applicability, then load their full bodies only when they improve this request. "
+                "For nontrivial work, use turn_plan for up to five bounded steps. Each step has a stable id and "
+                "only names prerequisites that must finish before it can start. Independent steps may run together; "
+                "omit turn_plan for a direct answer. Keep work_orders empty when turn_plan is present. "
                 "A proposed Runtime lifecycle is a recommendation with its evidence and boundary; it is not an "
                 "executed external action.\n"
             )
@@ -4598,6 +4647,43 @@ class Director:
                 "acceptance_criteria": [str(x)[:180] for x in (row.get("acceptance_criteria") or []) if str(x).strip()][:4],
             })
         plan["work_orders"] = work_orders
+        turn_plan: List[Dict[str, Any]] = []
+        if self.is_work_room:
+            seen_step_ids = set()
+            for index, row in enumerate(plan.get("turn_plan") or []):
+                if not isinstance(row, dict):
+                    continue
+                step_id = str(row.get("id") or "").strip().lower()[:80]
+                if not re.fullmatch(r"[a-z][a-z0-9_-]{0,79}", step_id) or step_id in seen_step_ids:
+                    continue
+                title = str(row.get("title") or "").strip()[:180]
+                objective = str(row.get("objective") or "").strip()[:600]
+                if not title or not objective:
+                    continue
+                dependencies = [str(value).strip().lower()[:80] for value in (row.get("depends_on") or [])
+                                if str(value).strip()][:4]
+                turn_plan.append({
+                    "id": step_id,
+                    "depends_on": dependencies,
+                    "kind": str(row.get("kind") or "analysis").strip().lower(),
+                    "owner_lane": str(row.get("owner_lane") or "Strategist").strip().title(),
+                    "title": title,
+                    "objective": objective,
+                    "required_evidence": [str(x)[:160] for x in (row.get("required_evidence") or []) if str(x).strip()][:4],
+                    "acceptance_criteria": [str(x)[:180] for x in (row.get("acceptance_criteria") or []) if str(x).strip()][:4],
+                })
+                seen_step_ids.add(step_id)
+                if len(turn_plan) == 5:
+                    break
+            # A plan cannot wait on an absent step or itself. Invalid dependencies
+            # become explicit no-ops rather than silently creating a deadlocked Room.
+            valid_ids = {step["id"] for step in turn_plan}
+            for step in turn_plan:
+                step["depends_on"] = [item for item in step["depends_on"]
+                                      if item in valid_ids and item != step["id"]]
+            if turn_plan:
+                plan["work_orders"] = []
+        plan["turn_plan"] = turn_plan
         plan["needs_debate"] = bool(plan.get("needs_debate"))
         if intensity == "deep":
             plan["needs_debate"] = True

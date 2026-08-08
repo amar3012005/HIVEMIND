@@ -615,6 +615,8 @@ async def create_hyper_work_order(
     required_evidence: list,
     acceptance_criteria: list,
     input_snapshot: Dict[str, Any],
+    plan_step_id: str = "",
+    depends_on: list | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Create one tenant-scoped work order, idempotently per turn/order key.
 
@@ -630,18 +632,19 @@ async def create_hyper_work_order(
             row = await conn.fetchrow(
                 """
                 INSERT INTO hivemind.hyper_work_orders (
-                  org_id, room_id, turn_id, order_key, kind, title, objective,
+                  org_id, room_id, turn_id, order_key, plan_step_id, depends_on, kind, title, objective,
                   owner_employee_id, owner_slug, owner_lane, selected_skills,
                   required_evidence, acceptance_criteria, input_snapshot
                 ) VALUES (
-                  $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7,
-                  NULLIF($8, '')::uuid, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb
+                  $1::uuid, $2::uuid, $3::uuid, $4, NULLIF($5, ''), $6::jsonb, $7, $8, $9,
+                  NULLIF($10, '')::uuid, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb
                 )
                 ON CONFLICT (turn_id, order_key) DO UPDATE
                   SET updated_at = now()
                 RETURNING id, status, attempt
                 """,
-                org_id, room_id, turn_id, order_key[:80], kind[:40], title[:180], objective,
+                org_id, room_id, turn_id, order_key[:80], plan_step_id[:80],
+                json.dumps(depends_on or [], ensure_ascii=False), kind[:40], title[:180], objective,
                 str(owner.get("id") or ""), str(owner.get("slug") or "")[:120],
                 str(owner.get("_lane") or owner.get("lane") or "")[:40],
                 json.dumps(selected_skills or [], ensure_ascii=False),

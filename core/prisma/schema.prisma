@@ -3032,6 +3032,8 @@ model HyperWorkOrder {
   runtimeEpoch        String?  @map("runtime_epoch") @db.Uuid
   growthDelegationId  String?  @map("growth_delegation_id") @db.Uuid
   orderKey            String   @map("order_key") @db.VarChar(80)
+  planStepId          String?  @map("plan_step_id") @db.VarChar(80)
+  dependsOn           Json     @default("[]") @map("depends_on") @db.JsonB
   kind                String   @db.VarChar(40)
   status              String   @default("queued") @db.VarChar(20)
   title               String   @db.VarChar(180)
@@ -3059,6 +3061,7 @@ model HyperWorkOrder {
   @@unique([hqCycleId, orderKey])
   @@index([orgId, roomId, status])
   @@index([turnId])
+  @@index([turnId, planStepId])
   @@index([hqCycleId, status])
   @@index([orgId, runtimeEpoch, status])
   @@index([status, leaseExpiresAt], map: "hyper_work_orders_status_lease_idx")

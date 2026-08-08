@@ -604,6 +604,50 @@ def test_work_orders_execute_as_independent_agent_results(monkeypatch):
     assert "second paragraph" not in worker_react["content"]
 
 
+def test_work_room_turn_plan_runs_dependencies_before_dependent_steps(monkeypatch):
+    director, _events = _director(message="Assess our product direction")
+    director.room_mode = "work"
+    director.is_work_room = True
+    director.blackboard = ["COMPANY: Acme provides compliance software."]
+    calls = []
+
+    async def create(**kwargs):
+        calls.append(("create", kwargs["plan_step_id"], kwargs["depends_on"]))
+        return None
+
+    async def start(*_args, **_kwargs):
+        return False
+
+    async def complete(**_kwargs):
+        return False
+
+    async def worker_call(messages, **_kwargs):
+        calls.append(("worker", messages[-1]["content"]))
+        return {"content": "Recommendation: validate the compliance wedge. Evidence: company context."}
+
+    monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", create)
+    monkeypatch.setattr("hivemind_employees.hyper.engine.start_hyper_work_order", start)
+    monkeypatch.setattr("hivemind_employees.hyper.engine.complete_hyper_work_order", complete)
+    monkeypatch.setattr(director, "_groq", worker_call)
+
+    results = asyncio.run(director._run_work_orders({"turn_plan": [
+        {"id": "evidence", "depends_on": [], "kind": "research", "owner_lane": "Researcher",
+         "title": "Inspect evidence", "objective": "Identify the strongest customer signal.",
+         "required_evidence": ["company"], "acceptance_criteria": ["One grounded signal"]},
+        {"id": "decision", "depends_on": ["evidence"], "kind": "decision", "owner_lane": "Strategist",
+         "title": "Choose validation", "objective": "Recommend the next product validation.",
+         "required_evidence": ["signal"], "acceptance_criteria": ["One explicit decision"]},
+    ]}))
+
+    assert [result["step_id"] for result in results] == ["evidence", "decision"]
+    assert [(entry[0], entry[1], entry[2]) for entry in calls if entry[0] == "create"] == [
+        ("create", "evidence", []), ("create", "decision", ["evidence"]),
+    ]
+    worker_inputs = [entry[1] for entry in calls if entry[0] == "worker"]
+    assert "COMPLETED PREREQUISITES" not in worker_inputs[0]
+    assert "COMPLETED PREREQUISITES" in worker_inputs[1]
+
+
 def test_post_output_action_uses_global_connected_toolkit(monkeypatch):
     director, _events = _director(
         message="Draft this in Gmail", enabled_connectors=["gmail"],

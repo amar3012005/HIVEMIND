@@ -216,3 +216,30 @@ def test_room_phase_v2_uses_checkpoint_guidance_and_declared_skills_without_deba
     assert director.work_order["objective"] == "Choose one strategy from the accepted evidence ledger."
     assert director.work_order["selected_skills"] == ["strategy-operating-loop", "positioning-ladder"]
     assert director.work_order["constraints"]["instruction"] == "Produce a complete go-to-market strategy."
+
+
+def test_room_phase_enforces_data_declared_tool_limits():
+    envelope = {
+        "contract": "room-phase.v2",
+        "run_id": "run-bounded",
+        "phase_id": "prepare",
+        "instruction": "Prepare a bounded evidence set.",
+        "context": {},
+        "lifecycle": {
+            "guidance": "Prepare the evidence once.",
+            "expected_artifacts": ["record"],
+            "execution_config": {
+                "tool_limits": {"load_skill": 1},
+                "result_limits": {"places_search": 10},
+            },
+        },
+    }
+    director = _director({**envelope, "objective": envelope["instruction"]})
+
+    first = asyncio.run(director._exec("load_skill", {"skill_name": "evidence-first"}))
+    second = json.loads(asyncio.run(director._exec("load_skill", {"skill_name": "evidence-first"})))
+
+    assert "call limit reached" not in first
+    assert second == {"error": "load_skill call limit reached for this lifecycle phase.",
+                      "limit": 1, "is_error": True}
+    assert director._runtime_result_limits["places_search"] == 10

@@ -67,6 +67,11 @@ export function resolveWorkResultTodo({ order, result }) {
   };
 }
 
+export function playbookRunOwnsCapacity(run) {
+  if (!run || !['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'].includes(run.status)) return false;
+  return run.status !== 'WAITING_EVENT' || run.waitingFor?.releases_execution_slot !== true;
+}
+
 // The first-life browser check-in is OPTIONAL: it may briefly hold planning
 // while an administrator adds current context, but it must never freeze the
 // company. A run still in progress waits; a run that exhausted verification
@@ -712,23 +717,10 @@ export class NativeHqEngine {
             summary: 'The Room completed the preparatory stages. HQ is holding the exact checkpoint before any governed external action.',
             details: { run_id: run.id, gate: authority.gate, policy_key: authority.policyKey },
           });
-          if (todo.context?.proposal_origin === 'strategy_program') {
-            const activation = await activateEligibleFirstLifeWork({
-              prisma, runtime, expansionTrigger: 'verified_preparation_checkpoint', proposalOrigin: 'strategy_program',
-            });
-            if (activation.promoted.length) {
-              await scheduleHqWake({
-                prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-                idempotencyKey: `strategy-preparation:${run.id}:${run.checkpointSequence}`,
-                triggerType: 'queue_advance', dueAt: new Date(),
-                payload: { run_id: run.id, promoted_todo_ids: activation.promoted.map((item) => item.id) },
-              });
-              queueContinuationScheduled = true;
-            }
-          }
         }
       } else if (run.status === 'WAITING_EVENT') {
         const waitingForCapability = (run.waitingFor?.types || []).includes('capability.connected');
+        const waitingCapability = waitingForCapability ? String(run.waitingFor?.capability || '').trim().toLowerCase() : '';
         const waitingPresentation = run.waitingFor?.presentation || {};
         const waitingTitle = String(waitingPresentation.title || '').trim()
           || (waitingForCapability ? `A connection is required: ${todo.title}` : `Waiting for lifecycle evidence: ${todo.title}`);
@@ -739,6 +731,14 @@ export class NativeHqEngine {
         await prisma.hqTodo.update({ where: { id: todo.id }, data: {
           status: waitingForCapability ? 'WAITING_FOR_CONNECTOR' : 'MONITORING',
           blockedReason: waitingForCapability ? 'A required tenant capability is not connected yet.' : null,
+          ...(waitingCapability ? {
+            requiredCapabilities: [...new Set([...(todo.requiredCapabilities || []), waitingCapability])],
+            context: {
+              ...(todo.context || {}),
+              runtime_required_capabilities: [...new Set([...(todo.context?.runtime_required_capabilities || []), waitingCapability])],
+              runtime_capability_run_id: run.id,
+            },
+          } : {}),
           result: {
             runtime_playbook_run_id: run.id,
             playbook_id: run.playbookId,
@@ -748,6 +748,20 @@ export class NativeHqEngine {
             artifact_refs: artifactRefs,
           },
         } });
+        if (waitingCapability) {
+          const existingRequest = await prisma.hqCapabilityRequest.findFirst({
+            where: { runtimeId: runtime.id, todoId: todo.id, capability: waitingCapability, status: 'REQUIRED' },
+          });
+          if (!existingRequest) await prisma.hqCapabilityRequest.create({ data: {
+            runtimeId: runtime.id,
+            orgId: runtime.orgId,
+            todoId: todo.id,
+            capability: waitingCapability,
+            provider: waitingCapability,
+            reason: String(run.waitingFor?.reason || `${todo.title} requires ${waitingCapability} before it can continue.`),
+            connectPath: `/hivemind/app/connectors?connect=${encodeURIComponent(waitingCapability)}`,
+          } });
+        }
         await event(prisma, runtime, cycle, {
           eventType: waitingForCapability ? 'capability_required' : 'observation',
           title: waitingTitle,
@@ -755,20 +769,6 @@ export class NativeHqEngine {
           details: { run_id: run.id, waiting_for: run.waitingFor || {}, artifact_refs: artifactRefs },
           evidenceRefs: artifactRefs,
         });
-        if (todo.context?.proposal_origin === 'strategy_program') {
-          const activation = await activateEligibleFirstLifeWork({
-            prisma, runtime, expansionTrigger: 'verified_preparation_checkpoint', proposalOrigin: 'strategy_program',
-          });
-          if (activation.promoted.length) {
-            await scheduleHqWake({
-              prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-              idempotencyKey: `strategy-preparation:${run.id}:${run.checkpointSequence}`,
-              triggerType: 'queue_advance', dueAt: new Date(),
-              payload: { run_id: run.id, promoted_todo_ids: activation.promoted.map((item) => item.id) },
-            });
-            queueContinuationScheduled = true;
-          }
-        }
         if (!waitingForCapability && run.waitingFor?.releases_execution_slot === true) {
           const activation = await activateEligibleFirstLifeWork({
             prisma, runtime, expansionTrigger: 'verified_monitoring_checkpoint',
@@ -874,10 +874,14 @@ export class NativeHqEngine {
     // next READY task and let a future measurement deadline win.
     capabilityState = await reconcileTodoCapabilities({ prisma, runtime });
     readyTodo = capabilityState.todos.find((todo) => todo.status === 'READY');
+    const capacityOwningRuns = this.runtimePlaybooks
+      ? await prisma.runtimePlaybookRun.findMany({
+        where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
+        select: { id: true, status: true, waitingFor: true },
+      }).catch(() => [])
+      : [];
     roomInFlight = capabilityState.todos.some((todo) => todo.status === 'RUNNING')
-      || (this.runtimePlaybooks ? !!(await prisma.runtimePlaybookRun.findFirst({
-        where: { orgId: runtime.orgId, status: 'ACTIVE' }, select: { id: true },
-      }).catch(() => null)) : false);
+      || capacityOwningRuns.some(playbookRunOwnsCapacity);
     if (trigger.type === 'work_result') {
       const workOrderId = String(trigger.payload?.work_order_id || '');
       const order = workOrderId ? await prisma.hyperWorkOrder.findFirst({

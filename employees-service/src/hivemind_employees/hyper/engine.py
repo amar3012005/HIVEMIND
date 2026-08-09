@@ -1314,6 +1314,18 @@ class Director:
         self._round_seq = 0
         self._web_calls = 0
         self._exec_counts: Counter[str] = Counter()
+        phase_lifecycle = self.room_phase.get("lifecycle") if isinstance(self.room_phase, dict) else {}
+        phase_config = phase_lifecycle.get("execution_config") if isinstance(phase_lifecycle, dict) else {}
+        self._runtime_tool_limits = {
+            str(name): max(0, int(value))
+            for name, value in ((phase_config or {}).get("tool_limits") or {}).items()
+            if str(name).strip() and str(value).lstrip("-").isdigit()
+        }
+        self._runtime_result_limits = {
+            str(name): max(1, int(value))
+            for name, value in ((phase_config or {}).get("result_limits") or {}).items()
+            if str(name).strip() and str(value).isdigit()
+        }
         self._work_order_records_created = 0
         self._work_order_successful_tools = 0
         self._outreach_metrics: Dict[str, int] = {
@@ -1835,6 +1847,10 @@ class Director:
         await self.emit({"t": "typing", "agent": agent, "note": note})
 
     async def _exec(self, name: str, args: Dict[str, Any]) -> str:
+        limit = self._runtime_tool_limits.get(str(name))
+        if limit is not None and self._exec_counts[str(name)] >= limit:
+            return json.dumps({"error": f"{name} call limit reached for this lifecycle phase.",
+                               "limit": limit, "is_error": True})
         self._exec_counts[str(name)] += 1
         try:
             if name == "recall":
@@ -1948,8 +1964,9 @@ class Director:
         self._web_calls += 1
         try:
             target = ((self.work_order or {}).get("target") or {}) if self.work_order else {}
-            requested_count = max(1, min(20, int(target.get("quantity") or 20)))
-            body = {"textQuery": query, "maxResultCount": max(10, requested_count)}
+            result_limit = self._runtime_result_limits.get("places_search", 20)
+            requested_count = max(1, min(20, result_limit, int(target.get("quantity") or result_limit)))
+            body = {"textQuery": query, "maxResultCount": requested_count}
             headers = {"Content-Type": "application/json", "X-Goog-Api-Key": key,
                        "X-Goog-FieldMask": "places.id,places.googleMapsUri,places.displayName,places.internationalPhoneNumber,"
                                            "places.websiteUri,places.formattedAddress,places.primaryTypeDisplayName,"

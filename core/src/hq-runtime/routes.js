@@ -86,17 +86,30 @@ function tokenPair(usage = {}) {
 
 async function getHqUsage(prisma, orgId, since = null) {
   const createdAt = since ? { gte: since } : undefined;
-  const [plans, workOrders] = await Promise.all([
+  const [plans, workOrders, runtimeTurns] = await Promise.all([
     prisma.sourceArtifact.findMany({
       where: { orgId, sourcePlatform: 'growth_plan', artifactType: 'api_response', ...(createdAt ? { createdAt } : {}) },
       select: { payload: true }, take: 100,
     }),
     prisma.hyperWorkOrder.findMany({ where: { orgId, hqCycleId: { not: null }, ...(createdAt ? { createdAt } : {}) }, select: { id: true }, take: 500 }),
+    prisma.hyperTurn.findMany({
+      where: {
+        runtimePlaybookRunId: { not: null },
+        runtimePlaybookRun: { is: { orgId } },
+        ...(since ? { startedAt: { gte: since } } : {}),
+      },
+      select: { lines: true }, take: 500,
+    }),
   ]);
   const results = workOrders.length ? await prisma.hyperWorkResult.findMany({
     where: { workOrderId: { in: workOrders.map((row) => row.id) } }, select: { usage: true }, take: 500,
   }) : [];
-  return [...plans.map((row) => row.payload?.usage || {}), ...results.map((row) => row.usage || {})]
+  const roomUsage = runtimeTurns.map((turn) => {
+    const lines = Array.isArray(turn.lines) ? turn.lines : [];
+    const seal = [...lines].reverse().find((line) => line?.t === 'seal') || {};
+    return { input_tokens: seal.tokens_in || 0, output_tokens: seal.tokens_out || 0 };
+  });
+  return [...plans.map((row) => row.payload?.usage || {}), ...results.map((row) => row.usage || {}), ...roomUsage]
     .reduce((total, usage) => { const value = tokenPair(usage); return { input_tokens: total.input_tokens + value.input, output_tokens: total.output_tokens + value.output }; }, { input_tokens: 0, output_tokens: 0 });
 }
 
@@ -716,12 +729,32 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             },
           },
         }) : []).map((campaign) => [campaign.sourceId, campaign]));
+        const projectPreparedBatch = (runId) => {
+          const run = playbookRuns.find((candidate) => String(candidate.id) === String(runId));
+          if (!run) return null;
+          const messages = run.artifacts.filter((artifact) => artifact.artifactKey === 'message_record').map((artifact) => ({
+            id: artifact.artifactId,
+            lead_ref: artifact.data?.lead_ref || null,
+            to: artifact.data?.recipient || null,
+            subject: artifact.data?.subject || null,
+            body: artifact.data?.body || null,
+          }));
+          const calls = run.artifacts.filter((artifact) => artifact.artifactKey === 'lead_record' && artifact.data?.phone).map((artifact) => ({
+            id: artifact.artifactId,
+            target_ref: artifact.id,
+            prospect: artifact.data?.company || artifact.data?.organization || null,
+            phone: artifact.data.phone,
+            goal: artifact.data?.outreach_angle || null,
+          }));
+          return messages.length || calls.length ? { run_id: run.id, messages, calls } : null;
+        };
         const projectedCapabilityRequests = capabilityRequests.map((request) => {
           const todo = todoById.get(String(request.todoId || ''));
           const runId = String(todo?.context?.runtime_capability_run_id || '');
           return {
             ...request,
             campaign: projectCampaignAuthorityPreview(campaignsByRun.get(runId) || null),
+            prepared_batch: projectPreparedBatch(runId),
             deferred: String(todo?.context?.deferred_capability_request_id || '') === String(request.id),
           };
         });

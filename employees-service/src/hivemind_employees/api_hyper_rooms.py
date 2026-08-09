@@ -1937,6 +1937,7 @@ class RoomTurnResponse(BaseModel):
     # exact historical response shape (unset fields are omitted by callers).
     result: Optional[Dict[str, Any]] = None
     summary: Optional[str] = None
+    usage: Optional[Dict[str, int]] = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -3493,10 +3494,14 @@ async def _orchestrate_single_agent(
         # order produced discussion + "Verified" and no report at all. Emit the same
         # readable final_report the normal Room path emits, built from the phase's own
         # summary/artifacts, before sealing.
-        await _emit(_runtime_phase_report(
-            user_message=req.user_message or "", contract=contract, result=result,
-            room_goal=req.room_goal or "", gaps=gaps,
-        ))
+        phase = Director._parse_room_phase_envelope(req.execution_context or "") or {}
+        lifecycle = phase.get("lifecycle") if isinstance(phase.get("lifecycle"), dict) else {}
+        phase_config = lifecycle.get("execution_config") if isinstance(lifecycle.get("execution_config"), dict) else {}
+        if phase_config.get("emit_report") is not False:
+            await _emit(_runtime_phase_report(
+                user_message=req.user_message or "", contract=contract, result=result,
+                room_goal=req.room_goal or "", gaps=gaps,
+            ))
         await _emit({
             "t": "seal", "cost_tokens": cost_tokens, "status": "complete",
             "duration_ms": int((time.time() - started) * 1000), "engine": "single-room-phase",
@@ -3511,6 +3516,9 @@ async def _orchestrate_single_agent(
             artifacts=contract.get("artifacts") or [],
             result=contract,
             summary=str(contract.get("summary") or "")[:4000],
+            usage={"input_tokens": int(_io.get("input", 0) or 0),
+                   "output_tokens": int(_io.get("output", 0) or 0),
+                   "cached_tokens": int(_io.get("cached", 0) or 0)},
         )
 
     # Runtime stages are governed by the generic Core predicate engine. The Room

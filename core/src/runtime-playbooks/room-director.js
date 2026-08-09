@@ -370,6 +370,6 @@ export class RuntimeRoomDirector {
       source: 'runtime-room-director',
       metadata: { status: gaps.length ? 'COMPLETED_WITH_GAPS' : 'COMPLETED', artifact_count: artifacts.length },
     });
-    return { artifacts, gaps, warnings: gaps, turn_id: turnId };
+    return { artifacts, gaps, warnings: gaps, turn_id: turnId, usage: asObject(body?.usage) };
   }
 }

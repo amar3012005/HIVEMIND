@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, operatingDecisionEvidenceRefs, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -78,6 +78,14 @@ test('active Room work outranks an older lifecycle wait in Runtime narration', (
   const active = { id: 'current-room', status: 'ACTIVE' };
   assert.equal(selectPendingPlaybookRun([waiting, authority, active]), active);
   assert.equal(selectPendingPlaybookRun([waiting, authority]), authority);
+});
+
+test('capability and authority waits retain lifecycle capacity until the playbook explicitly releases it', () => {
+  assert.equal(playbookRunOwnsCapacity({ status: 'ACTIVE' }), true);
+  assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_AUTHORITY' }), true);
+  assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_EVENT', waitingFor: { types: ['capability.connected'] } }), true);
+  assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_EVENT', waitingFor: { releases_execution_slot: true } }), false);
+  assert.equal(playbookRunOwnsCapacity({ status: 'COMPLETED' }), false);
 });
 
 test('HQ work-result reconciliation never reads a missing work order or result', () => {

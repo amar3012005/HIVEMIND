@@ -157,6 +157,7 @@ def test_campaign_governance_does_not_mutate_missing_semantics():
 
 def test_campaign_report_accepts_explicitly_proposed_kpi_percentage():
     bundle = _valid_v2_bundle()
+    bundle["contract_version"] = 4
     bundle["kpis"][0].update({"target": "2% engagement rate", "target_type": "proposed"})
     bundle["report_markdown"] = bundle["report_markdown"].replace(
         "Establish a baseline.", "The campaign target is a 2% engagement rate.",
@@ -164,7 +165,7 @@ def test_campaign_report_accepts_explicitly_proposed_kpi_percentage():
 
     accepted, errors = campaign__submit_plan(
         bundle, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
-        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        minimum_contract_version=4,
     )
 
     assert errors == []
@@ -439,7 +440,7 @@ def test_new_campaign_compilation_requires_v2_operating_sections():
         minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
     )
     assert accepted is None
-    assert "contract_version must be at least 4" in errors
+    assert "contract_version must be at least 5" in errors
     assert "positioning.statement is required for contract v2" in errors
     assert "timeline must not be empty for contract v2" in errors
     assert "measurement.primary_kpi is required for contract v2" in errors
@@ -498,6 +499,7 @@ def test_campaign_pace_requires_a_complete_sequence_not_one_sample():
 
 def test_campaign_report_rejects_unsupported_performance_numbers():
     bundle = _valid_v2_bundle()
+    bundle["contract_version"] = 4
     bundle["report_markdown"] = bundle["report_markdown"].replace(
         "Establish a baseline.", "Customers improve performance by 30%.",
     )
@@ -506,7 +508,7 @@ def test_campaign_report_rejects_unsupported_performance_numbers():
         bundle,
         channels=["x_organic"],
         requirements=["goal", "channel:x_organic"],
-        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        minimum_contract_version=4,
     )
 
     assert accepted is None
@@ -515,7 +517,24 @@ def test_campaign_report_rejects_unsupported_performance_numbers():
 
 def test_campaign_report_does_not_expose_internal_method_library():
     bundle = _valid_v2_bundle()
+    bundle["contract_version"] = 4
     bundle["report_markdown"] += "\nClaude Ads selected the method."
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=4,
+    )
+
+    assert accepted is None
+    assert "report_markdown must not expose internal method names" in errors
+
+
+def test_campaign_v5_uses_the_structured_dashboard_without_a_second_report():
+    bundle = _valid_v2_bundle()
+    bundle["contract_version"] = CAMPAIGN_CONTRACT_VERSION
+    bundle.pop("report_markdown", None)
 
     accepted, errors = campaign__submit_plan(
         bundle,
@@ -524,12 +543,13 @@ def test_campaign_report_does_not_expose_internal_method_library():
         minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
     )
 
-    assert accepted is None
-    assert "report_markdown must not expose internal method names" in errors
+    assert errors == []
+    assert accepted is not None
 
 
 def test_campaign_report_sections_may_be_localized():
     bundle = _valid_v2_bundle()
+    bundle["contract_version"] = 4
     bundle["report_markdown"] = "\n".join([
         "## Recommandation\nConstruire la confiance.",
         "## Public\nDécideurs.",

@@ -5156,13 +5156,11 @@ class Director:
         )
         system = (
             campaign_system_contract() + "\n\n"
-            "You are the final Campaign Intelligence synthesizer. Return one compact JSON object with exactly "
-            "report_markdown and plan. Write the polished user-facing operating report once, then provide only the "
-            "semantic campaign judgment needed to operate it. Never publish. Product code adds identifiers, timeline "
+            "You are the final Campaign Intelligence compiler. Return one compact JSON object with exactly plan. "
+            "The structured Campaign dashboard is the operating report; do not generate a second prose report. "
+            "Provide only the semantic campaign judgment needed to operate it. Never publish. Product code adds identifiers, timeline "
             "rows, payload mirrors, safety scaffolding, launch controls, and requirement coverage; it does not repair "
             "missing strategy, evidence, copy, timing, hypotheses, or action controls. "
-            "The report must use these exact Markdown H2 headings: ## Recommendation, ## Audience, ## Positioning, "
-            "## Content System, ## Campaign Sequence, ## Schedule, ## Measurement, ## Risks, and ## Launch Readiness. "
             "Do not repeat internal prompts, method names, or IDs. "
             "Required plan shape: {objective:string,strategy:string,"
             "strategy_options:[{id:string,name:string,thesis:string,tradeoff:string}],selected_strategy_id:string,"
@@ -5192,11 +5190,9 @@ class Director:
             "opening, goal, context, language, lawful_basis, country, timezone, and calling_window; TARA speaks first. "
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
-            "The report and plan must agree exactly on action count, timing, claims, metrics, and launch readiness. "
             f"For this {duration_days}-day campaign, scheduled_offset_minutes starts at 0 and the final action must be "
             f"between {last_action_minimum} and {last_action_maximum} inclusive so the sequence spans the promised horizon. "
             "Targets without verified historical evidence must be labeled proposed, never described as expected results. "
-            "In report_markdown, introduce every unsupported numeric target with the literal label 'Proposed target:' in the same sentence. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
         user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n{self._journal_block}\n"

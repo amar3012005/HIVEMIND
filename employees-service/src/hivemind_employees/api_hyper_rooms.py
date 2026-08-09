@@ -193,6 +193,19 @@ _SEAL_BY_TURN: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _SEAL_BY_TURN_CAP = 200
 
 
+def _merge_goalkeeper_seal(previous: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the latest lifecycle state with cumulative per-round token evidence."""
+    merged = dict(current)
+    prior = previous or {}
+    merged_tok_by = dict(prior.get("tok_by") or {})
+    for bucket, value in (current.get("tok_by") or {}).items():
+        merged_tok_by[bucket] = int(merged_tok_by.get(bucket, 0) or 0) + int(value or 0)
+    for field in ("cost_tokens", "tokens_in", "tokens_out", "tokens_cached"):
+        merged[field] = int(prior.get(field, 0) or 0) + int(current.get(field, 0) or 0)
+    merged["tok_by"] = merged_tok_by
+    return merged
+
+
 async def _register_and_emit_approvals(
     req: "RoomTurnRequest", pending: List[Dict[str, Any]]
 ) -> None:
@@ -2335,8 +2348,9 @@ async def _verify_turn(
             **lead,
             "tools": ["_verify_noop"],   # truthy, matches no real tool → empty toolkit
             "connectors": [],
-            "hyper": boot_emp.get("hyper"),
-            "active_prompt_version": boot_emp.get("active_prompt_version"),
+            "persona": "A neutral evidence verifier. Judge only the supplied contract and evidence; do not role-play.",
+            "hyper": None,
+            "active_prompt_version": None,
             "max_iters": 1,
         }
         # Put the final grounding/recon JUDGE on the reliable recon model (the
@@ -2927,8 +2941,9 @@ async def _repair_final_text(
             **lead,
             "tools": ["_verify_noop"],
             "connectors": [],
-            "hyper": boot_emp.get("hyper"),
-            "active_prompt_version": boot_emp.get("active_prompt_version"),
+            "persona": "A neutral final-report editor. Revise the supplied report directly; never critique it or role-play.",
+            "hyper": None,
+            "active_prompt_version": None,
             "max_iters": 1,
             "model": model or "deepseek/deepseek-v4-flash",
             "llm_provider": "openrouter",
@@ -3739,10 +3754,15 @@ async def _orchestrate_single_agent(
                         "claims_removed": len(_quality_verdict.get("unsupported_claims") or []),
                         "message": "The report was rewritten to remove unsupported claims and rechecked.",
                     })
-                    await _verify_and_emit(
+                    rechecked = await _verify_and_emit(
                         req, lead, final_text=final_text, blackboard=_quality_board, model=_m_recon,
                         company_name=_company_name, company_context_missing=_company_ctx_missing,
                     )
+                    if isinstance(rechecked, dict):
+                        rechecked["repair_attempted"] = True
+                        plan = _PLAN_BY_TURN.get(req.turn_id)
+                        if isinstance(plan, dict):
+                            plan["verification"] = rechecked
         except Exception as exc:  # noqa: BLE001
             log.warning("[single] verify failed: %s", exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side
@@ -3878,7 +3898,10 @@ async def _orchestrate_single_agent(
     if _GK_ACTIVE.get(req.turn_id):
         # Goalkeeper owns the seal: stash this round's payload; the loop emits ONE
         # final seal after the last round so the FE stream stays open across re-rounds.
-        _SEAL_BY_TURN[req.turn_id] = _seal_ev
+        # Preserve cumulative accounting instead of overwriting prior-round usage.
+        _SEAL_BY_TURN[req.turn_id] = _merge_goalkeeper_seal(
+            _SEAL_BY_TURN.get(req.turn_id) or {}, _seal_ev,
+        )
         while len(_SEAL_BY_TURN) > _SEAL_BY_TURN_CAP:
             _SEAL_BY_TURN.popitem(last=False)
     else:
@@ -4218,6 +4241,12 @@ def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(verdict, dict):
         return False
     if verdict.get("met"):
+        return False
+    # Grounding and report-shape failures receive one local edit + verification
+    # pass. Replaying discovery, debate, work orders, and synthesis after that
+    # duplicates the whole Room and can multiply token use without adding new
+    # evidence. Surface the exact remaining review gap instead.
+    if verdict.get("repair_attempted"):
         return False
     # A write awaiting approval is terminal ONLY when the draft is also sound —
     # produced AND grounded. If recon flagged the draft as ungrounded or

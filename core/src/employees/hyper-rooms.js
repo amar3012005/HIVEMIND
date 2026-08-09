@@ -137,12 +137,6 @@ export async function appendTurnEvent(prisma, turnId, event) {
       const existing = lines.find((line) => String(line?.event_id || '') === eventId);
       if (existing) return { stamped: existing, appended: false };
     }
-    // A turn has one canonical report. A delayed retry after seal-time recovery
-    // must not create a second report card with identical lifecycle meaning.
-    if (event?.t === 'final_report') {
-      const existing = lines.find((line) => line?.t === 'final_report');
-      if (existing) return { stamped: existing, appended: false };
-    }
     const now = Date.now();
     const stamped = { ts: now, received_ts: now, ...event };
     lines.push(stamped);

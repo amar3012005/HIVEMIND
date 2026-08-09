@@ -800,9 +800,26 @@ export class NativeHqEngine {
       await event(prisma, runtime, cycle, { eventType: 'skill_loaded', title: `I am taking the next item: ${readyTodo.title}`, summary: selectedSkill.description, skillRef: skillId, details: { todo_id: readyTodo.id } });
       const rooms = await prisma.hyperRoom.findMany({ where: { orgId: runtime.orgId, archivedAt: null }, orderBy: { updatedAt: 'desc' } });
       const boundedObjective = specialistWorkObjective(readyTodo, skillId);
+      const adminStatusRun = await prisma.runtimePlaybookRun.findFirst({
+        where: {
+          orgId: runtime.orgId,
+          playbookId: 'operations.browser-admin-checkin-to-status',
+          status: 'COMPLETED',
+          trigger: { path: ['runtime_epoch'], equals: runtime.epoch },
+        },
+        include: { artifacts: { orderBy: { createdAt: 'desc' } } },
+        orderBy: { updatedAt: 'desc' },
+      });
+      const adminCurrentStatus = adminStatusRun?.artifacts
+        ?.find((artifact) => artifact.artifactKey === 'user_current_status') || null;
       const lifecycleContext = {
         company: compactCompanyOperatingContext(context.company),
         baseline: context.evidence?.baseline || null,
+        admin_current_status: adminCurrentStatus ? {
+          artifact_id: adminCurrentStatus.artifactId,
+          data: adminCurrentStatus.data || {},
+          source_refs: adminCurrentStatus.sourceRefs || [],
+        } : null,
         target: {
           ...(readyTodo.context?.target || {}),
           ...(readyTodo.context?.location ? { location: readyTodo.context.location } : {}),

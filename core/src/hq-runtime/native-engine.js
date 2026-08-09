@@ -9,6 +9,7 @@ import { activateEligibleFirstLifeWork, ensureFirstLifeBootstrapProposal, projec
 import { resolveAuthorityPreference } from './contracts.js';
 import { publishHqRuntimeTransient } from './event-bus.js';
 import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
+import { runtimeConnectorConnectPath } from '../connectors/runtime-provider-policy.js';
 
 const DAY = 86400000;
 
@@ -763,7 +764,7 @@ export class NativeHqEngine {
             capability: waitingCapability,
             provider: waitingCapability,
             reason: String(run.waitingFor?.reason || `${todo.title} requires ${waitingCapability} before it can continue.`),
-            connectPath: `/hivemind/app/connectors?connect=${encodeURIComponent(waitingCapability)}`,
+            connectPath: runtimeConnectorConnectPath(waitingCapability),
           } });
         }
         await event(prisma, runtime, cycle, {

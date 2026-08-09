@@ -60,6 +60,7 @@ services:
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
       NANGO_ENCRYPTION_KEY: ${NANGO_ENCRYPTION_KEY}
       NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-http://nango:3003}
+      HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
     volumes:
       - hivemind-data:/app/data        # ← .amr files live here; BACK UP
       - hivemind-logs:/app/logs
@@ -88,6 +89,7 @@ services:
     environment:
       <<: *common-env
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
+      HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
       # Company onboarding is latency-sensitive and Groq is currently failing
       # over on this host. Prefer OpenRouter here; groqFetch still falls back.
       LLM_PRIMARY: ${CONTROL_LLM_PRIMARY:-openrouter}
@@ -112,6 +114,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hivemind_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hivemind}?schema=hivemind
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
+      HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
       GROQ_API_KEY: ${GROQ_API_KEY}
       HYPER_SYNTH_MODEL: ${HYPER_SYNTH_MODEL:-openai/gpt-oss-120b}
       CLAUDE_ADS_RESOURCE_ROOT: /opt/hivemind-resources/claude-ads

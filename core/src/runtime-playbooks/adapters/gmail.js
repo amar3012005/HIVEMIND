@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { runGoogleTool } from '../../connectors/google-native.js';
+import { executeComposioGoogleTool } from '../../connectors/composio/runtime-adapter.js';
+import { getHyperagentsRuntimeConnectorProvider } from '../../connectors/runtime-provider-policy.js';
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -214,7 +216,9 @@ function receiptArtifact(context, artifact, draft, receipt, key = 'delivery_rece
 
 export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
   if (!prisma) throw new Error('runtime_gmail_prisma_required');
-  const google = runTool || ((tool, args, actor) => runGoogleTool(tool, args, actor, prisma));
+  const google = runTool || ((tool, args, actor) => getHyperagentsRuntimeConnectorProvider() === 'composio'
+    ? executeComposioGoogleTool(actor.org_id, tool, args)
+    : runGoogleTool(tool, args, actor, prisma));
   return {
     id: 'gmail',
     name: 'Gmail',

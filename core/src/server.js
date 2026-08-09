@@ -12445,6 +12445,11 @@ exit \$RC
         case '/api/connectors/mcp/inspect':
           if (req.method === 'POST') {
             try {
+              if (String(process.env.HYPERAGENTS_RUNTIME_CONNECTORS || 'nango').toLowerCase() === 'composio') {
+                const { inspectComposioToolkit } = await import('./connectors/composio/runtime-adapter.js');
+                const inspection = await inspectComposioToolkit(body.name);
+                return jsonResponse(res, { success: true, inspection });
+              }
               const inspection = await mcpIngestionService.inspectEndpoint(body.name, {
                 user_id: userId,
                 org_id: orgId
@@ -12470,6 +12475,19 @@ exit \$RC
           }
           break;
 
+        case '/api/connectors/runtime/connected':
+          if (req.method === 'GET' || req.method === 'POST') {
+            try {
+              const { getHyperagentsRuntimeConnectorProvider, listRuntimeConnectedCapabilities } = await import('./connectors/runtime-provider-policy.js');
+              const provider = getHyperagentsRuntimeConnectorProvider();
+              const connectors = await listRuntimeConnectedCapabilities({ prisma, orgId, userId, provider });
+              return jsonResponse(res, { provider, connectors });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 502);
+            }
+          }
+          break;
+
         case '/api/connectors/mcp/exec':
           // P3 bridge (HyperAgents×Connectors): execute one live tool call on a
           // granted connector, scoped to the caller's tenant (Nango token
@@ -12479,6 +12497,11 @@ exit \$RC
             try {
               if (!body?.name || !body?.operation?.type) {
                 return jsonResponse(res, { error: 'name + operation.type are required' }, 400);
+              }
+              if (String(process.env.HYPERAGENTS_RUNTIME_CONNECTORS || 'nango').toLowerCase() === 'composio') {
+                const { executeComposioConnector } = await import('./connectors/composio/runtime-adapter.js');
+                const result = await executeComposioConnector(orgId, body.name, body.operation);
+                return jsonResponse(res, { success: true, result });
               }
               const result = await mcpIngestionService.executeTool(body.name, body.operation, {
                 user_id: userId,
@@ -12506,6 +12529,11 @@ exit \$RC
           if (req.method === 'POST') {
             try {
               if (!body?.tool) return jsonResponse(res, { error: 'tool is required' }, 400);
+              if (String(process.env.HYPERAGENTS_RUNTIME_CONNECTORS || 'nango').toLowerCase() === 'composio') {
+                const { executeComposioGoogleTool } = await import('./connectors/composio/runtime-adapter.js');
+                const result = await executeComposioGoogleTool(orgId, body.tool, body.arguments || {});
+                return jsonResponse(res, { success: true, result });
+              }
               const { runGoogleTool } = await import('./connectors/google-native.js');
               const result = await runGoogleTool(body.tool, body.arguments || {}, {
                 user_id: userId,

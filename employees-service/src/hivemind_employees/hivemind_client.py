@@ -448,6 +448,30 @@ async def google_exec_emulated(
         return {"error": str(exc)[:200]}
 
 
+async def runtime_connectors_emulated(
+    *, user_id: Optional[str], org_id: Optional[str], api_key: str = ""
+) -> Dict[str, Any]:
+    """Return the connector inventory selected for HyperAgents and Runtime.
+
+    Core owns the provider switch, so the sidecar never needs Composio or Nango
+    credentials and cannot accidentally combine both inventories.
+    """
+    settings = get_settings()
+    headers = _emulated_headers(api_key, user_id, org_id)
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.hivemind_core_url,
+            timeout=httpx.Timeout(20.0, connect=5.0),
+            headers=headers,
+        ) as c:
+            r = await c.get("/api/connectors/runtime/connected")
+            if r.status_code >= 400:
+                return {"provider": "unknown", "connectors": []}
+            return r.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"provider": "unknown", "connectors": [], "error": str(exc)[:200]}
+
+
 async def connector_inspect_emulated(
     name: str, *, user_id: Optional[str], org_id: Optional[str], api_key: str = ""
 ) -> Dict[str, Any]:

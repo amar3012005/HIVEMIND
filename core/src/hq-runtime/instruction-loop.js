@@ -1,7 +1,17 @@
 import { chatCompletionFetch, DEFAULT_HQ_DISPATCH_MODEL } from '../llm/chat-provider.js';
+import {
+  getHyperagentsRuntimeConnectorProvider,
+  listRuntimeConnectedCapabilities,
+  runtimeConnectorConnectPath,
+} from '../connectors/runtime-provider-policy.js';
 
 const providerAliases = {
   gmail: ['gmail', 'google-mail'],
+  'google-docs': ['google-docs', 'google_docs', 'googledocs'],
+  'google-drive': ['google-drive', 'google_drive', 'googledrive'],
+  notion: ['notion'],
+  github: ['github'],
+  linear: ['linear'],
   'google-maps': ['google-maps'],
   linkedin: ['linkedin'],
   instagram: ['instagram'],
@@ -302,13 +312,14 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
 }
 
 export async function getConnectedCapabilities({ prisma, runtime }) {
-  const [nango, platform, zernio] = await Promise.all([
-    prisma.nangoConnection.findMany({ where: { orgId: runtime.orgId, status: 'active' }, select: { providerKey: true } }).catch(() => []),
+  const connectorProvider = getHyperagentsRuntimeConnectorProvider();
+  const [runtimeConnectors, platform, zernio] = await Promise.all([
+    listRuntimeConnectedCapabilities({ prisma, orgId: runtime.orgId, userId: runtime.ownerUserId, provider: connectorProvider }),
     prisma.platformIntegration.findMany({ where: { userId: runtime.ownerUserId, isActive: true }, select: { platformType: true } }).catch(() => []),
     prisma.zernioOrgProfile.findUnique({ where: { orgId: runtime.orgId }, select: { connectedAccounts: true } }).catch(() => null),
   ]);
   const raw = new Set([
-    ...nango.map((row) => row.providerKey),
+    ...runtimeConnectors,
     ...platform.map((row) => row.platformType),
     ...(Array.isArray(zernio?.connectedAccounts) ? zernio.connectedAccounts.map((row) => row.platform || row.provider) : []),
   ].filter(Boolean).map((value) => String(value).toLowerCase()));
@@ -351,7 +362,7 @@ export async function reconcileTodoCapabilities({ prisma, runtime }) {
         if (!exists) await prisma.hqCapabilityRequest.create({ data: {
           runtimeId: runtime.id, orgId: runtime.orgId, todoId: todo.id, capability, provider: capability,
           reason: `${todo.title} requires ${capability} before HQ can continue.`,
-          connectPath: `/hivemind/app/connectors?connect=${encodeURIComponent(capability)}`,
+          connectPath: runtimeConnectorConnectPath(capability),
         } });
       }
     } else if (todo.status === 'WAITING_FOR_CONNECTOR') {

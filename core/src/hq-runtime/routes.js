@@ -8,6 +8,7 @@ import {
   transitionHqRuntime,
 } from './repository.js';
 import { reconcileTodoCapabilities } from './instruction-loop.js';
+import { getHyperagentsRuntimeConnectorProvider, toComposioToolkit } from '../connectors/runtime-provider-policy.js';
 import { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot, terminalOutcomeSatisfied } from '../runtime-playbooks/snapshot.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 import { projectCurrentActivationSprint } from './activation-sprint.js';
@@ -753,6 +754,9 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           const runId = String(todo?.context?.runtime_capability_run_id || '');
           return {
             ...request,
+            connector_provider: getHyperagentsRuntimeConnectorProvider(),
+            connector_toolkit: getHyperagentsRuntimeConnectorProvider() === 'composio'
+              ? toComposioToolkit(request.capability || request.provider) : null,
             campaign: projectCampaignAuthorityPreview(campaignsByRun.get(runId) || null),
             prepared_batch: projectPreparedBatch(runId),
             deferred: String(todo?.context?.deferred_capability_request_id || '') === String(request.id),

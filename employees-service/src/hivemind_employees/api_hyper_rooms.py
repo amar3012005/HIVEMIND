@@ -90,6 +90,7 @@ from .hivemind_client import (
     list_canon_emulated,
     org_members_emulated,
     recall_emulated,
+    runtime_connectors_emulated,
 )
 from .hyper.engine import (Director, _openrouter_chat, run_director, evo_reflect_and_merge, run_mention_reply,
                            make_journal_entry, _persona_fields, _evo_recall)
@@ -3354,8 +3355,12 @@ async def _orchestrate_single_agent(
     _sender_email = ""
     _gmail_connected = False
     try:
-        _sender_email = await get_connected_gmail(req.user_id, req.org_id)
-        _gmail_connected = bool(_sender_email) or await has_connected_gmail(req.user_id, req.org_id)
+        connector_state = await runtime_connectors_emulated(user_id=req.user_id, org_id=req.org_id)
+        selected_connectors = {str(value).lower().replace("_", "-") for value in connector_state.get("connectors", [])}
+        _gmail_connected = "gmail" in selected_connectors or "google-mail" in selected_connectors
+        if connector_state.get("provider") == "nango":
+            _sender_email = await get_connected_gmail(req.user_id, req.org_id)
+            _gmail_connected = _gmail_connected or bool(_sender_email) or await has_connected_gmail(req.user_id, req.org_id)
     except Exception:  # noqa: BLE001
         _sender_email = ""
         _gmail_connected = False

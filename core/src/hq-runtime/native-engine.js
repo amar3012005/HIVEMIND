@@ -894,7 +894,7 @@ export class NativeHqEngine {
       });
       const adminCurrentStatus = adminStatusRun?.artifacts
         ?.find((artifact) => artifact.artifactKey === 'user_current_status') || null;
-      const lifecycleCatalog = this.runtimePlaybooks?.registry.descriptors({ scopeKey: 'global' })
+      const lifecycleCatalog = this.runtimePlaybooks?.registry.descriptors({ scopeKey: 'global', latestOnly: true })
         .filter((entry) => entry.status === 'ACTIVE')
         .map((entry) => ({
           playbook_id: entry.playbook_id,

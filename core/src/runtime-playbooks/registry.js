@@ -106,7 +106,7 @@ export class RuntimePlaybookRegistry {
     return clone(candidates[0].definition);
   }
 
-  descriptors({ scopeKey = 'global' } = {}) {
+  descriptors({ scopeKey = 'global', latestOnly = false } = {}) {
     const candidates = [...this.records.values()]
       .filter((record) => record.scope_key === 'global' || record.scope_key === scopeKey)
       .sort((left, right) => {
@@ -119,7 +119,17 @@ export class RuntimePlaybookRegistry {
       const key = `${record.definition.playbook_id}\u0000${record.definition.version}`;
       if (!effective.has(key)) effective.set(key, record);
     }
-    return [...effective.values()].map((record) => ({
+    const selected = [...effective.values()];
+    const seenPlaybooks = new Set();
+    const visible = latestOnly
+      ? selected.filter((record) => {
+          if (record.definition.status !== 'ACTIVE') return false;
+          if (seenPlaybooks.has(record.definition.playbook_id)) return false;
+          seenPlaybooks.add(record.definition.playbook_id);
+          return true;
+        })
+      : selected;
+    return visible.map((record) => ({
         scope_key: record.scope_key,
         playbook_id: record.definition.playbook_id,
         version: record.definition.version,

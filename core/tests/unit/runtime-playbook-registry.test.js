@@ -160,6 +160,20 @@ test('GreenLeaf Bakery playbook is pure data and validates without engine change
   assert.equal(predicates.evaluate(stage(playbook, 'capture_request').transitions[0].when, artifacts), false);
 });
 
+test('new planning catalogs expose only the latest active playbook version', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  const first = await loadFixture();
+  const second = structuredClone(first);
+  second.version = 2;
+  second.name = `${first.name} v2`;
+  registry.register(first);
+  registry.register(second);
+
+  assert.deepEqual(registry.descriptors().map((entry) => entry.version), [2, 1]);
+  assert.deepEqual(registry.descriptors({ latestOnly: true }).map((entry) => entry.version), [2]);
+  assert.equal(registry.get(first.playbook_id, 1).version, 1);
+});
+
 test('Room Director sends a generic stage envelope and accepts only correlated expected artifacts', async () => {
   const calls = [];
   const director = new RuntimeRoomDirector({

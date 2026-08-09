@@ -201,17 +201,21 @@ export class EvidenceRetrievalService {
       // Remote (self-host) orgs: KB evidence lives on the agent — no central Qdrant or DB access.
       if (orgIsRemote(orgId)) {
         const access = { userId, projectId, accessContext, scopeFilter };
+        // Documents scope only -- access travels as its own explicit option to both calls
+        // below (both bridges now accept it that way), not nested inside this object. It
+        // used to be bundled into `filter` for both lanes; that happened to match how
+        // kb-lexical's server route read it, but kb-recall's took access as a named opt, so
+        // the two calls were relying on two different, undocumented shapes of the same object.
         const filter = {
           documentId: docIdSet && docIdSet.length === 1 ? docIdSet[0] : undefined,
           documentIds: docIdSet && docIdSet.length > 1 ? docIdSet : undefined,
-          access,
         };
         // Exact terms and embeddings are complementary. Start the lexical lane
         // immediately so a part number still returns when embedding is unavailable.
-        const lexicalPromise = amrKbLexicalRemote(orgId, query, filter, _depth);
+        const lexicalPromise = amrKbLexicalRemote(orgId, query, { filter, limit: _depth, access });
         const queryVector = await this.qdrantClient.generateEmbedding(query);
         const vectorPromise = queryVector
-          ? amrKbRecall(orgId, queryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold })
+          ? amrKbRecall(orgId, queryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold, access })
           : Promise.resolve([]);
         const [vectorHits, lexicalHits] = await Promise.all([vectorPromise, lexicalPromise]);
         // null (not []) means the lane FAILED rather than matched nothing — see

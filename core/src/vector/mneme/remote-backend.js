@@ -239,13 +239,26 @@ export async function remoteKbRecall(orgId, vector, opts = {}) {
   try { const out = await _call(orgId, '/v1/kb-recall', { vector, limit: opts.limit, documentId: opts.documentId, documentIds: opts.documentIds, scoreThreshold: opts.scoreThreshold, access: opts.access }); return out?.results || []; }
   catch (e) { console.warn(`[mneme/remote] kb-recall FAILED org=${orgId}: ${e.message} — vector evidence lane contributed nothing to this answer`); return null; }
 }
-export async function remoteKbLexical(orgId, text, filter = {}, limit = 20) {
+export async function remoteKbLexical(orgId, text, opts = {}) {
   // NULL on failure, [] on a genuine empty — see remoteKbRecall. This one mattered in
   // practice: the running agent had no /v1/kb-lexical endpoint at all for 9 days, so every
   // call 404'd and was swallowed into [], leaving remote evidence recall silently
   // VECTOR-ONLY. Exact part numbers and codes are precisely what the lexical lane exists to
   // catch, so the degradation was invisible and total.
-  try { const out = await _call(orgId, '/v1/kb-lexical', { text, filter, limit }); return out?.results || []; }
+  //
+  // `access` is an EXPLICIT named option here, matching remoteKbRecall's opts.access — not
+  // nested inside `filter`. It used to be reachable only via filter.access, which happened to
+  // match what the server read, but only because the one existing caller built it that way;
+  // nothing in either signature said it had to. Sent at BOTH levels below (top-level access
+  // AND still inside filter) so an as-yet-unupgraded BYOD box's server -- these run on customer
+  // premises and do not redeploy the instant this ships -- keeps reading it out of filter.access
+  // exactly as before, while an upgraded server can read the explicit top-level field.
+  const { filter = {}, limit = 20, access } = opts;
+  const wireFilter = access ? { ...filter, access } : filter;
+  try {
+    const out = await _call(orgId, '/v1/kb-lexical', { text, filter: wireFilter, limit, access });
+    return out?.results || [];
+  }
   catch (e) { console.warn(`[mneme/remote] kb-lexical FAILED org=${orgId}: ${e.message} — lexical evidence lane contributed nothing; exact-token matches are LOST for this query`); return null; }
 }
 export async function remoteKbHydrate(orgId, ids, access) {

@@ -248,7 +248,7 @@ export function amrLexicalRemote(orgId, text, filter, limit) {
 export function amrKbDoc(orgId, doc) { return orgIsRemote(orgId) ? remoteKbDoc(orgId, doc) : null; }
 export function amrKbSegment(orgId, segment, vector) { return orgIsRemote(orgId) ? remoteKbSegment(orgId, segment, vector) : null; }
 export function amrKbRecall(orgId, vector, opts) { return orgIsRemote(orgId) ? remoteKbRecall(orgId, vector, opts) : null; }
-export function amrKbLexicalRemote(orgId, text, filter, limit) { return orgIsRemote(orgId) ? remoteKbLexical(orgId, text, filter, limit) : null; }
+export function amrKbLexicalRemote(orgId, text, opts) { return orgIsRemote(orgId) ? remoteKbLexical(orgId, text, opts) : null; }
 export function amrKbHydrate(orgId, ids, access) { return orgIsRemote(orgId) ? remoteKbHydrate(orgId, ids, access) : null; }
 
 // KB doc LIST for remote org — returns the central-shaped { documents, pagination } response from the

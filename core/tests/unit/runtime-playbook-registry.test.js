@@ -8,6 +8,7 @@ import {
   DirectorPlaybookSelector,
   RuntimeAdapterRegistry,
   RuntimeRoomDirector,
+  serializeRoomEnvelope,
   RuntimePlaybookService,
   RuntimePlaybookRegistry,
   createJsonPlaybookSource,
@@ -191,6 +192,35 @@ test('Room Director sends a generic stage envelope and accepts only correlated e
   assert.deepEqual(result.artifacts.map((artifact) => artifact.key), ['request_record']);
 });
 
+test('Runtime Room context stays within the sidecar contract without losing phase evidence', () => {
+  const transcript = `Administrator: current priority\nRuntime: noted\n${'detail '.repeat(2200)}`;
+  const envelope = {
+    contract: 'room-phase.v2', run_id: 'run-large', playbook_id: 'opaque.lifecycle', playbook_version: 1,
+    phase_id: 'analyze', instruction: 'Analyze the retained conversation.',
+    context: {
+      company: { name: 'Example', profile: { facts: Array.from({ length: 80 }, (_, i) => `company fact ${i} ${'x'.repeat(160)}`) } },
+      baseline: { observations: Array.from({ length: 80 }, (_, i) => ({ id: i, detail: 'y'.repeat(180) })) },
+      request: { instruction: 'Analyze the retained conversation.' },
+      prior_artifacts: { event: { transcript } },
+    },
+    lifecycle: {
+      guidance: 'Produce evidence from the retained conversation.', expected_artifacts: ['status_record'],
+      completion_checks: [{ predicate: 'has_min_count', select: 'status_record', value: 1 }],
+      artifact_schemas: { status_record: { description: 'z'.repeat(9000) } },
+      strict_response_schema: { type: 'object', properties: { summary: { type: 'string' } } },
+    },
+    capabilities: Array.from({ length: 30 }, (_, i) => ({ id: `provider-${i}`, operations: ['execute', 'verify'], description: 'q'.repeat(500) })),
+  };
+  const encoded = serializeRoomEnvelope(envelope);
+  const decoded = JSON.parse(encoded);
+  assert.ok(encoded.length <= 15_500);
+  assert.equal(decoded.instruction, envelope.instruction);
+  assert.match(decoded.context.prior_artifacts.event.transcript, /Administrator: current priority/);
+  assert.deepEqual(decoded.lifecycle.strict_response_schema, envelope.lifecycle.strict_response_schema);
+  assert.equal(decoded.lifecycle.artifact_schemas, undefined);
+  assert.doesNotMatch(encoded, /nested context omitted/);
+});
+
 test('Room Director marks only an authority-granted stage as authorized', async () => {
   const policies = [];
   const director = new RuntimeRoomDirector({ transport: async (payload) => {
@@ -328,6 +358,85 @@ test('generic executor follows an alternate terminal transition from playbook da
   assert.equal(run.status, 'COMPLETED');
   assert.equal(run.terminalState, 'cancelled');
   assert.deepEqual(run.completedStageIds, ['capture_request']);
+});
+
+test('adapter-declared capability wait resumes the same stage after connection', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.capability-wait', version: 1, status: 'ACTIVE',
+    name: 'Generic capability wait', description: 'Wait and resume without replacing the run.',
+    initial_stage_id: 'perform', terminal_states: ['done'],
+    stages: [{
+      id: 'perform', objective: 'Perform the configured adapter action.',
+      input_refs: ['trigger.payload'], expected_artifacts: ['receipt'],
+      execution: { mode: 'adapter', adapter_id: 'provider', operation: 'execute' },
+      completion_checks: [{ predicate: 'has_exact_count', select: 'receipt', value: 1 }],
+      transitions: [{ default: true, to_terminal: 'done' }], on_failure: 'ESCALATE',
+    }],
+  });
+  const store = new TestRuntimeStore();
+  let connected = false;
+  const adapters = new RuntimeAdapterRegistry();
+  adapters.register({ id: 'provider', async execute() {
+    if (!connected) return { artifacts: [], waiting_for: {
+      types: ['capability.connected'], capability: 'provider',
+      presentation: { status_label: 'Waiting for provider' },
+    } };
+    return { artifacts: [{ id: 'receipt-1', key: 'receipt', status: 'READY', data: {} }] };
+  } });
+  const executor = new GenericStageExecutor({
+    registry, predicates: new PredicateEngine(), store, director: { async execute() { throw new Error('room_not_expected'); } },
+    adapters, workerId: 'capability-worker',
+  });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.capability-wait', playbookVersion: 1,
+    idempotencyKey: 'capability-1', trigger: { payload: {} },
+  });
+  let run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'WAITING_EVENT');
+  assert.equal(run.currentStageId, 'perform');
+  assert.deepEqual(run.completedStageIds, []);
+  connected = true;
+  run = await executor.run(run.id, { orgId: run.orgId, event: { type: 'capability.connected' } });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.terminalState, 'done');
+});
+
+test('a reconciled terminal outcome supersedes append-only uncertain history', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.reconcile-outcome', version: 1, status: 'ACTIVE',
+    name: 'Generic reconciliation', description: 'Resolve an uncertain item without deleting its audit history.',
+    initial_stage_id: 'perform', terminal_states: ['done'],
+    stages: [{
+      id: 'perform', objective: 'Produce one terminal outcome.', input_refs: ['trigger.payload'],
+      expected_artifacts: ['receipt', 'uncertain'],
+      completion_checks: [
+        { predicate: 'references_cover_all', select: ['receipt', 'uncertain'], path: 'data.input_ref', target_select: 'input', target_path: 'id' },
+        { predicate: 'has_max_count', select: 'uncertain', value: 0 },
+        { predicate: 'has_exact_count', select: 'receipt', value: 1 },
+      ],
+      transitions: [{ default: true, to_terminal: 'done' }], on_failure: 'REPAIR', max_attempts: 2,
+    }],
+  });
+  const store = new TestRuntimeStore();
+  let attempt = 0;
+  const director = { async execute() {
+    attempt += 1;
+    return { artifacts: attempt === 1
+      ? [{ id: 'uncertain-1', key: 'uncertain', status: 'UNCERTAIN', data: { input_ref: 'input-1' } }]
+      : [{ id: 'receipt-1', key: 'receipt', status: 'READY', data: { input_ref: 'input-1' } }] };
+  } };
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, workerId: 'reconcile-worker' });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.reconcile-outcome', playbookVersion: 1,
+    idempotencyKey: 'reconcile-1', trigger: { payload: {} },
+  });
+  store.runs.get(created.id).artifacts.push({ id: 'input-1', key: 'input', status: 'READY', data: {} });
+  const run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.artifacts.some((artifact) => artifact.status === 'UNCERTAIN'), true);
+  assert.equal(run.artifacts.some((artifact) => artifact.key === 'receipt'), true);
 });
 
 test('Director selects an exact registered playbook without local content routing', async () => {

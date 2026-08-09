@@ -492,6 +492,29 @@ export class ConnectorStore {
             console.log(`[connector-store] Refreshed ${provider} token for user ${userId}`);
             return tokens.access_token;
           }
+        } else if (refreshToken && provider === 'slack') {
+          // Slack's Token Rotation issues a short-lived (~12h) bot token plus
+          // a SINGLE-USE refresh_token — the old one is invalid after this
+          // call, so the new refresh_token must be persisted too, not just
+          // the new access_token (see refreshAccessToken's doc comment).
+          try {
+            const { refreshAccessToken } = await import('../providers/slack/oauth.js');
+            const tokens = await refreshAccessToken(refreshToken);
+            const newExpiresAt = tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000) : null;
+            await this.prisma.platformIntegration.update({
+              where: { id: record.id },
+              data: {
+                accessTokenEncrypted: encryptToken(tokens.access_token),
+                refreshTokenEncrypted: encryptToken(tokens.refresh_token),
+                tokenExpiresAt: newExpiresAt,
+                oauthLastRefreshed: new Date(),
+              },
+            });
+            console.log(`[connector-store] Refreshed slack token for user ${userId}`);
+            return tokens.access_token;
+          } catch (slackRefreshErr) {
+            console.warn(`[connector-store] Slack token refresh failed for user ${userId}:`, slackRefreshErr.message);
+          }
         }
       } catch (refreshErr) {
         console.warn(`[connector-store] Token refresh failed for ${provider}:`, refreshErr.message);

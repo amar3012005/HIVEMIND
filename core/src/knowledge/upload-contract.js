@@ -6,6 +6,17 @@ export const KB_UPLOAD_LIMITS = Object.freeze({
   audio: { minBytes: 1, maxBytes: 50 * 1024 * 1024 },
 });
 
+export const KNOWLEDGE_INGEST_MODES = Object.freeze(['both', 'evidence']);
+
+export function normalizeKnowledgeIngestMode(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return { ok: true, value: 'both' };
+  if (!KNOWLEDGE_INGEST_MODES.includes(normalized)) {
+    return { ok: false, code: 'INVALID_INGEST_MODE' };
+  }
+  return { ok: true, value: normalized };
+}
+
 // ACCEPTED FORMATS — the single server-side allowlist. Every entry point checks
 // here (HTTP upload, connectors, Slack file ingest, MCP), so this is the only
 // place a format can actually be turned off; blocking in the FE alone hides the
@@ -90,13 +101,15 @@ export function validateKnowledgeFile({ filename, contentType, bytes, buffer = n
 
 export function knowledgeUploadCapabilities() {
   return {
-    version: 1,
+    version: 2,
     endpoint: '/api/knowledge/upload',
     asynchronous: true,
     kinds: Object.fromEntries(Object.entries(KB_UPLOAD_LIMITS).map(([kind, limits]) => [kind, {
       ...limits, extensions: KB_EXTENSIONS[kind],
     }])),
     scopes: ['personal', 'project', 'team', 'organization'],
+    ingest_modes: KNOWLEDGE_INGEST_MODES,
+    default_ingest_mode: 'both',
   };
 }
 

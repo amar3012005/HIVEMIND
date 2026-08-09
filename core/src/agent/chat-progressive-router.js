@@ -95,11 +95,6 @@ export const HIGH_TOOLS = [
 ];
 
 const EXTERNAL_TOOL_NAMES = new Set(['use_connector', 'use_campaign', 'compound_plan']);
-const CONNECTOR_PROVIDERS = new Set([
-  'gmail', 'google-drive', 'google-docs', 'google-sheets', 'google-calendar',
-  'google-tasks', 'google-gemini', 'slack', 'notion', 'github', 'linear',
-]);
-
 // The initial router prompt stays small: native HIVE-MIND capabilities are
 // always available, while connected apps and compound execution are disclosed
 // only after the caller explicitly opts in for this turn.
@@ -109,7 +104,7 @@ export function getProgressiveTools({ useTools = false, connectedProviders = nul
 
   const allowed = [...new Set(connectedProviders
     .map((provider) => String(provider || '').trim().toLowerCase())
-    .filter((provider) => CONNECTOR_PROVIDERS.has(provider)))];
+    .filter(Boolean))];
   return HIGH_TOOLS.flatMap((tool) => {
     if (tool.function?.name !== 'use_connector') return [tool];
     if (allowed.length === 0) return [];
@@ -117,6 +112,7 @@ export function getProgressiveTools({ useTools = false, connectedProviders = nul
       ...tool,
       function: {
         ...tool.function,
+        description: `Select one of this tenant's active connected application toolkits (${allowed.join(', ')}). Use its live data or prepare an approval-gated action.`,
         parameters: {
           ...tool.function.parameters,
           properties: {

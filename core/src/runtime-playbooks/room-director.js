@@ -11,6 +11,68 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function compactJsonValue(value, { stringLimit = 2000, arrayLimit = 16, depth = 0 } = {}) {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.length <= stringLimit ? value : `${value.slice(0, stringLimit)}\n[truncated]`;
+  if (depth >= 6) return '[nested context omitted]';
+  if (Array.isArray(value)) {
+    return value.slice(0, arrayLimit).map((item) => compactJsonValue(item, {
+      stringLimit, arrayLimit, depth: depth + 1,
+    }));
+  }
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key, compactJsonValue(item, { stringLimit, arrayLimit, depth: depth + 1 }),
+    ]));
+  }
+  return String(value).slice(0, stringLimit);
+}
+
+export function serializeRoomEnvelope(envelope, maxChars = 15_500) {
+  const full = JSON.stringify(envelope);
+  if (full.length <= maxChars) return full;
+
+  // The strict schema is the executable response contract. artifact_schemas is
+  // its verbose explanatory mirror, so it can be omitted when both are present.
+  const compact = structuredClone(envelope);
+  const contract = asObject(compact.lifecycle || compact);
+  if (contract.strict_response_schema) {
+    delete contract.artifact_schemas;
+    delete contract.artifact_requirements;
+  }
+  compact.capabilities = asArray(compact.capabilities).map((item) => ({
+    id: item?.id || null,
+    operations: asArray(item?.operations).map(String).slice(0, 16),
+  }));
+  let encoded = JSON.stringify(compact);
+  if (encoded.length <= maxChars) return encoded;
+
+  const context = asObject(compact.context);
+  for (const budget of [
+    { general: 1200, request: 1600, supplied: 4000, prior: 8000, array: 16 },
+    { general: 800, request: 1200, supplied: 3000, prior: 6000, array: 12 },
+    { general: 500, request: 800, supplied: 1800, prior: 4000, array: 8 },
+    { general: 300, request: 500, supplied: 1000, prior: 2500, array: 6 },
+  ]) {
+    compact.context = {
+      company: compactJsonValue(context.company, { stringLimit: budget.general, arrayLimit: budget.array }),
+      baseline: compactJsonValue(context.baseline, { stringLimit: budget.general, arrayLimit: budget.array }),
+      request: compactJsonValue(context.request, { stringLimit: budget.request, arrayLimit: budget.array }),
+      target: compactJsonValue(context.target, { stringLimit: budget.general, arrayLimit: budget.array }),
+      policy: compactJsonValue(context.policy, { stringLimit: budget.general, arrayLimit: budget.array }),
+      supplied_inputs: compactJsonValue(context.supplied_inputs, { stringLimit: budget.supplied, arrayLimit: budget.array }),
+      // Event transcripts and prior Room artifacts are the evidence most likely
+      // to be unique to this phase, so they receive the largest remaining budget.
+      prior_artifacts: compactJsonValue(context.prior_artifacts, { stringLimit: budget.prior, arrayLimit: budget.array }),
+    };
+    encoded = JSON.stringify(compact);
+    if (encoded.length <= maxChars) return encoded;
+  }
+  // Never mutate lifecycle schemas to satisfy a transport budget. A deterministic
+  // intervention is safer than sending the Room a corrupted executable contract.
+  throw new Error(`runtime_room_execution_context_too_large:${encoded.length}`);
+}
+
 function internalKey() {
   return process.env.HIVEMIND_MASTER_API_KEY || process.env.HIVEMIND_API_KEY || '';
 }
@@ -236,7 +298,7 @@ export class RuntimeRoomDirector {
       org_id: request.org_id,
       user_message: String(request.instruction || request.objective || '').slice(0, 8000),
       display_message: String(request.instruction || request.objective || '').trim().slice(0, 8000),
-      execution_context: JSON.stringify(envelope),
+      execution_context: serializeRoomEnvelope(envelope),
       participant_ids: asArray(room.participant_ids).map(String).slice(0, 8),
       callback_url: this.callbackUrl,
       project_id: room.project_id || null,

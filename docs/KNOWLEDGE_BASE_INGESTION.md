@@ -118,6 +118,7 @@ Multipart form fields (all optional except the file):
 | `primaryTeamId` | scope to a team |
 | `smart` | `"true"` → force Docling smart-mode (OCR, table structure, enrichment) |
 | `picture_descriptions` | `"true"` → Groq VLM figure captions (smart only) |
+| `ingestMode` | `both` (default, including when omitted) → current full memory pipeline; `evidence` → semantic + lexical evidence only, with no memory/entity/relationship promotion. Documents and audio only. |
 | `enterprise` | `auto` (default) \| `true` \| `false` — schema extraction |
 
 **Allowed types:** PDF, DOCX/DOC, XLSX/XLS, PPTX/PPT, TXT, MD, CSV/TSV, HTML,

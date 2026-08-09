@@ -118,6 +118,28 @@ test('Gmail adapter persists an uncertain outcome for a provider timeout instead
   assert.equal(result.artifacts[0].data.input_ref, 'draft-artifact-1');
 });
 
+test('Gmail adapter declares a resumable capability wait when the tenant is not connected', async () => {
+  const adapter = createGmailRuntimeAdapter({
+    prisma: {
+      hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } },
+    },
+    runTool: async () => { throw new Error('gmail not connected for this user - connect it on the Connectors page'); },
+  });
+  const result = await adapter.execute({
+    config: { action: 'prepare_drafts' },
+    inputs: { 'artifacts.message_record': [{
+      id: 'message-artifact-1', key: 'message_record', source_refs: ['source:1'],
+      data: { recipient: 'lead@example.test', subject: 'Hello', body: 'Grounded body' },
+    }] },
+  }, context());
+  assert.deepEqual(result.artifacts, []);
+  assert.deepEqual(result.waiting_for.types, ['capability.connected']);
+  assert.equal(result.waiting_for.capability, 'gmail');
+  assert.equal(result.waiting_for.correlation_path, 'data.capability');
+  assert.deepEqual(result.waiting_for.correlation_values, ['gmail']);
+  assert.equal(result.waiting_for.presentation.next_action, 'connect_capability');
+});
+
 test('TARA Outreach adapter starts one exact authorized call and retains its provider correlation', async () => {
   const requests = [];
   const adapter = createTaraOutreachRuntimeAdapter({

@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 from copy import deepcopy
 
 import pytest
@@ -156,6 +157,7 @@ def test_campaign_governance_does_not_mutate_missing_semantics():
 
 def test_campaign_report_accepts_explicitly_proposed_kpi_percentage():
     bundle = _valid_v2_bundle()
+    bundle["contract_version"] = 4
     bundle["kpis"][0].update({"target": "2% engagement rate", "target_type": "proposed"})
     bundle["report_markdown"] = bundle["report_markdown"].replace(
         "Establish a baseline.", "The campaign target is a 2% engagement rate.",
@@ -163,7 +165,7 @@ def test_campaign_report_accepts_explicitly_proposed_kpi_percentage():
 
     accepted, errors = campaign__submit_plan(
         bundle, channels=["x_organic"], requirements=["goal", "channel:x_organic"],
-        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        minimum_contract_version=4,
     )
 
     assert errors == []
@@ -438,7 +440,7 @@ def test_new_campaign_compilation_requires_v2_operating_sections():
         minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
     )
     assert accepted is None
-    assert "contract_version must be at least 4" in errors
+    assert "contract_version must be at least 5" in errors
     assert "positioning.statement is required for contract v2" in errors
     assert "timeline must not be empty for contract v2" in errors
     assert "measurement.primary_kpi is required for contract v2" in errors
@@ -497,6 +499,7 @@ def test_campaign_pace_requires_a_complete_sequence_not_one_sample():
 
 def test_campaign_report_rejects_unsupported_performance_numbers():
     bundle = _valid_v2_bundle()
+    bundle["contract_version"] = 4
     bundle["report_markdown"] = bundle["report_markdown"].replace(
         "Establish a baseline.", "Customers improve performance by 30%.",
     )
@@ -505,7 +508,7 @@ def test_campaign_report_rejects_unsupported_performance_numbers():
         bundle,
         channels=["x_organic"],
         requirements=["goal", "channel:x_organic"],
-        minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+        minimum_contract_version=4,
     )
 
     assert accepted is None
@@ -514,7 +517,24 @@ def test_campaign_report_rejects_unsupported_performance_numbers():
 
 def test_campaign_report_does_not_expose_internal_method_library():
     bundle = _valid_v2_bundle()
+    bundle["contract_version"] = 4
     bundle["report_markdown"] += "\nClaude Ads selected the method."
+
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        minimum_contract_version=4,
+    )
+
+    assert accepted is None
+    assert "report_markdown must not expose internal method names" in errors
+
+
+def test_campaign_v5_uses_the_structured_dashboard_without_a_second_report():
+    bundle = _valid_v2_bundle()
+    bundle["contract_version"] = CAMPAIGN_CONTRACT_VERSION
+    bundle.pop("report_markdown", None)
 
     accepted, errors = campaign__submit_plan(
         bundle,
@@ -523,12 +543,13 @@ def test_campaign_report_does_not_expose_internal_method_library():
         minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
     )
 
-    assert accepted is None
-    assert "report_markdown must not expose internal method names" in errors
+    assert errors == []
+    assert accepted is not None
 
 
 def test_campaign_report_sections_may_be_localized():
     bundle = _valid_v2_bundle()
+    bundle["contract_version"] = 4
     bundle["report_markdown"] = "\n".join([
         "## Recommandation\nConstruire la confiance.",
         "## Public\nDécideurs.",
@@ -719,6 +740,62 @@ def test_campaign_governance_rejects_without_a_repair_synthesis(monkeypatch):
     assert "rollback_or_exit:string" in system
     assert "final action must be between 17280 and 18720 inclusive" in system
     assert "it does not repair" in system
+
+
+def test_campaign_governance_repairs_only_the_implicated_action(monkeypatch):
+    calls = []
+    governed = []
+
+    async def emit(event):
+        return None
+
+    async def synthesize(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) == 1:
+            return {"content": json.dumps({
+                "report_markdown": "## Recommendation\nKeep the campaign focused.",
+                "plan": {
+                    "actions": [
+                        {"id": "valid-1", "channel": "x_organic", "final_copy": "A factual product update."},
+                        {"id": "invalid-2", "channel": "x_organic", "final_copy": "Drive guaranteed growth."},
+                    ]
+                },
+            })}
+        return {"content": json.dumps({
+            "actions": [
+                {"id": "invalid-2", "channel": "x_organic", "final_copy": "A second factual product update."}
+            ]
+        })}
+
+    def govern(candidate, **kwargs):
+        governed.append(candidate)
+        if len(governed) == 1:
+            return None, {
+                "status": "unmet",
+                "unmet_deliverables": [
+                    "action invalid-2 is labeled no_claim but contains a customer, performance, or outcome claim"
+                ],
+            }
+        return candidate, {"status": "accepted", "unmet_deliverables": []}
+
+    director = Director(
+        user_message="Create an awareness campaign",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=emit,
+        room_kind="campaign", campaign_brief={"channels": ["x_organic"], "goal": "Build awareness"},
+    )
+    monkeypatch.setattr(director, "_groq", synthesize)
+    monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__govern_delivery", govern)
+
+    bundle, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
+
+    assert errors == []
+    assert len(calls) == 2
+    assert bundle["actions"][0]["final_copy"] == governed[0]["actions"][0]["final_copy"]
+    assert bundle["actions"][1]["final_copy"] == "A second factual product update."
+    repair_request = calls[1][1]["content"]
+    assert "invalid-2" in repair_request
+    assert "valid-1" not in repair_request.split("ACTIONS TO REPAIR:", 1)[1].split("ACCEPTED PLAN CONTEXT", 1)[0]
 
 
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():

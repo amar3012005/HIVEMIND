@@ -213,24 +213,18 @@ def _strip_cot(text: str) -> str:
     return t
 
 
-def _work_order_activity(title: Any, text: str, *, limit: int = 180) -> str:
-    """Return the small, human-facing status line for a completed worker job.
+def _work_order_activity(title: Any, text: str, *, limit: Optional[int] = None) -> str:
+    """Return the complete bounded worker note for the visible discussion.
 
-    A work order's note belongs on the evidence board and in durable storage;
-    replaying it verbatim as a chat bubble made Rooms noisy and needlessly
-    expensive. Keep the conversation legible while the synthesizer still sees
-    the complete bounded note.
+    Worker generation is already capped to a compact note. Clipping that note a
+    second time hid the evidence and disagreement users asked the Room to show.
     """
-    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    clean = str(text or "").strip()
     clean = re.sub(r"^(?:[-*#]+\s*)+", "", clean)
     if not clean:
         return f"Completed {str(title or 'assigned work').strip()}."
-    sentence = re.split(r"(?<=[.!?])\s+", clean, maxsplit=1)[0].strip()
     prefix = f"Completed {str(title or 'assigned work').strip()}: "
-    available = max(24, limit - len(prefix))
-    if len(sentence) > available:
-        sentence = sentence[: available - 3].rstrip() + "..."
-    return prefix + sentence
+    return prefix + clean
 
 
 def _route_direct_openrouter(model: str) -> bool:
@@ -511,19 +505,22 @@ _POST_OUTPUT_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "connector": "google-docs", "artifact_kind": "doc",
         "operation": "create_document",
         "description": "Create the completed output as a Google Doc.",
-        "aliases": ("google-docs", "google-drive", "google", "gmail"),
+        "aliases": ("google-docs", "google-drive", "google"),
+        "request_pattern": r"\bgoogle\s+docs?\b",
     },
     "google_sheets.create_spreadsheet": {
         "connector": "google-sheets", "artifact_kind": "sheet",
         "operation": "create_spreadsheet",
         "description": "Create the completed tabular output as a Google Sheet.",
-        "aliases": ("google-sheets", "google-drive", "google", "gmail"),
+        "aliases": ("google-sheets", "google-drive", "google"),
+        "request_pattern": r"\bgoogle\s+sheets?\b",
     },
     "notion.create_page": {
         "connector": "notion", "artifact_kind": "notion",
         "operation": "create_page",
         "description": "Create the completed output as a Notion page.",
         "aliases": ("notion",),
+        "request_pattern": r"\bnotion\b",
     },
 }
 
@@ -3234,7 +3231,7 @@ class Director:
                 self.blackboard.append(f"WORK_RESULT[{owner_name} | {order.get('title')}]:\n{text}")
             await self.emit({"t": "work_order", "id": subtask_id, "status": status,
                              "title": order.get("title"), "owner": owner_name,
-                             "summary": text[:500], "checks": checks, "gaps": gaps})
+                             "summary": text, "checks": checks, "gaps": gaps})
             if status == "blocked":
                 break
         return results
@@ -3457,14 +3454,16 @@ class Director:
             "checkpoint": work_order_result.get("checkpoint") or {},
         }
 
-    async def _synthesize_runtime_stage_result(self) -> Dict[str, Any]:
+    async def _synthesize_runtime_stage_result(
+        self, supplied_envelope: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Compile one Room turn into the generic artifact contract.
 
         The model may structure work already present on the evidence board, but
         it cannot create artifact kinds or evidence references outside the
         versioned stage envelope. Core remains the sole predicate evaluator.
         """
-        envelope = self.runtime_stage or {}
+        envelope = supplied_envelope or self.runtime_stage or {}
         expected = [str(value) for value in (envelope.get("expected_artifacts") or []) if str(value).strip()]
         evidence: List[Dict[str, str]] = []
         inputs = envelope.get("inputs") if isinstance(envelope.get("inputs"), dict) else {}
@@ -3651,6 +3650,82 @@ class Director:
             "artifacts": artifacts,
             "gaps": list(dict.fromkeys(gaps)),
             "summary": str(parsed.get("summary") or "").strip()[:4000],
+        }
+
+    async def _synthesize_room_phase_result(
+        self, work_order_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return provider-backed special artifacts plus generic contract artifacts.
+
+        The legacy compiler remains authoritative for records created by Room tools
+        (leads, drafts and calls). Any other playbook artifact is shaped through the
+        same strict, evidence-bound contract synthesizer used by runtime-stage.v1.
+        This keeps Room intelligence adaptive while making room-phase.v2 genuinely
+        generic instead of silently degrading unknown artifact keys into prose.
+        """
+        compiled = self._compile_room_phase_result(work_order_result)
+        phase = self.room_phase or {}
+        lifecycle = phase.get("lifecycle") if isinstance(phase.get("lifecycle"), dict) else {}
+        expected = [str(value) for value in (lifecycle.get("expected_artifacts") or []) if str(value).strip()]
+        produced = {str(row.get("key") or "") for row in (compiled.get("artifacts") or []) if isinstance(row, dict)}
+        missing = [key for key in expected if key not in produced]
+        if not missing or phase.get("contract") != "room-phase.v2":
+            return compiled
+
+        context = phase.get("context") if isinstance(phase.get("context"), dict) else {}
+        prior = context.get("prior_artifacts") if isinstance(context.get("prior_artifacts"), dict) else {}
+        inputs: Dict[str, Any] = {
+            "context.company": context.get("company"),
+            "context.baseline": context.get("baseline"),
+            "context.request": context.get("request"),
+            "context.target": context.get("target"),
+            **prior,
+        }
+        inputs = {key: value for key, value in inputs.items() if value is not None}
+        requirements = lifecycle.get("artifact_requirements")
+        requirements = requirements if isinstance(requirements, dict) else {}
+        schemas = lifecycle.get("artifact_schemas")
+        schemas = schemas if isinstance(schemas, dict) else {}
+        strict_response_schema = lifecycle.get("strict_response_schema")
+        strict_response_schema = strict_response_schema if isinstance(strict_response_schema, dict) else None
+        generic_envelope = {
+            "contract": "runtime-stage.v1",
+            "run_id": phase.get("run_id"),
+            "stage_id": phase.get("phase_id"),
+            "objective": phase.get("instruction") or lifecycle.get("guidance"),
+            "inputs": inputs,
+            "expected_artifacts": missing,
+            "completion_checks": [
+                row for row in (lifecycle.get("completion_checks") or [])
+                if isinstance(row, dict) and str(row.get("select") or "") in missing
+            ],
+            "artifact_requirements": {
+                key: value for key, value in requirements.items()
+                if key in missing
+            },
+            "artifact_schemas": {
+                key: value for key, value in schemas.items()
+                if key in missing
+            },
+            "strict_response_schema": strict_response_schema,
+        }
+        generic = await self._synthesize_runtime_stage_result(generic_envelope)
+        generic_artifacts = [
+            row for row in (generic.get("artifacts") or [])
+            if isinstance(row, dict) and str(row.get("key") or "") in missing
+        ]
+        all_artifacts = [*(compiled.get("artifacts") or []), *generic_artifacts]
+        final_keys = {str(row.get("key") or "") for row in all_artifacts if isinstance(row, dict)}
+        retained_gaps = [
+            str(gap) for gap in (compiled.get("gaps") or [])
+            if not any(str(gap) == f"The Room did not return a verified {key} artifact for this phase."
+                       for key in final_keys)
+        ]
+        return {
+            **compiled,
+            "artifacts": all_artifacts,
+            "gaps": list(dict.fromkeys([*retained_gaps, *(generic.get("gaps") or [])])),
+            "summary": str(generic.get("summary") or compiled.get("summary") or "")[:4000],
         }
 
     async def _synthesize_work_order_result(self) -> Dict[str, Any]:
@@ -4436,10 +4511,13 @@ class Director:
             "language, not from English keywords. Chat always uses standard.\n"
             "- post_output_actions: act like a coding agent selecting tools. After understanding the requested "
             "deliverable, choose zero or more capabilities from POST-OUTPUT ACTION CATALOG below, in execution "
-            "order. Select an action only when the ACTIVE MESSAGE explicitly asks to create, save, send, reply, "
-            "forward, publish, or otherwise perform it; discussing a channel or asking for strategy selects no "
-            "action. Set explicit=true. target_hint is the recipient, workspace, or destination exactly as stated, "
-            "or null. A disconnected capability may still be selected when explicitly requested: the UI will offer "
+            "order. A content verb such as create, build, prepare, design, write, or produce describes the answer, "
+            "not a provider write. Select an action only when the ACTIVE MESSAGE explicitly names the external "
+            "destination or provider effect: a stated recipient, workspace, document destination, publication "
+            "destination, or save/export target. Discussing a channel or requesting a blueprint, report, persona, "
+            "strategy, or plan selects no action by itself. Set explicit=true. target_hint must quote the recipient, "
+            "workspace, or destination exactly as it appears in the ACTIVE MESSAGE; use null and select no action "
+            "when there is no exact target. A disconnected capability may still be selected when explicitly requested: the UI will offer "
             "connection while the Room finishes the output. For email, choose gmail.create_draft only when the "
             "user explicitly asks to draft, compose, or prepare a draft without delivery. Choose gmail.send_email "
             "for send/reply/forward/deliver requests and for requests to write/email/message a stated recipient; "
@@ -4635,12 +4713,21 @@ class Director:
             spec = _POST_OUTPUT_CAPABILITIES.get(capability)
             if not spec:
                 continue
+            target_hint = str(action.get("target_hint") or "").strip()
+            if spec["artifact_kind"] in {"doc", "sheet", "notion"}:
+                message = str(self.user_message or "")
+                if (
+                    not target_hint
+                    or target_hint.casefold() not in message.casefold()
+                    or not re.search(str(spec.get("request_pattern") or r"(?!)"), message, re.IGNORECASE)
+                ):
+                    continue
             actions.append({
                 "capability": capability,
                 "connector": spec["connector"],
                 "operation": spec["operation"],
                 "artifact_kind": spec["artifact_kind"],
-                "target_hint": action.get("target_hint"),
+                "target_hint": target_hint or None,
                 "explicit": True,
                 "connected": any(_norm_connector(alias) in connected for alias in spec["aliases"]),
             })
@@ -5075,6 +5162,73 @@ class Director:
         from .campaign_contract import campaign_bundle_errors
         return campaign_bundle_errors(bundle, channels, requirements)
 
+    @staticmethod
+    def _campaign_action_ids_from_errors(errors: List[str], actions: List[Dict[str, Any]]) -> List[str]:
+        """Return only action IDs explicitly implicated by governance errors."""
+        action_ids = [str(action.get("id") or "").strip() for action in actions if isinstance(action, dict)]
+        return [
+            action_id
+            for action_id in action_ids
+            if action_id and any(re.search(rf"\b{re.escape(action_id)}\b", str(error)) for error in errors)
+        ]
+
+    async def _repair_campaign_actions(
+        self,
+        *,
+        semantic: Dict[str, Any],
+        report: str,
+        errors: List[str],
+        system_contract: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Repair only invalid campaign actions while preserving accepted work."""
+        actions = [action for action in (semantic.get("actions") or []) if isinstance(action, dict)]
+        action_ids = self._campaign_action_ids_from_errors(errors, actions)
+        if not action_ids:
+            return None
+        invalid_actions = [action for action in actions if str(action.get("id") or "") in action_ids]
+        repair_prompt = (
+            system_contract
+            + "\n\nYou are repairing a Campaign Contract after deterministic governance. Return JSON only: "
+            '{"actions":[<complete replacement action objects>]}. '
+            "Return exactly one complete replacement for each requested action ID and no other actions. "
+            "Keep each action ID, channel, schedule position, hypothesis, and strategic job unchanged unless an unmet "
+            "criterion explicitly requires changing that field. Correct only the stated unmet criteria. Do not add facts, "
+            "claims, evidence, URLs, recipients, channels, or actions."
+        )
+        repair_user = (
+            f"UNMET CRITERIA:\n{json.dumps(errors, ensure_ascii=False)}\n\n"
+            f"ACTIONS TO REPAIR:\n{json.dumps(invalid_actions, ensure_ascii=False)}\n\n"
+            f"ACCEPTED PLAN CONTEXT (read only):\n"
+            f"{json.dumps({k: v for k, v in semantic.items() if k != 'actions'}, ensure_ascii=False)[:7000]}\n\n"
+            f"USER-FACING REPORT (read only):\n{report[:2500]}"
+        )
+        repaired_message = await self._groq(
+            [{"role": "system", "content": repair_prompt}, {"role": "user", "content": repair_user}],
+            force_text=True,
+            model=self.synth_model,
+            bucket="synth_repair",
+            temp=0.1,
+            uncapped=True,
+            json_object=True,
+        )
+        repaired_payload = _first_json_object(str((repaired_message or {}).get("content") or "").strip())
+        replacements = repaired_payload.get("actions") if isinstance(repaired_payload, dict) else None
+        if not isinstance(replacements, list):
+            return None
+        replacement_by_id = {
+            str(action.get("id") or ""): action
+            for action in replacements
+            if isinstance(action, dict) and str(action.get("id") or "") in action_ids
+        }
+        if set(replacement_by_id) != set(action_ids):
+            return None
+        repaired_semantic = dict(semantic)
+        repaired_semantic["actions"] = [
+            replacement_by_id.get(str(action.get("id") or ""), action)
+            for action in actions
+        ]
+        return repaired_semantic
+
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
         board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
@@ -5089,13 +5243,11 @@ class Director:
         )
         system = (
             campaign_system_contract() + "\n\n"
-            "You are the final Campaign Intelligence synthesizer. Return one compact JSON object with exactly "
-            "report_markdown and plan. Write the polished user-facing operating report once, then provide only the "
-            "semantic campaign judgment needed to operate it. Never publish. Product code adds identifiers, timeline "
+            "You are the final Campaign Intelligence compiler. Return one compact JSON object with exactly plan. "
+            "The structured Campaign dashboard is the operating report; do not generate a second prose report. "
+            "Provide only the semantic campaign judgment needed to operate it. Never publish. Product code adds identifiers, timeline "
             "rows, payload mirrors, safety scaffolding, launch controls, and requirement coverage; it does not repair "
             "missing strategy, evidence, copy, timing, hypotheses, or action controls. "
-            "The report must use these exact Markdown H2 headings: ## Recommendation, ## Audience, ## Positioning, "
-            "## Content System, ## Campaign Sequence, ## Schedule, ## Measurement, ## Risks, and ## Launch Readiness. "
             "Do not repeat internal prompts, method names, or IDs. "
             "Required plan shape: {objective:string,strategy:string,"
             "strategy_options:[{id:string,name:string,thesis:string,tradeoff:string}],selected_strategy_id:string,"
@@ -5125,11 +5277,9 @@ class Director:
             "opening, goal, context, language, lawful_basis, country, timezone, and calling_window; TARA speaks first. "
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
-            "The report and plan must agree exactly on action count, timing, claims, metrics, and launch readiness. "
             f"For this {duration_days}-day campaign, scheduled_offset_minutes starts at 0 and the final action must be "
             f"between {last_action_minimum} and {last_action_maximum} inclusive so the sequence spans the promised horizon. "
             "Targets without verified historical evidence must be labeled proposed, never described as expected results. "
-            "In report_markdown, introduce every unsupported numeric target with the literal label 'Proposed target:' in the same sentence. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
         user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n{self._journal_block}\n"
@@ -5171,8 +5321,39 @@ class Director:
         if errors:
             await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
                              "title": "Governance found unmet deliverables",
-                             "detail": f"The Room did not deliver {len(errors)} promised requirement(s). Nothing was approved."})
-            return None, errors
+                             "detail": f"The Room is repairing {len(errors)} unmet criterion/criteria without repeating accepted work."})
+            repaired_semantic = await self._repair_campaign_actions(
+                semantic=semantic,
+                report=report,
+                errors=errors,
+                system_contract=campaign_system_contract(),
+            )
+            if repaired_semantic is None:
+                return None, errors
+            repaired_candidate = assemble_campaign_bundle(
+                repaired_semantic,
+                channels=channels,
+                requirements=requirements,
+                campaign_brief=self.campaign_brief,
+            )
+            repaired_candidate["report_markdown"] = report
+            accepted, governance = campaign__govern_delivery(
+                repaired_candidate,
+                channels=channels,
+                requirements=requirements,
+                minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+                campaign_brief=self.campaign_brief,
+            )
+            errors = governance["unmet_deliverables"]
+            await self.emit({
+                "t": "campaign_governance",
+                "tool": "campaign__govern_delivery",
+                "status": governance["status"],
+                "verdict": governance,
+                "repair": {"scope": "actions", "attempt": 1},
+            })
+            if errors:
+                return None, errors
         await self.emit({"t": "campaign_tool", "tool": "campaign__govern_delivery", "status": "accepted"})
         return accepted, []
 
@@ -5947,7 +6128,7 @@ class Director:
         room_phase_result = None
         if self.room_phase:
             work_order_result = await self._synthesize_work_order_result()
-            room_phase_result = self._compile_room_phase_result(work_order_result)
+            room_phase_result = await self._synthesize_room_phase_result(work_order_result)
             final_text = str(room_phase_result.get("summary") or "")
             await self.emit({"t": "room_phase_result", "result": room_phase_result})
         elif self.runtime_stage:

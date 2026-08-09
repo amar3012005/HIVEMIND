@@ -59,7 +59,9 @@ export function createSignupAdmission({ accountType, secret, enterpriseInvitatio
   if (!secret || !['personal', 'enterprise'].includes(accountType)) return null;
   if (enterpriseInvitation && accountType !== 'enterprise') return null;
   const invitation = enterpriseInvitation && {
-    id: String(enterpriseInvitation.id || ''),
+    // EnterpriseInvitationService exposes `invitationId`; accept `id` as a
+    // compatibility alias for direct callers and older tests.
+    id: String(enterpriseInvitation.invitationId || enterpriseInvitation.id || ''),
     method: String(enterpriseInvitation.method || ''),
     version: Number(enterpriseInvitation.version),
   };

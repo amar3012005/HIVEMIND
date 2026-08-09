@@ -2702,6 +2702,21 @@ export async function runReactAgentV2({
         signal: abortCtrl.signal,
         onEvent,
       });
+      let continuation = null;
+      if (compound.status === 'needs_input' && compound.resumeState && compound.inputRequests?.length) {
+        const { createChatContinuation } = await import('./chat-continuation-store.js');
+        const stored = await createChatContinuation({
+          userId: ctx.userId, orgId: ctx.orgId, message, language,
+          resumeState: compound.resumeState,
+        });
+        continuation = {
+          schema_version: 1,
+          token: stored.token,
+          expires_at: stored.expires_at,
+          requests: compound.inputRequests,
+        };
+        onEvent?.({ type: 'orchestration_input_required', schema_version: 1, ...continuation });
+      }
       steps.push(...compound.steps);
       let finalText = compound.summary;
       if (compound.status === 'completed'
@@ -2758,12 +2773,15 @@ export async function runReactAgentV2({
         usage: sumUsage(usages),
         trace: finalizeTrace(trace, usages),
         draft_ids: compound.draftIds,
+        pending_actions: compound.pendingActions || [],
         compound_status: compound.status,
         execution: {
           status: compound.status,
           steps: compound.steps,
           draft_ids: compound.draftIds,
+          pending_actions: compound.pendingActions || [],
         },
+        continuation,
       };
     }
 

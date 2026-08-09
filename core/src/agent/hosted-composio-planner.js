@@ -37,7 +37,10 @@ export const HIVEMIND_HOSTED_TOOL_CARDS = Object.freeze([
 export function connectedProvidersFromAccounts(accounts = []) {
   return [...new Set((Array.isArray(accounts) ? accounts : [])
     .filter((account) => account?.status === 'ACTIVE')
-    .map((account) => TOOLKIT_TO_PROVIDER[String(account?.toolkit || '').toLowerCase()])
+    .map((account) => {
+      const toolkit = String(account?.toolkit || '').trim().toLowerCase();
+      return TOOLKIT_TO_PROVIDER[toolkit] || toolkit;
+    })
     .filter(Boolean))];
 }
 
@@ -114,13 +117,34 @@ export async function planHostedComposioWorkflow({
   const connectedProviders = connectedProvidersFromAccounts(accounts);
   let parsed = null;
   let steps = null;
+  let bestCandidate = null;
   let attempts = 0;
   let lastError = null;
   while (attempts < 2 && !steps) {
     attempts += 1;
+    const auditHistory = attempts === 1 || !bestCandidate
+      ? history
+      : [
+          ...(Array.isArray(history) ? history : []),
+          {
+            role: 'assistant',
+            content: `PROPOSED_WORKFLOW (audit only; nothing executed): ${JSON.stringify(bestCandidate.steps.map((step) => ({
+              operation: step.operation,
+              authority: step.authority,
+              output_kind: step.output_kind,
+              tool_groups: step.tool_groups,
+              depends_on: step.depends_on,
+              instruction: step.instruction,
+            })))}`,
+          },
+          {
+            role: 'user',
+            content: `Audit the proposed workflow against this exact original request: ${JSON.stringify(message)}. Return a corrected compound plan containing every requested retrieval and terminal action exactly once, with explicit dependencies. Preserve the requested application, artifact type, recipient, and action semantics; never substitute a different connected application or artifact. Do not answer the request and do not omit a requested action.`,
+          },
+        ];
     parsed = await parseIntent({
       message,
-      history,
+      history: auditHistory,
       language,
       apiKey,
       signal,
@@ -133,7 +157,22 @@ export async function planHostedComposioWorkflow({
       continue;
     }
     try {
-      steps = decisionToHostedPlan(parsed?.decision, { request: message, connectedProviders });
+      const candidateSteps = decisionToHostedPlan(parsed?.decision, { request: message, connectedProviders });
+      if (!bestCandidate || candidateSteps.length > bestCandidate.steps.length
+        || (attempts > 1 && candidateSteps.length === bestCandidate.steps.length)) {
+        bestCandidate = { steps: candidateSteps, parsed };
+      }
+      // Audit every first proposal once. Step-count validation alone cannot
+      // detect a semantically substituted connector (for example, a Gmail
+      // draft in place of a requested Google Doc). On the second pass prefer
+      // an equally complete audited candidate, or retain the richer valid
+      // candidate if the audit accidentally drops a step. This remains
+      // language- and toolkit-general: the model compares semantic contracts
+      // against the exact request rather than code matching provider words.
+      if (attempts >= 2) {
+        steps = bestCandidate.steps;
+        parsed = bestCandidate.parsed;
+      }
     } catch (error) {
       lastError = error;
     }

@@ -26,7 +26,7 @@ test('use_tools true discloses connected and compound capabilities', () => {
 test('connection-aware tools disclose only active connector providers', () => {
   const tools = getProgressiveTools({ useTools: true, connectedProviders: ['gmail', 'slack', 'unknown-provider'] });
   const connector = tools.find((tool) => tool.function.name === 'use_connector');
-  assert.deepEqual(connector.function.parameters.properties.provider.enum, ['gmail', 'slack']);
+  assert.deepEqual(connector.function.parameters.properties.provider.enum, ['gmail', 'slack', 'unknown-provider']);
   assert.ok(tools.some((tool) => tool.function.name === 'compound_plan'));
   assert.ok(tools.some((tool) => tool.function.name === 'hivemind_context'));
 });

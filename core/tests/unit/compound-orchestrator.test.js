@@ -2,16 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCompoundSynthesisPayload,
+  buildCompoundUserSummary,
+  buildGroundedWriteFallbackPrompt,
+  buildGroundedWriteFallbackPayload,
   buildSubtaskArgumentPrompt,
   buildSubtaskExecutionMessage,
+  buildToolInputSystemPrompt,
   applyConnectorRetrievalPolicy,
   applyConnectorResultPolicy,
   buildToolSelectionCards,
+  buildToolCardSelectionPrompt,
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
+  filterProviderDraftToolsForTerminalOperation,
+  exactGroundedDependencyContent,
+  normalizeCompoundDependencies,
   rankToolSelectionCards,
   resolveSelectedTool,
   runCompoundOrchestrator,
+  unresolvedGroundedWriteFields,
   validateSemanticStepOutput,
 } from '../../src/agent/compound-orchestrator.js';
 
@@ -83,6 +92,31 @@ test('tool cards are generically ranked by the planner canonical operation', () 
     { name: 'calendar_events_list', description: 'List calendar events in a time range.' },
   ], 'count_today_events');
   assert.equal(ranked[0].name, 'calendar_events_list');
+});
+
+test('tool selection treats addressed communication as governed send unless draft is terminal intent', () => {
+  const prompt = buildToolCardSelectionPrompt([
+    { name: 'composio_gmail_send_email', description: 'Send an email.' },
+    { name: 'composio_gmail_create_email_draft', description: 'Create a Gmail draft.' },
+  ]);
+  assert.match(prompt, /any language/i);
+  assert.match(prompt, /addressed to a recipient has send\/deliver as its terminal result/i);
+  assert.match(prompt, /only when the requested result is specifically to save or create a draft/i);
+});
+
+test('structured terminal operation excludes provider draft without inspecting user language', () => {
+  const tools = [
+    { function: { name: 'composio_gmail_send_email' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_SEND_EMAIL' } },
+    { function: { name: 'composio_gmail_create_email_draft' }, _composio: { toolkit: 'gmail', slug: 'GMAIL_CREATE_EMAIL_DRAFT' } },
+  ];
+  assert.deepEqual(
+    filterProviderDraftToolsForTerminalOperation(tools, 'email').map((tool) => tool._composio.slug),
+    ['GMAIL_SEND_EMAIL'],
+  );
+  assert.deepEqual(
+    filterProviderDraftToolsForTerminalOperation(tools, 'create_email_draft').map((tool) => tool._composio.slug),
+    ['GMAIL_SEND_EMAIL', 'GMAIL_CREATE_EMAIL_DRAFT'],
+  );
 });
 
 test('Composio authority comes from controlled manifest actions, not user-language keywords', () => {
@@ -267,8 +301,154 @@ test('compound orchestrator: composio write creates a pendingWrite draft (never 
   assert.equal(res.draftIds[0], 'DRAFT1');
   assert.equal(created.length, 1);
   assert.equal(created[0].toolName, 'GMAIL_SEND_EMAIL');
-  assert.ok(res.summary.includes('awaiting your approval'));
+  assert.deepEqual(res.pendingActions, [{
+    id: 'DRAFT1', provider: 'composio', tool_name: 'composio_gmail_send_email',
+    tool_args: { to: 'boss@x.com' }, status: 'draft', step_index: 0,
+  }]);
+  assert.match(created[0].argsHash, /^[a-f0-9]{64}$/);
+  assert.match(res.summary, /approval is required/i);
+  assert.match(res.summary, /Nothing has been sent/i);
   assert.ok(!res.summary.includes('done'));
+});
+
+test('human-input summaries explain progress, safety pause, and resumability', () => {
+  const pending = buildCompoundUserSummary({
+    subtasks: [{}, {}], status: 'pending',
+    results: [{ status: 'completed' }, { status: 'draft_created' }],
+  });
+  assert.match(pending, /completed 1 of 2/i);
+  assert.match(pending, /Nothing has been sent, published, created, or changed/i);
+
+  const needsInput = buildCompoundUserSummary({
+    subtasks: [{}, {}], status: 'needs_input',
+    results: [{ status: 'completed' }, { status: 'needs_input', error: 'Choose one recipient' }],
+  });
+  assert.match(needsInput, /Choose one recipient/);
+  assert.match(needsInput, /will not be repeated/);
+});
+
+test('tool input policy requires complete grounded content instead of placeholders', () => {
+  const prompt = buildToolInputSystemPrompt();
+  assert.match(prompt, /complete useful final content/);
+  assert.match(prompt, /never substitute a generic placeholder/);
+  assert.match(prompt, /Do not execute/);
+});
+
+test('grounded write validation rejects unresolved templates and accepts detailed dependency content', () => {
+  assert.match(buildGroundedWriteFallbackPrompt(), /strict JSON/i);
+  assert.match(buildGroundedWriteFallbackPrompt(), /complete, useful content/i);
+  assert.match(buildGroundedWriteFallbackPrompt(), /Do not execute/i);
+  const schema = {
+    type: 'object',
+    properties: {
+      recipient_email: { type: 'string' },
+      body: { type: 'string' },
+    },
+  };
+  const prior = {
+    recall: JSON.stringify({ memories: [{ content: 'The handbag brand is G ROCHER. Its front has a gold JL logo and the bag is dark brown.' }] }),
+  };
+  assert.deepEqual(
+    unresolvedGroundedWriteFields('message', schema, {
+      recipient_email: 'amar@example.com',
+      body: 'Please find the handbag details below: [Add the specific handbag details here].',
+    }, prior),
+    ['body'],
+  );
+  assert.deepEqual(
+    unresolvedGroundedWriteFields('message', schema, {
+      recipient_email: 'amar@example.com',
+      body: 'The handbag is dark brown, is associated with G ROCHER, and has a gold JL logo.',
+    }, prior),
+    [],
+  );
+});
+
+test('grounded fallback payload keeps evidence visible ahead of a compact provider schema', () => {
+  const evidence = 'G ROCHER handbag with a gold JL logo. '.repeat(200);
+  const payload = buildGroundedWriteFallbackPayload({
+    message: 'Write the email',
+    args: { recipient_email: 'amar@example.com' },
+    priorOutputs: { recall: evidence },
+    schema: {
+      type: 'object',
+      required: ['recipient_email', 'body'],
+      properties: {
+        recipient_email: { type: 'string', description: 'x'.repeat(20_000) },
+        body: { type: 'string', description: 'y'.repeat(20_000) },
+      },
+    },
+  });
+  const parsed = JSON.parse(payload);
+  assert.equal(parsed.server_verified_prior_outputs.recall, evidence);
+  assert.equal(parsed.tool_schema.properties.body.type, 'string');
+  assert.equal(Object.hasOwn(parsed.tool_schema.properties.body, 'description'), false);
+  assert.ok(payload.indexOf('server_verified_prior_outputs') < payload.indexOf('tool_schema'));
+});
+
+test('exact dependency fallback extracts complete grounded content instead of a placeholder', () => {
+  const first = 'The handbag brand is G ROCHER and it has a gold JL logo.';
+  const second = 'The bag is dark brown with a zipper, chain strap, and white flower charm.';
+  const content = exactGroundedDependencyContent({
+    recall: JSON.stringify({ memories: [{ content: first }, { content: second }] }),
+  });
+  assert.match(content, /G ROCHER/);
+  assert.match(content, /white flower charm/);
+  assert.equal(content.includes('memories'), false);
+});
+
+test('plan validation attaches earlier reads to a governed write when planner omits the edge', () => {
+  const normalized = normalizeCompoundDependencies([
+    { operation: 'recall', authority: 'read', tool_groups: ['hivemind-recall'], depends_on: [] },
+    { operation: 'send_email', authority: 'write', tool_groups: ['gmail'], depends_on: [] },
+  ]);
+  assert.deepEqual(normalized[1].depends_on, [0]);
+  const explicit = normalizeCompoundDependencies([
+    { operation: 'recall', authority: 'read', tool_groups: ['hivemind-recall'], depends_on: [] },
+    { operation: 'search', authority: 'read', tool_groups: ['gmail'], depends_on: [] },
+    { operation: 'send_email', authority: 'write', tool_groups: ['gmail'], depends_on: [1] },
+  ]);
+  assert.deepEqual(explicit[2].depends_on, [1], 'explicit planner dependencies remain authoritative');
+});
+
+test('missing write fields produce a resumable generalized field-input request', async () => {
+  const created = [];
+  const schema = {
+    type: 'object',
+    properties: { recipient_email: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } },
+    required: ['recipient_email', 'subject', 'body'],
+  };
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send' }],
+    executeImpl: async () => ({ successful: false, error: 'must remain approval gated' }),
+  });
+  const ctx = {
+    userId: 'u1', orgId: 'o1', _trace: { traceId: 'field-1' },
+    prisma: { pendingWrite: { create: async (data) => { created.push(data.data); return { id: 'FIELD-DRAFT' }; } } },
+  };
+  const selectTool = makeSelector((message) => ({
+    toolName: 'composio_gmail_send_email', schema,
+    args: message.includes('person@example.com')
+      ? { recipient_email: 'person@example.com', subject: 'Ready', body: 'Complete grounded message.' }
+      : { subject: 'Ready', body: 'Complete grounded message.' },
+  }));
+  const paused = await runCompoundOrchestrator({
+    subtasks: [{ operation: 'send_email', authority: 'write', output_kind: 'message', tool_groups: ['gmail'], message: 'Prepare the email' }],
+    ctx, apiKey: 'k', composio, selectTool,
+  });
+  assert.equal(paused.status, 'needs_input');
+  assert.deepEqual(paused.inputRequests[0].fields.map((field) => field.name), ['recipient_email']);
+
+  const resumed = await runCompoundOrchestrator({
+    subtasks: paused.resumeState.subtasks,
+    ctx: { ...ctx, _trace: { traceId: 'field-2' } }, apiKey: 'k', composio, selectTool,
+    resumeState: {
+      ...paused.resumeState,
+      choice: { stepIndex: 0, retryStep: true, values: { recipient_email: 'person@example.com' } },
+    },
+  });
+  assert.equal(resumed.status, 'pending');
+  assert.equal(created[0].toolArgs.recipient_email, 'person@example.com');
 });
 
 test('compound orchestrator: a write missing a required provider field asks before creating a draft', async () => {
@@ -398,6 +578,30 @@ test('compound orchestrator stops an ambiguous dependent write instead of guessi
   assert.equal(created.length, 0);
   assert.match(result.summary, /Multiple recipient addresses matched/);
   assert.equal(result.steps[2].status, 'needs_input');
+  assert.deepEqual(result.inputRequests[0].options.map((option) => option.value), [
+    'amar@example.com', 'amar.sai@example.edu',
+  ]);
+  assert.ok(result.resumeState, 'paused state is available for server-side continuation storage');
+
+  const resumed = await runCompoundOrchestrator({
+    subtasks: result.resumeState.subtasks,
+    ctx: { ...ctx, _trace: { traceId: 't2' } }, apiKey: 'k', signal: null, composio,
+    resumeState: {
+      ...result.resumeState,
+      choice: { stepIndex: 1, field: 'recipient_email', value: 'amar@example.com' },
+    },
+    selectTool: async ({ message }) => {
+      assert.match(message, /amar@example\.com/);
+      return {
+        toolName: 'composio_gmail_create_email_draft',
+        args: { to: 'amar@example.com', subject: 'Handbag', body: 'Brand is G ROCHER.' },
+        schema: { properties: { to: {}, subject: {}, body: {} }, required: ['to', 'subject', 'body'] },
+      };
+    },
+  });
+  assert.equal(resumed.status, 'pending');
+  assert.equal(created.length, 1, 'resume executes only the blocked dependent write');
+  assert.equal(created[0].data.toolArgs.to, 'amar@example.com');
 });
 
 test('compound orchestrator: independent subtasks run in parallel (fan-out)', async () => {
@@ -447,4 +651,6 @@ test('compound orchestrator: emits tool_call/tool_result SSE events', async () =
   assert.equal(res.status, 'completed');
   assert.equal(events.filter((e) => e.type === 'tool_call').length, 1);
   assert.equal(events.filter((e) => e.type === 'tool_result').length, 1);
+  assert.equal(events.filter((e) => e.type === 'orchestration_plan').length, 1);
+  assert.deepEqual(events.filter((e) => e.type === 'orchestration_step').map((e) => e.phase), ['started', 'completed']);
 });

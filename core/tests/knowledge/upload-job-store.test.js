@@ -4,7 +4,10 @@ import { KnowledgeUploadJobStore } from '../../src/knowledge/upload-job-store.js
 
 test('job lookup always carries tenant and initiating user scope', async () => {
   let where;
-  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: { findFirst: async (query) => { where = query.where; return null; } } } });
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    updateMany: async () => ({ count: 0 }),
+    findFirst: async (query) => { where = query.where; return null; },
+  } } });
   await store.findOwned('job', { orgId: 'org', userId: 'user' });
   assert.deepEqual(where, { id: 'job', orgId: 'org', userId: 'user' });
 });
@@ -26,4 +29,17 @@ test('ready responses always expose an authoritative terminal lifecycle', () => 
   });
   assert.equal(response.stage, 'ready');
   assert.equal(response.progress, 100);
+});
+
+test('ready evidence-only responses expose durable intent and zero memories', () => {
+  const response = KnowledgeUploadJobStore.response({
+    id: 'job', status: 'ready', stage: 'ready', progress: 100,
+    ingestMode: 'evidence', evidenceOnlyReason: 'user_selected',
+    segmentCount: 4, promotedCount: 0, memoryIds: [], storageMode: 'amr_embedded',
+    createdAt: new Date(), updatedAt: new Date(),
+  });
+  assert.equal(response.ingest_mode, 'evidence');
+  assert.equal(response.evidence_only, true);
+  assert.equal(response.evidence_only_reason, 'user_selected');
+  assert.deepEqual(response.memory_ids, []);
 });

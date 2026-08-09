@@ -1,5 +1,48 @@
 # Current SINGULANCE Production Release
 
+## prod-20260809-5d4e08e3 — generalized inline human input + grounded governed actions
+
+- Parent/Core SHA: `5d4e08e3a333ee516dfc6acc14e5174c91de1aa6` on `singulance-main`; Core image `hivemind/core-api:sha-5d4e08e3`, image ID `sha256:7e92dac2937e1196d7e8f3e4cb6fed78510969405c03ee0839740a15689540cb`.
+- Frontend source SHA: `f864c0a2e2b7064c398c2746f9971333a208607f`; unchanged accepted frontend image `hivemind/fe:sha-96ed8afe`, image ID `sha256:99f01743c53bea6d2d58ecb677c74aa471f7ddaa23dbc44f7943c8e5eeea065d` (parent image revision `96ed8afe`, exact gitlink points to `f864c0a2`).
+- UX: Overview, side-panel Chat, and mobile now render approvals, arbitrary field input, continuation choices, project/save-scope choices, and cancel states directly on the chat background. There are no outer action cards; headings are bold, exact values are visible, and actions use rectangular inline buttons. Pending actions explain what finished, why HIVE-MIND paused, and that nothing external has happened.
+- Generalized continuation: server accepts only declared server-owned fields, validates required values, binds the continuation to tenant/user, resumes the paused step, and retains completed dependencies instead of replaying recall/provider reads.
+- Governed content: Query Mode remains primary. Unresolved templates and dependency-content loss are detected structurally plus by grounded overlap; one scoped synthesis fallback sees the complete bounded recall projection before a compact provider schema; an exact server-verified content fallback prevents evidence from being hidden by schema truncation. Missing data still pauses for inline input.
+- Compound robustness: read/write authority remains separate from semantic operation. Terminal communication selects the provider send capability unless the structured planner operation specifically requests a provider draft. A later write missing its dependency edge inherits prior read/recall steps; capability discovery/selection receives one side-effect-free retry. Provider writes themselves are never auto-retried and remain pending approval.
+- Tests: 42 focused Core tests passed; 3 shared frontend interaction-contract tests passed; frontend production build completed; syntax and `git diff --check` passed.
+- Authenticated acceptance: the handbag-to-email request was run twice with `use_tools:true`. Both completed recall and returned `pending` `composio_gmail_send_email` actions for `amarsai2005@gmail.com`; bodies were 685 and 1,759 characters and both contained `G ROCHER` and `JL`. Drafts `0a80f7c9-4243-48b9-8b45-52b5c72d7224` and `b69feefc-387f-43b1-8327-232ba2737a41` were cancelled; database verification showed `status=cancelled`, `sentAt=null`, and tool `GMAIL_SEND_EMAIL` for both.
+- Runtime acceptance: Core healthy, frontend running, zero restarts; public Core/home/login/Overview all returned 200; frontend served chunk `4676.aa4090dd.chunk.js` contains the inline interaction markers; fresh fatal/panic/uncaught/unhandled/OOM/migration error counts are zero.
+- Migration: none. Rollback Core: `hivemind/core-api:rollback-pre-5d4e08e3-20260808T234149Z`; frontend remains independently rollback-safe from the previous accepted frontend release. Manifest: `/root/releases/5d4e08e3-clean/RELEASE_MANIFEST.20260808T234149Z.json`.
+- Intentionally untested side effect: no Send button was clicked and no email was sent.
+
+## prod-20260809-68ec3448 — Slack stage progress + exact governed email preview/send
+
+- Parent SHA: `68ec34485ba25687f62371eb51811f3949b412e8` on `singulance-main`.
+- Frontend SHA: `bbc8e7aac91208868419bff5eafd76aa5cd84be7` on Da-vinci `main` and recorded by the parent gitlink.
+- Images: Core `hivemind/core-api:sha-68ec3448`, image ID `sha256:86c888f5407eb2ac58aff36c55387edaf60d1876ab7cc8de7da58d2ccef31d8d`; frontend `hivemind/fe:sha-68ec3448`, image ID `sha256:d18b553c4b2586effb3461322daa6d7695bc331840b03d7befa5c40361af5bee`.
+- Migration: none.
+- Slack: `@HIVEMIND` event-ingest now forwards the agent `onEvent` stream into one throttled in-place Slack message. Native recall/save and compound connector steps show stable stage rows; queued progress writes drain before the final answer. Connected tools are eligible on Slack unless `SLACK_CHAT_USE_TOOLS=false`; existing history and project-selection behavior remain intact.
+- Governed writes: compound responses now include `pending_actions` with the exact immutable tool arguments already persisted for approval. Desktop Overview, Chat, and mobile render complete email recipient, subject, and body plus one-click Send/Cancel actions. Semantic tool selection prefers the requested terminal provider effect because HIVE-MIND already owns the approval preview; a provider create-draft remains eligible only when that is the requested terminal outcome.
+- Tests: 37 focused Core routing, use-tools, compound/Composio, and Slack progress tests passed; 2 frontend approval-contract tests passed; clean frontend production build completed.
+- Authenticated acceptance: the exact request `find me everything u know about my company and then write a mail to amarsai2005@gmail.com about it` returned 200, completed HIVE-MIND recall, selected `composio_gmail_send_email`, and returned a full `pending_actions[0]` containing recipient `amarsai2005@gmail.com`, subject, and complete body. The acceptance draft `50b0ba08-24d7-4289-8964-7dc54367c028` was cancelled with 200; no email/provider write was executed.
+- Runtime acceptance: Core internal/public health, homepage, login, and Overview returned 200; exact Core/frontend revision labels match `68ec3448`; restarts are zero; frontend served chunks contain the new approval markers; fresh fatal/panic/uncaught/unhandled/OOM/migration error counts are zero.
+- Release-script incident: the server's stale canonical script initially recreated frontend from `sha-5246cdd7` while failing to gate its own revision mismatch. The release was not accepted in that state. The exact `sha-68ec3448` frontend and Core were then rendered with explicit immutable Compose overrides under the release lock, `VERSION`/`NEXT_VERSION` were set to this release, and provenance was re-verified.
+- Rollback: Core `hivemind/core-api:prod-20260809-8c8e2276`; frontend `hivemind/fe:sha-8c8e2276`; manifest `/root/releases/68ec3448/RELEASE_MANIFEST.20260808T222458Z.json` plus explicit overrides `/root/releases/68ec3448/{core,frontend}-68ec3448.yml`.
+- Intentionally untested side effect: the Send button was not clicked during acceptance, so no customer email was sent. Approval execution remains the existing tenant-scoped `/api/pending-writes/:id/approve` path.
+
+## prod-20260809-8c8e2276 — streamed chat orchestration, generalized Composio planning, resumable choices
+
+- **Deployed:** 2026-08-08T21:56Z UTC (release date 2026-08-09 Asia/Kolkata)
+- **Parent:** `singulance-main` runtime SHA `8c8e2276a6cb5516184f9d47f641483a2ebdceb4`
+- **Frontend source:** `8108fbecef442a57c25b20ca80e4220ca56625e0`; running image `hivemind/fe:prod-20260809-a1829df2-single`, digest `sha256:da57722c1076833d83135f51f027910e16bad058d8763c8e83ee065445884810` (same chat UI source; parent label predates later backend-only fixes).
+- **Core image:** `hivemind/core-api:prod-20260809-8c8e2276`, digest `sha256:6bd8bc2b6d0ab947c03a5f41feebe4e3033f4d7fe8c113836a3fdc4cd2e16697`, healthy with matching OCI revision.
+- **Changes:** canonical `orchestration_plan` / `orchestration_step` SSE events; shared expandable Reasoning timeline with provider logos on Overview and mobile; opaque tenant-bound single-use continuation tokens; choice buttons resume blocked dependencies without replaying completed recall/provider reads; ACTIVE Composio toolkit inventory replaces the closed toolkit allowlist; one provider-error-guided retry for failed reads only; pending-write hashes are bounded SHA-256.
+- **Governance:** `use_tools:false` native path unchanged; writes remain pending approval; read repair never retries writes; continuation state is server-side with a 15-minute TTL and scope check.
+- **Tests:** 33 focused planner/orchestrator policy tests passed; frontend production build compiled (repository-wide pre-existing lint warnings prevent `CI=true` warning-as-error); JS syntax and `git diff --check` passed.
+- **Authenticated acceptance:** tenant `0a1d5b33-…` ran recall + Gmail recipient lookup and received two choices. Choosing `amarsai2005@gmail.com` resumed only step 3 and created draft `f2352fe6-d4b3-47d6-b32c-f200004532b3`; persisted `status=draft`, `sentAt=null`, tool `GMAIL_CREATE_EMAIL_DRAFT`, 64-char args hash. Native handbag recall returned grounded `G ROCHER` with no compound status.
+- **Public checks:** Core health 200, Control health 200, frontend app 200; fresh fatal-pattern count zero for Core and frontend.
+- **Migrations:** none.
+- **Rollback:** Core `hivemind/core-api:rollback`; frontend `hivemind/fe:rollback-single`; env backups `/root/hivemind/.env.bak-prod-20260809-*` and `/root/hivemind-next/.env.embedding-canary-runtime.bak-prod-20260809-*`.
+
 This file is the deployment ledger. Update it only after production acceptance succeeds.
 
 ```yaml
@@ -260,3 +303,17 @@ confirmed.
 - Superseded candidate: `prod-20260808-c0c38526727f` built and passed health but failed affected-route acceptance: planner-only intermittently returned an empty plan (502), and Gmail input generation supplied an invalid provider field. No draft/write occurred. It was replaced, not repaired in place, by this immutable release.
 - Rollback: `hivemind/core-api:rollback-20260808-211230` (the immediately previous immutable candidate); pre-feature accepted runtime is retained as `hivemind/core-api:rollback-20260808-210725` / `sha-5605b858`. Env backup before flag enable: `/root/hivemind/.env.pre-hosted-planner-c0c38526`.
 - External side effects: Gmail recipient lookup read only. No pending-write row persisted, no approval executed, and no email/document/calendar/provider mutation occurred.
+
+## prod-20260809-3cce168a — hosted-plan completeness and connector-intent preservation
+
+- Parent SHA: `3cce168a897284a996fa40ab6d544395d6279051` on `singulance-main`.
+- Frontend SHA: `f864c0a2e2b7064c398c2746f9971333a208607f` (unchanged).
+- Core image: `hivemind/core-api:sha-3cce168a`, OCI revision `3cce168a897284a996fa40ab6d544395d6279051`.
+- Migration: none.
+- Fix: every hosted Composio workflow proposal receives one semantic audit against the exact current request. The audit restores omitted terminal actions and preserves the requested application, artifact, recipient, dependencies, and action semantics without language-specific or toolkit-keyword routing patches. A structurally complete plan can no longer pass solely because it has multiple steps.
+- Tests: 45/45 focused hosted-planner, compound-orchestrator, `use_tools` policy, and chat-router architecture tests passed, including omitted-action and equal-length substituted-connector regressions. Syntax and whitespace checks passed.
+- Authenticated acceptance: the exact request `Recall all information about my company, then put the recalled information into a new Google Doc.` was run twice with `use_tools:true`. Both runs returned 200 and `recall -> create_doc`; both selected `composio_googledocs_create_document` and persisted approval drafts with non-empty title and substantive recalled company text. Both diagnostic drafts were cancelled; no Google Doc was created.
+- Public/runtime acceptance: Core health returned 200; container healthy, restarts 0, and fresh fatal/panic/uncaught/unhandled/OOM/migration-error count 0.
+- Superseded candidate: `hivemind/core-api:sha-aada9ce0` restored the omitted terminal step but a live acceptance exposed an equal-length Gmail-for-Docs substitution. Its diagnostic Gmail draft was cancelled, nothing was sent, and the candidate was replaced by this immutable release.
+- Rollback: `hivemind/core-api:rollback-pre-3cce168a-20260809T074244Z`; manifest `/root/releases/3cce168a-clean/RELEASE_MANIFEST.txt`.
+- External side effects: HIVE-MIND recall reads and pending-write draft persistence only. All three diagnostic drafts were cancelled; no approval, email send, Google Doc creation, calendar action, or memory mutation executed.

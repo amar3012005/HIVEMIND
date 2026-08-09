@@ -61,6 +61,8 @@ export function serializeRoomEnvelope(envelope, maxChars = 15_500) {
       target: compactJsonValue(context.target, { stringLimit: budget.general, arrayLimit: budget.array }),
       policy: compactJsonValue(context.policy, { stringLimit: budget.general, arrayLimit: budget.array }),
       supplied_inputs: compactJsonValue(context.supplied_inputs, { stringLimit: budget.supplied, arrayLimit: budget.array }),
+      admin_current_status: compactJsonValue(context.admin_current_status, { stringLimit: budget.supplied, arrayLimit: budget.array }),
+      lifecycle_catalog: compactJsonValue(context.lifecycle_catalog, { stringLimit: budget.general, arrayLimit: 24 }),
       // Event transcripts and prior Room artifacts are the evidence most likely
       // to be unique to this phase, so they receive the largest remaining budget.
       prior_artifacts: compactJsonValue(context.prior_artifacts, { stringLimit: budget.prior, arrayLimit: budget.array }),
@@ -92,17 +94,25 @@ function turnIdempotencyKey(request) {
 }
 
 function usesRoomPhase(request) {
-  return asObject(request.execution_config).contract === 'room-phase.v1';
+  return /^room-phase\.v\d+$/.test(String(asObject(request.execution_config).contract || ''));
 }
 
 function roomPhaseContext(request) {
   const runtime = asObject(request.runtime_context);
+  const config = asObject(request.execution_config);
+  const lifecycleCatalog = asArray(runtime.lifecycle_catalog).filter((entry) => (
+    config.exclude_current_playbook_from_catalog !== true
+      || String(entry?.playbook_id || '') !== String(request.playbook_id || '')
+      || Number(entry?.version) !== Number(request.playbook_version)
+  ));
   return {
     company: runtime.company || null,
     baseline: runtime.baseline || null,
     request: runtime.request || null,
     target: runtime.target || null,
     policy: runtime.policy || null,
+    admin_current_status: runtime.admin_current_status || null,
+    lifecycle_catalog: lifecycleCatalog,
     supplied_inputs: asObject(runtime.supplied_inputs),
     prior_artifacts: asObject(request.inputs),
   };
@@ -151,13 +161,9 @@ export function runtimeStageEnvelope(request) {
     adapter_descriptors: asArray(request.adapter_descriptors),
     authority_granted: request.authority_granted === true,
     retry_policy: asObject(request.retry_policy),
-    // The derived contract belongs on BOTH envelopes. `usesRoomPhase()` tests the stage's
-    // configured contract against the literal 'room-phase.v1', so a stage configured
-    // 'room-phase.v2' — marketing's form_strategy — takes THIS envelope, not roomPhaseEnvelope.
-    // Shipping the schema only inside roomPhaseEnvelope.lifecycle therefore delivered it to
-    // nobody: form_strategy never saw it, and the outreach stages that do get the lifecycle
-    // block expect two artifacts, so strict correctly declines. Top-level here because this
-    // envelope has no lifecycle block, and the producer reads it off the envelope root.
+    // Legacy runtime-stage producers still need the same derived contract as
+    // room-phase producers. Keeping both envelopes symmetric prevents version
+    // negotiation from weakening the artifact boundary.
     ...artifactContractFields(request),
     result_contract: {
       contract: 'runtime-stage-result.v1',

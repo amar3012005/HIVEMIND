@@ -136,7 +136,8 @@ test('DELIVERY GUARD: the stage that needs the strict schema actually receives i
       execution_config: config, inputs: {}, runtime_context: {},
       retry_policy: { owner: 'playbook', stage_attempt: 1, max_stage_attempts: stage.max_attempts || 1 },
     };
-    const envelope = config.contract === 'room-phase.v1' ? roomPhaseEnvelope(request) : runtimeStageEnvelope(request);
+    const envelope = /^room-phase\.v\d+$/.test(String(config.contract || ''))
+      ? roomPhaseEnvelope(request) : runtimeStageEnvelope(request);
     const delivered = envelope.strict_response_schema || envelope.lifecycle?.strict_response_schema;
     assert.ok(delivered, `${fixture}:${stage.id} derives a strict schema but the ${envelope.contract} envelope does not carry it`);
     assert.equal(delivered.name, derived.name, `${fixture}:${stage.id} delivered a different schema than was derived`);
@@ -164,6 +165,24 @@ test('both envelopes carry the derived contract, so neither path can drift', asy
   assert.ok('strict_response_schema' in phase.lifecycle, 'room-phase.v2 must carry strict_response_schema');
   assert.equal(direct.retry_policy.owner, 'playbook');
   assert.equal(phase.lifecycle.retry_policy.owner, 'playbook');
+});
+
+test('room-phase.v2 is negotiated as a machine phase instead of a human runtime-stage turn', async () => {
+  const { RuntimeRoomDirector } = await import('../../src/runtime-playbooks/room-director.js');
+  let sent;
+  const director = new RuntimeRoomDirector({ transport: async (payload) => {
+    sent = payload;
+    return { result: { contract: 'room-phase-result.v1', run_id: 'run-1', phase_id: 'choose_strategy', artifacts: [], gaps: ['fixture'] } };
+  } });
+  await director.execute({
+    room_id: 'room-1', room_context: { user_id: 'user-1', room_tag: 'marketing' }, owner_user_id: 'user-1', org_id: 'org-1',
+    run_id: 'run-1', playbook_id: 'marketing.strategy-to-growth-brief', playbook_version: 4,
+    stage_id: 'choose_strategy', instruction: 'Produce the complete strategy.', objective: 'Choose one strategy.',
+    expected_artifacts: [], checks: [], execution_config: { contract: 'room-phase.v2', phase_kind: 'strategy_decision' },
+    inputs: {}, runtime_context: {}, stage_attempts: { choose_strategy: 1 }, retry_policy: { owner: 'playbook' },
+  });
+  assert.equal(sent.schema_version, 'room-phase.v2');
+  assert.equal(JSON.parse(sent.execution_context).contract, 'room-phase.v2');
 });
 
 test('MULTI-ARTIFACT DELIVERY GUARD: every producer sees every expected key and predicate selector', async () => {

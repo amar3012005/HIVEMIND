@@ -1440,10 +1440,15 @@ class Director:
         authority = authority if isinstance(authority, dict) else {}
         expected = lifecycle.get("expected_artifacts") if is_v2 else phase.get("expected_artifacts")
         expected = [str(value) for value in (expected or [])]
+        execution_config = lifecycle.get("execution_config") if isinstance(lifecycle.get("execution_config"), dict) else {}
+        phase_guidance = str(lifecycle.get("guidance") or phase.get("objective") or "").strip()
         return {
             "contract": "hq-work-order.v2",
             "work_order_id": f"room-phase:{phase.get('run_id')}:{phase.get('phase_id')}",
-            "objective": str(phase.get("instruction") or phase.get("objective") or "Complete the assigned Runtime phase."),
+            # The original instruction remains available in constraints/context,
+            # but the Director must execute the current checkpoint instead of
+            # re-planning the whole request at every phase.
+            "objective": phase_guidance or str(phase.get("instruction") or "Complete the assigned Runtime phase."),
             "location": target.get("location") or target.get("geography"),
             "target": target,
             "completion_requirements": [],
@@ -1453,7 +1458,7 @@ class Director:
                 "mode": "EXECUTE" if authority.get("external_writes") is True else "PREPARE",
                 "external_writes": authority.get("external_writes") is True,
             },
-            "selected_skills": [],
+            "selected_skills": [str(value) for value in (execution_config.get("required_skills") or []) if str(value).strip()],
             "required_evidence": ["Use the supplied company, baseline, prior artifacts, and exact targets only when relevant to the instruction."],
             "acceptance_criteria": [
                 "Complete the natural instruction using the Room Director's normal skills and tools.",
@@ -1465,8 +1470,10 @@ class Director:
             "runtime_support": {
                 "company": context.get("company"),
                 "baseline": context.get("baseline"),
+                "admin_current_status": context.get("admin_current_status"),
+                "lifecycle_catalog": context.get("lifecycle_catalog"),
                 "prior_artifacts": inputs,
-                "phase_guidance": lifecycle.get("guidance") if is_v2 else phase.get("objective"),
+                "phase_guidance": phase_guidance,
                 "expected_artifacts": expected,
                 "completion_checks": lifecycle.get("completion_checks") if is_v2 else phase.get("completion_checks"),
                 # Core DERIVES these from the very predicates it will run, so the Room is
@@ -2515,7 +2522,9 @@ class Director:
             for key in (envelope.get("expected_artifacts") or [])
         ) or "keystone" in str(envelope.get("objective") or "").lower()
         skill_budget = 7 if expects_strategy else 4
-        selected_skills = [str(x) for x in (plan.get("method_skills") or []) if str(x).strip()][:skill_budget]
+        declared_skills = [str(x) for x in (envelope.get("selected_skills") or []) if str(x).strip()]
+        planned_skills = [str(x) for x in (plan.get("method_skills") or []) if str(x).strip()]
+        selected_skills = list(dict.fromkeys([*declared_skills, *planned_skills]))[:skill_budget]
         # HQ Outreach work progressively loads one lifecycle skill around the
         # Director's own selected methods. It describes checkpoint semantics but
         # never prescribes a fixed tool sequence or replaces Room planning.
@@ -3682,6 +3691,8 @@ class Director:
             "context.baseline": context.get("baseline"),
             "context.request": context.get("request"),
             "context.target": context.get("target"),
+            "context.admin_current_status": context.get("admin_current_status"),
+            "context.lifecycle_catalog": context.get("lifecycle_catalog"),
             **prior,
         }
         inputs = {key: value for key, value in inputs.items() if value is not None}

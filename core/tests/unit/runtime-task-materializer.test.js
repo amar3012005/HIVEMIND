@@ -16,7 +16,7 @@ function fixture() {
     },
   };
   const prisma = {
-    runtimePlaybookRun: { async findFirst() { return { id: 'run-1', scopeKey: 'global', trigger: { runtime_id: 'runtime-1' }, context: { request: { instruction: 'Decide' } } }; } },
+    runtimePlaybookRun: { async findFirst() { return { id: 'run-1', playbookId: 'marketing.strategy-to-growth-brief', playbookVersion: 3, scopeKey: 'global', trigger: { runtime_id: 'runtime-1' }, context: { request: { instruction: 'Decide' } } }; } },
     async $transaction(fn) { return fn(tx); },
   };
   const registry = { get(id, version) {
@@ -52,4 +52,26 @@ test('strategy portfolio materialization is per-motion, evidence-bound and idemp
   assert.deepEqual(first.artifacts[0].data.accepted_todo_ids, ['todo-1']);
   assert.equal(first.artifacts[0].data.rejected_motions[0].reason, 'playbook_version_unavailable');
   assert.deepEqual(second.artifacts[0].data.accepted_todo_ids, ['todo-1']);
+});
+
+test('strategy portfolio cannot recursively materialize its own lifecycle', async () => {
+  const { prisma, todos } = fixture();
+  const registry = { get(id, version) {
+    if (id !== 'marketing.strategy-to-growth-brief' || version !== 3) throw new Error('missing');
+    return { playbook_id: id, version, metadata: { owner_room_tag: 'research', supported_actions: ['formulate_go_to_market_strategy'] } };
+  } };
+  const adapter = createRuntimeTaskMaterializerAdapter({ prisma, getService: () => ({ registry }) });
+  const portfolio = { id: 'portfolio-recursive', source_refs: ['evidence-1'], data: { motions: [
+    { motion_id: 'again-1', title: 'Form strategy again', objective: 'Repeat strategy', expected_outcome: 'strategy_program_ready',
+      playbook_id: 'marketing.strategy-to-growth-brief', playbook_version: 3, supported_action: 'formulate_go_to_market_strategy',
+      effect_class: 'internal', required_capabilities: [], evidence_refs: ['evidence-1'], success_measure: 'Repeated', dependencies: [], priority: 1 },
+    { motion_id: 'again-2', title: 'Repeat once more', objective: 'Repeat strategy', expected_outcome: 'strategy_program_ready',
+      playbook_id: 'marketing.strategy-to-growth-brief', playbook_version: 3, supported_action: 'formulate_go_to_market_strategy',
+      effect_class: 'internal', required_capabilities: [], evidence_refs: ['evidence-1'], success_measure: 'Repeated', dependencies: [], priority: 2 },
+  ] } };
+  await assert.rejects(() => adapter.execute({
+    config: { input_key: 'first_life_motion_portfolio', strategy_key: 'marketing_strategy' },
+    inputs: { 'artifacts.first_life_motion_portfolio': [portfolio], 'artifacts.marketing_strategy': [{ id: 'strategy-1', source_refs: ['evidence-1'] }] },
+  }, { runId: 'run-1', stageId: 'materialize', orgId: 'org-1' }), /recursive_playbook_not_allowed/);
+  assert.equal(todos.length, 0);
 });

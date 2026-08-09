@@ -195,3 +195,24 @@ def test_room_phase_v2_synthesizes_non_specialized_playbook_artifacts(monkeypatc
     assert result["artifacts"][0]["key"] == "user_current_status"
     assert result["artifacts"][0]["source_refs"]
     assert result["gaps"] == []
+
+
+def test_room_phase_v2_uses_checkpoint_guidance_and_declared_skills_without_debate_lane():
+    envelope = {
+        "contract": "room-phase.v2",
+        "run_id": "run-strategy",
+        "phase_id": "choose_strategy",
+        "instruction": "Produce a complete go-to-market strategy.",
+        "context": {"request": {"instruction": "Produce a complete go-to-market strategy."}},
+        "lifecycle": {
+            "guidance": "Choose one strategy from the accepted evidence ledger.",
+            "expected_artifacts": ["marketing_strategy_decision"],
+            "execution_config": {"required_skills": ["strategy-operating-loop", "positioning-ladder"]},
+        },
+    }
+    payload = {**envelope, "objective": envelope["instruction"]}
+    director = _director(payload)
+    assert director.room_phase == payload
+    assert director.work_order["objective"] == "Choose one strategy from the accepted evidence ledger."
+    assert director.work_order["selected_skills"] == ["strategy-operating-loop", "positioning-ladder"]
+    assert director.work_order["constraints"]["instruction"] == "Produce a complete go-to-market strategy."

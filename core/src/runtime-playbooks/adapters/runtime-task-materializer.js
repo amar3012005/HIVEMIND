@@ -69,6 +69,11 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
           } catch {
             rejected.push(reject(motion, 'playbook_version_unavailable')); continue;
           }
+          if (playbookId === run.playbookId
+            && version === Number(run.playbookVersion)
+            && playbook.metadata?.allow_recursive_children !== true) {
+            rejected.push(reject(motion, 'recursive_playbook_not_allowed')); continue;
+          }
           const supported = asArray(playbook.metadata?.supported_actions).map(String);
           const roomTag = String(playbook.metadata?.owner_room_tag || '').trim().toLowerCase();
           if (!supported.includes(supportedAction) || !roomTag) {
@@ -127,6 +132,10 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
           accepted.push(todo.id);
         }
       });
+
+      if (accepted.length === 0) {
+        throw new Error(`runtime_task_materializer_no_valid_motions:${rejected.map((row) => `${row.motion_id}:${row.reason}`).join(',')}`);
+      }
 
       return { artifacts: [{
         id: stableKey(context.runId, context.stageId, portfolio.id),

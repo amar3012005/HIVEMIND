@@ -1294,7 +1294,10 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
         return { status, error: detail, toolName: null, args: null, result: null, draftId: null, outputFields: {} };
       }
       const priorOutputs = {};
-      if (st.authority === 'write' && typeof conversationContext === 'string' && conversationContext.trim()) {
+      const contentProducingStep = st.authority === 'write'
+        || st.output_kind === 'message'
+        || st.output_kind === 'document';
+      if (contentProducingStep && typeof conversationContext === 'string' && conversationContext.trim()) {
         priorOutputs.conversation_context_untrusted = conversationContext.trim().slice(0, 6000);
       }
       for (const d of deps) Object.assign(priorOutputs, outputs[d] || {});

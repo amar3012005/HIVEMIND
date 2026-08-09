@@ -313,6 +313,32 @@ test('compound orchestrator: composio write creates a pendingWrite draft (never 
   assert.ok(!res.summary.includes('done'));
 });
 
+test('content artifact keeps prior assistant context even if planner authority is malformed', async () => {
+  const created = [];
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send email' }],
+    executeImpl: async () => ({ successful: true, data: {}, error: null }),
+  });
+  const res = await runCompoundOrchestrator({
+    subtasks: [{
+      operation: 'write_email', authority: 'read', output_kind: 'message',
+      tool_groups: ['gmail'], depends_on: [], message: 'Write the requested email',
+    }],
+    conversationContext: 'DLLMs denoise many token positions in parallel and reduce warmed inference latency.',
+    ctx: {
+      userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+      prisma: { pendingWrite: { create: async (data) => { created.push(data.data); return { id: 'DRAFT-CONTEXT' }; } } },
+    },
+    apiKey: 'k', signal: null, composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_gmail_send_email', args: { recipient_email: 'amar@example.com' },
+      schema: { type: 'object', required: ['recipient_email', 'body'], properties: { recipient_email: { type: 'string' } } },
+    })),
+  });
+  assert.equal(res.status, 'pending');
+  assert.match(created[0].toolArgs.body, /denoise many token positions in parallel/);
+});
+
 test('human-input summaries explain progress, safety pause, and resumability', () => {
   const pending = buildCompoundUserSummary({
     subtasks: [{}, {}], status: 'pending',

@@ -1522,8 +1522,13 @@ export class PrismaGraphStore {
         + 'If this org is .amr, the edge will NOT reach its shard: pass org_id at the call site.');
     }
     if (orgIsRemote(_remoteOrg)) {
-      amrAddEdge({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: _remoteOrg });
-      return mapRelationshipRecord({ id: edge.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });
+      // Central path generates `id` via Prisma's @default(uuid()) at the upsert below; this branch
+      // skips that upsert entirely, so callers that don't pass an id (the common case) were sending
+      // `id: undefined` straight to the agent's NOT-NULL, no-default `id` column — a guaranteed
+      // "null value in column id violates not-null constraint" on every remote-org edge write.
+      const _edgeId = edge.id || crypto.randomUUID();
+      amrAddEdge({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: _remoteOrg });
+      return mapRelationshipRecord({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });
     }
     const created = await this.client.relationship.upsert({
       where: {

@@ -13,7 +13,7 @@
 //   AGENT_PORT    listen port (default 8787)
 //   MNEME_DIM     embedding dim (default 1024)
 import http from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, randomUUID } from 'node:crypto';
 
 const ORG = process.env.ORG_ID || die('ORG_ID required');
 const TOKEN = process.env.AGENT_TOKEN || die('AGENT_TOKEN required');
@@ -506,10 +506,12 @@ const routes = {
     }
     for (const rel of (b.rels || [])) {
       if (rel?.fromId && rel?.toId) {
+        // id has no DEFAULT and is NOT NULL — a caller that omits it (the engine's remote-org edge
+        // path did, until fixed) must not 500 the whole write; generate one server-side.
         await pg.query(
           `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
            ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
-          [rel.id, ORG, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]
+          [rel.id || randomUUID(), ORG, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]
         );
       }
     }
@@ -629,10 +631,12 @@ const routes = {
   '/v1/edge': async (b) => {
     const rel = b.rel;
     if (rel?.fromId && rel?.toId) {
+      // id has no DEFAULT and is NOT NULL — a caller that omits it (the engine's remote-org edge
+      // path did, until fixed) must not 500 the whole write; generate one server-side.
       await pg.query(
         `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
-        [rel.id, ORG, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
+        [rel.id || randomUUID(), ORG, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
     }
     return { ok: true };
   },

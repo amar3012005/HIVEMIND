@@ -270,7 +270,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
     ? connectedPolicy
     : 'Connected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.';
   const workflowPolicy = workflowPlanner
-    ? 'You are the hosted workflow planner. Call compound_plan exactly once, even for a one-step request. Decompose the complete request; do not answer it and do not select another capability. For every retrieval or lookup step, put a compact semantic retrieval expression in query, preserving entities and requested attributes while removing workflow verbs and later actions. Put null in query for pure action steps.'
+    ? 'You are the hosted workflow planner. Call compound_plan exactly once, even for a one-step request. Decompose the complete request; do not answer it and do not select another capability. For every retrieval or lookup step, put a compact semantic retrieval expression in query, preserving entities and requested attributes while removing workflow verbs and later actions. Put null in query for pure action steps. A requested document, email, message, or other content artifact must receive substantive grounded content: when the current request supplies only a topic or refers to prior conversation, include the required knowledge-retrieval step and make the artifact depend on it rather than emitting a topic placeholder.'
     : '';
   const systemMessages = [
     { role: 'system', content: staticPrompt.value },

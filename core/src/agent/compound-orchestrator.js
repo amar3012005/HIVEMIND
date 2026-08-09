@@ -566,6 +566,17 @@ export function exactGroundedDependencyContent(priorOutputs) {
   return [...new Set(values)].join('\n\n');
 }
 
+export function backfillMissingGroundedContentArgs(outputKind, schema, args, priorOutputs) {
+  const exactContent = exactGroundedDependencyContent(priorOutputs);
+  if (!exactContent) return args || {};
+  const next = { ...(args || {}) };
+  for (const field of semanticContentFields(outputKind, schema)) {
+    if (next[field] == null || String(next[field]).trim() === '') next[field] = exactContent;
+  }
+  if (Object.hasOwn(schema?.properties || {}, 'is_html') && next.is_html == null) next.is_html = false;
+  return next;
+}
+
 export function normalizeCompoundDependencies(subtasks) {
   const normalized = (Array.isArray(subtasks) ? subtasks : []).map((step) => ({
     ...step,
@@ -1077,6 +1088,13 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // A draft is an approval artifact, not a deferred schema validator. Ask for
   // provider-required information before persisting one, so approval cannot
   // fail merely because the planner omitted a required field.
+  // Query Mode may omit a required body even though an earlier governed read
+  // produced all of the requested facts. Before asking the user to re-enter
+  // information HIVE-MIND already has, deterministically carry the exact
+  // dependency content into any still-empty content field exposed by the
+  // selected provider schema. Existing model-written content is never
+  // overwritten here, and no user-language/provider keyword is inspected.
+  args = backfillMissingGroundedContentArgs(subtask.output_kind, manifestSchema, args, priorOutputs);
   const missing = missingRequiredArgs(manifestSchema, args);
   const semanticMissing = [
     ...missingSemanticWriteArgs(subtask.output_kind, manifestSchema, args),

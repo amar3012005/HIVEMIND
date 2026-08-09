@@ -12,6 +12,7 @@ import {
   applyConnectorResultPolicy,
   buildToolSelectionCards,
   buildToolCardSelectionPrompt,
+  backfillMissingGroundedContentArgs,
   classifyComposioToolAuthority,
   filterComposioToolsByAuthority,
   filterProviderDraftToolsForTerminalOperation,
@@ -395,6 +396,24 @@ test('exact dependency fallback extracts complete grounded content instead of a 
   assert.match(content, /G ROCHER/);
   assert.match(content, /white flower charm/);
   assert.equal(content.includes('memories'), false);
+});
+
+test('missing provider body is backfilled from an existing grounded dependency', () => {
+  const prior = {
+    recall: JSON.stringify({ memories: [{ content: 'DLLMs denoise token positions in parallel and can reduce warmed inference latency.' }] }),
+  };
+  const args = backfillMissingGroundedContentArgs('message', {
+    type: 'object',
+    required: ['recipient_email', 'body'],
+    properties: {
+      recipient_email: { type: 'string' },
+      body: { type: 'string' },
+      is_html: { type: 'boolean' },
+    },
+  }, { recipient_email: 'amar@example.com' }, prior);
+  assert.equal(args.recipient_email, 'amar@example.com');
+  assert.match(args.body, /denoise token positions in parallel/);
+  assert.equal(args.is_html, false);
 });
 
 test('plan validation attaches earlier reads to a governed write when planner omits the edge', () => {

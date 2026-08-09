@@ -393,6 +393,140 @@ async function settleWebIntelUsage({ orgId, userId, jobId, planMetric }) {
   if (settled.settled && planEnforcer) planEnforcer.recordUsage(orgId, planMetric, 1, { userId, feature: 'web-intel', idempotencyKey: `web-job:${jobId}:${planMetric}` });
   return settled.settled;
 }
+
+// Shared by POST /api/web/search/jobs AND the hivemind_web_search tool
+// (tool-registry.js) — same shape/reasoning as runWebCrawlJob below.
+async function runWebSearchJob({ query, domains, limit, userId, orgId }) {
+  const rlCheck = webRateLimiter.check(userId);
+  if (!rlCheck.allowed) return { ok: false, httpStatus: 429, error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs };
+
+  if (planEnforcer && orgId) {
+    const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
+    if (!webIntelCheck.allowed) return { ok: false, httpStatus: webIntelCheck.status || 402, ...planLimitBody(webIntelCheck, 'webIntel') };
+  }
+
+  const usage = await webJobStore.getUsage({ userId, orgId });
+  if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
+    return { ok: false, httpStatus: 429, error: 'Daily search quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests };
+  }
+  const limits = await webJobStore.checkLimits({ userId, orgId });
+  if (limits.monthly.search.exceeded) {
+    return { ok: false, httpStatus: 429, error: 'Monthly search quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.search.hard, used: limits.monthly.search.used };
+  }
+  if (!query) return { ok: false, httpStatus: 400, error: 'query is required' };
+
+  const abuseCheck = detectAbuse({ userId, type: 'search', query, recentJobCount: usage.web_search_requests });
+  if (abuseCheck.action === 'block') return { ok: false, httpStatus: 403, error: 'Request blocked', code: 'abuse_detected', reason: abuseCheck.reason };
+
+  webRateLimiter.record(userId);
+  const job = await webJobStore.create({ type: 'search', params: { query, domains: domains || [], limit: limit || 10 }, userId, orgId });
+  setImmediate(async () => {
+    try {
+      await webJobStore.update(job.id, { status: 'running' });
+      const result = await browserRuntime.search({ query, domains: domains || [], limit: limit || 10 });
+      const resultCount = Array.isArray(result.results) ? result.results.length : 0;
+      const errors = Array.isArray(result.errors) ? result.errors : [];
+      if (resultCount === 0 && errors.length > 0) {
+        await webJobStore.update(job.id, {
+          status: 'failed', error: errors[0]?.error || 'search_failed', runtime_used: result.runtime_used,
+          fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: 0, results: [],
+        });
+        return;
+      }
+      await webJobStore.update(job.id, {
+        status: 'succeeded', results: result.results, runtime_used: result.runtime_used,
+        fallback_applied: result.fallback_applied, duration_ms: result.duration_ms,
+      });
+      await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
+    } catch (err) {
+      await webJobStore.update(job.id, { status: 'failed', error: err.message });
+      console.error(`[web-search] job ${job.id} failed:`, err.message);
+    }
+  });
+  return { ok: true, httpStatus: 202, job_id: job.id, status: 'queued', type: 'search' };
+}
+
+// Shared by POST /api/web/crawl/jobs AND the hivemind_web_crawl tool
+// (tool-registry.js) — same quota/rate-limit/abuse/policy gate for both
+// entry points, no second path. Returns a plain result object (never writes
+// to `res` itself) so a tool handler can consume it directly; the HTTP route
+// below wraps it in jsonResponse with the matching status code.
+async function runWebCrawlJob({ urls, depth, pageLimit, include, exclude, captureScreenshot, session, userId, orgId }) {
+  const rlCheck = webRateLimiter.check(userId);
+  if (!rlCheck.allowed) return { ok: false, httpStatus: 429, error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs };
+
+  if (planEnforcer && orgId) {
+    const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
+    if (!webIntelCheck.allowed) return { ok: false, httpStatus: webIntelCheck.status || 402, ...planLimitBody(webIntelCheck, 'webIntel') };
+  }
+
+  const usage = await webJobStore.getUsage({ userId, orgId });
+  if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
+    return { ok: false, httpStatus: 429, error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages };
+  }
+  const limits = await webJobStore.checkLimits({ userId, orgId });
+  if (limits.monthly.crawl.exceeded) {
+    return { ok: false, httpStatus: 429, error: 'Monthly crawl quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.crawl.hard, used: limits.monthly.crawl.used };
+  }
+  if (!urls || !Array.isArray(urls) || urls.length === 0) return { ok: false, httpStatus: 400, error: 'urls array is required' };
+
+  const normalizedInputUrls = urls.map((u) => normalizeWebUrl(u) || u);
+  const domainErrors = [];
+  for (const u of normalizedInputUrls) {
+    const domainCheck = validateDomain(u);
+    if (!domainCheck.allowed) domainErrors.push({ url: u, reason: domainCheck.reason });
+  }
+  if (domainErrors.length === normalizedInputUrls.length) {
+    return { ok: false, httpStatus: 403, error: 'All URLs blocked by policy', code: 'domain_blocked', details: domainErrors };
+  }
+  const abuseCheck = detectAbuse({ userId, type: 'crawl', urls, recentJobCount: usage.web_crawl_pages });
+  if (abuseCheck.action === 'block') return { ok: false, httpStatus: 403, error: 'Request blocked', code: 'abuse_detected', reason: abuseCheck.reason };
+
+  webRateLimiter.record(userId);
+  const allowedUrls = domainErrors.length > 0
+    ? normalizedInputUrls.filter((u) => !domainErrors.find((e) => e.url === u))
+    : normalizedInputUrls;
+  const requestedPageLimit = Number(pageLimit ?? 50);
+  const normalizedPageLimit = Number.isFinite(requestedPageLimit) && requestedPageLimit > 0 ? requestedPageLimit : 50;
+  const effectiveDepth = Number.isFinite(Number(depth)) ? Number(depth) : 1;
+  const effectivePageLimit = Math.min(normalizedPageLimit, WEB_CRAWL_DAILY_LIMIT - usage.web_crawl_pages);
+  // A screenshot or a named session needs a real browser render — same
+  // reason seoAudit() bypasses the markdown-first path. See renderCapture().
+  const needsRender = Boolean(captureScreenshot) || Boolean(session);
+  const job = await webJobStore.create({
+    type: 'crawl',
+    params: { urls: allowedUrls, depth: effectiveDepth, pageLimit: effectivePageLimit, include, exclude, domain_warnings: domainErrors, capture_screenshot: Boolean(captureScreenshot), session: session || null },
+    userId, orgId,
+  });
+  setImmediate(async () => {
+    try {
+      await webJobStore.update(job.id, { status: 'running' });
+      const result = needsRender
+        ? await browserRuntime.renderCapture({ urls: allowedUrls, depth: effectiveDepth, pageLimit: effectivePageLimit, captureScreenshot: Boolean(captureScreenshot), session })
+        : await browserRuntime.crawl({ urls: allowedUrls, depth: effectiveDepth, pageLimit: effectivePageLimit, include, exclude });
+      const pagesProcessed = Array.isArray(result.pages) ? result.pages.length : 0;
+      const errors = Array.isArray(result.errors) ? result.errors : [];
+      if (pagesProcessed === 0 && errors.length > 0) {
+        await webJobStore.update(job.id, {
+          status: 'failed', error: errors[0]?.error || 'crawl_failed', runtime_used: result.runtime_used,
+          fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: 0, results: [],
+        });
+        return;
+      }
+      await webJobStore.update(job.id, {
+        status: 'succeeded', results: result.pages, runtime_used: result.runtime_used,
+        fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: pagesProcessed,
+        session_used: result.session_used ?? null, session_requested_but_missing: result.session_requested_but_missing ?? null,
+      });
+      await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
+    } catch (err) {
+      await webJobStore.update(job.id, { status: 'failed', error: err.message });
+      console.error(`[web-crawl] job ${job.id} failed:`, err.message);
+    }
+  });
+  return { ok: true, httpStatus: 202, job_id: job.id, status: 'queued', type: 'crawl' };
+}
+
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
   scheduleRecurringMaintenanceJob({
@@ -4032,6 +4166,10 @@ const server = http.createServer(async (req, res) => {
       ingestRoutedPayload,
       ingestCanonicalPayload,
       webIntelligence: globalThis.webIntelligence || null,
+      webJobStore,
+      browserRuntime,
+      runWebCrawlJob,
+      runWebSearchJob,
       prisma,
       accessContext: null,
     };
@@ -10952,6 +11090,10 @@ exit \$RC
                     ingestCanonicalPayload,
                     accessContext: accessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
+                    webJobStore,
+                    browserRuntime,
+                    runWebCrawlJob,
+                    runWebSearchJob,
                   },
                 });
               } finally {
@@ -17231,74 +17373,13 @@ exit \$RC
         case '/api/web/search/jobs':
           if (req.method === 'POST') {
             // Web search open to all authenticated users (entitlement gate removed — all keys get access)
+            // Body logic lives in runWebSearchJob() (shared with the hivemind_web_search
+            // tool in tool-registry.js — same quota/rate-limit/abuse gate, no second path).
             try {
-              // Rate limit check
-              const rlCheck = webRateLimiter.check(userId);
-              if (!rlCheck.allowed) {
-                return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
-              }
-
-              // Plan enforcement: check daily web intel limit
-              if (planEnforcer && orgId) {
-                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
-                if (!webIntelCheck.allowed) {
-                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), webIntelCheck.status || 402);
-                }
-              }
-
-              const usage = await webJobStore.getUsage({ userId, orgId });
-              if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
-                return jsonResponse(res, { error: 'Daily search quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
-              }
-              // Monthly limit check
-              const limits = await webJobStore.checkLimits({ userId, orgId });
-              if (limits.monthly.search.exceeded) {
-                return jsonResponse(res, { error: 'Monthly search quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.search.hard, used: limits.monthly.search.used }, 429);
-              }
               const { query, domains, limit: searchLimit } = body;
-              if (!query) {
-                return jsonResponse(res, { error: 'query is required' }, 400);
-              }
-              // Abuse detection
-              const abuseCheck = detectAbuse({ userId, type: 'search', query, recentJobCount: usage.web_search_requests });
-              if (abuseCheck.action === 'block') {
-                return jsonResponse(res, { error: 'Request blocked', code: 'abuse_detected', reason: abuseCheck.reason }, 403);
-              }
-              webRateLimiter.record(userId);
-              const job = await webJobStore.create({ type: 'search', params: { query, domains: domains || [], limit: searchLimit || 10 }, userId, orgId });
-              setImmediate(async () => {
-                try {
-                  await webJobStore.update(job.id, { status: 'running' });
-                  const result = await browserRuntime.search({ query, domains: domains || [], limit: searchLimit || 10 });
-                  const resultCount = Array.isArray(result.results) ? result.results.length : 0;
-                  const errors = Array.isArray(result.errors) ? result.errors : [];
-                  if (resultCount === 0 && errors.length > 0) {
-                    await webJobStore.update(job.id, {
-                      status: 'failed',
-                      error: errors[0]?.error || 'search_failed',
-                      runtime_used: result.runtime_used,
-                      fallback_applied: result.fallback_applied,
-                      duration_ms: result.duration_ms,
-                      pages_processed: 0,
-                      results: []
-                    });
-                    return;
-                  }
-                  await webJobStore.update(job.id, {
-                    status: 'succeeded',
-                    results: result.results,
-                    runtime_used: result.runtime_used,
-                    fallback_applied: result.fallback_applied,
-                    duration_ms: result.duration_ms,
-                  });
-
-                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
-                } catch (err) {
-                  await webJobStore.update(job.id, { status: 'failed', error: err.message });
-                  console.error(`[web-search] job ${job.id} failed:`, err.message);
-                }
-              });
-              return jsonResponse(res, { job_id: job.id, status: 'queued', type: 'search' }, 202);
+              const result = await runWebSearchJob({ query, domains, limit: searchLimit, userId, orgId });
+              const { ok, httpStatus, ...responseBody } = result;
+              return jsonResponse(res, responseBody, httpStatus);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
             }
@@ -17606,92 +17687,14 @@ exit \$RC
         case '/api/web/crawl/jobs':
           if (req.method === 'POST') {
             // Web crawl open to all authenticated users (entitlement gate removed — all keys get access)
+            // Body logic lives in runWebCrawlJob() (shared with the hivemind_web_crawl
+            // tool in tool-registry.js — same quota/rate-limit/abuse/policy gate for
+            // both entry points, no second path).
             try {
-              // Rate limit check
-              const rlCheck = webRateLimiter.check(userId);
-              if (!rlCheck.allowed) {
-                return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
-              }
-
-              // Plan enforcement: check daily web intel limit
-              if (planEnforcer && orgId) {
-                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
-                if (!webIntelCheck.allowed) {
-                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), webIntelCheck.status || 402);
-                }
-              }
-
-              const usage = await webJobStore.getUsage({ userId, orgId });
-              if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
-                return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
-              }
-              // Monthly limit check
-              const limits = await webJobStore.checkLimits({ userId, orgId });
-              if (limits.monthly.crawl.exceeded) {
-                return jsonResponse(res, { error: 'Monthly crawl quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.crawl.hard, used: limits.monthly.crawl.used }, 429);
-              }
-              const { urls, depth, page_limit: pageLimit, include, exclude } = body;
-              if (!urls || !Array.isArray(urls) || urls.length === 0) {
-                return jsonResponse(res, { error: 'urls array is required' }, 400);
-              }
-              const normalizedInputUrls = urls.map((u) => normalizeWebUrl(u) || u);
-              // Domain policy validation
-              const domainErrors = [];
-              for (const u of normalizedInputUrls) {
-                const domainCheck = validateDomain(u);
-                if (!domainCheck.allowed) domainErrors.push({ url: u, reason: domainCheck.reason });
-              }
-              if (domainErrors.length === normalizedInputUrls.length) {
-                return jsonResponse(res, { error: 'All URLs blocked by policy', code: 'domain_blocked', details: domainErrors }, 403);
-              }
-              // Abuse detection
-              const abuseCheck = detectAbuse({ userId, type: 'crawl', urls, recentJobCount: usage.web_crawl_pages });
-              if (abuseCheck.action === 'block') {
-                return jsonResponse(res, { error: 'Request blocked', code: 'abuse_detected', reason: abuseCheck.reason }, 403);
-              }
-              webRateLimiter.record(userId);
-              // Filter allowed URLs
-              const allowedUrls = domainErrors.length > 0
-                ? normalizedInputUrls.filter(u => !domainErrors.find(e => e.url === u))
-                : normalizedInputUrls;
-              const requestedPageLimit = Number(pageLimit ?? 50);
-              const normalizedPageLimit = Number.isFinite(requestedPageLimit) && requestedPageLimit > 0 ? requestedPageLimit : 50;
-              const effectiveDepth = Number.isFinite(Number(depth)) ? Number(depth) : 1;
-              const effectivePageLimit = Math.min(normalizedPageLimit, WEB_CRAWL_DAILY_LIMIT - usage.web_crawl_pages);
-              const job = await webJobStore.create({ type: 'crawl', params: { urls: allowedUrls, depth: effectiveDepth, pageLimit: effectivePageLimit, include, exclude, domain_warnings: domainErrors }, userId, orgId });
-              setImmediate(async () => {
-                try {
-                  await webJobStore.update(job.id, { status: 'running' });
-                  const result = await browserRuntime.crawl({ urls: allowedUrls, depth: effectiveDepth, pageLimit: effectivePageLimit, include, exclude });
-                  const pagesProcessed = Array.isArray(result.pages) ? result.pages.length : 0;
-                  const errors = Array.isArray(result.errors) ? result.errors : [];
-                  if (pagesProcessed === 0 && errors.length > 0) {
-                    await webJobStore.update(job.id, {
-                      status: 'failed',
-                      error: errors[0]?.error || 'crawl_failed',
-                      runtime_used: result.runtime_used,
-                      fallback_applied: result.fallback_applied,
-                      duration_ms: result.duration_ms,
-                      pages_processed: 0,
-                      results: []
-                    });
-                    return;
-                  }
-                  await webJobStore.update(job.id, {
-                    status: 'succeeded',
-                    results: result.pages,
-                    runtime_used: result.runtime_used,
-                    fallback_applied: result.fallback_applied,
-                    duration_ms: result.duration_ms,
-                    pages_processed: pagesProcessed,
-                  });
-                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
-                } catch (err) {
-                  await webJobStore.update(job.id, { status: 'failed', error: err.message });
-                  console.error(`[web-crawl] job ${job.id} failed:`, err.message);
-                }
-              });
-              return jsonResponse(res, { job_id: job.id, status: 'queued', type: 'crawl' }, 202);
+              const { urls, depth, page_limit: pageLimit, include, exclude, capture_screenshot: captureScreenshot, session } = body;
+              const result = await runWebCrawlJob({ urls, depth, pageLimit, include, exclude, captureScreenshot, session, userId, orgId });
+              const { ok, httpStatus, ...responseBody } = result;
+              return jsonResponse(res, responseBody, httpStatus);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
             }
@@ -23234,6 +23237,10 @@ exit \$RC
                     prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                     smartIngestRouter, buildRoutedIngestPayloads, accessContext: agentAccessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
+                    webJobStore,
+                    browserRuntime,
+                    runWebCrawlJob,
+                    runWebSearchJob,
                     _trace: { traceId: crypto.randomUUID() },
                   },
                   apiKey: groqKey, onEvent: emit,
@@ -23359,6 +23366,10 @@ exit \$RC
                         buildRoutedIngestPayloads,
                         accessContext: agentAccessCtx,
                         webIntelligence: globalThis.webIntelligence || null,
+                        webJobStore,
+                        browserRuntime,
+                        runWebCrawlJob,
+                        runWebSearchJob,
                       },
                       onEvent: emit,
                       streamAnswer: true,
@@ -23408,6 +23419,10 @@ exit \$RC
                     ingestCanonicalPayload,
                     accessContext: agentAccessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
+                    webJobStore,
+                    browserRuntime,
+                    runWebCrawlJob,
+                    runWebSearchJob,
                   },
                 });
 

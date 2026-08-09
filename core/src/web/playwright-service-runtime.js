@@ -26,7 +26,11 @@ function validateResult(payload) {
     discovery: page.discovery && typeof page.discovery === 'object' ? page.discovery : {},
   }));
   if (!pages.length) throw new Error(payload.errors?.[0]?.error || 'Playwright service returned no pages');
-  return { pages, errors: Array.isArray(payload.errors) ? payload.errors : [], runtime_used: 'playwright-service' };
+  return {
+    pages, errors: Array.isArray(payload.errors) ? payload.errors : [], runtime_used: 'playwright-service',
+    session_used: payload.session_used ?? null,
+    session_requested_but_missing: payload.session_requested_but_missing ?? null,
+  };
 }
 
 export class PlaywrightServiceRuntime {
@@ -39,7 +43,7 @@ export class PlaywrightServiceRuntime {
     this.fetch = fetchImpl || globalThis.fetch;
   }
 
-  async crawl({ urls, depth = 2, pageLimit = 25, captureScreenshot = false } = {}) {
+  async crawl({ urls, depth = 2, pageLimit = 25, captureScreenshot = false, session = null } = {}) {
     const seeds = (Array.isArray(urls) ? urls : []).map(normalizeUrl).filter(Boolean);
     if (!seeds.length) throw new Error('No valid URLs provided');
     const allowedOrigin = new URL(seeds[0]).origin;
@@ -60,6 +64,12 @@ export class PlaywrightServiceRuntime {
           page_limit: Math.max(1, Math.min(Number(pageLimit) || 25, 100)),
           settle_ms: this.settleMs,
           capture_screenshot: Boolean(captureScreenshot),
+          // Named, pre-captured session (LinkedIn/X/Instagram) — see
+          // services/hm-playwright/sessions/README.md. hm-playwright validates
+          // the name against its own allowlist before touching its filesystem;
+          // an unknown/expired name degrades to an anonymous context there, so
+          // no validation is duplicated here.
+          ...(session ? { session: String(session).slice(0, 40) } : {}),
         }),
         signal: controller.signal,
       });

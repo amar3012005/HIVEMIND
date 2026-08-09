@@ -1844,6 +1844,46 @@ def build_hivemind_toolkit(
                 return _tool_response({"status": "timeout", "job_id": job_id})
         tk.register_tool_function(web_research)
 
+    if "hivemind_web_crawl" in enabled_tool_names:
+        def web_crawl(url: str, depth: int = 1, capture_screenshot: bool = False, session: str = "") -> ToolResponse:
+            """Render and crawl a specific public URL with a real browser (not a
+            static fetch) — page text, links, SEO meta, and optionally a screenshot.
+
+            Use when a task names a specific page (not a general question —
+            that's hivemind_web_search) and needs its actual rendered content,
+            or a visual of it.
+
+            Args:
+                url: The page to render and crawl.
+                depth: How many link-hops to follow from this page (0 = just this page).
+                capture_screenshot: Take a screenshot of the page.
+                session: Reuse a pre-authorized session for a gated platform —
+                    "linkedin" | "x" | "instagram" — if one has been captured
+                    (see services/hm-playwright/sessions/README.md). Falls back
+                    to an anonymous view if none exists; never fails the request.
+            """
+            import time
+            body = {"urls": [url], "depth": max(0, min(depth, 4)), "page_limit": 1,
+                    "capture_screenshot": bool(capture_screenshot)}
+            if session:
+                body["session"] = session
+            with _client(api_key, user_id, org_id) as c:
+                r = c.post("/api/web/crawl/jobs", json=body)
+                r.raise_for_status()
+                job_id = r.json().get("job_id")
+                if not job_id:
+                    return _tool_response({"error": "no job_id"})
+                for _ in range(60):
+                    time.sleep(2)
+                    result = c.get(f"/api/web/jobs/{job_id}")
+                    if result.status_code != 200:
+                        continue
+                    payload = result.json()
+                    if payload.get("status") in {"succeeded", "failed"}:
+                        return _tool_response(payload)
+                return _tool_response({"status": "timeout", "job_id": job_id})
+        tk.register_tool_function(web_crawl)
+
     if "hivemind_seo_audit" in enabled_tool_names:
         def seo_audit(url: str, page_limit: int = 25) -> ToolResponse:
             """Audit a public website with deterministic SEO rules.

@@ -2835,6 +2835,35 @@ model EnterpriseInvitation {
   @@map("enterprise_invitations")
 }
 
+/// Pre-organization access request captured from Singulance public surfaces.
+/// It contains no tenant data and becomes tenant-linked only after an approved
+/// invitation is redeemed.
+model AccessApplication {
+  id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                  String   @db.VarChar(255)
+  emailHash              String   @map("email_hash") @db.Char(64)
+  name                   String   @db.VarChar(160)
+  accountType            String   @map("account_type") @db.VarChar(24)
+  companyName            String?  @map("company_name") @db.VarChar(255)
+  useCase                String?  @map("use_case") @db.VarChar(120)
+  niche                  String?  @db.VarChar(120)
+  message                String?  @db.Text
+  source                 String   @default("singulancelabs.com") @db.VarChar(160)
+  status                 String   @default("pending") @db.VarChar(24)
+  reviewNote             String?  @map("review_note") @db.Text
+  reviewedBy             String?  @map("reviewed_by") @db.VarChar(160)
+  reviewedAt             DateTime? @map("reviewed_at") @db.Timestamptz(6)
+  invitationType         String?  @map("invitation_type") @db.VarChar(24)
+  enterpriseInvitationId String?  @map("enterprise_invitation_id") @db.Uuid
+  invitationSentAt       DateTime? @map("invitation_sent_at") @db.Timestamptz(6)
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([emailHash, accountType])
+  @@index([accountType, status, createdAt])
+  @@map("access_applications")
+}
+
 /// Provider-neutral checkout intent. The browser can request an offer but only
 /// a provider confirmation transitions it to paid and creates entitlements.
 model BillingCheckout {

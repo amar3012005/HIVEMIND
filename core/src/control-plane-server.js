@@ -62,7 +62,13 @@ import {
   redeemEnterpriseInvitation,
   revokeEnterpriseInvitation,
   rotateEnterpriseInvitationSecrets,
+  normalizeEnterpriseInvitationInput,
 } from './billing/enterprise-invitation-service.js';
+import {
+  publicAccessApplication,
+  reviewAccessApplication,
+  submitAccessApplication,
+} from './billing/access-application-service.js';
 import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './billing/runway-pricing.js';
 import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './billing/access-codes.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
@@ -152,6 +158,8 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
     // Dedicated commercial control surface. This is explicit rather than a
     // wildcard so normal tenant CORS policy cannot expand by accident.
     'https://admin.hivemind.singulancelabs.com',
+    'https://singulancelabs.com',
+    'https://www.singulancelabs.com',
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5000',
@@ -2770,6 +2778,34 @@ const server = http.createServer(async (req, res) => {
     return { delivery, invitation: recorded, activationUrl };
   }
 
+  function invitationTemplateVars({ kind, application, invitation = null, invitationUrl, accessCode = null }) {
+    const expiresAt = invitation?.invitationExpiresAt || new Date(Date.now() + 14 * 86400000);
+    const common = {
+      name: application?.name || application?.email?.split('@')[0] || 'there',
+      recipientEmail: invitation?.recipientEmail || application?.email,
+      invitationUrl,
+      expiresOn: expiresAt.toLocaleDateString('en-GB', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }),
+      supportEmail: process.env.SYSTEM_EMAIL_SUPPORT || 'support@singulancelabs.com',
+      privacyUrl: process.env.HIVEMIND_PRIVACY_URL || 'https://singulancelabs.com/privacy',
+      termsUrl: process.env.HIVEMIND_TERMS_URL || 'https://singulancelabs.com/terms',
+    };
+    if (kind === 'personal') return common;
+    const selfHosted = invitation.hostingMode === 'self_host';
+    return {
+      ...common,
+      companyName: invitation.companyName,
+      workspaceName: invitation.workspaceName || invitation.companyName,
+      hostingLabel: selfHosted ? 'Self-hosted' : 'Managed',
+      hostingExplanation: selfHosted
+        ? 'Your organization operates the memory infrastructure; your deployment is provisioned through the secure setup flow.'
+        : 'Singulance hosts and operates your workspace on managed EU infrastructure.',
+      storageLabel: ({ hybrid: 'Managed hybrid company brain', amr_embedded: 'Embedded .amr company brain', byod_amr: 'Self-hosted BYOD agent company brain' })[invitation.storageMode] || 'Company brain infrastructure',
+      accessCode: accessCode || `Code ending ${invitation.accessCodeHint}`,
+      onboardingDays: invitation.onboardingDays || 14,
+      welcomeMessage: invitation.welcomeMessage || 'Your HIVEMIND AI Operating System is ready to activate.',
+    };
+  }
+
   function _reqMeta(req) {
     const fwd = req.headers?.['x-forwarded-for'];
     const ip = typeof fwd === 'string' ? fwd.split(',')[0].trim() : null;
@@ -2798,6 +2834,20 @@ const server = http.createServer(async (req, res) => {
     runtimePlaybooks: () => hqScheduler?.runtimePlaybooks || null,
   });
   if (await handleHqRuntimeRoute(req, res, url)) return;
+
+  // Public waitlist intake is pre-tenant, deliberately data-minimal, rate
+  // limited, and always returns the same accepted shape to avoid account
+  // discovery. Re-submission refreshes the existing application.
+  if (pathname === '/auth/access-applications' && req.method === 'POST') {
+    if (signupAdmissionLimited(req)) return jsonResponse(res, { accepted: true }, 202);
+    if (!prisma) return jsonResponse(res, { error: 'Service unavailable' }, 503);
+    try {
+      await submitAccessApplication(prisma, await parseBody(req));
+      return jsonResponse(res, { accepted: true }, 202);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 400);
+    }
+  }
 
   if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
     if (platformUnlockLimited(req)) return jsonResponse(res, { error: 'Too many attempts. Try again later.' }, 429);
@@ -3076,6 +3126,99 @@ const server = http.createServer(async (req, res) => {
       resourceType: 'personal_invitation_link', metadata: { operator: operator.operator, session_id: operator.sessionId, validity_days: validityDays },
       ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
     return jsonResponse(res, { invitation_url: invitationUrl, expires_in_days: validityDays }, 201);
+  }
+
+  if (pathname === '/admin/api/platform/access-applications' && req.method === 'GET') {
+    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const accountType = url.searchParams.get('account_type');
+    const status = url.searchParams.get('status');
+    const where = {
+      ...(accountType && ['personal', 'enterprise'].includes(accountType) ? { accountType } : {}),
+      ...(status && ['pending', 'approved', 'discarded', 'invited', 'converted'].includes(status) ? { status } : {}),
+    };
+    const rows = await prisma.accessApplication.findMany({ where, orderBy: { createdAt: 'desc' }, take: 500 });
+    return jsonResponse(res, { applications: rows.map(publicAccessApplication) });
+  }
+
+  const accessApplicationAction = pathname.match(/^\/admin\/api\/platform\/access-applications\/([0-9a-f-]{36})\/(approve|discard|preview|send)$/i);
+  if (accessApplicationAction && req.method === 'POST') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const [, applicationId, action] = accessApplicationAction;
+    const body = await parseBody(req).catch(() => ({}));
+    try {
+      let application = await prisma.accessApplication.findUnique({ where: { id: applicationId } });
+      if (!application) return jsonResponse(res, { error: 'Not found' }, 404);
+      if (action === 'discard') {
+        application = await reviewAccessApplication(prisma, { id: applicationId, status: 'discarded', operator: operator.operator, note: body.note });
+        await audit({ eventType: 'commercial.access_application_discarded', eventCategory: 'billing', action: 'update', resourceType: 'access_application', resourceId: applicationId,
+          metadata: { operator: operator.operator, session_id: operator.sessionId, account_type: application.accountType }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+        return jsonResponse(res, { application: publicAccessApplication(application) });
+      }
+      if (action === 'approve') {
+        application = await reviewAccessApplication(prisma, { id: applicationId, status: 'approved', operator: operator.operator, note: body.note });
+        if (application.accountType === 'enterprise' && !application.enterpriseInvitationId) {
+          const normalized = normalizeEnterpriseInvitationInput({
+            company_name: body.company_name || application.companyName || `${application.name}'s company`,
+            workspace_name: body.workspace_name || body.company_name || application.companyName,
+            recipient_email: application.email,
+            account_type: body.account_type || 'enterprise_managed',
+            storage_mode: body.storage_mode || 'hybrid',
+            onboarding_days: body.onboarding_days || 14,
+            invitation_expires_at: body.invitation_expires_at,
+            welcome_message: body.welcome_message || application.message,
+            private_notes: body.private_notes,
+          });
+          const created = await createEnterpriseInvitation({ prisma, input: normalized });
+          application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { enterpriseInvitationId: created.invitation.id, invitationType: 'enterprise' } });
+        } else if (application.accountType === 'personal') {
+          application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { invitationType: 'personal' } });
+        }
+        await audit({ eventType: 'commercial.access_application_approved', eventCategory: 'billing', action: 'update', resourceType: 'access_application', resourceId: applicationId,
+          metadata: { operator: operator.operator, session_id: operator.sessionId, account_type: application.accountType, enterprise_invitation_id: application.enterpriseInvitationId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+        return jsonResponse(res, { application: publicAccessApplication(application) });
+      }
+
+      if (!['approved', 'invited'].includes(application.status)) throw new Error('Application must be approved first');
+      const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+      if (application.accountType === 'personal') {
+        const previewUrl = `${base}/hivemind/invite?personal_invite=generated-when-sent`;
+        if (action === 'preview') {
+          const rendered = renderTemplate('personal_invitation', invitationTemplateVars({ kind: 'personal', application, invitationUrl: previewUrl }));
+          return jsonResponse(res, { from: 'welcome@admin.singulancelabs.com', to: application.email, ...rendered });
+        }
+        const token = createPersonalInvitationLink({ configuredCode: PERSONAL_SIGNUP_INVITATION_CODE, secret: SIGNUP_ADMISSION_SECRET, ttlSeconds: 14 * 86400 });
+        if (!token) throw new Error('Invitation service is unavailable');
+        const invitationUrl = `${base}/hivemind/invite?personal_invite=${encodeURIComponent(token)}`;
+        const delivery = await sendSystemEmail({ templateId: 'personal_invitation', to: application.email,
+          from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
+          vars: invitationTemplateVars({ kind: 'personal', application, invitationUrl }) });
+        if (!delivery.ok) return jsonResponse(res, { error: delivery.error || 'Email delivery failed' }, 502);
+        application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { status: 'invited', invitationSentAt: new Date() } });
+        await audit({ eventType: 'commercial.personal_invitation_sent', eventCategory: 'billing', action: 'create', resourceType: 'access_application', resourceId: applicationId,
+          metadata: { operator: operator.operator, session_id: operator.sessionId, provider: delivery.provider || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+        return jsonResponse(res, { application: publicAccessApplication(application), delivery: { ok: true, provider: delivery.provider || null } });
+      }
+
+      const invitation = await prisma.enterpriseInvitation.findUnique({ where: { id: application.enterpriseInvitationId } });
+      if (!invitation) throw new Error('Invitation is unavailable');
+      if (action === 'preview') {
+        const rendered = renderTemplate('enterprise_invitation', invitationTemplateVars({ kind: 'enterprise', application, invitation, invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent` }));
+        return jsonResponse(res, { from: 'welcome@admin.singulancelabs.com', to: application.email, ...rendered });
+      }
+      const rotated = await rotateEnterpriseInvitationSecrets({ prisma, invitationId: invitation.id, rotateCode: true, rotateLink: true });
+      const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: invitation.id } });
+      const sent = await dispatchEnterpriseInvitation({ invitation: raw, token: rotated.plaintextToken, code: rotated.plaintextCode });
+      if (!sent.delivery.ok) return jsonResponse(res, { error: sent.delivery.error || 'Email delivery failed' }, 502);
+      application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { status: 'invited', invitationSentAt: new Date() } });
+      await audit({ eventType: 'commercial.enterprise_waitlist_invitation_sent', eventCategory: 'billing', action: 'create', resourceType: 'access_application', resourceId: applicationId,
+        metadata: { operator: operator.operator, session_id: operator.sessionId, enterprise_invitation_id: invitation.id, provider: sent.delivery.provider || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { application: publicAccessApplication(application), delivery: { ok: true, provider: sent.delivery.provider || null } });
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, /unavailable|not found/i.test(error.message) ? 404 : 400);
+    }
   }
 
   const adminInvitationDetail = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})$/i);

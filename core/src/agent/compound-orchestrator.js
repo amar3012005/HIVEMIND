@@ -589,7 +589,14 @@ export function normalizeCompoundDependencies(subtasks) {
   }));
   for (let index = 0; index < normalized.length; index += 1) {
     const step = normalized[index];
-    if (step.authority !== 'write' || step.depends_on.length) continue;
+    // A planner may emit an imprecise authority while still providing the
+    // authoritative semantic output contract. Message/document artifacts must
+    // receive preceding governed read results so provider input generation can
+    // produce complete content. This is language and toolkit independent.
+    const contentProducingStep = step.authority === 'write'
+      || step.output_kind === 'message'
+      || step.output_kind === 'document';
+    if (!contentProducingStep || step.depends_on.length) continue;
     const priorReads = normalized.slice(0, index).flatMap((candidate, priorIndex) => {
       const nativeRead = candidate.tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group));
       return candidate.authority === 'read' || nativeRead ? [priorIndex] : [];

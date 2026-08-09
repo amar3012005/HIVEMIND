@@ -456,6 +456,20 @@ test('plan validation attaches earlier reads to a governed write when planner om
   assert.deepEqual(explicit[2].depends_on, [1], 'explicit planner dependencies remain authoritative');
 });
 
+test('plan validation attaches earlier reads to semantic artifacts despite malformed authority', () => {
+  const normalized = normalizeCompoundDependencies([
+    {
+      operation: 'recall', authority: 'read', output_kind: 'knowledge',
+      tool_groups: ['hivemind-recall'], depends_on: [],
+    },
+    {
+      operation: 'send_email', authority: 'read', output_kind: 'message',
+      tool_groups: ['gmail'], depends_on: [],
+    },
+  ]);
+  assert.deepEqual(normalized[1].depends_on, [0]);
+});
+
 test('missing write fields produce a resumable generalized field-input request', async () => {
   const created = [];
   const schema = {
@@ -548,6 +562,47 @@ test('compound orchestrator: Composio Query Mode completes empty write arguments
   assert.equal(created.length, 1);
   assert.equal(created[0].toolArgs.recipient_email, 'amar@example.com');
   assert.match(created[0].toolArgs.body, /G ROCHER/);
+});
+
+test('compound orchestrator: recalled facts fill an email body when planner authority is malformed', async () => {
+  const created = [];
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send email' }],
+    executeImpl: async () => ({ successful: false, error: 'must remain approval gated' }),
+  });
+  const result = await runCompoundOrchestrator({
+    subtasks: [
+      {
+        operation: 'recall', authority: 'read', output_kind: 'knowledge',
+        tool_groups: ['hivemind-recall'], message: 'all company information',
+      },
+      {
+        operation: 'send_email', authority: 'read', output_kind: 'message',
+        tool_groups: ['gmail'], message: 'write the requested email', depends_on: [],
+      },
+    ],
+    ctx: {
+      userId: 'u1', orgId: 'o1', _trace: { traceId: 'company-email' },
+      _tracedDispatch: async () => ({
+        memories: [{ id: 'company-1', title: 'Company', content: 'Singulance builds governed organizational memory and HyperAgents.' }],
+        evidence: [],
+      }),
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'COMPANY-DRAFT' }; } } },
+    },
+    apiKey: 'k', composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_gmail_send_email',
+      args: { recipient_email: 'amar@example.com', subject: 'Company information' },
+      schema: {
+        type: 'object', required: ['recipient_email', 'subject', 'body'],
+        properties: { recipient_email: { type: 'string' }, subject: { type: 'string' } },
+      },
+    })),
+  });
+
+  assert.equal(result.status, 'pending');
+  assert.equal(created.length, 1);
+  assert.match(created[0].toolArgs.body, /governed organizational memory and HyperAgents/);
 });
 
 test('compound orchestrator: dependent subtask receives prior typed output fields', async () => {

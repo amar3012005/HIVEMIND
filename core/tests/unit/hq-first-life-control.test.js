@@ -70,6 +70,36 @@ test('v5 internal bootstrap starts only the evidence-only recommendation', async
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED']);
 });
 
+test('v6 starts the internal strategy bootstrap without a user Start decision', async () => {
+  const rows = [
+    todo('strategy', 'PROPOSED', 1, 'internal', true),
+    todo('external-1', 'PROPOSED', 2, 'external'),
+  ];
+  rows.forEach((row) => { row.context.first_life_policy_version = 6; });
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows), runtime, expansionTrigger: 'internal_bootstrap',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['strategy']);
+  assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED']);
+});
+
+test('v6 strategy portfolio promotes exactly one Room lifecycle at a time', async () => {
+  const rows = [
+    todo('motion-1', 'PROPOSED', 1, 'external', true),
+    todo('motion-2', 'PROPOSED', 2, 'external'),
+    todo('motion-3', 'PROPOSED', 3, 'internal'),
+  ];
+  rows.forEach((row) => {
+    row.context.first_life_policy_version = 6;
+    row.context.proposal_origin = 'strategy_program';
+  });
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows), runtime, expansionTrigger: 'strategy_program_ready', proposalOrigin: 'strategy_program',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['motion-1']);
+  assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED']);
+});
+
 test('v2 first start retains the historical companion-work policy', async () => {
   const rows = [
     todo('external-1', 'PROPOSED', 1, 'external', true),

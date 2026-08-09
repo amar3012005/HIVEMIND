@@ -171,6 +171,53 @@ const strList = (itemProps) => ({
  * in code, never by this schema, so they are deliberately absent here.
  */
 export const ARTIFACT_FIELD_SHAPES = {
+  marketing_strategy_program: {
+    evidence_summary: { kind: 'evidence_bound', schema: strList({ claim: STR, evidence_ref: STR, confidence: STR }) },
+    contradictions: { kind: 'evidence_bound', schema: strList({ claim: STR, conflict: STR, evidence_ref: STR }) },
+    unknowns: { kind: 'evidence_bound', schema: { type: 'array', items: STR } },
+    confidence: { kind: 'authored', schema: STR },
+    niche_wedge: { kind: 'authored', schema: STR },
+    positioning: { kind: 'authored', schema: STR },
+    offer_framing: { kind: 'authored', schema: STR },
+    expected_outcome: { kind: 'authored', schema: STR },
+    audience: {
+      kind: 'authored',
+      schema: strList({ segment: STR, sector: STR, size: STR, geography: STR, role: STR, buying_trigger: STR, evidence: STR }),
+    },
+    messaging_pillars: { kind: 'authored', schema: strList({ pillar: STR, claim: STR, proof_ref: STR }) },
+    competitor_plan: {
+      kind: 'authored',
+      schema: strList({ rival: STR, where_we_win: STR, where_we_lose: STR, differentiating_claim: STR }),
+    },
+    channel_mix: {
+      kind: 'authored',
+      schema: {
+        type: 'object', additionalProperties: false, required: ['organic', 'paid'],
+        properties: { organic: strList({ channel: STR, rationale: STR }), paid: strList({ channel: STR, rationale: STR }) },
+      },
+    },
+    risks: { kind: 'authored', schema: strList({ risk: STR, mitigation: STR }) },
+    measures: { kind: 'authored', schema: strList({ metric: STR, target: STR, window: STR, kill_criterion: STR }) },
+    dependencies: { kind: 'authored', schema: { type: 'array', items: STR } },
+    motions: {
+      kind: 'authored',
+      schema: {
+        type: 'array', minItems: 2, maxItems: 4,
+        items: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            motion_id: STR, title: STR, objective: STR, reason: STR, expected_outcome: STR,
+            playbook_id: STR, playbook_version: { type: 'integer' }, supported_action: STR,
+            effect_class: { type: 'string', enum: ['internal', 'external'] },
+            required_capabilities: { type: 'array', items: STR }, evidence_refs: { type: 'array', minItems: 1, items: STR },
+            success_measure: STR, dependencies: { type: 'array', items: STR }, priority: { type: 'integer' },
+          },
+          required: ['motion_id', 'title', 'objective', 'reason', 'expected_outcome', 'playbook_id', 'playbook_version',
+            'supported_action', 'effect_class', 'required_capabilities', 'evidence_refs', 'success_measure', 'dependencies', 'priority'],
+        },
+      },
+    },
+  },
   marketing_evidence_ledger: {
     market_evidence: { kind: 'evidence_bound', schema: strList({ claim: STR, evidence_ref: STR, confidence: STR }) },
     buyer_evidence: { kind: 'evidence_bound', schema: strList({ claim: STR, evidence_ref: STR, confidence: STR }) },

@@ -22,6 +22,8 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
       const config = asObject(input.config);
       const portfolio = asArray(input.inputs?.[`artifacts.${String(config.input_key || 'first_life_motion_portfolio')}`]).at(-1);
       const strategy = asArray(input.inputs?.[`artifacts.${String(config.strategy_key || 'marketing_strategy')}`]).at(-1);
+      const policyVersion = Number.isInteger(Number(config.first_life_policy_version))
+        ? Number(config.first_life_policy_version) : 5;
       if (!portfolio?.id) throw new Error('runtime_task_materializer_portfolio_required');
       const motions = asArray(portfolio.data?.motions).slice(0, 4);
       if (motions.length < 2) throw new Error('runtime_task_materializer_minimum_motions_required');
@@ -110,7 +112,7 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
                 runtime_epoch: epoch,
                 proposal_origin: 'strategy_program',
                 first_life_policy_id: 'runtime.first-life-policy',
-                first_life_policy_version: 5,
+                first_life_policy_version: policyVersion,
                 activation_sprint_id: `strategy-program:${context.runId}`,
                 recommendation_rank: index + 1,
                 recommended: index === 0,

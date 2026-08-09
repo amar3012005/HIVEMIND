@@ -485,10 +485,10 @@ export class NativeHqEngine {
     }
 
     const activationSprint = await projectCurrentActivationSprint({ prisma, orgId: runtime.orgId });
-    // A completed lifecycle can materialize a new first-life program. Its result
-    // cycle must reconcile the owning todo before the new program is allowed to
-    // pause for Start; otherwise the parent remains falsely RUNNING forever.
-    if (activationSprint?.status === 'AWAITING_START' && trigger.type !== 'runtime_playbook_result') {
+    // A current-policy internal bootstrap starts without a synthetic Start gate.
+    // Historical policies still retain their recorded AWAITING_START behavior.
+    if (['AWAITING_START', 'READY'].includes(activationSprint?.status)
+      && trigger.type !== 'runtime_playbook_result') {
       const recommended = activationSprint.items?.find((item) => item.todo_id === activationSprint.recommended_todo_id)
         || activationSprint.items?.[0];
       const recommendedTodo = recommended?.todo_id ? await prisma.hqTodo.findFirst({
@@ -527,7 +527,7 @@ export class NativeHqEngine {
           });
         }
       }
-      if (!internalBootstrap) {
+      if (!internalBootstrap && activationSprint.status === 'AWAITING_START') {
       const alreadyRequested = await prisma.hqRuntimeEvent.findFirst({
         where: {
           runtimeId: runtime.id,
@@ -1109,9 +1109,13 @@ export class NativeHqEngine {
         return { transition: 'WAIT_FOR_PLANNING_EVIDENCE', reason: 'planning_evidence' };
       }
       const acknowledged = summarizeGrowthPlanResult(result);
+      const requiresInitialStart = firstLifePolicy.require_initial_start_decision === true
+        || firstLifePolicy.require_initial_policy_choice === true;
       await event(prisma, runtime, cycle, {
         eventType: 'tool_result', title: 'I read and committed the Growth Operating Plan',
-        summary: `${acknowledged.summary} The persisted proposals are now the source of truth. I will not delegate them until you start the recommendation.`,
+        summary: `${acknowledged.summary} The persisted proposals are now the source of truth. ${requiresInitialStart
+          ? 'I will not delegate them until you start the recommendation.'
+          : 'After the optional administrator check-in, I will automatically run the recommended evidence-only lifecycle; external effects remain governed at their exact gates.'}`,
         toolRef: 'growth_plan_run', evidenceRefs: [result.artifact_id],
         details: { toolkit: growthToolkit.id, model: result.model, usage: result.usage || {}, ...acknowledged.details },
       });
@@ -1123,7 +1127,9 @@ export class NativeHqEngine {
       });
       await event(prisma, runtime, cycle, {
         eventType: 'todo_created', title: 'I committed the first operating proposals',
-        summary: `${(result.plan?.operating_queue || []).map((item, index) => `${index + 1}. ${item.title}`).join('; ')}. These remain proposed until you start the recommendation.`,
+        summary: `${(result.plan?.operating_queue || []).map((item, index) => `${index + 1}. ${item.title}`).join('; ')}. ${requiresInitialStart
+          ? 'These remain proposed until you start the recommendation.'
+          : 'These remain proposed while the recommended internal lifecycle starts automatically and prepares the coordinated program.'}`,
         details: { todo_ids: result.committed?.todo_ids || [], operating_queue: result.plan?.operating_queue || [] }, evidenceRefs: [result.artifact_id],
       });
       initialPolicyCommitted = true;
@@ -1209,7 +1215,9 @@ export class NativeHqEngine {
     const sleepReason = adminCheckinScheduled
       ? 'The initial diagnosis is retained. I am opening the optional administrator check-in next so corrections can shape the strategy program before specialist work begins.'
       : initialPolicyCommitted
-      ? 'I have retained the evidenced proposals without dispatching them. Start the recommendation when you are ready, or review it later. External authority remains undecided until a real immutable action reaches its gate.'
+      ? (firstLifePolicy.require_initial_start_decision === true || firstLifePolicy.require_initial_policy_choice === true
+        ? 'I have retained the evidenced proposals without dispatching them. Start the recommendation when you are ready, or review it later. External authority remains undecided until a real immutable action reaches its gate.'
+        : 'I retained the evidenced proposals and scheduled the recommended internal lifecycle. It will prepare the strategy program without granting any external effect.')
       : queueContinuationScheduled
       ? 'The next independent todo is already scheduled for immediate dispatch. I am retaining every in-flight assignment and will reconcile each result when it returns.'
       : openCapability
@@ -1224,7 +1232,9 @@ export class NativeHqEngine {
         ? `I am sleeping because the active stage now needs ${waitingDays} day(s) of measured observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} or earlier for material evidence.`
       : 'No executable or in-flight work remains. I will wake for a new instruction, connector event, or durable result.';
     if (dueAt) await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next measurement checkpoint', summary: `The next evidence review is ${dueAt.toISOString()} because the active Growth Stage declares that checkpoint.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
-    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null, blockedReason: adminCheckinScheduled ? null : initialPolicyCommitted ? 'initial_start_decision' : null });
+    const initialStartRequired = initialPolicyCommitted
+      && (firstLifePolicy.require_initial_start_decision === true || firstLifePolicy.require_initial_policy_choice === true);
+    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null, blockedReason: initialStartRequired ? 'initial_start_decision' : null });
     const waitingTitle = adminCheckinScheduled ? 'The initial diagnosis is ready'
       : initialPolicyCommitted ? 'The first operating plan is ready'
       : queueContinuationScheduled ? 'The queue is still moving'

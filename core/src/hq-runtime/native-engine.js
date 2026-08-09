@@ -720,6 +720,8 @@ export class NativeHqEngine {
             details: { run_id: run.id, gate: authority.gate, policy_key: authority.policyKey },
           });
         }
+        await move('WAITING', { nextWakeAt: null, currentCycleId: null, blockedReason: null });
+        return { transition: 'WAIT', reason: 'runtime_playbook_waiting_authority', run_id: run.id };
       } else if (run.status === 'WAITING_EVENT') {
         const waitingForCapability = (run.waitingFor?.types || []).includes('capability.connected');
         const waitingCapability = waitingForCapability ? String(run.waitingFor?.capability || '').trim().toLowerCase() : '';
@@ -771,6 +773,14 @@ export class NativeHqEngine {
           details: { run_id: run.id, waiting_for: run.waitingFor || {}, artifact_refs: artifactRefs },
           evidenceRefs: artifactRefs,
         });
+        if (waitingForCapability || run.waitingFor?.releases_execution_slot !== true) {
+          await move('WAITING', { nextWakeAt: null, currentCycleId: null, blockedReason: null });
+          return {
+            transition: 'WAIT',
+            reason: waitingForCapability ? 'runtime_playbook_waiting_capability' : 'runtime_playbook_waiting_event',
+            run_id: run.id,
+          };
+        }
         if (!waitingForCapability && run.waitingFor?.releases_execution_slot === true) {
           const activation = await activateEligibleFirstLifeWork({
             prisma, runtime, expansionTrigger: 'verified_monitoring_checkpoint',

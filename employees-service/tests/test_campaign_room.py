@@ -20,6 +20,17 @@ def test_campaign_task_tag_routes_to_dedicated_room_kind():
     assert resolve_room_kind("CAMPAIGN", "", "write some posts") == "campaign"
 
 
+def test_campaign_compiler_accepts_wrapped_or_direct_semantic_plan():
+    direct = {
+        "strategy": "Build familiarity through an evidence-led sequence.",
+        "actions": [{"id": "x-1", "channel": "x_organic", "final_copy": "Meet the product."}],
+    }
+
+    assert Director._campaign_semantic_plan({"plan": direct}) == direct
+    assert Director._campaign_semantic_plan(direct) == direct
+    assert Director._campaign_semantic_plan({"report_markdown": "legacy prose"}) == {}
+
+
 def test_campaign_bundle_cannot_pass_as_generic_report():
     channels = ["gmail", "tara"]
     requirements = ["goal", "channel:gmail", "channel:tara"]

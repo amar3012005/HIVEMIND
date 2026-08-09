@@ -215,6 +215,16 @@ async function ensureSchema() {
       deleted_at timestamptz
     );
     CREATE INDEX IF NOT EXISTS kbdoc_org_idx ON knowledge_documents(org_id) WHERE deleted_at IS NULL;
+    -- ingest_mode (evidence-only upload). knowledgeDocument is in ROUTED_MODELS, so for an
+    -- .amr / BYOD tenant prisma.knowledgeDocument resolves HERE, not against the central
+    -- schema -- and the Prisma migration that adds this column is unqualified, so it only ever
+    -- touches central. Without this the background promotion queries
+    -- (document.ingestMode != evidence) reference a column that does not exist
+    -- for exactly the tenants whose memories live in their own file.
+    -- Added here rather than as a second migration because this schema is created and evolved
+    -- by ensureSchema, which is idempotent and self-healing across every org and restart.
+    ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS ingest_mode varchar(16) NOT NULL DEFAULT 'both';
+    CREATE INDEX IF NOT EXISTS kbdoc_org_mode_idx ON knowledge_documents(org_id, ingest_mode);
     CREATE TABLE IF NOT EXISTS knowledge_segments (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
@@ -1318,12 +1328,20 @@ function routesFor(ctx) {
       const d = b.doc || {};
       if (!d.id) return { ok: false, error: 'doc.id required' };
       await db().query(
-        `INSERT INTO knowledge_documents (id, org_id, user_id, filename, content_type, status, checksum, metadata, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,coalesce($9::timestamptz,now()))
+        // ingest_mode is written to the COLUMN, not just metadata. The caller carries it in
+        // metadata.ingest_mode, but Prisma's `document: { ingestMode: ... }` filter -- which the
+        // background promotion queries use to skip evidence-only documents -- reads the column.
+        // Leaving it at its 'both' default would make an .amr tenant's evidence-only upload
+        // eligible for exactly the promotion the user opted out of.
+        `INSERT INTO knowledge_documents (id, org_id, user_id, filename, content_type, status, checksum, metadata, created_at, ingest_mode)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,coalesce($9::timestamptz,now()),coalesce($10,'both'))
          ON CONFLICT (id) DO UPDATE SET filename=EXCLUDED.filename, content_type=EXCLUDED.content_type,
-           status=EXCLUDED.status, checksum=EXCLUDED.checksum, metadata=EXCLUDED.metadata, deleted_at=NULL`,
+           status=EXCLUDED.status, checksum=EXCLUDED.checksum, metadata=EXCLUDED.metadata,
+           ingest_mode=EXCLUDED.ingest_mode, deleted_at=NULL`,
         [d.id, org, d.userId || null, d.filename || null, d.contentType || null, d.status || 'ready',
-         d.checksum || null, JSON.stringify({ ...(d.metadata || {}), title: d.title || d.filename || null, tags: d.tags || d.metadata?.tags || [] }), d.createdAt || null]);
+         d.checksum || null, JSON.stringify({ ...(d.metadata || {}), title: d.title || d.filename || null, tags: d.tags || d.metadata?.tags || [] }), d.createdAt || null,
+         // accept either the explicit field or the metadata the ingest pipeline already carries
+         (d.ingestMode || d.metadata?.ingest_mode) === 'evidence' ? 'evidence' : 'both']);
 
       // ── Document record into the shard (layer 'document') ────────────────────────────────
       // The one thing standing between a slot and serving evidence WITHOUT Postgres is the

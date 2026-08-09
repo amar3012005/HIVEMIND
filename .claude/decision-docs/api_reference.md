@@ -340,10 +340,12 @@ skip central-graph-only features rather than calling them and handling `501`.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "endpoint": "/api/knowledge/upload",
   "asynchronous": true,
   "scopes": ["personal", "project", "team", "organization"],
+  "ingest_modes": ["both", "evidence"],
+  "default_ingest_mode": "both",
   "kinds": {
     "document": { "minBytes": 32, "maxBytes": 52428800,
       "extensions": ["pdf","docx","doc","xlsx","xls","pptx","ppt","txt","md","markdown","csv","tsv","html","htm"] },
@@ -367,6 +369,7 @@ skip central-graph-only features rather than calling them and handling `501`.
 | `projectId` | Required when `targetScope=project`. |
 | `primaryTeamId` | For team scope. |
 | `tags` | Extra tags. |
+| `ingestMode` | `both` (default) preserves full memories + entities + relationships; `evidence` stores hybrid lexical + semantic evidence and skips memory promotion. Images support `both` only. |
 | `force` | Bypass dedup. |
 
 **Response `202` (async) — verified live**
@@ -379,6 +382,9 @@ skip central-graph-only features rather than calling them and handling `501`.
   "document_id": null,
   "memory_ids": [],
   "storage_mode": "amr_embedded",
+  "ingest_mode": "both",
+  "evidence_only": false,
+  "evidence_only_reason": null,
   "counts": { "pages": null, "segments": null, "candidates": null, "memories": null },
   "error": null,
   "created_at": "2026-08-04T14:02:26.383Z",

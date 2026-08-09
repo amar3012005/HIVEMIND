@@ -20,6 +20,10 @@ function context(overrides = {}) {
   };
 }
 
+function multipartWith(fields = {}) {
+  return Object.entries(fields).map(([name, value]) => ({ name, value }));
+}
+
 test('canonical upload returns a normalized durable 202', async () => {
   const result = await handleKnowledgeUploadRoute(context());
   assert.equal(result.statusCode, 202);
@@ -39,4 +43,53 @@ test('canonical upload does not reveal rejected scope details', async () => {
   } }));
   assert.equal(result.statusCode, 404);
   assert.deepEqual(result.body, { error: 'scope_not_found' });
+});
+
+test('canonical upload defaults missing ingestMode to both', async () => {
+  let admitted;
+  const ctx = context({ knowledgeUploadService: {
+    admit: async (input) => {
+      admitted = input;
+      return { ok: true, job: {
+        id: '33333333-3333-4333-8333-333333333333', status: 'queued', stage: 'queued', progress: 0,
+        ingestMode: input.metadata.ingest_mode, storageMode: 'hybrid', memoryIds: [],
+        createdAt: new Date(), updatedAt: new Date(),
+      } };
+    },
+  } });
+  await handleKnowledgeUploadRoute(ctx);
+  assert.equal(admitted.metadata.ingest_mode, 'both');
+});
+
+test('canonical upload accepts evidence and rejects unknown ingest modes', async () => {
+  let admitted;
+  const service = { admit: async (input) => {
+    admitted = input;
+    return { ok: true, job: {
+      id: '33333333-3333-4333-8333-333333333333', status: 'queued', stage: 'queued', progress: 0,
+      ingestMode: input.metadata.ingest_mode, storageMode: 'hybrid', memoryIds: [],
+      createdAt: new Date(), updatedAt: new Date(),
+    } };
+  } };
+  const evidence = context({
+    parseMultipart: () => [
+      { name: 'file', filename: 'report.pdf', contentType: 'application/pdf', data: Buffer.from('valid pdf payload with enough content') },
+      ...multipartWith({ ingestMode: 'evidence' }),
+    ],
+    knowledgeUploadService: service,
+  });
+  const accepted = await handleKnowledgeUploadRoute(evidence);
+  assert.equal(accepted.statusCode, 202);
+  assert.equal(admitted.metadata.ingest_mode, 'evidence');
+
+  const invalid = context({
+    parseMultipart: () => [
+      { name: 'file', filename: 'report.pdf', contentType: 'application/pdf', data: Buffer.from('valid pdf payload with enough content') },
+      ...multipartWith({ ingestMode: 'vector-only' }),
+    ],
+    knowledgeUploadService: service,
+  });
+  const rejected = await handleKnowledgeUploadRoute(invalid);
+  assert.equal(rejected.statusCode, 400);
+  assert.equal(rejected.body.error, 'invalid_ingest_mode');
 });

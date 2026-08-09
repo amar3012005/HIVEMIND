@@ -18,6 +18,13 @@ export class KnowledgeUploadService {
       filename, contentType: file.contentType, bytes: file.data?.length, buffer: file.data,
     });
     if (!validation.ok) return { ok: false, ...uploadError(validation.code, { limits: validation.limits }) };
+    const ingestMode = metadata?.ingest_mode === 'evidence' ? 'evidence' : 'both';
+    if (validation.kind === 'image' && ingestMode === 'evidence') {
+      return { ok: false, status: 400, body: {
+        error: 'evidence_mode_unsupported_for_image',
+        message: 'Images use the vision-to-memory pipeline and currently support ingestMode=both only.',
+      } };
+    }
 
     const scope = await authorizeKnowledgeScope({
       prisma: this.prisma, userId, orgId, targetScope, projectIds, primaryTeamId,
@@ -120,7 +127,7 @@ export class KnowledgeUploadService {
         orgId, userId, scopeType: scope.scopeType, scopeId: scope.scopeId,
         scopeKey: scope.scopeKey, storageMode, filename,
         contentType: file.contentType || 'application/octet-stream', mediaKind: validation.kind,
-        checksum, status: 'queued', stage: 'queued', progress: 0, processingVersion,
+        checksum, ingestMode, status: 'queued', stage: 'queued', progress: 0, processingVersion,
         metadata: { ...metadata, project_ids: projectIds, primary_team_id: primaryTeamId },
       });
     }

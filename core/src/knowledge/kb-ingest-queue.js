@@ -497,7 +497,7 @@ export class KbIngestQueue {
             userId, orgId,
             source: { type: 'kb', filename },
             file: { buffer: fileBuffer, contentType: contentType || 'application/octet-stream', filename },
-            metadata: metadata || {}, onProgress,
+            metadata: metadata || {}, ingestMode: metadata?.ingest_mode || 'both', onProgress,
           });
       // Hard timeout: poison-pill guard. The pipeline is idempotent (checksum
       // upserts + segment reuse), so an abandoned attempt is safe to retry.
@@ -544,6 +544,9 @@ export class KbIngestQueue {
         return { documentId: result?.documentId || null, segmentCount: _segs, promotedCount: 0, error: reason };
       }
       const _evidenceOnly = _promoted === 0 && _segs > 0;
+      const _evidenceOnlyReason = result?.evidenceOnlyReason
+        || (_evidenceOnly ? (metadata?.ingest_mode === 'evidence' ? 'user_selected' : 'extraction_yield_zero') : null);
+      if (_evidenceOnlyReason && !result.evidenceOnlyReason) result.evidenceOnlyReason = _evidenceOnlyReason;
       try {
         const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
         this.tracker?.updateJob(trackerJobId, {
@@ -553,7 +556,12 @@ export class KbIngestQueue {
       } catch { /* noop */ }
       if (this.jobStore) await this.jobStore.complete(trackerJobId, orgId, userId, result);
       else { try { this.recordUsage?.(orgId, result); } catch { /* legacy accounting */ } }
-      this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, evidenceOnly: _evidenceOnly, coverage: result.coverage || null, filename });
+      this._setStatus(trackerJobId, {
+        status: 'indexed', progress: 100, document_id: result.documentId,
+        segmentCount: result.segmentCount, promotedCount: result.promotedCount,
+        ingestMode: metadata?.ingest_mode || 'both', evidenceOnly: _evidenceOnly,
+        evidenceOnlyReason: _evidenceOnlyReason, coverage: result.coverage || null, filename,
+      });
       this._counters.processed++;
       // P3 no-silent-partial: if any evidence segment did NOT embed even after the
       // ingest-time heal, say so LOUD. The doc still indexes (evidence-only stays a

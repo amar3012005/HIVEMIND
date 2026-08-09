@@ -166,7 +166,9 @@ export class KnowledgeUploadJobStore {
         status: 'ready', stage: 'ready', progress: 100, documentId: result.documentId || null,
         memoryIds: result.promotedMemoryIds || [], pageCount: Math.max(1, Number(result.pages) || 1),
         segmentCount: Number(result.segmentCount) || 0, candidateCount: Number(result.candidateCount) || 0,
-        promotedCount: Number(result.promotedCount) || 0, completedAt: new Date(), errorCode: null, errorMessage: null,
+        promotedCount: Number(result.promotedCount) || 0,
+        evidenceOnlyReason: result.evidenceOnlyReason || null,
+        completedAt: new Date(), errorCode: null, errorMessage: null,
       },
     });
     if (!updated.count) {
@@ -199,9 +201,12 @@ export class KnowledgeUploadJobStore {
   static response(job) {
     if (!job) return null;
     const ready = job.status === 'ready';
+    const evidenceOnly = ready && Number(job.segmentCount || 0) > 0 && Number(job.promotedCount || 0) === 0;
     return {
       job_id: job.id, status: job.status, stage: ready ? 'ready' : job.stage, progress: ready ? 100 : job.progress,
       document_id: job.documentId, memory_ids: job.memoryIds || [], storage_mode: job.storageMode,
+      ingest_mode: job.ingestMode || 'both', evidence_only: evidenceOnly,
+      evidence_only_reason: evidenceOnly ? (job.evidenceOnlyReason || 'extraction_yield_zero') : null,
       counts: { pages: job.pageCount, segments: job.segmentCount, candidates: job.candidateCount, memories: job.promotedCount },
       error: job.errorCode ? { code: job.errorCode, message: job.errorMessage } : null,
       created_at: job.createdAt, updated_at: job.updatedAt, completed_at: job.completedAt,

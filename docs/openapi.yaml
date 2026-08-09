@@ -361,8 +361,13 @@ paths:
                 tags: { type: string, description: 'Comma-separated tags' }
                 targetScope:
                   type: string
-                  enum: [personal, organization]
+                  enum: [personal, project, team, organization]
                   default: personal
+                ingestMode:
+                  type: string
+                  enum: [both, evidence]
+                  default: both
+                  description: 'both runs the full memory pipeline; evidence indexes lexical and semantic evidence without memory promotion. Images support both only.'
                 containerTag: { type: string, description: 'Project slug for organization scope' }
       responses:
         '200':

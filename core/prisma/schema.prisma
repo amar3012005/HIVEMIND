@@ -1701,6 +1701,7 @@ model KnowledgeDocument {
   // which ingestion pipeline produced this row — makes selective re-ingestion possible.
   // NOT processing_version, which is a retry counter on the job.
   pipelineVersion    Int                  @default(1) @map("pipeline_version")
+  ingestMode         String               @default("both") @map("ingest_mode") @db.VarChar(16)
   userId             String               @map("user_id") @db.Uuid
   orgId              String               @map("org_id") @db.Uuid
   sourceArtifactId   String?              @map("source_artifact_id") @db.Uuid
@@ -1753,6 +1754,7 @@ model KnowledgeDocument {
   @@index([parentDocumentId])
   @@index([documentDate(sort: Desc)])
   @@index([parseStatus])
+  @@index([orgId, ingestMode])
   @@index([tags], type: Gin)
   @@index([createdAt(sort: Desc)])
   // V5: idempotent source-version lookup. Unique per org so a re-ingest of the
@@ -1864,6 +1866,8 @@ model KnowledgeIngestJob {
   filename          String    @db.VarChar(500)
   contentType       String?   @map("content_type") @db.VarChar(160)
   mediaKind         String    @map("media_kind") @db.VarChar(24)
+  ingestMode        String    @default("both") @map("ingest_mode") @db.VarChar(16)
+  evidenceOnlyReason String?  @map("evidence_only_reason") @db.VarChar(32)
   checksum          String    @db.VarChar(64)
   status            String    @default("queued") @db.VarChar(32)
   stage             String    @default("accepted") @db.VarChar(48)
@@ -1888,6 +1892,7 @@ model KnowledgeIngestJob {
   @@index([orgId, userId, createdAt(sort: Desc)])
   @@index([orgId, status, updatedAt])
   @@index([orgId, scopeKey, checksum])
+  @@index([orgId, ingestMode, status])
   @@index([queueJobId])
   @@map("knowledge_ingest_jobs")
 }

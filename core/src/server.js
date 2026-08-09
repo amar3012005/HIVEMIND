@@ -740,7 +740,7 @@ if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma && shouldRunRe
     try {
       // Find segments without any linked memory_evidence_link — re-evaluate them
       const orphans = await prisma.knowledgeSegment.findMany({
-        where: { memoryLinks: { none: {} } },
+        where: { memoryLinks: { none: {} }, document: { ingestMode: { not: 'evidence' } } },
         select: { id: true, documentId: true, userId: true, orgId: true, content: true },
         take: PROMOTION_BATCH,
         orderBy: { createdAt: 'desc' },
@@ -2218,7 +2218,8 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
           if (metadata.media_kind !== 'image') {
             return documentFirstIngestion.ingestSource({
               userId, orgId, source: { type: 'kb', filename },
-              file: { buffer: fileBuffer, contentType, filename }, metadata, onProgress,
+              file: { buffer: fileBuffer, contentType, filename }, metadata,
+              ingestMode: metadata?.ingest_mode || 'both', onProgress,
             });
           }
           onProgress({ stage: 'extracting', progress: 25 });
@@ -12597,12 +12598,18 @@ exit \$RC
                 const document = await prisma.knowledgeDocument.findFirst({
                   where: { id: documentId, orgId },
                   select: {
-                    id: true, userId: true, title: true, documentType: true, sourcePlatform: true,
+                    id: true, userId: true, ingestMode: true, title: true, documentType: true, sourcePlatform: true,
                     sourceId: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
                     segments: { orderBy: { segmentIndex: 'asc' }, select: { id: true, content: true, segmentIndex: true } },
                   },
                 });
                 if (!document) return jsonResponse(res, { error: 'Document not found' }, 404);
+                if (document.ingestMode === 'evidence') {
+                  return jsonResponse(res, {
+                    error: 'intentional_evidence_only',
+                    message: 'This document was intentionally uploaded as evidence only and cannot be promoted by repair.',
+                  }, 409);
+                }
                 const unpromoted = document.segments.filter((segment) => segment.content?.trim());
                 const result = await documentFirstIngestion._promoteMemories({
                   documentId: document.id,
@@ -12626,7 +12633,10 @@ exit \$RC
               const since = body.since ? new Date(body.since) : new Date(Date.now() - 30 * 86400000);
               const limit = Math.min(Number(body.limit || 100), 500);
               const segments = await prisma.knowledgeSegment.findMany({
-                where: { orgId, createdAt: { gte: since }, memoryLinks: { none: {} } },
+                where: {
+                  orgId, createdAt: { gte: since }, memoryLinks: { none: {} },
+                  document: { ingestMode: { not: 'evidence' } },
+                },
                 take: limit,
                 orderBy: { createdAt: 'asc' },
               });

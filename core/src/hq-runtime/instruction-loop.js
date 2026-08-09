@@ -222,7 +222,8 @@ export function resolveInstructionExecutionMode({ semantic = {}, persisted = {} 
   return semantic?.execution_mode === 'operating_plan' ? 'operating_plan' : 'single_outcome';
 }
 
-export async function ingestPendingInstructions({ prisma, runtime, company, deferTodos = false }) {
+export async function ingestPendingInstructions({ prisma, runtime, company, deferTodos = false, onProgress = null,
+  interpretInstruction = interpretHqInstructionSemantic }) {
   const [pending, roomRows] = await Promise.all([
     prisma.hqInstruction.findMany({
       where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'PENDING' }, orderBy: { createdAt: 'asc' }, take: 20,
@@ -234,7 +235,12 @@ export async function ingestPendingInstructions({ prisma, runtime, company, defe
   const availableRooms = [...new Set(roomRows.map((room) => room.roomTag).filter(Boolean))];
   const created = [];
   for (const instruction of pending) {
-    const semantic = await interpretHqInstructionSemantic(instruction.body, company, availableRooms);
+    if (onProgress) await onProgress({
+      stage: 'interpreting',
+      instructionId: instruction.id,
+      createdAt: instruction.createdAt,
+    });
+    const semantic = await interpretInstruction(instruction.body, company, availableRooms);
     const persisted = instruction.interpreted && typeof instruction.interpreted === 'object' ? instruction.interpreted : {};
     const executionMode = resolveInstructionExecutionMode({ semantic, persisted });
     const interpreted = {

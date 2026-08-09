@@ -81,6 +81,10 @@ export function adminCheckinDisposition(status) {
   return 'wait';
 }
 
+export function shouldOfferFirstLifeAdminCheckin({ initialPlanAbsent, optionalAdminCheckin, runtimePlaybooksAvailable }) {
+  return initialPlanAbsent === true && optionalAdminCheckin === true && runtimePlaybooksAvailable === true;
+}
+
 export function specialistWorkObjective(todo, skillId) {
   return String(todo?.objective || todo?.title || '').trim();
 }
@@ -225,6 +229,21 @@ export class NativeHqEngine {
     const buildingInitialPlan = !context.evidence.latest_growth_plan;
     const appliedInstructions = await ingestPendingInstructions({
       prisma, runtime, company: context.company, deferTodos: buildingInitialPlan,
+      onProgress: async ({ instructionId }) => {
+        const alreadyShown = await prisma.hqRuntimeEvent.findFirst({
+          where: {
+            runtimeId: runtime.id,
+            eventType: 'observation',
+            details: { path: ['interpreting_instruction_id'], equals: instructionId },
+          },
+        }).catch(() => null);
+        if (!alreadyShown) await event(prisma, runtime, cycle, {
+          eventType: 'observation',
+          title: 'I am reading the operating requirement',
+          summary: 'I am preserving the requested outcome, boundaries, and execution mode before I add anything to the operating plan.',
+          details: { interpreting_instruction_id: instructionId },
+        });
+      },
     });
     if (!appliedInstructions.length && !firstAwakening && narrateRoutine) await event(prisma, runtime, cycle, {
       eventType: 'instruction_checked', title: 'I checked for new operating instructions',
@@ -411,12 +430,15 @@ export class NativeHqEngine {
       });
     }
 
-    // First-life check-in follows the initial evidence-backed diagnosis. This gives
-    // the administrator a concrete plan to correct while still letting their
-    // current-status artifact shape the downstream strategy lifecycle.
+    // First-life check-in follows the baseline and precedes diagnosis. Growth and
+    // specialist work must not run ahead of the administrator's Talk/Skip decision.
     const firstLifePolicy = await loadFirstLifePolicy();
     const initialPlanAbsent = !context.evidence.latest_growth_plan;
-    if (!initialPlanAbsent && firstLifePolicy.optional_admin_checkin === true && this.runtimePlaybooks) {
+    if (shouldOfferFirstLifeAdminCheckin({
+      initialPlanAbsent,
+      optionalAdminCheckin: firstLifePolicy.optional_admin_checkin,
+      runtimePlaybooksAvailable: Boolean(this.runtimePlaybooks),
+    })) {
       const adminRuns = await prisma.runtimePlaybookRun.findMany({
         where: { orgId: runtime.orgId },
         orderBy: { updatedAt: 'desc' },

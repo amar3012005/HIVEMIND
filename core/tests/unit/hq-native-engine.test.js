@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -24,6 +24,15 @@ test('optional first-life check-in never freezes the company: unverified/termina
   // Defensive: unknown/absent status must never block; wait rather than freeze.
   assert.equal(adminCheckinDisposition(null), 'wait');
   assert.equal(adminCheckinDisposition('nEeDs_InTeRvEnTiOn'), 'proceed_unverified');
+});
+
+test('first-life admin check-in gates diagnosis only while the initial plan is absent', () => {
+  assert.equal(shouldOfferFirstLifeAdminCheckin({
+    initialPlanAbsent: true, optionalAdminCheckin: true, runtimePlaybooksAvailable: true,
+  }), true);
+  assert.equal(shouldOfferFirstLifeAdminCheckin({
+    initialPlanAbsent: false, optionalAdminCheckin: true, runtimePlaybooksAvailable: true,
+  }), false);
 });
 
 test('HQ work-result reconciliation never reads a missing work order or result', () => {

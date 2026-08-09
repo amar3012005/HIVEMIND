@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { canonicalInstructionKind, getPlatformManagedCapabilities, interpretHqInstruction, normalizeInstructionWorkUnits, normalizePrepareCapabilities, resolveInstructionExecutionMode, shouldDeferInstruction } from '../../src/hq-runtime/instruction-loop.js';
+import { canonicalInstructionKind, getPlatformManagedCapabilities, ingestPendingInstructions, interpretHqInstruction, normalizeInstructionWorkUnits, normalizePrepareCapabilities, resolveInstructionExecutionMode, shouldDeferInstruction } from '../../src/hq-runtime/instruction-loop.js';
 
 test('instruction ingestion contains no keyword router or domain lifecycle decomposition', async () => {
   const source = await readFile(new URL('../../src/hq-runtime/instruction-loop.js', import.meta.url), 'utf8');
@@ -32,6 +32,30 @@ test('offline instruction fallback preserves explicit provider targets without s
     { type: 'url', value: 'https://example.test/brief' },
   ]);
   assert.deepEqual(result.work_units[0].exact_targets, result.exact_targets);
+});
+
+test('instruction ingestion reports durable progress before semantic interpretation begins', async () => {
+  const order = [];
+  const instruction = { id: 'instruction-1', body: 'Run the company', interpreted: {}, createdAt: new Date() };
+  const prisma = {
+    hqInstruction: {
+      findMany: async () => [instruction],
+      update: async () => ({ ...instruction, status: 'APPLIED' }),
+    },
+    hyperRoom: { findMany: async () => [{ roomTag: 'general' }] },
+  };
+  await ingestPendingInstructions({
+    prisma,
+    runtime: { id: 'runtime-1', orgId: 'org-1' },
+    company: {},
+    deferTodos: true,
+    onProgress: async () => { order.push('progress'); },
+    interpretInstruction: async () => {
+      order.push('interpret');
+      return { execution_mode: 'operating_plan', work_units: [] };
+    },
+  });
+  assert.deepEqual(order, ['progress', 'interpret']);
 });
 
 test('offline instruction fallback adds only retained company location', () => {

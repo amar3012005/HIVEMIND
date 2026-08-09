@@ -26,6 +26,7 @@ const TRUSTED_INTERNAL_ARGUMENTS = new Set([
   '_explicit_mode',
   '_structured_intent',
   '_include_full_memory_content',
+  '_event_range',
   '_source_id',
   '_original_content',
   'semantic_recovery',

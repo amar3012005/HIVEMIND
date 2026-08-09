@@ -60,12 +60,14 @@ test('toolkit accepts only allowlisted server-owned recall controls', async () =
     _structured_intent: true,
     _explicit_mode: false,
     _include_full_memory_content: true,
+    _event_range: true,
     semantic_recovery: true,
     allow_semantic_source_recovery: true,
   }, {}, { trustedInternalArgs: true });
   assert.equal(ok.status, 'ok');
   assert.equal(received._structured_intent, true);
   assert.equal(received._include_full_memory_content, true);
+  assert.equal(received._event_range, true);
   assert.equal(received.semantic_recovery, true);
 
   const denied = await toolkit.execute('recall_read', { query: 'SolvisPia', _unsafe_internal: true });

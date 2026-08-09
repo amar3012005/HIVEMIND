@@ -826,8 +826,6 @@ const TOOL_HANDLERS = {
         ? args.query_canonical_en
         : null,
       named_entities: args.entities || [],
-      // V5 D5: planner-signalled memory type (language-neutral) → type-aware recall.
-      boost_memory_type: (typeof args.answer_type === 'string' && args.answer_type.trim()) ? args.answer_type.trim().toLowerCase() : null,
       include_full_memory_content: args._include_full_memory_content === true,
       allow_semantic_source_recovery: args.allow_semantic_source_recovery === true,
       semantic_recovery: args.semantic_recovery === true,

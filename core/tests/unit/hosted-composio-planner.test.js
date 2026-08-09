@@ -70,3 +70,50 @@ test('hosted planner gives the semantic router only tenant-active providers', as
   assert.equal(result.execution.writes_require_approval, true);
   assert.match(result.plan_id, /^hp_[a-f0-9]{24}$/);
 });
+
+test('hosted planner audits a one-step proposal and restores an omitted terminal action', async () => {
+  const parserInputs = [];
+  const result = await planHostedComposioWorkflow({
+    request: 'Recall company information, then put it into a new document.',
+    orgId: 'org-1',
+    apiKey: 'test-key',
+    composio: {
+      listConnectedAccounts: async () => [{ toolkit: 'googledocs', status: 'ACTIVE' }],
+    },
+    parseIntent: async (input) => {
+      parserInputs.push(input);
+      if (parserInputs.length === 1) {
+        return {
+          decision: {
+            operation: 'compound',
+            subtasks: [{
+              operation: 'recall', authority: 'read', output_kind: 'knowledge',
+              tool_groups: ['hivemind-recall'], message: 'Recall company information',
+            }],
+          },
+          usage: { total_tokens: 10 },
+        };
+      }
+      return {
+        decision: {
+          operation: 'compound',
+          subtasks: [
+            {
+              operation: 'recall', authority: 'read', output_kind: 'knowledge',
+              tool_groups: ['hivemind-recall'], message: 'Recall company information',
+            },
+            {
+              operation: 'create_doc', authority: 'write', output_kind: 'document',
+              tool_groups: ['google-docs'], depends_on: [0], message: 'Create the requested document',
+            },
+          ],
+        },
+        usage: { total_tokens: 12 },
+      };
+    },
+  });
+  assert.equal(result.planner_attempts, 2);
+  assert.deepEqual(result.steps.map((step) => step.operation), ['recall', 'create_doc']);
+  assert.deepEqual(result.steps[1].depends_on, [0]);
+  assert.match(parserInputs[1].history.at(-1).content, /every requested retrieval and terminal action/i);
+});

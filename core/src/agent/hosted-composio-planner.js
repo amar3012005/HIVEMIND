@@ -117,13 +117,32 @@ export async function planHostedComposioWorkflow({
   const connectedProviders = connectedProvidersFromAccounts(accounts);
   let parsed = null;
   let steps = null;
+  let bestCandidate = null;
   let attempts = 0;
   let lastError = null;
   while (attempts < 2 && !steps) {
     attempts += 1;
+    const auditHistory = attempts === 1 || !bestCandidate
+      ? history
+      : [
+          ...(Array.isArray(history) ? history : []),
+          {
+            role: 'assistant',
+            content: `PROPOSED_WORKFLOW (audit only; nothing executed): ${JSON.stringify(bestCandidate.steps.map((step) => ({
+              operation: step.operation,
+              authority: step.authority,
+              tool_groups: step.tool_groups,
+              depends_on: step.depends_on,
+            })))}`,
+          },
+          {
+            role: 'user',
+            content: 'Audit the proposed workflow against my complete original request. Return a corrected compound plan containing every requested retrieval and terminal action exactly once, with explicit dependencies. Do not answer the request and do not omit a connected-app action.',
+          },
+        ];
     parsed = await parseIntent({
       message,
-      history,
+      history: auditHistory,
       language,
       apiKey,
       signal,
@@ -136,7 +155,19 @@ export async function planHostedComposioWorkflow({
       continue;
     }
     try {
-      steps = decisionToHostedPlan(parsed?.decision, { request: message, connectedProviders });
+      const candidateSteps = decisionToHostedPlan(parsed?.decision, { request: message, connectedProviders });
+      if (!bestCandidate || candidateSteps.length > bestCandidate.steps.length) {
+        bestCandidate = { steps: candidateSteps, parsed };
+      }
+      // A one-step plan can be valid, but it is also the exact structural
+      // signature of a dropped terminal action. Audit it once with the first
+      // proposal visible; choose the richer valid plan if the repair restores
+      // an omitted step. This is semantic and toolkit-general—no user-language
+      // or provider keyword matching.
+      if (candidateSteps.length > 1 || attempts >= 2) {
+        steps = bestCandidate.steps;
+        parsed = bestCandidate.parsed;
+      }
     } catch (error) {
       lastError = error;
     }

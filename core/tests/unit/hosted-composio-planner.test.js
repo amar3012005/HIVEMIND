@@ -31,6 +31,25 @@ test('hosted plan preserves a validated sequential dependency graph', () => {
   assert.deepEqual(steps.map((step) => step.authority), ['read', 'read', 'write']);
 });
 
+test('hosted plan resolves a connected-action recipient through its live provider, not memory recall', () => {
+  const steps = decisionToHostedPlan({
+    operation: 'compound',
+    subtasks: [
+      {
+        operation: 'resolve_recipient', authority: 'read', output_kind: 'recipient',
+        tool_groups: ['hivemind-recall'], message: 'Resolve the named recipient',
+      },
+      {
+        operation: 'send_message', authority: 'write', output_kind: 'message',
+        tool_groups: ['gmail'], depends_on: [0], message: 'Send to the resolved recipient',
+      },
+    ],
+  }, { request: 'Email the named person', connectedProviders: ['gmail'] });
+
+  assert.deepEqual(steps[0].tool_groups, ['gmail']);
+  assert.deepEqual(steps[1].depends_on, [0]);
+});
+
 test('hosted plan fails closed when the planner selects an unavailable connector', () => {
   assert.throws(() => decisionToHostedPlan({
     operation: 'compound',

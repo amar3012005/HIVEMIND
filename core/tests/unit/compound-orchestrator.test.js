@@ -82,6 +82,20 @@ test('email destination normalization rejects display names and uses one governe
     { recall: 'Company contact is unrelated@example.com' },
   );
   assert.deepEqual(notResolvedFromContent.invalidFields, ['recipient_email']);
+
+  const explicit = normalizeEmailDestinationArgs(
+    'message', schema, { recipient_email: 'amarsai2005@gmail.com' }, {},
+    'Send this to amarsai2005@gmail.com',
+  );
+  assert.deepEqual(explicit.invalidFields, []);
+  assert.equal(explicit.args.recipient_email, 'amarsai2005@gmail.com');
+
+  const invented = normalizeEmailDestinationArgs(
+    'message', schema, { recipient_email: 'different@example.com' }, {},
+    'Send this to amarsai2005@gmail.com',
+  );
+  assert.deepEqual(invented.invalidFields, []);
+  assert.equal(invented.args.recipient_email, 'amarsai2005@gmail.com');
 });
 
 function makeSelector(pick) {
@@ -353,6 +367,7 @@ test('content artifact keeps prior assistant context even if planner authority i
     conversationContext: 'DLLMs denoise many token positions in parallel and reduce warmed inference latency.',
     ctx: {
       userId: 'u1', orgId: 'o1', _trace: { traceId: 't1' },
+      _originalUserMessage: 'Write an email to amar@example.com about DLLMs',
       prisma: { pendingWrite: { create: async (data) => { created.push(data.data); return { id: 'DRAFT-CONTEXT' }; } } },
     },
     apiKey: 'k', signal: null, composio,
@@ -606,6 +621,7 @@ test('compound orchestrator: Composio Query Mode completes empty write arguments
   });
   const ctx = {
     userId: 'u1', orgId: 'o1', _trace: { traceId: 't-query' },
+    _originalUserMessage: 'Recall the handbag and email amar@example.com',
     _tracedDispatch: async () => ({ memories: [{ id: 'm1', title: 'Handbag', content: 'The brand is G ROCHER.' }], evidence: [] }),
     prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'DQUERY' }; } } },
   };
@@ -643,6 +659,7 @@ test('compound orchestrator: recalled facts fill an email body when planner auth
     ],
     ctx: {
       userId: 'u1', orgId: 'o1', _trace: { traceId: 'company-email' },
+      _originalUserMessage: 'Email all company information to amar@example.com',
       _tracedDispatch: async () => ({
         memories: [{ id: 'company-1', title: 'Company', content: 'Singulance builds governed organizational memory and HyperAgents.' }],
         evidence: [],

@@ -151,27 +151,30 @@ function emailDestinationFields(outputKind, schema) {
  * from a prerequisite lookup is allowed to replace an invalid generated name;
  * otherwise report the field so the write pauses before draft persistence.
  */
-export function normalizeEmailDestinationArgs(outputKind, schema, args, priorOutputs) {
+export function normalizeEmailDestinationArgs(outputKind, schema, args, priorOutputs, explicitRecipientSource = '') {
   const next = { ...(args || {}) };
   // Only the typed recipient output may repair a destination. Never mine an
   // arbitrary address from recalled content, an email body, or another field.
   const priorCandidates = [...collectEmailCandidates(
     priorOutputs?.recipient_email ?? priorOutputs?.recipient_emails,
   )].slice(0, 20);
+  const explicitCandidates = [...collectEmailCandidates(explicitRecipientSource)].slice(0, 20);
+  const trustedCandidates = [...new Set([...priorCandidates, ...explicitCandidates])];
   const invalidFields = [];
   for (const field of emailDestinationFields(outputKind, schema)) {
     const property = schema?.properties?.[field] || {};
     const candidates = [...collectEmailCandidates(next[field])].slice(0, 20);
-    if (candidates.length === 1) {
+    if (candidates.length === 1 && trustedCandidates.includes(candidates[0])) {
       next[field] = property.type === 'array' ? candidates : candidates[0];
       continue;
     }
-    if (candidates.length > 1 && property.type === 'array') {
+    if (candidates.length > 1 && property.type === 'array'
+      && candidates.every((candidate) => trustedCandidates.includes(candidate))) {
       next[field] = candidates;
       continue;
     }
-    if (priorCandidates.length === 1) {
-      next[field] = property.type === 'array' ? priorCandidates : priorCandidates[0];
+    if (trustedCandidates.length === 1) {
+      next[field] = property.type === 'array' ? trustedCandidates : trustedCandidates[0];
       continue;
     }
     invalidFields.push(field);
@@ -1156,7 +1159,11 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // overwritten here, and no user-language/provider keyword is inspected.
   args = backfillMissingGroundedContentArgs(subtask.output_kind, manifestSchema, args, priorOutputs);
   const recipientValidation = normalizeEmailDestinationArgs(
-    subtask.output_kind, manifestSchema, args, priorOutputs,
+    subtask.output_kind,
+    manifestSchema,
+    args,
+    priorOutputs,
+    [ctx?._originalUserMessage, message].filter(Boolean).join('\n'),
   );
   args = recipientValidation.args;
   const missing = missingRequiredArgs(manifestSchema, args);

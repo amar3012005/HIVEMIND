@@ -84,7 +84,7 @@ export function decisionToHostedPlan(decision, { request, connectedProviders = [
   }
   if (rawSteps.length === 0 || rawSteps.length > 8) throw new Error('planner_invalid_step_count');
 
-  return rawSteps.map((step, index) => ({
+  const steps = rawSteps.map((step, index) => ({
     index,
     operation: String(step?.operation || `step_${index + 1}`).slice(0, 64),
     authority: step?.authority === 'write' ? 'write' : 'read',
@@ -96,6 +96,20 @@ export function decisionToHostedPlan(decision, { request, connectedProviders = [
     query: typeof step?.query === 'string' && step.query.trim() ? step.query.trim().slice(0, 500) : null,
     retrieval: step?.retrieval || null,
   }));
+
+  // A recipient needed by a connected action must be resolved by that live
+  // connector, not by mining arbitrary addresses from memory evidence. Repair
+  // the planner edge structurally from the dependent step, without inspecting
+  // user language or hard-coding a toolkit name.
+  for (const step of steps) {
+    if (step.output_kind !== 'recipient' || !step.tool_groups.some((group) => NATIVE_GROUPS.has(group))) continue;
+    const dependentGroups = [...new Set(steps
+      .filter((candidate) => candidate.depends_on.includes(step.index))
+      .flatMap((candidate) => candidate.tool_groups)
+      .filter((group) => !NATIVE_GROUPS.has(group) && connectedProviders.includes(group)))];
+    if (dependentGroups.length === 1) step.tool_groups = dependentGroups;
+  }
+  return steps;
 }
 
 export async function planHostedComposioWorkflow({

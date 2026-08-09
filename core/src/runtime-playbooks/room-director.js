@@ -113,11 +113,20 @@ function roomPhaseContext(request) {
         ? value.filter((artifact) => String(artifact?.status || '').toUpperCase() !== 'SUPERSEDED')
         : value]),
   );
-  const lifecycleCatalog = asArray(runtime.lifecycle_catalog).filter((entry) => (
-    config.exclude_current_playbook_from_catalog !== true
-      || String(entry?.playbook_id || '') !== String(request.playbook_id || '')
-      || Number(entry?.version) !== Number(request.playbook_version)
-  ));
+  const lifecycleCatalog = asArray(runtime.lifecycle_catalog)
+    .filter((entry) => (
+      config.exclude_current_playbook_from_catalog !== true
+        || String(entry?.playbook_id || '') !== String(request.playbook_id || '')
+        || Number(entry?.version) !== Number(request.playbook_version)
+    ))
+    .map((entry) => ({
+      playbook_id: entry?.playbook_id || null,
+      version: entry?.version || null,
+      owner_room_tag: entry?.owner_room_tag || null,
+      supported_actions: asArray(entry?.supported_actions),
+      effect_class: entry?.effect_class || null,
+      terminal_states: asArray(entry?.terminal_states),
+    }));
   return {
     company: runtime.company || null,
     baseline: runtime.baseline || null,

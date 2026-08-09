@@ -303,3 +303,17 @@ confirmed.
 - Superseded candidate: `prod-20260808-c0c38526727f` built and passed health but failed affected-route acceptance: planner-only intermittently returned an empty plan (502), and Gmail input generation supplied an invalid provider field. No draft/write occurred. It was replaced, not repaired in place, by this immutable release.
 - Rollback: `hivemind/core-api:rollback-20260808-211230` (the immediately previous immutable candidate); pre-feature accepted runtime is retained as `hivemind/core-api:rollback-20260808-210725` / `sha-5605b858`. Env backup before flag enable: `/root/hivemind/.env.pre-hosted-planner-c0c38526`.
 - External side effects: Gmail recipient lookup read only. No pending-write row persisted, no approval executed, and no email/document/calendar/provider mutation occurred.
+
+## prod-20260809-3cce168a — hosted-plan completeness and connector-intent preservation
+
+- Parent SHA: `3cce168a897284a996fa40ab6d544395d6279051` on `singulance-main`.
+- Frontend SHA: `f864c0a2e2b7064c398c2746f9971333a208607f` (unchanged).
+- Core image: `hivemind/core-api:sha-3cce168a`, OCI revision `3cce168a897284a996fa40ab6d544395d6279051`.
+- Migration: none.
+- Fix: every hosted Composio workflow proposal receives one semantic audit against the exact current request. The audit restores omitted terminal actions and preserves the requested application, artifact, recipient, dependencies, and action semantics without language-specific or toolkit-keyword routing patches. A structurally complete plan can no longer pass solely because it has multiple steps.
+- Tests: 45/45 focused hosted-planner, compound-orchestrator, `use_tools` policy, and chat-router architecture tests passed, including omitted-action and equal-length substituted-connector regressions. Syntax and whitespace checks passed.
+- Authenticated acceptance: the exact request `Recall all information about my company, then put the recalled information into a new Google Doc.` was run twice with `use_tools:true`. Both runs returned 200 and `recall -> create_doc`; both selected `composio_googledocs_create_document` and persisted approval drafts with non-empty title and substantive recalled company text. Both diagnostic drafts were cancelled; no Google Doc was created.
+- Public/runtime acceptance: Core health returned 200; container healthy, restarts 0, and fresh fatal/panic/uncaught/unhandled/OOM/migration-error count 0.
+- Superseded candidate: `hivemind/core-api:sha-aada9ce0` restored the omitted terminal step but a live acceptance exposed an equal-length Gmail-for-Docs substitution. Its diagnostic Gmail draft was cancelled, nothing was sent, and the candidate was replaced by this immutable release.
+- Rollback: `hivemind/core-api:rollback-pre-3cce168a-20260809T074244Z`; manifest `/root/releases/3cce168a-clean/RELEASE_MANIFEST.txt`.
+- External side effects: HIVE-MIND recall reads and pending-write draft persistence only. All three diagnostic drafts were cancelled; no approval, email send, Google Doc creation, calendar action, or memory mutation executed.

@@ -1608,6 +1608,38 @@ export class BrowserRuntime {
   }
 
   /**
+   * A screenshot or a session-authenticated page (LinkedIn/X/Instagram via a
+   * pre-captured storageState — see services/hm-playwright/sessions/) needs a
+   * REAL browser render, the same reason seoAudit() above bypasses Firecrawl's
+   * markdown-first crawl(). Playwright-service first (it's the only runtime
+   * that understands `session` and can actually take a screenshot); Lightpanda
+   * as a degraded fallback (screenshot/session dropped — flagged in errors,
+   * never silently); no fetch-fallback tier — a static fetch can neither
+   * screenshot nor hold a session, so pretending it's a fallback here would be
+   * a silent capability loss, not resilience.
+   */
+  async renderCapture({ urls, depth = 0, pageLimit = 1, captureScreenshot = false, session = null }) {
+    const start = Date.now();
+    try {
+      const result = await withJobTimeout(this.playwrightService.crawl({ urls, depth, pageLimit, captureScreenshot, session }));
+      return { ...result, runtime_used: 'playwright-service', fallback_applied: false, duration_ms: Date.now() - start };
+    } catch (serviceError) {
+      try {
+        const result = await withJobTimeout(this.lightpanda.crawl({ urls, depth, pageLimit }));
+        return {
+          ...result, runtime_used: 'lightpanda', fallback_applied: true, duration_ms: Date.now() - start,
+          errors: [...(result.errors || []), {
+            target: urls?.[0], type: 'renderer_fallback',
+            error: `playwright-service failed (${serviceError.message}) — fell back to lightpanda WITHOUT screenshot/session support`,
+          }],
+        };
+      } catch (localBrowserError) {
+        throw new Error(`Render capture failed. Playwright: ${serviceError.message}; Lightpanda: ${localBrowserError.message}`);
+      }
+    }
+  }
+
+  /**
    * Check if Tavily is the active runtime
    */
   isTavilyActive() {

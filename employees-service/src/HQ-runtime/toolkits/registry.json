@@ -10,6 +10,7 @@
     {"id":"campaigns","authority":"governed_write","description":"Create, schedule, inspect, pause, or operate campaign actions."},
     {"id":"zernio","authority":"governed_write","description":"Inspect connected social state and execute approved channel actions."},
     {"id":"seo","authority":"read_or_internal","description":"Inspect website evidence and delegate prioritized SEO work."},
+    {"id":"web_intelligence","authority":"read_or_internal","description":"Render/crawl a specific public URL (optionally reusing a pre-authorized session for a gated platform) or run a live web search; delegate to a Room for rendered text, links, SEO meta, or a screenshot."},
     {"id":"leads","authority":"read_or_internal","description":"Read organization leads and persist newly verified prospects."},
     {"id":"outreach","authority":"governed_write","description":"Prepare or execute approved outreach actions."},
     {"id":"scheduling","authority":"internal","description":"Create durable HQ checkpoints and event-driven wakes."},

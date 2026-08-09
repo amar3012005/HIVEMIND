@@ -421,12 +421,14 @@ export const TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'hivemind_web_crawl',
-      description: 'Crawl a specific URL. Returns job_id.',
+      description: 'Render and crawl a specific URL (real browser, not a static fetch). Returns job_id — poll with hivemind_web_job_status. Set capture_screenshot for a visual, or session for a platform (linkedin/x/instagram) where a pre-authorized session exists — see hivemind_web_job_status result for session_used / session_requested_but_missing.',
       parameters: {
         type: 'object',
         properties: {
           url: { type: 'string' },
           depth: { type: 'integer', default: 1 },
+          capture_screenshot: { type: 'boolean', default: false, description: 'Take a screenshot of the page.' },
+          session: { type: 'string', enum: ['linkedin', 'x', 'instagram'], description: 'Reuse a pre-authorized session for this platform, if one has been captured. Falls back to an anonymous view if none exists — never fails the request.' },
         },
         required: ['url'],
       },
@@ -1744,20 +1746,36 @@ const TOOL_HANDLERS = {
   },
 
   async hivemind_web_search(args, ctx) {
-    if (!ctx.webIntelligence?.search) return { error: 'web search not configured' };
-    const job = await ctx.webIntelligence.search({ query: args.query, freshness: args.freshness });
-    return { job_id: job.job_id || job.id, status: 'queued' };
+    // Was dead: read ctx.webIntelligence, which nothing ever set. Now shares
+    // runWebSearchJob() (server.js) with POST /api/web/search/jobs — same
+    // quota/rate-limit/abuse gate, no second path.
+    if (!ctx.runWebSearchJob) return { error: 'web search not configured' };
+    const result = await ctx.runWebSearchJob({
+      query: args.query, domains: [], limit: 10, userId: ctx.userId, orgId: ctx.orgId,
+    });
+    const { ok, httpStatus, ...body } = result;
+    return body;
   },
 
   async hivemind_web_crawl(args, ctx) {
-    if (!ctx.webIntelligence?.crawl) return { error: 'web crawl not configured' };
-    const job = await ctx.webIntelligence.crawl({ url: args.url, depth: args.depth });
-    return { job_id: job.job_id || job.id, status: 'queued' };
+    // Was dead: read ctx.webIntelligence, which nothing ever set (verified —
+    // no assignment to globalThis.webIntelligence anywhere in the codebase).
+    // Now shares runWebCrawlJob() (server.js) with POST /api/web/crawl/jobs —
+    // same quota/rate-limit/abuse/policy gate, no second path.
+    if (!ctx.runWebCrawlJob) return { error: 'web crawl not configured' };
+    const result = await ctx.runWebCrawlJob({
+      urls: [args.url], depth: args.depth, captureScreenshot: args.capture_screenshot, session: args.session,
+      userId: ctx.userId, orgId: ctx.orgId,
+    });
+    const { ok, httpStatus, ...body } = result;
+    return body;
   },
 
   async hivemind_web_job_status(args, ctx) {
-    if (!ctx.webIntelligence?.status) return { error: 'web intel not configured' };
-    return ctx.webIntelligence.status({ job_id: args.job_id });
+    if (!ctx.webJobStore) return { error: 'web intel not configured' };
+    const job = await ctx.webJobStore.get(args.job_id, { userId: ctx.userId, orgId: ctx.orgId });
+    if (!job) return { error: 'job not found' };
+    return job;
   },
 
   async update_user_profile(args, ctx) {

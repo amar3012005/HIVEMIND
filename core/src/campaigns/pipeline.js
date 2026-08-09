@@ -1,4 +1,4 @@
-import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle } from './service.js';
+import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle, persistCampaignRepairingBundle } from './service.js';
 import { normalizeCampaignRoomEvent } from './contracts.js';
 import { scheduleRuntimeCampaignEvent } from './runtime-bridge.js';
 
@@ -112,10 +112,25 @@ export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
     }).catch(() => {});
     return readyEvent ? { ...response, campaignReady: true, campaignReadyEventId: String(readyEvent.id) } : response;
   }
-  if (normalized.t === 'campaign_governance' && normalized.status === 'unmet') {
-    const result = await markCampaignNeedsInput({ prisma, turnId, errors: normalized.verdict?.unmet_deliverables || [] });
-    await scheduleRuntimeCampaignEvent({ prisma, campaignId: run.campaignId, type: 'campaign.contract_failed', data: { status: 'NEEDS_INPUT' } }).catch(() => {});
+  if (normalized.t === 'campaign_bundle_partial') {
+    const result = await persistCampaignRepairingBundle({
+      prisma, turnId, bundle: normalized.bundle, errors: normalized.errors, exhausted: normalized.repair_exhausted === true,
+    });
+    await scheduleRuntimeCampaignEvent({
+      prisma, campaignId: run.campaignId, type: 'campaign.contract_needs_repair',
+      data: { plan_version_id: result?.planVersionId || null, status: 'NEEDS_REPAIR', errors: result?.errors || [] },
+    }).catch(() => {});
     return result;
+  }
+  if (normalized.t === 'campaign_governance' && normalized.status === 'unmet') {
+    const errors = (normalized.verdict?.unmet_deliverables || []).map((value) => String(value).slice(0, 500));
+    await prisma.campaignEvent.create({ data: {
+      campaignId: run.campaignId,
+      orgId: run.campaign.orgId,
+      eventType: 'campaign_governance_repairing',
+      data: { errors, repair: normalized.repair || null },
+    } });
+    return { campaignId: run.campaignId, status: 'REPAIRING', errors };
   }
   if (normalized.t === 'campaign_bundle_invalid') {
     const result = await markCampaignNeedsInput({ prisma, turnId, errors: normalized.errors });

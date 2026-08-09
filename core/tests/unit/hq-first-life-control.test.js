@@ -57,6 +57,19 @@ test('v3 first start promotes only the recommendation', async () => {
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED', 'PROPOSED']);
 });
 
+test('v5 internal bootstrap starts only the evidence-only recommendation', async () => {
+  const rows = [
+    todo('strategy', 'PROPOSED', 1, 'internal', true),
+    todo('external-1', 'PROPOSED', 2, 'external'),
+  ];
+  rows.forEach((row) => { row.context.first_life_policy_version = 5; });
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows), runtime, expansionTrigger: 'internal_bootstrap',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['strategy']);
+  assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED']);
+});
+
 test('v2 first start retains the historical companion-work policy', async () => {
   const rows = [
     todo('external-1', 'PROPOSED', 1, 'external', true),

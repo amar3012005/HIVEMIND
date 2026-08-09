@@ -203,7 +203,7 @@ def test_campaign_governance_does_not_mutate_missing_semantics():
 
 def test_campaign_report_accepts_explicitly_proposed_kpi_percentage():
     bundle = _valid_v2_bundle()
-    bundle["contract_version"] = 4
+    bundle["contract_version"] = CAMPAIGN_CONTRACT_VERSION
     bundle["kpis"][0].update({"target": "2% engagement rate", "target_type": "proposed"})
     bundle["report_markdown"] = bundle["report_markdown"].replace(
         "Establish a baseline.", "The campaign target is a 2% engagement rate.",
@@ -595,7 +595,7 @@ def test_campaign_v5_uses_the_structured_dashboard_without_a_second_report():
 
 def test_campaign_report_sections_may_be_localized():
     bundle = _valid_v2_bundle()
-    bundle["contract_version"] = 4
+    bundle["contract_version"] = CAMPAIGN_CONTRACT_VERSION
     bundle["report_markdown"] = "\n".join([
         "## Recommandation\nConstruire la confiance.",
         "## Public\nDécideurs.",
@@ -752,7 +752,7 @@ def test_visual_concept_does_not_force_a_second_full_synthesis(monkeypatch):
     assert calls[0]["json_object"] is True
 
 
-def test_campaign_governance_rejects_without_a_repair_synthesis(monkeypatch):
+def test_campaign_governance_preserves_partial_dashboard_after_bounded_repair(monkeypatch):
     models = []
     message_sets = []
 
@@ -776,11 +776,12 @@ def test_campaign_governance_rejects_without_a_repair_synthesis(monkeypatch):
     monkeypatch.setattr(director, "_groq", synthesize)
     monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__govern_delivery", govern)
 
-    _, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
+    bundle, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
 
     assert errors == ["strategy needs delivery"]
-    assert models == [director.synth_model]
-    assert len(message_sets) == 1
+    assert bundle is not None
+    assert models == [director.synth_model, director.synth_model]
+    assert len(message_sets) == 2
     system = message_sets[0][0]["content"]
     assert "success_measure:string" in system
     assert "rollback_or_exit:string" in system
@@ -872,7 +873,7 @@ def test_campaign_places_discovery_requires_sourcing_intent_and_geography():
         user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
         room_goal="Campaign", enabled_connectors=[], emit=lambda event: None,
         room_kind="campaign",
-        campaign_brief={"goal": "Find law firm prospects in Berlin", "audiencePolicy": {"discover_if_insufficient": True}},
+        campaign_brief={"goal": "Find law firm prospects in Berlin", "evidence_mode": "prospecting", "audiencePolicy": {"discover_if_insufficient": True}},
     )
     assert director._allows_places_discovery() is True
 

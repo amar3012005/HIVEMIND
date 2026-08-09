@@ -2572,6 +2572,9 @@ class Director:
             }, ensure_ascii=False)})
         if plan.get("places_query"):
             planned_calls.append({"name": "places_search", "args_json": json.dumps({"query": str(plan["places_query"])}, ensure_ascii=False)})
+        if self.room_kind == "campaign" and not self._allows_places_discovery():
+            planned_calls = [call for call in planned_calls if call.get("name") != "places_search"]
+            plan["places_query"] = None
         phase_lifecycle = self.room_phase.get("lifecycle") if isinstance((self.room_phase or {}).get("lifecycle"), dict) else {}
         phase_expected = {
             str(value) for value in (phase_lifecycle.get("expected_artifacts") or [])
@@ -4146,7 +4149,18 @@ class Director:
     def _uses_prospect_debate(self, campaign_channels: List[str]) -> bool:
         if self.room_kind != "campaign":
             return True
-        return any(channel in {"gmail", "tara"} for channel in campaign_channels) or self.evidence_mode == "prospecting"
+        return any(channel in {"gmail", "tara"} for channel in campaign_channels) or getattr(self, "evidence_mode", "") == "prospecting"
+
+    def _allows_places_discovery(self) -> bool:
+        if self.room_kind != "campaign":
+            return True
+        brief = self.campaign_brief if isinstance(self.campaign_brief, dict) else {}
+        policy = brief.get("audiencePolicy") if isinstance(brief.get("audiencePolicy"), dict) else brief.get("audience_policy")
+        if isinstance(policy, dict) and policy.get("discover_if_insufficient") is False:
+            return False
+        channels, _ = self._campaign_requirements()
+        evidence_mode = str(brief.get("evidence_mode") or getattr(self, "evidence_mode", "")).strip().lower()
+        return evidence_mode == "prospecting" or self._uses_prospect_debate(channels)
 
     def _campaign_recall_query_is_grounded(self, query: str) -> bool:
         # The broad company brief can contain imported client/project memories.
@@ -5373,38 +5387,46 @@ class Director:
             await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
                              "title": "Governance found unmet deliverables",
                              "detail": f"The Room is repairing {len(errors)} unmet criterion/criteria without repeating accepted work."})
-            repaired_semantic = await self._repair_campaign_actions(
-                semantic=semantic,
-                report=report,
-                errors=errors,
-                system_contract=campaign_system_contract(),
-            )
-            if repaired_semantic is None:
-                return None, errors
-            repaired_candidate = assemble_campaign_bundle(
-                repaired_semantic,
-                channels=channels,
-                requirements=requirements,
-                campaign_brief=self.campaign_brief,
-            )
-            repaired_candidate["report_markdown"] = report
-            accepted, governance = campaign__govern_delivery(
-                repaired_candidate,
-                channels=channels,
-                requirements=requirements,
-                minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
-                campaign_brief=self.campaign_brief,
-            )
-            errors = governance["unmet_deliverables"]
-            await self.emit({
-                "t": "campaign_governance",
-                "tool": "campaign__govern_delivery",
-                "status": governance["status"],
-                "verdict": governance,
-                "repair": {"scope": "actions", "attempt": 1},
-            })
+            current_semantic = semantic
+            current_candidate = candidate
+            for repair_attempt in range(1, 4):
+                repaired_semantic = await self._repair_campaign_actions(
+                    semantic=current_semantic,
+                    report=report,
+                    errors=errors,
+                    system_contract=campaign_system_contract(),
+                )
+                if repaired_semantic is None:
+                    break
+                current_semantic = repaired_semantic
+                current_candidate = assemble_campaign_bundle(
+                    current_semantic,
+                    channels=channels,
+                    requirements=requirements,
+                    campaign_brief=self.campaign_brief,
+                )
+                current_candidate["report_markdown"] = report
+                accepted, governance = campaign__govern_delivery(
+                    current_candidate,
+                    channels=channels,
+                    requirements=requirements,
+                    minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+                    campaign_brief=self.campaign_brief,
+                )
+                errors = governance["unmet_deliverables"]
+                await self.emit({
+                    "t": "campaign_governance",
+                    "tool": "campaign__govern_delivery",
+                    "status": governance["status"],
+                    "verdict": governance,
+                    "repair": {"scope": "affected_actions", "attempt": repair_attempt, "maximum": 3},
+                })
+                if not errors:
+                    break
             if errors:
-                return None, errors
+                # A rejected field is local to its action. Keep the compiled dashboard
+                # and all accepted actions visible; Core persists this append-only attempt.
+                return current_candidate, errors
         await self.emit({"t": "campaign_tool", "tool": "campaign__govern_delivery", "status": "accepted"})
         return accepted, []
 
@@ -6199,9 +6221,13 @@ class Director:
                                  "title": "Campaign contract accepted", "detail": "Every required action, visual brief, timing decision, claim, and measurement field passed validation."})
                 await self.emit({"t": "campaign_bundle", "bundle": campaign_bundle})
                 final_text = self._render_campaign_report(campaign_bundle)
+            elif campaign_bundle:
+                await self.emit({"t": "campaign_bundle_partial", "bundle": campaign_bundle,
+                                 "errors": campaign_bundle_errors, "repair_exhausted": True})
+                final_text = self._render_campaign_report(campaign_bundle)
             else:
                 await self.emit({"t": "campaign_bundle_invalid", "errors": campaign_bundle_errors})
-                final_text = "The campaign plan needs input before it can be approved.\n\n" + "\n".join(
+                final_text = "Campaign evidence could not be compiled into a dashboard.\n\n" + "\n".join(
                     f"- {error}" for error in campaign_bundle_errors)
         elif self.room_kind == "hq" and "growth-stage-context.v1" in self.execution_context:
             await self.emit({"t": "growth_stage", "stage": "plan", "status": "active",

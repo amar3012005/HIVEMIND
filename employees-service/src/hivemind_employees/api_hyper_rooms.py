@@ -857,7 +857,7 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
     body = {"turn_id": turn_id, "event": event}
     critical = str(event.get("t") or "") in {
         "final_report", "seal", "connector_logo", "approval_request",
-        "approval_required", "campaign_bundle", "runtime_stage_result",
+        "approval_required", "campaign_bundle", "campaign_bundle_partial", "runtime_stage_result",
         "room_phase_result", "work_order_result",
     }
     attempts = 6 if critical else 1

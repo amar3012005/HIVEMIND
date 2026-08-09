@@ -9,7 +9,7 @@ const STORAGE_ROOT = path.resolve(process.env.HIVEMIND_DATA_DIR || '/app/data', 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const DAILY_GENERATION_LIMIT = 40;
 const IMAGE_TYPES = new Map([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/webp', 'webp']]);
-const MUTABLE_CAMPAIGN_STATUSES = new Set(['PREPARING_ASSETS', 'READY_FOR_APPROVAL', 'NEEDS_INPUT']);
+const MUTABLE_CAMPAIGN_STATUSES = new Set(['PREPARING_ASSETS', 'READY_FOR_APPROVAL', 'NEEDS_INPUT', 'NEEDS_REPAIR']);
 
 function hasValidImageSignature(bytes, contentType) {
   if (contentType === 'image/png') return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));

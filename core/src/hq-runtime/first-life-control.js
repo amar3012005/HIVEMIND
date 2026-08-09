@@ -178,9 +178,12 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
       : currentPolicy;
     if (!policy.expansion_triggers.includes(expansionTrigger)) return { promoted: [], reason: 'trigger_not_allowed' };
     const directProposals = todos.filter((todo) => asObject(todo.context).proposal_origin === 'user_instruction');
+    const strategyProposals = todos.filter((todo) => asObject(todo.context).proposal_origin === 'strategy_program');
     const proposals = proposalOrigin === 'user_instruction'
       ? directProposals
-      : expansionTrigger === 'user_start'
+      : proposalOrigin === 'strategy_program' || ['strategy_program_ready', 'verified_preparation_checkpoint'].includes(expansionTrigger)
+        ? strategyProposals
+      : ['user_start', 'internal_bootstrap'].includes(expansionTrigger)
       ? firstLifeProposals
       : policyConfigured ? [...directProposals, ...firstLifeProposals] : directProposals;
     const ownershipStatuses = new Set([
@@ -201,6 +204,8 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
         if (changed.count === 1) todo.context = { ...asObject(todo.context), execution_slot_released: true };
       }
     }
+    const preparationMode = policy.auto_prepare_strategy_motions === true
+      && (proposalOrigin === 'strategy_program' || ['strategy_program_ready', 'verified_preparation_checkpoint', 'verified_result'].includes(expansionTrigger));
     const countedExternal = active.filter((todo) => effectClass(todo) === 'external'
       && asObject(todo.context).execution_slot_released !== true);
     let externalAvailable = Math.max(0, Number(policy.external_execution_limit || 1)
@@ -214,8 +219,14 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
           - Number(asObject(right.context).recommendation_rank || right.position || 0));
     const recommended = ordered.find((todo) => asObject(todo.context).recommended === true) || ordered[0] || null;
     const selected = [];
+    let preparationAvailable = Math.max(0, Number(policy.preparation_execution_limit || 1)
+      - active.filter((todo) => ['READY', 'RUNNING'].includes(todo.lifecycleStatus)).length);
     const select = (todo) => {
       if (!todo || selected.some((row) => row.id === todo.id)) return;
+      if (preparationMode) {
+        if (preparationAvailable > 0) { selected.push(todo); preparationAvailable -= 1; }
+        return;
+      }
       const kind = effectClass(todo);
       if (kind === 'external' && externalAvailable > 0) {
         selected.push(todo); externalAvailable -= 1;
@@ -227,7 +238,7 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
     const initialLimit = Number.isFinite(Number(policy.initial_execution_limit))
       ? Math.max(1, Number(policy.initial_execution_limit))
       : 2;
-    if (expansionTrigger === 'user_start' && selected.length >= initialLimit) {
+    if (['user_start', 'internal_bootstrap'].includes(expansionTrigger) && selected.length >= initialLimit) {
       // V3 starts only the recommendation. Historical policies without this
       // field preserve their prior companion-work behavior.
     } else if (recommended && effectClass(recommended) === 'external' && authorityPolicy.internal_autonomy !== false) {

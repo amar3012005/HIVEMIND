@@ -10,6 +10,7 @@ import { applyExactSourceSummaryPenalty, sortWithImportanceTiebreaker } from './
 import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { rerank as crossEncoderRerank } from './reranker.js';
 import { meterTokens } from '../billing/usage-tracker.js';
+import { isMemoryInDateRange } from './temporal-range.js';
 
 // PHASE-B: single canonical ALGORITHMIC reranker, shared with three-tier-retrieval.js.
 // Lazily constructed inside the RECALL_TIERED_VIEW=true branch so the dark-by-default
@@ -487,37 +488,6 @@ function policyBoost(memory, {
   }
 
   return score;
-}
-
-function parseDateRangeBoundary(value) {
-  if (!value) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function isMemoryInDateRange(memory, dateRange) {
-  if (!dateRange) return true;
-
-  const start = parseDateRangeBoundary(dateRange.start);
-  const end = parseDateRangeBoundary(dateRange.end);
-  const candidateDates = [
-    memory.document_date,
-    memory.created_at,
-    memory.metadata?.record_time,
-    memory.metadata?.event_time,
-    memory.metadata?.valid_from,
-    memory.metadata?.valid_to
-  ]
-    .map(parseDateRangeBoundary)
-    .filter(Boolean);
-
-  if (candidateDates.length === 0) return false;
-
-  return candidateDates.some(date => {
-    if (start && date < start) return false;
-    if (end && date > end) return false;
-    return true;
-  });
 }
 
 function isMemoryInTemporalSnapshot(memory, { validAt = null, knownAt = null } = {}) {

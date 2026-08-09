@@ -32,7 +32,7 @@ export const HIGH_TOOLS = [
   { type: 'function', function: { name: 'hivemind_context', strict: true,
     description: 'Use for every workspace knowledge question: factual recall, named files, complete entity counts, relationships, timelines, changes, valid-time and known-time questions. This is the single grounded read capability.',
     parameters: object({
-      operation: { type: 'string', enum: ['recall', 'source_read', 'aggregate', 'relation_between', 'temporal', 'diff', 'timeline'] },
+      operation: { type: 'string', enum: ['recall', 'source_read', 'aggregate', 'relation_between', 'temporal_range', 'temporal', 'diff', 'timeline'] },
       query_original: { type: 'string' }, query_canonical_en: { type: 'string' }, response_language: { type: 'string' },
       mode: { type: 'string', enum: ['fact', 'explain', 'full'] }, entities: { type: 'array', items: { type: 'string' } },
       source_title: nullable('string'), valid_at: nullable('string'), known_at: nullable('string'),
@@ -149,8 +149,8 @@ ALWAYS classify answer_type on every hivemind_context call, by MEANING in the us
 Use use_connector whenever Gmail, email, Google Drive, Google Docs, Google Sheets, Google Calendar, Google Tasks, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
 For every connector read, classify ordering structurally in any language: last/latest/most recent means result_order=newest; earliest/oldest means result_order=oldest; otherwise provider_default. Ordering words are not content filters. Set has_explicit_filter=true only for an actual sender, entity, date, label, or content constraint, and set result_limit to the number of records requested (1 for one latest item).
 Use use_campaign whenever the user asks to create, run, start, inspect, improve, pause, or check an AI campaign. Starting a campaign creates its dedicated Campaign Room; it does not publish. Use intent=write for create, regenerate, or pause and intent=read for list, status, or metrics.
-Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". operation=diff for "what changed between date A and B". operation=temporal for "what was true / known on date D".
-DATES ARE MANDATORY on those two operations: with operation=diff you MUST fill range_start and range_end, and with operation=temporal you MUST fill valid_at (or known_at when the user asks what was KNOWN/recorded rather than what was true). Emit them as ISO yyyy-mm-dd, converting whatever the user wrote ("Aug 4", "4. August 2026", "last Tuesday"). Leaving these null turns a change question into a plain history walk and answers the wrong question.
+Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". Use operation=diff only to compare workspace state at two instants: "what changed between date A and B". Use operation=temporal for a point-in-time snapshot: "what was true / known on date D". Use operation=temporal_range for events, work, meetings, decisions, messages, records, or other activity that occurred during a period such as yesterday, today, last week, or the last N days.
+DATES ARE MANDATORY on temporal_range, diff, and temporal. For temporal_range fill range_start and range_end with the inclusive event-time window. "Last N days" means exactly N UTC calendar dates including today, so its start is CURRENT_UTC_DATE minus N-1 days. For diff fill both comparison instants. For temporal fill valid_at (or known_at when the user asks what was KNOWN/recorded rather than what was true). Emit ISO timestamps, resolving relative expressions against CURRENT_UTC_DATE supplied in the dynamic policy. Never turn an activity window into an as-of snapshot or a snapshot diff.
 Examples:
 - "How are A and B related?", "Wie hangen A und B zusammen?", and Arabic equivalents => hivemind_context operation=relation_between.
 - "What was the previous launch date?" / "What did the price used to be?" => hivemind_context operation=timeline.
@@ -169,7 +169,7 @@ Never invent workspace facts. Never bypass approval. Preserve exact entities, fi
 // temporal dispatch reads plan.time.* to choose _at/_diff/_timeline).
 const CONTEXT_OP = {
   recall: 'recall', source_read: 'source_read', aggregate: 'aggregate',
-  relation_between: 'relation_between', temporal: 'timeline', diff: 'timeline', timeline: 'timeline',
+  relation_between: 'relation_between', temporal_range: 'recall', temporal: 'timeline', diff: 'timeline', timeline: 'timeline',
 };
 
 // Defense-in-depth bounds (the current planner runs normalizeIntentDecision;
@@ -178,6 +178,21 @@ const s = (v, n = 2000) => (typeof v === 'string' ? v.slice(0, n) : null);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const uuid = (v) => (typeof v === 'string' && UUID_RE.test(v.trim()) ? v.trim() : null);
 const iso = (v) => (typeof v === 'string' && !Number.isNaN(new Date(v).getTime()) ? v : null);
+const eventRange = (startValue, endValue) => {
+  const start = iso(startValue);
+  const end = iso(endValue);
+  const anchor = start || end;
+  if (!anchor) return null;
+  const anchorDay = new Date(anchor).toISOString().slice(0, 10);
+  const complete = !!(start && end);
+  const startRaw = complete ? start : anchorDay;
+  const endRaw = complete ? end : anchorDay;
+  const dayOnly = /^\d{4}-\d{2}-\d{2}$/;
+  return {
+    start: dayOnly.test(startRaw) ? `${startRaw}T00:00:00.000Z` : new Date(startRaw).toISOString(),
+    end: dayOnly.test(endRaw) ? `${endRaw}T23:59:59.999Z` : new Date(endRaw).toISOString(),
+  };
+};
 
 // ── Deterministic temporal backstop ──────────────────────────────────────────
 // The router is asked for range_start/range_end on a diff and valid_at on a
@@ -266,9 +281,10 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
   const connectedPolicy = useTools && Array.isArray(connectedProviders)
     ? `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it. For an email action, a person's name or display label is not a resolved destination: only a syntactically valid email address is resolved, otherwise add a recipient lookup step with output_kind recipient and make the action depend on it.`
     : '';
-  const dynamicPolicy = useTools
+  const temporalPolicy = `CURRENT_UTC_DATE=${new Date().toISOString().slice(0, 10)}. Resolve relative dates semantically in the user's language and emit the required ISO temporal fields.`;
+  const dynamicPolicy = `${useTools
     ? connectedPolicy
-    : 'Connected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.';
+    : 'Connected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.'} ${temporalPolicy}`.trim();
   const workflowPolicy = workflowPlanner
     ? 'You are the hosted workflow planner. Call compound_plan exactly once, even for a one-step request. Decompose the complete request; do not answer it and do not select another capability. For every retrieval or lookup step, put a compact semantic retrieval expression in query, preserving entities and requested attributes while removing workflow verbs and later actions. Put null in query for pure action steps. A requested document, email, message, or other content artifact must receive substantive grounded content: when the current request supplies only a topic or refers to prior conversation, include the required knowledge-retrieval step and make the artifact depend on it rather than emitting a topic placeholder.'
     : '';
@@ -339,11 +355,37 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       if (args?.operation === 'recall' && PROFILE_RE.test(message)) {
         return { decision: { ...base, operation: 'profile', queries: [base.query_canonical_en], tool_groups: ['hivemind-recall'] }, usage: null };
       }
-      const op = CONTEXT_OP[args?.operation] || 'recall';
+      const rawOp = String(args?.operation || 'recall');
+      const op = CONTEXT_OP[rawOp] || 'recall';
       let time = (iso(args?.valid_at) || iso(args?.known_at) || iso(args?.range_start) || iso(args?.range_end))
         ? { valid_at: iso(args?.valid_at), known_at: iso(args?.known_at),
             range: (iso(args?.range_start) || iso(args?.range_end)) ? { start: iso(args?.range_start), end: iso(args?.range_end) } : null }
         : null;
+      if (time) {
+        time.kind = rawOp === 'temporal_range'
+          ? 'event_range'
+          : rawOp === 'diff'
+            ? 'snapshot_diff'
+            : rawOp === 'temporal'
+              ? 'snapshot_at'
+              : 'version_timeline';
+      }
+      if (rawOp === 'temporal_range' && time?.range) {
+        time = { ...time, valid_at: null, known_at: null, range: eventRange(time.range.start, time.range.end) };
+      }
+      // A temporal-range model response may provide one resolved ISO instant
+      // instead of duplicating it into start/end. Treat that as the inclusive
+      // UTC day. This is semantic-shape normalization only: the router already
+      // chose temporal_range and resolved the user's language into ISO.
+      if (rawOp === 'temporal_range' && time && !time.range && time.valid_at) {
+        const day = time.valid_at.slice(0, 10);
+        time = {
+          valid_at: null,
+          known_at: null,
+          range: { start: `${day}T00:00:00.000Z`, end: `${day}T23:59:59.999Z` },
+          kind: 'event_range',
+        };
+      }
       // Backstop (see extractMessageDates): the router routes the OPERATION
       // correctly but frequently emits null dates, which silently downgraded
       // every diff to a version-chain walk. Recover the dates from the message
@@ -351,18 +393,18 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       // usable date at all, so a model-provided value is never overridden, and
       // when no date can be parsed the value stays null and behaviour is
       // byte-identical to before.
-      const rawOp = String(args?.operation || '');
       if (!time && (rawOp === 'diff' || rawOp === 'temporal')) {
         const dates = extractMessageDates(message);
         if (rawOp === 'diff' && dates.length >= 1) {
           // Two or more dates → the explicit window. One date → "what changed
           // since D"; gatherEvidence defaults a missing end to now.
           time = { valid_at: null, known_at: null,
+            kind: 'snapshot_diff',
             range: { start: dates[0], end: dates.length >= 2 ? dates[dates.length - 1] : null } };
         } else if (rawOp === 'temporal' && dates.length >= 1) {
           // Point-in-time: the LAST date named is the instant being asked about
           // ("what was true on D"), matching hivemind_at's valid_time axis.
-          time = { valid_at: dates[dates.length - 1], known_at: null, range: null };
+          time = { valid_at: dates[dates.length - 1], known_at: null, range: null, kind: 'snapshot_at' };
         }
         if (time) console.log(`[chat-router] temporal backstop: op=${rawOp} recovered ${JSON.stringify(time)} from message (model sent null dates)`);
       }

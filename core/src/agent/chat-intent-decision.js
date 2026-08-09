@@ -454,8 +454,13 @@ export function intentDecisionToPlan(decision, message) {
     // hivemind_timeline (op=timeline / version history), hivemind_diff (a range),
     // or an as-of hivemind_at (valid_at/known_at). Previously hardcoded false,
     // so temporal chat questions never reached the bi-temporal tools.
+    // Event-time windows ("what did we do yesterday") are bounded retrieval,
+    // not time travel. They must reach hivemind_recall's date_range lane and
+    // must not also run hivemind_at/hivemind_diff, whose snapshot semantics are
+    // different. Existing untyped ranges retain the legacy diff behaviour.
     needs_time_travel: operation === 'timeline'
-      || !!(decision.time?.valid_at || decision.time?.known_at || decision.time?.range),
+      || (decision.time?.kind !== 'event_range'
+        && !!(decision.time?.valid_at || decision.time?.known_at || decision.time?.range)),
     time_travel: (decision.relation?.time || decision.time) || null,
     needs_web: false, ask_for_project: false, expected_evidence_types: [],
   };

@@ -331,3 +331,16 @@ confirmed.
 - Public/runtime acceptance: Core health, homepage, HIVE-MIND cover, and Overview returned 200. Both release-specific lazy chat chunks returned 200 and contained the connected-app Beta notice marker. Core healthy, frontend running, restarts 0, and fresh fatal/panic/uncaught/unhandled/OOM/migration-error count 0.
 - Rollback: Core `hivemind/core-api:rollback-pre-1f12a0b0-20260809T102619Z`; frontend `hivemind/fe:rollback-pre-1f12a0b0-20260809T102619Z-single`; manifest `/root/builds/prod-20260809-1f12a0b0/RELEASE_MANIFEST.txt`.
 - External side effects: recall reads and approval-draft persistence only. No draft was approved and no email was sent.
+
+## prod-20260809-637fd2df — preserve recall dependencies for semantic content artifacts
+
+- Parent SHA: `637fd2df94785d0662c882cf547b2578336f7747` on `singulance-main`.
+- Frontend SHA: `794ae726f4ae1479870d4f9e8cb978891209cdfa` (unchanged by this fix).
+- Images: Core `hivemind/core-api:sha-637fd2df`, digest `sha256:6f593a714e66998730418f3d8f5d115f9422bd4de40161cff76b36d18fda38f3`; Control `sha256:fca50b227b304454ea043bcdea087aa20b35c1fec72ba934a3f6e924da13be10`; Employees `sha256:864e72acb6e39674bcf0d252b4985d6bd8a76107adf308fe9f47bb44d76b23fd`; frontend `sha256:aea45f47794445311c948923b8f1c1e1ca2ecead442efc294ab3ac9802893d2e`. All carry OCI revision `637fd2df94785d0662c882cf547b2578336f7747`.
+- Migration: none.
+- Fix: dependency normalization now treats semantic `message` and `document` outputs as content-producing artifacts even if the hosted planner emits an imprecise authority. Earlier governed reads therefore reach provider argument generation and required body/text fields instead of producing a redundant human-input request. Hybrid recall and its ranking/delivery contract are unchanged; approval gating remains unchanged.
+- Tests: syntax and whitespace checks passed; 43/43 focused compound-orchestrator, hosted-planner, `use_tools`, and router tests passed. The regression suite includes the exact recall-to-email shape with malformed authority, an omitted dependency edge, a provider-required body absent from `properties`, and a substantive recalled fact.
+- Authenticated acceptance: `write email to amarsai2005@gmail.com about all company information` with `use_tools:true` returned 200 in 13.385 s. `hivemind_recall` completed, `composio_gmail_send_email` produced approval draft `b771057d-6db2-4735-a995-ad06cc804f5e`, and the body contained substantive recalled company details rather than requesting `body` from the user. The diagnostic draft was cancelled; database verification showed `status=cancelled`, `approvedAt=null`, and `sentAt=null`.
+- Public/runtime acceptance: Core health, homepage, HIVE-MIND cover, and Overview returned 200. Core, Control, and Employees were healthy; frontend running; all restart counts 0; fresh fatal/panic/uncaught/unhandled/OOM/migration-error count 0.
+- Rollback: immediately previous immutable images `hivemind/core-api:sha-981a2b04`, `hivemind/control-plane:sha-981a2b04`, `hivemind/employees:sha-981a2b04`, and `hivemind/fe:sha-981a2b04`; manifest `/root/releases/manifests/637fd2df/20260809T114712Z/RELEASE_MANIFEST.json`.
+- External side effects: HIVE-MIND recall reads and approval-draft persistence only. The diagnostic draft was cancelled; no approval occurred and no email was sent.

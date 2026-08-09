@@ -96,6 +96,19 @@ test('snapshot diff retains the existing bi-temporal tool path', () => {
   assert.equal(plan.needs_time_travel, true);
 });
 
+test('semantic event-window contract corrects an inconsistent diff operation', () => {
+  const { decision } = adaptToDecision('hivemind_context', {
+    operation: 'diff', temporal_semantics: 'event_window',
+    query_canonical_en: 'decisions taken', response_language: 'en', mode: 'explain', entities: [],
+    range_start: '2026-08-03', range_end: '2026-08-09', valid_at: null, known_at: null,
+    source_title: null, aggregate_kind: null, answer_type: 'decision',
+  }, 'what decisions did we take in last 7 days', 'en');
+  const plan = intentDecisionToPlan(decision, 'what decisions did we take in last 7 days');
+  assert.equal(decision.operation, 'recall');
+  assert.equal(decision.time.kind, 'event_range');
+  assert.equal(plan.needs_time_travel, false);
+});
+
 test('event windows match canonical temporal tags even when record time is outside the window', () => {
   const memory = {
     created_at: '2026-08-09T10:00:00.000Z',

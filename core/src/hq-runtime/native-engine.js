@@ -92,6 +92,18 @@ export function growthPlanModeForState({ latestGrowthPlan, focusedOutcome, polic
   return String(policy.ongoing_operation.mode || 'operate');
 }
 
+export function shouldAutoStartFirstLifeBootstrap({ activationStatus, policy, todo } = {}) {
+  if (!['AWAITING_START', 'READY'].includes(String(activationStatus || ''))) return false;
+  if (policy?.auto_start_internal_bootstrap !== true) return false;
+  return todo?.context?.effect_class === 'internal'
+    && Boolean(todo.context?.planned_playbook_id)
+    && Number.isInteger(Number(todo.context?.planned_playbook_version));
+}
+
+export function operatingDecisionEvidenceRefs(evidence = {}) {
+  return [evidence?.baseline?.id, evidence?.latest_growth_plan?.id].filter(Boolean);
+}
+
 export function selectPendingPlaybookRun(runs = []) {
   return runs.find((run) => run.status === 'ACTIVE')
     || runs.find((run) => run.status === 'WAITING_AUTHORITY')
@@ -567,18 +579,18 @@ export class NativeHqEngine {
     const activationSprint = await projectCurrentActivationSprint({ prisma, orgId: runtime.orgId });
     // A current-policy internal bootstrap starts without a synthetic Start gate.
     // Historical policies still retain their recorded AWAITING_START behavior.
-    if (['AWAITING_START', 'READY'].includes(activationSprint?.status)
-      && trigger.type !== 'runtime_playbook_result') {
+    if (['AWAITING_START', 'READY'].includes(activationSprint?.status)) {
       const recommended = activationSprint.items?.find((item) => item.todo_id === activationSprint.recommended_todo_id)
         || activationSprint.items?.[0];
       const recommendedTodo = recommended?.todo_id ? await prisma.hqTodo.findFirst({
         where: { id: recommended.todo_id, runtimeId: runtime.id, orgId: runtime.orgId },
       }) : null;
       let internalBootstrap = false;
-      if (firstLifePolicy.auto_start_internal_bootstrap === true
-        && recommendedTodo?.context?.effect_class === 'internal'
-        && recommendedTodo.context?.planned_playbook_id
-        && recommendedTodo.context?.planned_playbook_version) {
+      if (shouldAutoStartFirstLifeBootstrap({
+        activationStatus: activationSprint.status,
+        policy: firstLifePolicy,
+        todo: recommendedTodo,
+      })) {
         try {
           const declared = this.runtimePlaybooks.registry.get(
             recommendedTodo.context.planned_playbook_id,
@@ -1279,7 +1291,7 @@ export class NativeHqEngine {
       await event(prisma, runtime, cycle, {
         eventType: 'decision', title: `Next operating action: ${action.action}`,
         summary: action.reason, details: { priority: action.priority },
-        evidenceRefs: [context.evidence.baseline.id, context.evidence.latest_growth_plan.id],
+        evidenceRefs: operatingDecisionEvidenceRefs(context.evidence),
       });
       if (trigger.type === 'user_wake' && action.action === 'monitor' && !appliedInstructions.length) {
         await event(prisma, runtime, cycle, { eventType: 'observation', title: 'No material change detected', summary: 'The company state, operating instruction, work ownership, and measurement evidence are unchanged. Repeating the same work would create activity, not progress.' });

@@ -106,11 +106,12 @@ export async function runDueHqSchedule({ prisma, leaseOwner, logger = console, r
     return { scheduleId: schedule.id, cycleId: cycle.id, status: 'COMPLETED', decision };
   } catch (error) {
     await observed('FAILED', { cycle_id: cycle?.id || null, error: String(error?.message || error).slice(0, 300) });
-    logger.error('[hq-runtime] cycle failed:', error.message);
+    const diagnostic = String(error?.stack || error?.message || error).slice(0, 12000);
+    logger.error('[hq-runtime] cycle failed:', diagnostic);
     if (cycle) {
       await prisma.hqCycle.update({
         where: { id: cycle.id },
-        data: { status: 'FAILED', error: String(error.message || error).slice(0, 4000), completedAt: new Date(), leaseOwner: null, leaseExpiresAt: null },
+        data: { status: 'FAILED', error: diagnostic.slice(0, 4000), completedAt: new Date(), leaseOwner: null, leaseExpiresAt: null },
       }).catch(() => {});
       const runtime = await getHqRuntime({ prisma, orgId: schedule.org_id }).catch(() => null);
       if (runtime) {

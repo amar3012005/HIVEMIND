@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, selectPendingPlaybookRun, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, operatingDecisionEvidenceRefs, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -45,6 +45,31 @@ test('v7 bypasses initial Growth Planning and enables operate mode only after fi
   assert.equal(growthPlanModeForState({ policy, firstLifeGate: { motions_complete: true } }), 'operate');
   assert.equal(growthPlanModeForState({ policy, firstLifeGate: { motions_complete: true }, latestGrowthPlan: { id: 'plan' } }), null);
   assert.equal(growthPlanModeForState({ policy, firstLifeGate: { motions_complete: true }, focusedOutcome: { id: 'todo' } }), null);
+});
+
+test('admin check-in result wakes can auto-start the durable internal bootstrap', () => {
+  const todo = { context: {
+    effect_class: 'internal',
+    planned_playbook_id: 'marketing.strategy-to-growth-brief',
+    planned_playbook_version: 5,
+  } };
+  assert.equal(shouldAutoStartFirstLifeBootstrap({
+    activationStatus: 'AWAITING_START', policy: { auto_start_internal_bootstrap: true }, todo,
+  }), true);
+  assert.equal(shouldAutoStartFirstLifeBootstrap({
+    activationStatus: 'READY', policy: { auto_start_internal_bootstrap: true }, todo,
+  }), true);
+  assert.equal(shouldAutoStartFirstLifeBootstrap({
+    activationStatus: 'OPERATING', policy: { auto_start_internal_bootstrap: true }, todo,
+  }), false);
+  assert.equal(shouldAutoStartFirstLifeBootstrap({
+    activationStatus: 'READY', policy: { auto_start_internal_bootstrap: false }, todo,
+  }), false);
+});
+
+test('first-life fallback narration does not require a Growth Plan artifact', () => {
+  assert.deepEqual(operatingDecisionEvidenceRefs({ baseline: { id: 'baseline-1' }, latest_growth_plan: null }), ['baseline-1']);
+  assert.deepEqual(operatingDecisionEvidenceRefs({ baseline: null, latest_growth_plan: null }), []);
 });
 
 test('active Room work outranks an older lifecycle wait in Runtime narration', () => {

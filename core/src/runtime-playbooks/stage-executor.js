@@ -427,7 +427,8 @@ export class GenericStageExecutor {
             verdict,
           });
           const attempt = attempts[stage.id];
-          if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts && error?.ambiguous !== true) {
+          if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts
+            && error?.ambiguous !== true && error?.retryable !== false) {
             await this.store.updateRun(runId, orgId, { lastVerdict: verdict, status: 'ACTIVE' });
             continue;
           }
@@ -454,7 +455,8 @@ export class GenericStageExecutor {
             verdict,
           });
           const attempt = attempts[stage.id];
-          if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts && error?.ambiguous !== true) {
+          if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts
+            && error?.ambiguous !== true && error?.retryable !== false) {
             await this.store.updateRun(runId, orgId, { lastVerdict: verdict, status: 'ACTIVE' });
             continue;
           }

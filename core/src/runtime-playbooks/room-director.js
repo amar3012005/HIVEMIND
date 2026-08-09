@@ -72,7 +72,9 @@ export function serializeRoomEnvelope(envelope, maxChars = 15_500) {
   }
   // Never mutate lifecycle schemas to satisfy a transport budget. A deterministic
   // intervention is safer than sending the Room a corrupted executable contract.
-  throw new Error(`runtime_room_execution_context_too_large:${encoded.length}`);
+  const error = new Error(`runtime_room_execution_context_too_large:${encoded.length}`);
+  error.retryable = false;
+  throw error;
 }
 
 function internalKey() {
@@ -100,6 +102,13 @@ function usesRoomPhase(request) {
 function roomPhaseContext(request) {
   const runtime = asObject(request.runtime_context);
   const config = asObject(request.execution_config);
+  const dedicatedContextRefs = new Set([
+    'context.company', 'context.baseline', 'context.request', 'context.target',
+    'context.policy', 'context.admin_current_status', 'context.lifecycle_catalog',
+  ]);
+  const priorArtifacts = Object.fromEntries(
+    Object.entries(asObject(request.inputs)).filter(([key]) => !dedicatedContextRefs.has(key)),
+  );
   const lifecycleCatalog = asArray(runtime.lifecycle_catalog).filter((entry) => (
     config.exclude_current_playbook_from_catalog !== true
       || String(entry?.playbook_id || '') !== String(request.playbook_id || '')
@@ -114,7 +123,7 @@ function roomPhaseContext(request) {
     admin_current_status: runtime.admin_current_status || null,
     lifecycle_catalog: lifecycleCatalog,
     supplied_inputs: asObject(runtime.supplied_inputs),
-    prior_artifacts: asObject(request.inputs),
+    prior_artifacts: priorArtifacts,
   };
 }
 

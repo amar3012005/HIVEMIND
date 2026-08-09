@@ -8,6 +8,7 @@ import {
   DirectorPlaybookSelector,
   RuntimeAdapterRegistry,
   RuntimeRoomDirector,
+  roomPhaseEnvelope,
   serializeRoomEnvelope,
   RuntimePlaybookService,
   RuntimePlaybookRegistry,
@@ -233,6 +234,30 @@ test('Runtime Room context stays within the sidecar contract without losing phas
   assert.deepEqual(decoded.lifecycle.strict_response_schema, envelope.lifecycle.strict_response_schema);
   assert.equal(decoded.lifecycle.artifact_schemas, undefined);
   assert.doesNotMatch(encoded, /nested context omitted/);
+});
+
+test('room phase context does not duplicate dedicated lifecycle inputs inside prior artifacts', () => {
+  const catalog = Array.from({ length: 12 }, (_, index) => ({
+    playbook_id: `lifecycle.${index}`, version: 1, supported_actions: [`action_${index}`],
+  }));
+  const envelope = roomPhaseEnvelope({
+    run_id: 'run-dedup', playbook_id: 'marketing.strategy-to-growth-brief', playbook_version: 4,
+    stage_id: 'design_first_life_portfolio', instruction: 'Design the portfolio.',
+    expected_artifacts: ['first_life_motion_portfolio'], checks: [],
+    execution_config: { contract: 'room-phase.v2', exclude_current_playbook_from_catalog: true },
+    runtime_context: { company: { name: 'Example' }, request: { instruction: 'Design it' }, lifecycle_catalog: catalog },
+    inputs: {
+      'context.company': { name: 'Example' },
+      'context.request': { instruction: 'Design it' },
+      'context.lifecycle_catalog': catalog,
+      'artifacts.marketing_strategy_decision': [{ id: 'decision-1' }],
+    },
+  });
+  assert.equal(envelope.context.lifecycle_catalog.length, catalog.length);
+  assert.equal(envelope.context.prior_artifacts['context.lifecycle_catalog'], undefined);
+  assert.equal(envelope.context.prior_artifacts['context.company'], undefined);
+  assert.deepEqual(envelope.context.prior_artifacts['artifacts.marketing_strategy_decision'], [{ id: 'decision-1' }]);
+  assert.ok(serializeRoomEnvelope(envelope).length <= 15_500);
 });
 
 test('Room Director marks only an authority-granted stage as authorized', async () => {
@@ -534,6 +559,39 @@ test('artifact persistence failures obey the bounded playbook retry policy', asy
   assert.equal(run.stageAttempts.persist, 2);
   assert.equal(persistenceCalls, 2);
   assert.equal(store.checkpoints.filter((entry) => entry.phase === 'ARTIFACT_PERSISTENCE_ERROR').length, 2);
+});
+
+test('non-retryable Room contract failures stop after one attempt', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.non-retryable-room-error', version: 1, status: 'ACTIVE',
+    name: 'Non-retryable Room error', description: 'Stops deterministic contract failures immediately.',
+    initial_stage_id: 'perform', terminal_states: ['done'],
+    stages: [{
+      id: 'perform', objective: 'Produce accepted evidence.', expected_artifacts: ['result'], input_refs: [],
+      completion_checks: [{ predicate: 'has_min_count', select: 'result', value: 1 }],
+      transitions: [{ default: true, to_terminal: 'done' }], on_failure: 'REPAIR', max_attempts: 3,
+    }],
+  });
+  const store = new TestRuntimeStore();
+  let calls = 0;
+  const director = { async execute() {
+    calls += 1;
+    const error = new Error('runtime_room_execution_context_too_large:16933');
+    error.retryable = false;
+    throw error;
+  } };
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, workerId: 'non-retryable-room-error' });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.non-retryable-room-error', playbookVersion: 1,
+    idempotencyKey: 'non-retryable-room-error-1', trigger: { payload: {} },
+  });
+
+  const run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'NEEDS_INTERVENTION');
+  assert.equal(run.stageAttempts.perform, 1);
+  assert.equal(calls, 1);
+  assert.equal(store.checkpoints.filter((entry) => entry.phase === 'EXECUTION_ERROR').length, 1);
 });
 
 test('Director selects an exact registered playbook without local content routing', async () => {

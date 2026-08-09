@@ -129,6 +129,19 @@ async function findDraftByMessageId(runTool, actor, messageId) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+async function findDraftByRecipientAndSubject(runTool, actor, recipient, subject) {
+  const result = await runTool('gmail_list_drafts', { max: 100 }, actor).catch(() => null);
+  const candidates = asArray(result?.drafts).slice(0, 100);
+  for (const candidate of candidates) {
+    const ref = String(candidate?.draftId || '').trim();
+    if (!ref) continue;
+    const draft = await getDraft(runTool, actor, ref).catch(() => null);
+    if (String(draft?.to || '').trim().toLowerCase() === String(recipient || '').trim().toLowerCase()
+        && String(draft?.subject || '').trim() === String(subject || '').trim()) return draft;
+  }
+  return null;
+}
+
 async function findSentByMessageId(runTool, actor, messageId) {
   if (!messageId) return null;
   const result = await runTool('gmail_search', {
@@ -246,9 +259,9 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
           continue;
         }
         const messageId = operationMessageId(context, artifact, 'prepare_draft');
-        let draft;
+        let draft = await findDraftByRecipientAndSubject(google, actor, recipient, subject);
         try {
-          draft = await google('gmail_create_draft', {
+          if (!draft) draft = await google('gmail_create_draft', {
             to: recipient,
             subject,
             body,

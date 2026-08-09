@@ -18,6 +18,7 @@ import {
   filterProviderDraftToolsForTerminalOperation,
   exactGroundedDependencyContent,
   normalizeCompoundDependencies,
+  normalizeEmailDestinationArgs,
   rankToolSelectionCards,
   resolveSelectedTool,
   runCompoundOrchestrator,
@@ -56,6 +57,31 @@ test('recipient output contract resolves one address and rejects ambiguity', () 
   });
   assert.equal(many.status, 'needs_input');
   assert.deepEqual(many.candidates, ['one@example.com', 'two@example.com']);
+});
+
+test('email destination normalization rejects display names and uses one governed lookup address', () => {
+  const schema = {
+    type: 'object', required: ['recipient_email'],
+    properties: { recipient_email: { type: 'string' } },
+  };
+  const unresolved = normalizeEmailDestinationArgs(
+    'message', schema, { recipient_email: 'AmarSai' }, {},
+  );
+  assert.deepEqual(unresolved.invalidFields, ['recipient_email']);
+  assert.equal(unresolved.args.recipient_email, 'AmarSai');
+
+  const resolved = normalizeEmailDestinationArgs(
+    'message', schema, { recipient_email: 'AmarSai' },
+    { recipient_email: 'AmarSai <amarsai2005@gmail.com>' },
+  );
+  assert.deepEqual(resolved.invalidFields, []);
+  assert.equal(resolved.args.recipient_email, 'amarsai2005@gmail.com');
+
+  const notResolvedFromContent = normalizeEmailDestinationArgs(
+    'message', schema, { recipient_email: 'AmarSai' },
+    { recall: 'Company contact is unrelated@example.com' },
+  );
+  assert.deepEqual(notResolvedFromContent.invalidFields, ['recipient_email']);
 });
 
 function makeSelector(pick) {
@@ -508,6 +534,40 @@ test('missing write fields produce a resumable generalized field-input request',
   });
   assert.equal(resumed.status, 'pending');
   assert.equal(created[0].toolArgs.recipient_email, 'person@example.com');
+});
+
+test('email write pauses before draft persistence when generated recipient is only a name', async () => {
+  const created = [];
+  const schema = {
+    type: 'object', required: ['recipient_email', 'subject', 'body'],
+    properties: {
+      recipient_email: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' },
+    },
+  };
+  const composio = makeComposio({
+    tools: [{ name: 'composio_gmail_send_email', slug: 'GMAIL_SEND_EMAIL', description: 'send' }],
+    executeImpl: async () => ({ successful: false, error: 'must not execute' }),
+  });
+  const result = await runCompoundOrchestrator({
+    subtasks: [{
+      operation: 'send_email', authority: 'write', output_kind: 'message',
+      tool_groups: ['gmail'], message: 'send the prepared message',
+    }],
+    ctx: {
+      userId: 'u1', orgId: 'o1', _trace: { traceId: 'invalid-recipient' },
+      prisma: { pendingWrite: { create: async ({ data }) => { created.push(data); return { id: 'INVALID' }; } } },
+    },
+    apiKey: 'k', composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_gmail_send_email',
+      args: { recipient_email: 'AmarSai', subject: 'Hello', body: 'Complete message.' },
+      schema,
+    })),
+  });
+
+  assert.equal(result.status, 'needs_input');
+  assert.equal(created.length, 0);
+  assert.deepEqual(result.inputRequests[0].fields.map((field) => field.name), ['recipient_email']);
 });
 
 test('compound orchestrator: a write missing a required provider field asks before creating a draft', async () => {

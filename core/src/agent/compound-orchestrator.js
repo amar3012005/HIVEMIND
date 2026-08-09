@@ -130,6 +130,55 @@ function collectEmailCandidates(value, found = new Set(), depth = 0) {
   return found;
 }
 
+function emailDestinationFields(outputKind, schema) {
+  if (outputKind !== 'message') return [];
+  const properties = schema?.properties || {};
+  const names = new Set([
+    ...Object.keys(properties),
+    ...(Array.isArray(schema?.required) ? schema.required : []),
+  ]);
+  return [...names].filter((name) => {
+    const normalized = String(name).toLocaleLowerCase();
+    const property = properties[name] || {};
+    return ['recipient_email', 'recipient_emails', 'to_email', 'to_emails'].includes(normalized)
+      || (normalized === 'to' && (property.format === 'email' || property?.items?.format === 'email'));
+  });
+}
+
+/**
+ * Provider input generation may put a display name into an email destination.
+ * Normalize a destination to actual addresses only. A unique governed address
+ * from a prerequisite lookup is allowed to replace an invalid generated name;
+ * otherwise report the field so the write pauses before draft persistence.
+ */
+export function normalizeEmailDestinationArgs(outputKind, schema, args, priorOutputs) {
+  const next = { ...(args || {}) };
+  // Only the typed recipient output may repair a destination. Never mine an
+  // arbitrary address from recalled content, an email body, or another field.
+  const priorCandidates = [...collectEmailCandidates(
+    priorOutputs?.recipient_email ?? priorOutputs?.recipient_emails,
+  )].slice(0, 20);
+  const invalidFields = [];
+  for (const field of emailDestinationFields(outputKind, schema)) {
+    const property = schema?.properties?.[field] || {};
+    const candidates = [...collectEmailCandidates(next[field])].slice(0, 20);
+    if (candidates.length === 1) {
+      next[field] = property.type === 'array' ? candidates : candidates[0];
+      continue;
+    }
+    if (candidates.length > 1 && property.type === 'array') {
+      next[field] = candidates;
+      continue;
+    }
+    if (priorCandidates.length === 1) {
+      next[field] = property.type === 'array' ? priorCandidates : priorCandidates[0];
+      continue;
+    }
+    invalidFields.push(field);
+  }
+  return { args: next, invalidFields };
+}
+
 export function validateSemanticStepOutput(outputKind, data) {
   if (outputKind !== 'recipient') return { status: 'completed', outputFields: data && typeof data === 'object' ? data : {} };
   const candidates = [...collectEmailCandidates(data)].slice(0, 20);
@@ -1106,10 +1155,15 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // selected provider schema. Existing model-written content is never
   // overwritten here, and no user-language/provider keyword is inspected.
   args = backfillMissingGroundedContentArgs(subtask.output_kind, manifestSchema, args, priorOutputs);
+  const recipientValidation = normalizeEmailDestinationArgs(
+    subtask.output_kind, manifestSchema, args, priorOutputs,
+  );
+  args = recipientValidation.args;
   const missing = missingRequiredArgs(manifestSchema, args);
   const semanticMissing = [
     ...missingSemanticWriteArgs(subtask.output_kind, manifestSchema, args),
     ...unresolvedContent,
+    ...recipientValidation.invalidFields,
   ];
   if (missing.length || semanticMissing.length) {
     const missingFields = [...new Set([...missing, ...semanticMissing])];

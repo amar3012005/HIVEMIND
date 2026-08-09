@@ -264,7 +264,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
     family: 'chat-progressive-router', version: 'v3', variant: 'capability-contract', build: () => SYSTEM,
   });
   const connectedPolicy = useTools && Array.isArray(connectedProviders)
-    ? `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it.`
+    ? `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it. For an email action, a person's name or display label is not a resolved destination: only a syntactically valid email address is resolved, otherwise add a recipient lookup step with output_kind recipient and make the action depend on it.`
     : '';
   const dynamicPolicy = useTools
     ? connectedPolicy

@@ -273,6 +273,20 @@ test('Room Director fails closed on invented artifact keys and mismatched stages
   await assert.rejects(() => wrongStage.execute(baseRequest), /runtime_room_result_correlation_mismatch/);
 });
 
+test('Room Director namespaces retry artifacts by stage attempt', async () => {
+  const director = new RuntimeRoomDirector({ transport: async () => ({ result: {
+    contract: 'runtime-stage-result.v1', run_id: 'run-repair', stage_id: 'repair',
+    artifacts: [{ id: 'artifact-001', key: 'result', data: { revised: true } }], gaps: [],
+  } }) });
+  const result = await director.execute({
+    run_id: 'run-repair', org_id: 'org-1', room_id: 'room-1', owner_user_id: 'user-1',
+    room_context: { user_id: 'user-1' }, playbook_id: 'generic.repair', playbook_version: 1,
+    stage_id: 'repair', objective: 'Repair the rejected artifact.', expected_artifacts: ['result'],
+    checks: [], stage_attempts: { repair: 2 },
+  });
+  assert.equal(result.artifacts[0].id, 'artifact-001:attempt:2');
+});
+
 test('generic executor checkpoints and resumes the GreenLeaf lifecycle end to end', async () => {
   const registry = new RuntimePlaybookRegistry();
   await registry.load([createJsonPlaybookSource([fixturePath])]);
@@ -487,6 +501,39 @@ test('playbook executor exclusively owns semantic retry count and parks after th
   assert.equal(run.status, 'NEEDS_INTERVENTION');
   assert.equal(run.stageAttempts.perform, 2);
   assert.equal(requests.length, 2, 'automatic reentry must not create a third Room execution');
+});
+
+test('artifact persistence failures obey the bounded playbook retry policy', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.persistence-repair', version: 1, status: 'ACTIVE',
+    name: 'Persistence repair', description: 'Bounds persistence failures.',
+    initial_stage_id: 'persist', terminal_states: ['done'],
+    stages: [{
+      id: 'persist', objective: 'Persist one result.', expected_artifacts: ['result'], input_refs: [],
+      completion_checks: [{ predicate: 'has_min_count', select: 'result', value: 1 }],
+      transitions: [{ default: true, to_terminal: 'done' }], on_failure: 'REPAIR', max_attempts: 2,
+    }],
+  });
+  const store = new TestRuntimeStore();
+  let persistenceCalls = 0;
+  store.persistArtifacts = async () => {
+    persistenceCalls += 1;
+    throw new Error('runtime_artifact_immutable:artifact-001');
+  };
+  const director = { async execute() {
+    return { artifacts: [{ id: 'artifact-001', key: 'result', data: { ready: true } }] };
+  } };
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, workerId: 'persistence-repair' });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.persistence-repair', playbookVersion: 1,
+    idempotencyKey: 'persistence-repair-1', trigger: { payload: {} },
+  });
+  const run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'NEEDS_INTERVENTION');
+  assert.equal(run.stageAttempts.persist, 2);
+  assert.equal(persistenceCalls, 2);
+  assert.equal(store.checkpoints.filter((entry) => entry.phase === 'ARTIFACT_PERSISTENCE_ERROR').length, 2);
 });
 
 test('Director selects an exact registered playbook without local content routing', async () => {

@@ -145,7 +145,7 @@ export class PostgresRuntimeStore {
     });
   }
 
-  async persistArtifacts(runId, orgId, stageId, artifacts) {
+  async persistArtifacts(runId, orgId, stageId, artifacts, { replaceStageKeys = false } = {}) {
     const normalized = artifacts.map(artifactRecord);
     if (normalized.length === 0) return [];
     return this.prisma.$transaction(async (tx) => {
@@ -161,6 +161,20 @@ export class PostgresRuntimeStore {
         if (previous && previous.contentHash !== artifact.content_hash) {
           throw new Error(`runtime_artifact_immutable:${artifact.id}`);
         }
+      }
+      if (replaceStageKeys) {
+        const replacementKeys = [...new Set(normalized.map((artifact) => artifact.key))];
+        await tx.runtimePlaybookArtifact.updateMany({
+          where: {
+            runId,
+            orgId,
+            stageId,
+            artifactKey: { in: replacementKeys },
+            artifactId: { notIn: ids },
+            status: { not: 'SUPERSEDED' },
+          },
+          data: { status: 'SUPERSEDED' },
+        });
       }
       await tx.runtimePlaybookArtifact.createMany({
         data: normalized.filter((artifact) => !byId.has(artifact.id)).map((artifact) => ({

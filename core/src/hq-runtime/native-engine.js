@@ -411,12 +411,12 @@ export class NativeHqEngine {
       });
     }
 
-    // First-life check-in is an internal, user-initiated playbook.  It gates
-    // neither baseline truth nor provider authority, but it prevents planning
-    // from running ahead of an administrator who wants to add current context.
+    // First-life check-in follows the initial evidence-backed diagnosis. This gives
+    // the administrator a concrete plan to correct while still letting their
+    // current-status artifact shape the downstream strategy lifecycle.
     const firstLifePolicy = await loadFirstLifePolicy();
     const initialPlanAbsent = !context.evidence.latest_growth_plan;
-    if (initialPlanAbsent && firstLifePolicy.optional_admin_checkin === true && this.runtimePlaybooks) {
+    if (!initialPlanAbsent && firstLifePolicy.optional_admin_checkin === true && this.runtimePlaybooks) {
       const adminRuns = await prisma.runtimePlaybookRun.findMany({
         where: { orgId: runtime.orgId },
         orderBy: { updatedAt: 'desc' },
@@ -460,7 +460,7 @@ export class NativeHqEngine {
         if (!alreadyShown) await event(prisma, runtime, cycle, {
           eventType: 'decision_required',
           title: 'A brief internal check-in is available',
-          summary: 'You can speak with Runtime in this browser before it forms the first operating plan, or skip this check-in and continue from the evidence already collected.',
+          summary: 'You can speak with Runtime in this browser to correct or enrich the initial diagnosis before strategy work begins, or skip and continue from the retained evidence.',
           details: { admin_checkin_run_id: adminRun.id, first_life_policy: { id: firstLifePolicy.policy_id, version: firstLifePolicy.version } },
         });
         await move('WAITING', { blockedReason: null, currentCycleId: null, nextWakeAt: null });
@@ -549,6 +549,7 @@ export class NativeHqEngine {
 
     let queueContinuationScheduled = false;
     let initialPolicyCommitted = false;
+    let adminCheckinScheduled = false;
     if (trigger.type === 'runtime_playbook_result') {
       const runId = String(trigger.payload?.run_id || '');
       const run = runId ? await prisma.runtimePlaybookRun.findFirst({
@@ -1069,7 +1070,7 @@ export class NativeHqEngine {
         include: { artifacts: { orderBy: { createdAt: 'desc' } } }, orderBy: { updatedAt: 'desc' },
       });
       const currentStatus = adminStatusRun?.artifacts?.find((artifact) => artifact.artifactKey === 'user_current_status') || null;
-      const lifecycleCatalog = this.runtimePlaybooks?.registry.descriptors({ scopeKey: 'global' })
+      const lifecycleCatalog = this.runtimePlaybooks?.registry.descriptors({ scopeKey: 'global', latestOnly: true })
         .filter((entry) => entry.status === 'ACTIVE')
         .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.playbook_id === entry.playbook_id) === index)
         .map((entry) => ({
@@ -1123,6 +1124,20 @@ export class NativeHqEngine {
         details: { todo_ids: result.committed?.todo_ids || [], operating_queue: result.plan?.operating_queue || [] }, evidenceRefs: [result.artifact_id],
       });
       initialPolicyCommitted = true;
+      if (firstLifePolicy.optional_admin_checkin === true && this.runtimePlaybooks) {
+        await scheduleHqWake({
+          prisma,
+          runtimeId: runtime.id,
+          orgId: runtime.orgId,
+          runtimeEpoch: runtime.epoch,
+          idempotencyKey: `first-life-plan-to-admin-checkin:${runtime.epoch}`,
+          triggerType: 'queue_advance',
+          dueAt: new Date(),
+          payload: { first_life_admin_checkin: true, growth_plan_artifact_id: result.artifact_id },
+        });
+        queueContinuationScheduled = true;
+        adminCheckinScheduled = true;
+      }
     } else if (focusedOutcome) {
       await event(prisma, runtime, cycle, {
         eventType: 'observation', title: 'The focused outcome remains retained',
@@ -1188,7 +1203,9 @@ export class NativeHqEngine {
     const blockedTodos = capabilityState.todos.filter((todo) => todo.status === 'BLOCKED');
     const waitingForResponse = pendingPlaybookRun?.status === 'WAITING_EVENT';
     const waitingPresentation = pendingPlaybookRun?.waitingFor?.presentation || {};
-    const sleepReason = initialPolicyCommitted
+    const sleepReason = adminCheckinScheduled
+      ? 'The initial diagnosis is retained. I am opening the optional administrator check-in next so corrections can shape the strategy program before specialist work begins.'
+      : initialPolicyCommitted
       ? 'I have retained the evidenced proposals without dispatching them. Start the recommendation when you are ready, or review it later. External authority remains undecided until a real immutable action reaches its gate.'
       : queueContinuationScheduled
       ? 'The next independent todo is already scheduled for immediate dispatch. I am retaining every in-flight assignment and will reconcile each result when it returns.'
@@ -1204,8 +1221,9 @@ export class NativeHqEngine {
         ? `I am sleeping because the active stage now needs ${waitingDays} day(s) of measured observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} or earlier for material evidence.`
       : 'No executable or in-flight work remains. I will wake for a new instruction, connector event, or durable result.';
     if (dueAt) await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next measurement checkpoint', summary: `The next evidence review is ${dueAt.toISOString()} because the active Growth Stage declares that checkpoint.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
-    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null, blockedReason: initialPolicyCommitted ? 'initial_start_decision' : null });
-    const waitingTitle = initialPolicyCommitted ? 'The first operating plan is ready'
+    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null, blockedReason: adminCheckinScheduled ? null : initialPolicyCommitted ? 'initial_start_decision' : null });
+    const waitingTitle = adminCheckinScheduled ? 'The initial diagnosis is ready'
+      : initialPolicyCommitted ? 'The first operating plan is ready'
       : queueContinuationScheduled ? 'The queue is still moving'
       : openCapability ? 'I am waiting for access'
       : waitingForResponse ? String(waitingPresentation.title || 'I am waiting for lifecycle evidence')

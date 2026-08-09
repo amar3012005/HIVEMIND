@@ -108,11 +108,12 @@ function roomPhaseContext(request) {
   };
 }
 
-function normalizeArtifact(artifact, expectedKeys) {
-  const id = String(artifact?.id || '').trim();
+function normalizeArtifact(artifact, expectedKeys, attempt = 1) {
+  const localId = String(artifact?.id || '').trim();
   const key = String(artifact?.key || '').trim();
-  if (!id) throw new Error('runtime_room_artifact_id_required');
+  if (!localId) throw new Error('runtime_room_artifact_id_required');
   if (!expectedKeys.has(key)) throw new Error(`runtime_room_artifact_key_unexpected:${key || 'missing'}`);
+  const id = attempt > 1 ? `${localId.slice(0, 140)}:attempt:${attempt}` : localId;
   return {
     id,
     key,
@@ -329,7 +330,8 @@ export class RuntimeRoomDirector {
       throw new Error('runtime_room_result_correlation_mismatch');
     }
     const expectedKeys = new Set(asArray(request.expected_artifacts).map(String));
-    const artifacts = asArray(result.artifacts).map((artifact) => normalizeArtifact(artifact, expectedKeys));
+    const attempt = Number(asObject(request.stage_attempts)[request.stage_id] || 1);
+    const artifacts = asArray(result.artifacts).map((artifact) => normalizeArtifact(artifact, expectedKeys, attempt));
     const duplicateIds = artifacts.map((artifact) => artifact.id)
       .filter((id, index, values) => values.indexOf(id) !== index);
     if (duplicateIds.length) throw new Error(`runtime_room_artifact_duplicate:${duplicateIds[0]}`);

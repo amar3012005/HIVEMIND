@@ -440,7 +440,32 @@ export class GenericStageExecutor {
           return this.store.loadRun(runId, orgId);
         }
         const produced = normalizeDirectorArtifacts(result);
-        const persisted = await this.store.persistArtifacts(runId, orgId, stage.id, produced);
+        let persisted;
+        try {
+          persisted = await this.store.persistArtifacts(runId, orgId, stage.id, produced, {
+            replaceStageKeys: attempts[stage.id] > 1,
+          });
+        } catch (error) {
+          const verdict = executionErrorVerdict(error);
+          await this.store.appendCheckpoint(runId, orgId, {
+            stageId: stage.id,
+            phase: 'ARTIFACT_PERSISTENCE_ERROR',
+            status: 'FAILED',
+            verdict,
+          });
+          const attempt = attempts[stage.id];
+          if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts && error?.ambiguous !== true) {
+            await this.store.updateRun(runId, orgId, { lastVerdict: verdict, status: 'ACTIVE' });
+            continue;
+          }
+          const status = stage.on_failure === 'TERMINATE' ? 'TERMINATED' : 'NEEDS_INTERVENTION';
+          await this.store.updateRun(runId, orgId, {
+            status,
+            lastVerdict: verdict,
+            ...(status === 'TERMINATED' ? { completedAt: new Date() } : {}),
+          });
+          return this.store.loadRun(runId, orgId);
+        }
         run = await this.store.loadRun(runId, orgId);
         if (result?.waiting_for && typeof result.waiting_for === 'object') {
           const declared = asObject(result.waiting_for);

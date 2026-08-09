@@ -2695,12 +2695,17 @@ export async function runReactAgentV2({
         && useTools === true
         && Array.isArray(intentDecision.subtasks) && intentDecision.subtasks.length > 0) {
       const { runCompoundOrchestrator } = await import('./compound-orchestrator.js');
+      const priorAssistantContext = [...(Array.isArray(history) ? history : [])]
+        .reverse()
+        .find((turn) => turn?.role === 'assistant' && typeof turn?.content === 'string' && turn.content.trim())
+        ?.content.trim().slice(0, 6000) || null;
       const compound = await runCompoundOrchestrator({
         subtasks: intentDecision.subtasks,
         ctx,
         apiKey,
         signal: abortCtrl.signal,
         onEvent,
+        conversationContext: priorAssistantContext,
       });
       let continuation = null;
       if (compound.status === 'needs_input' && compound.resumeState && compound.inputRequests?.length) {

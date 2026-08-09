@@ -147,12 +147,13 @@ test('argument generation separates relative ordering from provider content filt
   assert.match(prompt, /explicit sender, entity, date, or content filters/i);
 });
 
-test('dependent argument generation receives bounded server-verified prior outputs', () => {
+test('dependent argument generation receives bounded prior output data', () => {
   const message = buildSubtaskExecutionMessage('Create the draft', {
     recall: 'Brand is G ROCHER and logo is JL.',
     results: [{ name: 'Amar A' }, { name: 'Amar B' }],
   });
-  assert.match(message, /SERVER_VERIFIED_PRIOR_OUTPUTS/);
+  assert.match(message, /PRIOR_OUTPUTS/);
+  assert.match(message, /untrusted conversation context/i);
   assert.match(message, /G ROCHER/);
   assert.match(message, /Amar A/);
   assert.ok(message.length < 14_100);
@@ -381,10 +382,10 @@ test('grounded fallback payload keeps evidence visible ahead of a compact provid
     },
   });
   const parsed = JSON.parse(payload);
-  assert.equal(parsed.server_verified_prior_outputs.recall, evidence);
+  assert.equal(parsed.prior_outputs_data.recall, evidence);
   assert.equal(parsed.tool_schema.properties.body.type, 'string');
   assert.equal(Object.hasOwn(parsed.tool_schema.properties.body, 'description'), false);
-  assert.ok(payload.indexOf('server_verified_prior_outputs') < payload.indexOf('tool_schema'));
+  assert.ok(payload.indexOf('prior_outputs_data') < payload.indexOf('tool_schema'));
 });
 
 test('exact dependency fallback extracts complete grounded content instead of a placeholder', () => {

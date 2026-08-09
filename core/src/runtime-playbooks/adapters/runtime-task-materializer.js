@@ -22,8 +22,6 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
       const config = asObject(input.config);
       const portfolio = asArray(input.inputs?.[`artifacts.${String(config.input_key || 'first_life_motion_portfolio')}`]).at(-1);
       const strategy = asArray(input.inputs?.[`artifacts.${String(config.strategy_key || 'marketing_strategy')}`]).at(-1);
-      const policyVersion = Number.isInteger(Number(config.first_life_policy_version))
-        ? Number(config.first_life_policy_version) : 5;
       if (!portfolio?.id) throw new Error('runtime_task_materializer_portfolio_required');
       const motions = asArray(portfolio.data?.motions).slice(0, 4);
       if (motions.length < 2) throw new Error('runtime_task_materializer_minimum_motions_required');
@@ -32,6 +30,10 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
       if (!service?.registry) throw new Error('runtime_task_materializer_registry_unavailable');
       const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: context.runId, orgId: context.orgId } });
       if (!run) throw new Error('runtime_task_materializer_run_not_found');
+      const runPolicyVersion = Number(asObject(run.context).policy?.first_life_policy_version);
+      const policyVersion = Number.isInteger(runPolicyVersion) && runPolicyVersion > 0
+        ? runPolicyVersion
+        : Number.isInteger(Number(config.first_life_policy_version)) ? Number(config.first_life_policy_version) : 5;
       const trigger = asObject(run.trigger);
       const runtimeId = String(trigger.runtime_id || '');
       if (!runtimeId) throw new Error('runtime_task_materializer_runtime_required');

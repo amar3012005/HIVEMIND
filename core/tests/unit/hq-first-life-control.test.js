@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activateEligibleFirstLifeWork, projectCurrentFirstLife } from '../../src/hq-runtime/first-life-control.js';
+import { activateEligibleFirstLifeWork, ensureFirstLifeBootstrapProposal, projectCurrentFirstLife } from '../../src/hq-runtime/first-life-control.js';
 
 function todo(id, status, rank, effect, recommended = false) {
   return {
@@ -42,6 +42,55 @@ function prismaFor(rows, authorityPolicy = { external_default: 'manual', interna
 }
 
 const runtime = { id: 'runtime-1', orgId: 'org-1', epoch: 'epoch-1' };
+
+test('v7 creates one epoch-scoped policy-selected bootstrap and never duplicates it', async () => {
+  const rows = [];
+  const tx = {
+    $queryRawUnsafe: async () => [{ id: runtime.id, epoch: runtime.epoch }],
+    hqTodo: {
+      findFirst: async ({ where }) => rows.find((row) => row.context.first_life_bootstrap_key === where.context.equals) || null,
+      create: async ({ data }) => {
+        const row = { id: `todo-${rows.length + 1}`, ...data };
+        rows.push(row);
+        return row;
+      },
+    },
+    hyperRoom: { findFirst: async () => ({ id: 'marketing-room' }) },
+  };
+  const prisma = { $transaction: async (callback) => callback(tx) };
+  const policy = {
+    policy_id: 'runtime.first-life-policy', version: 7,
+    initial_lifecycle: {
+      playbook_id: 'marketing.strategy-to-growth-brief', version: 5,
+      supported_action: 'formulate_go_to_market_strategy', bypass_growth_plan: true,
+    },
+  };
+  const registry = { get: () => ({
+    playbook_id: policy.initial_lifecycle.playbook_id,
+    version: 5,
+    name: 'Marketing strategy to first-life program',
+    description: 'Build one strategy program.',
+    metadata: {
+      owner_room_tag: 'marketing', effect_class: 'internal',
+      supported_actions: ['formulate_go_to_market_strategy'],
+      terminal_states_by_action: { formulate_go_to_market_strategy: ['strategy_program_ready'] },
+    },
+    stages: [], terminal_states: ['strategy_program_ready'],
+  }) };
+  const input = {
+    prisma, runtime, policy, registry, company: { name: 'Example' }, baseline: { id: 'baseline-1' },
+    connectedCapabilities: ['maps'], instruction: 'Run the company.',
+  };
+  const first = await ensureFirstLifeBootstrapProposal(input);
+  const second = await ensureFirstLifeBootstrapProposal(input);
+  assert.equal(first.created, true);
+  assert.equal(second.created, false);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, 'PROPOSED');
+  assert.equal(rows[0].context.execution_mode, 'first_life_bootstrap');
+  assert.equal(rows[0].context.planned_playbook_id, 'marketing.strategy-to-growth-brief');
+  assert.equal(rows[0].context.first_life_policy_version, 7);
+});
 
 test('v3 first start promotes only the recommendation', async () => {
   const rows = [

@@ -16,7 +16,7 @@ function fixture() {
     },
   };
   const prisma = {
-    runtimePlaybookRun: { async findFirst() { return { id: 'run-1', playbookId: 'marketing.strategy-to-growth-brief', playbookVersion: 3, scopeKey: 'global', trigger: { runtime_id: 'runtime-1' }, context: { request: { instruction: 'Decide' } } }; } },
+    runtimePlaybookRun: { async findFirst() { return { id: 'run-1', playbookId: 'marketing.strategy-to-growth-brief', playbookVersion: 3, scopeKey: 'global', trigger: { runtime_id: 'runtime-1' }, context: { request: { instruction: 'Decide' }, policy: { first_life_policy_version: 7 } } }; } },
     async $transaction(fn) { return fn(tx); },
   };
   const registry = { get(id, version) {
@@ -49,6 +49,7 @@ test('strategy portfolio materialization is per-motion, evidence-bound and idemp
   assert.equal(todos.length, 1);
   assert.equal(todos[0].status, 'PROPOSED');
   assert.equal(todos[0].context.planned_playbook_id, 'research.evidence-to-decision');
+  assert.equal(todos[0].context.first_life_policy_version, 7);
   assert.deepEqual(first.artifacts[0].data.accepted_todo_ids, ['todo-1']);
   assert.equal(first.artifacts[0].data.rejected_motions[0].reason, 'playbook_version_unavailable');
   assert.deepEqual(second.artifacts[0].data.accepted_todo_ids, ['todo-1']);

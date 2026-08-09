@@ -5,7 +5,7 @@ import { ingestPendingInstructions, reconcileTodoCapabilities } from './instruct
 import { narrateAwakening } from './awakening-narrator.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 import { projectCurrentActivationSprint } from './activation-sprint.js';
-import { activateEligibleFirstLifeWork } from './first-life-control.js';
+import { activateEligibleFirstLifeWork, ensureFirstLifeBootstrapProposal, projectFirstLifeOperatingGate } from './first-life-control.js';
 import { resolveAuthorityPreference } from './contracts.js';
 import { publishHqRuntimeTransient } from './event-bus.js';
 import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
@@ -83,6 +83,13 @@ export function adminCheckinDisposition(status) {
 
 export function shouldOfferFirstLifeAdminCheckin({ initialPlanAbsent, optionalAdminCheckin, runtimePlaybooksAvailable }) {
   return initialPlanAbsent === true && optionalAdminCheckin === true && runtimePlaybooksAvailable === true;
+}
+
+export function growthPlanModeForState({ latestGrowthPlan, focusedOutcome, policy, firstLifeGate }) {
+  if (latestGrowthPlan || focusedOutcome) return null;
+  if (policy?.initial_lifecycle?.bypass_growth_plan !== true) return 'initial_full';
+  if (policy?.ongoing_operation?.growth_plan_enabled !== true || firstLifeGate?.motions_complete !== true) return null;
+  return String(policy.ongoing_operation.mode || 'operate');
 }
 
 export function selectPendingPlaybookRun(runs = []) {
@@ -513,6 +520,50 @@ export class NativeHqEngine {
       }
     }
 
+    // Versioned first-life policy owns the bootstrap lifecycle. When it declares
+    // a direct initial lifecycle, materialize that one internal proposal without
+    // asking the Growth Planner to manufacture a queue first.
+    if (firstLifePolicy.initial_lifecycle?.bypass_growth_plan === true && this.runtimePlaybooks) {
+      const adminStatusRun = await prisma.runtimePlaybookRun.findFirst({
+        where: {
+          orgId: runtime.orgId,
+          playbookId: FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK.id,
+          status: 'COMPLETED',
+          trigger: { path: ['runtime_epoch'], equals: runtime.epoch },
+        },
+        include: { artifacts: { orderBy: { createdAt: 'desc' } } },
+        orderBy: { updatedAt: 'desc' },
+      });
+      const adminCurrentStatus = adminStatusRun?.artifacts
+        ?.find((artifact) => artifact.artifactKey === 'user_current_status') || null;
+      const bootstrap = await ensureFirstLifeBootstrapProposal({
+        prisma,
+        runtime,
+        policy: firstLifePolicy,
+        registry: this.runtimePlaybooks.registry,
+        company: compactCompanyOperatingContext(context.company),
+        baseline: context.evidence.baseline,
+        adminCurrentStatus,
+        connectedCapabilities: [
+          ...(context.capabilities?.connected || []),
+          ...(context.capabilities?.platform_managed || []),
+        ],
+        instruction: runtime.objective || '',
+      });
+      if (bootstrap.created) await event(prisma, runtime, cycle, {
+        eventType: 'todo_created',
+        title: `I prepared the first internal lifecycle: ${bootstrap.todo.title}`,
+        summary: 'The versioned first-life policy selected this evidence-only lifecycle directly. Growth Planning will begin later, after the first-life program has produced outcomes.',
+        details: {
+          todo_id: bootstrap.todo.id,
+          first_life_policy: { id: firstLifePolicy.policy_id, version: firstLifePolicy.version },
+          playbook_id: bootstrap.todo.context?.planned_playbook_id,
+          playbook_version: bootstrap.todo.context?.planned_playbook_version,
+        },
+        evidenceRefs: bootstrap.todo.context?.evidence_refs || [],
+      });
+    }
+
     const activationSprint = await projectCurrentActivationSprint({ prisma, orgId: runtime.orgId });
     // A current-policy internal bootstrap starts without a synthetic Start gate.
     // Historical policies still retain their recorded AWAITING_START behavior.
@@ -582,6 +633,14 @@ export class NativeHqEngine {
     let queueContinuationScheduled = false;
     let initialPolicyCommitted = false;
     let adminCheckinScheduled = false;
+    const firstLifeOperatingGate = firstLifePolicy.initial_lifecycle?.bypass_growth_plan === true
+      ? await projectFirstLifeOperatingGate({ prisma, runtime }) : null;
+    const growthPlanMode = growthPlanModeForState({
+      latestGrowthPlan: context.evidence.latest_growth_plan,
+      focusedOutcome,
+      policy: firstLifePolicy,
+      firstLifeGate: firstLifeOperatingGate,
+    });
     if (trigger.type === 'runtime_playbook_result') {
       const runId = String(trigger.payload?.run_id || '');
       const run = runId ? await prisma.runtimePlaybookRun.findFirst({
@@ -769,13 +828,15 @@ export class NativeHqEngine {
           evidenceRefs: artifactRefs,
         });
         if (completed) {
-          const strategyProgramReady = run.playbookId === 'marketing.strategy-to-growth-brief'
-            && run.terminalState === 'strategy_program_ready';
+          const proposalOrigin = String(todo.context?.proposal_origin || '');
+          const programBuilderReady = proposalOrigin === 'first_life_bootstrap'
+            && firstLifePolicy.initial_lifecycle?.materialize_motions === true;
+          const strategyMotionCompleted = proposalOrigin === 'strategy_program';
           const activation = await activateEligibleFirstLifeWork({
             prisma,
             runtime,
-            expansionTrigger: strategyProgramReady ? 'strategy_program_ready' : 'verified_result',
-            proposalOrigin: strategyProgramReady ? 'strategy_program' : null,
+            expansionTrigger: programBuilderReady ? 'strategy_program_ready' : 'verified_result',
+            proposalOrigin: programBuilderReady || strategyMotionCompleted ? 'strategy_program' : null,
           });
           for (const promoted of activation.promoted) await event(prisma, runtime, cycle, {
             eventType: 'todo_created',
@@ -940,14 +1001,23 @@ export class NativeHqEngine {
           terminal_states: entry.terminal_states,
         }));
       const lifecycleContext = {
+        mode: readyTodo.context?.execution_mode || null,
         company: compactCompanyOperatingContext(context.company),
         baseline: context.evidence?.baseline || null,
+        connected_capabilities: [
+          ...(context.capabilities?.connected || []),
+          ...(context.capabilities?.platform_managed || []),
+        ],
         admin_current_status: adminCurrentStatus ? {
           artifact_id: adminCurrentStatus.artifactId,
           data: adminCurrentStatus.data || {},
           source_refs: adminCurrentStatus.sourceRefs || [],
         } : null,
         lifecycle_catalog: lifecycleCatalog || [],
+        policy: {
+          first_life_policy_id: readyTodo.context?.first_life_policy_id || null,
+          first_life_policy_version: readyTodo.context?.first_life_policy_version || null,
+        },
         target: {
           ...(readyTodo.context?.target || {}),
           ...(readyTodo.context?.location ? { location: readyTodo.context.location } : {}),
@@ -1090,13 +1160,20 @@ export class NativeHqEngine {
         summary: `${readyTodo.title} is queued next, but a specialist Room already owns the active task. I will not open parallel work; I dispatch the next item only when this Room returns its result.`,
         details: { next_todo_id: readyTodo.id },
       });
-    } else if (!context.evidence.latest_growth_plan && !focusedOutcome) {
+    } else if (growthPlanMode) {
       await move('DIAGNOSING');
       const selectedSkill = this.skills.load('growth-constraint-diagnosis');
       const [growthToolkit] = this.toolkits.select(['growth_plan']);
       const selectedModel = selectedSkill.model_policy?.model || 'gpt-oss-120b';
       await event(prisma, runtime, cycle, { eventType: 'skill_loaded', title: 'I am ranking the company constraints', summary: `${selectedSkill.description} I will compare the complete company state, preserve material unknowns, and order only the work justified by evidence and the operating requirements.`, skillRef: selectedSkill.id, details: { model_policy: selectedSkill.model_policy, selected_model: selectedModel } });
-      await event(prisma, runtime, cycle, { eventType: 'tool_started', title: 'I am building the first Growth Operating Plan', summary: 'I will assess the complete baseline, rank multiple constraints, define the first bounded stage, and commit an ordered specialist todo queue before dispatching any work.', toolRef: 'growth_plan_run', details: { toolkit: growthToolkit.id, model: selectedModel, mode: 'initial_full' } });
+      await event(prisma, runtime, cycle, {
+        eventType: 'tool_started',
+        title: growthPlanMode === 'initial_full' ? 'I am building the first Growth Operating Plan' : 'I am updating the Growth Operating Plan',
+        summary: growthPlanMode === 'initial_full'
+          ? 'I will assess the complete baseline, rank multiple constraints, define the first bounded stage, and commit an ordered specialist todo queue before dispatching any work.'
+          : 'The first-life program has produced outcomes. I will now compare current evidence, retain one company-wide goal, and choose the next highest-leverage operating move.',
+        toolRef: 'growth_plan_run', details: { toolkit: growthToolkit.id, model: selectedModel, mode: growthPlanMode },
+      });
       const planningRequirements = appliedInstructions.map((item) => item.instruction.body).filter(Boolean);
       const adminStatusRun = await prisma.runtimePlaybookRun.findFirst({
         where: { orgId: runtime.orgId, playbookId: 'operations.browser-admin-checkin-to-status', status: 'COMPLETED' },
@@ -1119,7 +1196,7 @@ export class NativeHqEngine {
       let result;
       try {
         result = await this.toolkits.invoke('growth_plan', 'run', {
-          mode: 'initial_full', objective: [runtime.objective, ...planningRequirements].filter(Boolean).join('\n\nOperating requirement:\n'), hqCycleId: cycle.id,
+          mode: growthPlanMode, objective: [runtime.objective, ...planningRequirements].filter(Boolean).join('\n\nOperating requirement:\n'), hqCycleId: cycle.id,
           model: selectedModel, lifecycleCatalog,
           additionalEvidence: currentStatus ? { user_current_status: { artifact_id: currentStatus.artifactId, data: currentStatus.data || {}, source_refs: currentStatus.sourceRefs || [] } } : null,
           onProgress: async ({ stage, detail }) => event(prisma, runtime, cycle, {
@@ -1130,7 +1207,18 @@ export class NativeHqEngine {
           }),
         }, { prisma, orgId: runtime.orgId, userId: runtime.ownerUserId });
       } catch (error) {
-        if (!String(error?.message || error).includes('first_life_evidenced_proposals_required')) throw error;
+        const reason = String(error?.message || error);
+        if (growthPlanMode !== 'initial_full' && reason.startsWith('growth_plan_')) {
+          await event(prisma, runtime, cycle, {
+            eventType: 'observation',
+            title: 'The operating diagnosis needs better evidence',
+            summary: 'I retained the completed first-life program and stopped this planning attempt. I will retry only after new material evidence or an explicit instruction, rather than repeating the same rejected model contract.',
+            details: { waiting_reason: 'operating_plan_evidence', error: reason.slice(0, 500) },
+          });
+          await move('WAITING', { blockedReason: 'operating_plan_evidence', currentCycleId: null, nextWakeAt: null });
+          return { transition: 'WAIT_FOR_OPERATING_EVIDENCE', reason: 'operating_plan_evidence' };
+        }
+        if (!reason.includes('first_life_evidenced_proposals_required')) throw error;
         await event(prisma, runtime, cycle, {
           eventType: 'observation',
           title: 'The first operating plan needs more evidence',

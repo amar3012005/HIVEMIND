@@ -22,6 +22,108 @@ function hasPlannedLifecycle(todo) {
     && context.requested_action.length > 0;
 }
 
+function bootstrapIdentity(policy, runtime) {
+  return `${policy.policy_id}.v${policy.version}:${runtime.epoch}:bootstrap`;
+}
+
+export async function ensureFirstLifeBootstrapProposal({ prisma, runtime, policy, registry, company, baseline,
+  adminCurrentStatus = null, connectedCapabilities = [], instruction = '' }) {
+  const configured = asObject(policy?.initial_lifecycle);
+  if (configured.bypass_growth_plan !== true) return { todo: null, created: false, reason: 'policy_does_not_bypass_growth_plan' };
+  const playbookId = String(configured.playbook_id || '').trim();
+  const playbookVersion = Number(configured.version);
+  const requestedAction = String(configured.supported_action || '').trim();
+  if (!playbookId || !Number.isInteger(playbookVersion) || !requestedAction) {
+    throw new Error('first_life_initial_lifecycle_invalid');
+  }
+  if (!registry) throw new Error('first_life_playbook_registry_unavailable');
+  const playbook = registry.get(playbookId, playbookVersion, { scopeKey: 'global' });
+  const supportedActions = Array.isArray(playbook.metadata?.supported_actions)
+    ? playbook.metadata.supported_actions.map(String) : [];
+  const roomTag = String(playbook.metadata?.owner_room_tag || '').trim().toLowerCase();
+  if (!supportedActions.includes(requestedAction) || !roomTag) {
+    throw new Error('first_life_initial_lifecycle_incompatible');
+  }
+  if (playbook.metadata?.effect_class !== 'internal'
+    || (playbook.stages || []).some((stage) => stage.authority_gate)) {
+    throw new Error('first_life_initial_lifecycle_must_be_internal');
+  }
+  const key = bootstrapIdentity(policy, runtime);
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRawUnsafe(
+      `SELECT id, epoch FROM hivemind.hq_runtimes
+        WHERE id=$1::uuid AND org_id=$2::uuid AND epoch=$3::uuid FOR UPDATE`,
+      runtime.id, runtime.orgId, runtime.epoch,
+    );
+    if (!locked.length) throw new Error('first_life_runtime_epoch_conflict');
+    let todo = await tx.hqTodo.findFirst({
+      where: { runtimeId: runtime.id, orgId: runtime.orgId, context: { path: ['first_life_bootstrap_key'], equals: key } },
+    });
+    if (todo) return { todo, created: false, reason: 'already_exists' };
+    const room = await tx.hyperRoom.findFirst({
+      where: { orgId: runtime.orgId, archivedAt: null, roomTag }, select: { id: true },
+    });
+    if (!room) throw new Error(`first_life_initial_room_unavailable:${roomTag}`);
+    const baselineRef = String(baseline?.id || baseline?.resource_id || '').trim() || null;
+    const adminRef = String(adminCurrentStatus?.artifactId || adminCurrentStatus?.artifact_id || '').trim() || null;
+    todo = await tx.hqTodo.create({ data: {
+      runtimeId: runtime.id,
+      orgId: runtime.orgId,
+      title: String(playbook.name || playbook.description || requestedAction).slice(0, 240),
+      objective: String(playbook.description || playbook.name || requestedAction),
+      kind: roomTag.slice(0, 60),
+      status: 'PROPOSED',
+      priority: 0,
+      position: 0,
+      requiredCapabilities: [],
+      context: {
+        first_life_bootstrap_key: key,
+        runtime_epoch: runtime.epoch,
+        proposal_origin: 'first_life_bootstrap',
+        first_life_policy_id: policy.policy_id,
+        first_life_policy_version: policy.version,
+        activation_sprint_id: key,
+        recommendation_rank: 1,
+        recommended: true,
+        room_tag: roomTag,
+        effect_class: 'internal',
+        external_action_requested: false,
+        planned_playbook_id: playbookId,
+        planned_playbook_version: playbookVersion,
+        requested_action: requestedAction,
+        requested_terminal_outcome: String(playbook.metadata?.terminal_states_by_action?.[requestedAction]?.[0]
+          || playbook.terminal_states?.[0] || requestedAction),
+        source_instruction: String(instruction || runtime.objective || ''),
+        execution_mode: 'first_life_bootstrap',
+        baseline_ref: baselineRef,
+        admin_current_status_ref: adminRef,
+        evidence_refs: [baselineRef, adminRef].filter(Boolean),
+        company_context: asObject(company),
+        connected_capabilities: Array.isArray(connectedCapabilities) ? connectedCapabilities : [],
+      },
+    } });
+    return { todo, created: true, reason: 'created' };
+  });
+}
+
+export async function projectFirstLifeOperatingGate({ prisma, runtime }) {
+  const todos = await prisma.hqTodo.findMany({
+    where: { runtimeId: runtime.id, orgId: runtime.orgId, status: { notIn: ['CANCELLED'] } },
+    orderBy: [{ createdAt: 'asc' }, { priority: 'asc' }],
+  });
+  const current = todos.filter((todo) => String(asObject(todo.context).runtime_epoch || '') === String(runtime.epoch || ''));
+  const bootstrap = current.find((todo) => asObject(todo.context).proposal_origin === 'first_life_bootstrap') || null;
+  const motions = current.filter((todo) => asObject(todo.context).proposal_origin === 'strategy_program');
+  const terminal = new Set(['COMPLETED', 'CANCELLED']);
+  return {
+    bootstrap,
+    motions,
+    bootstrap_complete: bootstrap?.status === 'COMPLETED',
+    motions_materialized: motions.length > 0,
+    motions_complete: motions.length > 0 && motions.every((todo) => terminal.has(String(todo.status).toUpperCase())),
+  };
+}
+
 function projectedStatus(todo, run) {
   const runStatus = String(run?.status || '').toUpperCase();
   if (runStatus === 'WAITING_AUTHORITY') return 'WAITING_FOR_AUTHORITY';

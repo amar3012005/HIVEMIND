@@ -3234,7 +3234,7 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { invitation: publicEnterpriseInvitation(invitation), audit: auditRows, entitlement_grants: grants });
   }
 
-  const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(send|resend|revoke|extend|rotate-code|code-copied)$/i);
+  const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(preview|send|resend|revoke|extend|rotate-code|code-copied)$/i);
   if (adminInvitationAction && req.method === 'POST') {
     const operator = getPlatformAdminSession(req);
     if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
@@ -3242,6 +3242,23 @@ const server = http.createServer(async (req, res) => {
     const [, invitationId, action] = adminInvitationAction;
     const body = await parseBody(req).catch(() => ({}));
     try {
+      if (action === 'preview') {
+        const invitation = await prisma.enterpriseInvitation.findUnique({ where: { id: invitationId } });
+        if (!invitation) return jsonResponse(res, { error: 'Not found' }, 404);
+        const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+        const rendered = renderTemplate('enterprise_invitation', invitationTemplateVars({
+          kind: 'enterprise',
+          application: null,
+          invitation,
+          invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent`,
+        }));
+        return jsonResponse(res, {
+          from: 'welcome@admin.singulancelabs.com',
+          to: invitation.recipientEmail,
+          invitation: publicEnterpriseInvitation(invitation),
+          ...rendered,
+        });
+      }
       if (action === 'revoke') {
         await revokeEnterpriseInvitation({ prisma, invitationId });
         await audit({ eventType: 'commercial.enterprise_invitation_revoked', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,

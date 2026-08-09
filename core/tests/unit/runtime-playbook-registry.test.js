@@ -250,13 +250,16 @@ test('room phase context does not duplicate dedicated lifecycle inputs inside pr
       'context.company': { name: 'Example' },
       'context.request': { instruction: 'Design it' },
       'context.lifecycle_catalog': catalog,
-      'artifacts.marketing_strategy_decision': [{ id: 'decision-1' }],
+      'artifacts.marketing_strategy_decision': [
+        { id: 'decision-old', status: 'SUPERSEDED', data: { invalid: true } },
+        { id: 'decision-1', status: 'COMPLETED' },
+      ],
     },
   });
   assert.equal(envelope.context.lifecycle_catalog.length, catalog.length);
   assert.equal(envelope.context.prior_artifacts['context.lifecycle_catalog'], undefined);
   assert.equal(envelope.context.prior_artifacts['context.company'], undefined);
-  assert.deepEqual(envelope.context.prior_artifacts['artifacts.marketing_strategy_decision'], [{ id: 'decision-1' }]);
+  assert.deepEqual(envelope.context.prior_artifacts['artifacts.marketing_strategy_decision'], [{ id: 'decision-1', status: 'COMPLETED' }]);
   assert.ok(serializeRoomEnvelope(envelope).length <= 15_500);
 });
 

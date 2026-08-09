@@ -107,7 +107,11 @@ function roomPhaseContext(request) {
     'context.policy', 'context.admin_current_status', 'context.lifecycle_catalog',
   ]);
   const priorArtifacts = Object.fromEntries(
-    Object.entries(asObject(request.inputs)).filter(([key]) => !dedicatedContextRefs.has(key)),
+    Object.entries(asObject(request.inputs))
+      .filter(([key]) => !dedicatedContextRefs.has(key))
+      .map(([key, value]) => [key, Array.isArray(value)
+        ? value.filter((artifact) => String(artifact?.status || '').toUpperCase() !== 'SUPERSEDED')
+        : value]),
   );
   const lifecycleCatalog = asArray(runtime.lifecycle_catalog).filter((entry) => (
     config.exclude_current_playbook_from_catalog !== true

@@ -9,7 +9,8 @@
 # Enforces the canonical parallel workflow:
 #   * one deploy = one canonical SHA = one release manifest
 #   * --sha MUST be an ancestor of origin/singulance-main (no unmerged code)
-#   * detached immutable worktree at /root/releases/<sha> (never a dirty tree)
+#   * detached immutable worktree at /root/releases/builds/<full-sha>
+#   * manifests and generated Compose overrides live outside the source tree
 #   * compose validation before deploy
 #   * immutable image build tags (sha-<sha>) ONLY, from that worktree
 #   * deploy only named services with --no-deps
@@ -88,8 +89,9 @@ SHA="$FULLSHA"
 echo "[gate] $SHORT is on canonical ✓"
 
 # ── detached immutable worktree ────────────────────────────────────────────
-REL="/root/releases/$SHORT"
+REL="/root/releases/builds/$FULLSHA"
 if [ ! -d "$REL/.git" ] && [ ! -f "$REL/.git" ]; then
+  mkdir -p "$(dirname "$REL")"
   git -C "$CANON" worktree add --detach --force "$REL" "$FULLSHA" >/dev/null
   git -C "$REL" -c submodule.recurse=false submodule update --init --force -q frontend/Da-vinci
 fi
@@ -102,8 +104,10 @@ docker compose -f "$HETZNER" --env-file "$ENVF" config -q && echo "[compose] het
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 IMAGE_LABELS=(--label "org.opencontainers.image.revision=$SHA" --label "org.opencontainers.image.created=$TS")
-MANIFEST="$REL/RELEASE_MANIFEST.$TS.json"
-OVERRIDE="$REL/deploy-override.$TS.yml"
+STATE_ROOT="${RELEASE_STATE_ROOT:-/root/releases/manifests/$SHORT/$TS}"
+mkdir -p "$STATE_ROOT"
+MANIFEST="$STATE_ROOT/RELEASE_MANIFEST.json"
+OVERRIDE="$STATE_ROOT/deploy-override.yml"
 declare -A ROLLBACK=()
 
 if [ "$DRY" = 1 ]; then
@@ -143,7 +147,7 @@ if printf '%s\n' "${SVCS[@]}" | grep -qx frontend; then
   [ -n "$CUR" ] && { docker tag "$CUR" hivemind/fe:rollback-single; ROLLBACK[frontend]="$CUR"; }
   echo "[build] frontend → $FTAG"; ( cd "$REL" && build_cmd frontend "$FTAG" ) >/dev/null
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:frontend"
-  FOVERRIDE="$REL/frontend-override.$TS.yml"
+  FOVERRIDE="$STATE_ROOT/frontend-override.yml"
   printf 'services:\n  frontend:\n    image: %s\n' "$FTAG" > "$FOVERRIDE"
   docker compose -p hivemind-next -f "$NEXT" -f "$FOVERRIDE" --env-file "$NEXTENV" --profile single config -q
   ( cd "$NEXT_REPO" && docker compose -p hivemind-next -f "$NEXT" -f "$FOVERRIDE" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null )

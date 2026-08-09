@@ -100,8 +100,9 @@ must never double as permission to send, publish, call, or spend.
 
 `singulance-main` on the authoritative GitHub remote is the only deployable
 lineage. `/root/hivemind-main` is collaboration source; `/root/hivemind` is the
-Compose and environment tree. Builds use a clean detached worktree at the exact
-merged SHA.
+Compose and environment tree. Builds use a clean detached worktree at
+`/root/releases/builds/<full-sha>`. Generated manifests and Compose overrides
+live under `/root/releases/manifests/`, never inside the immutable source tree.
 
 All release entry points converge on `scripts/release-canonical.sh`, which uses
 one host-wide lock, named `--no-deps` recreation, immutable SHA images, one

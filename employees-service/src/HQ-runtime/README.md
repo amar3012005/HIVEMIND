@@ -1,5 +1,11 @@
 # SINGULANCE HQ Runtime: Production Handoff
 
+> **Current architecture:** Read [INVARIANTS.md](./INVARIANTS.md) first. It is
+> the authoritative closure contract for lifecycle ownership, Room behavior,
+> evidence, retries, authority, and release verification. Historical sections
+> in this handoff describe how the system evolved and must not override those
+> invariants.
+
 This document is the canonical implementation handoff for the SINGULANCE HQ
 Runtime. Read it before changing Runtime behavior. It exists so a new engineer
 or coding agent can begin from the current architecture instead of rediscovering

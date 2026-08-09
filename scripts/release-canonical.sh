@@ -44,12 +44,12 @@ RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=hivemind-next-frontend-1 )
 declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=fe )
 build_cmd() { local s="$1" tag="$2"; case "$s" in
-  core)          docker build -q --label org.opencontainers.image.revision="$SHA" -t "$tag" -f Dockerfile.production . ;;
-  control-plane) docker build -q --label org.opencontainers.image.revision="$SHA" -t "$tag" -f Dockerfile.control-plane . ;;
-  employees)     docker build -q --label org.opencontainers.image.revision="$SHA" -t "$tag" ./employees-service ;;
-  tara-grok)     docker build -q --label org.opencontainers.image.revision="$SHA" -t "$tag" ./services/tara-grok ;;
-  tara-deepgram) docker build -q --label org.opencontainers.image.revision="$SHA" -t "$tag" ./services/tara-deepgram ;;
-  frontend)      docker build -q --label org.opencontainers.image.revision="$SHA" -t "$tag" ./frontend/Da-vinci ;;
+  core)          docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=core -t "$tag" -f Dockerfile.production . ;;
+  control-plane) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=control-plane -t "$tag" -f Dockerfile.control-plane . ;;
+  employees)     docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=employees -t "$tag" ./employees-service ;;
+  tara-grok)     docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=tara-grok -t "$tag" ./services/tara-grok ;;
+  tara-deepgram) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=tara-deepgram -t "$tag" ./services/tara-deepgram ;;
+  frontend)      docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=frontend -t "$tag" ./frontend/Da-vinci ;;
 esac; }
 
 IFS=',' read -ra SVCS <<< "$SERVICES"
@@ -60,9 +60,14 @@ for s in "${SVCS[@]}"; do [ -n "${CONTAINER[$s]:-}" ] || { echo "FATAL: unknown 
 "$PRESENCE" claim --session "$RELEASE_SESSION_ID" --services "$SERVICES" --sha "$SHA" --phase planning --summary "canonical release requested"
 trap '"$PRESENCE" complete --session "$RELEASE_SESSION_ID" --result failed --summary "release exited before completion" || true' EXIT
 
-# ── serialize with quick-deploy (same lock) ────────────────────────────────
-exec 9>/run/lock/singulance-quick-deploy.lock
-flock -n 9 || { echo "FATAL: another SINGULANCE deployment holds the lock"; exit 1; }
+# ── one host-wide release lock and disk floor ─────────────────────────────
+LOCK_FILE="${RELEASE_LOCK_FILE:-/var/lock/hivemind-release.lock}"
+LOCK_WAIT="${RELEASE_LOCK_WAIT:-1800}"
+AVAILABLE_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+MIN_GB="${RELEASE_MIN_DISK_GB:-25}"
+[ "${AVAILABLE_GB:-0}" -ge "$MIN_GB" ] || { echo "FATAL: only ${AVAILABLE_GB:-0}GB free; need ${MIN_GB}GB"; exit 1; }
+exec 9>"$LOCK_FILE"
+flock -w "$LOCK_WAIT" 9 || { echo "FATAL: another SINGULANCE deployment holds the canonical lock"; exit 1; }
 echo "[lock] acquired"
 "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase locked
 
@@ -79,20 +84,24 @@ FULLSHA=$(git -C "$CANON" rev-parse "$SHA^{commit}" 2>/dev/null) || { echo "FATA
 git -C "$CANON" merge-base --is-ancestor "$FULLSHA" "$CANON_REMOTE/singulance-main" \
   || { echo "FATAL: $SHA is NOT an ancestor of origin/singulance-main — refusing (unmerged code)"; exit 1; }
 SHORT=$(git -C "$CANON" rev-parse --short "$FULLSHA")
+SHA="$FULLSHA"
 echo "[gate] $SHORT is on canonical ✓"
 
 # ── detached immutable worktree ────────────────────────────────────────────
 REL="/root/releases/$SHORT"
 if [ ! -d "$REL/.git" ] && [ ! -f "$REL/.git" ]; then
   git -C "$CANON" worktree add --detach --force "$REL" "$FULLSHA" >/dev/null
-  git -C "$REL" -c submodule.recurse=false submodule update --init --force -q frontend/Da-vinci || true
+  git -C "$REL" -c submodule.recurse=false submodule update --init --force -q frontend/Da-vinci
 fi
+[ "$(git -C "$REL" rev-parse HEAD)" = "$FULLSHA" ] || { echo "FATAL: release worktree SHA drift"; exit 1; }
+[ -z "$(git -C "$REL" status --porcelain --ignore-submodules=none)" ] || { echo "FATAL: release worktree is dirty"; exit 1; }
 echo "[worktree] $REL @ $(git -C "$REL" rev-parse --short HEAD)"
 
 # ── compose validation ─────────────────────────────────────────────────────
 docker compose -f "$HETZNER" --env-file "$ENVF" config -q && echo "[compose] hetzner valid"
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)
+IMAGE_LABELS=(--label "org.opencontainers.image.revision=$SHA" --label "org.opencontainers.image.created=$TS")
 MANIFEST="$REL/RELEASE_MANIFEST.$TS.json"
 OVERRIDE="$REL/deploy-override.$TS.yml"
 declare -A ROLLBACK=()
@@ -157,6 +166,7 @@ if [ "$SKIP_CANARY" = 0 ] && [ -n "$CANARY_URL" ]; then
   code=""; for i in $(seq 1 12); do code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$CANARY_URL" || true); case "$code" in 2*|3*|401|403) break;; esac; sleep 3; done
   echo "[canary] $CANARY_URL → $code"; case "$code" in 2*|3*|401|403);; *) FAIL=1;; esac
 fi
+"$REL/scripts/verify-deployed.sh" --sha "$SHA" --services "$SERVICES" --source-root "$REL" || FAIL=1
 
 # ── manifest ───────────────────────────────────────────────────────────────
 {

@@ -387,6 +387,13 @@ export class GenericStageExecutor {
           checks: stage.completion_checks,
           unmet: asObject(run.lastVerdict).unmet || [],
           stage_attempts: attempts,
+          retry_policy: {
+            owner: 'playbook',
+            stage_attempt: attempts[stage.id],
+            max_stage_attempts: Number(stage.max_attempts || 1),
+            room_outer_replays: 0,
+            local_artifact_repair: true,
+          },
           checkpoint_sequence: run.checkpointSequence,
           adapter_descriptors: this.adapters?.descriptors?.() || [],
           execution_config: asObject(stage.execution?.config),

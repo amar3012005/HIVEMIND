@@ -439,6 +439,42 @@ test('a reconciled terminal outcome supersedes append-only uncertain history', a
   assert.equal(run.artifacts.some((artifact) => artifact.key === 'receipt'), true);
 });
 
+test('playbook executor exclusively owns semantic retry count and parks after the declared maximum', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.retry-owner', version: 1, status: 'ACTIVE',
+    name: 'Retry owner', description: 'Proves bounded retry ownership.',
+    initial_stage_id: 'perform', terminal_states: ['done'],
+    stages: [{
+      id: 'perform', objective: 'Produce accepted evidence.', expected_artifacts: ['result'], input_refs: [],
+      completion_checks: [{ predicate: 'has_min_count', select: 'result', value: 1 }],
+      transitions: [{ default: true, to_terminal: 'done' }], on_failure: 'REPAIR', max_attempts: 2,
+    }],
+  });
+  const store = new TestRuntimeStore();
+  const requests = [];
+  const director = { async execute(request) { requests.push(request); return { artifacts: [] }; } };
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, workerId: 'retry-owner' });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.retry-owner', playbookVersion: 1,
+    idempotencyKey: 'retry-owner-1', trigger: { payload: {} },
+  });
+
+  let run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'NEEDS_INTERVENTION');
+  assert.equal(run.stageAttempts.perform, 2);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map((request) => request.retry_policy), [
+    { owner: 'playbook', stage_attempt: 1, max_stage_attempts: 2, room_outer_replays: 0, local_artifact_repair: true },
+    { owner: 'playbook', stage_attempt: 2, max_stage_attempts: 2, room_outer_replays: 0, local_artifact_repair: true },
+  ]);
+
+  run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'NEEDS_INTERVENTION');
+  assert.equal(run.stageAttempts.perform, 2);
+  assert.equal(requests.length, 2, 'automatic reentry must not create a third Room execution');
+});
+
 test('Director selects an exact registered playbook without local content routing', async () => {
   const fixture = await loadFixture();
   const alternate = structuredClone(fixture);

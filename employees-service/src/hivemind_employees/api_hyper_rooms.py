@@ -4216,15 +4216,36 @@ def _goalkeeper_rounds_for_room(room_kind: str, *, work_order: bool = False) -> 
     return 1 if work_order or str(room_kind or "").strip().lower() == "campaign" else _goalkeeper_max_rounds()
 
 
-def _is_hq_work_order_context(execution_context: str) -> bool:
-    """Recognize every versioned HQ work-order envelope.
+def _execution_retry_owner(execution_context: str) -> str:
+    """Read retry ownership from the private execution envelope.
 
-    HQ work orders already run a typed subtask executor and deterministic result
-    governor. Replaying the entire Room goalkeeper only repeats the same work.
+    Runtime playbooks own semantic retries. Human Work Rooms omit this field and
+    retain their adaptive goalkeeper. Legacy envelopes remain readable while old
+    in-flight turns drain, but new behavior does not depend on string matching.
     """
-    context = str(execution_context or "")
-    return ("hq-work-order.v" in context or "runtime-stage.v" in context
-            or "room-phase.v" in context)
+    try:
+        envelope = json.loads(str(execution_context or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(envelope, dict):
+        return ""
+    lifecycle = envelope.get("lifecycle") if isinstance(envelope.get("lifecycle"), dict) else {}
+    policy = lifecycle.get("retry_policy") or envelope.get("retry_policy") or {}
+    if isinstance(policy, dict):
+        return str(policy.get("owner") or "").strip().lower()
+    return ""
+
+
+def _is_hq_work_order_context(execution_context: str) -> bool:
+    """Compatibility classification for already-persisted pre-policy envelopes."""
+    if _execution_retry_owner(execution_context) == "playbook":
+        return True
+    try:
+        envelope = json.loads(str(execution_context or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    contract = str(envelope.get("contract") or "") if isinstance(envelope, dict) else ""
+    return contract.startswith(("hq-work-order.v", "runtime-stage.v", "room-phase.v"))
 
 
 def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:

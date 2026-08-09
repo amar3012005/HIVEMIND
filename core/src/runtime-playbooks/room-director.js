@@ -123,6 +123,18 @@ function normalizeArtifact(artifact, expectedKeys) {
   };
 }
 
+function artifactContractFields(request) {
+  const stage = {
+    expected_artifacts: asArray(request.expected_artifacts),
+    completion_checks: asArray(request.checks),
+  };
+  return {
+    artifact_requirements: renderArtifactRequirements(stage) || null,
+    artifact_schemas: deriveStageArtifactContract(stage).artifacts,
+    strict_response_schema: deriveStrictResponseSchema(stage),
+  };
+}
+
 export function runtimeStageEnvelope(request) {
   return {
     contract: 'runtime-stage.v1',
@@ -137,6 +149,7 @@ export function runtimeStageEnvelope(request) {
     unmet: asArray(request.unmet),
     adapter_descriptors: asArray(request.adapter_descriptors),
     authority_granted: request.authority_granted === true,
+    retry_policy: asObject(request.retry_policy),
     // The derived contract belongs on BOTH envelopes. `usesRoomPhase()` tests the stage's
     // configured contract against the literal 'room-phase.v1', so a stage configured
     // 'room-phase.v2' — marketing's form_strategy — takes THIS envelope, not roomPhaseEnvelope.
@@ -144,16 +157,7 @@ export function runtimeStageEnvelope(request) {
     // nobody: form_strategy never saw it, and the outreach stages that do get the lifecycle
     // block expect two artifacts, so strict correctly declines. Top-level here because this
     // envelope has no lifecycle block, and the producer reads it off the envelope root.
-    ...(() => {
-      try {
-        const stage = { expected_artifacts: asArray(request.expected_artifacts), completion_checks: asArray(request.checks) };
-        return {
-          artifact_requirements: renderArtifactRequirements(stage) || null,
-          artifact_schemas: deriveStageArtifactContract(stage).artifacts,
-          strict_response_schema: deriveStrictResponseSchema(stage),
-        };
-      } catch { return {}; }  // a derivation failure must never block a Room turn
-    })(),
+    ...artifactContractFields(request),
     result_contract: {
       contract: 'runtime-stage-result.v1',
       artifacts: ['id', 'key', 'status', 'data', 'source_refs', 'external_ref'],
@@ -181,25 +185,15 @@ export function roomPhaseEnvelope(request) {
       // is the failure class behind form_strategy / prepare_provider_drafts /
       // prepare_campaign_contract. `artifact_requirements` is plain language for the
       // prompt; `artifact_schemas` is the machine shape for schema-constrained output.
-      ...(() => {
-        try {
-          const stage = { expected_artifacts: asArray(request.expected_artifacts), completion_checks: asArray(request.checks) };
-          // `strict_response_schema` is the one-attempt mechanism, not documentation: the
-          // producer feeds it straight to response_format json_schema. Measured on the live
-          // synth model, a TYPED strict schema plus a non-contradictory prompt took the
-          // required-field-null rate from 5/5 to 0/10. Null when strict cannot apply
-          // (multi-key stage, or an artifact key with no registered field shapes) — the
-          // producer then keeps its json_object path rather than guessing a shape.
-          return {
-            artifact_requirements: renderArtifactRequirements(stage) || null,
-            artifact_schemas: deriveStageArtifactContract(stage).artifacts,
-            strict_response_schema: deriveStrictResponseSchema(stage),
-          };
-        } catch { return {}; }  // a derivation failure must never block a Room turn
-      })(),
+      // Strict output is the one-attempt mechanism when a typed schema exists. The
+      // predicate-derived artifact contract is mandatory for every stage, including
+      // multi-artifact stages; derivation failures stop dispatch instead of silently
+      // sending a producer a weaker contract than the validator will enforce.
+      ...artifactContractFields(request),
       unmet: asArray(request.unmet),
       checkpoint_sequence: request.checkpoint_sequence,
       attempt: asObject(request.stage_attempts)[request.stage_id] || 1,
+      retry_policy: asObject(request.retry_policy),
       authority: { external_writes: request.authority_granted === true },
       execution_config: asObject(request.execution_config),
     },

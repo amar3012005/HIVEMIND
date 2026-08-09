@@ -2795,7 +2795,6 @@ const server = http.createServer(async (req, res) => {
   const handleHqRuntimeRoute = createHqRuntimeRouteHandler({
     prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse,
     wakeScheduler: () => hqScheduler?.wake?.(),
-    emailLifecycle: () => hqScheduler?.emailLifecycle || null,
     runtimePlaybooks: () => hqScheduler?.runtimePlaybooks || null,
   });
   if (await handleHqRuntimeRoute(req, res, url)) return;

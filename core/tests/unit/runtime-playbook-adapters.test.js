@@ -101,6 +101,44 @@ test('Gmail adapter creates one provider draft per accepted message through gene
   assert.equal(result.artifacts[0].data.delivery_requested, true);
 });
 
+test('Gmail adapter reconciles a successful draft write with an incomplete provider receipt', async () => {
+  let created = false;
+  const adapter = createGmailRuntimeAdapter({
+    prisma: { hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } } },
+    runTool: async (tool, args) => {
+      if (tool === 'gmail_list_drafts') {
+        return created
+          ? { drafts: [{ draftId: 'draft-reconciled' }] }
+          : { drafts: [] };
+      }
+      if (tool === 'gmail_create_draft') {
+        created = true;
+        return { successful: true };
+      }
+      if (tool === 'gmail_get_draft' && args.draftId === 'draft-reconciled') {
+        return {
+          draftId: 'draft-reconciled',
+          to: 'lead@example.test',
+          subject: 'Grounded subject',
+          body: 'Grounded body',
+        };
+      }
+      throw new Error(`unexpected:${tool}`);
+    },
+  });
+  const result = await adapter.execute({
+    config: { action: 'prepare_drafts' },
+    inputs: { 'artifacts.message_record': [{
+      id: 'message-artifact-1', key: 'message_record',
+      data: { recipient: 'lead@example.test', subject: 'Grounded subject', body: 'Grounded body' },
+    }] },
+  }, context());
+  assert.equal(result.artifacts.length, 1);
+  assert.equal(result.artifacts[0].key, 'draft_record');
+  assert.equal(result.artifacts[0].data.draft_ref, 'draft-reconciled');
+  assert.deepEqual(result.warnings, []);
+});
+
 test('Gmail adapter persists an uncertain outcome for a provider timeout instead of replaying it', async () => {
   const adapter = createGmailRuntimeAdapter({
     prisma: {

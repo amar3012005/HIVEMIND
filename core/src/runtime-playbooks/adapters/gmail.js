@@ -289,6 +289,9 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
           }
         }
         if (!draft?.draftId) {
+          draft = await findDraftByRecipientAndSubject(google, actor, recipient, subject);
+        }
+        if (!draft?.draftId) {
           produced.push(actionOutcome(context, artifact, {
             key: uncertainKey, operation: 'prepare_draft', reason: 'provider_draft_receipt_incomplete',
           }));

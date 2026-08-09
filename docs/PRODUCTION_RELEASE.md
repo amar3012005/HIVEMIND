@@ -317,3 +317,17 @@ confirmed.
 - Superseded candidate: `hivemind/core-api:sha-aada9ce0` restored the omitted terminal step but a live acceptance exposed an equal-length Gmail-for-Docs substitution. Its diagnostic Gmail draft was cancelled, nothing was sent, and the candidate was replaced by this immutable release.
 - Rollback: `hivemind/core-api:rollback-pre-3cce168a-20260809T074244Z`; manifest `/root/releases/3cce168a-clean/RELEASE_MANIFEST.txt`.
 - External side effects: HIVE-MIND recall reads and pending-write draft persistence only. All three diagnostic drafts were cancelled; no approval, email send, Google Doc creation, calendar action, or memory mutation executed.
+
+## prod-20260809-1f12a0b0 — grounded follow-up connector content and refined tools control
+
+- Parent SHA: `1f12a0b0717376f2e753b88232c5e1ede3bd5981` on `singulance-main`.
+- Frontend SHA: `1cf1b89401f1595c6a0ce997b40d5491b3eeeb9c` (includes chat UI SHA `422c34f984041647d87b5c8337f5709e865cdea1`).
+- Images: `hivemind/core-api:prod-20260809-1f12a0b0`, OCI revision `1f12a0b0717376f2e753b88232c5e1ede3bd5981`; `hivemind/fe:prod-20260809-1f12a0b0-single`, OCI revision `1cf1b89401f1595c6a0ce997b40d5491b3eeeb9c`.
+- Migration: none.
+- Backend: content-producing follow-up actions receive the preceding assistant answer as bounded, explicitly untrusted data alongside governed recall. Query Mode must create substantive grounded content, and provider-required content fields are honored whether declared in `required`, `properties`, or both. Existing approval and Composio execution boundaries are unchanged.
+- Frontend: Overview, mobile Talk to HIVE, and side-panel chat no longer duplicate the current request in history. The `Use tools` control is now a compact blue/ivory status capsule with a Sparkles state icon and live status dot; the one-line Beta notice remains.
+- Tests/build: 47/47 focused compound, hosted-planner, `use_tools`, and router tests passed after final rebase. Frontend production build compiled successfully; strict-CI mode remains blocked by the repository's pre-existing unrelated lint warnings.
+- Authenticated acceptance: `write an email to amarsai2005@gmail.com about DLLMs` with prior DLLM answer context and `use_tools:true` returned 200, executed recall, and created a governed `composio_gmail_send_email` approval draft. The exact body included parallel denoising, faster inference/lower latency, sub-100 ms warmed latency, and efficient batching. The final diagnostic draft was cancelled; an earlier candidate draft expired. Database verification showed both `approvedAt=null` and `sentAt=null`.
+- Public/runtime acceptance: Core health, homepage, HIVE-MIND cover, and Overview returned 200. Both release-specific lazy chat chunks returned 200 and contained the connected-app Beta notice marker. Core healthy, frontend running, restarts 0, and fresh fatal/panic/uncaught/unhandled/OOM/migration-error count 0.
+- Rollback: Core `hivemind/core-api:rollback-pre-1f12a0b0-20260809T102619Z`; frontend `hivemind/fe:rollback-pre-1f12a0b0-20260809T102619Z-single`; manifest `/root/builds/prod-20260809-1f12a0b0/RELEASE_MANIFEST.txt`.
+- External side effects: recall reads and approval-draft persistence only. No draft was approved and no email was sent.

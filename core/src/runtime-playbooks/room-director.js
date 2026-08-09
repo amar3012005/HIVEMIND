@@ -11,6 +11,61 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function compactJsonValue(value, { stringLimit = 2000, arrayLimit = 16, depth = 0 } = {}) {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') return value.length <= stringLimit ? value : `${value.slice(0, stringLimit)}\n[truncated]`;
+  if (depth >= 6) return '[nested context omitted]';
+  if (Array.isArray(value)) {
+    return value.slice(0, arrayLimit).map((item) => compactJsonValue(item, {
+      stringLimit, arrayLimit, depth: depth + 1,
+    }));
+  }
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key, compactJsonValue(item, { stringLimit, arrayLimit, depth: depth + 1 }),
+    ]));
+  }
+  return String(value).slice(0, stringLimit);
+}
+
+export function serializeRoomEnvelope(envelope, maxChars = 15_500) {
+  const full = JSON.stringify(envelope);
+  if (full.length <= maxChars) return full;
+
+  // The strict schema is the executable response contract. artifact_schemas is
+  // its verbose explanatory mirror, so it can be omitted when both are present.
+  const compact = structuredClone(envelope);
+  const contract = asObject(compact.lifecycle || compact);
+  if (contract.strict_response_schema) delete contract.artifact_schemas;
+  compact.capabilities = asArray(compact.capabilities).map((item) => ({
+    id: item?.id || null,
+    operations: asArray(item?.operations).map(String).slice(0, 16),
+  }));
+  let encoded = JSON.stringify(compact);
+  if (encoded.length <= maxChars) return encoded;
+
+  const context = asObject(compact.context);
+  compact.context = {
+    company: compactJsonValue(context.company, { stringLimit: 1200, arrayLimit: 12 }),
+    baseline: compactJsonValue(context.baseline, { stringLimit: 1200, arrayLimit: 12 }),
+    request: compactJsonValue(context.request, { stringLimit: 1600, arrayLimit: 12 }),
+    target: compactJsonValue(context.target, { stringLimit: 1200, arrayLimit: 12 }),
+    policy: compactJsonValue(context.policy, { stringLimit: 1000, arrayLimit: 12 }),
+    supplied_inputs: compactJsonValue(context.supplied_inputs, { stringLimit: 4000, arrayLimit: 16 }),
+    // Event transcripts and prior Room artifacts are the evidence most likely
+    // to be unique to this phase, so they receive the largest remaining budget.
+    prior_artifacts: compactJsonValue(context.prior_artifacts, { stringLimit: 8000, arrayLimit: 24 }),
+  };
+  encoded = JSON.stringify(compact);
+  if (encoded.length <= maxChars) return encoded;
+
+  for (const stringLimit of [2000, 1000, 500]) {
+    encoded = JSON.stringify(compactJsonValue(compact, { stringLimit, arrayLimit: 10 }));
+    if (encoded.length <= maxChars) return encoded;
+  }
+  throw new Error(`runtime_room_execution_context_too_large:${encoded.length}`);
+}
+
 function internalKey() {
   return process.env.HIVEMIND_MASTER_API_KEY || process.env.HIVEMIND_API_KEY || '';
 }
@@ -236,7 +291,7 @@ export class RuntimeRoomDirector {
       org_id: request.org_id,
       user_message: String(request.instruction || request.objective || '').slice(0, 8000),
       display_message: String(request.instruction || request.objective || '').trim().slice(0, 8000),
-      execution_context: JSON.stringify(envelope),
+      execution_context: serializeRoomEnvelope(envelope),
       participant_ids: asArray(room.participant_ids).map(String).slice(0, 8),
       callback_url: this.callbackUrl,
       project_id: room.project_id || null,

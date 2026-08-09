@@ -8,6 +8,7 @@ import {
   DirectorPlaybookSelector,
   RuntimeAdapterRegistry,
   RuntimeRoomDirector,
+  serializeRoomEnvelope,
   RuntimePlaybookService,
   RuntimePlaybookRegistry,
   createJsonPlaybookSource,
@@ -189,6 +190,34 @@ test('Room Director sends a generic stage envelope and accepts only correlated e
   assert.equal(calls[0].write_policy, 'deny');
   assert.equal(JSON.parse(calls[0].execution_context).contract, 'runtime-stage.v1');
   assert.deepEqual(result.artifacts.map((artifact) => artifact.key), ['request_record']);
+});
+
+test('Runtime Room context stays within the sidecar contract without losing phase evidence', () => {
+  const transcript = `Administrator: current priority\nRuntime: noted\n${'detail '.repeat(2200)}`;
+  const envelope = {
+    contract: 'room-phase.v2', run_id: 'run-large', playbook_id: 'opaque.lifecycle', playbook_version: 1,
+    phase_id: 'analyze', instruction: 'Analyze the retained conversation.',
+    context: {
+      company: { name: 'Example', profile: { facts: Array.from({ length: 80 }, (_, i) => `company fact ${i} ${'x'.repeat(160)}`) } },
+      baseline: { observations: Array.from({ length: 80 }, (_, i) => ({ id: i, detail: 'y'.repeat(180) })) },
+      request: { instruction: 'Analyze the retained conversation.' },
+      prior_artifacts: { event: { transcript } },
+    },
+    lifecycle: {
+      guidance: 'Produce evidence from the retained conversation.', expected_artifacts: ['status_record'],
+      completion_checks: [{ predicate: 'has_min_count', select: 'status_record', value: 1 }],
+      artifact_schemas: { status_record: { description: 'z'.repeat(9000) } },
+      strict_response_schema: { type: 'object', properties: { summary: { type: 'string' } } },
+    },
+    capabilities: Array.from({ length: 30 }, (_, i) => ({ id: `provider-${i}`, operations: ['execute', 'verify'], description: 'q'.repeat(500) })),
+  };
+  const encoded = serializeRoomEnvelope(envelope);
+  const decoded = JSON.parse(encoded);
+  assert.ok(encoded.length <= 15_500);
+  assert.equal(decoded.instruction, envelope.instruction);
+  assert.match(decoded.context.prior_artifacts.event.transcript, /Administrator: current priority/);
+  assert.deepEqual(decoded.lifecycle.strict_response_schema, envelope.lifecycle.strict_response_schema);
+  assert.equal(decoded.lifecycle.artifact_schemas, undefined);
 });
 
 test('Room Director marks only an authority-granted stage as authorized', async () => {

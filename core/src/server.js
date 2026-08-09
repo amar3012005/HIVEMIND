@@ -10926,10 +10926,12 @@ exit \$RC
                   model: 'openai/gpt-oss-120b',
                   apiKey: groqKey,
                   language: 'en',
-                  // Slack mentions are a full HIVE chat surface. Connected
-                  // toolkits are eligible, while native recall remains the
-                  // default when it best answers the request.
-                  useTools: process.env.SLACK_CHAT_USE_TOOLS !== 'false',
+                  // Default OFF: the hosted/compound tool-use path was
+                  // leaking its raw step trace ("Step 1 (recall): done")
+                  // as the final Slack reply instead of a synthesized
+                  // answer. Slack stays on plain recall/chat until that's
+                  // fixed and explicitly re-enabled per org.
+                  useTools: process.env.SLACK_CHAT_USE_TOOLS === 'true',
                   onEvent: (event) => progressReporter?.onEvent(event),
                   ctx: {
                     userId: runUserId,

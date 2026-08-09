@@ -5075,6 +5075,73 @@ class Director:
         from .campaign_contract import campaign_bundle_errors
         return campaign_bundle_errors(bundle, channels, requirements)
 
+    @staticmethod
+    def _campaign_action_ids_from_errors(errors: List[str], actions: List[Dict[str, Any]]) -> List[str]:
+        """Return only action IDs explicitly implicated by governance errors."""
+        action_ids = [str(action.get("id") or "").strip() for action in actions if isinstance(action, dict)]
+        return [
+            action_id
+            for action_id in action_ids
+            if action_id and any(re.search(rf"\b{re.escape(action_id)}\b", str(error)) for error in errors)
+        ]
+
+    async def _repair_campaign_actions(
+        self,
+        *,
+        semantic: Dict[str, Any],
+        report: str,
+        errors: List[str],
+        system_contract: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Repair only invalid campaign actions while preserving accepted work."""
+        actions = [action for action in (semantic.get("actions") or []) if isinstance(action, dict)]
+        action_ids = self._campaign_action_ids_from_errors(errors, actions)
+        if not action_ids:
+            return None
+        invalid_actions = [action for action in actions if str(action.get("id") or "") in action_ids]
+        repair_prompt = (
+            system_contract
+            + "\n\nYou are repairing a Campaign Contract after deterministic governance. Return JSON only: "
+            '{"actions":[<complete replacement action objects>]}. '
+            "Return exactly one complete replacement for each requested action ID and no other actions. "
+            "Keep each action ID, channel, schedule position, hypothesis, and strategic job unchanged unless an unmet "
+            "criterion explicitly requires changing that field. Correct only the stated unmet criteria. Do not add facts, "
+            "claims, evidence, URLs, recipients, channels, or actions."
+        )
+        repair_user = (
+            f"UNMET CRITERIA:\n{json.dumps(errors, ensure_ascii=False)}\n\n"
+            f"ACTIONS TO REPAIR:\n{json.dumps(invalid_actions, ensure_ascii=False)}\n\n"
+            f"ACCEPTED PLAN CONTEXT (read only):\n"
+            f"{json.dumps({k: v for k, v in semantic.items() if k != 'actions'}, ensure_ascii=False)[:7000]}\n\n"
+            f"USER-FACING REPORT (read only):\n{report[:2500]}"
+        )
+        repaired_message = await self._groq(
+            [{"role": "system", "content": repair_prompt}, {"role": "user", "content": repair_user}],
+            force_text=True,
+            model=self.synth_model,
+            bucket="synth_repair",
+            temp=0.1,
+            uncapped=True,
+            json_object=True,
+        )
+        repaired_payload = _first_json_object(str((repaired_message or {}).get("content") or "").strip())
+        replacements = repaired_payload.get("actions") if isinstance(repaired_payload, dict) else None
+        if not isinstance(replacements, list):
+            return None
+        replacement_by_id = {
+            str(action.get("id") or ""): action
+            for action in replacements
+            if isinstance(action, dict) and str(action.get("id") or "") in action_ids
+        }
+        if set(replacement_by_id) != set(action_ids):
+            return None
+        repaired_semantic = dict(semantic)
+        repaired_semantic["actions"] = [
+            replacement_by_id.get(str(action.get("id") or ""), action)
+            for action in actions
+        ]
+        return repaired_semantic
+
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
         board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
@@ -5171,8 +5238,39 @@ class Director:
         if errors:
             await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
                              "title": "Governance found unmet deliverables",
-                             "detail": f"The Room did not deliver {len(errors)} promised requirement(s). Nothing was approved."})
-            return None, errors
+                             "detail": f"The Room is repairing {len(errors)} unmet criterion/criteria without repeating accepted work."})
+            repaired_semantic = await self._repair_campaign_actions(
+                semantic=semantic,
+                report=report,
+                errors=errors,
+                system_contract=campaign_system_contract(),
+            )
+            if repaired_semantic is None:
+                return None, errors
+            repaired_candidate = assemble_campaign_bundle(
+                repaired_semantic,
+                channels=channels,
+                requirements=requirements,
+                campaign_brief=self.campaign_brief,
+            )
+            repaired_candidate["report_markdown"] = report
+            accepted, governance = campaign__govern_delivery(
+                repaired_candidate,
+                channels=channels,
+                requirements=requirements,
+                minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
+                campaign_brief=self.campaign_brief,
+            )
+            errors = governance["unmet_deliverables"]
+            await self.emit({
+                "t": "campaign_governance",
+                "tool": "campaign__govern_delivery",
+                "status": governance["status"],
+                "verdict": governance,
+                "repair": {"scope": "actions", "attempt": 1},
+            })
+            if errors:
+                return None, errors
         await self.emit({"t": "campaign_tool", "tool": "campaign__govern_delivery", "status": "accepted"})
         return accepted, []
 

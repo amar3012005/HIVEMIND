@@ -36,6 +36,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
@@ -827,9 +828,10 @@ def _get_callback_client() -> httpx.AsyncClient:
 async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) -> None:
     """POST an event back to the control-plane append hook.
 
-    Failures here are non-fatal — orchestration keeps going so the
-    user still gets a sealed turn even if the SSE stream missed a
-    chunk (reload will read the final state from DB).
+    Every event carries a stable delivery id so a response lost after the
+    control-plane commit can be retried safely. High-value boundary events are
+    retried for a bounded period; dropping a final report or seal leaves a
+    completed Room looking permanently busy even though all LLM work finished.
     """
     if not callback_url:
         return
@@ -838,12 +840,29 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
         "X-API-Key": settings.hivemind_master_api_key or "",
         "Content-Type": "application/json",
     }
+    event.setdefault("event_id", str(uuid.uuid4()))
     body = {"turn_id": turn_id, "event": event}
-    try:
-        client = _get_callback_client()
-        await client.post(callback_url, headers=headers, content=json.dumps(body))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("hyper-rooms event POST failed: %s", exc)
+    critical = str(event.get("t") or "") in {
+        "final_report", "seal", "connector_logo", "approval_request",
+        "approval_required", "campaign_bundle", "runtime_stage_result",
+        "room_phase_result", "work_order_result",
+    }
+    attempts = 6 if critical else 1
+    client = _get_callback_client()
+    last_error: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            response = await client.post(callback_url, headers=headers, content=json.dumps(body))
+            response.raise_for_status()
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt + 1 < attempts:
+                await asyncio.sleep(min(0.5 * (2 ** attempt), 5.0))
+    log.warning(
+        "hyper-rooms event delivery exhausted type=%s turn=%s attempts=%d: %s",
+        event.get("t"), turn_id, attempts, last_error,
+    )
 
 
 # ─── Agent build / reuse ──────────────────────────────────────────────

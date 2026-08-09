@@ -831,6 +831,10 @@ const TOOL_HANDLERS = {
       include_full_memory_content: args._include_full_memory_content === true,
       allow_semantic_source_recovery: args.allow_semantic_source_recovery === true,
       semantic_recovery: args.semantic_recovery === true,
+      event_range: args._event_range === true,
+      boost_memory_type: (typeof args.answer_type === 'string' && args.answer_type.trim())
+        ? args.answer_type.trim().toLowerCase()
+        : null,
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,

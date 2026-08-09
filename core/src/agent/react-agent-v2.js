@@ -786,6 +786,10 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
 
   const recallExtras = {
     _structured_intent: true,
+    // A planner-classified activity window gets a bounded date-indexed lane in
+    // RecallRouter. This is distinct from snapshot time travel and keeps broad
+    // questions independent of wording or language.
+    ...(plan.time?.kind === 'event_range' ? { _event_range: true } : {}),
     // Keep a bounded semantic rerank pool when the legacy weighted floor has
     // no viable rows. This is part of the first structured-chat recall so a
     // failed fast path cannot consume the deadline before recovery runs. It

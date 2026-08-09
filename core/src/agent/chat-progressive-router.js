@@ -33,6 +33,7 @@ export const HIGH_TOOLS = [
     description: 'Use for every workspace knowledge question: factual recall, named files, complete entity counts, relationships, timelines, changes, valid-time and known-time questions. This is the single grounded read capability.',
     parameters: object({
       operation: { type: 'string', enum: ['recall', 'source_read', 'aggregate', 'relation_between', 'temporal_range', 'temporal', 'diff', 'timeline'] },
+      temporal_semantics: { type: 'string', enum: ['none', 'event_window', 'snapshot_at', 'snapshot_diff', 'version_history'], description: 'Semantic temporal contract independent of language. event_window means records/activity occurring during a range; snapshot_at means workspace truth at one instant; snapshot_diff compares truth at two instants; version_history walks revisions.' },
       query_original: { type: 'string' }, query_canonical_en: { type: 'string' }, response_language: { type: 'string' },
       mode: { type: 'string', enum: ['fact', 'explain', 'full'] }, entities: { type: 'array', items: { type: 'string' } },
       source_title: nullable('string'), valid_at: nullable('string'), known_at: nullable('string'),
@@ -151,6 +152,7 @@ For every connector read, classify ordering structurally in any language: last/l
 Use use_campaign whenever the user asks to create, run, start, inspect, improve, pause, or check an AI campaign. Starting a campaign creates its dedicated Campaign Room; it does not publish. Use intent=write for create, regenerate, or pause and intent=read for list, status, or metrics.
 Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". Use operation=diff only to compare workspace state at two instants: "what changed between date A and B". Use operation=temporal for a point-in-time snapshot: "what was true / known on date D". Use operation=temporal_range for events, work, meetings, decisions, messages, records, or other activity that occurred during a period such as yesterday, today, last week, or the last N days.
 DATES ARE MANDATORY on temporal_range, diff, and temporal. For temporal_range fill range_start and range_end with the inclusive event-time window. "Last N days" means exactly N UTC calendar dates including today, so its start is CURRENT_UTC_DATE minus N-1 days. For diff fill both comparison instants. For temporal fill valid_at (or known_at when the user asks what was KNOWN/recorded rather than what was true). Emit ISO timestamps, resolving relative expressions against CURRENT_UTC_DATE supplied in the dynamic policy. Never turn an activity window into an as-of snapshot or a snapshot diff.
+Always set temporal_semantics consistently: event_window for activity/records during a period, snapshot_at for truth at one instant, snapshot_diff only for comparing state, version_history for revisions, and none for non-temporal recall. temporal_semantics is authoritative when operation and temporal meaning disagree.
 Examples:
 - "How are A and B related?", "Wie hangen A und B zusammen?", and Arabic equivalents => hivemind_context operation=relation_between.
 - "What was the previous launch date?" / "What did the price used to be?" => hivemind_context operation=timeline.
@@ -355,7 +357,13 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       if (args?.operation === 'recall' && PROFILE_RE.test(message)) {
         return { decision: { ...base, operation: 'profile', queries: [base.query_canonical_en], tool_groups: ['hivemind-recall'] }, usage: null };
       }
-      const rawOp = String(args?.operation || 'recall');
+      const declaredOp = String(args?.operation || 'recall');
+      const rawOp = ({
+        event_window: 'temporal_range',
+        snapshot_at: 'temporal',
+        snapshot_diff: 'diff',
+        version_history: 'timeline',
+      })[String(args?.temporal_semantics || '')] || declaredOp;
       const op = CONTEXT_OP[rawOp] || 'recall';
       let time = (iso(args?.valid_at) || iso(args?.known_at) || iso(args?.range_start) || iso(args?.range_end))
         ? { valid_at: iso(args?.valid_at), known_at: iso(args?.known_at),

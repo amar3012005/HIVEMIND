@@ -30,6 +30,7 @@ import { rerank } from './reranker.js';
 import { ResultReranker } from '../search/result-reranker.js';
 import { buildEvidencePacket } from './recall-packet.js';
 import { isDurableKbPromotionAdmitted } from './durable-content.js';
+import { isMemoryInDateRange } from './temporal-range.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
 import { scopedMemoryWhere } from './prisma-graph-store.js';
@@ -1540,6 +1541,51 @@ export class RecallRouter {
       Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
       [],
     );
+    let eventRangeCount = 0;
+    if (options.event_range === true && recallPlan.time.range && this.store?.listMemories) {
+      try {
+        const explicitScope = options.scope_filter
+          ? `tier:${String(options.scope_filter).replace(/^tier:/, '')}`
+          : 'personal';
+        const listed = await withTimeout(this.store.listMemories({
+          user_id: ctx.userId,
+          org_id: ctx.orgId,
+          project: ctx.projectId || undefined,
+          is_latest: true,
+          limit: 500,
+          scope: explicitScope,
+          access_context: ctx.accessContext,
+        }), Math.min(900, remainingBudget()), { memories: [] });
+        const boostType = String(options.boost_memory_type || '').toLowerCase();
+        const ranged = (listed?.memories || [])
+          .filter((memory) => isMemoryInDateRange(memory, recallPlan.time.range))
+          .map((memory) => ({
+            ...memory,
+            // A structured event-window match is authoritative relevance, but
+            // remains below a strong topical semantic hit. Type matches receive
+            // a bounded lift for decision/goal/preference queries.
+            score: Math.max(
+              Number(memory.score) || 0,
+              boostType && String(memory.memory_type || '').toLowerCase() === boostType ? 0.70 : 0.45,
+            ),
+            _event_range_match: true,
+          }));
+        eventRangeCount = ranged.length;
+        if (ranged.length) {
+          const byId = new Map(
+            // Put canonical date matches last so they retain the structured
+            // event-range marker and score floor when semantic recall returned
+            // the same memory with a weaker score.
+            [...memories, ...ranged]
+              .filter((memory) => memory?.id)
+              .map((memory) => [memory.id, memory]),
+          );
+          memories = [...byId.values()];
+        }
+      } catch (eventRangeError) {
+        console.warn('[recall-router] event-range lane failed:', eventRangeError.message);
+      }
+    }
     // Project-scope fallback: if user has a project active but recall came
     // back empty, the relevant memories may live outside that project (e.g.
     // personal-scope or org-wide). Retry once without projectId so chat
@@ -1838,6 +1884,7 @@ export class RecallRouter {
       trace: {
         recall_plan:     recallPlan,
         hop1_count:      memories.length,
+        event_range_count: eventRangeCount,
         sparse:          inspection.sparse,
         top_score:       Number(inspection.topScore.toFixed(3)),
         anchors: {

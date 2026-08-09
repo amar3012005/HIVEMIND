@@ -7,7 +7,6 @@ const LEGACY_TOOL_SLUGS = Object.freeze({
   gmail_get_thread: 'GMAIL_FETCH_MESSAGE_BY_THREAD_ID',
   gmail_list_drafts: 'GMAIL_LIST_DRAFTS',
   gmail_list_labels: 'GMAIL_LIST_LABELS',
-  gmail_get_draft: 'GMAIL_GET_DRAFT',
   gmail_create_draft: 'GMAIL_CREATE_EMAIL_DRAFT',
   gmail_send_draft: 'GMAIL_SEND_DRAFT',
   gmail_send: 'GMAIL_SEND_EMAIL',
@@ -101,12 +100,23 @@ export async function executeComposioConnector(orgId, capability, operation = {}
 }
 
 export async function executeComposioGoogleTool(orgId, legacyTool, args = {}) {
+  if (legacyTool === 'gmail_get_draft') {
+    const wanted = String(args?.draftId || args?.draft_id || '').trim();
+    const listed = await executeComposioGoogleTool(orgId, 'gmail_list_drafts', { max: 100 });
+    const draft = (listed.drafts || []).find((item) => String(item.draftId || '') === wanted);
+    if (!draft?.message?.id) return null;
+    const message = await executeComposioConnector(orgId, 'gmail', {
+      name: 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID', arguments: { message_id: draft.message.id },
+    });
+    return { ...message, draftId: wanted, threadId: message?.threadId || draft.threadId || null,
+      to: message?.to || null, subject: message?.subject || null, body: message?.messageText || null };
+  }
   const toolkit = legacyTool.startsWith('gmail_') ? 'gmail'
     : legacyTool.startsWith('docs_') ? 'google-docs' : 'google-drive';
   const result = await executeComposioConnector(orgId, toolkit, { name: legacyTool, arguments: args });
   const payload = result?.data && typeof result.data === 'object' ? result.data : result;
   if (legacyTool === 'gmail_create_draft' || legacyTool === 'gmail_get_draft') {
-    const draft = payload?.draft || payload;
+    const draft = payload?.draft || payload?.response_data || payload?.responseData || payload?.result || payload;
     return { ...draft, draftId: draft?.draftId || draft?.draft_id || draft?.id || null,
       threadId: draft?.threadId || draft?.thread_id || draft?.message?.threadId || draft?.message?.thread_id || null };
   }

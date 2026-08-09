@@ -407,7 +407,6 @@ test('missing provider body is backfilled from an existing grounded dependency',
     required: ['recipient_email', 'body'],
     properties: {
       recipient_email: { type: 'string' },
-      body: { type: 'string' },
       is_html: { type: 'boolean' },
     },
   }, { recipient_email: 'amar@example.com' }, prior);

@@ -502,10 +502,14 @@ function missingSemanticWriteArgs(outputKind, schema, args) {
 
 function semanticContentFields(outputKind, schema) {
   const properties = schema?.properties || {};
+  const required = new Set(Array.isArray(schema?.required) ? schema.required : []);
   const preferred = outputKind === 'document'
     ? ['text', 'body', 'content', 'markdown']
     : ['body', 'text', 'message', 'content'];
-  return preferred.filter((name) => Object.hasOwn(properties, name));
+  // Some Composio manifests list a provider-required content field without
+  // duplicating it under `properties`. Required and properties are both
+  // controlled schema surfaces, so honor either declaration.
+  return preferred.filter((name) => Object.hasOwn(properties, name) || required.has(name));
 }
 
 function normalizedGroundingTokens(value) {

@@ -1158,6 +1158,13 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // selected provider schema. Existing model-written content is never
   // overwritten here, and no user-language/provider keyword is inspected.
   args = backfillMissingGroundedContentArgs(subtask.output_kind, manifestSchema, args, priorOutputs);
+  // Backfill is the final deterministic content fallback. Re-evaluate the
+  // unresolved set against the resulting arguments; retaining the earlier
+  // pre-backfill result incorrectly asked the user for a body that is already
+  // present in the review payload.
+  unresolvedContent = unresolvedGroundedWriteFields(
+    subtask.output_kind, manifestSchema, args, priorOutputs,
+  );
   const recipientValidation = normalizeEmailDestinationArgs(
     subtask.output_kind,
     manifestSchema,

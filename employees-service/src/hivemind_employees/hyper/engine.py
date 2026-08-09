@@ -213,24 +213,18 @@ def _strip_cot(text: str) -> str:
     return t
 
 
-def _work_order_activity(title: Any, text: str, *, limit: int = 180) -> str:
-    """Return the small, human-facing status line for a completed worker job.
+def _work_order_activity(title: Any, text: str, *, limit: Optional[int] = None) -> str:
+    """Return the complete bounded worker note for the visible discussion.
 
-    A work order's note belongs on the evidence board and in durable storage;
-    replaying it verbatim as a chat bubble made Rooms noisy and needlessly
-    expensive. Keep the conversation legible while the synthesizer still sees
-    the complete bounded note.
+    Worker generation is already capped to a compact note. Clipping that note a
+    second time hid the evidence and disagreement users asked the Room to show.
     """
-    clean = re.sub(r"\s+", " ", str(text or "")).strip()
+    clean = str(text or "").strip()
     clean = re.sub(r"^(?:[-*#]+\s*)+", "", clean)
     if not clean:
         return f"Completed {str(title or 'assigned work').strip()}."
-    sentence = re.split(r"(?<=[.!?])\s+", clean, maxsplit=1)[0].strip()
     prefix = f"Completed {str(title or 'assigned work').strip()}: "
-    available = max(24, limit - len(prefix))
-    if len(sentence) > available:
-        sentence = sentence[: available - 3].rstrip() + "..."
-    return prefix + sentence
+    return prefix + clean
 
 
 def _route_direct_openrouter(model: str) -> bool:
@@ -511,19 +505,22 @@ _POST_OUTPUT_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "connector": "google-docs", "artifact_kind": "doc",
         "operation": "create_document",
         "description": "Create the completed output as a Google Doc.",
-        "aliases": ("google-docs", "google-drive", "google", "gmail"),
+        "aliases": ("google-docs", "google-drive", "google"),
+        "request_pattern": r"\bgoogle\s+docs?\b",
     },
     "google_sheets.create_spreadsheet": {
         "connector": "google-sheets", "artifact_kind": "sheet",
         "operation": "create_spreadsheet",
         "description": "Create the completed tabular output as a Google Sheet.",
-        "aliases": ("google-sheets", "google-drive", "google", "gmail"),
+        "aliases": ("google-sheets", "google-drive", "google"),
+        "request_pattern": r"\bgoogle\s+sheets?\b",
     },
     "notion.create_page": {
         "connector": "notion", "artifact_kind": "notion",
         "operation": "create_page",
         "description": "Create the completed output as a Notion page.",
         "aliases": ("notion",),
+        "request_pattern": r"\bnotion\b",
     },
 }
 
@@ -3234,7 +3231,7 @@ class Director:
                 self.blackboard.append(f"WORK_RESULT[{owner_name} | {order.get('title')}]:\n{text}")
             await self.emit({"t": "work_order", "id": subtask_id, "status": status,
                              "title": order.get("title"), "owner": owner_name,
-                             "summary": text[:500], "checks": checks, "gaps": gaps})
+                             "summary": text, "checks": checks, "gaps": gaps})
             if status == "blocked":
                 break
         return results
@@ -4514,10 +4511,13 @@ class Director:
             "language, not from English keywords. Chat always uses standard.\n"
             "- post_output_actions: act like a coding agent selecting tools. After understanding the requested "
             "deliverable, choose zero or more capabilities from POST-OUTPUT ACTION CATALOG below, in execution "
-            "order. Select an action only when the ACTIVE MESSAGE explicitly asks to create, save, send, reply, "
-            "forward, publish, or otherwise perform it; discussing a channel or asking for strategy selects no "
-            "action. Set explicit=true. target_hint is the recipient, workspace, or destination exactly as stated, "
-            "or null. A disconnected capability may still be selected when explicitly requested: the UI will offer "
+            "order. A content verb such as create, build, prepare, design, write, or produce describes the answer, "
+            "not a provider write. Select an action only when the ACTIVE MESSAGE explicitly names the external "
+            "destination or provider effect: a stated recipient, workspace, document destination, publication "
+            "destination, or save/export target. Discussing a channel or requesting a blueprint, report, persona, "
+            "strategy, or plan selects no action by itself. Set explicit=true. target_hint must quote the recipient, "
+            "workspace, or destination exactly as it appears in the ACTIVE MESSAGE; use null and select no action "
+            "when there is no exact target. A disconnected capability may still be selected when explicitly requested: the UI will offer "
             "connection while the Room finishes the output. For email, choose gmail.create_draft only when the "
             "user explicitly asks to draft, compose, or prepare a draft without delivery. Choose gmail.send_email "
             "for send/reply/forward/deliver requests and for requests to write/email/message a stated recipient; "
@@ -4713,12 +4713,21 @@ class Director:
             spec = _POST_OUTPUT_CAPABILITIES.get(capability)
             if not spec:
                 continue
+            target_hint = str(action.get("target_hint") or "").strip()
+            if spec["artifact_kind"] in {"doc", "sheet", "notion"}:
+                message = str(self.user_message or "")
+                if (
+                    not target_hint
+                    or target_hint.casefold() not in message.casefold()
+                    or not re.search(str(spec.get("request_pattern") or r"(?!)"), message, re.IGNORECASE)
+                ):
+                    continue
             actions.append({
                 "capability": capability,
                 "connector": spec["connector"],
                 "operation": spec["operation"],
                 "artifact_kind": spec["artifact_kind"],
-                "target_hint": action.get("target_hint"),
+                "target_hint": target_hint or None,
                 "explicit": True,
                 "connected": any(_norm_connector(alias) in connected for alias in spec["aliases"]),
             })

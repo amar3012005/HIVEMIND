@@ -3174,8 +3174,8 @@ def _build_campaign_director(
 # the room must NEVER call a connector it hasn't toggled on (it would hang on an absent/
 # dead token and block) — if the producing connector is off, deliver the text instead.
 _KIND_CONNECTOR: Dict[str, tuple] = {
-    "doc": ("google-docs", "google-drive", "gmail", "google"),
-    "sheet": ("google-docs", "google-drive", "gmail", "google"),
+    "doc": ("google-docs", "google-drive", "google"),
+    "sheet": ("google-sheets", "google-drive", "google"),
     "email": ("gmail", "google"),
     "notion": ("notion",),
 }
@@ -3200,10 +3200,12 @@ _NOTION_WRITE_RE = re.compile(
 
 
 def _derive_intended_output(user_message: str) -> str:
-    """Deterministic intent → output kind (same guards the agentic planner applies).
-    Drives the centralized producer; the director writes the actual content. An
-    explicit DOC word wins over an incidental 'table' (a doc may *contain* a table),
-    so 'a Google Doc with an options table' is a doc, not a sheet."""
+    """Conservatively infer an explicitly requested external output.
+
+    Content nouns such as report, brief, table, and persona describe the answer,
+    not a provider write. The adaptive Director owns modern action selection; this
+    legacy guard recognizes only destinations the user actually named.
+    """
     m = user_message or ""
     if _SEND_INTENT_RE.search(m) or re.search(r"[\w.+-]+@[\w.-]+\.\w+", m):
         return "email"
@@ -3211,17 +3213,10 @@ def _derive_intended_output(user_message: str) -> str:
     # page. A read intent ("check/search Notion") is NOT a write — it stays answer.
     if _NOTION_WRITE_RE.search(m):
         return "notion"
-    has_doc = re.search(r"\b(doc|document|brief|memo|report|write[\s-]?up|letter|one[\s-]?pager)\b",
-                        m, re.IGNORECASE)
-    has_sheet = re.search(r"\b(spreadsheet|sheet|tracker|inventory|catalogue|catalog)\b", m, re.IGNORECASE)
-    if has_doc and not has_sheet:
+    if re.search(r"\bgoogle\s+docs?\b", m, re.IGNORECASE):
         return "doc"
-    if has_sheet:
+    if re.search(r"\bgoogle\s+sheets?\b", m, re.IGNORECASE):
         return "sheet"
-    if re.search(r"\btable\b", m, re.IGNORECASE):  # bare 'table' with no doc word → a sheet
-        return "sheet"
-    if re.search(r"\b(create|writ\w*|draft|build|make|generat\w*|compil\w*|prepare)\b", m, re.IGNORECASE):
-        return "doc"
     return "answer"
 
 

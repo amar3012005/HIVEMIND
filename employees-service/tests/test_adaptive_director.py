@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from hivemind_employees.hyper.engine import Director
+from hivemind_employees.hyper.engine import Director, _work_order_activity
 from hivemind_employees.hyper.domains.seo.reporting import render_remediation_report
 
 
@@ -579,8 +579,8 @@ def test_work_orders_execute_as_independent_agent_results(monkeypatch):
         assert kwargs["max_tokens"] == 220
         return {"content": (
             "Recommendation: lead with the compliance workflow. Evidence: company context.\n\n"
-            "This deliberately long second paragraph must stay on the evidence board and out of the visible "
-            "worker chat bubble so the Room remains readable for the user."
+            "This deliberately long second paragraph must remain visible in the worker chat bubble so the "
+            "user can inspect the complete bounded contribution."
         )}
 
     monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", create)
@@ -600,8 +600,8 @@ def test_work_orders_execute_as_independent_agent_results(monkeypatch):
     assert any(event.get("t") == "work_order" and event.get("status") == "completed" for event in events)
     worker_react = next(event for event in events if event.get("t") == "react")
     assert worker_react["content"].startswith("Completed Choose positioning:")
-    assert len(worker_react["content"]) <= 180
-    assert "second paragraph" not in worker_react["content"]
+    assert "deliberately long second paragraph" in worker_react["content"]
+    assert "complete bounded contribution" in worker_react["content"]
 
 
 def test_work_room_turn_plan_runs_dependencies_before_dependent_steps(monkeypatch):
@@ -785,6 +785,99 @@ def test_director_rejects_non_explicit_connector_action(monkeypatch):
     plan = asyncio.run(director._plan_gather())
 
     assert plan["post_output_actions"] == []
+
+
+def test_director_rejects_document_write_without_explicit_destination(monkeypatch):
+    director, _events = _director(
+        message="Build Regulated Enterprise Audience Persona",
+        enabled_connectors=["gmail"],
+    )
+    payload = {
+        "recall_queries": ["regulated enterprise audience"],
+        "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "seo_audit_scope": "none", "seo_task": "none",
+        "places_query": None, "needs_debate": True, "method_skills": [],
+        "campaign_method_assignments": [], "turn_mode": "task",
+        "collaboration_intensity": "standard", "response_depth": "focused",
+        "evidence_mode": "standard",
+        "post_output_actions": [{
+            "capability": "google_docs.create_document", "explicit": True,
+            "target_hint": "Audience Persona",
+        }],
+        "campaign_request": None,
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["post_output_actions"] == []
+
+
+def test_director_preserves_explicit_google_docs_destination(monkeypatch):
+    director, _events = _director(
+        message="Create this audience persona in Google Docs",
+        enabled_connectors=["google-docs"],
+    )
+    payload = {
+        "recall_queries": [], "connector_calls": [], "web_query": None,
+        "seo_audit_url": None, "seo_audit_scope": "none", "seo_task": "none",
+        "places_query": None, "needs_debate": False, "method_skills": [],
+        "campaign_method_assignments": [], "turn_mode": "task",
+        "collaboration_intensity": "light", "response_depth": "direct",
+        "evidence_mode": "standard",
+        "post_output_actions": [{
+            "capability": "google_docs.create_document", "explicit": True,
+            "target_hint": "Google Docs",
+        }],
+        "campaign_request": None,
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert plan["post_output_actions"] == [{
+        "capability": "google_docs.create_document",
+        "connector": "google-docs",
+        "operation": "create_document",
+        "artifact_kind": "doc",
+        "target_hint": "Google Docs",
+        "explicit": True,
+        "connected": True,
+    }]
+
+
+def test_gmail_connection_exposes_only_its_available_read_tools(monkeypatch):
+    director, _events = _director(
+        message="Summarize the latest reply",
+        enabled_connectors=["gmail"],
+    )
+
+    asyncio.run(director._init_connector_tools())
+
+    assert set(director._connector_routes) == {
+        "gmail_search", "gmail_get", "gmail_get_thread",
+    }
+    assert "drive_search" not in director._connector_routes
+    assert "docs_get" not in director._connector_routes
+
+
+def test_worker_discussion_keeps_the_complete_bounded_note():
+    note = (
+        "Recommendation: prioritize compliance-led messaging. "
+        "Evidence: the retained ICP names regulated CIOs and procurement leaders. "
+        "Unresolved gap: LinkedIn role-level audience data was not observed."
+    )
+
+    activity = _work_order_activity("Develop the audience persona", note)
+
+    assert activity == "Completed Develop the audience persona: " + note
+    assert "..." not in activity
 
 
 def test_runtime_emits_resumable_connection_event_but_keeps_final_output(monkeypatch):

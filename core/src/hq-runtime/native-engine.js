@@ -9,7 +9,7 @@ import { activateEligibleFirstLifeWork, ensureFirstLifeBootstrapProposal, projec
 import { resolveAuthorityPreference } from './contracts.js';
 import { publishHqRuntimeTransient } from './event-bus.js';
 import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
-import { runtimeConnectorConnectPath } from '../connectors/runtime-provider-policy.js';
+import { getHyperagentsRuntimeConnectorProvider, runtimeConnectorConnectPath } from '../connectors/runtime-provider-policy.js';
 
 const DAY = 86400000;
 
@@ -762,7 +762,7 @@ export class NativeHqEngine {
             orgId: runtime.orgId,
             todoId: todo.id,
             capability: waitingCapability,
-            provider: waitingCapability,
+            provider: getHyperagentsRuntimeConnectorProvider(),
             reason: String(run.waitingFor?.reason || `${todo.title} requires ${waitingCapability} before it can continue.`),
             connectPath: runtimeConnectorConnectPath(waitingCapability),
           } });

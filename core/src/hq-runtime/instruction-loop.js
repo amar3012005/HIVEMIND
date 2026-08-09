@@ -330,6 +330,7 @@ export async function getConnectedCapabilities({ prisma, runtime }) {
 }
 
 export async function reconcileTodoCapabilities({ prisma, runtime }) {
+  const connectorProvider = getHyperagentsRuntimeConnectorProvider();
   const connected = await getConnectedCapabilities({ prisma, runtime });
   const platformManaged = getPlatformManagedCapabilities();
   const todos = await prisma.hqTodo.findMany({
@@ -360,7 +361,7 @@ export async function reconcileTodoCapabilities({ prisma, runtime }) {
       for (const capability of missing) {
         const exists = await prisma.hqCapabilityRequest.findFirst({ where: { runtimeId: runtime.id, todoId: todo.id, capability, status: 'REQUIRED' } });
         if (!exists) await prisma.hqCapabilityRequest.create({ data: {
-          runtimeId: runtime.id, orgId: runtime.orgId, todoId: todo.id, capability, provider: capability,
+          runtimeId: runtime.id, orgId: runtime.orgId, todoId: todo.id, capability, provider: connectorProvider,
           reason: `${todo.title} requires ${capability} before HQ can continue.`,
           connectPath: runtimeConnectorConnectPath(capability),
         } });

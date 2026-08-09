@@ -3685,6 +3685,12 @@ class Director:
             **prior,
         }
         inputs = {key: value for key, value in inputs.items() if value is not None}
+        requirements = lifecycle.get("artifact_requirements")
+        requirements = requirements if isinstance(requirements, dict) else {}
+        schemas = lifecycle.get("artifact_schemas")
+        schemas = schemas if isinstance(schemas, dict) else {}
+        strict_response_schema = lifecycle.get("strict_response_schema")
+        strict_response_schema = strict_response_schema if isinstance(strict_response_schema, dict) else None
         generic_envelope = {
             "contract": "runtime-stage.v1",
             "run_id": phase.get("run_id"),
@@ -3697,14 +3703,14 @@ class Director:
                 if isinstance(row, dict) and str(row.get("select") or "") in missing
             ],
             "artifact_requirements": {
-                key: value for key, value in (lifecycle.get("artifact_requirements") or {}).items()
+                key: value for key, value in requirements.items()
                 if key in missing
             },
             "artifact_schemas": {
-                key: value for key, value in (lifecycle.get("artifact_schemas") or {}).items()
+                key: value for key, value in schemas.items()
                 if key in missing
             },
-            "strict_response_schema": lifecycle.get("strict_response_schema"),
+            "strict_response_schema": strict_response_schema,
         }
         generic = await self._synthesize_runtime_stage_result(generic_envelope)
         generic_artifacts = [

@@ -36,7 +36,10 @@ export function serializeRoomEnvelope(envelope, maxChars = 15_500) {
   // its verbose explanatory mirror, so it can be omitted when both are present.
   const compact = structuredClone(envelope);
   const contract = asObject(compact.lifecycle || compact);
-  if (contract.strict_response_schema) delete contract.artifact_schemas;
+  if (contract.strict_response_schema) {
+    delete contract.artifact_schemas;
+    delete contract.artifact_requirements;
+  }
   compact.capabilities = asArray(compact.capabilities).map((item) => ({
     id: item?.id || null,
     operations: asArray(item?.operations).map(String).slice(0, 16),
@@ -45,24 +48,28 @@ export function serializeRoomEnvelope(envelope, maxChars = 15_500) {
   if (encoded.length <= maxChars) return encoded;
 
   const context = asObject(compact.context);
-  compact.context = {
-    company: compactJsonValue(context.company, { stringLimit: 1200, arrayLimit: 12 }),
-    baseline: compactJsonValue(context.baseline, { stringLimit: 1200, arrayLimit: 12 }),
-    request: compactJsonValue(context.request, { stringLimit: 1600, arrayLimit: 12 }),
-    target: compactJsonValue(context.target, { stringLimit: 1200, arrayLimit: 12 }),
-    policy: compactJsonValue(context.policy, { stringLimit: 1000, arrayLimit: 12 }),
-    supplied_inputs: compactJsonValue(context.supplied_inputs, { stringLimit: 4000, arrayLimit: 16 }),
-    // Event transcripts and prior Room artifacts are the evidence most likely
-    // to be unique to this phase, so they receive the largest remaining budget.
-    prior_artifacts: compactJsonValue(context.prior_artifacts, { stringLimit: 8000, arrayLimit: 24 }),
-  };
-  encoded = JSON.stringify(compact);
-  if (encoded.length <= maxChars) return encoded;
-
-  for (const stringLimit of [2000, 1000, 500]) {
-    encoded = JSON.stringify(compactJsonValue(compact, { stringLimit, arrayLimit: 10 }));
+  for (const budget of [
+    { general: 1200, request: 1600, supplied: 4000, prior: 8000, array: 16 },
+    { general: 800, request: 1200, supplied: 3000, prior: 6000, array: 12 },
+    { general: 500, request: 800, supplied: 1800, prior: 4000, array: 8 },
+    { general: 300, request: 500, supplied: 1000, prior: 2500, array: 6 },
+  ]) {
+    compact.context = {
+      company: compactJsonValue(context.company, { stringLimit: budget.general, arrayLimit: budget.array }),
+      baseline: compactJsonValue(context.baseline, { stringLimit: budget.general, arrayLimit: budget.array }),
+      request: compactJsonValue(context.request, { stringLimit: budget.request, arrayLimit: budget.array }),
+      target: compactJsonValue(context.target, { stringLimit: budget.general, arrayLimit: budget.array }),
+      policy: compactJsonValue(context.policy, { stringLimit: budget.general, arrayLimit: budget.array }),
+      supplied_inputs: compactJsonValue(context.supplied_inputs, { stringLimit: budget.supplied, arrayLimit: budget.array }),
+      // Event transcripts and prior Room artifacts are the evidence most likely
+      // to be unique to this phase, so they receive the largest remaining budget.
+      prior_artifacts: compactJsonValue(context.prior_artifacts, { stringLimit: budget.prior, arrayLimit: budget.array }),
+    };
+    encoded = JSON.stringify(compact);
     if (encoded.length <= maxChars) return encoded;
   }
+  // Never mutate lifecycle schemas to satisfy a transport budget. A deterministic
+  // intervention is safer than sending the Room a corrupted executable contract.
   throw new Error(`runtime_room_execution_context_too_large:${encoded.length}`);
 }
 

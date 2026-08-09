@@ -218,6 +218,7 @@ test('Runtime Room context stays within the sidecar contract without losing phas
   assert.match(decoded.context.prior_artifacts.event.transcript, /Administrator: current priority/);
   assert.deepEqual(decoded.lifecycle.strict_response_schema, envelope.lifecycle.strict_response_schema);
   assert.equal(decoded.lifecycle.artifact_schemas, undefined);
+  assert.doesNotMatch(encoded, /nested context omitted/);
 });
 
 test('Room Director marks only an authority-granted stage as authorized', async () => {

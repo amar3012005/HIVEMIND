@@ -1,5 +1,5 @@
 import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
-import { projectRuntimePlaybookSnapshot } from '../runtime-playbooks/snapshot.js';
+import { projectRuntimePlaybookSnapshot, terminalOutcomeSatisfied } from '../runtime-playbooks/snapshot.js';
 import { resolveAuthorityPreference } from './contracts.js';
 
 function asObject(value) {
@@ -29,7 +29,7 @@ function projectedStatus(todo, run) {
     return (run?.waitingFor?.types || []).includes('capability.connected')
       ? 'WAITING_FOR_CONNECTOR' : 'MONITORING';
   }
-  if (runStatus === 'COMPLETED') return 'COMPLETED';
+  if (runStatus === 'COMPLETED') return terminalOutcomeSatisfied(run) ? 'COMPLETED' : 'NEEDS_ATTENTION';
   if (['NEEDS_INTERVENTION', 'TERMINATED'].includes(runStatus) || todo.status === 'BLOCKED') return 'NEEDS_ATTENTION';
   if (run) return 'RUNNING';
   return String(todo.status || 'PROPOSED').toUpperCase();

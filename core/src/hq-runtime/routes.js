@@ -8,7 +8,7 @@ import {
   transitionHqRuntime,
 } from './repository.js';
 import { reconcileTodoCapabilities } from './instruction-loop.js';
-import { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot } from '../runtime-playbooks/snapshot.js';
+import { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot, terminalOutcomeSatisfied } from '../runtime-playbooks/snapshot.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 import { projectCurrentActivationSprint } from './activation-sprint.js';
 import { activateEligibleFirstLifeWork } from './first-life-control.js';
@@ -169,6 +169,7 @@ export function playbookQueueStatus(run) {
     return waitingTypes.includes('capability.connected') ? 'WAITING_FOR_CONNECTOR' : 'MONITORING';
   }
   if (status === 'WAITING_AUTHORITY') return 'WAITING_FOR_AUTHORITY';
+  if (status === 'COMPLETED' && !terminalOutcomeSatisfied(run)) return 'NEEDS_ATTENTION';
   if (status === 'NEEDS_INTERVENTION' || status === 'TERMINATED') return 'NEEDS_ATTENTION';
   return queueStatus(status);
 }

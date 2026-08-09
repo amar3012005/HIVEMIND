@@ -687,12 +687,6 @@ export class NativeHqEngine {
             queueContinuationScheduled = true;
           }
         }
-        await scheduleHqWake({
-          prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-          idempotencyKey: `queue-after-playbook:${run.id}`, triggerType: 'queue_advance', dueAt: new Date(),
-          payload: { completed_todo_id: todo.id, run_id: run.id },
-        });
-        queueContinuationScheduled = true;
       }
     }
     }
@@ -1037,7 +1031,10 @@ export class NativeHqEngine {
       }
     }
 
-    if (['work_result', 'runtime_playbook_result'].includes(trigger.type) && capabilityState.todos.some((todo) => todo.status === 'READY')) {
+    // Runtime playbooks promote and wake their next eligible proposal only from
+    // the verified expansion paths above. A terminal mismatch, input request,
+    // or safety stop must never fall through into an unrelated READY row.
+    if (trigger.type === 'work_result' && capabilityState.todos.some((todo) => todo.status === 'READY')) {
       await scheduleHqWake({
         prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
         idempotencyKey: `queue-advance:${cycle.id}`, triggerType: 'queue_advance', dueAt: new Date(),

@@ -1,8 +1,12 @@
 {
   "policy_id": "runtime.first-life-policy",
   "version": 6,
-  "proposal_target": 4,
-  "proposal_minimum": 2,
+  "proposal_target": 1,
+  "proposal_minimum": 1,
+  "initial_bootstrap_selector": {
+    "metadata_flag": "first_life_program_builder",
+    "effect_class": "internal"
+  },
   "initial_execution_limit": 1,
   "preparation_execution_limit": 1,
   "external_execution_limit": 1,

@@ -10,6 +10,7 @@ test('marketing v5 performs one Room synthesis and deterministic materialization
   const adapterStages = playbook.stages.filter((stage) => stage.execution?.mode === 'adapter');
 
   assert.equal(roomStages.length, 1);
+  assert.equal(playbook.metadata.first_life_program_builder, true);
   assert.equal(roomStages[0].id, 'form_strategy_program');
   assert.deepEqual(roomStages[0].expected_artifacts, ['marketing_strategy_program']);
   assert.equal(roomStages[0].on_failure, 'ESCALATE');

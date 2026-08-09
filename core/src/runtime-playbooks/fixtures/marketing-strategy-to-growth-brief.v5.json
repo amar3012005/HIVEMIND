@@ -8,6 +8,7 @@
     "owner_room_tag": "marketing",
     "supported_actions": ["formulate_go_to_market_strategy"],
     "effect_class": "internal",
+    "first_life_program_builder": true,
     "terminal_states_by_action": {
       "formulate_go_to_market_strategy": ["strategy_program_ready", "strategy_needs_evidence", "cancelled"]
     }

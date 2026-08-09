@@ -26,14 +26,23 @@ function hasEvidence(item, constraints, baselineId) {
   return Boolean(constraint && refs.length && (!baselineId || refs.includes(baselineId)));
 }
 
-export function applyFirstLifePolicy(plan, context, policy) {
+export function applyFirstLifePolicy(plan, context, policy, lifecycleCatalog = []) {
   if (!plan || plan.mode !== 'initial_full') return plan;
   const baselineId = context?.baseline?.resource_id || null;
   const constraints = Array.isArray(plan.constraints) ? plan.constraints : [];
   const sourceQueue = Array.isArray(plan.operating_queue) ? plan.operating_queue : [];
   const maximum = Math.max(1, Number(policy.proposal_target || 4));
   const minimum = Math.max(1, Number(policy.proposal_minimum || 2));
-  const queue = sourceQueue.filter((item) => hasEvidence(item, constraints, baselineId)).slice(0, maximum);
+  let queue = sourceQueue.filter((item) => hasEvidence(item, constraints, baselineId));
+  const selector = policy.initial_bootstrap_selector;
+  if (selector?.metadata_flag) {
+    const eligible = new Set(lifecycleCatalog.filter((entry) => entry?.[selector.metadata_flag] === true
+      && (!selector.effect_class || entry.effect_class === selector.effect_class))
+      .map((entry) => `${entry.playbook_id}@${Number(entry.version)}`));
+    queue = queue.filter((item) => eligible.has(`${item.playbook_id}@${Number(item.playbook_version)}`));
+    if (!queue.length) throw new Error('growth_plan_first_life_bootstrap_lifecycle_required');
+  }
+  queue = queue.slice(0, maximum);
   if (queue.length < minimum) throw new Error('first_life_evidenced_proposals_required');
 
   const recommendedId = String(plan.stage?.queue_item_id || '');

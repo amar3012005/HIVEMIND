@@ -89,8 +89,8 @@ test('prepare queue retains model suggestions as evidence but grants no executio
   assert.deepEqual(plan.operating_queue[2].ignored_capability_suggestions, ['zernio', 'instagram', 'linkedin', 'x_organic']);
 });
 
-test('first-life policy preserves varied company proposals without injecting a domain or language', async () => {
-  const policy = await loadFirstLifePolicy();
+test('historical first-life policy preserves varied company proposals without injecting a domain or language', async () => {
+  const policy = await loadFirstLifePolicy(5);
   const cases = [
     ['English SaaS', ['Clarify retained demand', 'Measure activation evidence']],
     ['Deutsche Agentur', ['Angebotssignale pruefen', 'Bestandskunden lernen']],
@@ -118,8 +118,8 @@ test('first-life policy preserves varied company proposals without injecting a d
   }
 });
 
-test('first-life policy removes unsupported proposals and never pads the queue', async () => {
-  const policy = await loadFirstLifePolicy();
+test('historical first-life policy removes unsupported proposals and never pads the queue', async () => {
+  const policy = await loadFirstLifePolicy(5);
   const plan = {
     mode: 'initial_full',
     constraints: [
@@ -136,4 +136,27 @@ test('first-life policy removes unsupported proposals and never pads the queue',
   };
   const result = applyFirstLifePolicy(plan, { baseline: { resource_id: 'baseline-1' } }, policy);
   assert.deepEqual(result.operating_queue.map((item) => item.id), ['q1', 'q2']);
+});
+
+test('v6 retains one policy-selected program builder and leaves portfolio design to it', async () => {
+  const policy = await loadFirstLifePolicy(6);
+  const plan = {
+    mode: 'initial_full',
+    constraints: [
+      { id: 'strategy-gap', evidence_refs: ['baseline-1'] },
+      { id: 'downstream-gap', evidence_refs: ['baseline-1'] },
+    ],
+    stage: { queue_item_id: 'builder' },
+    operating_queue: [
+      { id: 'builder', constraint_id: 'strategy-gap', title: 'Form program', playbook_id: 'program.builder', playbook_version: 7 },
+      { id: 'downstream', constraint_id: 'downstream-gap', title: 'Act later', playbook_id: 'external.motion', playbook_version: 2 },
+    ],
+  };
+  const catalog = [
+    { playbook_id: 'program.builder', version: 7, effect_class: 'internal', first_life_program_builder: true },
+    { playbook_id: 'external.motion', version: 2, effect_class: 'external', first_life_program_builder: false },
+  ];
+  const result = applyFirstLifePolicy(plan, { baseline: { resource_id: 'baseline-1' } }, policy, catalog);
+  assert.deepEqual(result.operating_queue.map((item) => item.id), ['builder']);
+  assert.equal(result.first_life.proposal_count, 1);
 });

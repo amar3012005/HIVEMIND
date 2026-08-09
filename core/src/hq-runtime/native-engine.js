@@ -906,6 +906,7 @@ export class NativeHqEngine {
           owner_room_tag: entry.metadata?.owner_room_tag || null,
           supported_actions: Array.isArray(entry.metadata?.supported_actions) ? entry.metadata.supported_actions : [],
           effect_class: entry.metadata?.effect_class || null,
+          first_life_program_builder: entry.metadata?.first_life_program_builder === true,
           purpose: entry.metadata?.purpose || entry.description || '',
           terminal_states: entry.terminal_states,
         }));
@@ -1081,6 +1082,8 @@ export class NativeHqEngine {
           version: entry.version,
           owner_room_tag: entry.metadata?.owner_room_tag || null,
           supported_actions: Array.isArray(entry.metadata?.supported_actions) ? entry.metadata.supported_actions : [],
+          effect_class: entry.metadata?.effect_class || null,
+          first_life_program_builder: entry.metadata?.first_life_program_builder === true,
           purpose: entry.metadata?.purpose || entry.description || '',
           terminal_states: entry.terminal_states,
         })) || [];

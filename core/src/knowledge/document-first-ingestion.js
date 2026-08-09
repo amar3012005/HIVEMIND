@@ -16,6 +16,7 @@ import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables } from '../vector/mneme/driver.js';
+import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
 // row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
@@ -4293,7 +4294,9 @@ Every item must include a non-empty content field and one or more valid support_
         const segment = segments[_qi++];
         const segOrgId = callerOrgId || segment.orgId;
         try {
-          const embedding = await this.embeddingService.embed(segment.content);
+          // Embed the chunk WITH its document/heading anchor, not bare. Stored content is
+          // untouched -- the prefix exists only in the vector. See contextual-embed-input.js.
+          const embedding = await this.embeddingService.embed(contextualEmbedInputForSegment(segment));
           if (_isRemote) {
             // remoteKbSegment returns true | null (null = failed after its own
             // retries). It was AWAITED but the result IGNORED — so a segment that
@@ -4374,7 +4377,9 @@ Every item must include a non-empty content field and one or more valid support_
       const _healRows = [];
       for (const { segment, segOrgId } of _failedSegs) {
         try {
-          const emb = await this.embeddingService.embed(segment.content);
+          // Heal path must embed the SAME text as the primary path, or a healed segment
+          // would sit in a different vector space from its neighbours.
+          const emb = await this.embeddingService.embed(contextualEmbedInputForSegment(segment));
           if (orgIsRemote(segOrgId)) {
             const ok = await amrKbSegment(segOrgId, _remotePayload(segment), Array.isArray(emb) ? emb : []);
             if (ok) _healed += 1;

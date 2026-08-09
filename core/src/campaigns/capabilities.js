@@ -96,6 +96,13 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
     { id: 'gmail', planning_ready: planningEnabled, connected: gmailConnected, executable: enabled && gmailConnected, execution_ready: enabled && gmailConnected && campaignChannelExecutionEnabled('gmail'), reason: gmailConnected ? null : 'connect_gmail', execution_reason: campaignChannelExecutionEnabled('gmail') ? null : 'execution_not_enabled', evidence: { ...gmail, status: gmailConnected ? 'connected' : 'not_connected', adapter_available: true } },
     { id: 'tara', planning_ready: planningEnabled, connected: Boolean(tara), executable: enabled && Boolean(tara), execution_ready: enabled && Boolean(tara) && campaignChannelExecutionEnabled('tara'), reason: tara ? null : 'configure_tara', execution_reason: campaignChannelExecutionEnabled('tara') ? null : 'execution_not_enabled', provider: tara?.defaultProvider || null, evidence: { status: tara ? 'configured' : 'not_configured', scope: 'organization', provider: tara?.defaultProvider || null, revision: tara?.revision || null, verified_at: tara?.updatedAt || null, adapter_available: true } },
   ];
+  // Organic channels are planning surfaces even before an account is connected.
+  // Connection state governs provider execution later; it must never erase a
+  // strategically suitable channel from Campaign Intelligence's planning set.
+  const organicPlanningChannels = [
+    'linkedin', 'instagram', 'facebook', 'tiktok', 'youtube', 'pinterest',
+    'reddit', 'threads', 'bluesky', 'google_business',
+  ];
   const merged = new Map(nativeChannels.map((channel) => [channel.id, channel]));
   for (const providerChannel of executionConnections?.channels || []) {
     const channelId = providerChannel.id;
@@ -114,6 +121,15 @@ export async function getCampaignCapabilities({ prisma, userId, orgId }) {
       ad_accounts: Array.isArray(providerChannel.ad_accounts) ? providerChannel.ad_accounts : [],
       selected_ad_account: providerChannel.selected_ad_account || null,
       evidence: { status: providerChannel.connected ? 'connected' : 'not_connected', adapter_available: adapterAvailable, source: 'campaign_execution_profile' },
+    });
+  }
+  for (const channelId of organicPlanningChannels) {
+    if (merged.has(channelId)) continue;
+    merged.set(channelId, {
+      id: channelId, planning_ready: planningEnabled, connected: false,
+      executable: false, execution_ready: false, reason: 'connect_account',
+      execution_reason: 'adapter_not_available',
+      evidence: { status: 'not_connected', adapter_available: false },
     });
   }
   for (const channel of planningOnly) {

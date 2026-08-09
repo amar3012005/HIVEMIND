@@ -716,6 +716,15 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             },
           },
         }) : []).map((campaign) => [campaign.sourceId, campaign]));
+        const projectedCapabilityRequests = capabilityRequests.map((request) => {
+          const todo = todoById.get(String(request.todoId || ''));
+          const runId = String(todo?.context?.runtime_capability_run_id || '');
+          return {
+            ...request,
+            campaign: projectCampaignAuthorityPreview(campaignsByRun.get(runId) || null),
+            deferred: String(todo?.context?.deferred_capability_request_id || '') === String(request.id),
+          };
+        });
         const playbookProjectionWarnings = [];
         const playbookInputs = playbookRuns.filter((run) => run.status === 'WAITING_EVENT'
           && (run.waitingFor?.types || [run.waitingFor?.type]).includes('input.provided')).map((run) => {
@@ -794,7 +803,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           runtime, firstLife, growthBrief, tasks: agentRuntimeTasks, recognitionEvents, adminCheckin,
         });
         return jsonResponse(res, {
-          work_orders: workOrders, schedules, todos, capability_requests: capabilityRequests, instructions,
+          work_orders: workOrders, schedules, todos, capability_requests: projectedCapabilityRequests, instructions,
           agent_runtime_tasks: agentRuntimeTasks,
           runtime_queue: agentRuntimeTasks,
           growth_brief: growthBrief,
@@ -805,6 +814,42 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           playbook_projection_warnings: playbookProjectionWarnings,
           first_life: firstLife, activation_sprint: activationSprint,
         });
+      }
+
+      const capabilityDeferMatch = pathname.match(/^\/v1\/hq\/capability-requests\/([^/]+)\/defer$/);
+      if (capabilityDeferMatch && req.method === 'POST') {
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        const requestId = decodeURIComponent(capabilityDeferMatch[1]);
+        const capabilityRequest = await prisma.hqCapabilityRequest.findFirst({
+          where: { id: requestId, orgId, status: 'REQUIRED' },
+        });
+        if (!capabilityRequest?.todoId) return jsonResponse(res, { error: 'capability_request_not_found' }, 404);
+        const todo = await prisma.hqTodo.findFirst({ where: { id: capabilityRequest.todoId, orgId } });
+        if (!todo) return jsonResponse(res, { error: 'capability_todo_not_found' }, 404);
+        await prisma.hqTodo.update({ where: { id: todo.id }, data: {
+          context: {
+            ...(todo.context || {}), execution_slot_released: true,
+            execution_slot_release_trigger: 'capability_deferred',
+            deferred_capability_request_id: capabilityRequest.id,
+          },
+        } });
+        const activation = await activateEligibleFirstLifeWork({
+          prisma, runtime, expansionTrigger: 'verified_preparation_checkpoint',
+        });
+        await appendHqEvent({
+          prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+          eventType: 'decision', title: 'Prepared work retained for later connection',
+          summary: 'The prepared artifacts remain attached to this lifecycle. Runtime may prepare the next eligible task and will resume this one when its capability becomes available.',
+          details: { capability_request_id: capabilityRequest.id, todo_id: todo.id, promoted: activation.promoted },
+        });
+        if (activation.promoted.length) await requestWake({
+          prisma, runtime, triggerType: 'queue_advance',
+          payload: { promoted_todo_ids: activation.promoted.map((item) => item.id) },
+          key: `capability-deferred:${capabilityRequest.id}`,
+        });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, { ok: true, retained: true, promoted: activation.promoted }, 202);
       }
 
       if ((pathname === '/v1/hq/first-life/current' || pathname === '/v1/hq/activation-sprints/current') && req.method === 'GET') {

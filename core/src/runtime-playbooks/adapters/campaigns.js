@@ -2,10 +2,11 @@ import crypto from 'node:crypto';
 import { getCampaignCapabilities } from '../../campaigns/capabilities.js';
 import { dispatchCampaignRoomSafely } from '../../campaigns/dispatcher.js';
 import {
-  approveCampaign, createCampaign, getCampaign, resolveHyperagentsOrganicChannels, syncCampaignMetrics,
+  approveCampaign, createCampaign, getCampaign, syncCampaignMetrics,
 } from '../../campaigns/service.js';
 
 const ORGANIC = new Set(['x_organic', 'linkedin', 'instagram', 'facebook', 'tiktok', 'youtube', 'pinterest', 'reddit', 'threads', 'bluesky', 'google_business']);
+const PLANNING_FALLBACK = ['linkedin', 'instagram', 'x_organic'];
 
 function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
 function asArray(value) { return Array.isArray(value) ? value : []; }
@@ -13,6 +14,16 @@ function artifactId(prefix, ...parts) {
   return `${prefix}-${crypto.createHash('sha256').update(parts.map(String).join('\u0000')).digest('hex').slice(0, 32)}`;
 }
 function value(input, key) { return input?.inputs?.[key]; }
+export function requestedCampaignChannels(request, target) {
+  const candidates = [
+    target?.channels, target?.channel_mix, target?.recommended_channels,
+    request?.channels, request?.channel_mix, request?.recommended_channels,
+  ];
+  const selected = candidates.find(Array.isArray) || [];
+  return [...new Set(selected.map((item) => String(item?.id || item || '').trim().toLowerCase())
+    .map((item) => item === 'x' || item === 'twitter' ? 'x_organic' : item)
+    .filter((item) => ORGANIC.has(item)))];
+}
 function campaignRef(input) {
   return asArray(value(input, 'artifacts.campaign_record'))[0]?.data?.campaign_id
     || asArray(value(input, 'artifacts.campaign_status'))[0]?.data?.campaign_id
@@ -100,11 +111,12 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
         const target = asObject(value(input, 'context.target'));
         const baseline = asObject(value(input, 'context.baseline'));
         const capabilities = await getCampaignCapabilities({ prisma, userId, orgId: context.orgId });
-        const connected = resolveHyperagentsOrganicChannels([], capabilities);
-        const planningFallback = capabilities.channels
+        const plannable = new Set(capabilities.channels
           .filter((item) => ORGANIC.has(item.id) && item.planning_ready)
-          .map((item) => item.id).slice(0, 2);
-        const channels = connected.length ? connected : planningFallback;
+          .map((item) => item.id));
+        const requested = requestedCampaignChannels(request, target);
+        const channels = (requested.length ? requested : PLANNING_FALLBACK)
+          .filter((channel) => plannable.has(channel)).slice(0, 3);
         if (!channels.length) throw new Error('runtime_campaign_no_plannable_organic_channel');
         const instruction = String(request.instruction || request.objective || 'Create a focused awareness campaign').trim();
         const destinationUrl = String(

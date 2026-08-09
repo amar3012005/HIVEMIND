@@ -485,7 +485,10 @@ export class NativeHqEngine {
     }
 
     const activationSprint = await projectCurrentActivationSprint({ prisma, orgId: runtime.orgId });
-    if (activationSprint?.status === 'AWAITING_START') {
+    // A completed lifecycle can materialize a new first-life program. Its result
+    // cycle must reconcile the owning todo before the new program is allowed to
+    // pause for Start; otherwise the parent remains falsely RUNNING forever.
+    if (activationSprint?.status === 'AWAITING_START' && trigger.type !== 'runtime_playbook_result') {
       const recommended = activationSprint.items?.find((item) => item.todo_id === activationSprint.recommended_todo_id)
         || activationSprint.items?.[0];
       const recommendedTodo = recommended?.todo_id ? await prisma.hqTodo.findFirst({

@@ -650,6 +650,7 @@ export class NativeHqEngine {
     let queueContinuationScheduled = false;
     let initialPolicyCommitted = false;
     let adminCheckinScheduled = false;
+    let reconciledLifecycleOwnsCapacity = false;
     const firstLifeOperatingGate = firstLifePolicy.initial_lifecycle?.bypass_growth_plan === true
       ? await projectFirstLifeOperatingGate({ prisma, runtime }) : null;
     const growthPlanMode = growthPlanModeForState({
@@ -666,6 +667,7 @@ export class NativeHqEngine {
       }) : null;
       const todoId = String(run?.trigger?.todo_id || trigger.payload?.todo_id || '');
       const todo = todoId ? await prisma.hqTodo.findFirst({ where: { id: todoId, runtimeId: runtime.id, orgId: runtime.orgId } }) : null;
+      reconciledLifecycleOwnsCapacity = playbookRunOwnsCapacity(run);
       if (run?.trigger?.first_life_admin_checkin === true) {
         // The check-in has no todo by design. Its persisted terminal artifact is
         // additional planning evidence, never a work-order result.
@@ -881,6 +883,7 @@ export class NativeHqEngine {
       }).catch(() => [])
       : [];
     roomInFlight = capabilityState.todos.some((todo) => todo.status === 'RUNNING')
+      || reconciledLifecycleOwnsCapacity
       || capacityOwningRuns.some(playbookRunOwnsCapacity);
     if (trigger.type === 'work_result') {
       const workOrderId = String(trigger.payload?.work_order_id || '');

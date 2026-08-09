@@ -117,3 +117,38 @@ test('hosted planner audits a one-step proposal and restores an omitted terminal
   assert.deepEqual(result.steps[1].depends_on, [0]);
   assert.match(parserInputs[1].history.at(-1).content, /every requested retrieval and terminal action/i);
 });
+
+test('audits a structurally complete plan and repairs a substituted connector action', async () => {
+  const parserInputs = [];
+  const result = await planHostedComposioWorkflow({
+    request: 'Recall my company information and put it in a new Google Doc',
+    orgId: 'org-1',
+    composio: {
+      listConnectedAccounts: async () => [
+        { toolkit: 'gmail', status: 'ACTIVE' },
+        { toolkit: 'googledocs', status: 'ACTIVE' },
+      ],
+    },
+    parseIntent: async (input) => {
+      parserInputs.push(input);
+      const action = parserInputs.length === 1
+        ? { operation: 'create_draft', output_kind: 'message', tool_groups: ['gmail'], message: 'Draft an email' }
+        : { operation: 'create_doc', output_kind: 'document', tool_groups: ['google-docs'], message: 'Create the requested Google Doc' };
+      return {
+        decision: {
+          operation: 'compound',
+          subtasks: [
+            { operation: 'recall', authority: 'read', output_kind: 'knowledge', tool_groups: ['hivemind-recall'], message: 'Recall company information' },
+            { ...action, authority: 'write', depends_on: [0] },
+          ],
+        },
+        usage: { total_tokens: parserInputs.length * 10 },
+      };
+    },
+  });
+
+  assert.equal(result.planner_attempts, 2);
+  assert.equal(result.steps[1].tool_groups[0], 'google-docs');
+  assert.equal(result.steps[1].output_kind, 'document');
+  assert.match(parserInputs[1].history.at(-1).content, /never substitute/i);
+});

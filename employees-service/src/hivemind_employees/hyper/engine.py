@@ -3457,14 +3457,16 @@ class Director:
             "checkpoint": work_order_result.get("checkpoint") or {},
         }
 
-    async def _synthesize_runtime_stage_result(self) -> Dict[str, Any]:
+    async def _synthesize_runtime_stage_result(
+        self, supplied_envelope: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Compile one Room turn into the generic artifact contract.
 
         The model may structure work already present on the evidence board, but
         it cannot create artifact kinds or evidence references outside the
         versioned stage envelope. Core remains the sole predicate evaluator.
         """
-        envelope = self.runtime_stage or {}
+        envelope = supplied_envelope or self.runtime_stage or {}
         expected = [str(value) for value in (envelope.get("expected_artifacts") or []) if str(value).strip()]
         evidence: List[Dict[str, str]] = []
         inputs = envelope.get("inputs") if isinstance(envelope.get("inputs"), dict) else {}
@@ -3651,6 +3653,76 @@ class Director:
             "artifacts": artifacts,
             "gaps": list(dict.fromkeys(gaps)),
             "summary": str(parsed.get("summary") or "").strip()[:4000],
+        }
+
+    async def _synthesize_room_phase_result(
+        self, work_order_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return provider-backed special artifacts plus generic contract artifacts.
+
+        The legacy compiler remains authoritative for records created by Room tools
+        (leads, drafts and calls). Any other playbook artifact is shaped through the
+        same strict, evidence-bound contract synthesizer used by runtime-stage.v1.
+        This keeps Room intelligence adaptive while making room-phase.v2 genuinely
+        generic instead of silently degrading unknown artifact keys into prose.
+        """
+        compiled = self._compile_room_phase_result(work_order_result)
+        phase = self.room_phase or {}
+        lifecycle = phase.get("lifecycle") if isinstance(phase.get("lifecycle"), dict) else {}
+        expected = [str(value) for value in (lifecycle.get("expected_artifacts") or []) if str(value).strip()]
+        produced = {str(row.get("key") or "") for row in (compiled.get("artifacts") or []) if isinstance(row, dict)}
+        missing = [key for key in expected if key not in produced]
+        if not missing or phase.get("contract") != "room-phase.v2":
+            return compiled
+
+        context = phase.get("context") if isinstance(phase.get("context"), dict) else {}
+        prior = context.get("prior_artifacts") if isinstance(context.get("prior_artifacts"), dict) else {}
+        inputs: Dict[str, Any] = {
+            "context.company": context.get("company"),
+            "context.baseline": context.get("baseline"),
+            "context.request": context.get("request"),
+            "context.target": context.get("target"),
+            **prior,
+        }
+        inputs = {key: value for key, value in inputs.items() if value is not None}
+        generic_envelope = {
+            "contract": "runtime-stage.v1",
+            "run_id": phase.get("run_id"),
+            "stage_id": phase.get("phase_id"),
+            "objective": phase.get("instruction") or lifecycle.get("guidance"),
+            "inputs": inputs,
+            "expected_artifacts": missing,
+            "completion_checks": [
+                row for row in (lifecycle.get("completion_checks") or [])
+                if isinstance(row, dict) and str(row.get("select") or "") in missing
+            ],
+            "artifact_requirements": {
+                key: value for key, value in (lifecycle.get("artifact_requirements") or {}).items()
+                if key in missing
+            },
+            "artifact_schemas": {
+                key: value for key, value in (lifecycle.get("artifact_schemas") or {}).items()
+                if key in missing
+            },
+            "strict_response_schema": lifecycle.get("strict_response_schema"),
+        }
+        generic = await self._synthesize_runtime_stage_result(generic_envelope)
+        generic_artifacts = [
+            row for row in (generic.get("artifacts") or [])
+            if isinstance(row, dict) and str(row.get("key") or "") in missing
+        ]
+        all_artifacts = [*(compiled.get("artifacts") or []), *generic_artifacts]
+        final_keys = {str(row.get("key") or "") for row in all_artifacts if isinstance(row, dict)}
+        retained_gaps = [
+            str(gap) for gap in (compiled.get("gaps") or [])
+            if not any(str(gap) == f"The Room did not return a verified {key} artifact for this phase."
+                       for key in final_keys)
+        ]
+        return {
+            **compiled,
+            "artifacts": all_artifacts,
+            "gaps": list(dict.fromkeys([*retained_gaps, *(generic.get("gaps") or [])])),
+            "summary": str(generic.get("summary") or compiled.get("summary") or "")[:4000],
         }
 
     async def _synthesize_work_order_result(self) -> Dict[str, Any]:
@@ -6041,7 +6113,7 @@ class Director:
         room_phase_result = None
         if self.room_phase:
             work_order_result = await self._synthesize_work_order_result()
-            room_phase_result = self._compile_room_phase_result(work_order_result)
+            room_phase_result = await self._synthesize_room_phase_result(work_order_result)
             final_text = str(room_phase_result.get("summary") or "")
             await self.emit({"t": "room_phase_result", "result": room_phase_result})
         elif self.runtime_stage:

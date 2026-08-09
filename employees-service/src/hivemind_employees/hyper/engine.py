@@ -5229,6 +5229,31 @@ class Director:
         ]
         return repaired_semantic
 
+    @staticmethod
+    def _campaign_semantic_plan(envelope: Any) -> Dict[str, Any]:
+        """Read the compiler's semantic plan without throwing valid work away.
+
+        JSON-object mode guarantees an object, not a particular wrapper. Some
+        supported models follow ``{"plan": {...}}`` literally while others
+        return the requested plan fields at the top level. Both are the same
+        Campaign Contract input; accepting either shape keeps model formatting
+        variance outside lifecycle governance.
+        """
+        if not isinstance(envelope, dict):
+            return {}
+        wrapped = envelope.get("plan")
+        if isinstance(wrapped, dict) and wrapped:
+            return wrapped
+        semantic_fields = {
+            "objective", "strategy", "strategy_options", "selected_strategy_id",
+            "company_grounding", "positioning", "audience", "content_pillars",
+            "kpis", "actions", "measurement", "debate_conflicts_present",
+            "debate_decisions", "evidence", "creative_system", "assumptions", "risks",
+        }
+        if semantic_fields.intersection(envelope):
+            return {key: value for key, value in envelope.items() if key in semantic_fields}
+        return {}
+
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
         board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
@@ -5294,8 +5319,10 @@ class Director:
             json_object=True,
         )
         envelope = _first_json_object(str((msg or {}).get("content") or "").strip())
-        report = str((envelope or {}).get("report_markdown") or "").strip() if isinstance(envelope, dict) else ""
-        semantic = (envelope or {}).get("plan") if isinstance((envelope or {}).get("plan"), dict) else {}
+        # Campaign v5 has one output: the structured dashboard bundle. There is
+        # deliberately no parallel prose report to drift from its final copy.
+        report = ""
+        semantic = self._campaign_semantic_plan(envelope)
         for index, action in enumerate(semantic.get("actions") or []):
             if isinstance(action, dict):
                 action["id"] = str(action.get("id") or f"action_{index + 1}")

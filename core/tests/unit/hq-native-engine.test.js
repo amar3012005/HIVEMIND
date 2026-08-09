@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, selectPendingPlaybookRun, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -33,6 +33,14 @@ test('first-life admin check-in gates diagnosis only while the initial plan is a
   assert.equal(shouldOfferFirstLifeAdminCheckin({
     initialPlanAbsent: false, optionalAdminCheckin: true, runtimePlaybooksAvailable: true,
   }), false);
+});
+
+test('active Room work outranks an older lifecycle wait in Runtime narration', () => {
+  const waiting = { id: 'old-wait', status: 'WAITING_EVENT' };
+  const authority = { id: 'approval', status: 'WAITING_AUTHORITY' };
+  const active = { id: 'current-room', status: 'ACTIVE' };
+  assert.equal(selectPendingPlaybookRun([waiting, authority, active]), active);
+  assert.equal(selectPendingPlaybookRun([waiting, authority]), authority);
 });
 
 test('HQ work-result reconciliation never reads a missing work order or result', () => {

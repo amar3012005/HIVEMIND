@@ -975,6 +975,14 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             runtime,
             expansionTrigger: 'user_start',
           });
+          if (!activation.promoted.length) {
+            return jsonResponse(res, {
+              error: 'first_life_start_already_recorded',
+              first_life_id: sprint.id,
+              decision,
+              promoted: [],
+            }, 409);
+          }
           await appendHqEvent({
             prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
             eventType: 'verification', title: 'Recommended work started',

@@ -85,6 +85,13 @@ export function shouldOfferFirstLifeAdminCheckin({ initialPlanAbsent, optionalAd
   return initialPlanAbsent === true && optionalAdminCheckin === true && runtimePlaybooksAvailable === true;
 }
 
+export function selectPendingPlaybookRun(runs = []) {
+  return runs.find((run) => run.status === 'ACTIVE')
+    || runs.find((run) => run.status === 'WAITING_AUTHORITY')
+    || runs.find((run) => run.status === 'WAITING_EVENT')
+    || null;
+}
+
 export function specialistWorkObjective(todo, skillId) {
   return String(todo?.objective || todo?.title || '').trim();
 }
@@ -1221,16 +1228,18 @@ export class NativeHqEngine {
     const metrics = [...new Set([...(measurement.primary_metrics || []), ...(measurement.metrics || []), ...Object.keys(measurement.thresholds || {})])].slice(0, 6);
     const waitingDays = dueAt ? Math.max(1, Math.ceil((dueAt.getTime() - Date.now()) / DAY)) : null;
     const openCapability = capabilityState.requests[0];
-    const [pendingLegacySpecialist, pendingPlaybookRun] = await Promise.all([
+    const [pendingLegacySpecialist, pendingPlaybookRuns] = await Promise.all([
       prisma.hyperWorkOrder.findFirst({
         where: { orgId: runtime.orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null }, status: { in: ['queued', 'running', 'processing'] } },
         select: { title: true, status: true },
       }),
-      prisma.runtimePlaybookRun?.findFirst ? prisma.runtimePlaybookRun.findFirst({
+      prisma.runtimePlaybookRun?.findMany ? prisma.runtimePlaybookRun.findMany({
         where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
-        orderBy: { updatedAt: 'asc' }, select: { id: true, currentStageId: true, status: true, waitingFor: true },
-      }).catch(() => null) : Promise.resolve(null),
+        orderBy: { updatedAt: 'desc' }, take: 24,
+        select: { id: true, currentStageId: true, status: true, waitingFor: true },
+      }).catch(() => []) : Promise.resolve([]),
     ]);
+    const pendingPlaybookRun = selectPendingPlaybookRun(pendingPlaybookRuns);
     const pendingSpecialist = pendingLegacySpecialist || (pendingPlaybookRun ? {
       title: `stage ${pendingPlaybookRun.currentStageId}`, status: pendingPlaybookRun.status,
     } : null);

@@ -31,6 +31,41 @@ def test_campaign_compiler_accepts_wrapped_or_direct_semantic_plan():
     assert Director._campaign_semantic_plan({"report_markdown": "legacy prose"}) == {}
 
 
+def test_campaign_repair_can_fill_only_named_semantic_fields(monkeypatch):
+    async def synthesize(*args, **kwargs):
+        return {"content": json.dumps({
+            "actions": [],
+            "fields": {
+                "positioning": {"statement": "Keep the existing position.", "proof_points": ["Verified company fact"]},
+                "company_grounding": {"company_name": "Example", "facts_used": ["Verified company fact"], "unknowns": []},
+            },
+        })}
+
+    director = Director(
+        user_message="Create a campaign", user_id="user", org_id="org", project_id=None,
+        participants=[], room_template="auto", room_goal="Campaign", enabled_connectors=[],
+        emit=lambda event: None, room_kind="campaign", campaign_brief={"channels": ["x_organic"]},
+    )
+    director.blackboard = ["Verified company fact"]
+    monkeypatch.setattr(director, "_groq", synthesize)
+    semantic = {
+        "positioning": {"statement": "Keep the existing position.", "proof_points": []},
+        "company_grounding": {"company_name": "Example", "facts_used": [], "unknowns": []},
+        "actions": [{"id": "x-1", "channel": "x_organic", "final_copy": "Existing final copy"}],
+    }
+
+    repaired = asyncio.run(director._repair_campaign_actions(
+        semantic=semantic, report="", errors=[
+            "positioning.proof_points must not be empty for contract v2",
+            "company_grounding.facts_used must not be empty for contract v3",
+        ], system_contract="Campaign contract",
+    ))
+
+    assert repaired["actions"] == semantic["actions"]
+    assert repaired["positioning"]["proof_points"] == ["Verified company fact"]
+    assert repaired["company_grounding"]["facts_used"] == ["Verified company fact"]
+
+
 def test_campaign_bundle_cannot_pass_as_generic_report():
     channels = ["gmail", "tara"]
     requirements = ["goal", "channel:gmail", "channel:tara"]

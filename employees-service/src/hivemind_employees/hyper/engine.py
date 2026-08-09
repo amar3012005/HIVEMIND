@@ -5180,27 +5180,49 @@ class Director:
         errors: List[str],
         system_contract: str,
     ) -> Optional[Dict[str, Any]]:
-        """Repair only invalid campaign actions while preserving accepted work."""
+        """Repair only named invalid actions or semantic fields.
+
+        Governance may reject a complete action sequence because one bounded
+        top-level evidence field is absent. Treating that as terminal made the
+        Room fail despite having the required facts on its board. The patch call
+        can see and replace only fields named by the unmet criteria; the full
+        assembled bundle is then governed again.
+        """
         actions = [action for action in (semantic.get("actions") or []) if isinstance(action, dict)]
         action_ids = self._campaign_action_ids_from_errors(errors, actions)
-        if not action_ids:
+        semantic_fields = {
+            "strategy", "strategy_options", "selected_strategy_id", "company_grounding",
+            "positioning", "audience", "content_pillars", "kpis", "evidence",
+            "creative_system", "measurement", "debate_conflicts_present",
+            "debate_decisions", "assumptions", "risks",
+        }
+        relevant_fields = {
+            name: semantic.get(name)
+            for name in semantic_fields
+            if any(name in str(error).lower() or name.replace("_", " ") in str(error).lower() for error in errors)
+        }
+        if not action_ids and not relevant_fields:
             return None
         invalid_actions = [action for action in actions if str(action.get("id") or "") in action_ids]
         repair_prompt = (
             system_contract
-            + "\n\nYou are repairing a Campaign Contract after deterministic governance. Return JSON only: "
-            '{"actions":[<complete replacement action objects>]}. '
-            "Return exactly one complete replacement for each requested action ID and no other actions. "
+            + "\n\nYou are repairing only named parts of a Campaign Contract after deterministic governance. "
+            'Return JSON only as {"actions":[<complete replacement action objects>],"fields":{<named top-level field>:<replacement>}}. '
+            "Return exactly one complete replacement for each requested action ID and no other actions. In fields, "
+            "return every supplied field and no field that was not supplied. "
             "Keep each action ID, channel, schedule position, hypothesis, and strategic job unchanged unless an unmet "
-            "criterion explicitly requires changing that field. Correct only the stated unmet criteria. Do not add facts, "
-            "claims, evidence, URLs, recipients, channels, or actions."
+            "criterion explicitly requires changing that field. Build missing proof/fact lists only from VERIFIED CONTEXT "
+            "and EVIDENCE BOARD below. Correct only the stated unmet criteria. Do not add facts, claims, URLs, recipients, "
+            "channels, actions, performance, or provider state."
         )
         repair_user = (
             f"UNMET CRITERIA:\n{json.dumps(errors, ensure_ascii=False)}\n\n"
             f"ACTIONS TO REPAIR:\n{json.dumps(invalid_actions, ensure_ascii=False)}\n\n"
+            f"FIELDS TO REPAIR:\n{json.dumps(relevant_fields, ensure_ascii=False)}\n\n"
             f"ACCEPTED PLAN CONTEXT (read only):\n"
-            f"{json.dumps({k: v for k, v in semantic.items() if k != 'actions'}, ensure_ascii=False)[:7000]}\n\n"
-            f"USER-FACING REPORT (read only):\n{report[:2500]}"
+            f"{json.dumps({k: v for k, v in semantic.items() if k not in {'actions', *relevant_fields}}, ensure_ascii=False)[:6000]}\n\n"
+            f"VERIFIED COMPANY CONTEXT:\n{self.company_brief[:2500]}\n\n"
+            f"EVIDENCE BOARD:\n{'\n'.join(self.blackboard)[:5000]}"
         )
         repaired_message = await self._groq(
             [{"role": "system", "content": repair_prompt}, {"role": "user", "content": repair_user}],
@@ -5213,20 +5235,22 @@ class Director:
         )
         repaired_payload = _first_json_object(str((repaired_message or {}).get("content") or "").strip())
         replacements = repaired_payload.get("actions") if isinstance(repaired_payload, dict) else None
-        if not isinstance(replacements, list):
+        patched_fields = repaired_payload.get("fields", {}) if isinstance(repaired_payload, dict) else None
+        if not isinstance(replacements, list) or not isinstance(patched_fields, dict):
             return None
         replacement_by_id = {
             str(action.get("id") or ""): action
             for action in replacements
             if isinstance(action, dict) and str(action.get("id") or "") in action_ids
         }
-        if set(replacement_by_id) != set(action_ids):
+        if set(replacement_by_id) != set(action_ids) or set(patched_fields) != set(relevant_fields):
             return None
         repaired_semantic = dict(semantic)
         repaired_semantic["actions"] = [
             replacement_by_id.get(str(action.get("id") or ""), action)
             for action in actions
         ]
+        repaired_semantic.update({name: patched_fields[name] for name in relevant_fields})
         return repaired_semantic
 
     @staticmethod

@@ -2936,7 +2936,15 @@ const server = http.createServer(async (req, res) => {
       .sort((a, b) => b.line.localeCompare(a.line))
       .slice(0, 250)
       .map(({ line }) => line);
-    return jsonResponse(res, { observed_at: new Date().toISOString(), logs: { mixed, core, control: controlPlane, employees } });
+    const all = [...core, ...controlPlane, ...employees].sort((a, b) => b.localeCompare(a));
+    const runtimePattern = /\[(?:hq-runtime|runtime-playbooks)\]|runtime[_ -]playbook|playbook[_ -](?:run|checkpoint|result)|hq[_ -](?:cycle|schedule|wake)|WAITING_(?:AUTHORITY|EVENT)|NEEDS_INTERVENTION/i;
+    const hyperAgentsPattern = /\[(?:hyper-engine|single|template)\]|hyper[_ -](?:room|turn|agent)|\/internal\/hyper\/turn-event|room-phase\.v\d+|runtime-stage-result/i;
+    const runtime = all.filter((line) => runtimePattern.test(line)).slice(0, 250);
+    const hyperagents = all.filter((line) => hyperAgentsPattern.test(line)).slice(0, 250);
+    return jsonResponse(res, {
+      observed_at: new Date().toISOString(),
+      logs: { mixed, runtime, hyperagents, core, control: controlPlane, employees },
+    });
   }
 
   if (pathname === '/admin/api/platform/plans' && (req.method === 'GET' || req.method === 'POST')) {

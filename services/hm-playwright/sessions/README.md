@@ -8,9 +8,9 @@ excludes everything but itself) — a session file is exactly as sensitive as a
 password and must never reach a commit.
 
 `server.mjs`'s `/v1/crawl` accepts an optional `session` field (`"x"` /
-`"instagram"` / `"linkedin"`) matching a filename here (sans `.json`). If the
-name doesn't resolve to a real file, the request silently falls back to an
-anonymous (logged-out) context rather than failing — a stale/expired session
-should degrade gracefully, not 500.
+`"instagram"` / `"linkedin"`) matching a filename here (sans `.json`). The
+production Compose file mounts this directory read-only at `/app/sessions`.
+If a requested session is missing, the API returns `409 session_not_found`
+instead of silently issuing an anonymous crawl.
 
 Read-only reuse only. This must never grow into click/post/follow automation.

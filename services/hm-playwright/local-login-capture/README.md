@@ -37,7 +37,9 @@ account until it expires or you log out elsewhere.
 scp out/x.json <ssh-alias>:/root/hivemind/services/hm-playwright/sessions/x.json
 ```
 Then delete your local copy once you've confirmed it landed. `sessions/` on
-the server is gitignored — these files must never reach a commit.
+the server is gitignored and mounted read-only into `hm-playwright` — these
+files must never reach a commit. A crawl that requests a missing session
+returns `409 session_not_found`; it does not silently fall back to anonymous.
 
 ## When it stops working
 Sessions expire, and some platforms (Instagram especially) tie sessions to

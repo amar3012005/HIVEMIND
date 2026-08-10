@@ -21,12 +21,19 @@ const NAVIGATION_TIMEOUT_MS = Math.max(3_000, Number(process.env.PLAYWRIGHT_NAVI
 // OUT OF BAND via local-login-capture/social-login-capture.mjs, which the user
 // runs on their own machine (real login, never handled here). Read-only reuse
 // only — this must never grow into a click/post/follow automation surface.
-const SESSIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'sessions');
+const SESSIONS_DIR = process.env.PLAYWRIGHT_SESSIONS_DIR
+  || path.join(path.dirname(fileURLToPath(import.meta.url)), 'sessions');
 const SESSION_NAME_RE = /^[a-z0-9_-]{1,40}$/i;
 function sessionStatePath(name) {
   if (!name || !SESSION_NAME_RE.test(name)) return null; // reject before touching the filesystem — no path traversal surface
   const file = path.join(SESSIONS_DIR, `${name}.json`);
-  return fs.existsSync(file) ? file : null;
+  try {
+    // Refuse symlinks and non-files so a named session cannot escape the
+    // read-only mount even if the host directory is accidentally polluted.
+    return fs.lstatSync(file).isFile() ? file : null;
+  } catch {
+    return null;
+  }
 }
 
 let browserPromise = null;
@@ -188,12 +195,17 @@ async function crawl(input) {
   // Homepage capture is opt-in so ordinary SEO crawls retain their compact
   // responses. Onboarding requests exactly one bounded browser visual.
   const captureScreenshot = Boolean(input.capture_screenshot);
-  // Optional named session (LinkedIn/X/Instagram) — resolved to a real file or
-  // null; an unknown/missing name silently falls back to an anonymous context
-  // rather than failing the request, since a stale/expired session should
-  // degrade to "logged out" behavior, not a 500.
+  // Optional named session (LinkedIn/X/Instagram). A requested session must
+  // resolve to a regular file. Falling back to anonymous would make callers
+  // believe an authenticated crawl ran when it actually hit a login wall.
   const sessionName = typeof input.session === 'string' ? input.session : null;
+  if (sessionName && !SESSION_NAME_RE.test(sessionName)) {
+    throw Object.assign(new Error('invalid_session_name'), { status: 400 });
+  }
   const sessionFile = sessionName ? sessionStatePath(sessionName) : null;
+  if (sessionName && !sessionFile) {
+    throw Object.assign(new Error('session_not_found'), { status: 409 });
+  }
   const queue = seeds.map((url, index) => ({ url, depth: 0, source: index ? 'sitemap' : 'seed', from: null }));
   const visited = new Set();
   const pages = [];
@@ -251,7 +263,6 @@ async function crawl(input) {
   return {
     pages, errors, runtime_used: 'playwright-service',
     session_used: sessionFile ? sessionName : null,
-    session_requested_but_missing: Boolean(sessionName && !sessionFile) ? sessionName : null,
   };
 }
 

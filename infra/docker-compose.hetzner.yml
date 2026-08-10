@@ -341,6 +341,11 @@ services:
     cpus: 0.75
     environment:
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+      PLAYWRIGHT_SESSIONS_DIR: /app/sessions
+    volumes:
+      # Captured storageState files are credentials: host-managed, never baked
+      # into an image, and mounted read-only into the browser service.
+      - /root/hivemind/services/hm-playwright/sessions:/app/sessions:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8932/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s

@@ -190,6 +190,7 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
           artifact_refs: (artifacts || []).map((artifact) => artifact.id),
           artifact_counts: accepted.counts,
           verdict: verdict || null,
+          contract_rejections: verdict?.contract_rejections || [],
         },
         evidenceRefs: (artifacts || []).map((artifact) => artifact.id),
       });

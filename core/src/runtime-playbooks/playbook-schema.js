@@ -164,6 +164,64 @@ export const runtimePlaybookSchema = {
 const ajv = new Ajv({ allErrors: true, strict: false });
 const validateSchema = ajv.compile(runtimePlaybookSchema);
 
+const AMBIENT_CONTEXT_ROOTS = new Set([
+  'company', 'baseline', 'request', 'target', 'constraints', 'policy',
+  'admin_current_status', 'lifecycle_catalog', 'supplied_inputs', 'evidence_refs',
+]);
+
+function normalizedInputRoot(path) {
+  const parts = String(path || '').split('.').filter(Boolean);
+  if (parts[0] === 'context') parts.shift();
+  return parts[0] || null;
+}
+
+function validateInputLineage(playbook) {
+  const declaredRoots = new Set((playbook.input_contract?.fields || []).map((field) => normalizedInputRoot(field.path)).filter(Boolean));
+  const consumedContextRoots = new Set();
+  const available = new Map(playbook.stages.map((stage) => [stage.id, new Set()]));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const stage of playbook.stages) {
+      const outgoing = new Set([...available.get(stage.id), ...stage.expected_artifacts]);
+      for (const transition of stage.transitions) {
+        if (!transition.to_stage) continue;
+        const target = available.get(transition.to_stage);
+        for (const key of outgoing) {
+          if (!target.has(key)) { target.add(key); changed = true; }
+        }
+      }
+    }
+  }
+  for (const stage of playbook.stages) {
+    for (const ref of stage.input_refs) {
+      if (ref === 'event' || ref.startsWith('event.') || ref === 'trigger.payload' || ref.startsWith('trigger.')) continue;
+      if (ref.startsWith('context.')) {
+        const root = String(ref).split('.')[1];
+        consumedContextRoots.add(root);
+        if (!AMBIENT_CONTEXT_ROOTS.has(root) && !declaredRoots.has(root)) {
+          throw new Error(`runtime_playbook_input_context_undeclared:${stage.id}:${ref}`);
+        }
+        continue;
+      }
+      if (ref.startsWith('artifacts.')) {
+        const key = ref.slice(10).split('.')[0];
+        if (!available.get(stage.id).has(key)) {
+          throw new Error(`runtime_playbook_input_artifact_unavailable:${stage.id}:${key}`);
+        }
+        continue;
+      }
+      throw new Error(`runtime_playbook_input_namespace_unknown:${stage.id}:${ref}`);
+    }
+  }
+  for (const field of playbook.input_contract?.fields || []) {
+    const root = normalizedInputRoot(field.path);
+    if (root && !consumedContextRoots.has(root)) {
+      throw new Error(`runtime_playbook_declared_input_unused:${field.path}`);
+    }
+  }
+}
+
 function formatErrors(errors = []) {
   return errors.map((error) => `${error.instancePath || '/'} ${error.message}`).join('; ');
 }
@@ -242,5 +300,6 @@ export function validateRuntimePlaybookShape(playbook) {
   if (reachableTerminals.size === 0) {
     throw new Error('runtime_playbook_terminal_unreachable');
   }
+  validateInputLineage(playbook);
   return playbook;
 }

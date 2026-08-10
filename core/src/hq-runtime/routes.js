@@ -1376,6 +1376,37 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         return jsonResponse(res, { run }, 202);
       }
 
+      const playbookInterventionMatch = pathname.match(/^\/v1\/hq\/playbooks\/runs\/([0-9a-f-]{36})\/resume$/i);
+      if (playbookInterventionMatch && req.method === 'POST') {
+        const service = typeof runtimePlaybooks === 'function' ? runtimePlaybooks() : runtimePlaybooks;
+        if (!service) return jsonResponse(res, { error: 'runtime_playbook_service_unavailable' }, 503);
+        const body = await parseBody(req).catch(() => ({}));
+        const checkpointSequence = Number(body.checkpoint_sequence);
+        const reason = String(body.reason || '').trim().slice(0, 1000);
+        if (!Number.isInteger(checkpointSequence) || checkpointSequence < 0) {
+          return jsonResponse(res, { error: 'runtime_intervention_checkpoint_required' }, 400);
+        }
+        if (!reason) return jsonResponse(res, { error: 'runtime_intervention_reason_required' }, 400);
+        const run = await prisma.runtimePlaybookRun.findFirst({
+          where: { id: playbookInterventionMatch[1], orgId },
+          select: { id: true, status: true, checkpointSequence: true },
+        });
+        if (!run) return jsonResponse(res, { error: 'runtime_playbook_run_not_found' }, 404);
+        if (run.status !== 'NEEDS_INTERVENTION') {
+          return jsonResponse(res, { error: 'runtime_intervention_not_waiting' }, 409);
+        }
+        if (run.checkpointSequence !== checkpointSequence) {
+          return jsonResponse(res, { error: 'runtime_intervention_checkpoint_stale', checkpoint_sequence: run.checkpointSequence }, 409);
+        }
+        const resumed = await service.resumeIntervention(run.id, orgId, {
+          expectedCheckpointSequence: checkpointSequence,
+          resumedBy: userId,
+          reason,
+        });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, { run: resumed }, 202);
+      }
+
       if (pathname === '/v1/hq/instructions' && req.method === 'POST') {
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);

@@ -9,7 +9,7 @@ import { RuntimeRoomDirector } from './room-director.js';
 import { createProductionRuntimeAdapterRegistry } from './adapters/index.js';
 
 const fixtureDirectory = new URL('./fixtures/', import.meta.url);
-const executionPolicyUrl = new URL('./fixtures/runtime-execution-policy.v1.json', import.meta.url);
+const executionPolicyUrl = new URL('./fixtures/runtime-execution-policy.v2.json', import.meta.url);
 
 async function productionFixturePaths() {
   const manifest = JSON.parse(await readFile(new URL('registry.json', fixtureDirectory), 'utf8'));
@@ -161,6 +161,11 @@ export class RuntimePlaybookService {
 
   async resumeEvent(runId, orgId, event) {
     return this.execute(runId, orgId, { event });
+  }
+
+  async resumeIntervention(runId, orgId, input = {}) {
+    await this.executor.resumeIntervention(runId, orgId, input);
+    return this.execute(runId, orgId);
   }
 
   async drainActive({ limit = 4 } = {}) {

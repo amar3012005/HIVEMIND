@@ -123,6 +123,59 @@ export class PostgresRuntimeStore {
     return this.loadRun(runId, orgId);
   }
 
+  async resumeIntervention(runId, orgId, {
+    expectedCheckpointSequence,
+    resumedBy = null,
+    reason = '',
+  } = {}) {
+    const expected = Number(expectedCheckpointSequence);
+    if (!Number.isInteger(expected) || expected < 0) {
+      throw new Error('runtime_intervention_checkpoint_required');
+    }
+    await this.prisma.$transaction(async (tx) => {
+      const found = await tx.runtimePlaybookRun.findFirst({ where: { id: runId, orgId } });
+      if (!found) throw new Error('runtime_run_not_found');
+      if (found.status !== 'NEEDS_INTERVENTION') throw new Error('runtime_intervention_not_waiting');
+      if (found.checkpointSequence !== expected) throw new Error('runtime_intervention_checkpoint_stale');
+      const context = asObject(found.context);
+      const repairs = { ...asObject(context.runtime_repair_attempts) };
+      delete repairs[found.currentStageId];
+      const interventions = [
+        ...asArray(context.runtime_interventions),
+        {
+          stage_id: found.currentStageId,
+          resumed_by: resumedBy,
+          reason: String(reason || '').slice(0, 1000),
+          checkpoint_sequence: expected,
+          resumed_at: this.now().toISOString(),
+        },
+      ].slice(-100);
+      const updated = await tx.runtimePlaybookRun.updateMany({
+        where: { id: runId, orgId, status: 'NEEDS_INTERVENTION', checkpointSequence: expected },
+        data: {
+          status: 'ACTIVE',
+          lastVerdict: {},
+          context: { ...context, runtime_repair_attempts: repairs, runtime_interventions: interventions },
+          checkpointSequence: { increment: 1 },
+          version: { increment: 1 },
+        },
+      });
+      if (updated.count !== 1) throw new Error('runtime_intervention_checkpoint_stale');
+      await tx.runtimePlaybookCheckpoint.create({ data: {
+        runId,
+        orgId,
+        sequence: expected + 1,
+        stageId: found.currentStageId,
+        phase: 'INTERVENTION_RESUMED',
+        status: 'ACTIVE',
+        state: { resumed_by: resumedBy, reason: String(reason || '').slice(0, 1000), previous_checkpoint_sequence: expected },
+        verdict: {},
+        artifactRefs: [],
+      } });
+    });
+    return this.loadRun(runId, orgId);
+  }
+
   async appendCheckpoint(runId, orgId, checkpoint) {
     return this.prisma.$transaction(async (tx) => {
       const found = await tx.runtimePlaybookRun.findFirst({ where: { id: runId, orgId } });

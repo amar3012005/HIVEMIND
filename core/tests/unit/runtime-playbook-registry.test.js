@@ -43,6 +43,25 @@ test('shared playbook input binding accepts durable context and rejects missing 
   });
 });
 
+test('required playbook bindings reject empty containers and strings but preserve scalar zero values', () => {
+  for (const [type, value] of [['string', '  '], ['array', []], ['object', {}]]) {
+    assert.throws(() => bindPlaybookContext({ input_contract: { fields: [
+      { path: 'request.value', type, required: true },
+    ] } }, {}, { request: { value } }), new RegExp(`runtime_playbook_binding_empty:request.value:${type}`));
+  }
+  assert.deepEqual(bindPlaybookContext({ input_contract: { fields: [
+    { path: 'request.enabled', type: 'boolean', required: true },
+    { path: 'request.quantity', type: 'integer', required: true },
+  ] } }, {}, { request: { enabled: false, quantity: 0 } }), {
+    request: { enabled: false, quantity: 0 },
+  });
+  assert.deepEqual(bindPlaybookContext({ input_contract: { fields: [
+    { path: 'request.optional_targets', type: 'array', required: false },
+  ] } }, {}, { request: { optional_targets: [] } }), {
+    request: { optional_targets: [] },
+  });
+});
+
 class TestRuntimeStore {
   constructor() {
     this.runs = new Map();
@@ -67,6 +86,7 @@ class TestRuntimeStore {
       trigger: input.trigger || {},
       context: input.context || {},
       stageAttempts: {},
+      checkpointSequence: 0,
       waitingFor: null,
       lastVerdict: {},
       artifacts: [],
@@ -102,10 +122,32 @@ class TestRuntimeStore {
   }
 
   async appendCheckpoint(runId, orgId, checkpoint) {
-    await this.loadRun(runId, orgId);
-    const row = { runId, orgId, sequence: this.checkpoints.length + 1, ...structuredClone(checkpoint) };
+    const run = this.runs.get(runId);
+    if (!run || run.orgId !== orgId) throw new Error('runtime_run_not_found');
+    run.checkpointSequence += 1;
+    const row = { runId, orgId, sequence: run.checkpointSequence, ...structuredClone(checkpoint) };
     this.checkpoints.push(row);
     return row;
+  }
+
+  async resumeIntervention(runId, orgId, { expectedCheckpointSequence, resumedBy, reason } = {}) {
+    const run = this.runs.get(runId);
+    if (!run || run.orgId !== orgId) throw new Error('runtime_run_not_found');
+    if (run.status !== 'NEEDS_INTERVENTION') throw new Error('runtime_intervention_not_waiting');
+    if (run.checkpointSequence !== expectedCheckpointSequence) throw new Error('runtime_intervention_checkpoint_stale');
+    const repairs = { ...(run.context.runtime_repair_attempts || {}) };
+    delete repairs[run.currentStageId];
+    run.status = 'ACTIVE';
+    run.lastVerdict = {};
+    run.context = {
+      ...run.context,
+      runtime_repair_attempts: repairs,
+      runtime_interventions: [{ resumed_by: resumedBy, reason, checkpoint_sequence: expectedCheckpointSequence }],
+    };
+    await this.appendCheckpoint(runId, orgId, {
+      stageId: run.currentStageId, phase: 'INTERVENTION_RESUMED', status: 'ACTIVE', state: {}, verdict: {},
+    });
+    return this.loadRun(runId, orgId);
   }
 
   async persistArtifacts(runId, orgId, stageId, artifacts) {
@@ -545,15 +587,112 @@ test('playbook executor exclusively owns semantic retry count and parks after th
   assert.equal(run.status, 'NEEDS_INTERVENTION');
   assert.equal(run.stageAttempts.perform, 2);
   assert.equal(requests.length, 2);
+  assert.deepEqual(run.lastVerdict.contract_rejections, [{
+    rejected_field: null,
+    artifact_select: ['result'],
+    producer: 'room',
+    predicate: 'has_min_count',
+    attempt: 2,
+    expected: { value: 1 },
+    expected_schema: { result: { type: 'object', properties: {}, required: [] } },
+  }]);
   assert.deepEqual(requests.map((request) => request.retry_policy), [
-    { owner: 'playbook', stage_attempt: 1, max_stage_attempts: 2, room_outer_replays: 0, local_artifact_repair: true },
-    { owner: 'playbook', stage_attempt: 2, max_stage_attempts: 2, room_outer_replays: 0, local_artifact_repair: true },
+    { owner: 'playbook', stage_attempt: 1, execution_attempt: 1, stage_visit: 1, max_stage_attempts: 2, room_outer_replays: 0, local_artifact_repair: true },
+    { owner: 'playbook', stage_attempt: 2, execution_attempt: 2, stage_visit: 1, max_stage_attempts: 2, room_outer_replays: 0, local_artifact_repair: true },
   ]);
 
   run = await executor.run(created.id, { orgId: created.orgId });
   assert.equal(run.status, 'NEEDS_INTERVENTION');
   assert.equal(run.stageAttempts.perform, 2);
   assert.equal(requests.length, 2, 'automatic reentry must not create a third Room execution');
+});
+
+test('successful lifecycle loops start a new repair budget while retaining total execution and visit counts', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.loop-accounting', version: 1, status: 'ACTIVE',
+    name: 'Loop accounting', description: 'Separates visits from repairs.',
+    initial_stage_id: 'inspect', terminal_states: ['done'],
+    stages: [{
+      id: 'inspect', objective: 'Inspect once per visit.', expected_artifacts: ['inspection'], input_refs: [],
+      completion_checks: [{ predicate: 'has_min_count', select: 'inspection', value: 1 }],
+      transitions: [
+        { when: { predicate: 'field_equals', select: 'inspection', path: 'data.done', value: true }, to_terminal: 'done' },
+        { default: true, to_stage: 'advance' },
+      ], on_failure: 'REPAIR', max_attempts: 2,
+    }, {
+      id: 'advance', objective: 'Advance the loop.', expected_artifacts: ['advance_record'], input_refs: [],
+      completion_checks: [{ predicate: 'has_min_count', select: 'advance_record', value: 1 }],
+      transitions: [{ default: true, to_stage: 'inspect' }], on_failure: 'ESCALATE',
+    }],
+  });
+  const store = new TestRuntimeStore();
+  const requests = [];
+  let inspectCalls = 0;
+  const director = { async execute(request) {
+    requests.push(request);
+    if (request.stage_id === 'advance') return { artifacts: [{ id: 'advance-1', key: 'advance_record', data: {} }] };
+    inspectCalls += 1;
+    if (inspectCalls === 1) return { artifacts: [{ id: 'inspection-1', key: 'inspection', data: { done: false } }] };
+    const error = new Error('deterministic_second_visit_failure');
+    error.retryable = false;
+    throw error;
+  } };
+  const executor = new GenericStageExecutor({
+    registry, predicates: new PredicateEngine(), store, director,
+    executionPolicy: { max_stage_visits: 5 }, workerId: 'loop-accounting',
+  });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.loop-accounting', playbookVersion: 1,
+    idempotencyKey: 'loop-accounting-1', trigger: {},
+  });
+  const run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'NEEDS_INTERVENTION');
+  assert.equal(run.stageAttempts.inspect, 2);
+  assert.equal(run.context.runtime_stage_visits.inspect, 2);
+  assert.equal(requests.filter((request) => request.stage_id === 'inspect').at(-1).retry_policy.stage_attempt, 1);
+  assert.equal(requests.filter((request) => request.stage_id === 'inspect').at(-1).retry_policy.execution_attempt, 2);
+});
+
+test('checkpoint-bound intervention resume resets only the current repair budget', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.intervention-resume', version: 1, status: 'ACTIVE',
+    name: 'Intervention resume', description: 'Resumes one exact parked checkpoint.',
+    initial_stage_id: 'perform', terminal_states: ['done'],
+    stages: [{
+      id: 'perform', objective: 'Produce evidence.', expected_artifacts: ['result'], input_refs: [],
+      completion_checks: [{ predicate: 'has_min_count', select: 'result', value: 1 }],
+      transitions: [{ default: true, to_terminal: 'done' }], on_failure: 'REPAIR', max_attempts: 1,
+    }],
+  });
+  const store = new TestRuntimeStore();
+  let repaired = false;
+  const director = { async execute() {
+    if (!repaired) return { artifacts: [] };
+    return { artifacts: [{ id: 'result-after-intervention', key: 'result', data: { ready: true } }] };
+  } };
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, workerId: 'intervention-resume' });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.intervention-resume', playbookVersion: 1,
+    idempotencyKey: 'intervention-resume-1', trigger: {},
+  });
+  let run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'NEEDS_INTERVENTION');
+  const parkedSequence = run.checkpointSequence;
+  assert.rejects(
+    executor.resumeIntervention(run.id, run.orgId, { expectedCheckpointSequence: parkedSequence - 1, resumedBy: 'user-1', reason: 'Corrected evidence.' }),
+    /runtime_intervention_checkpoint_stale/,
+  );
+  repaired = true;
+  await executor.resumeIntervention(run.id, run.orgId, {
+    expectedCheckpointSequence: parkedSequence, resumedBy: 'user-1', reason: 'Corrected evidence.',
+  });
+  run = await executor.run(run.id, { orgId: run.orgId });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.stageAttempts.perform, 2);
+  assert.equal(run.context.runtime_stage_visits.perform, 2);
+  assert.equal(store.checkpoints.filter((checkpoint) => checkpoint.phase === 'INTERVENTION_RESUMED').length, 1);
 });
 
 test('artifact persistence failures obey the bounded playbook retry policy', async () => {
@@ -1187,7 +1326,7 @@ test('event resumption re-enters the same stage without consuming another semant
   assert.equal(run.stageAttempts.work, 1);
   assert.deepEqual(seenAttempts, [1, 1]);
   const after = store.checkpoints.find((entry) => entry.phase === 'AFTER_EXECUTION');
-  assert.deepEqual(after.state, { attempt: 1, rounds_used: 1 });
+  assert.deepEqual(after.state, { attempt: 1, execution_attempt: 1, stage_visit: 1, rounds_used: 1 });
 });
 
 test('registry enforces immutable versions, scope precedence, and schema integrity', async () => {
@@ -1215,6 +1354,27 @@ test('registry enforces immutable versions, scope precedence, and schema integri
   broken.version = 2;
   broken.stages[0].transitions = [{ default: true, to_stage: 'missing_stage' }];
   assert.throws(() => registry.register(broken), /runtime_playbook_transition_stage_missing/);
+});
+
+test('playbook schema validates input namespaces, declared binding consumption and artifact lineage', async () => {
+  const fixture = await loadFixture();
+  const unknownNamespace = structuredClone(fixture);
+  unknownNamespace.version = 101;
+  unknownNamespace.stages[0].input_refs.push('mystery.payload');
+  assert.throws(() => new RuntimePlaybookRegistry().register(unknownNamespace), /runtime_playbook_input_namespace_unknown/);
+
+  const unavailableArtifact = structuredClone(fixture);
+  unavailableArtifact.version = 102;
+  unavailableArtifact.stages[0].input_refs.push('artifacts.fulfillment_record');
+  assert.throws(() => new RuntimePlaybookRegistry().register(unavailableArtifact), /runtime_playbook_input_artifact_unavailable/);
+
+  const unusedBinding = structuredClone(fixture);
+  unusedBinding.version = 103;
+  unusedBinding.input_contract = { fields: [] };
+  unusedBinding.input_contract.fields.push({
+    path: 'unused.value', type: 'string', description: 'Intentionally unused test input.',
+  });
+  assert.throws(() => new RuntimePlaybookRegistry().register(unusedBinding), /runtime_playbook_declared_input_unused:unused.value/);
 });
 
 test('Prisma source maps persisted playbook records without coupling registry to storage', async () => {

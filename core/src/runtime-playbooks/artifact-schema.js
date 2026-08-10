@@ -211,10 +211,11 @@ export const ARTIFACT_FIELD_SHAPES = {
             effect_class: { type: 'string', enum: ['internal', 'external'] },
             required_capabilities: { type: 'array', items: STR }, evidence_refs: { type: 'array', minItems: 1, items: STR },
             success_measure: STR, dependencies: { type: 'array', items: STR }, priority: { type: 'integer' },
-            exact_targets: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            exact_targets: strList({ type: STR, value: STR, label: STR }),
           },
           required: ['motion_id', 'title', 'objective', 'reason', 'expected_outcome', 'motion_class',
-            'effect_class', 'required_capabilities', 'evidence_refs', 'success_measure', 'dependencies', 'priority'],
+            'effect_class', 'required_capabilities', 'evidence_refs', 'success_measure', 'dependencies', 'priority',
+            'exact_targets'],
         },
       },
     },
@@ -301,6 +302,10 @@ export const ARTIFACT_FIELD_SHAPES = {
     evidence: { kind: 'evidence_bound', schema: strList({ claim: STR, source_ref: STR, confidence: STR }) },
     unknowns: { kind: 'evidence_bound', schema: { type: 'array', items: STR } },
     recommendation: { kind: 'authored', schema: STR },
+  },
+  call_brief: {
+    phone: { kind: 'evidence_bound', schema: STR },
+    goal: { kind: 'authored', schema: STR },
   },
 };
 

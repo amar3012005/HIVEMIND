@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Backward-compatible entry point. All releases are implemented by
-# release-canonical.sh so every caller shares one lock, source gate, image
-# identity policy, deployment path and verifier.
+# Legacy positional interface. All production releases use release-canonical.
 set -euo pipefail
 
-sha="${1:?usage: release-singulance.sh <canonical-sha> [services...]}"
+SHA="${1:?usage: release-singulance.sh <canonical-sha> [services...]}"
 shift || true
-services=("${@:-fe}")
-canonical=()
-for service in "${services[@]}"; do
-  case "$service" in
-    fe) canonical+=(frontend) ;;
-    control) canonical+=(control-plane) ;;
-    *) canonical+=("$service") ;;
-  esac
-done
-canonical_csv=$(IFS=,; echo "${canonical[*]}")
-exec "$(dirname "$0")/release-canonical.sh" --sha "$sha" --services "$canonical_csv"
+if [ $# -eq 0 ]; then
+  SERVICES="core,control-plane,employees,frontend"
+else
+  normalized=()
+  for service in "$@"; do
+    [ "$service" = fe ] && service=frontend
+    [ "$service" = control ] && service=control-plane
+    normalized+=("$service")
+  done
+  SERVICES=$(IFS=,; echo "${normalized[*]}")
+fi
+
+exec "$(dirname "$0")/release-canonical.sh" --sha "$SHA" --services "$SERVICES"

@@ -42,6 +42,14 @@ function valueMatches(field, value) {
   return typeof value === field.type;
 }
 
+function valueIsMeaningful(field, value) {
+  if (!field.required) return true;
+  if (field.type === 'string') return value.trim().length > 0;
+  if (field.type === 'array') return value.length > 0;
+  if (field.type === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
 function selectionRequirementsSatisfied(playbook, context) {
   const requirements = asObject(playbook?.metadata?.selection_requirements);
   const exactTargets = Array.isArray(asObject(context).request?.exact_targets)
@@ -72,6 +80,7 @@ export function bindPlaybookContext(playbook, bindings = {}, context = {}) {
       continue;
     }
     if (!valueMatches(field, value)) throw new Error(`runtime_playbook_binding_type_invalid:${field.path}:${field.type}`);
+    if (!valueIsMeaningful(field, value)) throw new Error(`runtime_playbook_binding_empty:${field.path}:${field.type}`);
     if (field.enum && !field.enum.includes(value)) throw new Error(`runtime_playbook_binding_value_invalid:${field.path}`);
     setPath(patch, patchPath, value);
   }

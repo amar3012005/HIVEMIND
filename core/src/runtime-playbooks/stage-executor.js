@@ -1,4 +1,5 @@
 import crypto, { randomUUID } from 'node:crypto';
+import { deriveStageArtifactContract } from './artifact-schema.js';
 
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'TERMINATED']);
 // A run that exhausted max_attempts is parked in NEEDS_INTERVENTION — by name and by
@@ -98,6 +99,26 @@ function withoutLatestEvent(context) {
   return next;
 }
 
+function stageCounter(context, key, stageId) {
+  return Math.max(0, Number(asObject(asObject(context)[key])[stageId] || 0));
+}
+
+function withStageCounters(context, { stageId, repairAttempt, visitCount }) {
+  const current = asObject(context);
+  return {
+    ...current,
+    runtime_repair_attempts: { ...asObject(current.runtime_repair_attempts), [stageId]: repairAttempt },
+    runtime_stage_visits: { ...asObject(current.runtime_stage_visits), [stageId]: visitCount },
+  };
+}
+
+function clearStageRepairAttempt(context, stageId) {
+  const current = withoutLatestEvent(context);
+  const repairs = { ...asObject(current.runtime_repair_attempts) };
+  delete repairs[stageId];
+  return { ...current, runtime_repair_attempts: repairs };
+}
+
 function normalizeDirectorArtifacts(result) {
   const artifacts = Array.isArray(result?.artifacts) ? result.artifacts : [];
   return artifacts.map((artifact) => ({
@@ -116,6 +137,32 @@ function executionErrorVerdict(error) {
       ambiguous: error?.ambiguous === true,
     }],
   };
+}
+
+export function projectContractRejections({ stage, verdict, producer, attempt }) {
+  const unmet = Array.isArray(verdict?.unmet) ? verdict.unmet : [];
+  if (!unmet.length) return [];
+  const checks = Array.isArray(stage?.completion_checks) ? stage.completion_checks : [];
+  const contract = deriveStageArtifactContract(stage).artifacts;
+  return unmet.map((result) => {
+    const check = checks.find((candidate, index) => (
+      (candidate.id || `${candidate.predicate}:${candidate.select || '*'}:${index}`) === result.id
+    )) || checks.find((candidate) => candidate.predicate === result.predicate) || {};
+    const selectors = (Array.isArray(check.select) ? check.select : [check.select]).filter(Boolean).map(String);
+    return {
+      rejected_field: check.path || null,
+      artifact_select: selectors,
+      producer,
+      predicate: result.predicate || check.predicate || null,
+      attempt,
+      expected: {
+        ...(check.value !== undefined ? { value: check.value } : {}),
+        ...(check.values !== undefined ? { values: check.values } : {}),
+        ...(check.pattern !== undefined ? { pattern: check.pattern } : {}),
+      },
+      expected_schema: Object.fromEntries(selectors.map((key) => [key, contract[key]?.schema || null])),
+    };
+  });
 }
 
 function combineVerdicts(primary, verifications) {
@@ -229,6 +276,13 @@ export class GenericStageExecutor {
 
   async grantAuthority(runId, orgId, gate, grant = {}) {
     return this.store.grantAuthority(runId, orgId, gate, grant);
+  }
+
+  async resumeIntervention(runId, orgId, input = {}) {
+    if (typeof this.store.resumeIntervention !== 'function') {
+      throw new Error('runtime_intervention_resume_store_required');
+    }
+    return this.store.resumeIntervention(runId, orgId, input);
   }
 
   async monitorDeadlines() {
@@ -369,8 +423,27 @@ export class GenericStageExecutor {
 
         const priorAttempt = Number(asObject(run.stageAttempts)[stage.id] || 0);
         const stageAttempt = resumedFromEventWait && priorAttempt > 0 ? priorAttempt : priorAttempt + 1;
+        const priorRepairAttempt = stageCounter(run.context, 'runtime_repair_attempts', stage.id);
+        const repairAttempt = resumedFromEventWait && priorRepairAttempt > 0
+          ? priorRepairAttempt : priorRepairAttempt + 1;
+        const priorVisitCount = stageCounter(run.context, 'runtime_stage_visits', stage.id);
+        const visitCount = priorRepairAttempt === 0 && !resumedFromEventWait
+          ? priorVisitCount + 1 : Math.max(1, priorVisitCount);
+        const maxStageVisits = Math.max(1, Number(this.executionPolicy.max_stage_visits || 50));
+        if (visitCount > maxStageVisits) {
+          const verdict = { passed: false, unmet: [{ predicate: 'stage_visit_limit', reason: 'maximum_stage_visits_exceeded' }] };
+          await this.store.updateRun(runId, orgId, { status: 'NEEDS_INTERVENTION', lastVerdict: verdict });
+          await this.store.appendCheckpoint(runId, orgId, {
+            stageId: stage.id, phase: 'STAGE_VISIT_LIMIT', status: 'NEEDS_INTERVENTION',
+            state: { visit_count: visitCount, max_stage_visits: maxStageVisits }, verdict,
+          });
+          return this.store.loadRun(runId, orgId);
+        }
         const attempts = { ...asObject(run.stageAttempts), [stage.id]: stageAttempt };
-        await this.store.updateRun(runId, orgId, { stageAttempts: attempts });
+        run = await this.store.updateRun(runId, orgId, {
+          stageAttempts: attempts,
+          context: withStageCounters(run.context, { stageId: stage.id, repairAttempt, visitCount }),
+        });
         const executionRequest = {
           run_id: run.id,
           org_id: run.orgId,
@@ -386,14 +459,16 @@ export class GenericStageExecutor {
           runtime_context: asObject(run.context),
           expected_artifacts: stage.expected_artifacts,
           authority_granted: authorityGranted(run, stage),
-          inputs: { ...resolveInputs(run, stage, event), ...priorAttemptInputs(run, stage, attempts[stage.id]) },
+          inputs: { ...resolveInputs(run, stage, event), ...priorAttemptInputs(run, stage, repairAttempt) },
           checks: stage.completion_checks,
           unmet: asObject(run.lastVerdict).unmet || [],
           stage_attempts: attempts,
           max_attempts: Number(stage.max_attempts || 1),
           retry_policy: {
             owner: 'playbook',
-            stage_attempt: attempts[stage.id],
+            stage_attempt: repairAttempt,
+            execution_attempt: attempts[stage.id],
+            stage_visit: visitCount,
             max_stage_attempts: Number(stage.max_attempts || 1),
             room_outer_replays: 0,
             local_artifact_repair: true,
@@ -419,7 +494,7 @@ export class GenericStageExecutor {
               config: asObject(execution.config),
             }, {
               orgId: run.orgId, runId: run.id, stageId: stage.id, roomId: run.roomId,
-              attempt: attempts[stage.id], maxAttempts: Number(stage.max_attempts || 1),
+              attempt: repairAttempt, maxAttempts: Number(stage.max_attempts || 1),
             })
             : await this.director.execute(executionRequest);
           if (execution.mode === 'adapter' && !this.adapters) {
@@ -433,7 +508,7 @@ export class GenericStageExecutor {
             status: 'FAILED',
             verdict,
           });
-          const attempt = attempts[stage.id];
+          const attempt = repairAttempt;
           if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts
             && error?.ambiguous !== true && error?.retryable !== false) {
             await this.store.updateRun(runId, orgId, { lastVerdict: verdict, status: 'ACTIVE' });
@@ -451,7 +526,7 @@ export class GenericStageExecutor {
         let persisted;
         try {
           persisted = await this.store.persistArtifacts(runId, orgId, stage.id, produced, {
-            replaceStageKeys: attempts[stage.id] > 1,
+            replaceStageKeys: repairAttempt > 1,
           });
         } catch (error) {
           const verdict = executionErrorVerdict(error);
@@ -461,7 +536,7 @@ export class GenericStageExecutor {
             status: 'FAILED',
             verdict,
           });
-          const attempt = attempts[stage.id];
+          const attempt = repairAttempt;
           if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts
             && error?.ambiguous !== true && error?.retryable !== false) {
             await this.store.updateRun(runId, orgId, { lastVerdict: verdict, status: 'ACTIVE' });
@@ -515,7 +590,7 @@ export class GenericStageExecutor {
               verification.operation || 'verify',
               {
                 artifacts: grouped[verification.select] || [],
-                inputs: { ...resolveInputs(run, stage, event), ...priorAttemptInputs(run, stage, attempts[stage.id]) },
+                inputs: { ...resolveInputs(run, stage, event), ...priorAttemptInputs(run, stage, repairAttempt) },
                 checks: stage.completion_checks.filter((check) => check.select === verification.select),
                 config: asObject(verification.config),
               },
@@ -540,6 +615,12 @@ export class GenericStageExecutor {
           warnings: [...warnings, ...(predicateVerdict.gaps || [])],
           ...(predicateVerdict.advisory_unmet?.length ? { advisory_unmet: predicateVerdict.advisory_unmet } : {}),
         };
+        verdict.contract_rejections = projectContractRejections({
+          stage,
+          verdict,
+          producer: stage.execution?.mode === 'adapter' ? `adapter:${stage.execution.adapter_id}` : 'room',
+          attempt: repairAttempt,
+        });
 
         await this.store.appendCheckpoint(runId, orgId, {
           stageId: stage.id,
@@ -547,12 +628,12 @@ export class GenericStageExecutor {
           status: verdict.passed ? (warnings.length ? 'PASSED_WITH_WARNINGS' : 'PASSED') : 'FAILED',
           verdict,
           artifactRefs: persisted.map((artifact) => artifact.id),
-          state: { attempt: attempts[stage.id], rounds_used: Math.max(1, Number(result?.rounds_used || 1)) },
+          state: { attempt: repairAttempt, execution_attempt: attempts[stage.id], stage_visit: visitCount, rounds_used: Math.max(1, Number(result?.rounds_used || 1)) },
         });
         await notifyStage(this.onStageState, { phase: verdict.passed ? 'ACCEPTED' : 'REJECTED', run, stage, artifacts: persisted, verdict });
 
         if (!verdict.passed) {
-          const attempt = attempts[stage.id];
+          const attempt = repairAttempt;
           if (stage.on_failure === 'REPAIR' && attempt < stage.max_attempts) {
             await this.store.updateRun(runId, orgId, { lastVerdict: verdict, status: 'ACTIVE' });
             continue;
@@ -570,7 +651,7 @@ export class GenericStageExecutor {
             completedStageIds,
             terminalState: transition.to_terminal,
             lastVerdict: verdict,
-            context: withoutLatestEvent(run.context),
+            context: clearStageRepairAttempt(run.context, stage.id),
             completedAt: new Date(),
           });
           await this.store.appendCheckpoint(runId, orgId, {
@@ -590,7 +671,7 @@ export class GenericStageExecutor {
           completedStageIds,
           waitingFor,
           lastVerdict: verdict,
-          context: withoutLatestEvent(run.context),
+          context: clearStageRepairAttempt(run.context, stage.id),
         });
         await this.store.appendCheckpoint(runId, orgId, {
           stageId: stage.id,

@@ -174,6 +174,7 @@ test('current first-life policy uses the single-run strategy builder that requir
     auto_prepare_sequentially: true,
   });
   const playbook = JSON.parse(await readFile(new URL('../../src/runtime-playbooks/fixtures/marketing-strategy-to-growth-brief.v7.json', import.meta.url), 'utf8'));
+  assert.ok(playbook.input_contract.fields.every((field) => field.description));
   assert.match(playbook.stages[0].objective, /must include one bounded awareness-to-learning campaign experiment/);
   assert.match(playbook.stages[0].objective, /Do not select a playbook, Company Room, provider/);
   assert.deepEqual(playbook.stages[0].completion_checks.at(-1), {

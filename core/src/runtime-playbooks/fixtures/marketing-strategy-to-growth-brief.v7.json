@@ -14,10 +14,10 @@
     }
   },
   "input_contract": {"fields": [
-    {"path": "context.company", "type": "object", "required": true},
-    {"path": "context.baseline", "type": "object", "required": true},
-    {"path": "context.admin_current_status", "type": "object", "required": false},
-    {"path": "request.instruction", "type": "string", "required": true}
+    {"path": "context.company", "type": "object", "description": "Persisted company identity and onboarding context.", "required": true},
+    {"path": "context.baseline", "type": "object", "description": "Persisted first-life baseline observations and evidence references.", "required": true},
+    {"path": "context.admin_current_status", "type": "object", "description": "Optional transcript-backed administrator current-status artifact.", "required": false},
+    {"path": "request.instruction", "type": "string", "description": "The retained first-life operating instruction in the user's locale.", "required": true}
   ]},
   "initial_stage_id": "form_strategy_program",
   "terminal_states": ["strategy_program_ready", "strategy_needs_evidence", "cancelled"],

@@ -37,6 +37,7 @@ import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-ca
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
 import {
   applyProgressiveRecallView,
+  collapseNativeOnlyCompoundDecision,
   createProgressiveRecallSession,
   expandProgressiveRecall,
   shouldExpandProgressiveRecall,
@@ -2629,7 +2630,7 @@ export async function runReactAgentV2({
       });
     }
     _pt('intent_parse_ms', _ps);
-    let intentDecision = intentParsed.decision;
+    let intentDecision = collapseNativeOnlyCompoundDecision(intentParsed.decision, message);
     // `use_tools` is an authority boundary, not a prompt hint. A legacy or
     // malformed router decision therefore cannot disclose or execute an
     // external capability unless the API caller opted in for this turn.

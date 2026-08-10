@@ -4,11 +4,23 @@ import assert from 'node:assert/strict';
 import {
   chooseSynthesisModel,
   isCandidateSynthesisAcceptable,
+  normalizeJsonObject,
+  parseJsonObjectContent,
   scheduleShadowEvaluation,
   shouldRetryAfterZeroCoverage,
   shouldOptimizeRecallQuery,
   summarizeUsage,
 } from '../../src/agent/chat-synthesis-policy.js';
+
+test('JSON synthesis normalizes provider nulls and scalars to an object', () => {
+  assert.deepEqual(normalizeJsonObject(null), {});
+  assert.deepEqual(normalizeJsonObject([]), {});
+  assert.deepEqual(normalizeJsonObject('null'), {});
+  assert.deepEqual(normalizeJsonObject({ response: 'ok' }), { response: 'ok' });
+  assert.deepEqual(parseJsonObjectContent('null'), {});
+  assert.deepEqual(parseJsonObjectContent('prefix {"response":"ok"} suffix'), { response: 'ok' });
+  assert.deepEqual(parseJsonObjectContent('not JSON'), {});
+});
 
 test('router canonical query suppresses duplicate query optimization', () => {
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color' }), false);

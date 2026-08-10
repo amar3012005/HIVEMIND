@@ -20,6 +20,27 @@ export function isCandidateSynthesisAcceptable(answer) {
       && claim.citation_ids.length > 0);
 }
 
+/**
+ * JSON-mode providers may legally return the JSON literal `null`, an array,
+ * or another scalar even when the caller requested an object. Normalize that
+ * boundary once so downstream synthesis never dereferences a non-object.
+ */
+export function normalizeJsonObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+export function parseJsonObjectContent(raw = '{}') {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(raw || '{}'));
+  } catch {
+    const match = String(raw || '').match(/\{[\s\S]+\}/);
+    if (!match) return {};
+    try { parsed = JSON.parse(match[0]); } catch { return {}; }
+  }
+  return normalizeJsonObject(parsed);
+}
+
 export function scheduleShadowEvaluation({ execute, timeoutMs = 5000, onResult = () => {} } = {}) {
   if (typeof execute !== 'function') return;
   const controller = new AbortController();

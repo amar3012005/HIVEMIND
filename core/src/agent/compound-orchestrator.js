@@ -209,6 +209,14 @@ export function normalizeEmailDestinationArgs(outputKind, schema, args, priorOut
 }
 
 export function validateSemanticStepOutput(outputKind, data) {
+  if (data == null) {
+    return {
+      status: 'failed',
+      error: 'The connected provider completed the request but returned no result data.',
+      candidates: [],
+      outputFields: {},
+    };
+  }
   if (outputKind !== 'recipient') return { status: 'completed', outputFields: data && typeof data === 'object' ? data : {} };
   const candidates = [...collectEmailCandidates(data)].slice(0, 20);
   if (candidates.length === 1) {
@@ -694,7 +702,7 @@ export function buildSubtaskArgumentPrompt() {
 }
 
 export function buildToolInputSystemPrompt() {
-  return 'Generate complete arguments only. Preserve grounded prior outputs and exact identifiers. For content-producing actions, create complete useful final content from all relevant grounded details; never substitute a generic placeholder such as "the details retrieved" or merely refer to prior results. Do not execute the action.';
+  return 'Generate complete arguments only. Preserve grounded prior outputs and exact identifiers. For read operations, request the fields needed to answer the full instruction, use schema-supported current-user or account auto-resolution rather than inventing an ID, and when the instruction asks for all records request the largest safe bounded page supported by the schema. Do not add a content filter unless the instruction actually supplies one. For content-producing actions, create complete useful final content from all relevant grounded details; never substitute a generic placeholder such as "the details retrieved" or merely refer to prior results. Do not execute the action.';
 }
 
 export function buildGroundedWriteFallbackPrompt() {

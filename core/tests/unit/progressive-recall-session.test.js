@@ -67,6 +67,26 @@ test('multiple native read groups collapse even when the planner aliases the rec
   assert.equal(decision._native_compound_collapsed, true);
 });
 
+test('read-only capabilities win over a hallucinated write label in a native analysis plan', () => {
+  const decision = collapseNativeOnlyCompoundDecision({
+    operation: 'compound',
+    subtasks: [
+      { authority: 'read', output_kind: 'knowledge', tool_groups: ['hivemind-recall'], message: 'retrieve deck' },
+      { authority: 'write', output_kind: 'document', tool_groups: ['hivemind-recall'], message: 'give feedback' },
+    ],
+  }, 'review latest deck');
+  assert.equal(decision.operation, 'recall');
+  assert.equal(decision._native_compound_collapsed, true);
+});
+
+test('native memory writes remain on the governed compound path', () => {
+  const original = {
+    operation: 'compound',
+    subtasks: [{ authority: 'write', tool_groups: ['hivemind-memory-write'], message: 'save this' }],
+  };
+  assert.equal(collapseNativeOnlyCompoundDecision(original, 'save this'), original);
+});
+
 test('expands only on an explicit relevant-but-incomplete synthesis decision', () => {
   const session = createProgressiveRecallSession({ rankedCandidates, memories, evidence, query: 'small detail' });
   assert.equal(shouldExpandProgressiveRecall({ context_status: 'sufficient' }, session), false);

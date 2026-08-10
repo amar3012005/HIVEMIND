@@ -225,6 +225,10 @@ export async function handleRecallRoute(ctx = {}) {
           source: recallPlan.source,
           time: recallPlan.time,
           operation: recallPlan.operation,
+          // An explicit public API limit is caller intent. Forward it to the
+          // unified retrieval service instead of silently falling back to the
+          // org's synthesis delivery window (commonly five).
+          limit: Math.min(Math.max(Number(body.limit) || 15, 1), 50),
           include_superseded: recallPlan.operation === 'timeline' || body.include_superseded === true,
         }, {
           userId,

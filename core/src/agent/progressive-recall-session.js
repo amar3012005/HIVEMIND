@@ -97,12 +97,16 @@ export function shouldExpandProgressiveRecall(answer, session) {
 
 export function collapseNativeOnlyCompoundDecision(decision = {}, fallbackQuery = '') {
   if (decision?.operation !== 'compound' || !Array.isArray(decision.subtasks) || !decision.subtasks.length) return decision;
-  const nativeGroups = new Set(['hivemind-recall', 'hivemind-memory-write', 'hivemind-projects']);
+  // Capability is the authority boundary. Hosted planners occasionally label
+  // an analysis/feedback step as a "write" even though its only executable
+  // capability is read-only recall. Do not turn that hallucinated label into
+  // a redundant compound execution. Genuine native writes and every external
+  // connector remain on their governed paths because their groups are absent
+  // from this read-only allowlist.
+  const nativeReadGroups = new Set(['hivemind-recall', 'hivemind-projects']);
   const nativeRecallOnly = decision.subtasks.every((step) => {
     const groups = Array.isArray(step?.tool_groups) ? step.tool_groups : [];
-    return groups.length === 1 && nativeGroups.has(groups[0])
-      && step?.authority !== 'write'
-      && !['document', 'message'].includes(step?.output_kind);
+    return groups.length > 0 && groups.every((group) => nativeReadGroups.has(group));
   });
   if (!nativeRecallOnly) return decision;
   const queries = [...new Set([

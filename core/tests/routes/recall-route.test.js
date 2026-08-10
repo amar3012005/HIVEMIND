@@ -99,7 +99,7 @@ test('explicit recall modes use the bounded context service and return a RecallP
   const result = await handleRecallRoute({
     req: {},
     res: {},
-    body: { query_context: 'ground this', mode: 'explain' },
+    body: { query_context: 'ground this', mode: 'explain', limit: 15 },
     userId: 'user-1',
     orgId: 'org-1',
     prisma: {},
@@ -163,6 +163,7 @@ test('explicit recall modes use the bounded context service and return a RecallP
     mode: 'known_at',
     known_at: '2026-07-01T00:00:00.000Z',
   });
+  assert.equal(forwardedOptions.limit, 15);
 });
 
 test('recall route forwards typed source and time blocks unchanged', async () => {

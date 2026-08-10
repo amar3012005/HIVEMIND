@@ -97,10 +97,12 @@ export function shouldExpandProgressiveRecall(answer, session) {
 
 export function collapseNativeOnlyCompoundDecision(decision = {}, fallbackQuery = '') {
   if (decision?.operation !== 'compound' || !Array.isArray(decision.subtasks) || !decision.subtasks.length) return decision;
+  const nativeGroups = new Set(['hivemind-recall', 'hivemind-memory-write', 'hivemind-projects']);
   const nativeRecallOnly = decision.subtasks.every((step) => {
     const groups = Array.isArray(step?.tool_groups) ? step.tool_groups : [];
-    return groups.length === 1 && groups[0] === 'hivemind-recall'
-      && step?.authority !== 'write';
+    return groups.length === 1 && nativeGroups.has(groups[0])
+      && step?.authority !== 'write'
+      && !['document', 'message'].includes(step?.output_kind);
   });
   if (!nativeRecallOnly) return decision;
   const queries = [...new Set([

@@ -1945,6 +1945,7 @@ ${message}`;
       confidence: 0,
       gaps: ['No citation-valid claim could be produced from the final recall packet.'],
       context_status: answerPayload?.context_status === 'query_mismatch' ? 'query_mismatch' : 'relevant_but_incomplete',
+      recall_packets: evidence.recall_packets || [],
       usage: repairUsage || usage,
       usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
     };
@@ -1964,6 +1965,7 @@ ${message}`;
     context_status: ['sufficient', 'relevant_but_incomplete', 'query_mismatch'].includes(answerPayload.context_status)
       ? answerPayload.context_status
       : ((Array.isArray(answerPayload.gaps) && answerPayload.gaps.length) ? 'relevant_but_incomplete' : 'sufficient'),
+    recall_packets: evidence.recall_packets || [],
     usage: repairUsage || usage,
     usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
   };
@@ -3389,9 +3391,10 @@ export async function runReactAgentV2({
     onEvent?.({ type: 'finish', text: finalResponse });
     onEvent?.({ type: 'turn_completed', grounded: answer.grounded, confidence: answer.confidence });
 
+    const answerRecallPackets = answer.recall_packets || evidence.recall_packets || [];
     const citationPackets = answer.aggregate_citation_packet
-      ? [...(evidence.recall_packets || []), answer.aggregate_citation_packet]
-      : (evidence.recall_packets || []);
+      ? [...answerRecallPackets, answer.aggregate_citation_packet]
+      : answerRecallPackets;
     const citationSources = buildChatCitationSources(citationPackets, answer.claims);
     const memorySources = evidence.memories.slice(0, 10).map(m => {
       const tags = m.tags || [];

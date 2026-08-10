@@ -65,8 +65,9 @@ const HOP3_LIVE_LIMIT          = 5;
 // Deliver-narrow: retrieve stays wide (HOP1 fetches up to 50, RRF/MMR-ranked),
 // but only the top-N ranked memories go to the answer model. 1024 bge-m3 +
 // algorithmic rerank shows a clean relevance cliff after ~5 (junk/redundancy
-// beyond), so default 5. Env-tunable (no redeploy to widen for summarize).
-const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
+// beyond). Progressive consumers reveal five at a time, while recall itself
+// retains the top 15 so a later page never requires another search.
+const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 15);
 const MAX_TEMPORAL_RANGE_MS    = 366 * 24 * 60 * 60 * 1000;
 
 function normalizedIso(value) {

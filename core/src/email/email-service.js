@@ -45,6 +45,7 @@ const CLOUDFLARE_SEND_BASE = 'https://api.cloudflare.com/client/v4/accounts';
 const SEND_TIMEOUT_MS = 15_000;
 
 const APP_URL = process.env.HIVEMIND_APP_URL || 'https://hivemind.davinciai.eu/hivemind/app';
+const EMAIL_ASSET_BASE_URL = process.env.HIVEMIND_EMAIL_ASSET_BASE_URL || 'https://next.singulancelabs.com/email/welcome-cartesia/v1';
 
 let _templates = null;
 let _warnedNoProvider = false;
@@ -225,6 +226,7 @@ export function renderTemplate(templateId, vars = {}) {
       preheader,
       name: escapeHtml(ctx.name),
       appUrl: escapeHtml(ctx.appUrl),
+      assetBaseUrl: escapeHtml(EMAIL_ASSET_BASE_URL),
       year: escapeHtml(ctx.year),
     })
     : tpl.layout === 'singulance_transactional'

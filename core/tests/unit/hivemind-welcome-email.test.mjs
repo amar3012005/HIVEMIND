@@ -21,7 +21,7 @@ test('welcome renderer includes compact mobile rules without hiding product cont
   const rendered = renderTemplate('welcome_signup', { name: 'Maya' });
 
   assert.match(rendered.html, /@media only screen and \(max-width:620px\)/);
-  assert.match(rendered.html, /\.hm-col\{display:block!important/);
+  assert.match(rendered.html, /\.hm-shell\{width:100%!important/);
   assert.match(rendered.html, /Memories/);
   assert.match(rendered.html, /Knowledge Base/);
   assert.match(rendered.html, /Web Intel/);
@@ -34,4 +34,6 @@ test('welcome renderer includes compact mobile rules without hiding product cont
   assert.match(rendered.html, /Your editor/);
   assert.match(rendered.html, /Memory stays inside your walls/);
   assert.match(rendered.html, /Encryption that outlives/);
+  assert.match(rendered.html, /https:\/\/next\.singulancelabs\.com\/email\/welcome-cartesia\/v1\/hero@2x\.png/);
+  assert.match(rendered.html, /width="760"/);
 });

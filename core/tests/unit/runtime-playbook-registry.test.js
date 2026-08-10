@@ -371,7 +371,14 @@ test('Room Director fails closed on invented artifact keys and mismatched stages
 test('Room Director namespaces retry artifacts by stage attempt', async () => {
   const director = new RuntimeRoomDirector({ transport: async () => ({ result: {
     contract: 'runtime-stage-result.v1', run_id: 'run-repair', stage_id: 'repair',
-    artifacts: [{ id: 'artifact-001', key: 'result', data: { revised: true } }], gaps: [],
+    artifacts: [
+      { id: 'artifact-001', key: 'result', data: { revised: true } },
+      {
+        id: 'artifact-002', key: 'result',
+        data: { input_ref: 'artifact-001', nested: { refs: ['artifact-001', 'external:unchanged'] } },
+        source_refs: ['artifact-001'],
+      },
+    ], gaps: [],
   } }) });
   const result = await director.execute({
     run_id: 'run-repair', org_id: 'org-1', room_id: 'room-1', owner_user_id: 'user-1',
@@ -380,6 +387,10 @@ test('Room Director namespaces retry artifacts by stage attempt', async () => {
     checks: [], stage_attempts: { repair: 2 },
   });
   assert.equal(result.artifacts[0].id, 'artifact-001:attempt:2');
+  assert.equal(result.artifacts[1].id, 'artifact-002:attempt:2');
+  assert.equal(result.artifacts[1].data.input_ref, 'artifact-001:attempt:2');
+  assert.deepEqual(result.artifacts[1].data.nested.refs, ['artifact-001:attempt:2', 'external:unchanged']);
+  assert.deepEqual(result.artifacts[1].source_refs, ['artifact-001:attempt:2']);
 });
 
 test('generic executor checkpoints and resumes the GreenLeaf lifecycle end to end', async () => {

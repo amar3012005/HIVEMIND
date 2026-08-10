@@ -140,18 +140,39 @@ function roomPhaseContext(request) {
   };
 }
 
-function normalizeArtifact(artifact, expectedKeys, attempt = 1) {
+function rewriteExactArtifactRefs(value, idMap) {
+  if (typeof value === 'string') return idMap.get(value) || value;
+  if (Array.isArray(value)) return value.map((item) => rewriteExactArtifactRefs(item, idMap));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key, rewriteExactArtifactRefs(item, idMap),
+    ]));
+  }
+  return value;
+}
+
+function normalizeArtifacts(artifacts, expectedKeys, attempt = 1) {
+  const idMap = new Map(asArray(artifacts).map((artifact) => {
+    const localId = String(artifact?.id || '').trim();
+    return [localId, attempt > 1 ? `${localId.slice(0, 140)}:attempt:${attempt}` : localId];
+  }).filter(([localId]) => localId));
+  return asArray(artifacts).map((artifact) => normalizeArtifact(artifact, expectedKeys, attempt, idMap));
+}
+
+function normalizeArtifact(artifact, expectedKeys, attempt = 1, idMap = new Map()) {
   const localId = String(artifact?.id || '').trim();
   const key = String(artifact?.key || '').trim();
   if (!localId) throw new Error('runtime_room_artifact_id_required');
   if (!expectedKeys.has(key)) throw new Error(`runtime_room_artifact_key_unexpected:${key || 'missing'}`);
-  const id = attempt > 1 ? `${localId.slice(0, 140)}:attempt:${attempt}` : localId;
+  const id = idMap.get(localId) || (attempt > 1 ? `${localId.slice(0, 140)}:attempt:${attempt}` : localId);
   return {
     id,
     key,
     status: String(artifact?.status || 'READY').trim().toUpperCase(),
-    data: asObject(artifact?.data),
-    source_refs: asArray(artifact?.source_refs).map(String).map((value) => value.trim()).filter(Boolean),
+    data: rewriteExactArtifactRefs(asObject(artifact?.data), idMap),
+    source_refs: asArray(artifact?.source_refs)
+      .map(String).map((value) => value.trim()).filter(Boolean)
+      .map((value) => idMap.get(value) || value),
     external_ref: artifact?.external_ref == null ? null : String(artifact.external_ref),
   };
 }
@@ -371,7 +392,7 @@ export class RuntimeRoomDirector {
     }
     const expectedKeys = new Set(asArray(request.expected_artifacts).map(String));
     const attempt = Number(asObject(request.stage_attempts)[request.stage_id] || 1);
-    const artifacts = asArray(result.artifacts).map((artifact) => normalizeArtifact(artifact, expectedKeys, attempt));
+    const artifacts = normalizeArtifacts(result.artifacts, expectedKeys, attempt);
     const duplicateIds = artifacts.map((artifact) => artifact.id)
       .filter((id, index, values) => values.indexOf(id) !== index);
     if (duplicateIds.length) throw new Error(`runtime_room_artifact_duplicate:${duplicateIds[0]}`);

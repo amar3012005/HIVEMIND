@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   applyProgressiveRecallView,
+  collapseNativeOnlyCompoundDecision,
   createProgressiveRecallSession,
   expandProgressiveRecall,
   shouldExpandProgressiveRecall,
@@ -27,6 +28,31 @@ test('reveals five mixed candidates first and expands the same recall without re
   assert.equal(second.memories.length + second.evidence.length, 10);
   assert.equal(secondSession.recall_id, session.recall_id);
   assert.deepEqual(secondSession.candidates, session.candidates);
+});
+
+test('use_tools native-only compound plans collapse to the identical native recall path', () => {
+  const decision = collapseNativeOnlyCompoundDecision({
+    operation: 'compound',
+    subtasks: [
+      { authority: 'read', tool_groups: ['hivemind-recall'], message: 'pitch deck' },
+      { authority: 'read', tool_groups: ['hivemind-recall'], message: 'latest pitch deck' },
+    ],
+  }, 'What do you think about my latest pitch deck?');
+  assert.equal(decision.operation, 'recall');
+  assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
+  assert.equal(decision.subtasks, undefined);
+  assert.equal(decision._native_compound_collapsed, true);
+});
+
+test('a compound plan containing any external toolkit remains on the governed compound path', () => {
+  const original = {
+    operation: 'compound',
+    subtasks: [
+      { authority: 'read', tool_groups: ['hivemind-recall'], message: 'company details' },
+      { authority: 'write', tool_groups: ['gmail'], message: 'email them' },
+    ],
+  };
+  assert.equal(collapseNativeOnlyCompoundDecision(original, 'email company details'), original);
 });
 
 test('expands only on an explicit relevant-but-incomplete synthesis decision', () => {

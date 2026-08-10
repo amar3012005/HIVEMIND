@@ -94,3 +94,27 @@ export function shouldExpandProgressiveRecall(answer, session) {
   if (!session || session.delivered_until >= session.candidates.length || session.expansion_count >= 2) return false;
   return answer?.context_status === 'relevant_but_incomplete';
 }
+
+export function collapseNativeOnlyCompoundDecision(decision = {}, fallbackQuery = '') {
+  if (decision?.operation !== 'compound' || !Array.isArray(decision.subtasks) || !decision.subtasks.length) return decision;
+  const nativeRecallOnly = decision.subtasks.every((step) => {
+    const groups = Array.isArray(step?.tool_groups) ? step.tool_groups : [];
+    return groups.length === 1 && groups[0] === 'hivemind-recall'
+      && step?.authority !== 'write';
+  });
+  if (!nativeRecallOnly) return decision;
+  const queries = [...new Set([
+    decision.query_canonical_en,
+    ...(decision.queries || []),
+    ...decision.subtasks.flatMap((step) => [step?.query, step?.message, step?.instruction]),
+    fallbackQuery,
+  ].filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim()))];
+  return {
+    ...decision,
+    operation: 'recall',
+    tool_groups: ['hivemind-recall'],
+    queries: queries.slice(0, 3),
+    subtasks: undefined,
+    _native_compound_collapsed: true,
+  };
+}

@@ -18,9 +18,14 @@ test('the prior-attempt draft is injected on retries and only on retries', async
   assert.match(source, /if \(!\(attempt > 1\)\) return \{\};/);
   // Namespaced so it can never collide with a declared input_ref.
   assert.match(source, /`prior_attempt\.\$\{key\}`/);
-  // Both dispatch sites (the normal path and the error/repair path) must carry it.
-  const wired = source.match(/priorAttemptInputs\(run, stage, attempts\[stage\.id\]\)/g) || [];
-  assert.equal(wired.length, 2, 'both dispatch sites must inject the prior draft');
+  // Both dispatch sites (the normal path and the error/repair path) must carry it, keyed
+  // by the REPAIR-scoped attempt counter (repairAttempt), not the raw stage-attempt count.
+  // They diverged on purpose: a WAITING_EVENT resumption no longer bumps stageAttempts (an
+  // event continuation is not a retry), so repairAttempt is the counter that actually tracks
+  // "how many times has this stage's own output been rejected" — the number this function
+  // needs to decide whether a prior draft exists to carry forward.
+  const wired = source.match(/priorAttemptInputs\(run, stage, repairAttempt\)/g) || [];
+  assert.equal(wired.length, 2, 'both dispatch sites must inject the prior draft, keyed by repairAttempt');
 });
 
 test('the prior draft is the LAST draft of each expected artifact, upstream inputs untouched', () => {

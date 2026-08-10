@@ -155,7 +155,12 @@ export class PostgresRuntimeStore {
         data: {
           status: 'ACTIVE',
           lastVerdict: {},
-          context: { ...context, runtime_repair_attempts: repairs, runtime_interventions: interventions },
+          context: {
+            ...context,
+            runtime_repair_attempts: repairs,
+            runtime_interventions: interventions,
+            runtime_intervention_resume_stage: found.currentStageId,
+          },
           checkpointSequence: { increment: 1 },
           version: { increment: 1 },
         },

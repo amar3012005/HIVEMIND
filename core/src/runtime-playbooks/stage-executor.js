@@ -119,7 +119,9 @@ function clearStageRepairAttempt(context, stageId) {
   const current = withoutLatestEvent(context);
   const repairs = { ...asObject(current.runtime_repair_attempts) };
   delete repairs[stageId];
-  return { ...current, runtime_repair_attempts: repairs };
+  const next = { ...current, runtime_repair_attempts: repairs };
+  if (next.runtime_intervention_resume_stage === stageId) delete next.runtime_intervention_resume_stage;
+  return next;
 }
 
 function normalizeDirectorArtifacts(result) {
@@ -529,7 +531,8 @@ export class GenericStageExecutor {
         let persisted;
         try {
           persisted = await this.store.persistArtifacts(runId, orgId, stage.id, produced, {
-            replaceStageKeys: repairAttempt > 1,
+            replaceStageKeys: repairAttempt > 1
+              || asObject(run.context).runtime_intervention_resume_stage === stage.id,
           });
         } catch (error) {
           const verdict = executionErrorVerdict(error);

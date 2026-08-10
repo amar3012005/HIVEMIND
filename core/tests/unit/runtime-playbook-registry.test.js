@@ -66,6 +66,7 @@ class TestRuntimeStore {
   constructor() {
     this.runs = new Map();
     this.checkpoints = [];
+    this.persistOptions = [];
   }
 
   async createRun(input) {
@@ -143,6 +144,7 @@ class TestRuntimeStore {
       ...run.context,
       runtime_repair_attempts: repairs,
       runtime_interventions: [{ resumed_by: resumedBy, reason, checkpoint_sequence: expectedCheckpointSequence }],
+      runtime_intervention_resume_stage: run.currentStageId,
     };
     await this.appendCheckpoint(runId, orgId, {
       stageId: run.currentStageId, phase: 'INTERVENTION_RESUMED', status: 'ACTIVE', state: {}, verdict: {},
@@ -150,9 +152,16 @@ class TestRuntimeStore {
     return this.loadRun(runId, orgId);
   }
 
-  async persistArtifacts(runId, orgId, stageId, artifacts) {
+  async persistArtifacts(runId, orgId, stageId, artifacts, { replaceStageKeys = false } = {}) {
     const run = this.runs.get(runId);
     if (!run || run.orgId !== orgId) throw new Error('runtime_run_not_found');
+    this.persistOptions.push({ stageId, replaceStageKeys });
+    if (replaceStageKeys) {
+      const replacementKeys = new Set(artifacts.map((artifact) => artifact.key));
+      run.artifacts = run.artifacts.filter((artifact) => (
+        artifact.stage_id !== stageId || !replacementKeys.has(artifact.key)
+      ));
+    }
     for (const artifact of artifacts) {
       const previous = run.artifacts.find((candidate) => candidate.id === artifact.id);
       if (!previous) run.artifacts.push({ ...structuredClone(artifact), stage_id: stageId });
@@ -703,6 +712,8 @@ test('checkpoint-bound intervention resume resets only the current repair budget
   assert.equal(run.status, 'COMPLETED');
   assert.equal(run.stageAttempts.perform, 2);
   assert.equal(run.context.runtime_stage_visits.perform, 2);
+  assert.equal(store.persistOptions.at(-1).replaceStageKeys, true);
+  assert.equal(run.context.runtime_intervention_resume_stage, undefined);
   assert.equal(store.checkpoints.filter((checkpoint) => checkpoint.phase === 'INTERVENTION_RESUMED').length, 1);
 });
 

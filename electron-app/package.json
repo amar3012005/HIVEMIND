@@ -1,7 +1,7 @@
 {
   "name": "singulance",
-  "version": "2.1.1",
-  "description": "SINGULANCE \u2014 the sovereign AI memory workspace (HIVEMIND desktop)",
+  "version": "2.1.2",
+  "description": "SINGULANCE — the sovereign AI memory workspace (HIVEMIND desktop)",
   "main": "src/main.js",
   "author": "amarsai3012005",
   "license": "MIT",
@@ -21,7 +21,7 @@
   "build": {
     "appId": "com.singulancelabs.desktop",
     "productName": "SINGULANCE",
-    "copyright": "Copyright \u00a9 2026 SINGULANCE",
+    "copyright": "Copyright © 2026 SINGULANCE",
     "afterSign": "scripts/notarize.js",
     "protocols": [
       {
@@ -59,7 +59,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },

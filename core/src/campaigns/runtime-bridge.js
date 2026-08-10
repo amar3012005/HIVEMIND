@@ -18,16 +18,23 @@ export async function notifyRuntimeCampaignProjection({ prisma, campaignId, type
   if (!link) return null;
   const { campaign, run, trigger } = link;
   const identity = data.asset_id || data.plan_version_id || data.event_id || run.checkpointSequence;
+  const waitingForCapacity = type === 'campaign.visuals_waiting';
   return appendHqEvent({
     prisma,
     runtimeId: trigger.runtime_id,
     orgId: campaign.orgId,
     runtimeEpoch: trigger.runtime_epoch,
     eventType: 'campaign_artifact_progress',
-    title: type === 'campaign.asset_ready' ? 'A campaign visual is ready' : 'Campaign posts are rendering',
+    title: type === 'campaign.asset_ready'
+      ? 'A campaign visual is ready'
+      : waitingForCapacity
+        ? 'Campaign visuals are waiting for capacity'
+        : 'Campaign posts are rendering',
     summary: type === 'campaign.asset_ready'
       ? 'Runtime refreshed the persisted post frame with its generated visual.'
-      : 'The campaign contract is ready and its post visuals are being generated.',
+      : waitingForCapacity
+        ? 'The accepted campaign, captions, and schedule remain retained. Image generation will resume automatically when capacity is available.'
+        : 'The campaign contract is ready and its post visuals are being generated.',
     details: { campaign_id: campaign.id, run_id: run.id, type, ...data },
     idempotencyKey: `runtime-campaign-projection:${campaign.id}:${type}:${identity}`.slice(0, 180),
   });

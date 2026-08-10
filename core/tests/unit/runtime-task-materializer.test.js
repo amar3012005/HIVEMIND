@@ -80,3 +80,28 @@ test('strategy portfolio cannot turn its own lifecycle fields into Runtime assig
   assert.equal(result.artifacts[0].data.rejected_motions.length, 0);
   assert.equal(todos.every((todo) => !Object.hasOwn(todo.context, 'planned_playbook_id')), true);
 });
+
+test('limited evidence inherits truthful strategy lineage instead of discarding useful motions', async () => {
+  const { prisma, todos } = fixture();
+  const adapter = createRuntimeTaskMaterializerAdapter({ prisma });
+  const motions = ['campaign', 'research'].map((motionId, index) => ({
+    motion_id: motionId,
+    title: motionId === 'campaign' ? 'Test the strongest message' : 'Map competitive alternatives',
+    objective: motionId === 'campaign' ? 'Prepare a bounded market-response test' : 'Produce a competitor decision brief',
+    reason: 'Current evidence supports a useful next step but not a precise forecast',
+    expected_outcome: motionId === 'campaign' ? 'campaign_ready' : 'decision_ready',
+    success_measure: 'A reviewable artifact with explicit findings and unknowns',
+    effect_class: motionId === 'campaign' ? 'external' : 'internal',
+    evidence_refs: ['input:context.company:1'],
+    dependencies: [], priority: index + 1,
+  }));
+  const result = await adapter.execute({
+    config: { input_key: 'marketing_strategy_program', strategy_key: 'marketing_strategy_program' },
+    inputs: { 'artifacts.marketing_strategy_program': [{ id: 'strategy-limited', source_refs: [], data: { motions } }] },
+  }, { runId: 'run-1', stageId: 'materialize', orgId: 'org-1' });
+  assert.equal(todos.length, 2);
+  assert.equal(result.artifacts[0].data.rejected_motions.length, 0);
+  assert.equal(todos.every((todo) => todo.context.evidence_basis === 'strategy_recommendation'), true);
+  assert.equal(todos.every((todo) => todo.context.evidence_refs.includes('strategy-limited')), true);
+  assert.equal(todos.every((todo) => todo.context.unmatched_evidence_refs.includes('input:context.company:1')), true);
+});

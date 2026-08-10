@@ -162,29 +162,27 @@ test('v6 retains one policy-selected program builder and leaves portfolio design
   assert.equal(result.first_life.proposal_count, 1);
 });
 
-test('current first-life policy uses the single-run strategy builder that requires a campaign experiment', async () => {
+test('current first-life policy accepts two to four useful strategy motions under limited evidence', async () => {
   const policy = await loadFirstLifePolicy();
-  assert.equal(policy.version, 10);
+  assert.equal(policy.version, 11);
   assert.deepEqual(policy.initial_lifecycle, {
     playbook_id: 'marketing.strategy-to-growth-brief',
-    version: 8,
+    version: 9,
     supported_action: 'formulate_go_to_market_strategy',
     bypass_growth_plan: true,
     materialize_motions: true,
     auto_prepare_sequentially: true,
   });
-  const playbook = JSON.parse(await readFile(new URL('../../src/runtime-playbooks/fixtures/marketing-strategy-to-growth-brief.v8.json', import.meta.url), 'utf8'));
+  const playbook = JSON.parse(await readFile(new URL('../../src/runtime-playbooks/fixtures/marketing-strategy-to-growth-brief.v9.json', import.meta.url), 'utf8'));
   assert.ok(playbook.input_contract.fields.every((field) => field.description));
-  assert.match(playbook.stages[0].objective, /pipeline_development/);
-  assert.match(playbook.stages[0].objective, /evidence_decision/);
+  assert.match(playbook.stages[0].objective, /two to four useful first-life Runtime task proposals/);
+  assert.match(playbook.stages[0].objective, /strategy-artifact lineage/);
   assert.match(playbook.stages[0].objective, /Do not select a playbook, Company Room, provider/);
-  assert.deepEqual(playbook.stages[0].completion_checks.at(-3), {
-    predicate: 'array_has_field_value',
+  assert.equal(playbook.stages[0].completion_checks.some((check) => check.predicate === 'is_source_backed'), false);
+  assert.deepEqual(playbook.stages[0].completion_checks.at(-1), {
+    predicate: 'all_have_min_items',
     select: 'marketing_strategy_program',
     path: 'data.motions',
-    item_path: 'motion_class',
-    value: 'market_response_experiment',
+    value: 2,
   });
-  assert.equal(playbook.stages[0].completion_checks.at(-2).value, 'pipeline_development');
-  assert.equal(playbook.stages[0].completion_checks.at(-1).value, 'evidence_decision');
 });

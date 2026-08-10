@@ -91,13 +91,17 @@ export function createRuntimeTaskMaterializerAdapter({ prisma } = {}) {
         for (const [index, raw] of motions.entries()) {
           const motion = asObject(raw);
           const motionId = String(motion.motion_id || '').trim();
-          const evidenceRefs = asArray(motion.evidence_refs).map(String).filter(Boolean);
+          const declaredEvidenceRefs = asArray(motion.evidence_refs).map(String).filter(Boolean);
           if (!motionId || !proposalIsComplete(motion)) {
             rejected.push(reject(motion, 'runtime_task_proposal_fields_missing')); continue;
           }
-          if (!evidenceRefs.length || evidenceRefs.some((ref) => !sourceRefs.has(ref))) {
-            rejected.push(reject(motion, 'evidence_reference_not_in_strategy_lineage')); continue;
-          }
+          const matchedEvidenceRefs = declaredEvidenceRefs.filter((ref) => sourceRefs.has(ref));
+          const evidenceRefs = matchedEvidenceRefs.length
+            ? matchedEvidenceRefs
+            : [strategy?.id, portfolio.id].filter(Boolean).map(String);
+          const evidenceBasis = matchedEvidenceRefs.length
+            ? 'retained_evidence'
+            : 'strategy_recommendation';
 
           const materializationKey = stableKey(context.runId, portfolio.id, motionId);
           let todo = await tx.hqTodo.findFirst({
@@ -138,6 +142,8 @@ export function createRuntimeTaskMaterializerAdapter({ prisma } = {}) {
                 success_measure: motion.success_measure || null,
                 dependencies: asArray(motion.dependencies),
                 evidence_refs: [...new Set([...evidenceRefs, strategySourceArtifactId].filter(Boolean))],
+                evidence_basis: evidenceBasis,
+                unmatched_evidence_refs: declaredEvidenceRefs.filter((ref) => !sourceRefs.has(ref)),
                 suggested_targets: asArray(motion.exact_targets),
                 source_instruction: String(motion.objective),
                 strategy_source_instruction: String(asObject(run.context).request?.instruction || ''),

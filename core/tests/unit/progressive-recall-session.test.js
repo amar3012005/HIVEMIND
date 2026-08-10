@@ -55,6 +55,18 @@ test('a compound plan containing any external toolkit remains on the governed co
   assert.equal(collapseNativeOnlyCompoundDecision(original, 'email company details'), original);
 });
 
+test('multiple native read groups collapse even when the planner aliases the recall capability', () => {
+  const decision = collapseNativeOnlyCompoundDecision({
+    operation: 'compound',
+    subtasks: [
+      { authority: 'read', output_kind: 'knowledge', tool_groups: ['hivemind-recall'], message: 'deck' },
+      { authority: 'read', output_kind: 'generic', tool_groups: ['hivemind-projects'], message: 'latest deck' },
+    ],
+  }, 'review latest deck');
+  assert.equal(decision.operation, 'recall');
+  assert.equal(decision._native_compound_collapsed, true);
+});
+
 test('expands only on an explicit relevant-but-incomplete synthesis decision', () => {
   const session = createProgressiveRecallSession({ rankedCandidates, memories, evidence, query: 'small detail' });
   assert.equal(shouldExpandProgressiveRecall({ context_status: 'sufficient' }, session), false);

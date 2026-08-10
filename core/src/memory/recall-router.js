@@ -583,14 +583,28 @@ async function deliverHybrid({ query, memories = [], evidence = [], deliverN, ev
     console.warn(`[recall-hybrid] DEGRADED: no cross-encoder — interleaving ${byLane.memory.length} memories / ${byLane.evidence.length} evidence instead of comparing incomparable scores`);
   }
 
-  const outMem = []; const outEv = [];
+  const outMem = []; const outEv = []; const rankedCandidates = [];
   for (const c of ordered) {
     const x = c._row || {};
     if (x.is_latest === false || x.supersedes_id) continue;   // superseded: truth filter
-    if (c._kind === 'evidence') outEv.push(x); else outMem.push(x);
+    const rank = rankedCandidates.length + 1;
+    if (c._kind === 'evidence') {
+      outEv.push(x);
+      rankedCandidates.push({ kind: 'evidence', segment_id: x.segmentId || x.segment_id || x.id, rank });
+    } else {
+      outMem.push(x);
+      rankedCandidates.push({ kind: 'memory', memory_id: x.id, rank });
+    }
   }
   console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> mem=${Math.min(outMem.length, deliverN)} ev=${Math.min(outEv.length, evidenceN)}`);
-  return { memories: outMem.slice(0, deliverN), evidence: outEv.slice(0, evidenceN) };
+  return {
+    memories: outMem.slice(0, deliverN),
+    evidence: outEv.slice(0, evidenceN),
+    // Preserve the cross-encoder's one authoritative mixed order. Consumers
+    // may progressively reveal this list without another retrieval/rerank.
+    ranked_candidates: rankedCandidates.slice(0, Math.max(15, deliverN + evidenceN)),
+    ranking_mode: usedCrossEncoder ? 'cross_encoder' : 'lane_interleave_fallback',
+  };
 }
 
 // ── Hop 1 — Memory layer ────────────────────────────────────────────────────
@@ -1770,10 +1784,12 @@ export class RecallRouter {
     // self-evolution action space), falling back to RECALL_DELIVER_LIMIT.
     let deliverN = recallPlan.operation === 'timeline'
       ? Math.min(options.limit || recallPlan.max_memories, 50)
-      : RECALL_DELIVER_LIMIT;
+      : (options.structured_intent === true
+          ? Math.min(Math.max(1, options.limit || 15), 15)
+          : RECALL_DELIVER_LIMIT);
     try {
       const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, remainingBudget()), null);
-      if (recallPlan.operation !== 'timeline' && cfg?.deliver_limit) deliverN = cfg.deliver_limit;
+      if (recallPlan.operation !== 'timeline' && options.structured_intent !== true && cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 
     // Dreams-first quota: guarantee raw source evidence still appears in the
@@ -1843,6 +1859,8 @@ export class RecallRouter {
     // survive. Default OFF → byte-identical delivery. Falls back to the existing
     // order on any failure/timeout.
     let finalEvidence = evidenceWithLineage;
+    let rankedCandidates = [];
+    let hybridRankingMode = 'not_applicable';
     if (recallPlan.operation !== 'timeline') {
       const v2 = await deliverHybrid({
         query,
@@ -1856,6 +1874,8 @@ export class RecallRouter {
       if (v2 && Array.isArray(v2.memories)) {
         deliverMemories = dedupeMemoriesById(v2.memories).slice(0, deliverN);
         finalEvidence = v2.evidence || evidenceWithLineage;
+        rankedCandidates = v2.ranked_candidates || [];
+        hybridRankingMode = v2.ranking_mode || 'unknown';
       }
     }
 
@@ -1880,9 +1900,11 @@ export class RecallRouter {
         page:             e.metadata?.startPage || null,
         linked_memory_id: e.linked_memory_id,
       })),
+      ranked_candidates: rankedCandidates,
       live: hop3.items,
       trace: {
         recall_plan:     recallPlan,
+        hybrid_ranking_mode: hybridRankingMode,
         hop1_count:      memories.length,
         event_range_count: eventRangeCount,
         sparse:          inspection.sparse,

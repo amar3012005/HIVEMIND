@@ -250,8 +250,25 @@ test('compound synthesis payload retains complete rank-one recall alongside conn
     recallResults: [{ memories: [{ id: 'm1', title: 'Handbag', content }] }],
     readResults: [{ operation: 'read', data: { event_count: 2 } }],
   });
-  assert.equal(payload.recall[0].memories[0].content, content);
+  assert.equal(payload.recall[0].ranked_context[0].content, content);
+  assert.equal(payload.recall[0].ranked_context[0].kind, 'memory');
   assert.equal(payload.connectors[0].data.event_count, 2);
+});
+
+test('compound synthesis payload preserves the canonical mixed memory and evidence order', () => {
+  const payload = buildCompoundSynthesisPayload({
+    recallResults: [{
+      memories: [{ id: 'm1', content: 'summary memory' }],
+      evidence: [{ segment_id: 'e1', content: 'exact PDF fact' }],
+      ranked_candidates: [
+        { kind: 'evidence', segment_id: 'e1', rank: 1 },
+        { kind: 'memory', memory_id: 'm1', rank: 2 },
+      ],
+    }],
+    visibleLimit: 5,
+  });
+  assert.deepEqual(payload.recall[0].ranked_context.map((row) => row.kind), ['evidence', 'memory']);
+  assert.match(payload.recall[0].ranked_context[0].content, /exact PDF fact/);
 });
 
 test('compound orchestrator: native hivemind-recall step runs via dispatchTool', async () => {
@@ -296,7 +313,7 @@ test('compound recall retries once with a semantic rewrite after zero coverage',
   assert.equal(res.status, 'completed');
   assert.equal(dispatched.length, 2);
   assert.equal(dispatched[1].args.query, 'handbag brand');
-  assert.match(res.synthesisPayload.recall[0].memories[0].content, /G ROCHER/);
+  assert.match(res.synthesisPayload.recall[0].ranked_context[0].content, /G ROCHER/);
 });
 
 test('compound orchestrator: composio read step executes and reports completed', async () => {

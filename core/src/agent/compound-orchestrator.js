@@ -84,19 +84,45 @@ function composioToolkitFor(groups) {
   return null;
 }
 
-export function buildCompoundSynthesisPayload({ recallResults = [], readResults = [] } = {}) {
+function rankedRecallRows(result, limit = 15) {
+  const memories = new Map((result?.memories || []).map((row) => [row?.id, row]));
+  const evidence = new Map((result?.evidence || []).map((row) => [row?.segment_id || row?.segmentId || row?.id, row]));
+  const out = [];
+  const seen = new Set();
+  const add = (kind, id) => {
+    const row = kind === 'memory' ? memories.get(id) : evidence.get(id);
+    const key = `${kind}:${id}`;
+    if (!row || !id || seen.has(key) || out.length >= limit) return;
+    seen.add(key);
+    out.push(kind === 'memory' ? {
+      rank: out.length + 1, kind, id,
+      title: row?.title || null,
+      content: String(row?.content || '').slice(0, out.length === 0 ? 8000 : 1600),
+      tags: Array.isArray(row?.tags) ? row.tags.slice(0, 8) : [],
+    } : {
+      rank: out.length + 1, kind, segment_id: id,
+      document_title: row?.document_title || row?.document?.title || null,
+      content: String(row?.snippet || row?.content || '').slice(0, 1600),
+    });
+  };
+  for (const candidate of (result?.ranked_candidates || [])) {
+    add(candidate?.kind === 'evidence' ? 'evidence' : 'memory', candidate?.memory_id || candidate?.segment_id || candidate?.id);
+  }
+  for (let index = 0; out.length < limit && index < Math.max(memories.size, evidence.size); index += 1) {
+    const evidenceRow = (result?.evidence || [])[index];
+    const memoryRow = (result?.memories || [])[index];
+    if (evidenceRow) add('evidence', evidenceRow.segment_id || evidenceRow.segmentId || evidenceRow.id);
+    if (memoryRow) add('memory', memoryRow.id);
+  }
+  return out;
+}
+
+export function buildCompoundSynthesisPayload({ recallResults = [], readResults = [], visibleLimit = 15 } = {}) {
   return {
     recall: recallResults.map((result) => ({
-      memories: (result?.memories || []).slice(0, 6).map((memory, index) => ({
-        id: memory?.id || null,
-        title: memory?.title || null,
-        content: String(memory?.content || '').slice(0, index === 0 ? 8000 : 1200),
-        tags: Array.isArray(memory?.tags) ? memory.tags.slice(0, 8) : [],
-      })),
-      evidence: (result?.evidence || []).slice(0, 6).map((item) => ({
-        document_title: item?.document_title || item?.document?.title || null,
-        content: String(item?.snippet || item?.content || '').slice(0, 1200),
-      })),
+      ranked_context: rankedRecallRows(result, visibleLimit),
+      total_ranked: Math.min(15, (result?.ranked_candidates || []).length
+        || ((result?.memories || []).length + (result?.evidence || []).length)),
     })),
     connectors: readResults,
   };
@@ -869,17 +895,9 @@ async function runNativeHivemindStep({ subtask, ctx, priorOutputs, onEvent }) {
     }
     // Extract a compact text summary + any scalar output fields for downstream
     // steps (e.g. the doc-creation step can reference recalled facts).
-    const recallProjection = Array.isArray(result?.memories) && result.memories.length
+    const recallProjection = ((result?.memories?.length || 0) + (result?.evidence?.length || 0)) > 0
       ? JSON.stringify({
-          memories: result.memories.slice(0, 6).map((memory, index) => ({
-            id: memory?.id || null,
-            title: memory?.title || null,
-            content: String(memory?.content || '').slice(0, index === 0 ? 8000 : 1200),
-          })),
-          evidence: (result?.evidence || []).slice(0, 6).map((item) => ({
-            segment_id: item?.segmentId || item?.segment_id || null,
-            content: String(item?.snippet || item?.content || '').slice(0, 1200),
-          })),
+          ranked_context: rankedRecallRows(result, 15),
         }).slice(0, 12_000)
       : String(result?.content || result?.response || result?.summary || JSON.stringify(result)).slice(0, 12_000);
     const text = result?.content || result?.response || result?.summary || recallProjection;

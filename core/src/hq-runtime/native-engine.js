@@ -1072,6 +1072,7 @@ export class NativeHqEngine {
         policy: {
           first_life_policy_id: readyTodo.context?.first_life_policy_id || null,
           first_life_policy_version: readyTodo.context?.first_life_policy_version || null,
+          execution_defaults: readyTodo.context?.execution_defaults || null,
         },
         target: {
           ...(readyTodo.context?.target || {}),

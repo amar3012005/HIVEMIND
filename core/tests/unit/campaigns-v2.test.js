@@ -404,7 +404,7 @@ test('campaign creation reuses the permanent Campaign Intelligence room and batc
 });
 
 test('campaign room contract carries the campaign identity and completion tool', () => {
-  const campaign = { id: 'campaign-a', ownerUserId: 'user-a', orgId: 'org-a', goal: 'Launch', objective: 'PRODUCT_LAUNCH', requestedChannels: ['x_organic'], brief: {}, audiencePolicy: {} };
+  const campaign = { id: 'campaign-a', ownerUserId: 'user-a', orgId: 'org-a', goal: 'Launch', objective: 'PRODUCT_LAUNCH', requestedChannels: ['x_organic'], requirements: [{ id: 'format', text: 'Standalone image posts' }], brief: { cadence: { expected_actions_by_channel: { x_organic: { minimum: 4, maximum: 6 } } } }, audiencePolicy: {} };
   const kickoff = buildCampaignKickoff(campaign);
   const displayMessage = buildCampaignDisplayMessage(campaign);
   const dispatch = buildCampaignRoomDispatch({
@@ -419,6 +419,8 @@ test('campaign room contract carries the campaign identity and completion tool',
   assert.equal(dispatch.user_message, displayMessage);
   assert.equal(dispatch.display_message, displayMessage);
   assert.match(dispatch.execution_context, /CAMPAIGN_ID: campaign-a/);
+  assert.match(dispatch.execution_context, /CADENCE_CONTRACT: x_organic: 4-6 standalone posts/);
+  assert.match(dispatch.execution_context, /CAMPAIGN_REQUIREMENTS_JSON/);
   assert.equal(dispatch.task_tag, 'CAMPAIGN');
   assert.equal(dispatch.campaign_id, 'campaign-a');
   assert.equal(normalizeCampaignRoomEvent({ t: 'campaign_bundle', bundle: {} }).t, 'campaign_bundle');

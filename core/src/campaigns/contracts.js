@@ -22,12 +22,18 @@ export function buildCampaignDisplayMessage(campaign, feedback = '') {
 }
 
 export function buildCampaignExecutionContext(campaign, feedback = '', channelCapabilities = []) {
+  const cadence = campaign.brief?.cadence?.expected_actions_by_channel || {};
+  const cadenceContract = Object.entries(cadence).map(([channel, range]) => (
+    `${channel}: ${Number(range?.minimum || 0)}-${Number(range?.maximum || 0)} standalone posts`
+  )).join('; ');
   return [
     `CAMPAIGN_ID: ${campaign.id}`,
     `GOAL: ${campaign.goal}`,
     `OBJECTIVE: ${campaign.objective}`,
     `CHANNELS: ${campaign.requestedChannels.join(', ')}`,
     `BRIEF_JSON: ${JSON.stringify(campaign.brief || {})}`,
+    cadenceContract ? `CADENCE_CONTRACT: ${cadenceContract}. The returned action count for every channel must stay inside its exact range.` : null,
+    `CAMPAIGN_REQUIREMENTS_JSON: ${JSON.stringify(campaign.requirements || [])}`,
     `AUDIENCE_POLICY_JSON: ${JSON.stringify(campaign.audiencePolicy || {})}`,
     `CHANNEL_CAPABILITIES_JSON: ${JSON.stringify(Array.isArray(channelCapabilities) ? channelCapabilities : [])}`,
     feedback ? `USER_FEEDBACK: ${String(feedback).slice(0, 4000)}` : null,

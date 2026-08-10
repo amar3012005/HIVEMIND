@@ -164,12 +164,14 @@ test('v6 retains one policy-selected program builder and leaves portfolio design
 
 test('current first-life policy routes first-life through Growth Planning and leaves lifecycle selection to Runtime', async () => {
   const policy = await loadFirstLifePolicy();
-  assert.equal(policy.version, 12);
+  assert.equal(policy.version, 13);
   assert.equal(policy.initial_lifecycle, undefined);
   assert.equal(policy.runtime_selects_lifecycle, true);
   assert.equal(policy.auto_start_initial_plan, true);
   assert.equal(policy.initial_execution_limit, 1);
   assert.equal(policy.first_life_outcome_preferences.length, 3);
+  assert.deepEqual(policy.execution_defaults.campaign.channels, ['x_organic']);
+  assert.equal(policy.execution_defaults.campaign.creative_format, 'single_image_post');
 
   const baselineId = 'baseline-current';
   const plan = applyFirstLifePolicy({
@@ -188,4 +190,5 @@ test('current first-life policy routes first-life through Growth Planning and le
   assert.equal(plan.operating_queue.length, 2);
   assert.ok(plan.operating_queue.every((item) => item.room_tag === null
     && item.playbook_id === null && item.playbook_version === null && item.requested_action === null));
+  assert.ok(plan.operating_queue.every((item) => item.execution_defaults === policy.execution_defaults));
 });

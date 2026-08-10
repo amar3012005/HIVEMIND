@@ -6,7 +6,7 @@ import {
 } from '../../campaigns/service.js';
 
 const ORGANIC = new Set(['x_organic', 'linkedin', 'instagram', 'facebook', 'tiktok', 'youtube', 'pinterest', 'reddit', 'threads', 'bluesky', 'google_business']);
-const PLANNING_FALLBACK = ['linkedin', 'instagram', 'x_organic'];
+const PLANNING_FALLBACK = ['x_organic'];
 
 function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
 function asArray(value) { return Array.isArray(value) ? value : []; }
@@ -23,6 +23,14 @@ export function requestedCampaignChannels(request, target) {
   return [...new Set(selected.map((item) => String(item?.id || item || '').trim().toLowerCase())
     .map((item) => item === 'x' || item === 'twitter' ? 'x_organic' : item)
     .filter((item) => ORGANIC.has(item)))];
+}
+export function resolveRuntimeCampaignChannels({ request = {}, target = {}, policy = {}, plannable = [] } = {}) {
+  const requested = requestedCampaignChannels(request, target);
+  const campaignDefaults = asObject(asObject(policy).execution_defaults).campaign;
+  const defaultChannels = requestedCampaignChannels({}, { channels: asObject(campaignDefaults).channels });
+  const allowed = new Set(defaultChannels.length ? defaultChannels : requested.length ? requested : PLANNING_FALLBACK);
+  const available = new Set(plannable);
+  return [...allowed].filter((channel) => available.has(channel)).slice(0, 3);
 }
 function campaignRef(input) {
   return asArray(value(input, 'artifacts.campaign_record'))[0]?.data?.campaign_id
@@ -117,16 +125,20 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
       if (action === 'create_campaign') {
         const request = asObject(value(input, 'context.request'));
         const target = asObject(value(input, 'context.target'));
+        const policy = asObject(value(input, 'context.policy'));
+        const campaignDefaults = asObject(asObject(policy.execution_defaults).campaign);
         const baseline = asObject(value(input, 'context.baseline'));
         const capabilities = await getCampaignCapabilities({ prisma, userId, orgId: context.orgId });
         const plannable = new Set(capabilities.channels
           .filter((item) => ORGANIC.has(item.id) && item.planning_ready)
           .map((item) => item.id));
-        const requested = requestedCampaignChannels(request, target);
-        const channels = (requested.length ? requested : PLANNING_FALLBACK)
-          .filter((channel) => plannable.has(channel)).slice(0, 3);
+        const channels = resolveRuntimeCampaignChannels({ request, target, policy, plannable: [...plannable] });
         if (!channels.length) throw new Error('runtime_campaign_no_plannable_organic_channel');
-        const instruction = String(request.instruction || request.objective || 'Create a focused awareness campaign').trim();
+        const baseInstruction = String(request.instruction || request.objective || 'Create a focused awareness campaign').trim();
+        const formatInstruction = campaignDefaults.creative_format === 'single_image_post'
+          ? 'Create standalone single-image posts only. Each scheduled action is one complete post with at most one image. Do not create carousels, multi-slide copy, numbered slide sequences, or threads.'
+          : '';
+        const instruction = [baseInstruction, formatInstruction].filter(Boolean).join('\n\n');
         const destinationUrl = String(
           baseline?.company?.website || baseline?.website?.url || value(input, 'context.company')?.website || '',
         ).trim();

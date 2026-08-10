@@ -125,6 +125,13 @@ export function specialistWorkObjective(todo, skillId) {
   return String(todo?.objective || todo?.title || '').trim();
 }
 
+export function lifecycleSelectionObjective(todo) {
+  const title = String(todo?.title || '').trim();
+  const objective = specialistWorkObjective(todo);
+  if (!title || title === objective) return objective;
+  return `${title}\n\n${objective}`;
+}
+
 export function compactCompanyOperatingContext(company = {}) {
   const profile = company.profile && typeof company.profile === 'object' ? company.profile : {};
   return {
@@ -1010,6 +1017,7 @@ export class NativeHqEngine {
       await event(prisma, runtime, cycle, { eventType: 'skill_loaded', title: `I am taking the next item: ${readyTodo.title}`, summary: selectedSkill.description, skillRef: skillId, details: { todo_id: readyTodo.id } });
       const rooms = await prisma.hyperRoom.findMany({ where: { orgId: runtime.orgId, archivedAt: null }, orderBy: { updatedAt: 'desc' } });
       const boundedObjective = specialistWorkObjective(readyTodo, skillId);
+      const selectionObjective = lifecycleSelectionObjective(readyTodo);
       const adminStatusRun = await prisma.runtimePlaybookRun.findFirst({
         where: {
           orgId: runtime.orgId,
@@ -1062,6 +1070,15 @@ export class NativeHqEngine {
           acceptance_criteria: readyTodo.context?.acceptance_criteria || [],
           instruction_id: readyTodo.instructionId || null,
         },
+        task: {
+          title: readyTodo.title,
+          objective: readyTodo.objective,
+          expected_outcome: readyTodo.context?.expected_outcome || null,
+          success_measure: readyTodo.context?.success_measure || null,
+          effect_class: readyTodo.context?.effect_class || null,
+          dependencies: readyTodo.context?.dependencies || [],
+          evidence_refs: readyTodo.context?.evidence_refs || [],
+        },
         request: {
           owner_room_tag: policyBootstrap
             ? String(readyTodo.context?.room_tag || readyTodo.kind || '').trim().toLowerCase() || null
@@ -1111,7 +1128,7 @@ export class NativeHqEngine {
         }
       }
       if (!selectedLifecycle && this.runtimePlaybooks) selectedLifecycle = await this.runtimePlaybooks.selectAssignment({
-        objective: boundedObjective, context: lifecycleContext,
+        objective: selectionObjective, context: lifecycleContext,
       }).catch((error) => {
         selectionError = error;
         this.logger.warn('[hq-runtime] playbook selection unavailable:', error.message);

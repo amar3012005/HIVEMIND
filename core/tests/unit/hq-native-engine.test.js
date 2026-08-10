@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -71,6 +71,12 @@ test('only a policy-created bootstrap may retain a preselected lifecycle', () =>
   assert.equal(isPolicyBootstrapTodo({ context: { proposal_origin: 'first_life_bootstrap', planned_playbook_id: 'marketing.strategy-to-growth-brief' } }), true);
   assert.equal(isPolicyBootstrapTodo({ context: { proposal_origin: 'strategy_program', planned_playbook_id: 'outreach.direct-message' } }), false);
   assert.equal(isPolicyBootstrapTodo({ context: { proposal_origin: 'user_instruction' } }), false);
+});
+
+test('Runtime gives lifecycle selection the durable task title without changing the Room objective', () => {
+  const todo = { title: 'Campaign-ready title', objective: 'Prepare the bounded work.' };
+  assert.equal(specialistWorkObjective(todo), 'Prepare the bounded work.');
+  assert.equal(lifecycleSelectionObjective(todo), 'Campaign-ready title\n\nPrepare the bounded work.');
 });
 
 test('first-life fallback narration does not require a Growth Plan artifact', () => {

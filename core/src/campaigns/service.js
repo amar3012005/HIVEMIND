@@ -1069,9 +1069,13 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
   };
   const capabilities = await getCampaignCapabilities({ prisma, userId, orgId });
   const result = await prisma.$transaction(async (tx) => {
+    const preserveRepairingPlan = campaign.status === 'NEEDS_REPAIR';
     const claimed = await tx.campaign.updateMany({
       where: { id, orgId, status: { in: ['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'NEEDS_REPAIR', 'FAILED'] } },
-      data: { status: 'GENERATING', currentPlanVersionId: null, approvedPlanVersionId: null, lastError: null },
+      data: {
+        status: 'GENERATING', approvedPlanVersionId: null, lastError: null,
+        ...(!preserveRepairingPlan ? { currentPlanVersionId: null } : {}),
+      },
     });
     if (!claimed.count) throw campaignError('Campaign regeneration was already started', 409, 'campaign_regeneration_conflict');
     await tx.hyperRoom.update({ where: { id: room.id }, data: { roomTag: 'campaign' } });
@@ -1092,7 +1096,7 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
       capabilities_checked_at: capabilities.checked_at,
     };
     const run = await tx.campaignRun.create({ data: { campaignId: id, roomId: room.id, turnId: turn.id, status: 'DISPATCHING', briefSnapshot, startedAt: new Date() } });
-    if (campaign.currentPlanVersionId) {
+    if (campaign.currentPlanVersionId && !preserveRepairingPlan) {
       await tx.campaignPlanVersion.updateMany({ where: { id: campaign.currentPlanVersionId, campaignId: id }, data: { status: 'SUPERSEDED' } });
       await tx.campaignAction.updateMany({ where: { campaignId: id, planVersionId: campaign.currentPlanVersionId, status: 'READY' }, data: { status: 'CANCELLED' } });
     }

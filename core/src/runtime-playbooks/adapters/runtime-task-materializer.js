@@ -51,6 +51,7 @@ export function createRuntimeTaskMaterializerAdapter({ prisma } = {}) {
       ].filter(Boolean).map(String));
       const accepted = [];
       const rejected = [];
+      let strategySourceArtifactId = null;
 
       await prisma.$transaction(async (tx) => {
         const locked = await tx.$queryRawUnsafe(
@@ -59,6 +60,34 @@ export function createRuntimeTaskMaterializerAdapter({ prisma } = {}) {
         );
         if (!locked.length) throw new Error('runtime_task_materializer_runtime_not_found');
         const epoch = String(locked[0].epoch);
+        if (strategy?.id) {
+          const room = await tx.hyperRoom.findFirst({
+            where: { id: run.roomId, orgId: context.orgId }, select: { userId: true },
+          });
+          if (!room?.userId) throw new Error('runtime_task_materializer_strategy_owner_required');
+          const strategyPayload = {
+            artifact_key: 'marketing_strategy_program',
+            artifact_id: strategy.id,
+            playbook_run_id: context.runId,
+            data: strategy.data || {},
+            source_refs: asArray(strategy.sourceRefs || strategy.source_refs),
+          };
+          const checksum = crypto.createHash('sha256').update(JSON.stringify(strategyPayload)).digest('hex');
+          const retained = await tx.sourceArtifact.upsert({
+            where: { userId_orgId_checksum_sourcePlatform: {
+              userId: room.userId, orgId: context.orgId, checksum, sourcePlatform: 'runtime_strategy',
+            } },
+            create: {
+              userId: room.userId, orgId: context.orgId, artifactType: 'api_response',
+              sourcePlatform: 'runtime_strategy', sourceId: strategy.id, checksum,
+              storageLocation: 'postgres:inline', payload: strategyPayload,
+              metadata: { reusable: true, runtime_epoch: epoch, playbook_run_id: context.runId },
+            },
+            update: { payload: strategyPayload, metadata: { reusable: true, runtime_epoch: epoch, playbook_run_id: context.runId } },
+          });
+          strategySourceArtifactId = retained.id;
+          sourceRefs.add(retained.id);
+        }
         for (const [index, raw] of motions.entries()) {
           const motion = asObject(raw);
           const motionId = String(motion.motion_id || '').trim();
@@ -92,6 +121,7 @@ export function createRuntimeTaskMaterializerAdapter({ prisma } = {}) {
                 strategy_run_id: context.runId,
                 strategy_stage_id: context.stageId,
                 strategy_artifact_id: strategy?.id || null,
+                strategy_source_artifact_id: strategySourceArtifactId,
                 portfolio_artifact_id: portfolio.id,
                 motion_id: motionId,
                 runtime_epoch: epoch,
@@ -107,7 +137,7 @@ export function createRuntimeTaskMaterializerAdapter({ prisma } = {}) {
                 expected_outcome: motion.expected_outcome || null,
                 success_measure: motion.success_measure || null,
                 dependencies: asArray(motion.dependencies),
-                evidence_refs: evidenceRefs,
+                evidence_refs: [...new Set([...evidenceRefs, strategySourceArtifactId].filter(Boolean))],
                 suggested_targets: asArray(motion.exact_targets),
                 source_instruction: String(motion.objective),
                 strategy_source_instruction: String(asObject(run.context).request?.instruction || ''),
@@ -126,8 +156,8 @@ export function createRuntimeTaskMaterializerAdapter({ prisma } = {}) {
         id: stableKey(context.runId, context.stageId, portfolio.id),
         key: 'runtime_task_materialization',
         status: rejected.length ? 'READY_WITH_WARNINGS' : 'READY',
-        data: { portfolio_ref: portfolio.id, strategy_ref: strategy?.id || null, accepted_todo_ids: accepted, rejected_motions: rejected },
-        source_refs: [portfolio.id, strategy?.id].filter(Boolean),
+        data: { portfolio_ref: portfolio.id, strategy_ref: strategy?.id || null, strategy_source_artifact_ref: strategySourceArtifactId, accepted_todo_ids: accepted, rejected_motions: rejected },
+        source_refs: [portfolio.id, strategy?.id, strategySourceArtifactId].filter(Boolean),
       }] };
     },
   };

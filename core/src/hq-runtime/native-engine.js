@@ -1045,6 +1045,11 @@ export class NativeHqEngine {
           input_contract: entry.input_contract || null,
         }));
       const policyBootstrap = isPolicyBootstrapTodo(readyTodo);
+      const retainedStrategy = readyTodo.context?.strategy_source_artifact_id
+        ? await prisma.sourceArtifact.findFirst({
+          where: { id: readyTodo.context.strategy_source_artifact_id, orgId: runtime.orgId, sourcePlatform: 'runtime_strategy' },
+          select: { id: true, payload: true, createdAt: true },
+        }) : null;
       const lifecycleContext = {
         mode: readyTodo.context?.execution_mode || null,
         company: compactCompanyOperatingContext(context.company),
@@ -1057,6 +1062,11 @@ export class NativeHqEngine {
           artifact_id: adminCurrentStatus.artifactId,
           data: adminCurrentStatus.data || {},
           source_refs: adminCurrentStatus.sourceRefs || [],
+        } : null,
+        strategy: retainedStrategy ? {
+          source_artifact_id: retainedStrategy.id,
+          created_at: retainedStrategy.createdAt,
+          ...(retainedStrategy.payload && typeof retainedStrategy.payload === 'object' ? retainedStrategy.payload : {}),
         } : null,
         lifecycle_catalog: lifecycleCatalog || [],
         policy: {
@@ -1203,7 +1213,15 @@ export class NativeHqEngine {
             context: lifecycleContext,
             selection: selectedLifecycle.selection,
           });
-          await prisma.hqTodo.update({ where: { id: readyTodo.id }, data: { status: 'RUNNING', startedAt: new Date(), blockedReason: null } });
+          await prisma.hqTodo.update({ where: { id: readyTodo.id }, data: {
+            status: 'RUNNING', startedAt: new Date(), blockedReason: null,
+            context: {
+              ...(readyTodo.context || {}),
+              runtime_owner_room_tag: roomTag,
+              runtime_selected_playbook_id: playbookAssignment.selection.playbook_id,
+              runtime_selected_playbook_version: playbookAssignment.selection.version,
+            },
+          } });
           await event(prisma, runtime, cycle, {
             eventType: 'work_order_created',
             title: `I started a checkpointed lifecycle: ${readyTodo.title}`,

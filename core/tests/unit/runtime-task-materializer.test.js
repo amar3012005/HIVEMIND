@@ -6,6 +6,10 @@ function fixture() {
   const todos = [];
   const tx = {
     async $queryRawUnsafe() { return [{ id: 'runtime-1', epoch: 'epoch-1' }]; },
+    hyperRoom: { async findFirst() { return { userId: 'user-1' }; } },
+    sourceArtifact: {
+      async upsert({ create }) { return { id: 'strategy-source-1', ...create }; },
+    },
     hqTodo: {
       async findFirst({ where }) {
         const key = where.context.equals;
@@ -15,7 +19,7 @@ function fixture() {
     },
   };
   const prisma = {
-    runtimePlaybookRun: { async findFirst() { return { id: 'run-1', playbookId: 'marketing.strategy-to-growth-brief', playbookVersion: 3, scopeKey: 'global', trigger: { runtime_id: 'runtime-1' }, context: { request: { instruction: 'Decide' }, policy: { first_life_policy_version: 7 } } }; } },
+    runtimePlaybookRun: { async findFirst() { return { id: 'run-1', roomId: 'room-1', playbookId: 'marketing.strategy-to-growth-brief', playbookVersion: 3, scopeKey: 'global', trigger: { runtime_id: 'runtime-1' }, context: { request: { instruction: 'Decide' }, policy: { first_life_policy_version: 7 } } }; } },
     async $transaction(fn) { return fn(tx); },
   };
   return { prisma, todos };
@@ -50,6 +54,8 @@ test('strategy portfolio materialization is per-motion, evidence-bound, provider
   assert.equal(Object.hasOwn(todos[0].context, 'requested_action'), false);
   assert.equal(Object.hasOwn(todos[0].context, 'provider'), false);
   assert.equal(todos[0].context.first_life_policy_version, 7);
+  assert.equal(todos[0].context.strategy_source_artifact_id, 'strategy-source-1');
+  assert.ok(todos[0].context.evidence_refs.includes('strategy-source-1'));
   assert.deepEqual(first.artifacts[0].data.accepted_todo_ids, ['todo-1']);
   assert.equal(first.artifacts[0].data.rejected_motions[0].reason, 'runtime_task_proposal_fields_missing');
   assert.deepEqual(second.artifacts[0].data.accepted_todo_ids, ['todo-1']);

@@ -1,4 +1,5 @@
-import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle, persistCampaignRepairingBundle } from './service.js';
+import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle, persistCampaignRepairingBundle, regenerateCampaign } from './service.js';
+import { dispatchCampaignRoomSafely } from './dispatcher.js';
 import { normalizeCampaignRoomEvent } from './contracts.js';
 import { scheduleRuntimeCampaignEvent } from './runtime-bridge.js';
 
@@ -116,10 +117,30 @@ export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
     const result = await persistCampaignRepairingBundle({
       prisma, turnId, bundle: normalized.bundle, errors: normalized.errors, exhausted: normalized.repair_exhausted === true,
     });
+    const repairAttempts = await prisma.campaignPlanVersion.count({
+      where: { campaignId: run.campaignId, status: 'NEEDS_REPAIR' },
+    });
+    const repairExhausted = normalized.repair_exhausted === true || repairAttempts >= 3;
     await scheduleRuntimeCampaignEvent({
-      prisma, campaignId: run.campaignId, type: 'campaign.contract_needs_repair',
-      data: { plan_version_id: result?.planVersionId || null, status: 'NEEDS_REPAIR', errors: result?.errors || [] },
+      prisma, campaignId: run.campaignId,
+      type: repairExhausted ? 'campaign.contract_failed' : 'campaign.contract_needs_repair',
+      data: { plan_version_id: result?.planVersionId || null, status: 'NEEDS_REPAIR', errors: result?.errors || [], repair_attempt: repairAttempts, repair_exhausted: repairExhausted },
     }).catch(() => {});
+    if (!result?.duplicate && !repairExhausted) {
+      if (repairAttempts < 3) {
+        const repair = await regenerateCampaign({
+          prisma,
+          campaignId: run.campaignId,
+          orgId: run.campaign.orgId,
+          userId: run.campaign.ownerUserId,
+          id: run.campaignId,
+          feedback: `Repair only the rejected Campaign Contract fields and actions. Preserve accepted actions unchanged. Governance errors: ${(result?.errors || []).join('; ')}`,
+        }).catch(() => null);
+        if (repair?.dispatch) {
+          dispatchCampaignRoomSafely({ prisma, campaignId: run.campaignId, dispatch: repair.dispatch }).catch(() => {});
+        }
+      }
+    }
     return result;
   }
   if (normalized.t === 'campaign_governance' && normalized.status === 'unmet') {

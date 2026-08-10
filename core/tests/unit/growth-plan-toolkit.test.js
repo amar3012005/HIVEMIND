@@ -164,24 +164,27 @@ test('v6 retains one policy-selected program builder and leaves portfolio design
 
 test('current first-life policy uses the single-run strategy builder that requires a campaign experiment', async () => {
   const policy = await loadFirstLifePolicy();
-  assert.equal(policy.version, 9);
+  assert.equal(policy.version, 10);
   assert.deepEqual(policy.initial_lifecycle, {
     playbook_id: 'marketing.strategy-to-growth-brief',
-    version: 7,
+    version: 8,
     supported_action: 'formulate_go_to_market_strategy',
     bypass_growth_plan: true,
     materialize_motions: true,
     auto_prepare_sequentially: true,
   });
-  const playbook = JSON.parse(await readFile(new URL('../../src/runtime-playbooks/fixtures/marketing-strategy-to-growth-brief.v7.json', import.meta.url), 'utf8'));
+  const playbook = JSON.parse(await readFile(new URL('../../src/runtime-playbooks/fixtures/marketing-strategy-to-growth-brief.v8.json', import.meta.url), 'utf8'));
   assert.ok(playbook.input_contract.fields.every((field) => field.description));
-  assert.match(playbook.stages[0].objective, /must include one bounded awareness-to-learning campaign experiment/);
+  assert.match(playbook.stages[0].objective, /pipeline_development/);
+  assert.match(playbook.stages[0].objective, /evidence_decision/);
   assert.match(playbook.stages[0].objective, /Do not select a playbook, Company Room, provider/);
-  assert.deepEqual(playbook.stages[0].completion_checks.at(-1), {
+  assert.deepEqual(playbook.stages[0].completion_checks.at(-3), {
     predicate: 'array_has_field_value',
     select: 'marketing_strategy_program',
     path: 'data.motions',
     item_path: 'motion_class',
     value: 'market_response_experiment',
   });
+  assert.equal(playbook.stages[0].completion_checks.at(-2).value, 'pipeline_development');
+  assert.equal(playbook.stages[0].completion_checks.at(-1).value, 'evidence_decision');
 });

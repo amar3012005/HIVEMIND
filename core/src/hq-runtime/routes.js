@@ -225,6 +225,8 @@ export function playbookQueueStatus(run) {
   const status = String(run?.status || '').toUpperCase();
   if (status === 'WAITING_EVENT') {
     const waitingTypes = Array.isArray(run?.waitingFor?.types) ? run.waitingFor.types : [];
+    const projected = String(run?.waitingFor?.presentation?.task_status || '').toUpperCase();
+    if (['RUNNING', 'MONITORING'].includes(projected)) return projected;
     return waitingTypes.includes('capability.connected') ? 'WAITING_FOR_CONNECTOR' : 'MONITORING';
   }
   if (status === 'WAITING_AUTHORITY') return 'WAITING_FOR_AUTHORITY';
@@ -262,7 +264,7 @@ function runtimeQueue({ todos, stages, delegations }) {
     .sort((left, right) => left.priority - right.priority || left.position - right.position || new Date(left.updated_at) - new Date(right.updated_at));
 }
 
-function projectAgentRuntimeTasks({ todos, playbookRuns }) {
+function projectAgentRuntimeTasks({ todos, playbookRuns, playbookOwners = new Map() }) {
   const runByTodo = new Map();
   for (const run of playbookRuns) {
     const todoId = String(run.trigger?.todo_id || '');
@@ -286,7 +288,9 @@ function projectAgentRuntimeTasks({ todos, playbookRuns }) {
       title: todo.title,
       objective: todo.objective,
       status,
-      owner: context.room_tag || todo.kind || null,
+      owner: context.runtime_owner_room_tag
+        || playbookOwners.get(`${controllingRun?.playbookId || ''}@${controllingRun?.playbookVersion || ''}`)
+        || context.room_tag || todo.kind || null,
       lifecycle_stage: controllingSnapshot?.current_stage || null,
       blocker: todo.blockedReason || (status === 'WAITING_FOR_CONNECTOR' || status === 'WAITING_FOR_AUTHORITY' ? waitingSummary : null),
       next_action: controllingSnapshot?.next_action || (status === 'PROPOSED' ? 'await_start' : status === 'READY' ? 'select_playbook' : null),
@@ -886,7 +890,15 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           const baselineId = artifact.payload?.plan?.baseline_ref?.resource_id || artifact.metadata?.baseline_id || null;
           return !baselineArtifact?.id || baselineId === baselineArtifact.id;
         }) || null;
-        const agentRuntimeTasks = projectAgentRuntimeTasks({ todos, playbookRuns });
+        const playbookOwners = new Map();
+        for (const run of playbookRuns) {
+          try {
+            const definition = playbookService?.registry?.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
+            const owner = String(definition?.metadata?.owner_room_tag || '').trim().toLowerCase();
+            if (owner) playbookOwners.set(`${run.playbookId}@${run.playbookVersion}`, owner);
+          } catch { /* Historical unavailable definitions are reported separately below. */ }
+        }
+        const agentRuntimeTasks = projectAgentRuntimeTasks({ todos, playbookRuns, playbookOwners });
         const growthBrief = projectGrowthBrief(baselineArtifact, currentPlanArtifact);
         const adminCheckin = playbookRuns.find((run) => run.playbookId === 'operations.browser-admin-checkin-to-status'
           && run.trigger?.first_life_admin_checkin === true

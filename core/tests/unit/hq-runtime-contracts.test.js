@@ -76,6 +76,7 @@ test('HQ queue projects semantic playbook waits truthfully', () => {
   assert.equal(playbookQueueStatus({ status: 'WAITING_AUTHORITY' }), 'WAITING_FOR_AUTHORITY');
   assert.equal(playbookQueueStatus({ status: 'WAITING_EVENT', waitingFor: { types: ['capability.connected'] } }), 'WAITING_FOR_CONNECTOR');
   assert.equal(playbookQueueStatus({ status: 'WAITING_EVENT', waitingFor: { types: ['provider.reply', 'wait.timeout'] } }), 'MONITORING');
+  assert.equal(playbookQueueStatus({ status: 'WAITING_EVENT', waitingFor: { types: ['campaign.contract_ready'], presentation: { task_status: 'RUNNING' } } }), 'RUNNING');
   assert.equal(playbookQueueStatus({ status: 'NEEDS_INTERVENTION' }), 'NEEDS_ATTENTION');
   assert.equal(playbookQueueStatus({
     status: 'COMPLETED', terminalState: 'campaign_needs_input',

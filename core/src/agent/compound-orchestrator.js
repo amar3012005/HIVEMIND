@@ -148,6 +148,12 @@ export function buildCompoundSynthesisPayload({ recallResults = [], readResults 
   };
 }
 
+export function compoundSynthesisResultsLabel({ recallResults = [], visibleLimit = 15 } = {}) {
+  return recallResults.length > 0
+    ? `COMPLETED GOVERNED RESULTS (recall ranks 1-${visibleLimit})`
+    : 'COMPLETED GOVERNED CONNECTOR RESULTS';
+}
+
 // Provider schemas are often the largest part of a compound prompt. First
 // select by compact, language-agnostic capability cards; only the one selected
 // tool's schema is sent to the argument-generation turn.

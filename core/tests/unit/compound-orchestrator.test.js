@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildCompoundSynthesisPayload,
   projectConnectorDataForSynthesis,
+  compoundSynthesisResultsLabel,
   buildCompoundUserSummary,
   buildGroundedWriteFallbackPrompt,
   buildGroundedWriteFallbackPayload,
@@ -316,6 +317,17 @@ test('connector synthesis projection preserves records while removing volatile U
   assert.equal(projected.data[0].media_url, 'https://cdn.example.com/video.mp4');
   assert.equal(projected.data[0].like_count, 53);
   assert.ok(JSON.stringify(projected).length < 500);
+});
+
+test('connector-only synthesis does not imply a recall rank count', () => {
+  assert.equal(
+    compoundSynthesisResultsLabel({ recallResults: [], visibleLimit: 15 }),
+    'COMPLETED GOVERNED CONNECTOR RESULTS',
+  );
+  assert.equal(
+    compoundSynthesisResultsLabel({ recallResults: [{}], visibleLimit: 5 }),
+    'COMPLETED GOVERNED RESULTS (recall ranks 1-5)',
+  );
 });
 
 test('compound orchestrator: native hivemind-recall step runs via dispatchTool', async () => {

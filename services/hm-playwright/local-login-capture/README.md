@@ -33,13 +33,23 @@ password). Once you're in, press Enter in the terminal. It saves
 ## Ship it to the server
 That file is as sensitive as a password — it grants read access to your
 account until it expires or you log out elsewhere.
+
+Sessions are scoped **per org**, not global — without this, a different
+tenant requesting `session:"linkedin"` would silently ride as *your*
+authenticated identity. Find your org's UUID (`orgId` — same value used
+everywhere else in HIVEMIND) and upload into that org's own subdirectory:
 ```
-scp out/x.json <ssh-alias>:/root/hivemind/services/hm-playwright/sessions/x.json
+ssh <ssh-alias> mkdir -p /root/hivemind/services/hm-playwright/sessions/<your-org-id>
+scp out/x.json <ssh-alias>:/root/hivemind/services/hm-playwright/sessions/<your-org-id>/x.json
 ```
 Then delete your local copy once you've confirmed it landed. `sessions/` on
 the server is gitignored and mounted read-only into `hm-playwright` — these
-files must never reach a commit. A crawl that requests a missing session
-returns `409 session_not_found`; it does not silently fall back to anonymous.
+files must never reach a commit. A crawl must now pass both `session` AND
+`org_id` to use one; a crawl that requests a session without a matching
+`org_id` returns `400 org_id_required_for_session`, and one for a session
+that doesn't exist under that org returns `409 session_not_found` — it never
+silently falls back to anonymous, and it never falls back to another org's
+session.
 
 ## When it stops working
 Sessions expire, and some platforms (Instagram especially) tie sessions to

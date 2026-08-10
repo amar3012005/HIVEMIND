@@ -6,7 +6,9 @@ import {
   resolveAuthorityPreference,
   validateWorkResultPacket,
 } from '../../src/hq-runtime/contracts.js';
-import { eventCursor, playbookQueueStatus, projectCampaignAuthorityPreview } from '../../src/hq-runtime/routes.js';
+import {
+  eventCursor, playbookQueueStatus, projectCampaignAuthorityPreview, projectOutreachCallProposals,
+} from '../../src/hq-runtime/routes.js';
 
 test('HQ runtime permits only explicit state transitions', () => {
   assert.doesNotThrow(() => assertHqTransition('INACTIVE', 'OBSERVING'));
@@ -102,4 +104,37 @@ test('HQ campaign authority projection exposes only the current immutable launch
   assert.equal(preview.actions[0].payload.text, 'Exact copy');
   assert.equal(preview.actions[0].assets[0].content_url, '/v1/campaigns/campaign-1/assets/asset-1/content');
   assert.equal('storageKey' in preview.actions[0].assets[0], false);
+});
+
+test('HQ offers one sequential TARA cohort from verified outreach leads and retained notes', () => {
+  const proposals = projectOutreachCallProposals({
+    runtimeId: 'runtime-1', runtimeEpoch: 'epoch-1', todos: [],
+    outreachTargets: [{
+      id: 'lead-1', company: 'Acme', phone: '+49 511 1234567', email: 'buyer@acme.test',
+      inputContext: { notes: 'Ask about the audit window.', outreach_angle: 'Lead with audit readiness.' },
+    }],
+    playbookRuns: [{
+      id: 'run-1', playbookId: 'outreach.prospect-to-conversation',
+      trigger: { runtime_id: 'runtime-1', runtime_epoch: 'epoch-1', todo_id: 'todo-1' },
+      artifacts: [
+        { artifactKey: 'lead_record', artifactId: 'artifact-lead-1', data: { persistence_ref: 'lead-1', company: 'Acme', fit_rationale: 'Verified fit.' }, sourceRefs: ['source-1'] },
+        { artifactKey: 'message_record', data: { lead_ref: 'artifact-lead-1', recipient: 'buyer@acme.test' } },
+      ],
+    }],
+  });
+  assert.equal(proposals.length, 1);
+  assert.equal(proposals[0].targets.length, 1);
+  assert.equal(proposals[0].targets[0].value, '+495111234567');
+  assert.equal(proposals[0].targets[0].verified_email, 'buyer@acme.test');
+  assert.match(proposals[0].targets[0].personal_notes, /audit window/);
+});
+
+test('HQ does not offer the same outreach cohort twice', () => {
+  const proposals = projectOutreachCallProposals({
+    runtimeId: 'runtime-1', runtimeEpoch: 'epoch-1',
+    todos: [{ context: { source_outreach_run_id: 'run-1' } }],
+    outreachTargets: [{ id: 'lead-1', phone: '+495111234567' }],
+    playbookRuns: [{ id: 'run-1', playbookId: 'outreach.prospect-to-conversation', trigger: { runtime_id: 'runtime-1', runtime_epoch: 'epoch-1' }, artifacts: [{ artifactKey: 'lead_record', artifactId: 'lead-artifact', data: { persistence_ref: 'lead-1' } }] }],
+  });
+  assert.deepEqual(proposals, []);
 });

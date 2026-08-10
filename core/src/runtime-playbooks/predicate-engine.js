@@ -101,6 +101,13 @@ const predicates = {
     check,
     (value) => Array.isArray(value) && value.length >= check.value,
   ),
+  array_has_field_value: ({ artifacts, check }) => compareSelected(
+    artifacts,
+    check,
+    (value) => Array.isArray(value) && value.some(
+      (item) => getPath(item, check.item_path) === check.value,
+    ),
+  ),
   unique_by: ({ artifacts, check }) => {
     const values = selectArtifacts(artifacts, check.select).map((artifact) => getPath(artifact, check.path));
     return values.length > 0 && values.every((value) => value != null) && new Set(values).size === values.length;
@@ -150,6 +157,7 @@ const requiredArguments = {
   field_lte: ['select', 'path', 'value'],
   field_matches: ['select', 'path', 'pattern'],
   all_have_min_items: ['select', 'path', 'value'],
+  array_has_field_value: ['select', 'path', 'item_path', 'value'],
   unique_by: ['select', 'path'],
   all_reference_existing: ['select', 'path', 'target_select'],
   is_source_backed: ['select'],

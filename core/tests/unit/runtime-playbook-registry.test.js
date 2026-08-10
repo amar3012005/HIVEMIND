@@ -965,7 +965,7 @@ test('service-level authority grant resumes the exact waiting run immediately', 
 });
 
 test('predicate engine exposes a bounded generic vocabulary and exact unmet checks', () => {
-  assert.equal(defaultPredicateNames.length, 25);
+  assert.equal(defaultPredicateNames.length, 26);
   const engine = new PredicateEngine();
   const verdict = engine.validateChecks([
     { id: 'minimum', predicate: 'has_min_count', select: 'records', value: 2 },
@@ -985,6 +985,20 @@ test('predicate engine exposes a bounded generic vocabulary and exact unmet chec
     () => engine.validateChecks([{ predicate: 'has_min_count', select: 'records' }], {}),
     /runtime_predicate_argument_missing:has_min_count:value/,
   );
+});
+
+test('generic array field predicate validates a configured portfolio requirement', () => {
+  const engine = new PredicateEngine();
+  const check = {
+    predicate: 'array_has_field_value', select: 'program', path: 'data.motions',
+    item_path: 'motion_class', value: 'market_response_experiment',
+  };
+  assert.equal(engine.evaluate(check, {
+    program: [{ key: 'program', data: { motions: [{ motion_class: 'market_response_experiment' }] } }],
+  }), true);
+  assert.equal(engine.evaluate(check, {
+    program: [{ key: 'program', data: { motions: [{ motion_class: 'pipeline_development' }] } }],
+  }), false);
 });
 
 test('dynamic predicate thresholds resolve from run context without engine domain logic', () => {

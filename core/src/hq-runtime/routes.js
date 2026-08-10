@@ -68,6 +68,51 @@ export function projectCampaignAuthorityPreview(campaign) {
   };
 }
 
+function normalizedPhone(value) {
+  const phone = String(value || '').replace(/[\s()/-]/g, '');
+  return /^\+[1-9]\d{6,14}$/.test(phone) ? phone : null;
+}
+
+export function projectOutreachCallProposals({ playbookRuns = [], outreachTargets = [], todos = [], runtimeId = null, runtimeEpoch = null } = {}) {
+  const targetById = new Map(outreachTargets.map((target) => [String(target.id), target]));
+  const alreadyRequested = new Set(todos.map((todo) => String(todo.context?.source_outreach_run_id || '')).filter(Boolean));
+  return playbookRuns.flatMap((run) => {
+    if (run.playbookId !== 'outreach.prospect-to-conversation' || alreadyRequested.has(String(run.id))) return [];
+    if (runtimeId && String(run.trigger?.runtime_id || '') !== String(runtimeId)) return [];
+    if (runtimeEpoch && String(run.trigger?.runtime_epoch || '') !== String(runtimeEpoch)) return [];
+    const messagesByLead = new Map(run.artifacts.filter((artifact) => artifact.artifactKey === 'message_record')
+      .map((artifact) => [String(artifact.data?.lead_ref || ''), artifact.data]));
+    const targets = run.artifacts.filter((artifact) => artifact.artifactKey === 'lead_record').flatMap((artifact) => {
+      const persisted = targetById.get(String(artifact.data?.persistence_ref || '')) || {};
+      const phone = normalizedPhone(artifact.data?.phone || persisted.phone);
+      if (!phone) return [];
+      const message = messagesByLead.get(String(artifact.artifactId || '')) || {};
+      const inputContext = persisted.inputContext && typeof persisted.inputContext === 'object' ? persisted.inputContext : {};
+      const personalNotes = [artifact.data?.personal_notes, inputContext.notes, inputContext.special_instruction]
+        .map((value) => String(value || '').trim()).filter(Boolean).join('\n');
+      return [{
+        type: 'phone', value: phone,
+        label: artifact.data?.company || persisted.company || phone,
+        lead_ref: artifact.data?.persistence_ref || persisted.id || null,
+        verified_email: message.recipient || persisted.email || null,
+        personal_notes: personalNotes || null,
+        goal: artifact.data?.outreach_angle || inputContext.outreach_angle || 'Understand the prospect\'s current priorities and determine whether a useful next conversation exists.',
+        fit_rationale: artifact.data?.fit_rationale || inputContext.fit_rationale || null,
+        source_refs: Array.isArray(artifact.sourceRefs) ? artifact.sourceRefs : [],
+      }];
+    });
+    if (!targets.length) return [];
+    return [{
+      id: `outreach-calls:${run.id}`,
+      source_run_id: run.id,
+      source_todo_id: run.trigger?.todo_id || null,
+      title: 'Start TARA outreach calls',
+      summary: `${targets.length} verified prospect${targets.length === 1 ? '' : 's'} ready for sequential TARA outreach. Each call is analyzed before Runtime prepares the next one.`,
+      targets,
+    }];
+  });
+}
+
 export function eventCursor(...values) {
   return values.reduce((highest, value) => {
     try {
@@ -711,6 +756,16 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           }),
         ]);
         const todoById = new Map(todos.map((todo) => [todo.id, todo]));
+        const outreachLeadRefs = [...new Set(playbookRuns.flatMap((run) => run.artifacts)
+          .filter((artifact) => artifact.artifactKey === 'lead_record')
+          .map((artifact) => String(artifact.data?.persistence_ref || '')).filter(Boolean))];
+        const outreachTargets = outreachLeadRefs.length ? await prisma.outreachTarget.findMany({
+          where: { id: { in: outreachLeadRefs }, campaign: { orgId } },
+          select: { id: true, company: true, email: true, phone: true, inputContext: true },
+        }).catch(() => []) : [];
+        const outreachCallProposals = projectOutreachCallProposals({
+          playbookRuns, outreachTargets, todos, runtimeId: runtime.id, runtimeEpoch: runtime.epoch,
+        });
         const campaignsByRun = new Map((playbookRuns.length ? await prisma.campaign.findMany({
           where: { orgId, sourceType: 'runtime_playbook', sourceId: { in: playbookRuns.map((run) => run.id) } },
           select: {
@@ -845,12 +900,85 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           runtime_queue: agentRuntimeTasks,
           growth_brief: growthBrief,
           first_life_experience: firstLifeExperience,
+          outreach_call_proposals: outreachCallProposals,
           playbook_approvals: playbookApprovals, playbook_runs: playbookRuns,
           playbook_inputs: playbookInputs,
           playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)),
           playbook_projection_warnings: playbookProjectionWarnings,
           first_life: firstLife, activation_sprint: activationSprint,
         });
+      }
+
+      const outreachCallsMatch = pathname.match(/^\/v1\/hq\/outreach\/runs\/([0-9a-f-]{36})\/calls$/i);
+      if (outreachCallsMatch && req.method === 'POST') {
+        const runtime = await getHqRuntime({ prisma, orgId });
+        if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        const sourceRun = await prisma.runtimePlaybookRun.findFirst({
+          where: { id: outreachCallsMatch[1], orgId, playbookId: 'outreach.prospect-to-conversation' },
+          include: { artifacts: { where: { status: { not: 'SUPERSEDED' } }, orderBy: { createdAt: 'asc' } } },
+        });
+        if (!sourceRun || String(sourceRun.trigger?.runtime_id || '') !== String(runtime.id)
+          || String(sourceRun.trigger?.runtime_epoch || '') !== String(runtime.epoch)) {
+          return jsonResponse(res, { error: 'runtime_outreach_source_unavailable' }, 404);
+        }
+        const leadRefs = sourceRun.artifacts.filter((artifact) => artifact.artifactKey === 'lead_record')
+          .map((artifact) => String(artifact.data?.persistence_ref || '')).filter(Boolean);
+        const [outreachTargets, currentTodos] = await Promise.all([
+          leadRefs.length ? prisma.outreachTarget.findMany({
+            where: { id: { in: leadRefs }, campaign: { orgId } },
+            select: { id: true, company: true, email: true, phone: true, inputContext: true },
+          }) : [],
+          prisma.hqTodo.findMany({ where: { runtimeId: runtime.id, orgId } }),
+        ]);
+        const proposal = projectOutreachCallProposals({
+          playbookRuns: [sourceRun], outreachTargets, todos: [], runtimeId: runtime.id, runtimeEpoch: runtime.epoch,
+        })[0];
+        if (!proposal) return jsonResponse(res, { error: 'runtime_outreach_no_verified_call_targets' }, 409);
+        let todo = currentTodos.find((candidate) => String(candidate.context?.source_outreach_run_id || '') === sourceRun.id);
+        if (!todo) {
+          const sourceTodo = currentTodos.find((candidate) => String(candidate.id) === String(sourceRun.trigger?.todo_id || ''));
+          todo = await prisma.hqTodo.create({ data: {
+            runtimeId: runtime.id, orgId, instructionId: sourceTodo?.instructionId || null,
+            title: proposal.title,
+            objective: `Call ${proposal.targets.length} verified outreach prospect${proposal.targets.length === 1 ? '' : 's'} sequentially with TARA. Analyze each completed transcript and retained lead learning before preparing the next call.`,
+            kind: 'runtime_task', status: 'PROPOSED',
+            priority: Number(sourceTodo?.priority || 100) + 1,
+            position: Number(sourceTodo?.position || 0) + 1,
+            requiredCapabilities: [],
+            context: {
+              proposal_origin: 'user_instruction',
+              runtime_epoch: runtime.epoch,
+              source_outreach_run_id: sourceRun.id,
+              source_outreach_todo_id: sourceTodo?.id || null,
+              source_instruction: proposal.title,
+              requested_action: 'place_sequential_voice_calls',
+              requested_terminal_outcome: 'cohort_completed',
+              expected_outcome: 'cohort_completed',
+              effect_class: 'external', external_action_requested: true,
+              exact_targets: proposal.targets,
+              evidence_refs: proposal.targets.flatMap((target) => target.source_refs || []),
+              acceptance_criteria: ['Every selected call reaches a durable analyzed outcome before the next call begins.'],
+            },
+          } });
+        }
+        const activation = await activateEligibleFirstLifeWork({
+          prisma, runtime, expansionTrigger: 'user_instruction', proposalOrigin: 'user_instruction',
+        });
+        await appendHqEvent({
+          prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+          eventType: 'todo_created', title: 'TARA outreach sequence retained',
+          summary: activation.promoted.some((item) => item.id === todo.id)
+            ? 'Runtime will prepare the verified calls sequentially. No call is placed before its exact authority gate.'
+            : 'The verified call sequence is queued behind the active external lifecycle and will retain the same targets and notes.',
+          details: { todo_id: todo.id, source_run_id: sourceRun.id, target_count: proposal.targets.length, promoted: activation.promoted },
+        });
+        if (activation.promoted.length) await requestWake({
+          prisma, runtime, triggerType: 'queue_advance',
+          payload: { promoted_todo_ids: activation.promoted.map((item) => item.id) },
+          key: `outreach-calls:${sourceRun.id}`,
+        });
+        Promise.resolve(wakeScheduler?.()).catch(() => {});
+        return jsonResponse(res, { ok: true, todo_id: todo.id, target_count: proposal.targets.length, promoted: activation.promoted }, 202);
       }
 
       const capabilityDeferMatch = pathname.match(/^\/v1\/hq\/capability-requests\/([^/]+)\/defer$/);

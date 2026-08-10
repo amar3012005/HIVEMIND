@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { getGrowthPlanToolCatalog } from '../../src/agent/connector-toolkits/growth-plan-tools.js';
 import { buildGrowthPlanArtifactData, compilePrepareQueue, completeGrowthPlanAssessments, growthPlanArtifactMetadata, normalizeGrowthPlanEvidence, renderGrowthPlanReport, selectGrowthPlanAspects } from '../../src/growth/planner.js';
 import { applyFirstLifePolicy, loadFirstLifePolicy } from '../../src/growth/first-life-policy.js';
@@ -159,4 +160,27 @@ test('v6 retains one policy-selected program builder and leaves portfolio design
   const result = applyFirstLifePolicy(plan, { baseline: { resource_id: 'baseline-1' } }, policy, catalog);
   assert.deepEqual(result.operating_queue.map((item) => item.id), ['builder']);
   assert.equal(result.first_life.proposal_count, 1);
+});
+
+test('current first-life policy uses the single-run strategy builder that requires a campaign experiment', async () => {
+  const policy = await loadFirstLifePolicy();
+  assert.equal(policy.version, 9);
+  assert.deepEqual(policy.initial_lifecycle, {
+    playbook_id: 'marketing.strategy-to-growth-brief',
+    version: 7,
+    supported_action: 'formulate_go_to_market_strategy',
+    bypass_growth_plan: true,
+    materialize_motions: true,
+    auto_prepare_sequentially: true,
+  });
+  const playbook = JSON.parse(await readFile(new URL('../../src/runtime-playbooks/fixtures/marketing-strategy-to-growth-brief.v7.json', import.meta.url), 'utf8'));
+  assert.match(playbook.stages[0].objective, /must include one bounded awareness-to-learning campaign experiment/);
+  assert.match(playbook.stages[0].objective, /Do not select a playbook, Company Room, provider/);
+  assert.deepEqual(playbook.stages[0].completion_checks.at(-1), {
+    predicate: 'array_has_field_value',
+    select: 'marketing_strategy_program',
+    path: 'data.motions',
+    item_path: 'motion_class',
+    value: 'market_response_experiment',
+  });
 });

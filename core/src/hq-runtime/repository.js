@@ -143,7 +143,7 @@ export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = n
     // and provider callbacks. Lock the Runtime row and reconcile against the
     // append-only ledger before assigning the next sequence.
     const locked = await tx.$queryRawUnsafe(
-      `SELECT epoch, event_sequence
+      `SELECT epoch, event_sequence, owner_user_id
          FROM hivemind.hq_runtimes
         WHERE id = $1::uuid AND org_id = $2::uuid
         FOR UPDATE`,
@@ -179,9 +179,23 @@ export async function appendHqEvent({ prisma, runtimeId, orgId, runtimeEpoch = n
     const event = await tx.hqRuntimeEvent.create({
       data: { runtimeId, orgId, cycleId, sequence, eventType, title, summary, details: idempotencyKey ? { ...details, idempotency_key: idempotencyKey } : details, skillRef, toolRef, workOrderId, evidenceRefs, visibility },
     });
-    return { event, created: true };
+    return { event, created: true, ownerUserId: locked[0].owner_user_id };
   });
-  if (result.created) publishHqRuntimeEvent(result.event).catch(() => {});
+  if (result.created) {
+    // One safe, grep-friendly major-action line per persisted Runtime event.
+    // The durable event remains canonical; logs deliberately omit summaries,
+    // artifact bodies, recipients and provider payloads.
+    console.info('[hq-runtime-action]', JSON.stringify({
+      user_id: result.ownerUserId,
+      org_id: orgId,
+      runtime_id: runtimeId,
+      cycle_id: cycleId,
+      sequence: String(result.event.sequence),
+      event_type: eventType,
+      title: String(title || '').replace(/[\r\n]+/g, ' ').slice(0, 240),
+    }));
+    publishHqRuntimeEvent(result.event).catch(() => {});
+  }
   return result.event;
 }
 

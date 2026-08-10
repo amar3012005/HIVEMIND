@@ -417,7 +417,10 @@ export class GenericStageExecutor {
               expected_artifacts: stage.expected_artifacts,
               checks: stage.completion_checks,
               config: asObject(execution.config),
-            }, { orgId: run.orgId, runId: run.id, stageId: stage.id, roomId: run.roomId })
+            }, {
+              orgId: run.orgId, runId: run.id, stageId: stage.id, roomId: run.roomId,
+              attempt: attempts[stage.id], maxAttempts: Number(stage.max_attempts || 1),
+            })
             : await this.director.execute(executionRequest);
           if (execution.mode === 'adapter' && !this.adapters) {
             throw new Error('runtime_stage_adapter_registry_required');

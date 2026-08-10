@@ -248,6 +248,13 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
       const actor = await ownerFor(prisma, context);
       const produced = [];
       const warnings = [];
+      // A successful first attempt has no prior provider write to reconcile.
+      // Listing and hydrating the entire draft mailbox once per recipient made
+      // a 19-message batch take almost 27 minutes. On semantic retries, perform
+      // one bounded mailbox read and reuse it for every recipient.
+      const existingDrafts = Number(context.attempt || 1) > 1
+        ? asArray((await google('gmail_list_drafts', { max: 30 }, actor).catch(() => null))?.drafts)
+        : [];
       for (const artifact of messages) {
         const recipient = String(artifact?.data?.recipient || '').trim();
         const subject = String(artifact?.data?.subject || '').trim();
@@ -259,7 +266,11 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
           continue;
         }
         const messageId = operationMessageId(context, artifact, 'prepare_draft');
-        let draft = await findDraftByRecipientAndSubject(google, actor, recipient, subject);
+        let draft = existingDrafts.find((candidate) => (
+          normalizedMessageId(candidate?.headerMessageId) === normalizedMessageId(messageId)
+          || (String(candidate?.to || '').trim().toLowerCase() === recipient.toLowerCase()
+            && String(candidate?.subject || '').trim() === subject)
+        )) || null;
         try {
           if (!draft) draft = await google('gmail_create_draft', {
             to: recipient,
@@ -287,6 +298,9 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
             warnings.push({ input_ref: artifact?.id || null, reason: String(cause?.message || cause), uncertain: key === 'action_uncertain' });
             continue;
           }
+        }
+        if (!draft?.draftId) {
+          draft = await findDraftByMessageId(google, actor, messageId);
         }
         if (!draft?.draftId) {
           draft = await findDraftByRecipientAndSubject(google, actor, recipient, subject);

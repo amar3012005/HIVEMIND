@@ -101,6 +101,51 @@ test('Gmail adapter creates one provider draft per accepted message through gene
   assert.equal(result.artifacts[0].data.delivery_requested, true);
 });
 
+test('Gmail draft preparation skips mailbox scans on a healthy first batch', async () => {
+  const calls = [];
+  const adapter = createGmailRuntimeAdapter({
+    prisma: { hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } } },
+    runTool: async (tool, args) => {
+      calls.push(tool);
+      if (tool !== 'gmail_create_draft') throw new Error(`unexpected:${tool}`);
+      return { draftId: `draft-${args.to}`, messageId: `message-${args.to}` };
+    },
+  });
+  const messages = ['one', 'two', 'three'].map((name) => ({
+    id: `message-${name}`, key: 'message_record',
+    data: { recipient: `${name}@example.test`, subject: `Subject ${name}`, body: `Body ${name}` },
+  }));
+  const result = await adapter.execute({
+    config: { action: 'prepare_drafts' }, inputs: { 'artifacts.message_record': messages },
+  }, { ...context(), attempt: 1, maxAttempts: 2 });
+  assert.equal(result.artifacts.length, 3);
+  assert.deepEqual(calls, ['gmail_create_draft', 'gmail_create_draft', 'gmail_create_draft']);
+});
+
+test('Gmail draft retry performs one bounded reconciliation listing for the whole batch', async () => {
+  const calls = [];
+  const adapter = createGmailRuntimeAdapter({
+    prisma: { hyperRoom: { async findFirst() { return { userId: '44444444-4444-4444-8444-444444444444' }; } } },
+    runTool: async (tool) => {
+      calls.push(tool);
+      if (tool === 'gmail_list_drafts') return { drafts: [
+        { draftId: 'draft-one', to: 'one@example.test', subject: 'Subject one' },
+        { draftId: 'draft-two', to: 'two@example.test', subject: 'Subject two' },
+      ] };
+      throw new Error(`unexpected:${tool}`);
+    },
+  });
+  const messages = ['one', 'two'].map((name) => ({
+    id: `message-${name}`, key: 'message_record',
+    data: { recipient: `${name}@example.test`, subject: `Subject ${name}`, body: `Body ${name}` },
+  }));
+  const result = await adapter.execute({
+    config: { action: 'prepare_drafts' }, inputs: { 'artifacts.message_record': messages },
+  }, { ...context(), attempt: 2, maxAttempts: 2 });
+  assert.equal(result.artifacts.length, 2);
+  assert.deepEqual(calls, ['gmail_list_drafts']);
+});
+
 test('Gmail adapter reconciles a successful draft write with an incomplete provider receipt', async () => {
   let created = false;
   const adapter = createGmailRuntimeAdapter({

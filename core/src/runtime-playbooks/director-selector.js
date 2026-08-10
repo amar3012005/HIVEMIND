@@ -175,6 +175,16 @@ export class DirectorPlaybookSelector {
         }
         let acceptableTerminalStates = Array.isArray(selected.acceptable_terminal_states)
           ? [...new Set(selected.acceptable_terminal_states.map(String).filter((state) => playbook.terminal_states.includes(state)))] : [];
+        const declaredActionTerminals = Array.isArray(playbook.metadata?.terminal_states_by_action?.[matchedSupportedAction])
+          ? playbook.metadata.terminal_states_by_action[matchedSupportedAction]
+            .map(String).filter((state) => playbook.terminal_states.includes(state))
+          : [];
+        // The Director chooses the compatible action; immutable playbook data owns
+        // which terminal outcomes satisfy that action. Letting model output narrow
+        // this set made valid prepared outcomes appear as failed lifecycles.
+        if (runtimeRequest && declaredActionTerminals.length) {
+          acceptableTerminalStates = [...new Set(declaredActionTerminals)];
+        }
         // Runtime assignments always include the durable request contract and
         // therefore require an explicit outcome binding. The broader selector
         // API remains backwards-compatible for non-Runtime registry consumers.

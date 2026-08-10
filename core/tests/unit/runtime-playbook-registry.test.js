@@ -976,6 +976,38 @@ test('Runtime selection binds one exact supported action from playbook data', as
   }), /runtime_playbook_supported_action_required/);
 });
 
+test('Runtime selection uses playbook-declared terminal states for the selected action', async () => {
+  const fixture = await loadFixture();
+  fixture.metadata = {
+    ...(fixture.metadata || {}),
+    supported_actions: ['prepare_campaign'],
+    terminal_states_by_action: {
+      prepare_campaign: [fixture.terminal_states[0], fixture.terminal_states[1]],
+    },
+  };
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(fixture);
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => ({
+      ok: true,
+      async json() { return { choices: [{ message: { content: JSON.stringify({
+        playbook_id: fixture.playbook_id,
+        version: fixture.version,
+        matched_supported_action: 'prepare_campaign',
+        acceptable_terminal_states: [fixture.terminal_states[0]],
+      }) } }] }; },
+    }),
+  });
+  const selected = await selector.select({
+    objective: 'Prepare the campaign for review.',
+    context: { request: { requested_terminal_outcome: 'Campaign ready for review.' } },
+  });
+  assert.deepEqual(selected.acceptable_terminal_states, [
+    fixture.terminal_states[0], fixture.terminal_states[1],
+  ]);
+});
+
 test('Director binds only playbook-declared inputs without keyword parsing in the engine', async () => {
   const registry = new RuntimePlaybookRegistry();
   await registry.load([createJsonPlaybookSource([outreachV2FixturePath])]);

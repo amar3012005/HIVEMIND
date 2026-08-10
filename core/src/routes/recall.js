@@ -1,5 +1,10 @@
 import crypto from 'node:crypto';
 
+export function normalizeRecallLimit(value, fallback = 15) {
+  const parsed = Number(value);
+  return Math.min(Math.max(Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback, 1), 50);
+}
+
 // PROJECT-SCOPE FILTER — one authority for BOTH recall branches (bounded
 // fact/explain/full AND legacy). Hydrates scope/project/owner from the DB, then:
 //   caller WITH project  → org-plane memories + that project's memories;
@@ -228,7 +233,7 @@ export async function handleRecallRoute(ctx = {}) {
           // An explicit public API limit is caller intent. Forward it to the
           // unified retrieval service instead of silently falling back to the
           // org's synthesis delivery window (commonly five).
-          limit: Math.min(Math.max(Number(body.limit) || 15, 1), 50),
+          limit: normalizeRecallLimit(body.limit),
           include_superseded: recallPlan.operation === 'timeline' || body.include_superseded === true,
         }, {
           userId,
@@ -327,7 +332,10 @@ export async function handleRecallRoute(ctx = {}) {
       preferred_source_platforms: body.preferred_source_platforms || [],
       preferred_tags: body.preferred_tags || [],
       date_range: body.date_range || temporalExpansion.dateRange || null,
-      max_memories: body.max_memories || 5,
+      // `quick` is the documented public mode and still uses this compatible
+      // pipeline. Honor the documented `limit` field here as well, retaining
+      // 10-15 results by default while chat independently reveals only five.
+      max_memories: normalizeRecallLimit(body.max_memories ?? body.limit),
       weights: recallWeights,
       is_latest: body.is_latest,
       include_expired: body.include_expired,

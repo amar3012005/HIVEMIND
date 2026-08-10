@@ -8,6 +8,7 @@ import {
 } from '../../src/hq-runtime/contracts.js';
 import {
   eventCursor, playbookQueueStatus, projectCampaignAuthorityPreview, projectOutreachCallProposals,
+  projectRuntimeCampaignPreviews,
 } from '../../src/hq-runtime/routes.js';
 
 test('HQ runtime permits only explicit state transitions', () => {
@@ -105,6 +106,20 @@ test('HQ campaign authority projection exposes only the current immutable launch
   assert.equal(preview.actions[0].payload.text, 'Exact copy');
   assert.equal(preview.actions[0].assets[0].content_url, '/v1/campaigns/campaign-1/assets/asset-1/content');
   assert.equal('storageKey' in preview.actions[0].assets[0], false);
+});
+
+test('HQ campaign canvas projection includes only the current Runtime epoch', () => {
+  const campaign = { id: 'campaign-1', name: 'Current campaign', status: 'READY_FOR_APPROVAL', actions: [] };
+  const previews = projectRuntimeCampaignPreviews({
+    runtimeId: 'runtime-1', runtimeEpoch: 'epoch-2', campaignsByRun: new Map([['current', campaign], ['old', campaign]]),
+    playbookRuns: [
+      { id: 'old', trigger: { runtime_id: 'runtime-1', runtime_epoch: 'epoch-1', todo_id: 'old-todo' } },
+      { id: 'current', trigger: { runtime_id: 'runtime-1', runtime_epoch: 'epoch-2', todo_id: 'todo-1' } },
+    ],
+  });
+  assert.equal(previews.length, 1);
+  assert.equal(previews[0].run_id, 'current');
+  assert.equal(previews[0].todo_id, 'todo-1');
 });
 
 test('HQ offers one sequential TARA cohort from verified outreach leads and retained notes', () => {

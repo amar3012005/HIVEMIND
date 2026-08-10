@@ -68,6 +68,17 @@ export function projectCampaignAuthorityPreview(campaign) {
   };
 }
 
+export function projectRuntimeCampaignPreviews({ playbookRuns = [], campaignsByRun = new Map(), runtimeId, runtimeEpoch } = {}) {
+  return playbookRuns.flatMap((run) => {
+    if (String(run.trigger?.runtime_id || '') !== String(runtimeId || '')
+      || String(run.trigger?.runtime_epoch || '') !== String(runtimeEpoch || '')) return [];
+    const campaign = campaignsByRun.get(run.id);
+    if (!campaign) return [];
+    const preview = projectCampaignAuthorityPreview(campaign);
+    return preview ? [{ ...preview, run_id: run.id, todo_id: run.trigger?.todo_id || null }] : [];
+  });
+}
+
 function normalizedPhone(value) {
   const phone = String(value || '').replace(/[\s()/-]/g, '');
   return /^\+[1-9]\d{6,14}$/.test(phone) ? phone : null;
@@ -899,6 +910,9 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           } catch { /* Historical unavailable definitions are reported separately below. */ }
         }
         const agentRuntimeTasks = projectAgentRuntimeTasks({ todos, playbookRuns, playbookOwners });
+        const campaignPreviews = projectRuntimeCampaignPreviews({
+          playbookRuns, campaignsByRun, runtimeId: runtime.id, runtimeEpoch: runtime.epoch,
+        });
         const growthBrief = projectGrowthBrief(baselineArtifact, currentPlanArtifact);
         const adminCheckin = playbookRuns.find((run) => run.playbookId === 'operations.browser-admin-checkin-to-status'
           && run.trigger?.first_life_admin_checkin === true
@@ -913,6 +927,7 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
           growth_brief: growthBrief,
           first_life_experience: firstLifeExperience,
           outreach_call_proposals: outreachCallProposals,
+          campaign_previews: campaignPreviews,
           playbook_approvals: playbookApprovals, playbook_runs: playbookRuns,
           playbook_inputs: playbookInputs,
           playbook_snapshots: playbookRuns.map((run) => projectRuntimePlaybookSnapshot(run)),

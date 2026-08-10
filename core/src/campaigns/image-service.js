@@ -182,6 +182,13 @@ export async function processQueuedCampaignAssets({ prisma, limit = 1, provider 
       const action = await prisma.campaignAction.findUnique({ where: { id: queued.actionId } });
       if (action && !action.payload?.asset_id) await selectReadyAsset(prisma, { campaign: queued.campaign, action, asset });
       await prisma.campaignEvent.create({ data: { campaignId: queued.campaignId, orgId: queued.campaign.orgId, eventType: 'campaign_asset_ready', data: { action_id: queued.actionId, asset_id: queued.id, content_hash: contentHash, provider: asset.provider, model: asset.model } } });
+      const { notifyRuntimeCampaignProjection } = await import('./runtime-bridge.js');
+      await notifyRuntimeCampaignProjection({
+        prisma,
+        campaignId: queued.campaignId,
+        type: 'campaign.asset_ready',
+        data: { action_id: queued.actionId, asset_id: queued.id },
+      }).catch(() => {});
     } catch (error) {
       await prisma.campaignAsset.update({ where: { id: queued.id }, data: { status: 'FAILED', metadata: { ...(queued.metadata || {}), error: String(error?.message || error).slice(0, 1000), error_code: error?.code || null } } });
     }

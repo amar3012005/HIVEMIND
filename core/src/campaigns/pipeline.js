@@ -1,7 +1,7 @@
 import { autoLaunchCampaignIfReady, markCampaignNeedsInput, persistCampaignBundle, persistCampaignRepairingBundle, regenerateCampaign } from './service.js';
 import { dispatchCampaignRoomSafely } from './dispatcher.js';
 import { normalizeCampaignRoomEvent } from './contracts.js';
-import { scheduleRuntimeCampaignEvent } from './runtime-bridge.js';
+import { notifyRuntimeCampaignProjection, scheduleRuntimeCampaignEvent } from './runtime-bridge.js';
 
 const FINAL_RUN_STATES = new Set(['COMPLETED', 'NEEDS_INPUT', 'FAILED', 'CANCELLED']);
 
@@ -110,6 +110,12 @@ export async function handleCampaignRoomEvent({ prisma, turnId, event }) {
       prisma, campaignId: run.campaignId,
       type: result?.ok ? 'campaign.contract_ready' : 'campaign.contract_failed',
       data: { plan_version_id: result?.planVersionId || null, status: response?.status || null },
+    }).catch(() => {});
+    if (result?.ok) await notifyRuntimeCampaignProjection({
+      prisma,
+      campaignId: run.campaignId,
+      type: 'campaign.assets_rendering',
+      data: { plan_version_id: result.planVersionId, action_count: result.visualActionCount || 0 },
     }).catch(() => {});
     return readyEvent ? { ...response, campaignReady: true, campaignReadyEventId: String(readyEvent.id) } : response;
   }

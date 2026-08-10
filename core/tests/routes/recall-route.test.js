@@ -1,10 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleQuickSearchRoute, handleRecallRoute } from '../../src/routes/recall.js';
+import { handleQuickSearchRoute, handleRecallRoute, normalizeRecallLimit } from '../../src/routes/recall.js';
 
 function jsonResponse(_res, body, statusCode = 200) {
   return { statusCode, body };
 }
+
+test('public recall limits retain 15 by default and honor bounded caller limits', () => {
+  assert.equal(normalizeRecallLimit(undefined), 15);
+  assert.equal(normalizeRecallLimit(12), 12);
+  assert.equal(normalizeRecallLimit(500), 50);
+  assert.equal(normalizeRecallLimit(0), 15);
+});
 
 test('recall route rejects project-scoped access the caller does not have', async () => {
   const result = await handleRecallRoute({

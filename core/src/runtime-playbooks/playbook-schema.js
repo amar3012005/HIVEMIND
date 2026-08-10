@@ -148,6 +148,7 @@ export const runtimePlaybookSchema = {
                   title: { type: 'string', minLength: 1, maxLength: 240 },
                   summary: { type: 'string', minLength: 1, maxLength: 2000 },
                   next_action: { type: 'string', minLength: 1, maxLength: 160 },
+                  task_status: { enum: ['RUNNING', 'MONITORING'] },
                 },
               },
             },

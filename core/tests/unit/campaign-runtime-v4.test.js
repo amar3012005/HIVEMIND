@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { validateRuntimePlaybookShape } from '../../src/runtime-playbooks/playbook-schema.js';
 
 const fixtureUrl = new URL('../../src/runtime-playbooks/fixtures/campaign-awareness-to-learning.v5.json', import.meta.url);
 const registryUrl = new URL('../../src/runtime-playbooks/fixtures/registry.json', import.meta.url);
@@ -10,6 +11,8 @@ test('campaign v5 projects asynchronous Campaign Room work as running', async ()
   const prepare = playbook.stages.find((stage) => stage.id === 'prepare_campaign_contract');
   const inspect = playbook.stages.find((stage) => stage.id === 'inspect_campaign_contract');
   const repair = playbook.stages.find((stage) => stage.id === 'wait_for_campaign_repair');
+
+  assert.doesNotThrow(() => validateRuntimePlaybookShape(playbook));
 
   assert.ok(prepare.waits_for_event.types.includes('campaign.contract_needs_repair'));
   assert.equal(prepare.presentation.waiting.task_status, 'RUNNING');

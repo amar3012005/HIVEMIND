@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { fetchBearerFromNango } from '../connectors/mcp/nango-service.js';
 import { renderSingulanceTransactionalEmail } from './templates/singulance-transactional.js';
+import { renderHivemindWelcomeEmail } from './templates/hivemind-welcome.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -219,9 +220,16 @@ export function renderTemplate(templateId, vars = {}) {
   const text = tpl.text ? fill(tpl.text, ctx, false) : '';
   const inner = tpl.html ? fill(tpl.html, ctx, true) : `<p>${escapeHtml(text)}</p>`;
   const preheader = tpl.preheader ? fill(tpl.preheader, ctx, true) : '';
-  const html = tpl.layout === 'singulance_transactional'
-    ? renderSingulanceTransactionalEmail({ preheader, innerHtml: inner, year: escapeHtml(ctx.year) })
-    : wrapHtml(inner, preheader, ctx);
+  const html = tpl.layout === 'hivemind_cartesia_welcome'
+    ? renderHivemindWelcomeEmail({
+      preheader,
+      name: escapeHtml(ctx.name),
+      appUrl: escapeHtml(ctx.appUrl),
+      year: escapeHtml(ctx.year),
+    })
+    : tpl.layout === 'singulance_transactional'
+      ? renderSingulanceTransactionalEmail({ preheader, innerHtml: inner, year: escapeHtml(ctx.year) })
+      : wrapHtml(inner, preheader, ctx);
   return { subject, text, html };
 }
 

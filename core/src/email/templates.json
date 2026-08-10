@@ -18,7 +18,7 @@
     "html": "<div style=\"margin:0 0 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:16px;font-weight:700;letter-spacing:2px;color:#117dff\">SIGN IN</div><h1 style=\"margin:0 0 22px;font-family:'Space Grotesk',Arial,sans-serif;font-size:32px;line-height:39px;letter-spacing:-0.4px;color:#0a0a0a\">Welcome back, {{name}}</h1><p style=\"margin:0 0 26px;font-size:17px;line-height:28px;color:#5d5d5d\">Your company AI Operating System is ready. HIVEMIND gives your AI workforce approved context inside your company brain, while your organization retains control.</p><p style=\"margin:0 0 28px\"><a href=\"{{appUrl}}\" style=\"display:inline-block;background:#117dff;color:#ffffff;text-decoration:none;font-family:'Space Grotesk',Arial,sans-serif;font-weight:700;font-size:15px;letter-spacing:0.6px;padding:15px 24px;border-radius:6px\">OPEN HIVEMIND</a></p><p style=\"margin:0;font-size:13px;line-height:22px;color:#7b7b7b\">The HIVEMIND team</p>"
   },
   "welcome_signup": {
-    "layout": "singulance_transactional",
+    "layout": "hivemind_cartesia_welcome",
     "subject": "Welcome to HIVEMIND, {{name}} — let's get you set up",
     "preheader": "Your company AI Operating System is ready to activate.",
     "text": "Hi {{name}},\n\nWelcome to HIVEMIND — the AI Operating System for your company.\n\nYour AI workforce now works inside your company brain, using approved context to coordinate work, execute tasks, and preserve durable organizational intelligence under your control.\n\nStart by connecting your company context:\n\n{{appUrl}}\n\nWe're glad you're here.\nThe HIVEMIND team\n\n© {{year}} Da'vinci Solutions",

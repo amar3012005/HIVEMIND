@@ -2733,7 +2733,7 @@ export async function runReactAgentV2({
         && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
         && useTools === true
         && Array.isArray(intentDecision.subtasks) && intentDecision.subtasks.length > 0) {
-      const { runCompoundOrchestrator, buildCompoundSynthesisPayload } = await import('./compound-orchestrator.js');
+      const { runCompoundOrchestrator, buildCompoundSynthesisPayload, compoundSynthesisResultsLabel } = await import('./compound-orchestrator.js');
       const priorAssistantContext = [...(Array.isArray(history) ? history : [])]
         .reverse()
         .find((turn) => turn?.role === 'assistant' && typeof turn?.content === 'string' && turn.content.trim())
@@ -2775,7 +2775,7 @@ export async function runReactAgentV2({
             const synthesized = await callJsonLLM({
               messages: [
                 { role: 'system', content: `Return strict JSON {"response":string,"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Answer naturally as HIVE using only the completed HIVE-MIND recall and live connector results supplied. Answer every requested part and include useful closely related grounded details when they add context. If ranked recall context is relevant but insufficient and more ranked rows may exist, set context_status="relevant_but_incomplete"; the server will reveal the next page without recalling. If one detail remains missing after the final page, first explain what the results establish, then identify only the missing part and invite specificity. Preserve exact counts, dates, names, relationships, and uncertainty. Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
-                { role: 'user', content: `USER REQUEST:\n${message}\n\nCOMPLETED GOVERNED RESULTS (ranks 1-${visibleLimit}):\n${boundedResults}` },
+                { role: 'user', content: `USER REQUEST:\n${message}\n\n${compoundSynthesisResultsLabel({ recallResults: compound.recallResults || [], visibleLimit })}:\n${boundedResults}` },
               ],
               model: requestedAnswerModel,
               apiKey,

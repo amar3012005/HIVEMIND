@@ -248,7 +248,10 @@ def assemble_campaign_bundle(
         action["success_measure"] = str(action.get("success_measure") or "")
         action["rollback_or_exit"] = str(action.get("rollback_or_exit") or "")
         action["evidence_ids"] = action.get("evidence_ids") if isinstance(action.get("evidence_ids"), list) else []
-        action["claim_status"] = str(action.get("claim_status") or "no_claim")
+        claim_status = str(action.get("claim_status") or "no_claim").strip().lower()
+        # Normalize a common model synonym without weakening governance:
+        # "verified" still requires directly supporting verified evidence.
+        action["claim_status"] = "verified" if claim_status == "claim" else claim_status
         creative_brief = action.get("creative_brief") if isinstance(action.get("creative_brief"), dict) else {}
         required = creative_brief.get("required") is True
         creative_brief["required"] = required

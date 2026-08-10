@@ -291,6 +291,27 @@ def test_campaign_contract_rejects_assumptions_in_executable_copy():
     assert any("cannot publish an assumption as final_copy" in error for error in errors)
 
 
+def test_campaign_compiler_normalizes_claim_synonym_without_bypassing_evidence_governance():
+    semantic = _valid_v2_bundle()
+    semantic["actions"][0]["claim_status"] = "claim"
+
+    bundle = assemble_campaign_bundle(
+        semantic,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+        campaign_brief={"brief": {"duration_days": 7}},
+    )
+
+    assert bundle["actions"][0]["claim_status"] == "verified"
+    accepted, errors = campaign__submit_plan(
+        bundle,
+        channels=["x_organic"],
+        requirements=["goal", "channel:x_organic"],
+    )
+    assert errors == []
+    assert accepted is not None
+
+
 def test_campaign_contract_rejects_numbers_and_absolutes_borrowing_unrelated_evidence():
     bundle = _valid_v2_bundle()
     bundle["actions"][0]["final_copy"] = "Campaign Rooms are always ready in 50 ms."

@@ -198,13 +198,16 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
   });
   if (!baselineArtifact) throw new Error('Growth plan references a baseline outside this organization or one that does not exist');
 
-  const roomTags = [...new Set(queue.map((item) => String(item.room_tag).toLowerCase()))];
-  const rooms = await prisma.hyperRoom.findMany({
-    where: { orgId, archivedAt: null, roomTag: { in: roomTags } }, select: { roomTag: true },
-  });
-  const available = new Set(rooms.map((room) => room.roomTag));
-  const missingRooms = roomTags.filter((tag) => !available.has(tag));
-  if (missingRooms.length) throw new Error(`Missing Company Room(s): ${missingRooms.join(', ')}`);
+  const runtimeSelectsLifecycle = contract.first_life?.runtime_selects_lifecycle === true;
+  if (!runtimeSelectsLifecycle) {
+    const roomTags = [...new Set(queue.map((item) => String(item.room_tag).toLowerCase()))];
+    const rooms = await prisma.hyperRoom.findMany({
+      where: { orgId, archivedAt: null, roomTag: { in: roomTags } }, select: { roomTag: true },
+    });
+    const available = new Set(rooms.map((room) => room.roomTag));
+    const missingRooms = roomTags.filter((tag) => !available.has(tag));
+    if (missingRooms.length) throw new Error(`Missing Company Room(s): ${missingRooms.join(', ')}`);
+  }
   const runtime = await prisma.hqRuntime.findUnique({ where: { orgId }, select: { id: true, epoch: true } });
   if (!runtime) throw new Error('Growth plan requires an active HQ Runtime');
   const now = new Date();
@@ -247,9 +250,10 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
     }
     // Auto-execute nulls the first-life gate → every opportunity commits READY and
     // dispatches without a Start click (and no activation sprint is projected).
-    const firstLife = autoExecuteEnabled(contract)
-      ? null
-      : (contract.first_life && typeof contract.first_life === 'object' ? contract.first_life : null);
+    // A versioned first-life policy always owns initial activation. Environment or
+    // plan autonomy may remove a user click, but it may not turn every proposal READY.
+    const firstLife = contract.first_life && typeof contract.first_life === 'object'
+      ? contract.first_life : null;
     const recommendedSourceId = String(firstLife?.recommended_todo_source_id || stage.queue_item_id || '');
     const todos = [];
     for (const [index, item] of queue.entries()) {
@@ -261,12 +265,12 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
       const todo = await tx.hqTodo.create({ data: {
         runtimeId: runtime.id, orgId,
         title: String(item.title).slice(0, 240), objective: String(item.objective),
-        kind: String(item.kind || item.room_tag).toLowerCase(), status: firstLife ? 'PROPOSED' : 'READY',
+        kind: runtimeSelectsLifecycle ? 'runtime_task' : String(item.kind || item.room_tag).toLowerCase(), status: firstLife ? 'PROPOSED' : 'READY',
         priority: Number.isFinite(Number(item.priority)) ? Number(item.priority) : (index + 1) * 10,
         position: Number.isFinite(Number(item.position)) ? Number(item.position) : index,
         requiredCapabilities: Array.isArray(item.required_capabilities) ? item.required_capabilities : [],
         context: {
-          room_tag: String(item.room_tag).toLowerCase(), skill: item.skills?.[0] || null,
+          room_tag: runtimeSelectsLifecycle ? null : String(item.room_tag).toLowerCase(), skill: item.skills?.[0] || null,
           skills: Array.isArray(item.skills) ? item.skills : [],
           deliverable: String(item.deliverable || ''), success_measure: String(item.success_measure || ''),
           acceptance_criteria: Array.isArray(item.acceptance_criteria) ? item.acceptance_criteria : [],
@@ -278,6 +282,8 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
           activation_sprint_id: firstLife ? (item.activation_sprint_id || null) : null,
           activation_slot: firstLife ? (item.activation_slot || null) : null,
           proposal_source_id: item.id || null,
+          proposal_origin: runtimeSelectsLifecycle ? 'growth_plan' : null,
+          source_instruction: String(item.objective || ''),
           first_life_policy_id: item.first_life_policy_id || firstLife?.policy_id || null,
           first_life_policy_version: item.first_life_policy_version || firstLife?.policy_version || null,
           recommendation_rank: Number(item.recommendation_rank || index + 1),
@@ -286,10 +292,11 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
           effect_basis: item.effect_basis || null,
           response_locale: contract.response_locale || null,
           evidence_refs: proposalEvidenceRefs,
-          requested_action: item.requested_action || null,
+          requested_action: runtimeSelectsLifecycle ? null : item.requested_action || null,
           requested_terminal_outcome: item.requested_terminal_outcome || null,
-          planned_playbook_id: item.playbook_id || null,
-          planned_playbook_version: Number.isInteger(Number(item.playbook_version)) ? Number(item.playbook_version) : null,
+          planned_playbook_id: runtimeSelectsLifecycle ? null : item.playbook_id || null,
+          planned_playbook_version: runtimeSelectsLifecycle ? null
+            : Number.isInteger(Number(item.playbook_version)) ? Number(item.playbook_version) : null,
           external_action_requested: item.effect_class === 'external',
           authority_mode: 'PREPARE',
           ignored_capability_suggestions: Array.isArray(item.ignored_capability_suggestions) ? item.ignored_capability_suggestions : [],

@@ -1323,7 +1323,7 @@ export class NativeHqEngine {
         eventType: 'tool_result', title: 'I read and committed the Growth Operating Plan',
         summary: `${acknowledged.summary} The persisted proposals are now the source of truth. ${requiresInitialStart
           ? 'I will not delegate them until you start the recommendation.'
-          : 'After the optional administrator check-in, I will automatically run the recommended evidence-only lifecycle; external effects remain governed at their exact gates.'}`,
+          : 'I will promote one recommendation, select its lifecycle, and prepare it now; external effects remain governed at their exact gates.'}`,
         toolRef: 'growth_plan_run', evidenceRefs: [result.artifact_id],
         details: { toolkit: growthToolkit.id, model: result.model, usage: result.usage || {}, ...acknowledged.details },
       });
@@ -1337,11 +1337,34 @@ export class NativeHqEngine {
         eventType: 'todo_created', title: 'I committed the first operating proposals',
         summary: `${(result.plan?.operating_queue || []).map((item, index) => `${index + 1}. ${item.title}`).join('; ')}. ${requiresInitialStart
           ? 'These remain proposed until you start the recommendation.'
-          : 'These remain proposed while the recommended internal lifecycle starts automatically and prepares the coordinated program.'}`,
+          : 'Runtime will start the recommendation and keep the remaining proposals dormant until the current lifecycle produces a verified result.'}`,
         details: { todo_ids: result.committed?.todo_ids || [], operating_queue: result.plan?.operating_queue || [] }, evidenceRefs: [result.artifact_id],
       });
       initialPolicyCommitted = true;
-      if (firstLifePolicy.optional_admin_checkin === true && this.runtimePlaybooks) {
+      if (firstLifePolicy.auto_start_initial_plan === true) {
+        const activation = await activateEligibleFirstLifeWork({
+          prisma, runtime, expansionTrigger: 'initial_plan_ready',
+        });
+        for (const promoted of activation.promoted) await event(prisma, runtime, cycle, {
+          eventType: 'todo_created', title: `I started the first bounded task: ${promoted.title}`,
+          summary: 'Runtime promoted one persisted proposal. It will select the compatible lifecycle and Company Room next; every other proposal remains dormant.',
+          details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'initial_plan_ready' },
+        });
+        if (activation.promoted.length) {
+          await scheduleHqWake({
+            prisma,
+            runtimeId: runtime.id,
+            orgId: runtime.orgId,
+            runtimeEpoch: runtime.epoch,
+            idempotencyKey: `first-life-plan-ready:${runtime.epoch}:${result.artifact_id}`,
+            triggerType: 'queue_advance',
+            dueAt: new Date(),
+            payload: { growth_plan_artifact_id: result.artifact_id, expansion_trigger: 'initial_plan_ready' },
+          });
+          queueContinuationScheduled = true;
+        }
+      } else if (firstLifePolicy.optional_admin_checkin === true
+        && firstLifePolicy.admin_checkin_before_planning !== true && this.runtimePlaybooks) {
         await scheduleHqWake({
           prisma,
           runtimeId: runtime.id,
@@ -1427,7 +1450,7 @@ export class NativeHqEngine {
       : initialPolicyCommitted
       ? (firstLifePolicy.require_initial_start_decision === true || firstLifePolicy.require_initial_policy_choice === true
         ? 'I have retained the evidenced proposals without dispatching them. Start the recommendation when you are ready, or review it later. External authority remains undecided until a real immutable action reaches its gate.'
-        : 'I retained the evidenced proposals and scheduled the recommended internal lifecycle. It will prepare the strategy program without granting any external effect.')
+        : 'I retained the evidenced proposals and scheduled exactly one recommended task. Runtime will select its lifecycle before specialist work begins.')
       : queueContinuationScheduled
       ? 'The next independent todo is already scheduled for immediate dispatch. I am retaining every in-flight assignment and will reconcile each result when it returns.'
       : openCapability

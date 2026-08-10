@@ -90,7 +90,7 @@ export function compilePrepareQueue(plan) {
   return plan;
 }
 
-function validatePlan(plan, context, mode, aspects, lifecycleCatalog = []) {
+function validatePlan(plan, context, mode, aspects, lifecycleCatalog = [], firstLifePolicy = null) {
   if (!plan || plan.contract_version !== 'growth-plan.v3') throw new Error('growth_plan_v3_contract_required');
   if (plan.mode !== mode) throw new Error('growth_plan_mode_mismatch');
   plan.response_locale = String(plan.response_locale || context?.company?.locale || context?.company?.language || 'und').slice(0, 80);
@@ -107,9 +107,11 @@ function validatePlan(plan, context, mode, aspects, lifecycleCatalog = []) {
   if (constraints.some((item) => !item?.id || !item?.type || !(item.evidence_refs || []).includes(context.baseline.resource_id))) {
     throw new Error('growth_plan_constraints_must_reference_baseline');
   }
+  const runtimeSelectsLifecycle = mode === 'initial_full' && firstLifePolicy?.runtime_selects_lifecycle === true;
   const available = new Set((context.available_rooms || []).map((room) => room.room_tag));
-  if (queue.some((item) => !item?.id || !item?.title || !item?.objective || !item?.room_tag
-    || !available.has(item.room_tag) || !constraints.some((constraint) => constraint.id === item.constraint_id)
+  if (queue.some((item) => !item?.id || !item?.title || !item?.objective
+    || (!runtimeSelectsLifecycle && (!item?.room_tag || !available.has(item.room_tag)))
+    || !constraints.some((constraint) => constraint.id === item.constraint_id)
     || !Array.isArray(item.acceptance_criteria) || !item.acceptance_criteria.length
     || !['internal', 'external'].includes(item.effect_class)
     || !String(item.effect_basis || '').trim())) {
@@ -122,7 +124,7 @@ function validatePlan(plan, context, mode, aspects, lifecycleCatalog = []) {
   if (!constraints.some((item) => item.id === plan.primary_constraint_id)) throw new Error('growth_plan_primary_constraint_required');
   if (!plan.stage?.name || !plan.stage?.objective) throw new Error('growth_plan_stage_required');
   if (!queue.some((item) => item.id === plan.stage.queue_item_id)) throw new Error('growth_plan_stage_queue_item_required');
-  if (mode === 'initial_full' && lifecycleCatalog.length) {
+  if (mode === 'initial_full' && lifecycleCatalog.length && !runtimeSelectsLifecycle) {
     const recommended = queue.find((item) => item.id === plan.stage.queue_item_id);
     const lifecycle = lifecycleCatalog.find((entry) => entry.playbook_id === recommended?.playbook_id
       && Number(entry.version) === Number(recommended?.playbook_version));
@@ -225,10 +227,10 @@ export async function runGrowthPlan({ prisma, orgId, userId, mode = 'operate', a
 
   const system = `You are the Company HQ Growth Planner. Produce a source-grounded company operating decision, not a brainstorm and not a generic report.
 Facts must come from the supplied context. A correlation is not a cause. Unknown causes must remain hypotheses. Never invent competitors, CRM results, connector capabilities, budgets, dates, or benchmarks.
-For initial_full, assess every requested company aspect, rank multiple material constraints, and create an ordered queue of bounded work across only the specialist Rooms genuinely needed. When the retained evidence cannot support a trustworthy downstream motion because strategy-level positioning, audience, offer, channel, or market evidence is missing, you may select a registered preparation-only strategy lifecycle before recommending downstream work. The first queue item defines the first Growth Stage, but the complete ordered queue must survive so HQ can continue without replanning after every result. For operate, inspect only the requested aspects and current operating state, then update the queue as evidence requires. Use the language of the operating requirements when they establish one; otherwise use the company's retained locale. Keep machine identifiers unchanged while writing every user-facing field in response_locale.
+For initial_full, assess every requested company aspect, rank multiple material constraints, and create an ordered queue of bounded work. The first queue item defines the first Growth Stage, but the complete ordered queue must survive so HQ can continue without replanning after every result. For operate, inspect only the requested aspects and current operating state, then update the queue as evidence requires. Use the language of the operating requirements when they establish one; otherwise use the company's retained locale. Keep machine identifiers unchanged while writing every user-facing field in response_locale.
 Return JSON only. Contract:
-{contract_version:'growth-plan.v3',mode:'initial_full|operate',response_locale:string,baseline_ref:{resource_id,captured_at},goal:{title,objective},executive_thesis:string,aspect_assessments:[{aspect,status:'strength|constraint|unknown',observations:string[],evidence_refs:string[],implication:string,next_move:string}],constraints:[{id,type:string,statement,priority:number,evidence_refs:string[],known_facts:string[],unknowns:string[]}],primary_constraint_id:string,hypotheses:[{statement,confidence:'LOW|MEDIUM|HIGH',evidence_refs:string[],expected_signal,falsification}],stage:{name,objective,queue_item_id,duration_days:7-30,checkpoint_day,measurement:{primary_signal,source,decision_rule,stop_condition}},operating_queue:[{id,constraint_id,title,kind:string,room_tag:string,objective,deliverable,success_measure,skills:string[],required_capabilities:string[],acceptance_criteria:string[],priority:number,position:number,activation_condition:string,target:{location:string|null,audience:string|null,sector:string|null,quantity:number|null},playbook_id:string|null,playbook_version:integer|null,effect_class:'internal|external',effect_basis:string,external_action_requested:boolean,requested_action:string|null,requested_terminal_outcome:string}],policy:{autonomy_mode,channel_policy:{},claim_constraints:string[]},roadmap:[{horizon,focus,activation_condition}]}.
-For initial_full obey first_life_policy.proposal_minimum and proposal_target. When first_life_policy.initial_bootstrap_selector exists, return exactly one recommended evidence-producing bootstrap whose available lifecycle carries the named metadata flag and effect class. That lifecycle owns downstream portfolio design, so do not pre-create its downstream motions in this plan. Otherwise return only the ranked, genuinely evidenced queue items the company state supports. Never pad the queue, prescribe a domain, infer a lifecycle from wording, or assign every Room. Order work by persisted dependencies. Every queue item must address an evidenced constraint, have an exact available room_tag, and be independently verifiable. The first queue item must match stage.queue_item_id and the primary constraint. Every factual assessment, constraint, and hypothesis must reference the baseline resource id or another supplied source reference.
+{contract_version:'growth-plan.v3',mode:'initial_full|operate',response_locale:string,baseline_ref:{resource_id,captured_at},goal:{title,objective},executive_thesis:string,aspect_assessments:[{aspect,status:'strength|constraint|unknown',observations:string[],evidence_refs:string[],implication:string,next_move:string}],constraints:[{id,type:string,statement,priority:number,evidence_refs:string[],known_facts:string[],unknowns:string[]}],primary_constraint_id:string,hypotheses:[{statement,confidence:'LOW|MEDIUM|HIGH',evidence_refs:string[],expected_signal,falsification}],stage:{name,objective,queue_item_id,duration_days:7-30,checkpoint_day,measurement:{primary_signal,source,decision_rule,stop_condition}},operating_queue:[{id,constraint_id,title,kind:string,room_tag:string|null,objective,deliverable,success_measure,skills:string[],required_capabilities:string[],acceptance_criteria:string[],priority:number,position:number,activation_condition:string,target:{location:string|null,audience:string|null,sector:string|null,quantity:number|null},playbook_id:string|null,playbook_version:integer|null,effect_class:'internal|external',effect_basis:string,external_action_requested:boolean,requested_action:string|null,requested_terminal_outcome:string}],policy:{autonomy_mode,channel_policy:{},claim_constraints:string[]},roadmap:[{horizon,focus,activation_condition}]}.
+For initial_full obey first_life_policy.proposal_minimum and proposal_target. Return only the ranked, genuinely evidenced queue items the company state supports; never pad the queue. Follow first_life_policy.task_style and consider its outcome preferences only where retained evidence supports them. Keep titles short and objectives concrete enough for a specialist Director to execute without inheriting the parent diagnosis. When first_life_policy.runtime_selects_lifecycle is true, set room_tag, playbook_id, playbook_version, and requested_action to null: Runtime selects those mechanics after persistence. The first queue item must match stage.queue_item_id and the primary constraint. Every factual assessment, constraint, and hypothesis must reference the baseline resource id or another supplied source reference.
 		effect_class describes the complete lifecycle's eventual effect, not the authority of the current planning phase. Use external whenever reaching requested_terminal_outcome requires any state change outside Runtime's persisted internal artifacts. Use internal only when persisted internal evidence or preparation fully satisfies every acceptance criterion. State that distinction briefly in effect_basis, and set external_action_requested to exactly (effect_class == 'external'). For initial_full, the first queue item must bind one supplied available_lifecycle by exact playbook_id, version, owner_room_tag, and one exact supported_actions value. Other proposals may use null playbook fields when no supplied lifecycle directly implements them; never invent a lifecycle or action identifier. All initial queue items still begin in PREPARE authority: they may research and persist internal deliverables, but may not make an external change. The selected playbook, not this planner, resolves capabilities and exact authority gates. Treat unavailable evidence as an explicit gap and do not block unrelated safe preparation.`;
   const firstLifePolicy = mode === 'initial_full' ? await loadFirstLifePolicy() : null;
   const user = JSON.stringify({ objective: String(objective || '').slice(0, 4000), mode, aspects: selected, autonomy_mode: autonomyMode || context.active_goal?.autonomy_mode || 'MANUAL_REVIEW', first_life_policy: firstLifePolicy, available_lifecycles: lifecycleCatalog, context });
@@ -250,7 +252,7 @@ For initial_full obey first_life_policy.proposal_minimum and proposal_target. Wh
   for (let attempt = 1; attempt <= MAX_PLAN_ATTEMPTS; attempt += 1) {
     const response = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, temperature: 0.1, max_completion_tokens: mode === 'initial_full' ? 16000 : 8000, reasoning_effort: 'low', response_format: { type: 'json_object' }, messages }),
+      body: JSON.stringify({ model, temperature: 0.1, max_completion_tokens: 8000, reasoning_effort: 'low', response_format: { type: 'json_object' }, messages }),
     }, { timeoutMs: 120000 });
     if (!response?.ok) throw new Error(`growth_plan_model_failed:${response?.status || 'unknown'}`);
     body = await response.json();
@@ -259,7 +261,7 @@ For initial_full obey first_life_policy.proposal_minimum and proposal_target. Wh
       const extracted = extractJson(raw);
       let preparedPlan = completeGrowthPlanAssessments(normalizeGrowthPlanEvidence(extracted, context), context, selected);
       if (mode === 'initial_full') preparedPlan = applyFirstLifePolicy(preparedPlan, context, firstLifePolicy, lifecycleCatalog);
-      plan = validatePlan(compilePrepareQueue(preparedPlan), context, mode, selected, lifecycleCatalog);
+      plan = validatePlan(compilePrepareQueue(preparedPlan), context, mode, selected, lifecycleCatalog, firstLifePolicy);
       break;
     } catch (error) {
       const reason = String(error?.message || error);

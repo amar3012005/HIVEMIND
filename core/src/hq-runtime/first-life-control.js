@@ -271,11 +271,13 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
     if (!policy.expansion_triggers.includes(expansionTrigger)) return { promoted: [], reason: 'trigger_not_allowed' };
     const directProposals = todos.filter((todo) => asObject(todo.context).proposal_origin === 'user_instruction');
     const strategyProposals = todos.filter((todo) => asObject(todo.context).proposal_origin === 'strategy_program');
+    const autoPlanProposal = policy.auto_start_initial_plan === true
+      && ['initial_plan_ready', 'verified_result'].includes(expansionTrigger);
     const proposals = proposalOrigin === 'user_instruction'
       ? directProposals
       : proposalOrigin === 'strategy_program' || ['strategy_program_ready', 'verified_preparation_checkpoint'].includes(expansionTrigger)
         ? strategyProposals
-      : ['user_start', 'internal_bootstrap'].includes(expansionTrigger)
+      : ['user_start', 'internal_bootstrap'].includes(expansionTrigger) || autoPlanProposal
       ? firstLifeProposals
       : policyConfigured ? [...directProposals, ...firstLifeProposals] : directProposals;
     const ownershipStatuses = new Set([
@@ -332,7 +334,8 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
     const initialLimit = Number.isFinite(Number(policy.initial_execution_limit))
       ? Math.max(1, Number(policy.initial_execution_limit))
       : 2;
-    if (['user_start', 'internal_bootstrap'].includes(expansionTrigger) && selected.length >= initialLimit) {
+    if ((['user_start', 'internal_bootstrap'].includes(expansionTrigger) || policy.auto_start_initial_plan === true)
+      && selected.length >= initialLimit) {
       // V3 starts only the recommendation. Historical policies without this
       // field preserve their prior companion-work behavior.
     } else if (recommended && effectClass(recommended) === 'external' && authorityPolicy.internal_autonomy !== false) {

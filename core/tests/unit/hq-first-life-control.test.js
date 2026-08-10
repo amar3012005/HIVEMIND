@@ -149,6 +149,31 @@ test('v6 strategy portfolio promotes exactly one Room lifecycle at a time', asyn
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED']);
 });
 
+test('v12 Growth Plan promotes one neutral task and advances one-by-one after verified results', async () => {
+  const rows = [
+    todo('growth-1', 'PROPOSED', 1, 'external', true),
+    todo('growth-2', 'PROPOSED', 2, 'external'),
+    todo('growth-3', 'PROPOSED', 3, 'internal'),
+  ];
+  rows.forEach((row) => {
+    row.context.first_life_policy_version = 12;
+    row.context.proposal_origin = 'growth_plan';
+    delete row.context.planned_playbook_id;
+    delete row.context.planned_playbook_version;
+    delete row.context.requested_action;
+    delete row.context.room_tag;
+  });
+  const prisma = prismaFor(rows);
+  const first = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'initial_plan_ready' });
+  assert.deepEqual(first.promoted.map((item) => item.id), ['growth-1']);
+  assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED']);
+
+  rows[0].status = 'COMPLETED';
+  const second = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'verified_result' });
+  assert.deepEqual(second.promoted.map((item) => item.id), ['growth-2']);
+  assert.deepEqual(rows.map((item) => item.status), ['COMPLETED', 'READY', 'PROPOSED']);
+});
+
 test('v2 first start retains the historical companion-work policy', async () => {
   const rows = [
     todo('external-1', 'PROPOSED', 1, 'external', true),

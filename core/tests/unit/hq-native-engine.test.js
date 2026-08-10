@@ -47,6 +47,12 @@ test('v7 bypasses initial Growth Planning and enables operate mode only after fi
   assert.equal(growthPlanModeForState({ policy, firstLifeGate: { motions_complete: true }, focusedOutcome: { id: 'todo' } }), null);
 });
 
+test('current policy enters initial Growth Planning after the optional admin decision', () => {
+  const policy = { runtime_selects_lifecycle: true, ongoing_operation: { growth_plan_enabled: true } };
+  assert.equal(growthPlanModeForState({ policy, firstLifeGate: null }), 'initial_full');
+  assert.equal(growthPlanModeForState({ policy, firstLifeGate: null, latestGrowthPlan: { id: 'plan' } }), null);
+});
+
 test('admin check-in result wakes can auto-start the durable internal bootstrap', () => {
   const todo = { context: {
     effect_class: 'internal',

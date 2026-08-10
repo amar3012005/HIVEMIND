@@ -9,6 +9,11 @@ export function shouldRecallEvidence(mode = 'auto') {
   return String(mode || 'auto').toLowerCase() !== 'memory';
 }
 
+async function unifiedResultsFor({ memories = [], evidence = [], rankedCandidates = [] }) {
+  const { buildUnifiedRecallResults } = await import('../memory/unified-recall-results.js');
+  return buildUnifiedRecallResults({ memories, evidence, rankedCandidates });
+}
+
 // PROJECT-SCOPE FILTER — one authority for BOTH recall branches (bounded
 // fact/explain/full AND legacy). Hydrates scope/project/owner from the DB, then:
 //   caller WITH project  → org-plane memories + that project's memories;
@@ -290,7 +295,13 @@ export async function handleRecallRoute(ctx = {}) {
       // KB (SOLVIS) contaminated org-scope rooms' company brief.
       const _boundedScoped = await applyProjectScopeFilter(
         prisma, orgId, { memories: bounded.memories || [] }, recallProjectId);
+      const unifiedResults = await unifiedResultsFor({
+        memories: _boundedScoped.memories,
+        evidence: bounded.evidence || [],
+        rankedCandidates: bounded.ranked_candidates || [],
+      });
       return jsonResponse(res, {
+        results: unifiedResults,
         memories: _boundedScoped.memories,
         evidence: bounded.evidence || [],
         live: bounded.live || [],
@@ -504,7 +515,7 @@ export async function handleRecallRoute(ctx = {}) {
       }
 
       try {
-        const { recallEnhance } = await import('../memory/recall-router.js');
+        const { recallEnhance, deliverHybrid } = await import('../memory/recall-router.js');
         const enhanced = await recallEnhance({
           memories: memoryHits,
           query: rawRecallQuery,
@@ -516,7 +527,21 @@ export async function handleRecallRoute(ctx = {}) {
         const attachedSegIds = new Set(
           memoryHits.flatMap((m) => (m.evidence || []).map((e) => e.segment_id))
         );
-        result.evidence = (enhanced.evidence || [])
+        const mixed = await deliverHybrid({
+          query: rawRecallQuery,
+          memories: memoryHits,
+          evidence: enhanced.evidence || [],
+          deliverN: normalizeRecallLimit(body.max_memories ?? body.limit),
+          evidenceN: normalizeRecallLimit(body.limit),
+          budgetMs: Number(process.env.RECALL_LATENCY_BUDGET_MS || 5000),
+        }).catch(() => null);
+        if (mixed) {
+          result.memories = mixed.memories;
+          result.ranked_candidates = mixed.ranked_candidates;
+          result.ranking_mode = mixed.ranking_mode;
+        }
+        const deliveredEvidence = mixed?.evidence || enhanced.evidence || [];
+        result.evidence = deliveredEvidence
           .filter((e) => !attachedSegIds.has(e.segmentId));
         result.evidence_count = result.evidence.length;
         result.live = enhanced.live || [];
@@ -576,6 +601,12 @@ export async function handleRecallRoute(ctx = {}) {
         }));
       }
     }
+
+    result.results = await unifiedResultsFor({
+      memories: result.memories || [],
+      evidence: result.evidence || [],
+      rankedCandidates: result.ranked_candidates || [],
+    });
 
     try {
       const hits = Array.isArray(result.memories) ? result.memories : [];

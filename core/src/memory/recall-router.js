@@ -494,7 +494,7 @@ const V2_RRF_K = 60;
 // The parked A/B ran with a 24 pool while evidence arrived capped at 8 — it never saw
 // depth, which is the variable that moved small-detail answerability 3/5 -> 5/5.
 const V2_POOL  = Number(process.env.RECALL_UNIFIED_POOL || 150);
-async function deliverHybrid({ query, memories = [], evidence = [], deliverN, evidenceN, budgetMs }) {
+export async function deliverHybrid({ query, memories = [], evidence = [], deliverN, evidenceN, budgetMs }) {
   // THE recall pipeline. Two lanes retrieved in parallel, fused into ONE pool, ranked by
   // ONE cross-encoder pass, split back out. No RRF, no amplitude boosts, no flag.
   //
@@ -552,7 +552,10 @@ async function deliverHybrid({ query, memories = [], evidence = [], deliverN, ev
       null,
     );
     if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
-      ordered = rr.map((x) => x._u); usedCrossEncoder = true;
+      ordered = rr.map((x) => {
+        const score = Number(x.rerank_score);
+        return { ...x._u, _rerankScore: Number.isFinite(score) ? score : null };
+      }); usedCrossEncoder = true;
     } else if (rr === null) {
       console.warn(`[recall-hybrid] cross-encoder TIMED OUT after ${Date.now() - _rrStart}ms `
         + `(budget=${_rrBudget}ms inner=${_rrInner}ms pool=${deduped.length}) — ranking degrades to `
@@ -591,10 +594,10 @@ async function deliverHybrid({ query, memories = [], evidence = [], deliverN, ev
     const rank = rankedCandidates.length + 1;
     if (c._kind === 'evidence') {
       outEv.push(x);
-      rankedCandidates.push({ kind: 'evidence', segment_id: x.segmentId || x.segment_id || x.id, rank });
+      rankedCandidates.push({ kind: 'evidence', segment_id: x.segmentId || x.segment_id || x.id, rank, score: c._rerankScore ?? null });
     } else {
       outMem.push(x);
-      rankedCandidates.push({ kind: 'memory', memory_id: x.id, rank });
+      rankedCandidates.push({ kind: 'memory', memory_id: x.id, rank, score: c._rerankScore ?? null });
     }
   }
   console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> mem=${Math.min(outMem.length, deliverN)} ev=${Math.min(outEv.length, evidenceN)}`);

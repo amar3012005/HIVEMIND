@@ -117,6 +117,26 @@ function rankedRecallRows(result, limit = 15) {
   return out;
 }
 
+export function projectConnectorDataForSynthesis(value, depth = 0) {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (depth > 10) return '[nested data omitted]';
+  if (typeof value === 'string') {
+    if (/^https?:\/\//i.test(value)) {
+      try {
+        const url = new URL(value);
+        return `${url.origin}${url.pathname}`.slice(0, 1000);
+      } catch {}
+    }
+    return value.slice(0, 6000);
+  }
+  if (Array.isArray(value)) return value.slice(0, 100).map((item) => projectConnectorDataForSynthesis(item, depth + 1));
+  if (typeof value !== 'object') return String(value).slice(0, 1000);
+  return Object.fromEntries(Object.entries(value).slice(0, 100).map(([key, item]) => [
+    key,
+    projectConnectorDataForSynthesis(item, depth + 1),
+  ]));
+}
+
 export function buildCompoundSynthesisPayload({ recallResults = [], readResults = [], visibleLimit = 15 } = {}) {
   return {
     recall: recallResults.map((result) => ({
@@ -124,7 +144,7 @@ export function buildCompoundSynthesisPayload({ recallResults = [], readResults 
       total_ranked: Math.min(15, (result?.ranked_candidates || []).length
         || ((result?.memories || []).length + (result?.evidence || []).length)),
     })),
-    connectors: readResults,
+    connectors: projectConnectorDataForSynthesis(readResults),
   };
 }
 

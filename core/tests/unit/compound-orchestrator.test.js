@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCompoundSynthesisPayload,
+  projectConnectorDataForSynthesis,
   buildCompoundUserSummary,
   buildGroundedWriteFallbackPrompt,
   buildGroundedWriteFallbackPayload,
@@ -298,6 +299,23 @@ test('compound synthesis payload preserves the canonical mixed memory and eviden
   });
   assert.deepEqual(payload.recall[0].ranked_context.map((row) => row.kind), ['evidence', 'memory']);
   assert.match(payload.recall[0].ranked_context[0].content, /exact PDF fact/);
+});
+
+test('connector synthesis projection preserves records while removing volatile URL query bloat', () => {
+  const projected = projectConnectorDataForSynthesis({
+    data: [{
+      caption: 'A complete grounded caption',
+      permalink: 'https://www.instagram.com/p/example/?utm_source=large',
+      media_url: `https://cdn.example.com/video.mp4?token=${'x'.repeat(20_000)}`,
+      like_count: 53,
+    }],
+  });
+  assert.equal(projected.data.length, 1);
+  assert.equal(projected.data[0].caption, 'A complete grounded caption');
+  assert.equal(projected.data[0].permalink, 'https://www.instagram.com/p/example/');
+  assert.equal(projected.data[0].media_url, 'https://cdn.example.com/video.mp4');
+  assert.equal(projected.data[0].like_count, 53);
+  assert.ok(JSON.stringify(projected).length < 500);
 });
 
 test('compound orchestrator: native hivemind-recall step runs via dispatchTool', async () => {

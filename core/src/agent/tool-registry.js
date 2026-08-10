@@ -845,6 +845,16 @@ const TOOL_HANDLERS = {
     // answering an org-scope question) and a project-scoped chat was not
     // actually restricted to its project.
     await applyProjectScopeFilter(ctx.prisma, ctx.orgId, result, ctx.projectId || null);
+    // Project filtering mutates the lane arrays. Filter the preserved mixed
+    // ranking against those authorized rows as well; a rank cursor must never
+    // retain an id that the scope gate removed.
+    if (Array.isArray(result.ranked_candidates)) {
+      const allowedMemories = new Set((result.memories || []).map((row) => row?.id).filter(Boolean));
+      const allowedEvidence = new Set((result.evidence || []).map((row) => row?.segment_id || row?.segmentId || row?.id).filter(Boolean));
+      result.ranked_candidates = result.ranked_candidates.filter((candidate) => candidate?.kind === 'memory'
+        ? allowedMemories.has(candidate.memory_id)
+        : allowedEvidence.has(candidate.segment_id));
+    }
     const effectivePlan = result.trace?.recall_plan || recallPlan;
 
     let graph = [];
@@ -960,6 +970,7 @@ const TOOL_HANDLERS = {
       live:           result.live,
       evidence_count: result.evidence.length,
       evidence:       result.evidence,
+      ranked_candidates: result.ranked_candidates || [],
       timeline:       effectivePlan.operation === 'timeline' ? result.memories : [],
       relationships:  graph,
       evidence_packet: evidencePacket,

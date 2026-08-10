@@ -34,7 +34,13 @@ import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-syn
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
 import { chooseSynthesisModel, isCandidateSynthesisAcceptable, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
-import { citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
+import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
+import {
+  applyProgressiveRecallView,
+  createProgressiveRecallSession,
+  expandProgressiveRecall,
+  shouldExpandProgressiveRecall,
+} from './progressive-recall-session.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 import {
   chatCompletionFetch,
@@ -247,12 +253,13 @@ function createEvidenceBus() {
   const synthesisChains = new Map();
   const recallPackets = [];
   const coMentions = [];
+  const rankedCandidates = [];
   const _evidenceSeen = new Set();
   const _liveSeen = new Set();
 
   return {
     memoriesById, liveItems, evidenceItems, edgesByKey,
-    synthesisChains, recallPackets, coMentions,
+    synthesisChains, recallPackets, coMentions, rankedCandidates,
     _evidenceSeen, _liveSeen,
 
     // rows: memory rows. opts:
@@ -324,6 +331,16 @@ function createEvidenceBus() {
     addPacket(packet) { if (packet) recallPackets.push(packet); },
     addPackets(list) { for (const p of (list || [])) recallPackets.push(p); },
     addCoMentions(list) { for (const c of (list || [])) coMentions.push(c); },
+    mergeRankedCandidates(rows) {
+      const seen = new Set(rankedCandidates.map((row) => row.kind === 'memory'
+        ? `memory:${row.memory_id}` : `evidence:${row.segment_id}`));
+      for (const row of (rows || [])) {
+        const key = row?.kind === 'memory' ? `memory:${row.memory_id}` : `evidence:${row?.segment_id}`;
+        if (!row || seen.has(key)) continue;
+        seen.add(key);
+        rankedCandidates.push({ ...row, rank: rankedCandidates.length + 1 });
+      }
+    },
   };
 }
 
@@ -664,6 +681,7 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
     bus.mergeMemories(r?.memories);
     bus.mergeLive(r?.live, { dedup: true });
     bus.mergeEvidence(r?.evidence, { keyMode: 'withPage' });
+    bus.mergeRankedCandidates(r?.ranked_candidates);
     bus.mergeEdges(r?.relationships, { overwrite: false });
     bus.addPacket(r?.evidence_packet);
     // KB-answer fix: base recall returns evidence[] but NO evidence_packet, so
@@ -675,8 +693,18 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
     // didn't) so synthesis can ground a KB answer in evidence. Bounded to 8.
     if (Array.isArray(r?.evidence) && r.evidence.length) {
       bus.addPacket({
-        citations: r.evidence.slice(0, 8).map((e, i) => ({
+        sourceSections: r.evidence.slice(0, 15).map((e) => ({
+          segment_id: e.segment_id || e.id,
+          document_id: e.document_id || null,
+          document_title: e.document_title || 'Document',
+          snippet: String(e.snippet || e.content || '').replace(/\s+/g, ' ').slice(0, 1200),
+          content: String(e.content || e.snippet || '').slice(0, 1200),
+          page: e.page ?? null,
+          score: Number.isFinite(e.score) ? e.score : null,
+        })),
+        citations: r.evidence.slice(0, 15).map((e, i) => ({
           id: `E${i + 1}`,
+          segment_id: e.segment_id || e.id,
           source_type: 'evidence',
           source_label: e.document_title || 'Document',
           title: e.document_title || 'Document',
@@ -754,7 +782,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // so Step 1 is a byte-identical wrapper: same Map/array references, existing
   // inline `if(!has)set` fragments keep compiling. Step 2 routes each fragment
   // through the bus.merge* methods one accumulator at a time.
-  const { memoriesById, liveItems, evidenceItems, edgesByKey, synthesisChains, recallPackets, coMentions } = bus;
+  const { memoriesById, liveItems, evidenceItems, edgesByKey, synthesisChains, recallPackets, coMentions, rankedCandidates } = bus;
   let relationChecked = false;
   let activeDeadlineAt = deadlineAt;
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
@@ -822,11 +850,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // 12 — render cap (evidenceTopK=6) is unchanged so zero answer-token / zero
   // quality change, but the recall-router runs MMR + score-floor over a
   // smaller set and downstream dedup carries less.
-  const recallLimit = recallMode === 'full' || recallMode === 'panorama'
-    ? 14
-    : recallMode === 'explain' || recallMode === 'insight'
-      ? 12
-      : 8;
+  const recallLimit = 15;
   // Lead with the optimised canonical-English query (set upstream by
   // optimizeRecallQueries) instead of the raw conversational message, so the
   // SEARCH uses the optimised version. Falls back to user_message if unset.
@@ -911,6 +935,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
         );
         bus.mergeMemories(expanded?.memories);
         bus.mergeEvidence(expanded?.evidence, { keyMode: 'withPage' });
+        bus.mergeRankedCandidates(expanded?.ranked_candidates);
         bus.mergeEdges(expanded?.relationships, { overwrite: true });
         bus.addPacket(expanded?.evidence_packet);
       } catch (error) {
@@ -944,6 +969,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     // Synthesis evidence chains from insight-mode recall.
     synthesis_chains: [...synthesisChains.values()],
     recall_packets: recallPackets,
+    ranked_candidates: rankedCandidates,
     profile_context: profileContext,
     aggregate: aggregateResult,
     coverage: {
@@ -983,7 +1009,8 @@ OUTPUT — STRICT JSON (no prose, no code fence):
   "claims":          [{"text":"<one user-visible claim>","grounded":true,"citation_ids":["P1-C1"]}],
   "evidence_used":   [<memory_id_short>, ...],   // first 8 chars of each id you actually relied on
   "confidence":      0.0,                          // [0,1] — how grounded the answer is in evidence
-  "gaps":            ["..."]                       // what the user might want but the evidence didn't cover
+  "gaps":            ["..."],                      // what the user might want but the evidence didn't cover
+  "context_status":  "sufficient|relevant_but_incomplete|query_mismatch"
 }
 
 CORE RULES:
@@ -1592,7 +1619,8 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const rawDate = m.document_date || m.created_at || m.createdAt || m.valid_from;
     const date = rawDate ? new Date(rawDate).toISOString().slice(0, 10) : '?';
     const src = m.source_metadata?.source_platform || m.source_platform || m.memory_type || 'memory';
-    return citationId ? `${synthTag}{citation_id:${citationId}, rank:${id8 ? _projectedMemories.findIndex((item) => item.memory?.id === m.id) + 1 : '?'} source:${src}, date:${date}}${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}` : '';
+    const rank = m._progressive_rank || (_projectedMemories.findIndex((item) => item.memory?.id === m.id) + 1);
+    return citationId ? `${synthTag}{citation_id:${citationId}, rank:${rank || '?'} source:${src}, date:${date}}${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}` : '';
   }).filter(Boolean).join('\n');
 
   // Live Workspace block — Gmail / Drive / Calendar fetched in this turn.
@@ -1618,8 +1646,10 @@ export async function answerStep({ message, history, evidence, plan, language, a
     // start of a long source segment so exact policy questions retain the
     // matching sentence in the bounded answer prompt.
     const body = (e.snippet || e.content || '').replace(/\n/g, ' ').slice(0, 520);
-    return `[DOC/${doc}${page}] ${body}`;
-  }).join('\n');
+    const citationId = citationIdForEvidence(citationPacket.citations, e);
+    const rank = e._progressive_rank || '?';
+    return citationId ? `{citation_id:${citationId}, rank:${rank} source:document} [DOC/${doc}${page}] ${body}` : '';
+  }).filter(Boolean).join('\n');
 
   // T2-1: distilled tail — depth 4 (or 6 on anaphora), assistant turns reduced
   // to their `.response` prose, each turn start-capped. Biggest answer-prompt
@@ -1726,10 +1756,12 @@ export async function answerStep({ message, history, evidence, plan, language, a
     }
   }
 
-  const sourceFirst = evidence.coverage?.source_requested === true;
-  const groundedEvidence = sourceFirst
-    ? `${evLines ? `DOCUMENT SEGMENTS (${(evidence.evidence || []).length} exact-source passages):\n${evLines}\n\n` : ''}MEMORIES:\n${evidenceLines || '(none)'}`
-    : `MEMORIES:\n${evidenceLines || '(none)'}${evLines ? `\n\nDOCUMENT SEGMENTS (${(evidence.evidence || []).length} non-promoted KB chunks):\n${evLines}` : ''}`;
+  const rankOfLine = (line) => Number(line.match(/\brank:(\d+)/)?.[1] || Number.MAX_SAFE_INTEGER);
+  const groundedEvidenceRows = [
+    ...String(evidenceLines || '').split('\n').filter(Boolean),
+    ...String(evLines || '').split('\n').filter(Boolean),
+  ].sort((left, right) => rankOfLine(left) - rankOfLine(right));
+  const groundedEvidence = `RANKED CONTEXT (memories and exact document passages share one relevance order):\n${groundedEvidenceRows.join('\n') || '(none)'}`;
 
   // PHASE 1 — combined evidence budget, priority-ordered truncation.
   //
@@ -1771,7 +1803,10 @@ ${groundedEvidence}`;
   const evidenceBlock = alwaysKept + _kept.join('');
 
   const assistantContext = `\n\nASSISTANT CONTEXT: You are ${assistantName || 'HIVE'}, serving ${orgName || 'this HIVEMIND workspace'}.`;
-  const userBlock = `${evidenceBlock}${assistantContext}${capabilityHint}${windowNote}${personaNote}${coverageNote}
+  const progressiveNote = evidence.progressive_recall
+    ? `\n\nRECALL WINDOW: showing unified ranks 1-${evidence.progressive_recall.delivered_until} of ${evidence.progressive_recall.candidates.length} from recall ${evidence.progressive_recall.recall_id}. If these ranks are relevant but do not contain enough detail to answer, set context_status="relevant_but_incomplete" so the server can reveal the next already-ranked page. If they are off-topic because retrieval misunderstood the request, set context_status="query_mismatch". Otherwise set "sufficient".`
+    : '';
+  const userBlock = `${evidenceBlock}${progressiveNote}${assistantContext}${capabilityHint}${windowNote}${personaNote}${coverageNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
@@ -1908,6 +1943,7 @@ ${message}`;
       evidence_used: [],
       confidence: 0,
       gaps: ['No citation-valid claim could be produced from the final recall packet.'],
+      context_status: answerPayload?.context_status === 'query_mismatch' ? 'query_mismatch' : 'relevant_but_incomplete',
       usage: repairUsage || usage,
       usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
     };
@@ -1924,6 +1960,9 @@ ${message}`;
     evidence_used: Array.isArray(answerPayload.evidence_used) ? answerPayload.evidence_used : [],
     confidence:    Number.isFinite(answerPayload.confidence) ? Math.max(0, Math.min(1, answerPayload.confidence)) : 0.5,
     gaps:          Array.isArray(answerPayload.gaps) ? answerPayload.gaps : [],
+    context_status: ['sufficient', 'relevant_but_incomplete', 'query_mismatch'].includes(answerPayload.context_status)
+      ? answerPayload.context_status
+      : ((Array.isArray(answerPayload.gaps) && answerPayload.gaps.length) ? 'relevant_but_incomplete' : 'sufficient'),
     usage: repairUsage || usage,
     usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
   };
@@ -2698,7 +2737,7 @@ export async function runReactAgentV2({
         && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
         && useTools === true
         && Array.isArray(intentDecision.subtasks) && intentDecision.subtasks.length > 0) {
-      const { runCompoundOrchestrator } = await import('./compound-orchestrator.js');
+      const { runCompoundOrchestrator, buildCompoundSynthesisPayload } = await import('./compound-orchestrator.js');
       const priorAssistantContext = [...(Array.isArray(history) ? history : [])]
         .reverse()
         .find((turn) => turn?.role === 'assistant' && typeof turn?.content === 'string' && turn.content.trim())
@@ -2731,22 +2770,34 @@ export async function runReactAgentV2({
       if (compound.status === 'completed'
           && ((compound.readResults?.length || 0) > 0 || (compound.recallResults?.length || 0) > 0)) {
         try {
-          const boundedResults = JSON.stringify(compound.synthesisPayload || {}).slice(0, 28000);
-          const synthesized = await callJsonLLM({
-            messages: [
-              { role: 'system', content: `Return strict JSON {"response":string}. Answer naturally as HIVE using only the completed HIVE-MIND recall and live connector results supplied. Answer every requested part and include useful closely related grounded details when they add context. If one detail is missing, first explain what the results do establish, then identify only the missing part and invite the user to be more specific; never replace partial knowledge with "unknown", a blank value, or a blanket absence response. Preserve exact counts, dates, names, relationships, and uncertainty. Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
-              { role: 'user', content: `USER REQUEST:\n${message}\n\nCOMPLETED GOVERNED RESULTS:\n${boundedResults}` },
-            ],
-            model: requestedAnswerModel,
-            apiKey,
-            maxTokens: 800,
-            signal: abortCtrl.signal,
-            reasoningEffort: 'low',
-            temperature: 0,
-          });
-          if (typeof synthesized.parsed?.response === 'string' && synthesized.parsed.response.trim()) {
-            finalText = synthesized.parsed.response.trim();
-            recordUsage('connector_synthesis', synthesized.usage);
+          let visibleLimit = compound.recallResults?.length ? 5 : 15;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const payload = buildCompoundSynthesisPayload({
+              recallResults: compound.recallResults || [], readResults: compound.readResults || [], visibleLimit,
+            });
+            const boundedResults = JSON.stringify(payload).slice(0, 28000);
+            const synthesized = await callJsonLLM({
+              messages: [
+                { role: 'system', content: `Return strict JSON {"response":string,"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Answer naturally as HIVE using only the completed HIVE-MIND recall and live connector results supplied. Answer every requested part and include useful closely related grounded details when they add context. If ranked recall context is relevant but insufficient and more ranked rows may exist, set context_status="relevant_but_incomplete"; the server will reveal the next page without recalling. If one detail remains missing after the final page, first explain what the results establish, then identify only the missing part and invite specificity. Preserve exact counts, dates, names, relationships, and uncertainty. Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
+                { role: 'user', content: `USER REQUEST:\n${message}\n\nCOMPLETED GOVERNED RESULTS (ranks 1-${visibleLimit}):\n${boundedResults}` },
+              ],
+              model: requestedAnswerModel,
+              apiKey,
+              maxTokens: 800,
+              signal: abortCtrl.signal,
+              reasoningEffort: 'low',
+              temperature: 0,
+            });
+            recordUsage(attempt === 0 ? 'connector_synthesis' : `connector_synthesis_expand_${attempt}`, synthesized.usage);
+            if (typeof synthesized.parsed?.response === 'string' && synthesized.parsed.response.trim()) {
+              finalText = synthesized.parsed.response.trim();
+            }
+            const hasMore = (compound.recallResults || []).some((result) =>
+              ((result?.ranked_candidates || []).length || ((result?.memories || []).length + (result?.evidence || []).length)) > visibleLimit);
+            if (synthesized.parsed?.context_status !== 'relevant_but_incomplete' || !hasMore || visibleLimit >= 15) break;
+            const previous = visibleLimit;
+            visibleLimit = Math.min(15, visibleLimit + 5);
+            onEvent?.({ type: 'recall_window_revealed', mode: 'compound', from_rank: previous + 1, to_rank: visibleLimit });
           }
         } catch (error) {
           trace.warnings.push(`connector_synthesis_degraded:${error.message}`);
@@ -3196,6 +3247,34 @@ export async function runReactAgentV2({
     };
     onEvent?.({ type: 'coverage_assessed', coverage: evidence.coverage });
 
+    // One retrieval, one authoritative mixed ranking, progressively revealed.
+    // The session is turn-local and tenant-scoped by the already-filtered
+    // evidence bundle. Expanding it performs no retrieval and no reranking.
+    const fullEvidence = evidence;
+    let progressiveSession = createProgressiveRecallSession({
+      rankedCandidates: evidence.ranked_candidates || [],
+      memories: evidence.memories || [],
+      evidence: evidence.evidence || [],
+      query: plan.query_canonical_en || message,
+      initialSize: 5,
+      pageSize: 5,
+      maxVisible: 15,
+    });
+    if (progressiveSession.candidates.length > 0) {
+      evidence = applyProgressiveRecallView(evidence, progressiveSession);
+    }
+    trace.recall.progressive = {
+      recall_id: progressiveSession.recall_id,
+      candidate_count: progressiveSession.candidates.length,
+      delivered_until: progressiveSession.delivered_until,
+      degraded_order: progressiveSession.degraded_order,
+    };
+    onEvent?.({
+      type: 'recall_window_revealed', recall_id: progressiveSession.recall_id,
+      from_rank: 1, to_rank: progressiveSession.delivered_until,
+      candidate_count: progressiveSession.candidates.length,
+    });
+
     // STEP 4 — Answer with the caller-selected user-facing model.
     _ps = Date.now();
     const answerInput = {
@@ -3220,6 +3299,23 @@ export async function runReactAgentV2({
       answerModel = requestedAnswerModel;
       trace.models.synthesis = answerModel;
       answer = await answerStep({ ...answerInput, model: answerModel });
+    }
+    const progressiveAnswers = [answer];
+    while (progressiveSession.candidates.length > 0 && shouldExpandProgressiveRecall(answer, progressiveSession)) {
+      const previousUntil = progressiveSession.delivered_until;
+      progressiveSession = expandProgressiveRecall(progressiveSession);
+      evidence = applyProgressiveRecallView(fullEvidence, progressiveSession);
+      answerInput.evidence = evidence;
+      onEvent?.({
+        type: 'recall_window_revealed', recall_id: progressiveSession.recall_id,
+        from_rank: previousUntil + 1, to_rank: progressiveSession.delivered_until,
+        candidate_count: progressiveSession.candidates.length,
+      });
+      const expandedAnswer = await answerStep({ ...answerInput, model: answerModel });
+      answer = expandedAnswer;
+      progressiveAnswers.push(expandedAnswer);
+      trace.recall.progressive.delivered_until = progressiveSession.delivered_until;
+      trace.recall.progressive.expansion_count = progressiveSession.expansion_count;
     }
     if (modelPolicy.shadow) {
       const servedSummary = {
@@ -3252,8 +3348,10 @@ export async function runReactAgentV2({
       });
     }
     _pt('answer_step_ms', _ps);
-    for (const [stage, usage] of Object.entries(answer.usage_stages || { synthesis: answer.usage })) {
-      recordUsage(stage, usage);
+    for (const [attemptIndex, attemptedAnswer] of progressiveAnswers.entries()) {
+      for (const [stage, usage] of Object.entries(attemptedAnswer.usage_stages || { synthesis: attemptedAnswer.usage })) {
+        recordUsage(attemptIndex === 0 ? stage : `${stage}_expand_${attemptIndex}`, usage);
+      }
     }
     onEvent?.({
       type: 'answer_validated',

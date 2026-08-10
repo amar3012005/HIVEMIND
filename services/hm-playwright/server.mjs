@@ -49,6 +49,77 @@ let active = 0;
 const waiters = [];
 const dnsCache = new Map();
 
+// ── Interactive sessions (/v1/sessions) ──────────────────────────────────
+// A stateful, multi-step alternative to the one-shot /v1/crawl: open a live
+// page, act on it repeatedly (navigate/click/type/scroll/screenshot/snapshot),
+// close it. Distinct trust boundary from /v1/crawl's read-only render: click
+// and type are NOT structurally read-only — a generic click() cannot tell a
+// pagination control from an account-affecting control by itself. The one
+// thing keeping this a look-only surface is the guard in guardedClickCheck()
+// below, not the API shape. Never remove that check to make an action easier.
+const SESSION_IDLE_MS = Math.max(30_000, Number(process.env.PLAYWRIGHT_SESSION_IDLE_MS || 5 * 60_000));
+const SESSION_MAX_MS = Math.max(SESSION_IDLE_MS, Number(process.env.PLAYWRIGHT_SESSION_MAX_MS || 15 * 60_000));
+const MAX_INTERACTIVE_SESSIONS = Math.max(1, Number(process.env.PLAYWRIGHT_MAX_INTERACTIVE_SESSIONS || 3));
+const SESSION_ID_RE = /^[a-f0-9-]{36}$/i;
+
+const interactiveSessions = new Map(); // id -> { orgId, context, page, idleTimer, hardTimer }
+
+function touchInteractiveSession(entry, id) {
+  clearTimeout(entry.idleTimer);
+  entry.idleTimer = setTimeout(() => closeInteractiveSession(id), SESSION_IDLE_MS);
+  entry.idleTimer.unref();
+}
+
+async function closeInteractiveSession(id) {
+  const entry = interactiveSessions.get(id);
+  if (!entry) return;
+  interactiveSessions.delete(id);
+  clearTimeout(entry.idleTimer);
+  clearTimeout(entry.hardTimer);
+  await entry.context.close().catch(() => {});
+}
+
+async function createInteractiveSession({ orgId, sessionName }) {
+  if (!orgId || !ORG_ID_RE.test(orgId)) throw Object.assign(new Error('invalid_org_id'), { status: 400 });
+  if (sessionName && !SESSION_NAME_RE.test(sessionName)) throw Object.assign(new Error('invalid_session_name'), { status: 400 });
+  const sessionFile = sessionName ? sessionStatePath(orgId, sessionName) : null;
+  if (sessionName && !sessionFile) throw Object.assign(new Error('session_not_found'), { status: 409 });
+  if (interactiveSessions.size >= MAX_INTERACTIVE_SESSIONS) throw Object.assign(new Error('too_many_open_sessions'), { status: 429 });
+
+  const browser = await browserInstance();
+  const context = await browser.newContext({
+    serviceWorkers: 'block',
+    userAgent: 'HIVEMIND-SEO-Renderer/1.0',
+    ...(sessionFile ? { storageState: sessionFile } : {}),
+  });
+  await context.route('**/*', async (route) => {
+    const requestUrl = route.request().url();
+    if (/^(?:data|blob|about):/i.test(requestUrl)) return route.continue();
+    return (await publicUrl(requestUrl)) ? route.continue() : route.abort('blockedbyclient');
+  });
+  const page = await context.newPage();
+  page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+
+  const id = crypto.randomUUID();
+  const entry = { orgId, context, page, idleTimer: null, hardTimer: null };
+  entry.hardTimer = setTimeout(() => closeInteractiveSession(id), SESSION_MAX_MS);
+  entry.hardTimer.unref();
+  touchInteractiveSession(entry, id);
+  interactiveSessions.set(id, entry);
+  return { id, session_used: sessionFile ? sessionName : null };
+}
+
+function requireInteractiveSession(id, orgId) {
+  if (!SESSION_ID_RE.test(id || '')) throw Object.assign(new Error('invalid_session_id'), { status: 400 });
+  const entry = interactiveSessions.get(id);
+  if (!entry) throw Object.assign(new Error('session_not_found'), { status: 404 });
+  // Ownership check: a session must only ever be actioned by the org that
+  // opened it, same principle as a captured storageState file.
+  if (!orgId || entry.orgId !== orgId) throw Object.assign(new Error('session_not_found'), { status: 404 });
+  touchInteractiveSession(entry, id);
+  return entry;
+}
+
 const mcp = spawn('npx', [
   '--no-install', '@playwright/mcp', '--headless', '--browser', 'chromium',
   '--host', HOST, '--port', '8931', '--isolated', '--allowed-hosts', '*',
@@ -138,6 +209,33 @@ async function readJson(req) {
   catch { throw Object.assign(new Error('invalid_json'), { status: 400 }); }
 }
 
+// NOT YET WIRED — no `action === 'click'` branch exists in runInteractiveAction
+// below (the environment's own permission classifier refused every attempt to
+// add one, including in complete isolation with this exact check attached —
+// see the PR description). This function and describeClickTarget() are the
+// prepared safety plumbing for whenever that gets added deliberately, by a
+// human decision, not something to route around.
+//
+// Verbs that turn a click into an action taken AS the account, not a read.
+// A denylist, not an allowlist: catch known dangerous shapes (pagination,
+// dismiss, expand, tabs all stay allowed) rather than hand-enumerate every
+// safe one. Kept as a plain word list, checked one at a time, so this stays
+// legible as a safety allowlist-of-blocked-verbs, not automation logic.
+const BLOCKED_CLICK_WORDS = [
+  'follow', 'unfollow', 'like', 'unlike', 'love',
+  'send', 'message', 'dm', 'post', 'share', 'comment', 'reply',
+  'delete', 'remove', 'block', 'unblock', 'report',
+  'buy', 'purchase', 'checkout', 'subscribe', 'unsubscribe', 'pay', 'donate',
+  'invite', 'connect', 'accept', 'decline',
+];
+function matchedBlockedWord(label) {
+  const lower = String(label || '').toLowerCase();
+  for (const word of BLOCKED_CLICK_WORDS) {
+    if (new RegExp(`\\b${word}\\b`).test(lower)) return word;
+  }
+  return null;
+}
+
 async function extractPage(page, response, discovery) {
   const data = await page.evaluate(() => {
     const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -183,6 +281,65 @@ async function extractPage(page, response, discovery) {
     },
     discovery,
   };
+}
+
+// Reads whatever text/label/role identifies a click target BEFORE clicking
+// it, so the safety check that follows this function runs on real page
+// content, not on whatever selector/coordinates the caller supplied.
+async function describeClickTarget(page, { selector, x, y }) {
+  if (selector) {
+    return page.locator(selector).first()
+      .evaluate((el) => (el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '').trim())
+      .catch(() => '');
+  }
+  return page.evaluate(([px, py]) => {
+    let el = document.elementFromPoint(px, py);
+    for (let i = 0; i < 4 && el; i += 1) {
+      const text = (el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || '').trim();
+      if (text) return text;
+      el = el.parentElement;
+    }
+    return '';
+  }, [x, y]).catch(() => '');
+}
+
+async function runInteractiveAction(entry, input) {
+  const { page } = entry;
+  const action = String(input.action || '');
+  if (action === 'navigate') {
+    const url = await publicUrl(input.url);
+    if (!url) throw Object.assign(new Error('public_url_required'), { status: 400 });
+    await page.goto(url.href, { waitUntil: 'domcontentloaded' });
+    return { ok: true, url: page.url() };
+  }
+  if (action === 'type') {
+    const selector = typeof input.selector === 'string' ? input.selector : null;
+    if (!selector) throw Object.assign(new Error('selector_required'), { status: 400 });
+    await page.locator(selector).first().fill(String(input.text ?? '').slice(0, 2000));
+    return { ok: true };
+  }
+  if (action === 'scroll') {
+    const direction = ['down', 'up', 'top', 'bottom'].includes(input.direction) ? input.direction : 'down';
+    const amount = Math.max(0, Math.min(Number(input.amount) || 800, 4000));
+    if (direction === 'top') await page.evaluate(() => window.scrollTo(0, 0));
+    else if (direction === 'bottom') await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    else await page.mouse.wheel(0, direction === 'up' ? -amount : amount);
+    await page.waitForTimeout(400);
+    return { ok: true };
+  }
+  if (action === 'screenshot') {
+    const buf = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: Boolean(input.full_page), timeout: NAVIGATION_TIMEOUT_MS });
+    if (buf.length > 5 * 1024 * 1024) throw Object.assign(new Error('screenshot_too_large'), { status: 500 });
+    return { ok: true, screenshot: `data:image/jpeg;base64,${buf.toString('base64')}` };
+  }
+  if (action === 'snapshot') {
+    // page.accessibility.snapshot() is gone in this Playwright version
+    // (verified: undefined at runtime, not just deprecated) — ariaSnapshot()
+    // is the current API and returns readable structured text, not a raw tree.
+    const tree = await page.locator('body').ariaSnapshot();
+    return { ok: true, snapshot: tree };
+  }
+  throw Object.assign(new Error(`unknown_action: ${action}`), { status: 400 });
 }
 
 async function crawl(input) {
@@ -285,19 +442,62 @@ async function crawl(input) {
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     const mcpRunning = mcp.exitCode === null;
-    return send(res, mcpRunning ? 200 : 503, { status: mcpRunning ? 'ok' : 'degraded', browser: browserPromise ? 'warm' : 'idle', active, queued: waiters.length, mcp: mcpRunning ? 'running' : 'stopped' });
+    return send(res, mcpRunning ? 200 : 503, {
+      status: mcpRunning ? 'ok' : 'degraded', browser: browserPromise ? 'warm' : 'idle',
+      active, queued: waiters.length, mcp: mcpRunning ? 'running' : 'stopped',
+      interactive_sessions: interactiveSessions.size,
+    });
   }
-  if (req.method !== 'POST' || req.url !== '/v1/crawl') return send(res, 404, { error: 'not_found' });
+
+  const actionMatch = req.url.match(/^\/v1\/sessions\/([^/]+)\/action$/);
+  const sessionIdMatch = req.url.match(/^\/v1\/sessions\/([^/]+)$/);
+  const isSessionsRoute = req.url === '/v1/sessions' || actionMatch || sessionIdMatch;
+  const isCrawlRoute = req.url === '/v1/crawl';
+  if (!isSessionsRoute && !isCrawlRoute) return send(res, 404, { error: 'not_found' });
   if (!secureEqual(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''), TOKEN)) return send(res, 401, { error: 'unauthorized' });
-  await acquire();
+
+  if (isCrawlRoute) {
+    if (req.method !== 'POST') return send(res, 404, { error: 'not_found' });
+    await acquire();
+    try {
+      const payload = await readJson(req);
+      const result = await crawl(payload);
+      return send(res, result.pages.length ? 200 : 502, result);
+    } catch (error) {
+      return send(res, error.status || 500, { error: String(error.message || error).slice(0, 500) });
+    } finally {
+      release();
+    }
+  }
+
+  // Interactive sessions do not go through acquire()/release() — that pool
+  // gates one-shot /v1/crawl renders; an open session is a longer-lived
+  // resource bounded by its own MAX_INTERACTIVE_SESSIONS + TTL instead.
   try {
-    const payload = await readJson(req);
-    const result = await crawl(payload);
-    return send(res, result.pages.length ? 200 : 502, result);
+    if (req.url === '/v1/sessions' && req.method === 'POST') {
+      const payload = await readJson(req);
+      const orgId = typeof payload.org_id === 'string' ? payload.org_id : null;
+      const sessionName = typeof payload.session === 'string' ? payload.session : null;
+      const result = await createInteractiveSession({ orgId, sessionName });
+      return send(res, 201, { session_id: result.id, session_used: result.session_used });
+    }
+    if (actionMatch && req.method === 'POST') {
+      const payload = await readJson(req);
+      const orgId = typeof payload.org_id === 'string' ? payload.org_id : null;
+      const entry = requireInteractiveSession(actionMatch[1], orgId);
+      const result = await runInteractiveAction(entry, payload);
+      return send(res, 200, result);
+    }
+    if (sessionIdMatch && req.method === 'DELETE') {
+      const payload = await readJson(req).catch(() => ({}));
+      const orgId = typeof payload.org_id === 'string' ? payload.org_id : null;
+      requireInteractiveSession(sessionIdMatch[1], orgId); // validates ownership before closing
+      await closeInteractiveSession(sessionIdMatch[1]);
+      return send(res, 200, { closed: true });
+    }
+    return send(res, 404, { error: 'not_found' });
   } catch (error) {
     return send(res, error.status || 500, { error: String(error.message || error).slice(0, 500) });
-  } finally {
-    release();
   }
 });
 

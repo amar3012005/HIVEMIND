@@ -7,15 +7,6 @@ function nextAction(status) {
   return ['COMPLETED', 'TERMINATED'].includes(status) ? null : 'execute_current_stage';
 }
 
-export function terminalOutcomeSatisfied(run) {
-  if (String(run?.status || '').toUpperCase() !== 'COMPLETED') return false;
-  const acceptable = rows(run?.context?.playbook_selection?.acceptable_terminal_states).map(String);
-  // Historical runs predate requested-terminal binding. Preserve their legacy
-  // projection; every newly selected run carries an explicit non-empty set.
-  return acceptable.length === 0
-    || acceptable.includes(String(run?.terminalState || run?.terminal_state || ''));
-}
-
 export function projectRuntimePlaybookSnapshot(run, { turns = [] } = {}) {
   const counts = {};
   for (const artifact of rows(run.artifacts)) {

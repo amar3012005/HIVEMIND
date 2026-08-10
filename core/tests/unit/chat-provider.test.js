@@ -11,32 +11,15 @@ import {
   resolveChatCompletionRoute,
 } from '../../src/llm/chat-provider.js';
 
-test('chat model policy uses Gemini Flash-Lite planning and GPT-OSS-20B Nitro synthesis', () => {
+test('chat model policy uses Gemini Flash-Lite planning and Cerebras 120B synthesis', () => {
   assert.equal(DEFAULT_CHAT_PLANNER_MODEL, 'google/gemini-2.5-flash-lite');
-  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'openai/gpt-oss-20b:nitro');
+  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'cerebras/gpt-oss-120b');
 });
 
 test('HQ bounded language tasks use DeepSeek without changing Room synthesis policy', () => {
   assert.equal(DEFAULT_HQ_AWAKENING_MODEL, 'deepseek/deepseek-v4-flash-0731');
   assert.equal(DEFAULT_HQ_DISPATCH_MODEL, 'deepseek/deepseek-v4-flash-0731');
-  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'openai/gpt-oss-20b:nitro');
-});
-
-test('GPT-OSS-20B Nitro final synthesis uses OpenRouter variant routing without manual provider order', () => {
-  const prior = process.env.OPENROUTER_API_KEY;
-  process.env.OPENROUTER_API_KEY = 'or-test';
-  try {
-    const route = resolveChatCompletionRoute(DEFAULT_CHAT_SYNTHESIS_MODEL);
-    assert.equal(route.provider, 'openrouter:openai');
-    assert.equal(route.wireModel, 'openai/gpt-oss-20b:nitro');
-    assert.equal(route.providerPolicy.sort, undefined);
-    assert.equal(route.providerPolicy.order, undefined);
-    assert.equal(route.providerPolicy.allow_fallbacks, true);
-    assert.equal(route.providerPolicy.data_collection, 'deny');
-  } finally {
-    if (prior == null) delete process.env.OPENROUTER_API_KEY;
-    else process.env.OPENROUTER_API_KEY = prior;
-  }
+  assert.equal(DEFAULT_CHAT_SYNTHESIS_MODEL, 'cerebras/gpt-oss-120b');
 });
 
 test('DeepSeek HQ requests route directly to OpenRouter throughput selection', () => {
@@ -95,31 +78,6 @@ test('OpenRouter streaming accumulates content deltas and final usage', async ()
   }
 });
 
-test('a workload-specific DeepSeek provider order overrides sorting without affecting the shared route', async () => {
-  const prior = process.env.OPENROUTER_API_KEY;
-  process.env.OPENROUTER_API_KEY = 'or-test';
-  try {
-    await chatCompletionFetch(DEFAULT_HQ_AWAKENING_MODEL, {
-      method: 'POST',
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: 'Synthesize' }],
-        provider: { order: ['baidu', 'digitalocean', 'streamlake'] },
-      }),
-    }, {
-      fetchImpl: async (_url, options) => {
-        const sent = JSON.parse(options.body);
-        assert.deepEqual(sent.provider.order, ['baidu', 'digitalocean', 'streamlake']);
-        assert.equal(sent.provider.sort, undefined);
-        assert.equal(sent.provider.allow_fallbacks, true);
-        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
-      },
-    });
-  } finally {
-    if (prior == null) delete process.env.OPENROUTER_API_KEY;
-    else process.env.OPENROUTER_API_KEY = prior;
-  }
-});
-
 test('GPT-OSS synthesis permits provider failover through OpenRouter when no direct Cerebras key exists', () => {
   const priorOpenRouter = process.env.OPENROUTER_API_KEY;
   const priorCerebras = process.env.CEREBRAS_API_KEY;
@@ -169,37 +127,5 @@ test('Gemini planner request uses OpenRouter and preserves required tool paramet
   } finally {
     if (prior == null) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = prior;
-  }
-});
-
-test('OpenRouter preserves prompt cache keys while Cerebras relies on automatic prefix caching', async () => {
-  const priorOpenRouter = process.env.OPENROUTER_API_KEY;
-  const priorCerebras = process.env.CEREBRAS_API_KEY;
-  process.env.OPENROUTER_API_KEY = 'or-test';
-  process.env.CEREBRAS_API_KEY = 'cerebras-test';
-  try {
-    await chatCompletionFetch(DEFAULT_CHAT_PLANNER_MODEL, {
-      method: 'POST',
-      body: JSON.stringify({ messages: [], prompt_cache_key: 'hm:planner:v1' }),
-    }, {
-      fetchImpl: async (_url, options) => {
-        assert.equal(JSON.parse(options.body).prompt_cache_key, 'hm:planner:v1');
-        return new Response('{}', { status: 200 });
-      },
-    });
-    await chatCompletionFetch('cerebras/gpt-oss-120b', {
-      method: 'POST',
-      body: JSON.stringify({ messages: [], prompt_cache_key: 'hm:synthesis:v1' }),
-    }, {
-      fetchImpl: async (_url, options) => {
-        assert.equal(JSON.parse(options.body).prompt_cache_key, undefined);
-        return new Response('{}', { status: 200 });
-      },
-    });
-  } finally {
-    if (priorOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
-    else process.env.OPENROUTER_API_KEY = priorOpenRouter;
-    if (priorCerebras == null) delete process.env.CEREBRAS_API_KEY;
-    else process.env.CEREBRAS_API_KEY = priorCerebras;
   }
 });

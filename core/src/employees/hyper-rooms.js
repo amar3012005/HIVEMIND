@@ -132,11 +132,6 @@ export async function appendTurnEvent(prisma, turnId, event) {
     });
     if (!row) throw new Error(`HyperTurn not found: ${turnId}`);
     const lines = Array.isArray(row.lines) ? row.lines : [];
-    const eventId = String(event?.event_id || '').trim();
-    if (eventId) {
-      const existing = lines.find((line) => String(line?.event_id || '') === eventId);
-      if (existing) return { stamped: existing, appended: false };
-    }
     const now = Date.now();
     const stamped = { ts: now, received_ts: now, ...event };
     lines.push(stamped);
@@ -144,10 +139,10 @@ export async function appendTurnEvent(prisma, turnId, event) {
       where: { id: turnId },
       data: { lines },
     });
-    return { stamped, appended: true };
+    return stamped;
   });
-  if (result.appended) publishTurnEvent(turnId, result.stamped);
-  return result.stamped;
+  publishTurnEvent(turnId, result);
+  return result;
 }
 
 /**
@@ -157,28 +152,10 @@ export async function appendTurnEvent(prisma, turnId, event) {
 export async function sealTurn(prisma, turnId, { status = 'complete', costTokens = 0, event = null } = {}) {
   const cur = await prisma.hyperTurn.findUnique({
     where: { id: turnId },
-    select: { sealedAt: true, lines: true },
+    select: { sealedAt: true },
   });
   if (!cur) throw new Error(`HyperTurn not found: ${turnId}`);
   if (cur.sealedAt) return false; // already sealed
-  const lines = Array.isArray(cur.lines) ? cur.lines : [];
-  if (status === 'complete' && !lines.some((line) => line?.t === 'final_report')) {
-    const synthesis = [...lines].reverse().find((line) => (
-      line?.t === 'line' && line?.kind === 'synthesis' && String(line?.content || '').trim()
-    ));
-    if (synthesis) {
-      await appendTurnEvent(prisma, turnId, {
-        t: 'final_report',
-        event_id: `recovered-final-report:${turnId}`,
-        title: 'Final report',
-        template: 'recovered_synthesis',
-        status: 'complete',
-        verdict: 'complete',
-        content: String(synthesis.content).trim(),
-        recovered_from: 'synthesis',
-      });
-    }
-  }
   await appendTurnEvent(prisma, turnId, event || { t: 'seal', cost_tokens: costTokens, status });
   await prisma.hyperTurn.update({
     where: { id: turnId },

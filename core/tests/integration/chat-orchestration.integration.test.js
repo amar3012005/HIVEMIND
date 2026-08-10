@@ -137,7 +137,6 @@ test('connector write is selected by schemas and stops at an org-bound draft', a
   try {
     const result = await runReactAgentV2({
       message: 'Envoie le rapport à Léa', language: 'fr', apiKey: 'test',
-      useTools: true,
       ctx: {
         userId: '55555555-5555-5555-5555-555555555555', orgId: '66666666-6666-6666-6666-666666666666',
         prisma, accessContext: { projectIds: [], teamIds: [], orgRole: 'member' },

@@ -12,13 +12,7 @@ import {
 } from './auth/api-keys.js';
 import { buildAllClientDescriptors, buildClientDescriptor } from './control-plane/descriptors.js';
 import { ControlPlaneSessionStore, buildSessionCookie, verifySessionCookie } from './control-plane/session-store.js';
-import {
-  createPersonalInvitationLink,
-  createSignupAdmission,
-  invitationCodeMatches,
-  verifyPersonalInvitationLink,
-  verifySignupAdmission,
-} from './control-plane/signup-admission.js';
+import { createSignupAdmission, invitationCodeMatches, verifySignupAdmission } from './control-plane/signup-admission.js';
 import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
@@ -51,24 +45,6 @@ import {
   normalizePromotionCode,
   redeemPromotion,
 } from './billing/promotion-service.js';
-import {
-  activateEnterpriseRunway,
-  createEnterpriseInvitation,
-  extendEnterpriseInvitation,
-  findEnterpriseInvitationAdmission,
-  getEnterpriseInvitationPreview,
-  markEnterpriseInvitationDelivery,
-  publicEnterpriseInvitation,
-  redeemEnterpriseInvitation,
-  revokeEnterpriseInvitation,
-  rotateEnterpriseInvitationSecrets,
-  normalizeEnterpriseInvitationInput,
-} from './billing/enterprise-invitation-service.js';
-import {
-  publicAccessApplication,
-  reviewAccessApplication,
-  submitAccessApplication,
-} from './billing/access-application-service.js';
 import { computeRunwayQuote, buildRunwayOffer, normalizeRunwayConfig } from './billing/runway-pricing.js';
 import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './billing/access-codes.js';
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
@@ -84,8 +60,7 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { renderTemplate, sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
-import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
+import { sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
@@ -93,7 +68,7 @@ import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
 import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
 import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
 import { createHqRuntimeRouteHandler } from './hq-runtime/routes.js';
-import { activateHqAfterOnboarding, appendHqEvent, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement, scheduleHqWake } from './hq-runtime/repository.js';
+import { activateHqAfterOnboarding, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement, scheduleHqWake } from './hq-runtime/repository.js';
 import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { runtimeTransportStats } from './runtime-transport/client.js';
 import { internalFetch } from './internal/internal-fetch.js';
@@ -158,8 +133,6 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
     // Dedicated commercial control surface. This is explicit rather than a
     // wildcard so normal tenant CORS policy cannot expand by accident.
     'https://admin.hivemind.singulancelabs.com',
-    'https://singulancelabs.com',
-    'https://www.singulancelabs.com',
     'http://localhost:3000',
     'http://localhost:3001',
     'http://localhost:5000',
@@ -343,7 +316,7 @@ async function findOrCreateKindRoom(session, hqRoom, kind, message) {
   const room = await createHyperRoomWithinPlan({
     orgId, userId: session.userId, name, template: 'auto',
     participantIds, goal: `${_HQ_KIND_LABEL[kind]} work routed from HQ`,
-    agentConnectors: { _kind: kind }, roomMode: 'runtime',
+    agentConnectors: { _kind: kind },
     permanentLeadId: participantIds.slice().sort()[0] || null,
   });
   return { id: room.id, participantIds, created: true };
@@ -990,7 +963,6 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
               userId: hq.user_id, orgId: hq.org_id,
               name: task.title.slice(0, 120), participantIds,
               template: 'auto', permanentLeadId: participantIds.slice().sort()[0] || null,
-              roomMode: 'runtime',
           });
           roomId = taskRoom.id;
           const goal = `${task.title}\n${task.detail || ''}\nCompany: ${state.company} — ${state.mission || ''}`.slice(0, 2000);
@@ -1019,7 +991,6 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
           room_id: roomId, turn_id: turn.id, user_id: hq.user_id, org_id: hq.org_id,
           user_message: kickoff, participant_ids: roomRow?.participantIds || [],
           project_id: roomRow?.projectId || null, room_goal: roomRow?.goal || '',
-          room_mode: 'runtime',
           task_tag: `ROOM_${String(task.room_tag || task.tag || 'general').toUpperCase()}`,
           callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
         }).catch((e) => console.warn('[hyper-cycle] sidecar kick failed:', e.message));
@@ -1140,22 +1111,6 @@ function dispatchHyperRoomTurn(body) {
     headers: { 'Content-Type': 'application/json' },
     body: payload,
   });
-}
-
-// A Room's execution boundary is durable data, not an inference from its title
-// or domain tag. Human-facing Work Rooms keep a neutral Director; Company Rooms
-// are invoked by Runtime/playbooks as specialist operators.
-function roomExecutionMode(room) {
-  if (room?.roomMode === 'work' || room?.room_mode === 'work') return 'work';
-  if (room?.roomMode === 'runtime' || room?.room_mode === 'runtime') return 'runtime';
-  return room?.agentConnectors?._domain_home === true ? 'runtime' : 'work';
-}
-
-function roomExecutionTag(room) {
-  if (roomExecutionMode(room) === 'work') return 'WORK';
-  if (room?.agentConnectors?._domain_home === true
-    && String(room.roomTag || room.room_tag || 'general') === 'general') return 'HQ';
-  return `ROOM_${String(room?.roomTag || room?.room_tag || 'general').toUpperCase()}`;
 }
 
 function requestsGrowthStage(message) {
@@ -2739,73 +2694,6 @@ const server = http.createServer(async (req, res) => {
     a.log(entry).catch(err => console.warn('[audit] log failed:', err.message));
   }
 
-  async function dispatchEnterpriseInvitation({ invitation, token, code = null }) {
-    const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
-    const activationUrl = `${base}/hivemind/invite?enterprise_invite=${encodeURIComponent(token)}`;
-    const selfHosted = invitation.hostingMode === 'self_host';
-    const storageLabels = {
-      hybrid: 'Managed hybrid company brain',
-      amr_embedded: 'Embedded .amr company brain',
-      byod_amr: 'Self-hosted BYOD agent company brain',
-    };
-    const delivery = await sendSystemEmail({
-      templateId: 'enterprise_invitation',
-      to: invitation.recipientEmail,
-      // Sender identity is configured server-side; the browser never supplies it.
-      from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
-      vars: {
-        companyName: invitation.companyName,
-        workspaceName: invitation.workspaceName || invitation.companyName,
-        recipientEmail: invitation.recipientEmail,
-        hostingLabel: selfHosted ? 'Self-hosted' : 'Managed',
-        hostingExplanation: selfHosted
-          ? 'Your organization operates the memory infrastructure; your deployment is provisioned through the secure setup flow.'
-          : 'Singulance hosts and operates your workspace on managed EU infrastructure.',
-        invitationUrl: activationUrl,
-        accessCode: code || 'Use the secure activation link above.',
-        expiresOn: invitation.invitationExpiresAt.toLocaleDateString('en-GB', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }),
-        onboardingDays: invitation.onboardingDays || 14,
-        storageLabel: storageLabels[invitation.storageMode] || 'Company brain infrastructure',
-        welcomeMessage: invitation.welcomeMessage || 'Your HIVEMIND AI Operating System is ready to activate.',
-        supportEmail: process.env.SYSTEM_EMAIL_SUPPORT || 'support@singulancelabs.com',
-        privacyUrl: process.env.HIVEMIND_PRIVACY_URL || 'https://singulancelabs.com/privacy',
-        termsUrl: process.env.HIVEMIND_TERMS_URL || 'https://singulancelabs.com/terms',
-      },
-    });
-    const recorded = await markEnterpriseInvitationDelivery({
-      prisma, invitationId: invitation.id, delivered: delivery.ok, error: delivery.error || null,
-    });
-    return { delivery, invitation: recorded, activationUrl };
-  }
-
-  function invitationTemplateVars({ kind, application, invitation = null, invitationUrl, accessCode = null }) {
-    const expiresAt = invitation?.invitationExpiresAt || new Date(Date.now() + 14 * 86400000);
-    const common = {
-      name: application?.name || application?.email?.split('@')[0] || 'there',
-      recipientEmail: invitation?.recipientEmail || application?.email,
-      invitationUrl,
-      expiresOn: expiresAt.toLocaleDateString('en-GB', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }),
-      supportEmail: process.env.SYSTEM_EMAIL_SUPPORT || 'support@singulancelabs.com',
-      privacyUrl: process.env.HIVEMIND_PRIVACY_URL || 'https://singulancelabs.com/privacy',
-      termsUrl: process.env.HIVEMIND_TERMS_URL || 'https://singulancelabs.com/terms',
-    };
-    if (kind === 'personal') return common;
-    const selfHosted = invitation.hostingMode === 'self_host';
-    return {
-      ...common,
-      companyName: invitation.companyName,
-      workspaceName: invitation.workspaceName || invitation.companyName,
-      hostingLabel: selfHosted ? 'Self-hosted' : 'Managed',
-      hostingExplanation: selfHosted
-        ? 'Your organization operates the memory infrastructure; your deployment is provisioned through the secure setup flow.'
-        : 'Singulance hosts and operates your workspace on managed EU infrastructure.',
-      storageLabel: ({ hybrid: 'Managed hybrid company brain', amr_embedded: 'Embedded .amr company brain', byod_amr: 'Self-hosted BYOD agent company brain' })[invitation.storageMode] || 'Company brain infrastructure',
-      accessCode: accessCode || `Code ending ${invitation.accessCodeHint}`,
-      onboardingDays: invitation.onboardingDays || 14,
-      welcomeMessage: invitation.welcomeMessage || 'Your HIVEMIND AI Operating System is ready to activate.',
-    };
-  }
-
   function _reqMeta(req) {
     const fwd = req.headers?.['x-forwarded-for'];
     const ip = typeof fwd === 'string' ? fwd.split(',')[0].trim() : null;
@@ -2831,23 +2719,10 @@ const server = http.createServer(async (req, res) => {
   const handleHqRuntimeRoute = createHqRuntimeRouteHandler({
     prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse,
     wakeScheduler: () => hqScheduler?.wake?.(),
+    emailLifecycle: () => hqScheduler?.emailLifecycle || null,
     runtimePlaybooks: () => hqScheduler?.runtimePlaybooks || null,
   });
   if (await handleHqRuntimeRoute(req, res, url)) return;
-
-  // Public waitlist intake is pre-tenant, deliberately data-minimal, rate
-  // limited, and always returns the same accepted shape to avoid account
-  // discovery. Re-submission refreshes the existing application.
-  if (pathname === '/auth/access-applications' && req.method === 'POST') {
-    if (signupAdmissionLimited(req)) return jsonResponse(res, { accepted: true }, 202);
-    if (!prisma) return jsonResponse(res, { error: 'Service unavailable' }, 503);
-    try {
-      await submitAccessApplication(prisma, await parseBody(req));
-      return jsonResponse(res, { accepted: true }, 202);
-    } catch (error) {
-      return jsonResponse(res, { error: error.message }, 400);
-    }
-  }
 
   if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
     if (platformUnlockLimited(req)) return jsonResponse(res, { error: 'Too many attempts. Try again later.' }, 429);
@@ -2963,45 +2838,6 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // Manual transactional email is deliberately narrow: platform admins can
-  // render/send approved welcome templates to one recipient at a time. Real
-  // enterprise invitations keep using their secure invitation lifecycle.
-  if (pathname === '/admin/api/platform/email/templates' && req.method === 'GET') {
-    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    return jsonResponse(res, { templates: Object.entries(ADMIN_EMAIL_TEMPLATES).map(([id, label]) => ({ id, label })) });
-  }
-  if (pathname === '/admin/api/platform/email/preview' && req.method === 'POST') {
-    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    try {
-      const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
-        appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
-      });
-      const rendered = renderTemplate(message.templateId, message.vars);
-      return jsonResponse(res, { template_id: message.templateId, subject: rendered.subject, text: rendered.text, html: rendered.html });
-    } catch (error) {
-      return jsonResponse(res, { error: error.message }, 400);
-    }
-  }
-  if (pathname === '/admin/api/platform/email/send' && req.method === 'POST') {
-    const operator = getPlatformAdminSession(req);
-    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    try {
-      const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
-        appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
-      });
-      const delivery = await sendSystemEmail({ templateId: message.templateId, to: message.to, vars: message.vars });
-      await audit({
-        eventType: delivery.ok ? 'commercial.admin_email_sent' : 'commercial.admin_email_delivery_failed',
-        eventCategory: 'billing', action: 'create', resourceType: 'system_email', resourceId: crypto.randomUUID(),
-        metadata: { operator: operator.operator, session_id: operator.sessionId, template_id: message.templateId, recipient_domain: message.to.split('@')[1], provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, safe_error: delivery.error || null },
-        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin',
-      });
-      return jsonResponse(res, { ok: delivery.ok, provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, error: delivery.ok ? null : (delivery.error || 'delivery_failed') }, delivery.ok ? 200 : 502);
-    } catch (error) {
-      return jsonResponse(res, { error: error.message }, 400);
-    }
-  }
-
   // ─── Platform Commercial: canonical promotions and pilot grants ───────────
   // This namespace is deliberately separate from tenant billing routes. It is
   // protected by the short-lived platform passkey session and every mutation is
@@ -3063,235 +2899,6 @@ const server = http.createServer(async (req, res) => {
     await audit({ eventType: 'commercial.promotion_revoked', eventCategory: 'billing', action: 'update', resourceType: 'promotion', resourceId: adminPromotionRevoke[1],
       metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
     return jsonResponse(res, { ok: true });
-  }
-
-  // ─── Platform Commercial: B2B enterprise invitations ───────────────────
-  // Invitations are deliberately distinct from reusable promotions/referrals:
-  // one invited owner, one eventual organization, one onboarding grant.
-  if (pathname === '/admin/api/platform/invitations' && (req.method === 'GET' || req.method === 'POST')) {
-    const operator = getPlatformAdminSession(req);
-    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    if (req.method === 'GET') {
-      const invitations = await prisma.enterpriseInvitation.findMany({ orderBy: { createdAt: 'desc' }, take: 500 });
-      const orgIds = invitations.map((row) => row.orgId).filter(Boolean);
-      const grants = orgIds.length ? await prisma.entitlementGrant.findMany({ where: { orgId: { in: orgIds } }, orderBy: { startsAt: 'desc' } }) : [];
-      const latestGrant = new Map();
-      for (const grant of grants) if (!latestGrant.has(grant.orgId)) latestGrant.set(grant.orgId, grant);
-      return jsonResponse(res, { invitations: invitations.map((row) => ({
-        ...publicEnterpriseInvitation(row),
-        entitlement: row.orgId && latestGrant.get(row.orgId) ? {
-          grant_id: latestGrant.get(row.orgId).id, source: latestGrant.get(row.orgId).source,
-          status: latestGrant.get(row.orgId).status, ends_at: latestGrant.get(row.orgId).endsAt,
-        } : null,
-      })) });
-    }
-    try {
-      const body = await parseBody(req).catch(() => ({}));
-      const created = await createEnterpriseInvitation({ prisma, input: body });
-      const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: created.invitation.id } });
-      let sent = null;
-      if (body.send_email !== false) sent = await dispatchEnterpriseInvitation({ invitation: raw, token: created.plaintextToken, code: created.plaintextCode });
-      await audit({ eventType: 'commercial.enterprise_invitation_created', eventCategory: 'billing', action: 'create',
-        resourceType: 'enterprise_invitation', resourceId: created.invitation.id,
-        metadata: { operator: operator.operator, session_id: operator.sessionId, account_type: created.invitation.account_type, delivery_status: sent?.invitation?.delivery_status || 'not_sent' },
-        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-      if (sent) await audit({ eventType: sent.delivery.ok ? 'commercial.enterprise_invitation_sent' : 'commercial.enterprise_invitation_delivery_failed', eventCategory: 'billing', action: 'create',
-        resourceType: 'enterprise_invitation', resourceId: created.invitation.id,
-        metadata: { operator: operator.operator, session_id: operator.sessionId, safe_error: sent.delivery.error || null },
-        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-      return jsonResponse(res, { invitation: sent?.invitation || created.invitation, code: created.plaintextCode, ...(sent ? { activation_url: sent.activationUrl, email_dispatch: sent.delivery } : {}) }, 201);
-    } catch (error) {
-      return jsonResponse(res, { error: error.message }, 400);
-    }
-  }
-
-  if (pathname === '/admin/api/platform/personal-invitation-link' && req.method === 'POST') {
-    const operator = getPlatformAdminSession(req);
-    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    const body = await parseBody(req).catch(() => ({}));
-    if (!invitationCodeMatches(String(body.invitation_code || ''), PERSONAL_SIGNUP_INVITATION_CODE)) {
-      return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);
-    }
-    const validityDays = Math.min(90, Math.max(1, Number(body.validity_days || 14)));
-    const token = createPersonalInvitationLink({
-      configuredCode: PERSONAL_SIGNUP_INVITATION_CODE,
-      secret: SIGNUP_ADMISSION_SECRET,
-      ttlSeconds: validityDays * 24 * 60 * 60,
-    });
-    if (!token) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 503);
-    const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
-    const invitationUrl = `${base}/hivemind/invite?personal_invite=${encodeURIComponent(token)}`;
-    await audit({ eventType: 'commercial.personal_invitation_link_created', eventCategory: 'billing', action: 'create',
-      resourceType: 'personal_invitation_link', metadata: { operator: operator.operator, session_id: operator.sessionId, validity_days: validityDays },
-      ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-    return jsonResponse(res, { invitation_url: invitationUrl, expires_in_days: validityDays }, 201);
-  }
-
-  if (pathname === '/admin/api/platform/access-applications' && req.method === 'GET') {
-    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    const accountType = url.searchParams.get('account_type');
-    const status = url.searchParams.get('status');
-    const where = {
-      ...(accountType && ['personal', 'enterprise'].includes(accountType) ? { accountType } : {}),
-      ...(status && ['pending', 'approved', 'discarded', 'invited', 'converted'].includes(status) ? { status } : {}),
-    };
-    const rows = await prisma.accessApplication.findMany({ where, orderBy: { createdAt: 'desc' }, take: 500 });
-    return jsonResponse(res, { applications: rows.map(publicAccessApplication) });
-  }
-
-  const accessApplicationAction = pathname.match(/^\/admin\/api\/platform\/access-applications\/([0-9a-f-]{36})\/(approve|discard|preview|send)$/i);
-  if (accessApplicationAction && req.method === 'POST') {
-    const operator = getPlatformAdminSession(req);
-    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    const [, applicationId, action] = accessApplicationAction;
-    const body = await parseBody(req).catch(() => ({}));
-    try {
-      let application = await prisma.accessApplication.findUnique({ where: { id: applicationId } });
-      if (!application) return jsonResponse(res, { error: 'Not found' }, 404);
-      if (action === 'discard') {
-        application = await reviewAccessApplication(prisma, { id: applicationId, status: 'discarded', operator: operator.operator, note: body.note });
-        await audit({ eventType: 'commercial.access_application_discarded', eventCategory: 'billing', action: 'update', resourceType: 'access_application', resourceId: applicationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId, account_type: application.accountType }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-        return jsonResponse(res, { application: publicAccessApplication(application) });
-      }
-      if (action === 'approve') {
-        application = await reviewAccessApplication(prisma, { id: applicationId, status: 'approved', operator: operator.operator, note: body.note });
-        if (application.accountType === 'enterprise' && !application.enterpriseInvitationId) {
-          const normalized = normalizeEnterpriseInvitationInput({
-            company_name: body.company_name || application.companyName || `${application.name}'s company`,
-            workspace_name: body.workspace_name || body.company_name || application.companyName,
-            recipient_email: application.email,
-            account_type: body.account_type || 'enterprise_managed',
-            storage_mode: body.storage_mode || 'hybrid',
-            onboarding_days: body.onboarding_days || 14,
-            invitation_expires_at: body.invitation_expires_at,
-            welcome_message: body.welcome_message || application.message,
-            private_notes: body.private_notes,
-          });
-          const created = await createEnterpriseInvitation({ prisma, input: normalized });
-          application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { enterpriseInvitationId: created.invitation.id, invitationType: 'enterprise' } });
-        } else if (application.accountType === 'personal') {
-          application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { invitationType: 'personal' } });
-        }
-        await audit({ eventType: 'commercial.access_application_approved', eventCategory: 'billing', action: 'update', resourceType: 'access_application', resourceId: applicationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId, account_type: application.accountType, enterprise_invitation_id: application.enterpriseInvitationId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-        return jsonResponse(res, { application: publicAccessApplication(application) });
-      }
-
-      if (!['approved', 'invited'].includes(application.status)) throw new Error('Application must be approved first');
-      const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
-      if (application.accountType === 'personal') {
-        const previewUrl = `${base}/hivemind/invite?personal_invite=generated-when-sent`;
-        if (action === 'preview') {
-          const rendered = renderTemplate('personal_invitation', invitationTemplateVars({ kind: 'personal', application, invitationUrl: previewUrl }));
-          return jsonResponse(res, { from: 'welcome@admin.singulancelabs.com', to: application.email, ...rendered });
-        }
-        const token = createPersonalInvitationLink({ configuredCode: PERSONAL_SIGNUP_INVITATION_CODE, secret: SIGNUP_ADMISSION_SECRET, ttlSeconds: 14 * 86400 });
-        if (!token) throw new Error('Invitation service is unavailable');
-        const invitationUrl = `${base}/hivemind/invite?personal_invite=${encodeURIComponent(token)}`;
-        const delivery = await sendSystemEmail({ templateId: 'personal_invitation', to: application.email,
-          from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
-          vars: invitationTemplateVars({ kind: 'personal', application, invitationUrl }) });
-        if (!delivery.ok) return jsonResponse(res, { error: delivery.error || 'Email delivery failed' }, 502);
-        application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { status: 'invited', invitationSentAt: new Date() } });
-        await audit({ eventType: 'commercial.personal_invitation_sent', eventCategory: 'billing', action: 'create', resourceType: 'access_application', resourceId: applicationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId, provider: delivery.provider || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-        return jsonResponse(res, { application: publicAccessApplication(application), delivery: { ok: true, provider: delivery.provider || null } });
-      }
-
-      const invitation = await prisma.enterpriseInvitation.findUnique({ where: { id: application.enterpriseInvitationId } });
-      if (!invitation) throw new Error('Invitation is unavailable');
-      if (action === 'preview') {
-        const rendered = renderTemplate('enterprise_invitation', invitationTemplateVars({ kind: 'enterprise', application, invitation, invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent` }));
-        return jsonResponse(res, { from: 'welcome@admin.singulancelabs.com', to: application.email, ...rendered });
-      }
-      const rotated = await rotateEnterpriseInvitationSecrets({ prisma, invitationId: invitation.id, rotateCode: true, rotateLink: true });
-      const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: invitation.id } });
-      const sent = await dispatchEnterpriseInvitation({ invitation: raw, token: rotated.plaintextToken, code: rotated.plaintextCode });
-      if (!sent.delivery.ok) return jsonResponse(res, { error: sent.delivery.error || 'Email delivery failed' }, 502);
-      application = await prisma.accessApplication.update({ where: { id: applicationId }, data: { status: 'invited', invitationSentAt: new Date() } });
-      await audit({ eventType: 'commercial.enterprise_waitlist_invitation_sent', eventCategory: 'billing', action: 'create', resourceType: 'access_application', resourceId: applicationId,
-        metadata: { operator: operator.operator, session_id: operator.sessionId, enterprise_invitation_id: invitation.id, provider: sent.delivery.provider || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-      return jsonResponse(res, { application: publicAccessApplication(application), delivery: { ok: true, provider: sent.delivery.provider || null } });
-    } catch (error) {
-      return jsonResponse(res, { error: error.message }, /unavailable|not found/i.test(error.message) ? 404 : 400);
-    }
-  }
-
-  const adminInvitationDetail = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})$/i);
-  if (adminInvitationDetail && req.method === 'GET') {
-    const operator = getPlatformAdminSession(req);
-    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    const invitation = await prisma?.enterpriseInvitation.findUnique({ where: { id: adminInvitationDetail[1] } });
-    if (!invitation) return jsonResponse(res, { error: 'Not found' }, 404);
-    const [auditRows, grants] = await Promise.all([
-      prisma.auditLog.findMany({ where: { resourceType: 'enterprise_invitation', resourceId: invitation.id }, orderBy: { createdAt: 'desc' }, take: 100 }),
-      invitation.orgId ? prisma.entitlementGrant.findMany({ where: { orgId: invitation.orgId }, orderBy: { startsAt: 'desc' }, take: 20 }) : [],
-    ]);
-    return jsonResponse(res, { invitation: publicEnterpriseInvitation(invitation), audit: auditRows, entitlement_grants: grants });
-  }
-
-  const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(preview|send|resend|revoke|extend|rotate-code|code-copied)$/i);
-  if (adminInvitationAction && req.method === 'POST') {
-    const operator = getPlatformAdminSession(req);
-    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    const [, invitationId, action] = adminInvitationAction;
-    const body = await parseBody(req).catch(() => ({}));
-    try {
-      if (action === 'preview') {
-        const invitation = await prisma.enterpriseInvitation.findUnique({ where: { id: invitationId } });
-        if (!invitation) return jsonResponse(res, { error: 'Not found' }, 404);
-        const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
-        const rendered = renderTemplate('enterprise_invitation', invitationTemplateVars({
-          kind: 'enterprise',
-          application: null,
-          invitation,
-          invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent`,
-        }));
-        return jsonResponse(res, {
-          from: 'welcome@admin.singulancelabs.com',
-          to: invitation.recipientEmail,
-          invitation: publicEnterpriseInvitation(invitation),
-          ...rendered,
-        });
-      }
-      if (action === 'revoke') {
-        await revokeEnterpriseInvitation({ prisma, invitationId });
-        await audit({ eventType: 'commercial.enterprise_invitation_revoked', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-        return jsonResponse(res, { ok: true });
-      }
-      if (action === 'extend') {
-        const updated = await extendEnterpriseInvitation({ prisma, invitationId, expiresAt: body.invitation_expires_at || body.expires_at });
-        await audit({ eventType: 'commercial.enterprise_invitation_extended', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId, invitation_expires_at: updated.invitationExpiresAt }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-        return jsonResponse(res, { invitation: publicEnterpriseInvitation(updated) });
-      }
-      if (action === 'code-copied') {
-        await audit({ eventType: 'commercial.enterprise_invitation_code_copied', eventCategory: 'billing', action: 'read', resourceType: 'enterprise_invitation', resourceId: invitationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-        return jsonResponse(res, { ok: true });
-      }
-      const rotateCode = action === 'send' || action === 'rotate-code';
-      const rotated = await rotateEnterpriseInvitationSecrets({ prisma, invitationId, rotateCode, rotateLink: action !== 'rotate-code' });
-      if (action === 'rotate-code') {
-        await audit({ eventType: 'commercial.enterprise_invitation_code_rotated', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-        return jsonResponse(res, { invitation: rotated.invitation, code: rotated.plaintextCode });
-      }
-      const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: invitationId } });
-      const sent = await dispatchEnterpriseInvitation({ invitation: raw, token: rotated.plaintextToken, code: action === 'send' ? rotated.plaintextCode : null });
-      const sentEvent = action === 'resend' ? 'commercial.enterprise_invitation_resent' : 'commercial.enterprise_invitation_sent';
-      await audit({ eventType: sent.delivery.ok ? sentEvent : 'commercial.enterprise_invitation_delivery_failed', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
-        metadata: { operator: operator.operator, session_id: operator.sessionId, safe_error: sent.delivery.error || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-      return jsonResponse(res, { invitation: sent.invitation, activation_url: sent.activationUrl, ...(action === 'send' ? { code: rotated.plaintextCode } : {}), email_dispatch: sent.delivery });
-    } catch (error) {
-      return jsonResponse(res, { error: error.message }, /unavailable|not found/i.test(error.message) ? 404 : 400);
-    }
   }
 
   // ─── Platform Commercial: two-phase referral campaigns ────────────────────
@@ -3954,26 +3561,6 @@ const server = http.createServer(async (req, res) => {
     if (envId) opts.idpId = envId;
     else opts.idpHint = h;
   };
-  if (pathname === '/auth/enterprise-invitations/preview' && req.method === 'GET') {
-    if (signupAdmissionLimited(req)) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
-    const preview = await getEnterpriseInvitationPreview({ prisma, token: url.searchParams.get('token') }).catch(() => null);
-    recordSignupAdmissionAttempt(req, Boolean(preview));
-    if (!preview) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 404);
-    return jsonResponse(res, { invitation: preview });
-  }
-
-  if (pathname === '/auth/personal-invitations/preview' && req.method === 'GET') {
-    if (signupAdmissionLimited(req)) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
-    const admission = verifyPersonalInvitationLink({
-      token: url.searchParams.get('token'),
-      configuredCode: PERSONAL_SIGNUP_INVITATION_CODE,
-      secret: SIGNUP_ADMISSION_SECRET,
-    });
-    recordSignupAdmissionAttempt(req, Boolean(admission));
-    if (!admission) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 404);
-    return jsonResponse(res, { invitation: { account_type: 'personal', invitation_expires_at: new Date(admission.expiresAt * 1000).toISOString() } });
-  }
-
   if (pathname === '/auth/signup-admission' && req.method === 'POST') {
     if (signupAdmissionLimited(req)) {
       return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 429);
@@ -3981,27 +3568,14 @@ const server = http.createServer(async (req, res) => {
     const body = await parseBody(req);
     const accountType = String(body.account_type || '').trim().toLowerCase();
     const code = String(body.invitation_code || body.enterprise_access_code || '').trim();
-    const personalAdmission = accountType === 'personal'
-      ? verifyPersonalInvitationLink({
-        token: body.personal_invitation_token || null,
-        configuredCode: PERSONAL_SIGNUP_INVITATION_CODE,
-        secret: SIGNUP_ADMISSION_SECRET,
-      })
-      : null;
-    const enterpriseAdmission = accountType === 'enterprise'
-      ? await findEnterpriseInvitationAdmission({ prisma, code, token: body.enterprise_invitation_token || null }).catch(() => null)
-      : null;
-    // The environment allowlist is legacy-only. New B2B workspaces receive an
-    // invitation bound to one recipient and one commercial profile.
     const accepted = accountType === 'personal'
-      ? Boolean(personalAdmission) || invitationCodeMatches(code, PERSONAL_SIGNUP_INVITATION_CODE)
-      : Boolean(enterpriseAdmission) || (accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code)));
+      ? invitationCodeMatches(code, PERSONAL_SIGNUP_INVITATION_CODE)
+      : accountType === 'enterprise' && isValidEnterpriseAccessCode(normalizeEnterpriseAccessCode(code));
     recordSignupAdmissionAttempt(req, accepted);
     if (!accepted) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 403);
     return jsonResponse(res, {
-      signup_ticket: createSignupAdmission({ accountType, secret: SIGNUP_ADMISSION_SECRET, enterpriseInvitation: enterpriseAdmission, ttlSeconds: SIGNUP_ADMISSION_TTL_SECONDS }),
+      signup_ticket: createSignupAdmission({ accountType, secret: SIGNUP_ADMISSION_SECRET, ttlSeconds: SIGNUP_ADMISSION_TTL_SECONDS }),
       expires_in_seconds: SIGNUP_ADMISSION_TTL_SECONDS,
-      ...(enterpriseAdmission ? { invitation: enterpriseAdmission.preview } : {}),
     });
   }
 
@@ -4366,41 +3940,29 @@ const server = http.createServer(async (req, res) => {
       accountType: requestedPlanInput === 'enterprise' ? 'enterprise' : 'personal',
       secret: SIGNUP_ADMISSION_SECRET,
     });
-    const enterpriseInvitationAdmission = requestedPlanInput === 'enterprise'
-      ? signupAdmission?.enterpriseInvitation || null : null;
     const existingMembershipCount = await prisma.userOrganization.count({ where: { userId: current.session.userId, isActive: true } });
     if (!isAdminAuthorized(req, url) && existingMembershipCount === 0 && !signupAdmission) {
       return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_required' }, 403);
     }
     const enterpriseAccessCode = normalizeEnterpriseAccessCode(body.enterprise_access_code);
     let enterpriseViaAccessCode = false;
-    let enterpriseInvitationProfile = null;
     let requestedPlan;
     if (isAdminAuthorized(req, url)) {
       requestedPlan = requestedPlanInput;
     } else if (requestedPlanInput === 'enterprise') {
-      if (enterpriseInvitationAdmission) {
-        const invitation = await prisma.enterpriseInvitation.findUnique({ where: { id: enterpriseInvitationAdmission.id } }).catch(() => null);
-        if (!invitation) return jsonResponse(res, { error: 'invitation unavailable', code: 'invalid_enterprise_code' }, 403);
-        enterpriseInvitationProfile = invitation;
-        requestedPlan = 'enterprise';
-      } else if (!isValidEnterpriseAccessCode(enterpriseAccessCode)) {
+      if (!isValidEnterpriseAccessCode(enterpriseAccessCode)) {
         // FE maps a 403 here → onboarding_error=invalid_enterprise_code.
         return jsonResponse(res, { error: 'invalid or inactive enterprise access code', code: 'invalid_enterprise_code' }, 403);
-      } else {
-        requestedPlan = 'enterprise';
-        enterpriseViaAccessCode = true;
       }
+      requestedPlan = 'enterprise';
+      enterpriseViaAccessCode = true;
     } else {
       requestedPlan = 'free';
     }
     if (!PLANS[requestedPlan]) {
       return jsonResponse(res, { error: 'invalid plan', valid: Object.keys(PLANS) }, 400);
     }
-    const referralCode = normalizeReferralCode(body.referralCode || body.referral_code);
-    if (enterpriseInvitationAdmission && referralCode) {
-      return jsonResponse(res, { error: 'an enterprise invitation cannot be combined with a referral code' }, 400);
-    }
+    const referralCode = normalizeReferralCode(body.referralCode);
     let referralCampaign = null;
     let signupPromotion = null;
     if (referralCode) {
@@ -4425,11 +3987,7 @@ const server = http.createServer(async (req, res) => {
       ? 'self_host' : 'managed';
     let memoryStorageMode = memoryStorageModeFor(provisionPlan, hostingMode);
     let accountType = provisionPlan === 'enterprise' ? (hostingMode === 'self_host' ? 'enterprise_self_hosted' : 'enterprise_managed') : 'personal';
-    if (enterpriseInvitationProfile) {
-      hostingMode = enterpriseInvitationProfile.hostingMode;
-      memoryStorageMode = enterpriseInvitationProfile.storageMode;
-      accountType = enterpriseInvitationProfile.accountType;
-    } else if (signupPromotion) {
+    if (signupPromotion) {
       hostingMode = signupPromotion.version.hostingMode;
       memoryStorageMode = signupPromotion.version.storageMode;
       accountType = signupPromotion.version.accountType;
@@ -4446,7 +4004,6 @@ const server = http.createServer(async (req, res) => {
       }
     }
     let org;
-    let enterpriseInvitationRedemption = null;
     try {
       const created = await prisma.$transaction(async (tx) => {
         const newOrg = await tx.organization.create({
@@ -4481,30 +4038,16 @@ const server = http.createServer(async (req, res) => {
         if (enterpriseViaAccessCode) {
           await activateOffer({ tx, orgId: newOrg.id, offer: buildStandardOffer('enterprise'), source: 'enterprise_access_code' });
         }
-        let enterpriseInvitation = null;
-        if (enterpriseInvitationAdmission) {
-          const signupUser = await tx.user.findUnique({ where: { id: current.session.userId }, select: { email: true } });
-          enterpriseInvitation = await redeemEnterpriseInvitation({
-            tx,
-            invitationId: enterpriseInvitationAdmission.id,
-            method: enterpriseInvitationAdmission.method,
-            version: enterpriseInvitationAdmission.version,
-            userId: current.session.userId,
-            userEmail: signupUser?.email || '',
-            orgId: newOrg.id,
-          });
-        }
         let promotion = null;
         if (signupPromotion) {
           const signupUser = await tx.user.findUnique({ where: { id: current.session.userId }, select: { email: true } });
           promotion = await redeemPromotion({ prisma, tx, orgId: newOrg.id, userId: current.session.userId, email: signupUser?.email || '', code: referralCode,
             requestId: req.headers['x-request-id'] || null, applyProfile: true });
         }
-        return { org: newOrg, promotion, enterpriseInvitation };
+        return { org: newOrg, promotion };
       });
       org = created.org;
       signupPromotion = created.promotion || signupPromotion;
-      enterpriseInvitationRedemption = created.enterpriseInvitation || null;
     } catch (error) {
       if (needsEmbeddedAmr) {
         try { unregisterEmbeddedAmrOrg(orgId, regFile); }
@@ -4516,13 +4059,6 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (needsEmbeddedAmr) console.log(`[org-create] .amr-central registered for new personal org ${org.id}`);
-
-    if (enterpriseInvitationRedemption) {
-      await audit({ organizationId: org.id, userId: current.session.userId, eventType: 'commercial.enterprise_invitation_redeemed', eventCategory: 'billing', action: 'create',
-        resourceType: 'enterprise_invitation', resourceId: enterpriseInvitationRedemption.invitation.id,
-        metadata: { onboarding_ends_at: enterpriseInvitationRedemption.onboardingEndsAt, account_type: enterpriseInvitationRedemption.invitation.account_type },
-        ..._reqMeta(req) });
-    }
 
     // Route the org to its Qdrant home by PLAN:
     //   enterprise (paid)  → own collection org_<id> (provisioned now, fire-and-forget)
@@ -4572,12 +4108,6 @@ const server = http.createServer(async (req, res) => {
         memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode)),
         referral: referralOffer ? { code: referralOffer.code, phase: 'pending_payment', offer: referralOffer } : null,
         promotion: signupPromotion?.termsSnapshot || null,
-        enterprise_onboarding: enterpriseInvitationRedemption ? {
-          active: true,
-          ends_at: enterpriseInvitationRedemption.onboardingEndsAt,
-          account_type: enterpriseInvitationRedemption.invitation.account_type,
-          hosting_mode: enterpriseInvitationRedemption.invitation.hosting_mode,
-        } : null,
       }
     }, 201, {
       'Set-Cookie': makeSessionCookie(sessionId)
@@ -10499,22 +10029,35 @@ Write the persona now.`;
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
         const task = (company.tasks || []).find((x) => x.id === taskId);
         if (!task) return jsonResponse(res, { error: 'task not found' }, 404);
-        // Human task clicks always enter a neutral Work Room. The Director decides
-        // whether this turn needs a direct answer, research, debate, an artifact,
-        // or a proposal for a governed Runtime lifecycle.
+        // Optimized kickoff query — the FE posts this as the room's first turn
+        // (idempotency-keyed) so the swarm starts working the task immediately.
         const kickoff = [
-          `You are working with the ${company.company} team on a human request.`,
-          `REQUEST: ${task.title}`,
-          task.detail ? `CONTEXT: ${task.detail}` : '',
+          `You are the ${company.company} team. Execute this task now.`,
+          `TASK [${task.tag}]: ${task.title}`,
+          task.detail ? `SCOPE: ${task.detail}` : '',
           company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
-          'Choose the smallest useful approach. Answer directly when that satisfies the request. Research, deliberate, create an internal artifact, or propose Runtime work only when the request and evidence require it. Never claim an external action occurred without a provider receipt.',
+          'DELIVER: (1) concrete findings grounded in company memory and live web research where needed, (2) 3-5 actionable recommendations specific to this company (no generic advice), (3) an owner and immediate next step per recommendation. Finish with a crisp summary the founder can act on today.',
         ].filter(Boolean).join('\n');
+        if (!task.room_id && task.room_tag) {
+          const domainRows = await prisma.$queryRawUnsafe(
+            `SELECT id, name
+               FROM "hivemind"."hyper_rooms"
+              WHERE org_id = $1::uuid
+                AND room_tag = $2
+                AND archived_at IS NULL
+                AND agent_connectors->>'_domain_home' = 'true'
+              ORDER BY created_at ASC LIMIT 1`,
+            current.session.orgId,
+            String(task.room_tag),
+          ).catch(() => []);
+          if (domainRows?.[0]?.id) task.room_id = domainRows[0].id;
+        }
         if (task.room_id) {
           const existing = await prisma.hyperRoom.findFirst({
             where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },
-            select: { id: true, name: true, roomMode: true },
+            select: { id: true, name: true },
           }).catch(() => null);
-          if (existing?.roomMode === 'work') {
+          if (existing) {
             let created = false;
             const idempotencyKey = `task-kickoff-${row.id}-${task.id}`.slice(0, 64);
             const kickTurn = await prisma.$transaction(async (tx) => {
@@ -10537,7 +10080,7 @@ Write the persona now.`;
                 user_id: current.session.userId, org_id: current.session.orgId,
                 user_message: kickoff, participant_ids: rr?.participantIds || [],
                 project_id: rr?.projectId || null, room_goal: rr?.goal || '',
-                room_mode: 'work', task_tag: 'WORK',
+                task_tag: `ROOM_${String(task.room_tag || task.tag || 'general').toUpperCase()}`,
                 callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
               }).catch((e) => console.warn('[hyper-tasks] domain kickoff dispatch failed:', e.message));
             }
@@ -10548,10 +10091,6 @@ Write the persona now.`;
             ).catch(() => {});
             return jsonResponse(res, { room: existing, task });
           }
-          // A historical task may point at a specialist Company Room. Keep that
-          // reference for audit, but never turn a human click into Runtime work.
-          task.legacy_room_id = task.room_id;
-          task.room_id = null;
         }
         const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
         const taskRoom = await createHyperRoomWithinPlan({
@@ -10560,14 +10099,30 @@ Write the persona now.`;
             name: task.title.slice(0, 120),
             participantIds,
             template: 'auto',
-            roomMode: 'work',
-            roomTag: 'general',
             permanentLeadId: participantIds.slice().sort()[0] || null,
-          });
+        });
         const goal = `${task.title}\n${task.detail || ''}\nCompany: ${company.company} — ${company.mission || ''}`.slice(0, 2000);
         try {
           await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "goal" = $1 WHERE "id" = $2::uuid', goal, taskRoom.id);
         } catch { /* goal best-effort */ }
+        // EVENT-DRIVEN outbound: an OUTREACH-tagged task auto-enables the org's
+        // Gmail connector on its room (when connected), so the first turn can
+        // produce a ready-to-send email (compose card) instead of downgrading
+        // to a text answer. Driven by the task's tag — no task is hardcoded.
+        if (String(task.tag || '').toUpperCase() === 'OUTREACH') {
+          try {
+            const g = await prisma.platformIntegration.findFirst({
+              where: { orgId: current.session.orgId, platformType: { in: ['gmail', 'google'] } },
+              select: { id: true },
+            }).catch(() => null);
+            if (g) {
+              await prisma.$executeRawUnsafe(
+                'UPDATE "hivemind"."hyper_rooms" SET "enabled_connectors" = ARRAY[\'gmail\'] WHERE "id" = $1::uuid AND ("enabled_connectors" IS NULL OR cardinality("enabled_connectors") = 0)',
+                taskRoom.id,
+              );
+            }
+          } catch { /* best-effort — room still works as text */ }
+        }
         // Mark the task with its room in the persisted state.
         task.room_id = taskRoom.id;
         task.status = 'active';
@@ -10595,7 +10150,6 @@ Write the persona now.`;
             user_id: current.session.userId, org_id: current.session.orgId,
             user_message: kickoff, participant_ids: roomRow2?.participantIds || [],
             project_id: roomRow2?.projectId || null, room_goal: roomRow2?.goal || goal,
-            room_mode: 'work', task_tag: 'WORK',
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           }).catch((e) => console.warn('[hyper-tasks] kickoff dispatch failed:', e.message));
         } catch (e) { console.warn('[hyper-tasks] kickoff turn create failed:', e.message || e.code || e); }
@@ -10652,296 +10206,7 @@ Write the persona now.`;
     const flybyDecisionCompat = roomTurnMatch && roomTurnMatch[2] && !roomTurnMatch[3] && url.searchParams.get('action') === 'flyby-decision';
     // Phase 7 — resolve a queued connector write (approval card action).
     const roomApproveMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/approve$/);
-    const roomWorkPlanMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan$/);
-    const roomWorkPlanResumeMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/resume$/);
-    const roomWorkPlanHandoffMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/handoff$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
-
-    // GET /v1/hyper-rooms/:id/work-plan — one continuous, durable projection
-    // for a human Work Room. This reads the existing work-order ledger; it never
-    // creates a second workflow authority or derives completion from prose.
-    if (roomWorkPlanMatch && req.method === 'GET') {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      const roomId = roomWorkPlanMatch[1];
-      const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
-        select: { id: true, roomMode: true },
-      });
-      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
-      if (room.roomMode !== 'work') return jsonResponse(res, { error: 'Work plan is only available for Work Rooms' }, 409);
-      const rows = await prisma.$queryRawUnsafe(
-        `SELECT wo.id, wo.turn_id, wo.plan_step_id, wo.depends_on, wo.kind, wo.status,
-                wo.title, wo.objective, wo.owner_slug, wo.owner_lane, wo.error,
-                wo.wait_for, wo.handoff,
-                wo.attempt, wo.created_at, wo.started_at, wo.completed_at, wo.updated_at,
-                latest.summary AS latest_summary
-           FROM "hivemind"."hyper_work_orders" wo
-           LEFT JOIN LATERAL (
-             SELECT summary
-               FROM "hivemind"."hyper_work_results" result
-              WHERE result.work_order_id = wo.id
-              ORDER BY result.attempt DESC, result.created_at DESC
-              LIMIT 1
-           ) latest ON true
-          WHERE wo.org_id = $1::uuid AND wo.room_id = $2::uuid AND wo.hq_cycle_id IS NULL
-          ORDER BY wo.created_at ASC, wo.plan_step_id ASC NULLS LAST`,
-        current.session.orgId, roomId,
-      ).catch(() => []);
-      const steps = (rows || []).map((row) => {
-        const status = String(row.status || 'queued');
-        const projectedStatus = status === 'blocked' ? 'needs_attention'
-          : status === 'running' ? 'active'
-          : status;
-        return {
-          id: String(row.id), turn_id: row.turn_id ? String(row.turn_id) : null,
-          step_id: row.plan_step_id || null,
-          depends_on: Array.isArray(row.depends_on) ? row.depends_on : [],
-          status: projectedStatus,
-          title: row.title, objective: row.objective, kind: row.kind,
-          owner: { slug: row.owner_slug || null, lane: row.owner_lane || null },
-          attempt: Number(row.attempt || 0), blocker: row.error || null,
-          waiting: row.wait_for && typeof row.wait_for === 'object' ? row.wait_for : null,
-          handoff: row.handoff && typeof row.handoff === 'object' ? row.handoff : null,
-          summary: row.latest_summary || null,
-          timestamps: { created_at: row.created_at, started_at: row.started_at,
-                        completed_at: row.completed_at, updated_at: row.updated_at },
-        };
-      });
-      return jsonResponse(res, { room_id: roomId, mode: 'work', steps });
-    }
-
-    // POST /v1/hyper-rooms/:id/work-plan/:workOrderId/resume — resolve an
-    // exact pause and re-run the same durable Work Order. The new HyperTurn is
-    // only an audit/SSE transport envelope; it is explicitly pinned to the old
-    // work-order identity and cannot create a Runtime lifecycle.
-    if (roomWorkPlanResumeMatch && req.method === 'POST') {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      const [, roomId, workOrderId] = roomWorkPlanResumeMatch;
-      const body = await parseBody(req);
-      const resolution = body?.resolution;
-      if (!resolution || typeof resolution !== 'object' || Array.isArray(resolution)) {
-        return jsonResponse(res, { error: 'resolution object is required' }, 400);
-      }
-      const serializedResolution = JSON.stringify(resolution);
-      if (serializedResolution.length > 8000) {
-        return jsonResponse(res, { error: 'resolution is too large' }, 400);
-      }
-      const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId, archivedAt: null, roomMode: 'work' },
-      });
-      if (!room) return jsonResponse(res, { error: 'Work Room not found' }, 404);
-      const result = await prisma.$transaction(async (tx) => {
-        const rows = await tx.$queryRawUnsafe(
-          `SELECT id, turn_id, plan_step_id, depends_on, kind, title, objective,
-                  owner_lane, required_evidence, acceptance_criteria, input_snapshot,
-                  wait_for, handoff, status
-             FROM "hivemind"."hyper_work_orders"
-            WHERE id = $1::uuid AND org_id = $2::uuid AND room_id = $3::uuid
-              AND hq_cycle_id IS NULL
-            FOR UPDATE`,
-          workOrderId, current.session.orgId, roomId,
-        );
-        const order = rows?.[0];
-        if (!order) return { error: 'Work step not found', status: 404 };
-        const status = String(order.status || '');
-        if (!status.startsWith('waiting_for_')) {
-          const snapshot = order.input_snapshot && typeof order.input_snapshot === 'object'
-            ? order.input_snapshot : {};
-          const resumeTurnId = typeof snapshot.resume_turn_id === 'string' ? snapshot.resume_turn_id : null;
-          if ((status === 'queued' || status === 'running') && resumeTurnId) {
-            const existing = await tx.hyperTurn.findFirst({
-              where: { id: resumeTurnId, roomId }, select: { id: true, status: true },
-            });
-            if (existing) return { order, turn: existing, duplicate: true };
-          }
-          return { error: 'Work step is not waiting for a resolution', status: 409 };
-        }
-        const waitFor = order.wait_for && typeof order.wait_for === 'object' ? order.wait_for : {};
-        const last = await tx.hyperTurn.findFirst({ where: { roomId }, orderBy: { seq: 'desc' }, select: { seq: true } });
-        const seq = (last?.seq ?? 0) + 1;
-        const userMessage = String(waitFor.prompt || waitFor.reason || 'Continue the paused work step.').slice(0, 8000);
-        const idempotencyKey = `work-resume:${crypto.createHash('sha256')
-          .update(`${workOrderId}:${serializedResolution}`).digest('hex')}`.slice(0, 64);
-        const existing = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
-        if (existing) return { order, turn: existing, duplicate: true };
-        const turn = await tx.hyperTurn.create({
-          data: { roomId, seq, userMessage, status: 'live', idempotencyKey, lines: [] },
-        });
-        const updated = await tx.$executeRawUnsafe(
-          `UPDATE "hivemind"."hyper_work_orders"
-              SET status = 'queued', wait_for = jsonb_set(COALESCE(wait_for, '{}'::jsonb), '{resolution}', $1::jsonb, true),
-                  input_snapshot = jsonb_set(COALESCE(input_snapshot, '{}'::jsonb), '{resume_turn_id}', to_jsonb($2::text), true),
-                  error = NULL, updated_at = now()
-            WHERE id = $3::uuid AND org_id = $4::uuid AND status = $5`,
-          serializedResolution, turn.id, workOrderId, current.session.orgId, status,
-        );
-        if (!String(updated).endsWith('1')) throw new Error('Work step changed while resuming');
-        return { order, turn, duplicate: false };
-      });
-      if (result.error) return jsonResponse(res, { error: result.error }, result.status);
-      const order = result.order;
-      const waitFor = order.wait_for && typeof order.wait_for === 'object' ? order.wait_for : {};
-      const envelope = {
-        contract: 'work-room-resume.v1',
-        work_order_id: String(order.id),
-        resume_key: waitFor.resume_key || null,
-        resolution,
-        step: {
-          id: order.plan_step_id || `work-${String(order.id).slice(0, 8)}`,
-          depends_on: Array.isArray(order.depends_on) ? order.depends_on : [],
-          kind: order.kind, owner_lane: order.owner_lane || 'Strategist', title: order.title,
-          objective: order.objective,
-          required_evidence: Array.isArray(order.required_evidence) ? order.required_evidence : [],
-          acceptance_criteria: Array.isArray(order.acceptance_criteria) ? order.acceptance_criteria : [],
-        },
-      };
-      if (!result.duplicate) {
-        dispatchHyperRoomTurn({
-          room_id: room.id, turn_id: result.turn.id,
-          user_id: current.session.userId, org_id: current.session.orgId,
-          user_message: result.turn.userMessage, participant_ids: room.participantIds || [],
-          project_id: room.projectId || null, room_goal: room.goal || '', room_mode: 'work', task_tag: 'WORK',
-          execution_context: JSON.stringify(envelope),
-          callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
-        }).catch((error) => console.warn('[work-plan] resume dispatch failed:', error.message));
-      }
-      return jsonResponse(res, {
-        ok: true, work_order_id: String(order.id), turn_id: result.turn.id,
-        status: result.duplicate ? 'resuming' : 'queued', duplicate: Boolean(result.duplicate),
-      }, 202);
-    }
-
-    // Accept a completed Work Room recommendation into HQ's normal semantic
-    // instruction loop. This does not create a todo, select a playbook, or
-    // grant authority; HQ remains responsible for those later decisions.
-    if (roomWorkPlanHandoffMatch && req.method === 'POST') {
-      const current = await requireSession(req, res);
-      if (!current) return;
-      const [, roomId, workOrderId] = roomWorkPlanHandoffMatch;
-      const body = await parseBody(req).catch(() => ({}));
-      if (body.decision !== 'accept') return jsonResponse(res, { error: 'decision must be accept' }, 400);
-      const room = await prisma.hyperRoom.findFirst({
-        where: { id: roomId, orgId: current.session.orgId, archivedAt: null, roomMode: 'work' },
-        select: { id: true },
-      });
-      if (!room) return jsonResponse(res, { error: 'Work Room not found' }, 404);
-
-      const accepted = await prisma.$transaction(async (tx) => {
-        const rows = await tx.$queryRawUnsafe(
-          `SELECT wo.id, wo.title, wo.objective, wo.status, wo.handoff,
-                  result.id AS result_id, result.status AS result_status,
-                  result.summary AS result_summary,
-                  COALESCE(resume_turn.status, source_turn.status) AS effective_turn_status,
-                  COALESCE(resume_turn.lines, source_turn.lines) AS effective_turn_lines
-             FROM "hivemind"."hyper_work_orders" wo
-             LEFT JOIN LATERAL (
-               SELECT id, status, summary
-                 FROM "hivemind"."hyper_work_results"
-                WHERE work_order_id = wo.id
-                ORDER BY attempt DESC, created_at DESC
-                LIMIT 1
-             ) result ON true
-             LEFT JOIN "hivemind"."hyper_turns" source_turn ON source_turn.id = wo.turn_id
-             LEFT JOIN "hivemind"."hyper_turns" resume_turn
-               ON resume_turn.id = CASE
-                    WHEN COALESCE(wo.input_snapshot->>'resume_turn_id', '')
-                         ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-                    THEN (wo.input_snapshot->>'resume_turn_id')::uuid
-                    ELSE NULL
-                  END
-            WHERE wo.id = $1::uuid AND wo.org_id = $2::uuid
-              AND wo.room_id = $3::uuid AND wo.hq_cycle_id IS NULL
-            FOR UPDATE OF wo`,
-          workOrderId, current.session.orgId, roomId,
-        );
-        const order = rows?.[0];
-        if (!order) return { error: 'Work step not found', status: 404 };
-        if (order.status !== 'completed' || order.result_status !== 'completed') {
-          return { error: 'Only a completed, evidenced work step can be handed to Runtime', status: 409 };
-        }
-        const effectiveLines = Array.isArray(order.effective_turn_lines) ? order.effective_turn_lines : [];
-        const verificationPassed = effectiveLines.some((event) => event?.t === 'verify' && event?.met === true);
-        if (order.effective_turn_status !== 'complete' || !verificationPassed) {
-          return { error: 'The Room turn must complete verification before Runtime handoff', status: 409 };
-        }
-        const handoff = order.handoff && typeof order.handoff === 'object' ? order.handoff : {};
-        if (!['runtime', 'hq', 'hq runtime'].includes(String(handoff.owner || '').trim().toLowerCase())) {
-          return { error: 'This work step has no Runtime handoff', status: 409 };
-        }
-        if (handoff.runtime_instruction_id) {
-          const instruction = await tx.hqInstruction.findFirst({
-            where: { id: String(handoff.runtime_instruction_id), orgId: current.session.orgId },
-          });
-          const runtime = await tx.hqRuntime.findUnique({ where: { orgId: current.session.orgId } });
-          return instruction && runtime ? { order, handoff, instruction, runtime, duplicate: true } : {
-            error: 'The recorded Runtime handoff cannot be resolved', status: 409,
-          };
-        }
-        const runtime = await tx.hqRuntime.findUnique({ where: { orgId: current.session.orgId } });
-        if (!runtime || runtime.state === 'INACTIVE') {
-          return { error: 'HQ Runtime must be active before accepting this handoff', status: 409 };
-        }
-        const instructionBody = String(handoff.objective || order.objective || order.title).trim().slice(0, 5000);
-        if (!instructionBody) return { error: 'Runtime handoff objective is missing', status: 409 };
-        const instruction = await tx.hqInstruction.create({
-          data: {
-            runtimeId: runtime.id,
-            orgId: current.session.orgId,
-            userId: current.session.userId,
-            body: instructionBody,
-            interpreted: {
-              source: 'work_room_handoff', execution_mode: 'single_outcome',
-              work_room_id: roomId, work_order_id: workOrderId,
-              work_result_id: order.result_id, source_summary: order.result_summary || null,
-            },
-          },
-        });
-        const nextHandoff = {
-          ...handoff, status: 'accepted', runtime_instruction_id: instruction.id,
-          work_result_id: order.result_id, accepted_by: current.session.userId,
-          accepted_at: new Date().toISOString(),
-        };
-        await tx.$executeRawUnsafe(
-          `UPDATE "hivemind"."hyper_work_orders"
-              SET handoff = $1::jsonb, updated_at = now()
-            WHERE id = $2::uuid AND org_id = $3::uuid`,
-          JSON.stringify(nextHandoff), workOrderId, current.session.orgId,
-        );
-        await tx.growthJournal.create({
-          data: {
-            orgId: current.session.orgId, actorUserId: current.session.userId,
-            eventType: 'work_room_handoff_accepted',
-            summary: `Accepted the completed Work Room result: ${String(order.title || 'work result').slice(0, 180)}`,
-            evidenceRefs: [`hyper-work-result:${order.result_id}`],
-            decision: { room_id: roomId, work_order_id: workOrderId, instruction_id: instruction.id },
-          },
-        });
-        return { order, handoff: nextHandoff, instruction, runtime, duplicate: false };
-      });
-      if (accepted.error) return jsonResponse(res, { error: accepted.error }, accepted.status);
-      await scheduleHqWake({
-        prisma, runtimeId: accepted.runtime.id, orgId: current.session.orgId,
-        runtimeEpoch: accepted.runtime.epoch,
-        idempotencyKey: `work-room-handoff:${workOrderId}`,
-        triggerType: 'instruction_updated', dueAt: new Date(),
-        payload: { instruction_id: accepted.instruction.id, source: 'work_room_handoff' },
-      });
-      if (!accepted.duplicate) {
-        await appendHqEvent({
-          prisma, runtimeId: accepted.runtime.id, orgId: current.session.orgId,
-          runtimeEpoch: accepted.runtime.epoch, eventType: 'instruction_received',
-          title: 'A completed Work Room result was accepted',
-          summary: 'The handoff is now a durable operating instruction. HQ will classify it semantically before creating any lifecycle.',
-          details: { room_id: roomId, work_order_id: workOrderId, instruction_id: accepted.instruction.id },
-        });
-      }
-      return jsonResponse(res, {
-        ok: true, duplicate: Boolean(accepted.duplicate),
-        instruction_id: accepted.instruction.id, handoff: accepted.handoff,
-      }, accepted.duplicate ? 200 : 202);
-    }
 
     // DELETE /v1/hyper-rooms/:id — permanent delete (?hard=true) or archive.
     // Archive (default) sets archived_at so the room drops to the rail's
@@ -11003,8 +10268,8 @@ Write the persona now.`;
     }
 
     // DELETE /v1/hyper-rooms/:id/turns — clear the whole discussion (every
-    // turn + its agent activity). Keeps an ordinary Work Room, while permanent
-    // Company Intelligence Rooms retain their operating history. Tenant-scoped.
+    // turn + its agent activity). Keeps the room. Saved decision memories are
+    // separate and untouched. Tenant-scoped.
     if (roomTurnMatch && roomTurnMatch[2] == null && req.method === 'DELETE') {
       const current = await requireSession(req, res);
       if (!current) return;
@@ -11014,30 +10279,17 @@ Write the persona now.`;
       // different member (incl. the HQ room) — it 404'd and silently no-op'd.
       const room = await prisma.hyperRoom.findFirst({
         where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
-        select: { id: true, agentConnectors: true },
+        select: { id: true },
       });
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
-      if (room.agentConnectors?._domain_home === true) {
-        return jsonResponse(res, {
-          error: 'Company Intelligence Room history is retained as durable company context.',
-          code: 'DOMAIN_HOME_ROOM',
-        }, 409);
-      }
       try {
-        const result = await prisma.$transaction(async (tx) => {
-          const deleted = await tx.hyperTurn.deleteMany({ where: { roomId } });
-          await tx.hyperRoom.update({
-            where: { id: roomId },
-            data: { roomJournal: [] },
-          });
-          // Control-room reports are outside the turn relation, so remove them
-          // explicitly. Other turn-owned records cascade from hyper_turns.
-          await tx.$executeRawUnsafe(
-            'DELETE FROM "hivemind"."hq_activity" WHERE org_id = $1::uuid AND source_room_id = $2::uuid',
-            current.session.orgId, roomId,
-          ).catch(() => {});
-          return deleted;
-        });
+        const result = await prisma.hyperTurn.deleteMany({ where: { roomId } });
+        // Also wipe this room's control-room reports so cleared runs vanish from
+        // HQ too (best-effort; table may not exist on an un-migrated box).
+        await prisma.$executeRawUnsafe(
+          'DELETE FROM "hivemind"."hq_activity" WHERE org_id = $1::uuid AND source_room_id = $2::uuid',
+          current.session.orgId, roomId,
+        ).catch(() => {});
         return jsonResponse(res, { ok: true, cleared: result.count });
       } catch (err) {
         console.warn('[hyper-rooms] clear discussion failed:', err.message);
@@ -11413,13 +10665,12 @@ Write the persona now.`;
         if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal, room_tag, room_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
           room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
           room.roomTag = gr?.[0]?.room_tag || 'general';
-          room.roomMode = gr?.[0]?.room_mode || null;
         } catch { room.goal = ''; }
         const turn = await prisma.hyperTurn.findFirst({
           where: { id: turnId, roomId },
@@ -11448,8 +10699,7 @@ Write the persona now.`;
           participant_ids: room.participantIds || [],
           project_id: room.projectId || null,
           room_goal: room.goal || '',
-          room_mode: roomExecutionMode(room),
-          task_tag: roomExecutionTag(room),
+          task_tag: `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
           flyby_decision: decision,
           flyby_spec: flybySpec,
           callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -11746,13 +10996,12 @@ Write the persona now.`;
       if (room) {
         try {
           const gr = await prisma.$queryRawUnsafe(
-            'SELECT project_id, goal, room_tag, room_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
+            'SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid',
             roomId,
           );
           room.projectId = gr?.[0]?.project_id || null;
           room.goal = gr?.[0]?.goal || '';
           room.roomTag = gr?.[0]?.room_tag || 'general';
-          room.roomMode = gr?.[0]?.room_mode || null;
         } catch { room.goal = ''; }
       }
       if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
@@ -11781,7 +11030,6 @@ Write the persona now.`;
               user_id: current.session.userId, org_id: current.session.orgId,
               user_message: userMessage, participant_ids: target.participantIds || [],
               project_id: null, room_goal: `${kind} work routed from HQ`,
-              room_mode: 'runtime', task_tag: `ROOM_${String(kind).toUpperCase()}`,
               callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
             }).catch((e) => console.warn('[hq-dispatch] kick failed:', e.message));
             // Routing card in the HQ feed so the owner sees where it went.
@@ -11836,8 +11084,8 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
-            room_mode: roomExecutionMode(room),
-            task_tag: roomExecutionTag(room),
+            task_tag: room.agentConnectors?._domain_home === true && String(room.roomTag || room.room_tag || 'general') === 'general'
+              ? 'HQ' : `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
             flyby_decision: decision,
             flyby_spec: flybySpec,
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -11991,8 +11239,7 @@ Write the persona now.`;
             participant_ids: room.participantIds || [],
             project_id: room.projectId || null,
             room_goal: room.goal || '',
-            room_mode: roomExecutionMode(room),
-            task_tag: isHq ? 'HQ' : roomExecutionTag(room),
+            task_tag: isHq ? 'HQ' : `ROOM_${String(room.roomTag || room.room_tag || 'general').toUpperCase()}`,
             ...(executionContext ? { execution_context: executionContext } : {}),
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -12478,7 +11725,6 @@ Write the persona now.`;
           const activation = offer.kind === 'referral'
             ? await claimReferralOffer({ tx, orgId, userId, offer })
             : await activateOffer({ tx, orgId, offer, source: 'dummy_checkout' });
-          if (offer.kind === 'runway') await activateEnterpriseRunway({ tx, orgId, offer });
           const confirmed = await tx.billingCheckout.update({
             where: { id: checkout.id },
             data: { status: 'confirmed', confirmedAt: new Date() },
@@ -12525,11 +11771,6 @@ Write the persona now.`;
     // dynamic Stripe subscription, and (on webhook) activate a CUSTOM entitlement
     // matching the scope. This is the post-onboarding path for enterprise orgs.
     if (pathname === '/v1/billing/runway/checkout' && req.method === 'POST') {
-      // This configuration becomes the organization's paid commercial contract.
-      // Members may inspect billing; only the owner can create it.
-      if (!effectiveRoles(callerMem).includes('org_owner')) {
-        return jsonResponse(res, { error: 'organization owner required' }, 403);
-      }
       const body = await parseBody(req).catch(() => ({}));
       const quote = computeRunwayQuote(body);
       if (!(quote.monthlyTotal > 0)) return jsonResponse(res, { error: 'invalid scope configuration' }, 400);
@@ -12874,20 +12115,13 @@ Write the persona now.`;
             const pending = await prisma.billingCheckout.findUnique({ where: { providerRef: obj.id } }).catch(() => null);
             if (pending && pending.orgId === org.id && pending.offer?.kind === 'runway') {
               try {
-                const activated = await prisma.$transaction(async (tx) => {
+                await prisma.$transaction(async (tx) => {
                   await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `billing:checkout:${pending.id}`);
                   const fresh = await tx.billingCheckout.findUnique({ where: { id: pending.id } });
-                  if (fresh?.status !== 'pending') return false;
+                  if (fresh?.status !== 'pending') return;
                   await activateOffer({ tx, orgId: org.id, offer: pending.offer, source: 'stripe_runway' });
-                  await activateEnterpriseRunway({ tx, orgId: org.id, offer: pending.offer });
                   await tx.billingCheckout.update({ where: { id: pending.id }, data: { status: 'confirmed', confirmedAt: new Date() } });
-                  return true;
                 });
-                if (activated) {
-                  const invitation = await prisma.enterpriseInvitation.findFirst({ where: { orgId: org.id, status: 'redeemed' }, select: { id: true } }).catch(() => null);
-                  if (invitation) await audit({ organizationId: org.id, eventType: 'commercial.enterprise_onboarding_to_runway', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitation.id,
-                    metadata: { checkout_id: pending.id, provider: 'stripe' }, actorType: 'system' });
-                }
                 provisionPaidManagedOrg(org.id, 'enterprise')
                   .catch((e) => console.error('[managed-provision] runway post-checkout failed', { orgId: org.id, error: e.message }));
               } catch (e) { console.error('[runway] activation failed', { orgId: org.id, error: e.message }); }

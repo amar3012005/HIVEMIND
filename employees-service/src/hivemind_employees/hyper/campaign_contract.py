@@ -4,7 +4,7 @@ import copy
 import re
 from typing import Any
 
-CAMPAIGN_CONTRACT_VERSION = 5
+CAMPAIGN_CONTRACT_VERSION = 4
 
 _HIGH_RISK_CLAIM_TERMS = ("only", "never", "always", "guarantee", "guaranteed", "ensures", "ensuring", "certified", "compliant", "proprietary")
 _PUBLIC_URL_RE = re.compile(r"https?://[^\s)\]}>]+", re.I)
@@ -99,9 +99,9 @@ def campaign_system_contract(allowed_urls=None) -> str:
         "proof, or emotional clarity; never add decorative images to every action. When required=true, provide a "
         "concise visual concept and alt text. The visual-prompt-architecture skill expands that concept only after "
         "the plan is accepted, immediately before asset generation.\n"
-        "- A Campaign Room is complete ONLY when campaign__govern_delivery verifies that the compiled CampaignBundle "
-        "delivers every promise in the normalized brief. The Campaign dashboard is the operating report. A generic "
-        "final_report, prose summary, or "
+        "- A Campaign Room is complete ONLY when campaign__govern_delivery verifies that the authored report and "
+        "compiled CampaignBundle deliver every promise in the normalized brief. Governance never rewrites content. "
+        "A generic final_report, prose summary, or "
         "partial draft can never complete campaign work.\n"
         "- Keep internal identifiers, serialized execution context, tool instructions, and raw JSON out of "
         "user-facing prose."
@@ -787,12 +787,9 @@ def campaign_bundle_errors(
                 errors.append(f"quality_gate.checks.{check} must pass for contract v4")
 
         report = str(bundle.get("report_markdown") or "").strip()
-        # Historical v4 required a second authored report. New v5 contracts use
-        # the structured Campaign dashboard as their operating report, avoiding
-        # a duplicate prose surface that can contradict otherwise valid actions.
-        if declared_version == 4 and not report:
+        if not report:
             errors.append("report_markdown is required for contract v4")
-        elif declared_version == 4:
+        else:
             lowered_report = report.lower()
             headings = re.findall(r"(?m)^##\s+\S.+$", report)
             if len(headings) < 6:

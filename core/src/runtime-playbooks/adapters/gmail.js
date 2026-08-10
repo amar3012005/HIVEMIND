@@ -61,27 +61,9 @@ function actionOutcome(context, artifact, { key, operation, reason, status = nul
 
 function classifyWriteFailure(error) {
   const status = providerStatus(error);
-  const message = String(error?.message || error || '');
-  if ([401, 403].includes(status) || /not connected|connect it|missing (?:credential|connection)|authentication required/i.test(message)) {
-    return { kind: 'capability', status: status || null };
-  }
   if ([400, 404, 410, 422].includes(status)) return { kind: 'rejection', status };
+  if ([401, 403].includes(status)) return { kind: 'fatal', status };
   return { kind: 'uncertain', status: status || null };
-}
-
-function capabilityWait(reason) {
-  return {
-    types: ['capability.connected'],
-    capability: 'gmail',
-    correlation_path: 'data.capability',
-    correlation_values: ['gmail'],
-    reason: String(reason || 'gmail_connection_required').slice(0, 1000),
-    presentation: {
-      status_label: 'Waiting for Gmail',
-      detail: 'Connect Gmail to continue this same execution.',
-      next_action: 'connect_capability',
-    },
-  };
 }
 
 function messageDraftArtifact(context, artifact, draft, messageId = null, key = 'draft_record') {
@@ -253,9 +235,7 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
           }, actor);
         } catch (cause) {
           const classification = classifyWriteFailure(cause);
-          if (classification.kind === 'capability') {
-            return { artifacts: produced, gaps: [], warnings, waiting_for: capabilityWait(cause?.message || cause) };
-          }
+          if (classification.kind === 'fatal') throw cause;
           if (classification.kind === 'uncertain') {
             draft = await findDraftByMessageId(google, actor, messageId);
           }
@@ -383,9 +363,7 @@ export function createGmailRuntimeAdapter({ prisma, runTool = null } = {}) {
         receipt = await google('gmail_send_draft', { draftId: ref }, actor);
       } catch (cause) {
         const classification = classifyWriteFailure(cause);
-        if (classification.kind === 'capability') {
-          return { artifacts: produced, gaps: [], warnings, waiting_for: capabilityWait(cause?.message || cause) };
-        }
+        if (classification.kind === 'fatal') throw cause;
         if (classification.kind === 'uncertain') {
           const sent = await findSentByMessageId(google, actor, idempotencyMessageId);
           if (sent?.id && sent?.threadId) receipt = { id: sent.id, threadId: sent.threadId };

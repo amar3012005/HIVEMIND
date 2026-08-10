@@ -435,66 +435,6 @@ export async function persistCampaignBundle({ prisma, turnId, bundle }) {
   });
 }
 
-function affectedCampaignActionIds(errors = []) {
-  const ids = new Set();
-  for (const error of errors) {
-    const match = String(error).match(/(?:X |Gmail |TARA )?action\s+([^\s:;,]+)/i);
-    if (match?.[1] && !/^\d+$/.test(match[1])) ids.add(match[1]);
-  }
-  return ids;
-}
-
-export const __campaignRepairTest = { affectedCampaignActionIds };
-
-export async function persistCampaignRepairingBundle({ prisma, turnId, bundle, errors, exhausted = false }) {
-  const run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: true } });
-  if (!run || !bundle || !Array.isArray(bundle.actions)) return null;
-  const cleanErrors = (Array.isArray(errors) ? errors : []).map((value) => String(value).slice(0, 500)).slice(0, 50);
-  const affected = affectedCampaignActionIds(cleanErrors);
-  const hash = canonicalHash({ bundle, errors: cleanErrors, exhausted });
-  return prisma.$transaction(async (tx) => {
-    const existing = await tx.campaignPlanVersion.findFirst({ where: { campaignId: run.campaignId, canonicalHash: hash } });
-    if (existing) return { ok: false, duplicate: true, campaignId: run.campaignId, planVersionId: existing.id, status: 'NEEDS_REPAIR' };
-    const latest = await tx.campaignPlanVersion.findFirst({ where: { campaignId: run.campaignId }, orderBy: { version: 'desc' }, select: { version: true } });
-    const version = Number(latest?.version || 0) + 1;
-    const plan = await tx.campaignPlanVersion.create({ data: {
-      campaignId: run.campaignId, version, status: 'NEEDS_REPAIR', canonicalHash: hash,
-      bundle: { ...bundle, repair: { errors: cleanErrors, affected_action_ids: [...affected], exhausted } },
-      reportMarkdown: renderBundleReport(bundle),
-      validation: { valid: false, errors: cleanErrors, affected_action_ids: [...affected], repair_exhausted: exhausted },
-    } });
-    for (const [position, action] of bundle.actions.entries()) {
-      const sourceId = String(action?.id || `action_${position + 1}`);
-      const actionAffected = affected.has(sourceId) || (!affected.size && cleanErrors.length > 0);
-      await tx.campaignAction.create({ data: {
-        campaignId: run.campaignId, planVersionId: plan.id,
-        channel: String(action?.channel || 'unknown').slice(0, 40), actionType: actionType(action?.channel), position,
-        status: actionAffected ? (exhausted ? 'NEEDS_ATTENTION' : 'REPAIRING') : 'READY',
-        scheduledAt: Number.isInteger(action?.scheduled_offset_minutes)
-          ? new Date(Date.now() + action.scheduled_offset_minutes * 60_000) : null,
-        payload: { ...(action?.payload || {}), final_copy: action?.final_copy || '', source_action_id: sourceId,
-          governance_errors: actionAffected ? cleanErrors.filter((error) => error.includes(sourceId)) : [] },
-        rationale: String(action?.rationale || ''),
-        successMetric: String(action?.success_measure || action?.success_metric || '').slice(0, 200) || null,
-        idempotencyKey: `plan:${version}:action:${sourceId.slice(0, 100)}`,
-        lastError: actionAffected ? cleanErrors.join('; ').slice(0, 2000) : null,
-      } });
-    }
-    await tx.campaign.update({ where: { id: run.campaignId }, data: {
-      status: 'NEEDS_REPAIR', currentPlanVersionId: plan.id, lastError: cleanErrors.join('; ').slice(0, 2000),
-    } });
-    await tx.campaignRun.update({ where: { id: run.id }, data: {
-      status: 'NEEDS_INPUT', validation: { valid: false, errors: cleanErrors, plan_version_id: plan.id },
-      error: cleanErrors.join('; '), completedAt: new Date(),
-    } });
-    await tx.campaignEvent.create({ data: {
-      campaignId: run.campaignId, orgId: run.campaign.orgId, eventType: 'campaign_plan_needs_repair',
-      data: { plan_version_id: plan.id, version, affected_action_ids: [...affected], errors: cleanErrors, repair_exhausted: exhausted },
-    } });
-    return { ok: false, campaignId: run.campaignId, planVersionId: plan.id, version, status: 'NEEDS_REPAIR', errors: cleanErrors };
-  });
-}
-
 export async function markCampaignNeedsInput({ prisma, turnId, errors }) {
   const run = await prisma.campaignRun.findUnique({ where: { turnId }, include: { campaign: { select: { orgId: true } } } });
   if (!run) return null;
@@ -1046,7 +986,7 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
   const campaign = await prisma.campaign.findFirst({ where: { id, orgId } });
   if (!campaign) throw campaignError('Campaign not found', 404, 'campaign_not_found');
   await requireCampaignEditor(prisma, campaign, userId);
-  if (!['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'NEEDS_REPAIR', 'FAILED'].includes(campaign.status) || !campaign.roomId) {
+  if (!['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'FAILED'].includes(campaign.status) || !campaign.roomId) {
     throw campaignError('This campaign cannot be regenerated in its current state', 409, 'campaign_regeneration_unavailable');
   }
   const room = await prisma.hyperRoom.findUnique({ where: { id: campaign.roomId } });
@@ -1070,7 +1010,7 @@ export async function regenerateCampaign({ prisma, orgId, userId, id, feedback =
   const capabilities = await getCampaignCapabilities({ prisma, userId, orgId });
   const result = await prisma.$transaction(async (tx) => {
     const claimed = await tx.campaign.updateMany({
-      where: { id, orgId, status: { in: ['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'NEEDS_REPAIR', 'FAILED'] } },
+      where: { id, orgId, status: { in: ['READY_FOR_APPROVAL', 'NEEDS_INPUT', 'FAILED'] } },
       data: { status: 'GENERATING', currentPlanVersionId: null, approvedPlanVersionId: null, lastError: null },
     });
     if (!claimed.count) throw campaignError('Campaign regeneration was already started', 409, 'campaign_regeneration_conflict');

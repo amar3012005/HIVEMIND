@@ -333,11 +333,17 @@ services:
     image: hivemind/hm-playwright:${VERSION:-latest}
     container_name: hm-playwright
     restart: unless-stopped
-    mem_limit: 1536m
-    memswap_limit: 2304m
-    cpus: 0.75
+    mem_limit: 2560m
+    memswap_limit: 3328m
+    cpus: 1.5
     environment:
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
+      # Raised 2->4 2026-08-10: measured 330MB/1536m under real 2-way load (plenty of
+      # memory headroom), but cpus was the real cap at 0.75 — host has 8 cores at
+      # load average ~2.3, real headroom there too. Doubled both together; a
+      # concurrency raise without more CPU just trades queueing for contention.
+      # Verified live: same 8-request screenshot batch went 24.7s -> 11.4s.
+      PLAYWRIGHT_CRAWL_CONCURRENCY: "4"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8932/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s

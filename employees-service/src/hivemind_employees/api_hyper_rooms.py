@@ -36,7 +36,6 @@ import logging
 import os
 import re
 import time
-import uuid
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
@@ -191,19 +190,6 @@ _PENDING_APPROVALS_CAP = 500
 _GK_ACTIVE: Dict[str, bool] = {}
 _SEAL_BY_TURN: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _SEAL_BY_TURN_CAP = 200
-
-
-def _merge_goalkeeper_seal(previous: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep the latest lifecycle state with cumulative per-round token evidence."""
-    merged = dict(current)
-    prior = previous or {}
-    merged_tok_by = dict(prior.get("tok_by") or {})
-    for bucket, value in (current.get("tok_by") or {}).items():
-        merged_tok_by[bucket] = int(merged_tok_by.get(bucket, 0) or 0) + int(value or 0)
-    for field in ("cost_tokens", "tokens_in", "tokens_out", "tokens_cached"):
-        merged[field] = int(prior.get(field, 0) or 0) + int(current.get(field, 0) or 0)
-    merged["tok_by"] = merged_tok_by
-    return merged
 
 
 async def _register_and_emit_approvals(
@@ -841,10 +827,9 @@ def _get_callback_client() -> httpx.AsyncClient:
 async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) -> None:
     """POST an event back to the control-plane append hook.
 
-    Every event carries a stable delivery id so a response lost after the
-    control-plane commit can be retried safely. High-value boundary events are
-    retried for a bounded period; dropping a final report or seal leaves a
-    completed Room looking permanently busy even though all LLM work finished.
+    Failures here are non-fatal — orchestration keeps going so the
+    user still gets a sealed turn even if the SSE stream missed a
+    chunk (reload will read the final state from DB).
     """
     if not callback_url:
         return
@@ -853,29 +838,12 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
         "X-API-Key": settings.hivemind_master_api_key or "",
         "Content-Type": "application/json",
     }
-    event.setdefault("event_id", str(uuid.uuid4()))
     body = {"turn_id": turn_id, "event": event}
-    critical = str(event.get("t") or "") in {
-        "final_report", "seal", "connector_logo", "approval_request",
-        "approval_required", "campaign_bundle", "campaign_bundle_partial", "runtime_stage_result",
-        "room_phase_result", "work_order_result",
-    }
-    attempts = 6 if critical else 1
-    client = _get_callback_client()
-    last_error: Optional[BaseException] = None
-    for attempt in range(attempts):
-        try:
-            response = await client.post(callback_url, headers=headers, content=json.dumps(body))
-            response.raise_for_status()
-            return
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            if attempt + 1 < attempts:
-                await asyncio.sleep(min(0.5 * (2 ** attempt), 5.0))
-    log.warning(
-        "hyper-rooms event delivery exhausted type=%s turn=%s attempts=%d: %s",
-        event.get("t"), turn_id, attempts, last_error,
-    )
+    try:
+        client = _get_callback_client()
+        await client.post(callback_url, headers=headers, content=json.dumps(body))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("hyper-rooms event POST failed: %s", exc)
 
 
 # ─── Agent build / reuse ──────────────────────────────────────────────
@@ -1891,9 +1859,6 @@ class RoomTurnRequest(BaseModel):
     # the project HIVEMIND so the room stays about that project.
     project_id: Optional[str] = None
     room_goal: Optional[str] = None
-    # Explicit ownership boundary. Human Work Rooms remain domain-neutral; only
-    # Runtime/Company Rooms use the specialist routing selected by a playbook.
-    room_mode: Optional[str] = None
     # Typed task context. Campaign callers require this to bypass generic report
     # routing; campaign_id/brief are metadata only and never authorize a write.
     task_tag: Optional[str] = None
@@ -2348,9 +2313,8 @@ async def _verify_turn(
             **lead,
             "tools": ["_verify_noop"],   # truthy, matches no real tool → empty toolkit
             "connectors": [],
-            "persona": "A neutral evidence verifier. Judge only the supplied contract and evidence; do not role-play.",
-            "hyper": None,
-            "active_prompt_version": None,
+            "hyper": boot_emp.get("hyper"),
+            "active_prompt_version": boot_emp.get("active_prompt_version"),
             "max_iters": 1,
         }
         # Put the final grounding/recon JUDGE on the reliable recon model (the
@@ -2941,9 +2905,8 @@ async def _repair_final_text(
             **lead,
             "tools": ["_verify_noop"],
             "connectors": [],
-            "persona": "A neutral final-report editor. Revise the supplied report directly; never critique it or role-play.",
-            "hyper": None,
-            "active_prompt_version": None,
+            "hyper": boot_emp.get("hyper"),
+            "active_prompt_version": boot_emp.get("active_prompt_version"),
             "max_iters": 1,
             "model": model or "deepseek/deepseek-v4-flash",
             "llm_provider": "openrouter",
@@ -3174,8 +3137,8 @@ def _build_campaign_director(
 # the room must NEVER call a connector it hasn't toggled on (it would hang on an absent/
 # dead token and block) — if the producing connector is off, deliver the text instead.
 _KIND_CONNECTOR: Dict[str, tuple] = {
-    "doc": ("google-docs", "google-drive", "google"),
-    "sheet": ("google-sheets", "google-drive", "google"),
+    "doc": ("google-docs", "google-drive", "gmail", "google"),
+    "sheet": ("google-docs", "google-drive", "gmail", "google"),
     "email": ("gmail", "google"),
     "notion": ("notion",),
 }
@@ -3200,12 +3163,10 @@ _NOTION_WRITE_RE = re.compile(
 
 
 def _derive_intended_output(user_message: str) -> str:
-    """Conservatively infer an explicitly requested external output.
-
-    Content nouns such as report, brief, table, and persona describe the answer,
-    not a provider write. The adaptive Director owns modern action selection; this
-    legacy guard recognizes only destinations the user actually named.
-    """
+    """Deterministic intent → output kind (same guards the agentic planner applies).
+    Drives the centralized producer; the director writes the actual content. An
+    explicit DOC word wins over an incidental 'table' (a doc may *contain* a table),
+    so 'a Google Doc with an options table' is a doc, not a sheet."""
     m = user_message or ""
     if _SEND_INTENT_RE.search(m) or re.search(r"[\w.+-]+@[\w.-]+\.\w+", m):
         return "email"
@@ -3213,10 +3174,17 @@ def _derive_intended_output(user_message: str) -> str:
     # page. A read intent ("check/search Notion") is NOT a write — it stays answer.
     if _NOTION_WRITE_RE.search(m):
         return "notion"
-    if re.search(r"\bgoogle\s+docs?\b", m, re.IGNORECASE):
+    has_doc = re.search(r"\b(doc|document|brief|memo|report|write[\s-]?up|letter|one[\s-]?pager)\b",
+                        m, re.IGNORECASE)
+    has_sheet = re.search(r"\b(spreadsheet|sheet|tracker|inventory|catalogue|catalog)\b", m, re.IGNORECASE)
+    if has_doc and not has_sheet:
         return "doc"
-    if re.search(r"\bgoogle\s+sheets?\b", m, re.IGNORECASE):
+    if has_sheet:
         return "sheet"
+    if re.search(r"\btable\b", m, re.IGNORECASE):  # bare 'table' with no doc word → a sheet
+        return "sheet"
+    if re.search(r"\b(create|writ\w*|draft|build|make|generat\w*|compil\w*|prepare)\b", m, re.IGNORECASE):
+        return "doc"
     return "answer"
 
 
@@ -3235,8 +3203,8 @@ async def _orchestrate_single_agent(
     swarm — only the executor changes. Reuses _produce_output / _verify_and_emit /
     _register_and_emit_approvals so dead-end, recipient resolution and HITL are intact."""
     conns = [str(c) for c in (enabled_connectors or [])]
-    from .hyper.skills import resolve_turn_room_kind
-    _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
+    from .hyper.skills import resolve_room_kind
+    _room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
     _m_recon = (getattr(req, "agentic_model", None)
                 or os.environ.get("HYPER_MODEL_RECON") or "deepseek/deepseek-v4-flash")
 
@@ -3288,8 +3256,6 @@ async def _orchestrate_single_agent(
     if _room_kind == "campaign":
         _evo_mode = "on"
     _evo_playbooks: Dict[str, list] = {}
-    # Load prior lessons before execution. Completion is not known yet; the
-    # post-report reflection below is where truthful completion is enforced.
     if _evo_mode in ("on", "evolve", "true", "1", "yes"):
         try:
             _p_slugs = [str(p.get("slug")) for p in (participants or []) if p.get("slug")]
@@ -3399,7 +3365,6 @@ async def _orchestrate_single_agent(
             "company_brief": _company_brief, "intended_output": intended_output,
             "execution_context": req.execution_context or "",
             "room_kind": _room_kind,
-            "room_mode": req.room_mode or "runtime",
             "room_playbook": _room_playbook, "room_journal": _room_journal,
             "room_instructions": _room_instructions,
             "sender_email": _sender_email, "out_language": (req.language or ""),
@@ -3588,7 +3553,7 @@ async def _orchestrate_single_agent(
 
     # 2. PLAN — build the plan dict the producer + verifier consume. intended_output +
     # the capability gate were already resolved BEFORE the run (so SYNTH wrote the right format).
-    done_txt = req.user_message if (req.room_mode or "").strip().lower() == "work" else (req.room_goal or req.user_message)
+    done_txt = req.room_goal or req.user_message
     contributions = [
         {"owner": x.get("agent"), "subtask": f"debate round {x.get('round')}",
          "contribution": str(x.get("text") or "")}
@@ -3749,15 +3714,10 @@ async def _orchestrate_single_agent(
                         "claims_removed": len(_quality_verdict.get("unsupported_claims") or []),
                         "message": "The report was rewritten to remove unsupported claims and rechecked.",
                     })
-                    rechecked = await _verify_and_emit(
+                    await _verify_and_emit(
                         req, lead, final_text=final_text, blackboard=_quality_board, model=_m_recon,
                         company_name=_company_name, company_context_missing=_company_ctx_missing,
                     )
-                    if isinstance(rechecked, dict):
-                        rechecked["repair_attempted"] = True
-                        plan = _PLAN_BY_TURN.get(req.turn_id)
-                        if isinstance(plan, dict):
-                            plan["verification"] = rechecked
         except Exception as exc:  # noqa: BLE001
             log.warning("[single] verify failed: %s", exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side
@@ -3816,7 +3776,7 @@ async def _orchestrate_single_agent(
     # seal) gets a live self_evolve event. Scores each employee's contribution vs the turn's REAL
     # outcome, then persists to the GLOBAL playbook (digital_employees) — learning compounds across
     # ALL rooms. Best-effort + org-scoped; any failure never blocks the seal.
-    if status == "complete" and _evo_mode in ("on", "evolve", "true", "1", "yes"):
+    if _evo_mode in ("on", "evolve", "true", "1", "yes"):
         try:
             _outcome = {
                 "verdict": _gv if isinstance(_gv, dict) else {},
@@ -3893,10 +3853,7 @@ async def _orchestrate_single_agent(
     if _GK_ACTIVE.get(req.turn_id):
         # Goalkeeper owns the seal: stash this round's payload; the loop emits ONE
         # final seal after the last round so the FE stream stays open across re-rounds.
-        # Preserve cumulative accounting instead of overwriting prior-round usage.
-        _SEAL_BY_TURN[req.turn_id] = _merge_goalkeeper_seal(
-            _SEAL_BY_TURN.get(req.turn_id) or {}, _seal_ev,
-        )
+        _SEAL_BY_TURN[req.turn_id] = _seal_ev
         while len(_SEAL_BY_TURN) > _SEAL_BY_TURN_CAP:
             _SEAL_BY_TURN.popitem(last=False)
     else:
@@ -3961,8 +3918,8 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
         )
         return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
 
-    from .hyper.skills import resolve_turn_room_kind
-    _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
+    from .hyper.skills import resolve_room_kind
+    _room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
     if _room_kind == "campaign":
         try:
             participants = _campaign_primary_roster(participants)
@@ -4216,36 +4173,15 @@ def _goalkeeper_rounds_for_room(room_kind: str, *, work_order: bool = False) -> 
     return 1 if work_order or str(room_kind or "").strip().lower() == "campaign" else _goalkeeper_max_rounds()
 
 
-def _execution_retry_owner(execution_context: str) -> str:
-    """Read retry ownership from the private execution envelope.
-
-    Runtime playbooks own semantic retries. Human Work Rooms omit this field and
-    retain their adaptive goalkeeper. Legacy envelopes remain readable while old
-    in-flight turns drain, but new behavior does not depend on string matching.
-    """
-    try:
-        envelope = json.loads(str(execution_context or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return ""
-    if not isinstance(envelope, dict):
-        return ""
-    lifecycle = envelope.get("lifecycle") if isinstance(envelope.get("lifecycle"), dict) else {}
-    policy = lifecycle.get("retry_policy") or envelope.get("retry_policy") or {}
-    if isinstance(policy, dict):
-        return str(policy.get("owner") or "").strip().lower()
-    return ""
-
-
 def _is_hq_work_order_context(execution_context: str) -> bool:
-    """Compatibility classification for already-persisted pre-policy envelopes."""
-    if _execution_retry_owner(execution_context) == "playbook":
-        return True
-    try:
-        envelope = json.loads(str(execution_context or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    contract = str(envelope.get("contract") or "") if isinstance(envelope, dict) else ""
-    return contract.startswith(("hq-work-order.v", "runtime-stage.v", "room-phase.v"))
+    """Recognize every versioned HQ work-order envelope.
+
+    HQ work orders already run a typed subtask executor and deterministic result
+    governor. Replaying the entire Room goalkeeper only repeats the same work.
+    """
+    context = str(execution_context or "")
+    return ("hq-work-order.v" in context or "runtime-stage.v" in context
+            or "room-phase.v" in context)
 
 
 def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
@@ -4257,12 +4193,6 @@ def _goalkeeper_should_continue(verdict: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(verdict, dict):
         return False
     if verdict.get("met"):
-        return False
-    # Grounding and report-shape failures receive one local edit + verification
-    # pass. Replaying discovery, debate, work orders, and synthesis after that
-    # duplicates the whole Room and can multiply token use without adding new
-    # evidence. Surface the exact remaining review gap instead.
-    if verdict.get("repair_attempted"):
         return False
     # A write awaiting approval is terminal ONLY when the draft is also sound —
     # produced AND grounded. If recon flagged the draft as ungrounded or
@@ -4359,8 +4289,8 @@ async def post_room_turn(
     # while the verdict is unmet AND the gap is re-plannable, feed the gaps back
     # into the turn message and re-plan, up to a round cap. Same shape as the
     # Claude `/goal` keep-working-toward-the-goal loop.
-    from .hyper.skills import resolve_turn_room_kind
-    room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
+    from .hyper.skills import resolve_room_kind
+    room_kind = resolve_room_kind(req.task_tag or "", req.room_goal or "", req.user_message or "")
     # Campaign Intelligence already performs its own compile/validate/repair pass.
     # Re-running the general goalkeeper duplicates research, debate and synthesis,
     # burns tokens, and can replace a nearly-complete campaign with a later draft.

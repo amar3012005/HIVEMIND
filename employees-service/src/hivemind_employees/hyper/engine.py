@@ -33,13 +33,8 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..config import get_settings
-from ..db import (
-    create_hyper_work_order,
-    start_hyper_work_order,
-    complete_hyper_work_order,
-    pause_hyper_work_order,
-)
-from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog, work_skill_catalog
+from ..db import create_hyper_work_order, start_hyper_work_order, complete_hyper_work_order
+from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog
 from .domains import get_domain_pack
 from ..hivemind_client import (
     campaign_create_emulated,
@@ -69,38 +64,6 @@ _CEREBRAS_URL = (os.environ.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai
 _CEREBRAS_DIRECT_MODELS = {m.strip() for m in
     (os.environ.get("HYPER_CEREBRAS_DIRECT_MODELS", "zai-glm-4.7,gpt-oss-120b")).split(",") if m.strip()}
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
-
-
-def _normalize_work_step_wait(value: Any) -> Dict[str, Any]:
-    """Keep only a bounded, data-declared pause contract from a Work Room plan."""
-    if not isinstance(value, dict):
-        return {}
-    kind = str(value.get("kind") or "").strip().lower()
-    reason = str(value.get("reason") or "").strip()[:1000]
-    if kind not in {"input", "approval", "capability", "event"} or not reason:
-        return {}
-    prompt = value.get("prompt")
-    resume_key = value.get("resume_key")
-    return {
-        "kind": kind,
-        "reason": reason,
-        "prompt": str(prompt).strip()[:600] if isinstance(prompt, str) and prompt.strip() else None,
-        "resume_key": str(resume_key).strip()[:120] if isinstance(resume_key, str) and resume_key.strip() else None,
-    }
-
-
-def _normalize_work_step_handoff(value: Any) -> Dict[str, Any]:
-    """Persist a proposal for the next owner without invoking that owner."""
-    if not isinstance(value, dict):
-        return {}
-    owner = str(value.get("owner") or "").strip()[:80]
-    if owner.lower() in {"runtime", "hq", "hq runtime"}:
-        owner = "runtime"
-    objective = str(value.get("objective") or "").strip()[:600]
-    rationale = str(value.get("rationale") or "").strip()[:1000]
-    if not owner or not objective or not rationale:
-        return {}
-    return {"owner": owner, "objective": objective, "rationale": rationale}
 
 # Groq model id → OpenRouter slug. None (or a NO_FALLBACK / unknown bare id) means
 # "no OpenRouter text equivalent" → no fallback, the Groq failure is surfaced.
@@ -213,18 +176,24 @@ def _strip_cot(text: str) -> str:
     return t
 
 
-def _work_order_activity(title: Any, text: str, *, limit: Optional[int] = None) -> str:
-    """Return the complete bounded worker note for the visible discussion.
+def _work_order_activity(title: Any, text: str, *, limit: int = 180) -> str:
+    """Return the small, human-facing status line for a completed worker job.
 
-    Worker generation is already capped to a compact note. Clipping that note a
-    second time hid the evidence and disagreement users asked the Room to show.
+    A work order's note belongs on the evidence board and in durable storage;
+    replaying it verbatim as a chat bubble made Rooms noisy and needlessly
+    expensive. Keep the conversation legible while the synthesizer still sees
+    the complete bounded note.
     """
-    clean = str(text or "").strip()
+    clean = re.sub(r"\s+", " ", str(text or "")).strip()
     clean = re.sub(r"^(?:[-*#]+\s*)+", "", clean)
     if not clean:
         return f"Completed {str(title or 'assigned work').strip()}."
+    sentence = re.split(r"(?<=[.!?])\s+", clean, maxsplit=1)[0].strip()
     prefix = f"Completed {str(title or 'assigned work').strip()}: "
-    return prefix + clean
+    available = max(24, limit - len(prefix))
+    if len(sentence) > available:
+        sentence = sentence[: available - 3].rstrip() + "..."
+    return prefix + sentence
 
 
 def _route_direct_openrouter(model: str) -> bool:
@@ -505,22 +474,19 @@ _POST_OUTPUT_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "connector": "google-docs", "artifact_kind": "doc",
         "operation": "create_document",
         "description": "Create the completed output as a Google Doc.",
-        "aliases": ("google-docs", "google-drive", "google"),
-        "request_pattern": r"\bgoogle\s+docs?\b",
+        "aliases": ("google-docs", "google-drive", "google", "gmail"),
     },
     "google_sheets.create_spreadsheet": {
         "connector": "google-sheets", "artifact_kind": "sheet",
         "operation": "create_spreadsheet",
         "description": "Create the completed tabular output as a Google Sheet.",
-        "aliases": ("google-sheets", "google-drive", "google"),
-        "request_pattern": r"\bgoogle\s+sheets?\b",
+        "aliases": ("google-sheets", "google-drive", "google", "gmail"),
     },
     "notion.create_page": {
         "connector": "notion", "artifact_kind": "notion",
         "operation": "create_page",
         "description": "Create the completed output as a Notion page.",
         "aliases": ("notion",),
-        "request_pattern": r"\bnotion\b",
     },
 }
 
@@ -1217,7 +1183,6 @@ class Director:
         execution_context: str = "",
         intended_output: str = "answer",
         room_kind: str = "",
-        room_mode: str = "runtime",
         room_playbook: Optional[List[str]] = None,
         room_journal: Optional[List[Dict[str, Any]]] = None,
         room_instructions: str = "",
@@ -1251,7 +1216,6 @@ class Director:
         self.runtime_stage = self._parse_runtime_stage_envelope(self.execution_context)
         self.work_order = (self._parse_work_order_envelope(self.execution_context)
                            or self._work_order_from_room_phase(self.room_phase))
-        self.work_room_resume = self._parse_work_room_resume_envelope(self.execution_context)
         # What the turn must DELIVER (answer/decision/email/doc/sheet/notion), derived from the user
         # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
         self.intended_output = str(intended_output or "answer").strip().lower()
@@ -1262,8 +1226,6 @@ class Director:
         # structured Director below rather than lexical routing.
         self.room_kind = (str(room_kind or "").strip().lower()
                           or resolve_room_kind("", room_goal or "", user_message or ""))
-        self.room_mode = str(room_mode or "runtime").strip().lower()
-        self.is_work_room = self.room_mode == "work"
         self.domain_pack = get_domain_pack(self.room_kind)
         self.campaign_brief = campaign_brief if isinstance(campaign_brief, dict) else {}
         self.skills_used: List[str] = []
@@ -1373,27 +1335,6 @@ class Director:
         except (TypeError, ValueError):
             return None
         return parsed if isinstance(parsed, dict) and parsed.get("contract") == "hq-work-order.v2" else None
-
-    @staticmethod
-    def _parse_work_room_resume_envelope(raw: str) -> Optional[Dict[str, Any]]:
-        """Recognize a control-plane resume envelope without turning it into HQ work.
-
-        The envelope identifies an already-persisted human Work Room step. It is
-        transport metadata only: the Director executes the stored step once and
-        does not re-plan the user's original request or create Runtime work.
-        """
-        if "work-room-resume.v1" not in str(raw or ""):
-            return None
-        try:
-            parsed = json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(parsed, dict) or parsed.get("contract") != "work-room-resume.v1":
-            return None
-        step = parsed.get("step")
-        if not isinstance(step, dict) or not str(parsed.get("work_order_id") or "").strip():
-            return None
-        return parsed
 
     @staticmethod
     def _parse_runtime_stage_envelope(raw: str) -> Optional[Dict[str, Any]]:
@@ -2572,9 +2513,6 @@ class Director:
             }, ensure_ascii=False)})
         if plan.get("places_query"):
             planned_calls.append({"name": "places_search", "args_json": json.dumps({"query": str(plan["places_query"])}, ensure_ascii=False)})
-        if self.room_kind == "campaign" and not self._allows_places_discovery():
-            planned_calls = [call for call in planned_calls if call.get("name") != "places_search"]
-            plan["places_query"] = None
         phase_lifecycle = self.room_phase.get("lifecycle") if isinstance((self.room_phase or {}).get("lifecycle"), dict) else {}
         phase_expected = {
             str(value) for value in (phase_lifecycle.get("expected_artifacts") or [])
@@ -3234,7 +3172,7 @@ class Director:
                 self.blackboard.append(f"WORK_RESULT[{owner_name} | {order.get('title')}]:\n{text}")
             await self.emit({"t": "work_order", "id": subtask_id, "status": status,
                              "title": order.get("title"), "owner": owner_name,
-                             "summary": text, "checks": checks, "gaps": gaps})
+                             "summary": text[:500], "checks": checks, "gaps": gaps})
             if status == "blocked":
                 break
         return results
@@ -3457,16 +3395,14 @@ class Director:
             "checkpoint": work_order_result.get("checkpoint") or {},
         }
 
-    async def _synthesize_runtime_stage_result(
-        self, supplied_envelope: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    async def _synthesize_runtime_stage_result(self) -> Dict[str, Any]:
         """Compile one Room turn into the generic artifact contract.
 
         The model may structure work already present on the evidence board, but
         it cannot create artifact kinds or evidence references outside the
         versioned stage envelope. Core remains the sole predicate evaluator.
         """
-        envelope = supplied_envelope or self.runtime_stage or {}
+        envelope = self.runtime_stage or {}
         expected = [str(value) for value in (envelope.get("expected_artifacts") or []) if str(value).strip()]
         evidence: List[Dict[str, str]] = []
         inputs = envelope.get("inputs") if isinstance(envelope.get("inputs"), dict) else {}
@@ -3655,82 +3591,6 @@ class Director:
             "summary": str(parsed.get("summary") or "").strip()[:4000],
         }
 
-    async def _synthesize_room_phase_result(
-        self, work_order_result: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Return provider-backed special artifacts plus generic contract artifacts.
-
-        The legacy compiler remains authoritative for records created by Room tools
-        (leads, drafts and calls). Any other playbook artifact is shaped through the
-        same strict, evidence-bound contract synthesizer used by runtime-stage.v1.
-        This keeps Room intelligence adaptive while making room-phase.v2 genuinely
-        generic instead of silently degrading unknown artifact keys into prose.
-        """
-        compiled = self._compile_room_phase_result(work_order_result)
-        phase = self.room_phase or {}
-        lifecycle = phase.get("lifecycle") if isinstance(phase.get("lifecycle"), dict) else {}
-        expected = [str(value) for value in (lifecycle.get("expected_artifacts") or []) if str(value).strip()]
-        produced = {str(row.get("key") or "") for row in (compiled.get("artifacts") or []) if isinstance(row, dict)}
-        missing = [key for key in expected if key not in produced]
-        if not missing or phase.get("contract") != "room-phase.v2":
-            return compiled
-
-        context = phase.get("context") if isinstance(phase.get("context"), dict) else {}
-        prior = context.get("prior_artifacts") if isinstance(context.get("prior_artifacts"), dict) else {}
-        inputs: Dict[str, Any] = {
-            "context.company": context.get("company"),
-            "context.baseline": context.get("baseline"),
-            "context.request": context.get("request"),
-            "context.target": context.get("target"),
-            **prior,
-        }
-        inputs = {key: value for key, value in inputs.items() if value is not None}
-        requirements = lifecycle.get("artifact_requirements")
-        requirements = requirements if isinstance(requirements, dict) else {}
-        schemas = lifecycle.get("artifact_schemas")
-        schemas = schemas if isinstance(schemas, dict) else {}
-        strict_response_schema = lifecycle.get("strict_response_schema")
-        strict_response_schema = strict_response_schema if isinstance(strict_response_schema, dict) else None
-        generic_envelope = {
-            "contract": "runtime-stage.v1",
-            "run_id": phase.get("run_id"),
-            "stage_id": phase.get("phase_id"),
-            "objective": phase.get("instruction") or lifecycle.get("guidance"),
-            "inputs": inputs,
-            "expected_artifacts": missing,
-            "completion_checks": [
-                row for row in (lifecycle.get("completion_checks") or [])
-                if isinstance(row, dict) and str(row.get("select") or "") in missing
-            ],
-            "artifact_requirements": {
-                key: value for key, value in requirements.items()
-                if key in missing
-            },
-            "artifact_schemas": {
-                key: value for key, value in schemas.items()
-                if key in missing
-            },
-            "strict_response_schema": strict_response_schema,
-        }
-        generic = await self._synthesize_runtime_stage_result(generic_envelope)
-        generic_artifacts = [
-            row for row in (generic.get("artifacts") or [])
-            if isinstance(row, dict) and str(row.get("key") or "") in missing
-        ]
-        all_artifacts = [*(compiled.get("artifacts") or []), *generic_artifacts]
-        final_keys = {str(row.get("key") or "") for row in all_artifacts if isinstance(row, dict)}
-        retained_gaps = [
-            str(gap) for gap in (compiled.get("gaps") or [])
-            if not any(str(gap) == f"The Room did not return a verified {key} artifact for this phase."
-                       for key in final_keys)
-        ]
-        return {
-            **compiled,
-            "artifacts": all_artifacts,
-            "gaps": list(dict.fromkeys([*retained_gaps, *(generic.get("gaps") or [])])),
-            "summary": str(generic.get("summary") or compiled.get("summary") or "")[:4000],
-        }
-
     async def _synthesize_work_order_result(self) -> Dict[str, Any]:
         from .work_order_contract import assemble_work_order_result, govern_work_order_result
         subtask_view = []
@@ -3860,61 +3720,26 @@ class Director:
         for synthesis and verification; the existing producer remains the sole
         path for sending, publishing, or other external writes.
         """
-        plan_steps = [row for row in (plan.get("turn_plan") or []) if isinstance(row, dict)] if self.is_work_room else []
-        orders = plan_steps or [row for row in (plan.get("work_orders") or []) if isinstance(row, dict)]
+        orders = [row for row in (plan.get("work_orders") or []) if isinstance(row, dict)]
         if not orders or not self.participants:
             return []
-        completed_by_step: Dict[str, Dict[str, Any]] = {}
 
         async def execute(index: int, order: Dict[str, Any]) -> Dict[str, Any]:
             owner = self._work_order_owner(str(order.get("owner_lane") or "Strategist"))
             owner_name = str(owner.get("name") or owner.get("slug") or "Director")
             owner_slug = str(owner.get("slug") or "director")
-            step_id = str(order.get("id") or f"work-{index + 1}")[:80]
-            dependencies = [str(value)[:80] for value in (order.get("depends_on") or []) if str(value)]
-            order_key = f"{step_id}-{str(order.get('kind') or 'analysis')[:20]}"[:80]
+            order_key = f"work-{index + 1}-{str(order.get('kind') or 'analysis')[:20]}"
             evidence = list(order.get("required_evidence") or [])
             criteria = list(order.get("acceptance_criteria") or [])
-            wait_for = _normalize_work_step_wait(order.get("wait"))
-            handoff = _normalize_work_step_handoff(order.get("handoff"))
-            existing_work_id = str(order.get("_work_order_id") or "").strip()
-            persisted = None
-            if not existing_work_id:
-                persisted = await create_hyper_work_order(
-                    org_id=self.org_id, room_id=self.room_id or "", turn_id=self.turn_id or "",
-                    order_key=order_key, kind=str(order.get("kind") or "analysis"),
-                    title=str(order.get("title") or "Work order"), objective=str(order.get("objective") or ""),
-                    owner=owner, selected_skills=list(self.skills_used), required_evidence=evidence,
-                    acceptance_criteria=criteria,
-                    input_snapshot={"room_kind": self.room_kind, "room_mode": self.room_mode,
-                                    "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps)},
-                    plan_step_id=step_id,
-                    depends_on=dependencies,
-                    wait_for=wait_for,
-                    handoff=handoff,
-                )
-            work_id = existing_work_id or str((persisted or {}).get("id") or "")
-            if wait_for:
-                waiting_status = {
-                    "input": "waiting_for_input",
-                    "approval": "waiting_for_approval",
-                    "capability": "waiting_for_capability",
-                    "event": "waiting_for_event",
-                }[wait_for["kind"]]
-                if work_id:
-                    await pause_hyper_work_order(
-                        work_order_id=work_id, org_id=self.org_id, status=waiting_status,
-                        wait_for=wait_for, handoff=handoff,
-                    )
-                result = {
-                    "id": work_id or order_key, "step_id": step_id, "depends_on": dependencies,
-                    "order_key": order_key, "status": waiting_status, "kind": order.get("kind"),
-                    "title": order.get("title"), "owner": owner_name, "owner_slug": owner_slug,
-                    "text": wait_for["reason"], "acceptance_criteria": criteria,
-                    "wait_for": wait_for, "handoff": handoff,
-                }
-                await self.emit({"t": "work_order", **result})
-                return result
+            persisted = await create_hyper_work_order(
+                org_id=self.org_id, room_id=self.room_id or "", turn_id=self.turn_id or "",
+                order_key=order_key, kind=str(order.get("kind") or "analysis"),
+                title=str(order.get("title") or "Work order"), objective=str(order.get("objective") or ""),
+                owner=owner, selected_skills=list(self.skills_used), required_evidence=evidence,
+                acceptance_criteria=criteria,
+                input_snapshot={"room_kind": self.room_kind, "user_message": self.user_message[:1000]},
+            )
+            work_id = str((persisted or {}).get("id") or "")
             if work_id:
                 await start_hyper_work_order(work_id, self.org_id)
             await self.emit({"t": "work_order", "id": work_id or order_key, "status": "running",
@@ -3925,10 +3750,6 @@ class Director:
                              "note": f"{owner_name} — working on {str(order.get('title') or 'the assigned deliverable').lower()}…"})
             persona_name, lane, persona = _persona_fields(owner)
             context = self._work_order_context(evidence)
-            predecessor_notes = [completed_by_step[dependency].get("text", "")
-                                 for dependency in dependencies if dependency in completed_by_step]
-            if predecessor_notes:
-                context += "\n\nCOMPLETED PREREQUISITES:\n" + "\n".join(predecessor_notes)
             prompt = (
                 f"WORK ORDER: {order.get('title')}\nOBJECTIVE: {order.get('objective')}\n"
                 f"ACCEPTANCE CRITERIA:\n" + "\n".join(f"- {item}" for item in criteria) +
@@ -3949,7 +3770,7 @@ class Director:
                 if not text:
                     raise RuntimeError("worker returned no usable result")
                 activity = _work_order_activity(order.get("title"), text)
-                result = {"id": work_id or order_key, "step_id": step_id, "depends_on": dependencies, "order_key": order_key, "status": "completed",
+                result = {"id": work_id or order_key, "order_key": order_key, "status": "completed",
                           "kind": order.get("kind"), "title": order.get("title"), "owner": owner_name,
                           "owner_slug": owner_slug, "text": text, "acceptance_criteria": criteria}
                 self.blackboard.append(f"WORK_RESULT[{owner_name} | {order.get('title')}]:\n{text}")
@@ -3969,7 +3790,7 @@ class Director:
                 return result
             except Exception as exc:  # a worker failure is a visible, bounded result, never a dead Room
                 message = str(exc)[:500]
-                result = {"id": work_id or order_key, "step_id": step_id, "depends_on": dependencies, "order_key": order_key, "status": "failed",
+                result = {"id": work_id or order_key, "order_key": order_key, "status": "failed",
                           "kind": order.get("kind"), "title": order.get("title"), "owner": owner_name,
                           "owner_slug": owner_slug, "text": message, "acceptance_criteria": criteria}
                 await self.emit({"t": "work_order", **result})
@@ -3981,73 +3802,7 @@ class Director:
                     )
                 return result
 
-        if not plan_steps:
-            return list(await asyncio.gather(*(execute(index, order) for index, order in enumerate(orders))))
-
-        pending = list(enumerate(orders))
-        results: List[Dict[str, Any]] = []
-        while pending:
-            ready = [(index, order) for index, order in pending
-                     if all(dependency in completed_by_step and completed_by_step[dependency].get("status") == "completed"
-                            for dependency in (order.get("depends_on") or []))]
-            if not ready:
-                for index, order in pending:
-                    step_id = str(order.get("id") or f"work-{index + 1}")[:80]
-                    dependencies = list(order.get("depends_on") or [])
-                    owner = self._work_order_owner(str(order.get("owner_lane") or "Strategist"))
-                    persisted = await create_hyper_work_order(
-                        org_id=self.org_id, room_id=self.room_id or "", turn_id=self.turn_id or "",
-                        order_key=f"{step_id}-{str(order.get('kind') or 'analysis')[:20]}"[:80],
-                        kind=str(order.get("kind") or "analysis"), title=str(order.get("title") or "Work step"),
-                        objective=str(order.get("objective") or ""), owner=owner,
-                        selected_skills=list(self.skills_used),
-                        required_evidence=list(order.get("required_evidence") or []),
-                        acceptance_criteria=list(order.get("acceptance_criteria") or []),
-                        input_snapshot={"room_kind": self.room_kind, "room_mode": self.room_mode,
-                                        "user_message": self.user_message[:1000], "turn_plan": True},
-                        plan_step_id=step_id, depends_on=dependencies,
-                    )
-                    work_id = str((persisted or {}).get("id") or step_id)
-                    waiting_dependencies = [
-                        dependency for dependency in dependencies
-                        if str((completed_by_step.get(dependency) or {}).get("status") or "").startswith("waiting_for_")
-                    ]
-                    if waiting_dependencies:
-                        wait_for = {
-                            "kind": "event",
-                            "reason": "Waiting for prerequisite step: " + ", ".join(waiting_dependencies),
-                            "prompt": None,
-                            "resume_key": None,
-                        }
-                        message = wait_for["reason"]
-                        if persisted:
-                            await pause_hyper_work_order(
-                                work_order_id=work_id, org_id=self.org_id, status="waiting_for_dependency",
-                                wait_for=wait_for,
-                            )
-                        result_status = "waiting_for_dependency"
-                    else:
-                        message = "Dependencies were not completed; this step was not started."
-                        if persisted:
-                            await complete_hyper_work_order(
-                                work_order_id=work_id, org_id=self.org_id, status="blocked", summary=message,
-                                output={}, evidence=[], artifacts=[], usage={}, error=message,
-                            )
-                        result_status = "needs_attention"
-                    result = {"id": work_id, "step_id": step_id, "depends_on": dependencies,
-                              "status": result_status, "kind": order.get("kind"), "title": order.get("title"),
-                              "text": message}
-                    completed_by_step[step_id] = result
-                    results.append(result)
-                    await self.emit({"t": "work_order", **result})
-                break
-            wave = await asyncio.gather(*(execute(index, order) for index, order in ready))
-            for result in wave:
-                completed_by_step[str(result.get("step_id") or result.get("id"))] = result
-                results.append(result)
-            ready_ids = {id(order) for _, order in ready}
-            pending = [(index, order) for index, order in pending if id(order) not in ready_ids]
-        return results
+        return list(await asyncio.gather(*(execute(index, order) for index, order in enumerate(orders))))
 
     async def _debate(self, topic: str, rounds: int) -> str:
         rounds = max(1, min(self.debate_max_rounds, rounds))
@@ -4149,18 +3904,7 @@ class Director:
     def _uses_prospect_debate(self, campaign_channels: List[str]) -> bool:
         if self.room_kind != "campaign":
             return True
-        return any(channel in {"gmail", "tara"} for channel in campaign_channels) or getattr(self, "evidence_mode", "") == "prospecting"
-
-    def _allows_places_discovery(self) -> bool:
-        if self.room_kind != "campaign":
-            return True
-        brief = self.campaign_brief if isinstance(self.campaign_brief, dict) else {}
-        policy = brief.get("audiencePolicy") if isinstance(brief.get("audiencePolicy"), dict) else brief.get("audience_policy")
-        if isinstance(policy, dict) and policy.get("discover_if_insufficient") is False:
-            return False
-        channels, _ = self._campaign_requirements()
-        evidence_mode = str(brief.get("evidence_mode") or getattr(self, "evidence_mode", "")).strip().lower()
-        return evidence_mode == "prospecting" or self._uses_prospect_debate(channels)
+        return any(channel in {"gmail", "tara"} for channel in campaign_channels) or self.evidence_mode == "prospecting"
 
     def _campaign_recall_query_is_grounded(self, query: str) -> bool:
         # The broad company brief can contain imported client/project memories.
@@ -4443,27 +4187,6 @@ class Director:
                     "required_evidence": {"type": "array", "items": {"type": "string"}},
                     "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                 }, "required": ["kind", "owner_lane", "title", "objective", "required_evidence", "acceptance_criteria"], "additionalProperties": False}},
-                "turn_plan": {"type": "array", "items": {"type": "object", "properties": {
-                    "id": {"type": "string"},
-                    "depends_on": {"type": "array", "items": {"type": "string"}},
-                    "kind": {"type": "string", "enum": ["research", "analysis", "creative", "decision"]},
-                    "owner_lane": {"type": "string", "enum": ["Strategist", "Researcher", "Skeptic", "Builder", "Communicator"]},
-                    "title": {"type": "string"},
-                    "objective": {"type": "string"},
-                    "required_evidence": {"type": "array", "items": {"type": "string"}},
-                    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                    "wait": {"type": ["object", "null"], "properties": {
-                        "kind": {"type": "string", "enum": ["input", "approval", "capability", "event"]},
-                        "reason": {"type": "string"},
-                        "prompt": {"type": ["string", "null"]},
-                        "resume_key": {"type": ["string", "null"]},
-                    }, "required": ["kind", "reason", "prompt", "resume_key"], "additionalProperties": False},
-                    "handoff": {"type": ["object", "null"], "properties": {
-                        "owner": {"type": "string", "enum": ["runtime", "hq"]},
-                        "objective": {"type": "string"},
-                        "rationale": {"type": "string"},
-                    }, "required": ["owner", "objective", "rationale"], "additionalProperties": False},
-                }, "required": ["id", "depends_on", "kind", "owner_lane", "title", "objective", "required_evidence", "acceptance_criteria"], "additionalProperties": False}},
                 "turn_mode": {"type": "string", "enum": ["chat", "task"]},
                 "collaboration_intensity": {"type": "string", "enum": ["light", "standard", "deep"]},
                 "response_depth": {"type": "string", "enum": ["direct", "focused", "operating"]},
@@ -4525,13 +4248,10 @@ class Director:
             "language, not from English keywords. Chat always uses standard.\n"
             "- post_output_actions: act like a coding agent selecting tools. After understanding the requested "
             "deliverable, choose zero or more capabilities from POST-OUTPUT ACTION CATALOG below, in execution "
-            "order. A content verb such as create, build, prepare, design, write, or produce describes the answer, "
-            "not a provider write. Select an action only when the ACTIVE MESSAGE explicitly names the external "
-            "destination or provider effect: a stated recipient, workspace, document destination, publication "
-            "destination, or save/export target. Discussing a channel or requesting a blueprint, report, persona, "
-            "strategy, or plan selects no action by itself. Set explicit=true. target_hint must quote the recipient, "
-            "workspace, or destination exactly as it appears in the ACTIVE MESSAGE; use null and select no action "
-            "when there is no exact target. A disconnected capability may still be selected when explicitly requested: the UI will offer "
+            "order. Select an action only when the ACTIVE MESSAGE explicitly asks to create, save, send, reply, "
+            "forward, publish, or otherwise perform it; discussing a channel or asking for strategy selects no "
+            "action. Set explicit=true. target_hint is the recipient, workspace, or destination exactly as stated, "
+            "or null. A disconnected capability may still be selected when explicitly requested: the UI will offer "
             "connection while the Room finishes the output. For email, choose gmail.create_draft only when the "
             "user explicitly asks to draft, compose, or prepare a draft without delivery. Choose gmail.send_email "
             "for send/reply/forward/deliver requests and for requests to write/email/message a stated recipient; "
@@ -4614,35 +4334,13 @@ class Director:
                 "Select tools because they close a named evidence gap. The toolkit describes preferred "
                 "capabilities, but never claim a connector is available unless it appears in the available list."
             )
-        if self.is_work_room:
-            sysp += (
-                "\n\nWORK ROOM BOUNDARY: This is a human-facing, neutral workspace. "
-                "The ROOM GOAL and any historical task label are context, not a domain assignment. "
-                "First decide whether the active message is best answered directly, needs targeted evidence, "
-                "benefits from independent challenge, needs an internal artifact, or should become a proposed "
-                "Runtime lifecycle. Use the smallest useful approach. Do not manufacture a report, a debate, "
-                "or employee work orders merely because a room exists. Select method skills from the catalog "
-                "by their stated applicability, then load their full bodies only when they improve this request. "
-                "For nontrivial work, use turn_plan for up to five bounded steps. Each step has a stable id and "
-                "only names prerequisites that must finish before it can start. Independent steps may run together; "
-                "omit turn_plan for a direct answer. Keep work_orders empty when turn_plan is present. "
-                "Use a step's optional wait only when the step cannot honestly continue without a specific input, "
-                "approval, capability, or external event. State the exact reason, an optional concise prompt, and "
-                "a stable resume key. A wait pauses the same step; it is not a failure or a completed result. "
-                "Use optional handoff only to record a proposed next owner with objective and rationale. A handoff "
-                "never invokes another system or authorizes action. "
-                "When the active human message explicitly requests a handoff, represent that reviewable decision "
-                "as a bounded turn_plan step with handoff metadata rather than an untracked direct answer. "
-                "A proposed Runtime lifecycle is a recommendation with its evidence and boundary; it is not an "
-                "executed external action.\n"
-            )
         if self.room_kind == "campaign":
             from .campaign_contract import campaign_system_contract
             sysp += campaign_system_contract()
         # Progressive-disclosure skill catalog: the planner pays only for names +
         # one-liners; a chosen skill's full method body loads during gather.
         if _METHOD_SKILLS_ENABLED:
-            cat = work_skill_catalog() if self.is_work_room else skill_catalog(self.room_kind)
+            cat = skill_catalog(self.room_kind)
             if cat:
                 skill_pick_instruction = (
                     "pick 2-4 METHOD SKILLS" if self.room_kind == "campaign"
@@ -4727,21 +4425,12 @@ class Director:
             spec = _POST_OUTPUT_CAPABILITIES.get(capability)
             if not spec:
                 continue
-            target_hint = str(action.get("target_hint") or "").strip()
-            if spec["artifact_kind"] in {"doc", "sheet", "notion"}:
-                message = str(self.user_message or "")
-                if (
-                    not target_hint
-                    or target_hint.casefold() not in message.casefold()
-                    or not re.search(str(spec.get("request_pattern") or r"(?!)"), message, re.IGNORECASE)
-                ):
-                    continue
             actions.append({
                 "capability": capability,
                 "connector": spec["connector"],
                 "operation": spec["operation"],
                 "artifact_kind": spec["artifact_kind"],
-                "target_hint": target_hint or None,
+                "target_hint": action.get("target_hint"),
                 "explicit": True,
                 "connected": any(_norm_connector(alias) in connected for alias in spec["aliases"]),
             })
@@ -4894,45 +4583,6 @@ class Director:
                 "acceptance_criteria": [str(x)[:180] for x in (row.get("acceptance_criteria") or []) if str(x).strip()][:4],
             })
         plan["work_orders"] = work_orders
-        turn_plan: List[Dict[str, Any]] = []
-        if self.is_work_room:
-            seen_step_ids = set()
-            for index, row in enumerate(plan.get("turn_plan") or []):
-                if not isinstance(row, dict):
-                    continue
-                step_id = str(row.get("id") or "").strip().lower()[:80]
-                if not re.fullmatch(r"[a-z][a-z0-9_-]{0,79}", step_id) or step_id in seen_step_ids:
-                    continue
-                title = str(row.get("title") or "").strip()[:180]
-                objective = str(row.get("objective") or "").strip()[:600]
-                if not title or not objective:
-                    continue
-                dependencies = [str(value).strip().lower()[:80] for value in (row.get("depends_on") or [])
-                                if str(value).strip()][:4]
-                turn_plan.append({
-                    "id": step_id,
-                    "depends_on": dependencies,
-                    "kind": str(row.get("kind") or "analysis").strip().lower(),
-                    "owner_lane": str(row.get("owner_lane") or "Strategist").strip().title(),
-                    "title": title,
-                    "objective": objective,
-                    "required_evidence": [str(x)[:160] for x in (row.get("required_evidence") or []) if str(x).strip()][:4],
-                    "acceptance_criteria": [str(x)[:180] for x in (row.get("acceptance_criteria") or []) if str(x).strip()][:4],
-                    "wait": _normalize_work_step_wait(row.get("wait")),
-                    "handoff": _normalize_work_step_handoff(row.get("handoff")),
-                })
-                seen_step_ids.add(step_id)
-                if len(turn_plan) == 5:
-                    break
-            # A plan cannot wait on an absent step or itself. Invalid dependencies
-            # become explicit no-ops rather than silently creating a deadlocked Room.
-            valid_ids = {step["id"] for step in turn_plan}
-            for step in turn_plan:
-                step["depends_on"] = [item for item in step["depends_on"]
-                                      if item in valid_ids and item != step["id"]]
-            if turn_plan:
-                plan["work_orders"] = []
-        plan["turn_plan"] = turn_plan
         plan["needs_debate"] = bool(plan.get("needs_debate"))
         if intensity == "deep":
             plan["needs_debate"] = True
@@ -5176,122 +4826,6 @@ class Director:
         from .campaign_contract import campaign_bundle_errors
         return campaign_bundle_errors(bundle, channels, requirements)
 
-    @staticmethod
-    def _campaign_action_ids_from_errors(errors: List[str], actions: List[Dict[str, Any]]) -> List[str]:
-        """Return only action IDs explicitly implicated by governance errors."""
-        action_ids = [str(action.get("id") or "").strip() for action in actions if isinstance(action, dict)]
-        return [
-            action_id
-            for action_id in action_ids
-            if action_id and any(re.search(rf"\b{re.escape(action_id)}\b", str(error)) for error in errors)
-        ]
-
-    async def _repair_campaign_actions(
-        self,
-        *,
-        semantic: Dict[str, Any],
-        report: str,
-        errors: List[str],
-        system_contract: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Repair only named invalid actions or semantic fields.
-
-        Governance may reject a complete action sequence because one bounded
-        top-level evidence field is absent. Treating that as terminal made the
-        Room fail despite having the required facts on its board. The patch call
-        can see and replace only fields named by the unmet criteria; the full
-        assembled bundle is then governed again.
-        """
-        actions = [action for action in (semantic.get("actions") or []) if isinstance(action, dict)]
-        action_ids = self._campaign_action_ids_from_errors(errors, actions)
-        semantic_fields = {
-            "strategy", "strategy_options", "selected_strategy_id", "company_grounding",
-            "positioning", "audience", "content_pillars", "kpis", "evidence",
-            "creative_system", "measurement", "debate_conflicts_present",
-            "debate_decisions", "assumptions", "risks",
-        }
-        relevant_fields = {
-            name: semantic.get(name)
-            for name in semantic_fields
-            if any(name in str(error).lower() or name.replace("_", " ") in str(error).lower() for error in errors)
-        }
-        if not action_ids and not relevant_fields:
-            return None
-        invalid_actions = [action for action in actions if str(action.get("id") or "") in action_ids]
-        repair_prompt = (
-            system_contract
-            + "\n\nYou are repairing only named parts of a Campaign Contract after deterministic governance. "
-            'Return JSON only as {"actions":[<complete replacement action objects>],"fields":{<named top-level field>:<replacement>}}. '
-            "Return exactly one complete replacement for each requested action ID and no other actions. In fields, "
-            "return every supplied field and no field that was not supplied. "
-            "Keep each action ID, channel, schedule position, hypothesis, and strategic job unchanged unless an unmet "
-            "criterion explicitly requires changing that field. Build missing proof/fact lists only from VERIFIED CONTEXT "
-            "and EVIDENCE BOARD below. Correct only the stated unmet criteria. Do not add facts, claims, URLs, recipients, "
-            "channels, actions, performance, or provider state."
-        )
-        repair_user = (
-            f"UNMET CRITERIA:\n{json.dumps(errors, ensure_ascii=False)}\n\n"
-            f"ACTIONS TO REPAIR:\n{json.dumps(invalid_actions, ensure_ascii=False)}\n\n"
-            f"FIELDS TO REPAIR:\n{json.dumps(relevant_fields, ensure_ascii=False)}\n\n"
-            f"ACCEPTED PLAN CONTEXT (read only):\n"
-            f"{json.dumps({k: v for k, v in semantic.items() if k not in {'actions', *relevant_fields}}, ensure_ascii=False)[:6000]}\n\n"
-            f"VERIFIED COMPANY CONTEXT:\n{self.company_brief[:2500]}\n\n"
-            f"EVIDENCE BOARD:\n{'\n'.join(self.blackboard)[:5000]}"
-        )
-        repaired_message = await self._groq(
-            [{"role": "system", "content": repair_prompt}, {"role": "user", "content": repair_user}],
-            force_text=True,
-            model=self.synth_model,
-            bucket="synth_repair",
-            temp=0.1,
-            uncapped=True,
-            json_object=True,
-        )
-        repaired_payload = _first_json_object(str((repaired_message or {}).get("content") or "").strip())
-        replacements = repaired_payload.get("actions") if isinstance(repaired_payload, dict) else None
-        patched_fields = repaired_payload.get("fields", {}) if isinstance(repaired_payload, dict) else None
-        if not isinstance(replacements, list) or not isinstance(patched_fields, dict):
-            return None
-        replacement_by_id = {
-            str(action.get("id") or ""): action
-            for action in replacements
-            if isinstance(action, dict) and str(action.get("id") or "") in action_ids
-        }
-        if set(replacement_by_id) != set(action_ids) or set(patched_fields) != set(relevant_fields):
-            return None
-        repaired_semantic = dict(semantic)
-        repaired_semantic["actions"] = [
-            replacement_by_id.get(str(action.get("id") or ""), action)
-            for action in actions
-        ]
-        repaired_semantic.update({name: patched_fields[name] for name in relevant_fields})
-        return repaired_semantic
-
-    @staticmethod
-    def _campaign_semantic_plan(envelope: Any) -> Dict[str, Any]:
-        """Read the compiler's semantic plan without throwing valid work away.
-
-        JSON-object mode guarantees an object, not a particular wrapper. Some
-        supported models follow ``{"plan": {...}}`` literally while others
-        return the requested plan fields at the top level. Both are the same
-        Campaign Contract input; accepting either shape keeps model formatting
-        variance outside lifecycle governance.
-        """
-        if not isinstance(envelope, dict):
-            return {}
-        wrapped = envelope.get("plan")
-        if isinstance(wrapped, dict) and wrapped:
-            return wrapped
-        semantic_fields = {
-            "objective", "strategy", "strategy_options", "selected_strategy_id",
-            "company_grounding", "positioning", "audience", "content_pillars",
-            "kpis", "actions", "measurement", "debate_conflicts_present",
-            "debate_decisions", "evidence", "creative_system", "assumptions", "risks",
-        }
-        if semantic_fields.intersection(envelope):
-            return {key: value for key, value in envelope.items() if key in semantic_fields}
-        return {}
-
     async def _synthesize_campaign_bundle(self, forced_debate: bool, transcript_json: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         channels, requirements = self._campaign_requirements()
         board = "\n".join(self.blackboard)[:6000] or "(no grounded facts were gathered)"
@@ -5306,11 +4840,13 @@ class Director:
         )
         system = (
             campaign_system_contract() + "\n\n"
-            "You are the final Campaign Intelligence compiler. Return one compact JSON object with exactly plan. "
-            "The structured Campaign dashboard is the operating report; do not generate a second prose report. "
-            "Provide only the semantic campaign judgment needed to operate it. Never publish. Product code adds identifiers, timeline "
+            "You are the final Campaign Intelligence synthesizer. Return one compact JSON object with exactly "
+            "report_markdown and plan. Write the polished user-facing operating report once, then provide only the "
+            "semantic campaign judgment needed to operate it. Never publish. Product code adds identifiers, timeline "
             "rows, payload mirrors, safety scaffolding, launch controls, and requirement coverage; it does not repair "
             "missing strategy, evidence, copy, timing, hypotheses, or action controls. "
+            "The report must use these exact Markdown H2 headings: ## Recommendation, ## Audience, ## Positioning, "
+            "## Content System, ## Campaign Sequence, ## Schedule, ## Measurement, ## Risks, and ## Launch Readiness. "
             "Do not repeat internal prompts, method names, or IDs. "
             "Required plan shape: {objective:string,strategy:string,"
             "strategy_options:[{id:string,name:string,thesis:string,tradeoff:string}],selected_strategy_id:string,"
@@ -5340,9 +4876,11 @@ class Director:
             "opening, goal, context, language, lawful_basis, country, timezone, and calling_window; TARA speaks first. "
             "Generate the full action range in the normalized brief for every selected channel. Prefer a coherent "
             "sequence with distinct jobs over repetitive variants. Never copy company facts from another organisation. "
+            "The report and plan must agree exactly on action count, timing, claims, metrics, and launch readiness. "
             f"For this {duration_days}-day campaign, scheduled_offset_minutes starts at 0 and the final action must be "
             f"between {last_action_minimum} and {last_action_maximum} inclusive so the sequence spans the promised horizon. "
             "Targets without verified historical evidence must be labeled proposed, never described as expected results. "
+            "In report_markdown, introduce every unsupported numeric target with the literal label 'Proposed target:' in the same sentence. "
             f"Selected channels: {channels}. Required requirement ids: {requirements}."
         )
         user = (f"USER CAMPAIGN BRIEF:\n{self.user_message}\n\nNORMALIZED BRIEF:\n{json.dumps(self.campaign_brief, ensure_ascii=False)[:3500]}\n\nCOMPANY CONTEXT:\n{self.company_brief[:2000]}\n{self._journal_block}\n"
@@ -5357,10 +4895,8 @@ class Director:
             json_object=True,
         )
         envelope = _first_json_object(str((msg or {}).get("content") or "").strip())
-        # Campaign v5 has one output: the structured dashboard bundle. There is
-        # deliberately no parallel prose report to drift from its final copy.
-        report = ""
-        semantic = self._campaign_semantic_plan(envelope)
+        report = str((envelope or {}).get("report_markdown") or "").strip() if isinstance(envelope, dict) else ""
+        semantic = (envelope or {}).get("plan") if isinstance((envelope or {}).get("plan"), dict) else {}
         for index, action in enumerate(semantic.get("actions") or []):
             if isinstance(action, dict):
                 action["id"] = str(action.get("id") or f"action_{index + 1}")
@@ -5386,47 +4922,8 @@ class Director:
         if errors:
             await self.emit({"t": "campaign_stage", "stage": "validation", "status": "active",
                              "title": "Governance found unmet deliverables",
-                             "detail": f"The Room is repairing {len(errors)} unmet criterion/criteria without repeating accepted work."})
-            current_semantic = semantic
-            current_candidate = candidate
-            for repair_attempt in range(1, 4):
-                repaired_semantic = await self._repair_campaign_actions(
-                    semantic=current_semantic,
-                    report=report,
-                    errors=errors,
-                    system_contract=campaign_system_contract(),
-                )
-                if repaired_semantic is None:
-                    break
-                current_semantic = repaired_semantic
-                current_candidate = assemble_campaign_bundle(
-                    current_semantic,
-                    channels=channels,
-                    requirements=requirements,
-                    campaign_brief=self.campaign_brief,
-                )
-                current_candidate["report_markdown"] = report
-                accepted, governance = campaign__govern_delivery(
-                    current_candidate,
-                    channels=channels,
-                    requirements=requirements,
-                    minimum_contract_version=CAMPAIGN_CONTRACT_VERSION,
-                    campaign_brief=self.campaign_brief,
-                )
-                errors = governance["unmet_deliverables"]
-                await self.emit({
-                    "t": "campaign_governance",
-                    "tool": "campaign__govern_delivery",
-                    "status": governance["status"],
-                    "verdict": governance,
-                    "repair": {"scope": "affected_actions", "attempt": repair_attempt, "maximum": 3},
-                })
-                if not errors:
-                    break
-            if errors:
-                # A rejected field is local to its action. Keep the compiled dashboard
-                # and all accepted actions visible; Core persists this append-only attempt.
-                return current_candidate, errors
+                             "detail": f"The Room did not deliver {len(errors)} promised requirement(s). Nothing was approved."})
+            return None, errors
         await self.emit({"t": "campaign_tool", "tool": "campaign__govern_delivery", "status": "accepted"})
         return accepted, []
 
@@ -5886,7 +5383,7 @@ class Director:
         needs_debate = bool(plan.get("needs_debate"))
         report_expected = (
             self.response_depth == "operating"
-            or self.intended_output in {"report", "doc", "notion"}
+            or self.intended_output in {"answer", "report", "doc", "notion"}
         )
         opening = (
             "I’ll start by grounding this in the relevant company and market evidence."
@@ -5945,55 +5442,6 @@ class Director:
                 "activity_only": True,
             })
 
-    async def _run_resumed_work_step(self, started_at: float) -> Dict[str, Any]:
-        """Execute one previously-paused Work Room step under its existing ID."""
-        envelope = self.work_room_resume or {}
-        raw_step = envelope.get("step") if isinstance(envelope.get("step"), dict) else {}
-        work_order_id = str(envelope.get("work_order_id") or "").strip()
-        if not raw_step or not work_order_id:
-            raise RuntimeError("invalid work-room resume envelope")
-        step = {
-            "id": str(raw_step.get("id") or "resume")[:80],
-            # The control plane only exposes a step for resume after its prior
-            # dependencies let it reach the persisted wait. Re-checking those
-            # dependencies in a new transport turn would create a second order.
-            "depends_on": [],
-            "kind": str(raw_step.get("kind") or "analysis")[:40],
-            "owner_lane": str(raw_step.get("owner_lane") or "Strategist")[:40],
-            "title": str(raw_step.get("title") or "Resumed work")[:180],
-            "objective": str(raw_step.get("objective") or self.user_message)[:600],
-            "required_evidence": [str(value)[:160] for value in (raw_step.get("required_evidence") or []) if str(value)][:4],
-            "acceptance_criteria": [str(value)[:180] for value in (raw_step.get("acceptance_criteria") or []) if str(value)][:4],
-            "_work_order_id": work_order_id,
-        }
-        resolution = envelope.get("resolution") if isinstance(envelope.get("resolution"), dict) else {}
-        if self.company_brief:
-            self.blackboard.append("COMPANY CONTEXT[authoritative]: " + self.company_brief[:8000])
-        self.blackboard.append("RESUMPTION INPUT[authoritative]: " + json.dumps(resolution, ensure_ascii=False)[:6000])
-        prior_dependencies = [str(value)[:80] for value in (raw_step.get("depends_on") or []) if str(value)][:4]
-        if prior_dependencies:
-            self.blackboard.append("COMPLETED PREREQUISITES[authoritative]: " + json.dumps(prior_dependencies))
-        await self.emit({
-            "t": "work_order", "id": work_order_id, "status": "active", "title": step["title"],
-            "resumed": True, "resume_key": str(envelope.get("resume_key") or "")[:120],
-        })
-        self.work_results = await self._run_work_orders({"turn_plan": [step]})
-        final_text = "\n\n".join(
-            str(row.get("text") or "") for row in self.work_results if isinstance(row, dict)
-        ).strip()
-        return {
-            "cost_tokens": int(self.tokens or 0),
-            "final_text": final_text,
-            "transcript": list(self.transcript),
-            "gather_count": self.gather_count,
-            "io": dict(self.io), "tok_by": dict(self.tok_by),
-            "intended_output": "work_step_resume",
-            "turn_mode": "task",
-            "work_orders": [], "work_results": list(self.work_results),
-            "post_output_actions": [],
-            "duration_ms": int((time.time() - started_at) * 1000),
-        }
-
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
         # Instant feedback from t=0: connector-tool init + the first model call run
@@ -6013,8 +5461,6 @@ class Director:
                 "report_contract": True,
             })
         await self._init_connector_tools()  # register toggled connectors as read tools
-        if self.work_room_resume:
-            return await self._run_resumed_work_step(t0)
         await self._prefetch_runtime_prospects()
         if self.room_kind == "hq" and "growth-stage-context.v1" in self.execution_context:
             self.blackboard.append("GROWTH_CONTEXT[authoritative]: " + self.execution_context[:12000])
@@ -6201,7 +5647,7 @@ class Director:
         room_phase_result = None
         if self.room_phase:
             work_order_result = await self._synthesize_work_order_result()
-            room_phase_result = await self._synthesize_room_phase_result(work_order_result)
+            room_phase_result = self._compile_room_phase_result(work_order_result)
             final_text = str(room_phase_result.get("summary") or "")
             await self.emit({"t": "room_phase_result", "result": room_phase_result})
         elif self.runtime_stage:
@@ -6221,13 +5667,9 @@ class Director:
                                  "title": "Campaign contract accepted", "detail": "Every required action, visual brief, timing decision, claim, and measurement field passed validation."})
                 await self.emit({"t": "campaign_bundle", "bundle": campaign_bundle})
                 final_text = self._render_campaign_report(campaign_bundle)
-            elif campaign_bundle:
-                await self.emit({"t": "campaign_bundle_partial", "bundle": campaign_bundle,
-                                 "errors": campaign_bundle_errors, "repair_exhausted": True})
-                final_text = self._render_campaign_report(campaign_bundle)
             else:
                 await self.emit({"t": "campaign_bundle_invalid", "errors": campaign_bundle_errors})
-                final_text = "Campaign evidence could not be compiled into a dashboard.\n\n" + "\n".join(
+                final_text = "The campaign plan needs input before it can be approved.\n\n" + "\n".join(
                     f"- {error}" for error in campaign_bundle_errors)
         elif self.room_kind == "hq" and "growth-stage-context.v1" in self.execution_context:
             await self.emit({"t": "growth_stage", "stage": "plan", "status": "active",
@@ -6356,7 +5798,6 @@ async def run_director(
     execution_context: str = "",
     intended_output: str = "answer",
     room_kind: str = "",
-    room_mode: str = "runtime",
     room_playbook: Optional[List[str]] = None,
     room_journal: Optional[List[Dict[str, Any]]] = None,
     room_instructions: str = "",
@@ -6378,7 +5819,7 @@ async def run_director(
         company_brief=company_brief,
         execution_context=execution_context,
         intended_output=intended_output,
-        room_kind=room_kind, room_mode=room_mode, room_playbook=room_playbook, room_journal=room_journal,
+        room_kind=room_kind, room_playbook=room_playbook, room_journal=room_journal,
         room_instructions=room_instructions,
         sender_email=sender_email,
         out_language=out_language,

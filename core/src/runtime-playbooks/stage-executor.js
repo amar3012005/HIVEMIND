@@ -21,18 +21,8 @@ function getPath(value, path) {
 }
 
 function artifactMap(artifacts) {
-  // Append-only audit history may contain an UNCERTAIN outcome followed by a
-  // reconciled READY/REJECTED outcome for the same input. Predicates operate on
-  // the effective outcome set while the full history remains on the run.
-  const resolvedInputRefs = new Set((artifacts || [])
-    .filter((artifact) => String(artifact?.status || '').toUpperCase() !== 'UNCERTAIN')
-    .map((artifact) => getPath(artifact, 'data.input_ref'))
-    .filter(Boolean));
   const grouped = {};
   for (const artifact of artifacts || []) {
-    const inputRef = getPath(artifact, 'data.input_ref');
-    if (String(artifact?.status || '').toUpperCase() === 'UNCERTAIN'
-        && inputRef && resolvedInputRefs.has(inputRef)) continue;
     const key = artifact.key || artifact.artifactKey;
     if (!grouped[key]) grouped[key] = [];
     grouped[key].push(artifact);
@@ -387,13 +377,6 @@ export class GenericStageExecutor {
           checks: stage.completion_checks,
           unmet: asObject(run.lastVerdict).unmet || [],
           stage_attempts: attempts,
-          retry_policy: {
-            owner: 'playbook',
-            stage_attempt: attempts[stage.id],
-            max_stage_attempts: Number(stage.max_attempts || 1),
-            room_outer_replays: 0,
-            local_artifact_repair: true,
-          },
           checkpoint_sequence: run.checkpointSequence,
           adapter_descriptors: this.adapters?.descriptors?.() || [],
           execution_config: asObject(stage.execution?.config),
@@ -442,30 +425,6 @@ export class GenericStageExecutor {
         const produced = normalizeDirectorArtifacts(result);
         const persisted = await this.store.persistArtifacts(runId, orgId, stage.id, produced);
         run = await this.store.loadRun(runId, orgId);
-        if (result?.waiting_for && typeof result.waiting_for === 'object') {
-          const declared = asObject(result.waiting_for);
-          const waitingFor = {
-            ...declared,
-            types: Array.isArray(declared.types) ? declared.types : [declared.type].filter(Boolean),
-            presentation: asObject(declared.presentation || stage.presentation?.waiting),
-            after_stage_id: stage.id,
-          };
-          await this.store.updateRun(runId, orgId, {
-            status: 'WAITING_EVENT',
-            currentStageId: stage.id,
-            waitingFor,
-            lastVerdict: { passed: false, unmet: [], waiting: true },
-            context: withoutLatestEvent(run.context),
-          });
-          await this.store.appendCheckpoint(runId, orgId, {
-            stageId: stage.id,
-            phase: 'EVENT_REQUIRED',
-            status: 'WAITING_EVENT',
-            state: { next_stage_id: stage.id, waiting_for: waitingFor },
-            artifactRefs: persisted.map((artifact) => artifact.id),
-          });
-          return this.store.loadRun(runId, orgId);
-        }
         if (asObject(asObject(run.context).runtime_deadlines)[stage.id]?.hard_emitted_at) {
           const verdict = { passed: false, unmet: [{ predicate: 'execution_deadline', reason: 'hard_execution_deadline_exceeded_after_reconciliation' }] };
           await this.store.updateRun(runId, orgId, { status: 'NEEDS_INTERVENTION', lastVerdict: verdict });

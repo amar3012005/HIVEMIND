@@ -165,12 +165,16 @@
 - **Rollback:** tag `hivemind/core-api:prod-20260807-5ca742275da4` in `/root/.last-core-rollback`; compose tag swap + `up -d --no-deps core`.
 - **Untested side effects:** compound orchestrator not exercised live (flag off); no emails/calls placed.
 
-## prod-20260808-d9f497b9 — /chat generalized small-detail evidence delivery
+## prod-20260808-366af2c1 — /chat: additive use_tools gate + Composio draft approval fix + unified compound response
 - **Date:** 2026-08-08
-- **Parent:** branch `claude/fervent-tesla-7830e1`, SHA `d9f497b9`; core image `hivemind/core-api:sha-d9f497b`.
-- **Behavior:** structured chat keeps a bounded multilingual semantic recovery pool only when the ordinary relevance floor has no viable rows; authorized full ranked rows are passed internally to a semantic passage projector. No domain keyword list or language-specific detail rule was added.
-- **Failure safety:** the toolkit now allowlists only the new server-owned recall controls. If semantic projection times out, synthesis receives the complete highest-ranked memory under one global 12,000-character guard, then compact lower-ranked previews; it no longer receives equal prefix truncations that can hide a late fact.
-- **Routing:** a model-selected semantic clarification is grounded through recall before asking the user. Greetings/arithmetic and safety refusals retain the direct path.
-- **Tests:** Linux production-runtime checks passed: 4/4 projector tests, 4/4 toolkit validation/security tests, initial-recall contract, and progressive semantic-fallback contract. Local macOS aggregate remains blocked by the existing missing `singulance-amr` darwin-arm64 binary.
-- **Live acceptance:** tenant-scoped `/api/chat` answered the same buried rank-1 memory detail in English and German as `G ROCHER`, and a separate Spanish small-detail query as dark brown; all were grounded and cited memory `b021510a-c979-47c7-8621-7e3991c9154f`. Projector-timeout runs still answered correctly. Observed prompt tokens: 6,476-7,102; global fallback stays bounded rather than silently removing rank-1 detail.
-- **Deployment proof:** canonical release gate passed; `hm-core` healthy on revision `d9f497b9`; manifest `/root/releases/d9f497b/RELEASE_MANIFEST.20260808T115026Z.json`.
+- **Parent:** branch `claude/fervent-tesla-7830e1`, SHA `366af2c1c1f22fa955bd5673a1f49263e0748089`
+- **Frontend:** unchanged
+- **Additive `use_tools` contract (default false):** new optional `use_tools` boolean on `/api/chat`. Omitted/false keeps the current HIVE-MIND-only path byte-for-byte unchanged (verified live: normal recall still grounded, no compound/execution fields). `true` makes connected Composio apps / external tools ELIGIBLE for the turn (never mandatory — native recall still preferred when best). The compound orchestrator path is now gated on `useTools === true` in addition to `COMPOUND_ORCHESTRATOR_ENABLED`.
+- **Composio draft approval fix:** the `/api/pending-writes/:id/approve` endpoint previously built a legacy toolkit and called `tk.execute(row.toolName)` where toolName is a Composio slug — the toolkit has no composio group, so approving a Composio draft did nothing. Now detects `row.provider === 'composio'` and executes via `composio.executeTool(orgId, slug, args)` directly. Verified live: approving a GOOGLEDOCS_CREATE_DOCUMENT draft now calls Composio and surfaces its response (draft marked approved→failed with Composio's validation error when required fields missing — the execution path works).
+- **Composio draft idempotency:** `createComposioDraft` idempotency key is now traceId-scoped AND SHA-256 hashed to 64 chars (the raw concatenation exceeded the VarChar(160) unique column; a deterministic key collided on repeat requests).
+- **Unified compound response:** compound turns now return the normal chat evidence fields (sources, citations, claims, grounded, confidence, scopes_found, etc.) plus a stable `execution` object `{ status, steps, draft_ids }`. `compound_status`/`draft_ids` kept for backward compatibility.
+- **Tests:** 6/6 compound-orchestrator unit tests; 6/6 chat-intent-decision + chat-router-architecture.
+- **Image:** `hivemind/core-api:prod-20260808-366af2c1c1f2` (built). hm-core recreated, healthy.
+- **Acceptance evidence:** public 200 x4. Live: without use_tools → normal recall unchanged; with use_tools:true → compound runs, create_doc → draft_created (persisted, hashed idempotency key), email step correctly waits for doc; approving the draft executes the Composio slug. Compound flag ON.
+- **Rollback:** tag `hivemind/core-api:prod-20260808-5bd36fa491b2` in /root/.last-core-rollback; compose tag swap + up -d --no-deps core.
+- **Untested side effects:** a fully-successful Composio write (all required fields present) not yet exercised live; no emails/calls placed.

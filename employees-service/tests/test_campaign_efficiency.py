@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from hivemind_employees import api_hyper_rooms
@@ -118,23 +116,3 @@ def test_campaign_turn_uses_one_orchestration_round(monkeypatch):
     assert api_hyper_rooms._is_hq_work_order_context('{"contract":"hq-work-order.v2"}') is True
     assert api_hyper_rooms._is_hq_work_order_context('{"contract":"hq-work-order.v1"}') is True
     assert api_hyper_rooms._is_hq_work_order_context('{"contract":"campaign-plan.v2"}') is False
-
-
-def test_runtime_retry_owner_is_structured_not_version_string_dependent(monkeypatch):
-    monkeypatch.setenv("HYPER_ROOM_GOALKEEPER_MAX_ROUNDS", "5")
-    runtime = json.dumps({
-        "contract": "future-envelope.v9",
-        "retry_policy": {"owner": "playbook", "stage_attempt": 2, "max_stage_attempts": 3},
-    })
-    phase = json.dumps({
-        "contract": "room-phase.v99",
-        "lifecycle": {"retry_policy": {"owner": "playbook"}},
-    })
-    human = json.dumps({"contract": "work-room-turn.v1"})
-
-    assert api_hyper_rooms._execution_retry_owner(runtime) == "playbook"
-    assert api_hyper_rooms._execution_retry_owner(phase) == "playbook"
-    assert api_hyper_rooms._is_hq_work_order_context(runtime) is True
-    assert api_hyper_rooms._is_hq_work_order_context(phase) is True
-    assert api_hyper_rooms._is_hq_work_order_context(human) is False
-    assert api_hyper_rooms._goalkeeper_rounds_for_room("general", work_order=False) == 5

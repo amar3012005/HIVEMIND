@@ -146,7 +146,6 @@ The full agent turn: intent → retrieval → grounded answer.
   "scope": "all",
   "project_id": null,
   "project_ids": [],
-  "use_tools": false,
   "limit": null
 }
 ```
@@ -160,7 +159,6 @@ The full agent turn: intent → retrieval → grounded answer.
 | `language` | string\|null | auto | |
 | `scope` | enum | `all` | `personal` \| `project` \| `team` \| `organization` \| `all`. **Narrows only — never widens.** |
 | `project_id` | uuid\|null | — | `project_ids[0]` accepted as an alias. |
-| `use_tools` | bool | `false` | Additive authority gate. `false` keeps native HIVE-MIND chat unchanged; `true` makes active Composio connectors eligible. |
 
 **Response (non-stream)**
 ```json
@@ -193,27 +191,6 @@ lanes. Empty on connector-write turns that retrieve nothing.
 **Timeout semantics.** If retrieval exceeds `HIVEMIND_AGENT_RETRIEVAL_BUDGET_MS` (default
 **12 000 ms**), `coverage.retrieval_timed_out` is set and the reply says the lookup was cut off and
 to retry. It will **never** claim the topic is absent — a timeout is not an absence.
-
----
-
-### `POST /api/composio/plan`
-
-Hosted plan-only tool for a bounded sequential workflow across native HIVE-MIND
-capabilities and the authenticated tenant's ACTIVE Composio connectors.
-
-```json
-{
-  "request": "Recall the handbag, resolve Amar from Gmail, and prepare an email",
-  "history": [],
-  "language": "en"
-}
-```
-
-The response contains `connected_providers`, a stable `plan_id`, and at most
-eight validated steps. Every step names exactly one available tool group and
-may depend only on earlier steps. The endpoint never executes a tool or provider
-side effect. Connector writes still require the canonical pending-write approval
-flow when the plan is later executed.
 
 ---
 
@@ -340,12 +317,10 @@ skip central-graph-only features rather than calling them and handling `501`.
 
 ```json
 {
-  "version": 2,
+  "version": 1,
   "endpoint": "/api/knowledge/upload",
   "asynchronous": true,
   "scopes": ["personal", "project", "team", "organization"],
-  "ingest_modes": ["both", "evidence"],
-  "default_ingest_mode": "both",
   "kinds": {
     "document": { "minBytes": 32, "maxBytes": 52428800,
       "extensions": ["pdf","docx","doc","xlsx","xls","pptx","ppt","txt","md","markdown","csv","tsv","html","htm"] },
@@ -369,7 +344,6 @@ skip central-graph-only features rather than calling them and handling `501`.
 | `projectId` | Required when `targetScope=project`. |
 | `primaryTeamId` | For team scope. |
 | `tags` | Extra tags. |
-| `ingestMode` | `both` (default) preserves full memories + entities + relationships; `evidence` stores hybrid lexical + semantic evidence and skips memory promotion. Images support `both` only. |
 | `force` | Bypass dedup. |
 
 **Response `202` (async) — verified live**
@@ -382,9 +356,6 @@ skip central-graph-only features rather than calling them and handling `501`.
   "document_id": null,
   "memory_ids": [],
   "storage_mode": "amr_embedded",
-  "ingest_mode": "both",
-  "evidence_only": false,
-  "evidence_only_reason": null,
   "counts": { "pages": null, "segments": null, "candidates": null, "memories": null },
   "error": null,
   "created_at": "2026-08-04T14:02:26.383Z",

@@ -75,22 +75,13 @@ human posts "@HIVEMIND what do we know about X?"
   → core POST /api/connectors/slack/event-ingest   (master key)
       - resolves the OAuth owner from team_id (PlatformIntegration)
       - resolves the ASKING Slack user → HIVEMIND user via email (their recall scope)
-      - posts one placeholder, then updates that same message with throttled
-        stage progress (understand → plan → recall/tool → evidence → answer)
-      - runReactAgentV2: full recall + save + connected tools + draft-approval;
-        provider stages retain their Slack/Gmail/Docs/Calendar identity
+      - posts "🧠 Thinking…" placeholder
+      - runReactAgentV2 (gpt-oss-120b): full recall + save + tools + draft-approval
       - chat.update → the placeholder becomes the answer, in-thread
       - per-conversation history (12 turns) for follow-ups
       - files in the message → downloaded with the bot token → /api/knowledge/upload (Docling)
       - "save this" flows → Block-Kit project picker → /api/connectors/slack/interactivity
 ```
-
-Progress is event-driven from the agent's existing `onEvent` contract, not
-keyword-derived. Repeated tool start/result events update one stable row, and
-queued progress writes are drained before the final answer so a delayed
-`chat.update` cannot overwrite completion. Set `SLACK_CHAT_USE_TOOLS=false`
-only to make connected toolkits ineligible on the Slack surface; native recall,
-save, history, and project selection remain available.
 
 App config (Event Subscriptions page): Request URL as above (**Verified ✓**),
 bot events `app_mention`, `message.im`, `message.channels`.

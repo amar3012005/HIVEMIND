@@ -171,45 +171,6 @@ const strList = (itemProps) => ({
  * in code, never by this schema, so they are deliberately absent here.
  */
 export const ARTIFACT_FIELD_SHAPES = {
-  marketing_evidence_ledger: {
-    market_evidence: { kind: 'evidence_bound', schema: strList({ claim: STR, evidence_ref: STR, confidence: STR }) },
-    buyer_evidence: { kind: 'evidence_bound', schema: strList({ claim: STR, evidence_ref: STR, confidence: STR }) },
-    alternatives: { kind: 'authored', schema: strList({ option: STR, evidence_ref: STR }) },
-    contradictions: { kind: 'evidence_bound', schema: strList({ claim: STR, conflict: STR, evidence_ref: STR }) },
-    unknowns: { kind: 'evidence_bound', schema: { type: 'array', items: STR } },
-    confidence: { kind: 'authored', schema: STR },
-  },
-  marketing_strategy_decision: {
-    chosen_strategy: { kind: 'authored', schema: STR },
-    rejected_options: { kind: 'authored', schema: strList({ option: STR, reason: STR }) },
-    buying_trigger: { kind: 'authored', schema: STR },
-    positioning: { kind: 'authored', schema: STR },
-    offer_architecture: { kind: 'authored', schema: STR },
-    buyer_journey: { kind: 'authored', schema: STR },
-    brand_direction: { kind: 'authored', schema: STR },
-    validation_risks: { kind: 'authored', schema: strList({ risk: STR, test: STR }) },
-  },
-  first_life_motion_portfolio: {
-    strategy_ref: { kind: 'evidence_bound', schema: STR },
-    motions: {
-      kind: 'authored',
-      schema: {
-        type: 'array', minItems: 2, maxItems: 4,
-        items: {
-          type: 'object', additionalProperties: false,
-          properties: {
-            motion_id: STR, title: STR, objective: STR, reason: STR, expected_outcome: STR,
-            playbook_id: STR, playbook_version: { type: 'integer' }, supported_action: STR,
-            effect_class: { type: 'string', enum: ['internal', 'external'] },
-            required_capabilities: { type: 'array', items: STR }, evidence_refs: { type: 'array', minItems: 1, items: STR },
-            success_measure: STR, dependencies: { type: 'array', items: STR }, priority: { type: 'integer' },
-          },
-          required: ['motion_id', 'title', 'objective', 'reason', 'expected_outcome', 'playbook_id', 'playbook_version',
-            'supported_action', 'effect_class', 'required_capabilities', 'evidence_refs', 'success_measure', 'dependencies', 'priority'],
-        },
-      },
-    },
-  },
   marketing_strategy: {
     niche_wedge: { kind: 'authored', schema: STR },
     positioning: { kind: 'authored', schema: STR },
@@ -246,13 +207,6 @@ export const ARTIFACT_FIELD_SHAPES = {
     risks: { kind: 'authored', schema: strList({ risk: STR, mitigation: STR }) },
     measures: { kind: 'authored', schema: strList({ metric: STR, target: STR, window: STR, kill_criterion: STR }) },
     dependencies: { kind: 'authored', schema: { type: 'array', items: STR } },
-    portfolio_ref: { kind: 'evidence_bound', schema: STR },
-  },
-  research_decision: {
-    decision: { kind: 'authored', schema: STR },
-    evidence: { kind: 'evidence_bound', schema: strList({ claim: STR, source_ref: STR, confidence: STR }) },
-    unknowns: { kind: 'evidence_bound', schema: { type: 'array', items: STR } },
-    recommendation: { kind: 'authored', schema: STR },
   },
 };
 

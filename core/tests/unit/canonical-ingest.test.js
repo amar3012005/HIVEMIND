@@ -20,13 +20,6 @@ test('canonical envelope rejects relationship memory rows', () => {
   assert.match(result.error, /memory_type/);
 });
 
-test('document ingestMode is independent from the legacy evidence record mode', () => {
-  assert.deepEqual(validateEnvelope({ ...base, mode: 'document', ingestMode: 'evidence' }), { ok: true });
-  const invalid = validateEnvelope({ ...base, ingestMode: 'semantic-only' });
-  assert.equal(invalid.ok, false);
-  assert.match(invalid.error, /ingestMode/);
-});
-
 test('canonical provenance accepts snake-case external source ids', () => {
   const provenance = normalizeProvenance(base);
   assert.equal(provenance.sourceMetadata.source_id, 'source-1');

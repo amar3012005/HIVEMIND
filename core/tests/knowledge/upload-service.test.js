@@ -63,32 +63,4 @@ test('accepted upload persists one durable job before enqueue', async () => {
   assert.equal(deps.created[0].orgId, ids.org);
   assert.equal(deps.created[0].userId, ids.user);
   assert.equal(deps.created[0].scopeKey, `personal:${ids.user}`);
-  assert.equal(deps.created[0].ingestMode, 'both');
-});
-
-test('evidence mode persists through the durable job and queue metadata', async () => {
-  const deps = dependencies();
-  let queued;
-  deps.queue.enqueue = async (input) => { queued = input; return { queue_job_id: 'queue-1' }; };
-  const req = request();
-  req.metadata = { ingest_mode: 'evidence' };
-  const result = await new KnowledgeUploadService(deps).admit(req);
-  assert.equal(result.ok, true);
-  assert.equal(deps.created[0].ingestMode, 'evidence');
-  assert.equal(deps.created[0].metadata.ingest_mode, 'evidence');
-  assert.equal(queued.metadata.ingest_mode, 'evidence');
-});
-
-test('image uploads reject evidence mode before authorization or enqueue', async () => {
-  const deps = dependencies();
-  const req = request();
-  req.file = {
-    filename: 'diagram.png', contentType: 'image/png',
-    data: Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(64, 1)]),
-  };
-  req.metadata = { ingest_mode: 'evidence' };
-  const result = await new KnowledgeUploadService(deps).admit(req);
-  assert.equal(result.status, 400);
-  assert.equal(result.body.error, 'evidence_mode_unsupported_for_image');
-  assert.equal(deps.created.length, 0);
 });

@@ -75,14 +75,6 @@ test('HQ queue projects semantic playbook waits truthfully', () => {
   assert.equal(playbookQueueStatus({ status: 'WAITING_EVENT', waitingFor: { types: ['capability.connected'] } }), 'WAITING_FOR_CONNECTOR');
   assert.equal(playbookQueueStatus({ status: 'WAITING_EVENT', waitingFor: { types: ['provider.reply', 'wait.timeout'] } }), 'MONITORING');
   assert.equal(playbookQueueStatus({ status: 'NEEDS_INTERVENTION' }), 'NEEDS_ATTENTION');
-  assert.equal(playbookQueueStatus({
-    status: 'COMPLETED', terminalState: 'campaign_needs_input',
-    context: { playbook_selection: { acceptable_terminal_states: ['reviewed'] } },
-  }), 'NEEDS_ATTENTION');
-  assert.equal(playbookQueueStatus({
-    status: 'COMPLETED', terminalState: 'reviewed',
-    context: { playbook_selection: { acceptable_terminal_states: ['reviewed'] } },
-  }), 'COMPLETED');
 });
 
 test('HQ campaign authority projection exposes only the current immutable launch batch', () => {

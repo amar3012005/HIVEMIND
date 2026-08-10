@@ -18,7 +18,6 @@
  */
 
 import { chatCompletionFetch } from '../llm/chat-provider.js';
-import { getStaticPromptArtifact, promptContributionTelemetry } from './chat-static-prompt-cache.js';
 
 // Router model: Cerebras-direct gpt-oss-120b (the hardened synthesis path).
 // Env-overridable for A/B; falls back to the resolved synthesis model.
@@ -59,13 +58,10 @@ export const HIGH_TOOLS = [
     description: 'Search or crawl the public web for current external information. Never use for workspace documents, email, Slack, Notion or internal memory.',
     parameters: object({ operation: { type: 'string', enum: ['search', 'crawl', 'job_status'] }, query: { type: 'string' }, url: nullable('string'), response_language: { type: 'string' } }) } },
   { type: 'function', function: { name: 'use_connector', strict: true,
-    description: 'Select one connected application capability. Use only for live Gmail, Google Drive, Docs, Sheets, Calendar, Tasks, Gemini, Slack, Notion, GitHub or Linear data/actions. Writes are converted to approval-required drafts.',
+    description: 'Select one connected application capability. Use only for live Gmail, Google Docs, Gemini, Slack, Notion, GitHub or Linear data/actions. Writes are converted to approval-required drafts.',
     parameters: object({
-      provider: { type: 'string', enum: ['gmail', 'google-drive', 'google-docs', 'google-sheets', 'google-calendar', 'google-tasks', 'google-gemini', 'slack', 'notion', 'github', 'linear'] },
+      provider: { type: 'string', enum: ['gmail', 'google-docs', 'google-gemini', 'slack', 'notion', 'github', 'linear'] },
       intent: { type: 'string', enum: ['read', 'write'] }, request: { type: 'string' }, response_language: { type: 'string' },
-      result_order: { type: 'string', enum: ['provider_default', 'newest', 'oldest'], description: 'Semantic ordering requested by the user in any language. "Last/latest/most recent" means newest.' },
-      result_limit: { type: ['integer', 'null'], minimum: 1, maximum: 100 },
-      has_explicit_filter: { type: 'boolean', description: 'True only when the user supplied a sender, entity, date, label, or content constraint; relative ordering words alone are not filters.' },
     }) } },
   { type: 'function', function: { name: 'use_campaign', strict: true,
     description: 'Create, inspect, improve, pause, or refresh an AI campaign. Creating one hands the work to a dedicated Campaign Room and never publishes automatically.',
@@ -77,15 +73,9 @@ export const HIGH_TOOLS = [
     parameters: object({
       subtasks: { type: 'array', items: object({
         operation: { type: 'string', description: 'Short label for this step, e.g. recall, create_doc, send_email.' },
-        intent: { type: 'string', enum: ['read', 'write'], description: 'Authority required by this step. Creating drafts, documents, events, messages, updates, or deletions is write; retrieval and lookup is read.' },
-        output_kind: { type: 'string', enum: ['knowledge', 'recipient', 'record', 'document', 'message', 'generic'], description: 'Semantic result contract. Use recipient when this step must uniquely resolve a person/address for a later action; knowledge for HIVE-MIND recall; document/message for those provider artifacts; otherwise record or generic.' },
         tool_groups: { type: 'array', items: { type: 'string' }, description: 'Connector group(s) for this step, e.g. ["hivemind-recall"], ["google-docs"], ["gmail"].' },
         depends_on: { type: ['array', 'null'], items: { type: 'integer' }, description: 'Indices of prior subtasks this step depends on, or null if independent.' },
         message: { type: 'string', description: 'The instruction for this single step, in the user\'s language, with exact identifiers preserved.' },
-        query: { type: ['string', 'null'], description: 'Compact canonical semantic query for retrieval/lookup steps, preserving the entity and requested attributes but excluding workflow verbs and downstream actions. Null for pure action steps.' },
-        result_order: { type: 'string', enum: ['provider_default', 'newest', 'oldest'] },
-        result_limit: { type: ['integer', 'null'], minimum: 1, maximum: 100 },
-        has_explicit_filter: { type: 'boolean' },
       }) },
       response_language: { type: 'string' },
     }) } },
@@ -93,48 +83,6 @@ export const HIGH_TOOLS = [
     description: 'Use only for greetings, arithmetic, harmless general conversation, clarification questions, or safety refusals. Never use for workspace knowledge, memory writes, projects, web research or named connected applications.',
     parameters: object({ response: { type: 'string' }, response_language: { type: 'string' }, reason: { type: 'string', enum: ['general', 'clarification', 'safety_refusal'] } }) } },
 ];
-
-const EXTERNAL_TOOL_NAMES = new Set(['use_connector', 'use_campaign', 'compound_plan']);
-// The initial router prompt stays small: native HIVE-MIND capabilities are
-// always available, while connected apps and compound execution are disclosed
-// only after the caller explicitly opts in for this turn.
-export function getProgressiveTools({ useTools = false, connectedProviders = null } = {}) {
-  if (!useTools) return HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name));
-  if (!Array.isArray(connectedProviders)) return HIGH_TOOLS;
-
-  const allowed = [...new Set(connectedProviders
-    .map((provider) => String(provider || '').trim().toLowerCase())
-    .filter(Boolean))];
-  return HIGH_TOOLS.flatMap((tool) => {
-    if (tool.function?.name !== 'use_connector') return [tool];
-    if (allowed.length === 0) return [];
-    return [{
-      ...tool,
-      function: {
-        ...tool.function,
-        description: `Select one of this tenant's active connected application toolkits (${allowed.join(', ')}). Use its live data or prepare an approval-gated action.`,
-        parameters: {
-          ...tool.function.parameters,
-          properties: {
-            ...tool.function.parameters.properties,
-            provider: { ...tool.function.parameters.properties.provider, enum: allowed },
-          },
-        },
-      },
-    }];
-  });
-}
-
-function getWorkflowPlannerTool() {
-  const compound = HIGH_TOOLS.find((tool) => tool.function?.name === 'compound_plan');
-  return [{
-    ...compound,
-    function: {
-      ...compound.function,
-      description: 'Plan the complete user request as one or more bounded DAG steps. Include prerequisite reads, use exactly one tool group per step, preserve dependencies, and classify each semantic output contract. This plans only; it never executes actions.',
-    },
-  }];
-}
 
 // Token-lean system prompt: rules + a handful of multilingual routing examples
 // (the benchmark's exact prompt — the examples are cheap and materially lift
@@ -146,8 +94,7 @@ Any explicit filename or file extension such as .pdf, .docx, .pptx, .xlsx, .md o
 Use hivemind_memory for remember/save/update/delete/rename requests in every language, AND for any durable fact the user simply ASSERTS - no request needed. A statement of fact about the user, their organisation, its products, people, naming or history is a save: \"Singulance was first known as Davinci AI\", \"X is our new pricing\", \"Y replaced Z\". The user is the authority on their own company, so a third-person claim still counts. Never acknowledge a write without this tool, and never reply \"would you like me to save this?\" - a new fact is additive, so store it and say you did. Deletion is the only write needing approval, and that is enforced in code by a one-time server token, not by asking. Questions, opinions and chit-chat are NOT saves. Distinguish the two "name" operations: "change MY name / my role / my company / I prefer X" => operation=update_profile (the USER's own profile). "Call yourself X / rename the assistant" => operation=rename_assistant (the ASSISTANT). Ambiguous "change it" with no clear target => ask ONE clarification via respond_directly(reason=clarification), never guess.
 Use hivemind_projects for project listing/resolution. Use web_research only for the public internet.
 ALWAYS classify answer_type on every hivemind_context call, by MEANING in the user's language: decisions/agreements/choices => decision; goals/targets/action items/next steps => goal; likes/preferences => preference; learnings/takeaways => lesson; things that happened, meetings, quotes => event; how entities relate => relationship; plain attribute lookups => fact or null. Asking WHAT WAS DECIDED is answer_type=decision even when the topic is pricing, dates, or vendors.
-Use use_connector whenever Gmail, email, Google Drive, Google Docs, Google Sheets, Google Calendar, Google Tasks, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
-For every connector read, classify ordering structurally in any language: last/latest/most recent means result_order=newest; earliest/oldest means result_order=oldest; otherwise provider_default. Ordering words are not content filters. Set has_explicit_filter=true only for an actual sender, entity, date, label, or content constraint, and set result_limit to the number of records requested (1 for one latest item).
+Use use_connector whenever Gmail, email, Google Docs, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
 Use use_campaign whenever the user asks to create, run, start, inspect, improve, pause, or check an AI campaign. Starting a campaign creates its dedicated Campaign Room; it does not publish. Use intent=write for create, regenerate, or pause and intent=read for list, status, or metrics.
 Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". operation=diff for "what changed between date A and B". operation=temporal for "what was true / known on date D".
 DATES ARE MANDATORY on those two operations: with operation=diff you MUST fill range_start and range_end, and with operation=temporal you MUST fill valid_at (or known_at when the user asks what was KNOWN/recorded rather than what was true). Emit them as ISO yyyy-mm-dd, converting whatever the user wrote ("Aug 4", "4. August 2026", "last Tuesday"). Leaving these null turns a change question into a plain history walk and answers the wrong question.
@@ -255,41 +202,21 @@ export function extractMessageDates(text, now = new Date()) {
 // stays recall. "What is my name" already contains the literal "my name".
 const PROFILE_RE = /\b(about me|about my (company|org|organi[sz]ation)|who am i|what do you know about me|what am i called|my name)\b|\bmy(\s+[a-z-]+){0,3}\s+(profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus)\b|\bmy (profile|preferences?|role|title|position|name|goals?|objectives?|strateg(y|ies)|plans?|priorities|focus|company|organi[sz]ation|team|language|location)\b|über mich|was weißt du über mich|wie hei(ß|ss)e ich|mein name|meine (firma|rolle|ziele|strategie|präferenz)|qui suis-je|comment je m'appelle|mon (nom|rôle|objectif|entreprise)|sobre mí|cómo me llamo|mi (nombre|rol|empresa|objetivo)/i;
 
-async function callRouter({ message, history, apiKey, signal, useTools = false, connectedProviders = null, workflowPlanner = false }) {
+async function callRouter({ message, history, apiKey, signal }) {
   const histMsgs = Array.isArray(history)
     ? history.slice(-3).filter((h) => h && (h.role === 'user' || h.role === 'assistant') && h.content)
         .map((h) => ({ role: h.role, content: String(h.content).slice(0, 1200) }))
     : [];
-  const staticPrompt = getStaticPromptArtifact({
-    family: 'chat-progressive-router', version: 'v3', variant: 'capability-contract', build: () => SYSTEM,
-  });
-  const connectedPolicy = useTools && Array.isArray(connectedProviders)
-    ? `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it. For an email action, a person's name or display label is not a resolved destination: only a syntactically valid email address is resolved, otherwise add a recipient lookup step with output_kind recipient and make the action depend on it.`
-    : '';
-  const dynamicPolicy = useTools
-    ? connectedPolicy
-    : 'Connected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.';
-  const workflowPolicy = workflowPlanner
-    ? 'You are the hosted workflow planner. Call compound_plan exactly once, even for a one-step request. Decompose the complete request; do not answer it and do not select another capability. For every retrieval or lookup step, put a compact semantic retrieval expression in query, preserving entities and requested attributes while removing workflow verbs and later actions. Put null in query for pure action steps. A requested document, email, message, or other content artifact must receive substantive grounded content: when the current request supplies only a topic or refers to prior conversation, include the required knowledge-retrieval step and make the artifact depend on it rather than emitting a topic placeholder.'
-    : '';
-  const systemMessages = [
-    { role: 'system', content: staticPrompt.value },
-    ...(dynamicPolicy ? [{ role: 'system', content: dynamicPolicy }] : []),
-    ...(workflowPolicy ? [{ role: 'system', content: workflowPolicy }] : []),
-  ];
   const resp = await chatCompletionFetch(ROUTER_MODEL, {
     method: 'POST',
     // chatCompletionFetch sets Authorization from the resolved route; no header here.
     body: JSON.stringify({
-      messages: [...systemMessages, ...histMsgs, { role: 'user', content: message }],
-      tools: workflowPlanner ? getWorkflowPlannerTool() : getProgressiveTools({ useTools, connectedProviders }),
-      tool_choice: workflowPlanner
-        ? { type: 'function', function: { name: 'compound_plan' } }
-        : 'required',
+      messages: [{ role: 'system', content: SYSTEM }, ...histMsgs, { role: 'user', content: message }],
+      tools: HIGH_TOOLS,
+      tool_choice: 'required',
       parallel_tool_calls: false,
       temperature: 0,
-      max_tokens: workflowPlanner ? 1400 : 900,
-      prompt_cache_key: staticPrompt.key,
+      max_tokens: 900,
     }),
     signal,
   }, { fallbackApiKey: apiKey });
@@ -298,18 +225,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
   const call = data.choices?.[0]?.message?.tool_calls?.[0] || null;
   let args = {};
   try { args = call ? JSON.parse(call.function.arguments) : {}; } catch { args = {}; }
-  const dynamicPrompt = `${dynamicPolicy}\n${histMsgs.map((item) => item.content).join('\n')}\n${message}`;
-  return {
-    tool: call?.function?.name || null,
-    args,
-    usage: {
-      ...(data.usage || {}),
-      hivemind_prompt_cache: {
-        static_prompt_cag: { key: staticPrompt.key, status: staticPrompt.cache, fingerprint: staticPrompt.fingerprint },
-        provider_prefix: promptContributionTelemetry({ staticPrompt: staticPrompt.value, dynamicPrompt }),
-      },
-    },
-  };
+  return { tool: call?.function?.name || null, args, usage: data.usage };
 }
 
 /**
@@ -318,7 +234,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
  * runs intentDecisionToPlan(decision, message) exactly as for the current
  * planner, so ALL downstream behavior is identical.
  */
-export function adaptToDecision(tool, args, message, language, { useTools = true } = {}) {
+export function adaptToDecision(tool, args, message, language) {
   const lang = args?.response_language || language || 'und';
   const base = {
     version: 'chat-progressive.v1',
@@ -416,7 +332,6 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       // fetch happened — do NOT set needs_web. TODO: wire hivemind_web_search.
       return { decision: { ...base, operation: 'recall', queries: [s(args?.query, 2000) || message], tool_groups: ['hivemind-recall'] }, usage: null };
     case 'use_connector': {
-      if (!useTools) return { decision: { ...base, operation: 'recall', queries: [message], tool_groups: ['hivemind-recall'] }, usage: null };
       const write = args?.intent === 'write';
       const provider = s(args?.provider, 128);
       return { decision: {
@@ -424,11 +339,6 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
         operation: write ? 'connector_write' : 'connector_read',
         queries: [s(args?.request, 2000) || message],
         connector_provider: provider,
-        connector_retrieval: {
-          result_order: ['newest', 'oldest'].includes(args?.result_order) ? args.result_order : 'provider_default',
-          result_limit: Number.isInteger(args?.result_limit) ? Math.max(1, Math.min(100, args.result_limit)) : null,
-          has_explicit_filter: args?.has_explicit_filter === true,
-        },
         // The provider name IS the toolkit group name — buildToolkitForUser only
         // registers a connector's tools when selectedGroups includes the provider.
         // Empty groups (the bug) meant the connector was never registered.
@@ -436,7 +346,6 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       }, usage: null };
     }
     case 'use_campaign': {
-      if (!useTools) return { decision: { ...base, operation: 'recall', queries: [message], tool_groups: ['hivemind-recall'] }, usage: null };
       const write = args?.intent === 'write';
       return { decision: {
         ...base,
@@ -447,7 +356,6 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       }, usage: null };
     }
     case 'compound_plan': {
-      if (!useTools) return { decision: { ...base, operation: 'recall', queries: [message], tool_groups: ['hivemind-recall'] }, usage: null };
       // Multi-step request — the router decomposed it into ordered subtasks.
       // The caller (runReactAgentV2) routes this to the compound orchestrator
       // behind COMPOUND_ORCHESTRATOR_ENABLED. Each subtask is bounded here so
@@ -455,9 +363,6 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       const raw = Array.isArray(args?.subtasks) ? args.subtasks : [];
       const subtasks = raw.slice(0, 8).map((st, i) => ({
         operation: s(st?.operation, 64) || `step_${i + 1}`,
-        authority: st?.intent === 'write' ? 'write' : 'read',
-        output_kind: ['knowledge', 'recipient', 'record', 'document', 'message', 'generic'].includes(st?.output_kind)
-          ? st.output_kind : 'generic',
         tool_groups: Array.isArray(st?.tool_groups)
           ? st.tool_groups.filter((g) => typeof g === 'string' && g).slice(0, 4).map((g) => s(g, 128))
           : [],
@@ -465,12 +370,6 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
           ? st.depends_on.filter((d) => Number.isInteger(d) && d >= 0 && d < raw.length).slice(0, 4)
           : null,
         message: s(st?.message, 2000) || '',
-        query: s(st?.query, 500) || null,
-        retrieval: {
-          result_order: ['newest', 'oldest'].includes(st?.result_order) ? st.result_order : 'provider_default',
-          result_limit: Number.isInteger(st?.result_limit) ? Math.max(1, Math.min(100, st.result_limit)) : null,
-          has_explicit_filter: st?.has_explicit_filter === true,
-        },
       }));
       return { decision: {
         ...base,
@@ -507,21 +406,6 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       //     statement like "let's meet on August 5" is NOT diverted.
       // If any of those fail, behaviour is byte-identical to before.
       const _reason = String(args?.reason || 'general');
-      // A clarification is a semantic admission that the router is unsure; it
-      // is not proof that workspace evidence is absent. Ground it through the
-      // bounded recall path first. If recall also finds nothing, synthesis can
-      // still ask for clarification, but a multilingual routing miss can no
-      // longer bypass stored knowledge. Greetings/arithmetic (`general`) and
-      // safety refusals retain the direct path. No language or domain keywords
-      // are involved in this recovery contract.
-      if (_reason === 'clarification') {
-        return { decision: {
-          ...base,
-          operation: 'recall',
-          queries: [base.query_canonical_en],
-          tool_groups: ['hivemind-recall'],
-        }, usage: null };
-      }
       if (_reason === 'general') {
         const _msg = String(message || '');
         const _dates = extractMessageDates(message);
@@ -564,10 +448,10 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
  * Main entry — mirrors parseChatIntent's { decision, usage } contract so the
  * caller is a drop-in swap under the flag.
  */
-export async function parseChatIntentProgressive({ message, history, language, apiKey, signal, useTools = false, connectedProviders = null, workflowPlanner = false }) {
+export async function parseChatIntentProgressive({ message, history, language, apiKey, signal }) {
   try {
-    const { tool, args, usage } = await callRouter({ message, history, apiKey, signal, useTools, connectedProviders, workflowPlanner });
-    const { decision } = adaptToDecision(tool, args, message, language, { useTools });
+    const { tool, args, usage } = await callRouter({ message, history, apiKey, signal });
+    const { decision } = adaptToDecision(tool, args, message, language);
     // Diagnostics for the A/B gate (read via trace.intent; harmless downstream).
     decision._router = 'progressive';
     decision._router_tool = tool;

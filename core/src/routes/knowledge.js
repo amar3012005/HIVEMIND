@@ -1,5 +1,4 @@
 import { KnowledgeUploadJobStore } from '../knowledge/upload-job-store.js';
-import { normalizeKnowledgeIngestMode } from '../knowledge/upload-contract.js';
 
 function field(parts, name, fallback = '') {
   return parts.find((part) => part.name === name)?.value ?? fallback;
@@ -32,18 +31,10 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
     ]);
     const primaryTeamId = field(parts, 'primaryTeamId', null);
     const tags = field(parts, 'tags').split(',').map((tag) => tag.trim()).filter(Boolean);
-    const ingestMode = normalizeKnowledgeIngestMode(field(parts, 'ingestMode', ''));
-    if (!ingestMode.ok) {
-      return jsonResponse(res, {
-        error: 'invalid_ingest_mode',
-        message: 'ingestMode must be both or evidence.',
-      }, 400);
-    }
     const admitted = await knowledgeUploadService.admit({
       userId, orgId, file, targetScope, projectIds, primaryTeamId,
       metadata: {
-        tags, ingest_mode: ingestMode.value,
-        smart: field(parts, 'smart').toLowerCase() === 'true',
+        tags, smart: field(parts, 'smart').toLowerCase() === 'true',
         picture_descriptions: field(parts, 'picture_descriptions').toLowerCase() === 'true',
         hint: field(parts, 'hint', null),
         visibility: targetScope === 'organization' ? 'organization' : 'private',

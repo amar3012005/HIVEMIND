@@ -30,7 +30,6 @@ from typing import Dict, List, Tuple
 from ..domains import (
     default_domain_skill,
     domain_skill_catalog,
-    domain_slugs,
     get_domain_pack,
     load_domain_skill,
 )
@@ -121,20 +120,6 @@ def resolve_room_kind(task_tag: str, goal: str, message: str) -> str:
     return "general"
 
 
-def resolve_turn_room_kind(room_mode: str, task_tag: str, goal: str, message: str) -> str:
-    """Resolve a persisted Room boundary before compatibility routing.
-
-    A human Work Room is intentionally domain-neutral. Task labels may inform the
-    Director's semantic plan, but must never select a specialist Company Room or
-    inject a domain pack before the Director has reasoned about the request.
-    Runtime Rooms retain the legacy/tagged resolver because their playbook chose
-    the specialist owner before dispatch.
-    """
-    if str(room_mode or "").strip().lower() == "work":
-        return "general"
-    return resolve_room_kind(task_tag, goal, message)
-
-
 # A room kind gets its own methods plus the ADJACENT method families it genuinely
 # needs. Without this a `marketing` room (a domain pack) only ever saw the marketing
 # pack + `general`, so the whole strategy/market/business method library was invisible
@@ -167,26 +152,6 @@ def skill_catalog(room_kind: str) -> List[Tuple[str, str]]:
                 seen.add(name)
     if room_kind != "general":
         for name, (when, _body) in METHOD_SKILLS.get("general", {}).items():
-            if name not in seen:
-                out.append((name, when))
-                seen.add(name)
-    return out
-
-
-def work_skill_catalog() -> List[Tuple[str, str]]:
-    """Compact capability catalog for a human Work Room.
-
-    This exposes names and one-line applicability only. The Director still loads
-    full method bodies progressively after it semantically selects them, so a
-    general room can use a product, research, or strategy method without becoming
-    a permanent specialist room.
-    """
-    out: List[Tuple[str, str]] = []
-    seen = set()
-    for kind in ["general", *domain_slugs(), *sorted(METHOD_SKILLS)]:
-        for name, when in [*domain_skill_catalog(kind), *[
-            (skill_name, descriptor[0]) for skill_name, descriptor in (METHOD_SKILLS.get(kind) or {}).items()
-        ]]:
             if name not in seen:
                 out.append((name, when))
                 seen.add(name)

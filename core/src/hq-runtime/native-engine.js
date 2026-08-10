@@ -271,7 +271,7 @@ export class NativeHqEngine {
         details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'user_instruction' },
       });
     }
-    let capabilityState = await reconcileTodoCapabilities({ prisma, runtime });
+    const capabilityState = await reconcileTodoCapabilities({ prisma, runtime });
     for (const resolved of capabilityState.resolved) {
       await event(prisma, runtime, cycle, {
         eventType: 'capability_resolved', title: 'A required capability is available',
@@ -302,7 +302,7 @@ export class NativeHqEngine {
         details: { capability_request_id: request.id, todo_id: request.todoId, provider: request.provider, connect_path: request.connectPath },
       });
     }
-    let readyTodo = capabilityState.todos.find((todo) => todo.status === 'READY');
+    const readyTodo = capabilityState.todos.find((todo) => todo.status === 'READY');
     const focusedOutcome = capabilityState.todos.find((todo) => (
       todo.context?.execution_mode === 'single_outcome' && todo.status !== 'COMPLETED'
     ));
@@ -312,9 +312,9 @@ export class NativeHqEngine {
     // READY, so without this guard a burst of wakes could fan out several Rooms at once
     // (parallel, dangerous). A room is in flight when a todo is RUNNING or a playbook run
     // is ACTIVE/WAITING. When in flight we neither dispatch nor re-plan — we wait.
-    let roomInFlight = capabilityState.todos.some((todo) => todo.status === 'RUNNING')
+    const roomInFlight = capabilityState.todos.some((todo) => todo.status === 'RUNNING')
       || (this.runtimePlaybooks ? !!(await prisma.runtimePlaybookRun.findFirst({
-        where: { orgId: runtime.orgId, status: 'ACTIVE' },
+        where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
         select: { id: true },
       }).catch(() => null)) : false);
     // Only narrate the queue when it actually has something to say — a real next item,
@@ -486,45 +486,6 @@ export class NativeHqEngine {
 
     const activationSprint = await projectCurrentActivationSprint({ prisma, orgId: runtime.orgId });
     if (activationSprint?.status === 'AWAITING_START') {
-      const recommended = activationSprint.items?.find((item) => item.todo_id === activationSprint.recommended_todo_id)
-        || activationSprint.items?.[0];
-      const recommendedTodo = recommended?.todo_id ? await prisma.hqTodo.findFirst({
-        where: { id: recommended.todo_id, runtimeId: runtime.id, orgId: runtime.orgId },
-      }) : null;
-      let internalBootstrap = false;
-      if (firstLifePolicy.auto_start_internal_bootstrap === true
-        && recommendedTodo?.context?.effect_class === 'internal'
-        && recommendedTodo.context?.planned_playbook_id
-        && recommendedTodo.context?.planned_playbook_version) {
-        try {
-          const declared = this.runtimePlaybooks.registry.get(
-            recommendedTodo.context.planned_playbook_id,
-            Number(recommendedTodo.context.planned_playbook_version),
-            { scopeKey: 'global' },
-          );
-          internalBootstrap = declared.metadata?.effect_class === 'internal'
-            && !(declared.stages || []).some((stage) => stage.authority_gate);
-        } catch { internalBootstrap = false; }
-      }
-      if (internalBootstrap) {
-        const activation = await activateEligibleFirstLifeWork({
-          prisma, runtime, expansionTrigger: 'internal_bootstrap',
-        });
-        if (activation.promoted.length) {
-          capabilityState = await reconcileTodoCapabilities({ prisma, runtime });
-          readyTodo = capabilityState.todos.find((todo) => todo.status === 'READY');
-          roomInFlight = capabilityState.todos.some((todo) => todo.status === 'RUNNING')
-            || (this.runtimePlaybooks ? !!(await prisma.runtimePlaybookRun.findFirst({
-              where: { orgId: runtime.orgId, status: 'ACTIVE' }, select: { id: true },
-            }).catch(() => null)) : false);
-          await event(prisma, runtime, cycle, {
-            eventType: 'todo_created', title: `I started the evidence-only recommendation: ${activation.promoted[0].title}`,
-            summary: 'This internal lifecycle performs strategy preparation only. It has no provider effect and grants no external authority.',
-            details: { todo_id: activation.promoted[0].id, expansion_trigger: 'internal_bootstrap' },
-          });
-        }
-      }
-      if (!internalBootstrap) {
       const alreadyRequested = await prisma.hqRuntimeEvent.findFirst({
         where: {
           runtimeId: runtime.id,
@@ -544,7 +505,6 @@ export class NativeHqEngine {
       });
       await move('WAITING', { blockedReason: null, currentCycleId: null, nextWakeAt: null });
       return { transition: 'WAIT_FOR_FIRST_LIFE_START', activation_sprint_id: activationSprint.id };
-      }
     }
 
     let queueContinuationScheduled = false;
@@ -608,20 +568,6 @@ export class NativeHqEngine {
             summary: 'The Room completed the preparatory stages. HQ is holding the exact checkpoint before any governed external action.',
             details: { run_id: run.id, gate: authority.gate, policy_key: authority.policyKey },
           });
-          if (todo.context?.proposal_origin === 'strategy_program') {
-            const activation = await activateEligibleFirstLifeWork({
-              prisma, runtime, expansionTrigger: 'verified_preparation_checkpoint', proposalOrigin: 'strategy_program',
-            });
-            if (activation.promoted.length) {
-              await scheduleHqWake({
-                prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-                idempotencyKey: `strategy-preparation:${run.id}:${run.checkpointSequence}`,
-                triggerType: 'queue_advance', dueAt: new Date(),
-                payload: { run_id: run.id, promoted_todo_ids: activation.promoted.map((item) => item.id) },
-              });
-              queueContinuationScheduled = true;
-            }
-          }
         }
       } else if (run.status === 'WAITING_EVENT') {
         const waitingForCapability = (run.waitingFor?.types || []).includes('capability.connected');
@@ -651,20 +597,6 @@ export class NativeHqEngine {
           details: { run_id: run.id, waiting_for: run.waitingFor || {}, artifact_refs: artifactRefs },
           evidenceRefs: artifactRefs,
         });
-        if (todo.context?.proposal_origin === 'strategy_program') {
-          const activation = await activateEligibleFirstLifeWork({
-            prisma, runtime, expansionTrigger: 'verified_preparation_checkpoint', proposalOrigin: 'strategy_program',
-          });
-          if (activation.promoted.length) {
-            await scheduleHqWake({
-              prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
-              idempotencyKey: `strategy-preparation:${run.id}:${run.checkpointSequence}`,
-              triggerType: 'queue_advance', dueAt: new Date(),
-              payload: { run_id: run.id, promoted_todo_ids: activation.promoted.map((item) => item.id) },
-            });
-            queueContinuationScheduled = true;
-          }
-        }
         if (!waitingForCapability && run.waitingFor?.releases_execution_slot === true) {
           const activation = await activateEligibleFirstLifeWork({
             prisma, runtime, expansionTrigger: 'verified_monitoring_checkpoint',
@@ -736,13 +668,8 @@ export class NativeHqEngine {
           evidenceRefs: artifactRefs,
         });
         if (completed) {
-          const strategyProgramReady = run.playbookId === 'marketing.strategy-to-growth-brief'
-            && run.terminalState === 'strategy_program_ready';
           const activation = await activateEligibleFirstLifeWork({
-            prisma,
-            runtime,
-            expansionTrigger: strategyProgramReady ? 'strategy_program_ready' : 'verified_result',
-            proposalOrigin: strategyProgramReady ? 'strategy_program' : null,
+            prisma, runtime, expansionTrigger: 'verified_result',
           });
           for (const promoted of activation.promoted) await event(prisma, runtime, cycle, {
             eventType: 'todo_created',
@@ -760,18 +687,15 @@ export class NativeHqEngine {
             queueContinuationScheduled = true;
           }
         }
+        await scheduleHqWake({
+          prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+          idempotencyKey: `queue-after-playbook:${run.id}`, triggerType: 'queue_advance', dueAt: new Date(),
+          payload: { completed_todo_id: todo.id, run_id: run.id },
+        });
+        queueContinuationScheduled = true;
       }
     }
     }
-    // Reconcile after applying the current lifecycle event. The pre-cycle snapshot can
-    // still say RUNNING after the result above completed it, which used to suppress the
-    // next READY task and let a future measurement deadline win.
-    capabilityState = await reconcileTodoCapabilities({ prisma, runtime });
-    readyTodo = capabilityState.todos.find((todo) => todo.status === 'READY');
-    roomInFlight = capabilityState.todos.some((todo) => todo.status === 'RUNNING')
-      || (this.runtimePlaybooks ? !!(await prisma.runtimePlaybookRun.findFirst({
-        where: { orgId: runtime.orgId, status: 'ACTIVE' }, select: { id: true },
-      }).catch(() => null)) : false);
     if (trigger.type === 'work_result') {
       const workOrderId = String(trigger.payload?.work_order_id || '');
       const order = workOrderId ? await prisma.hyperWorkOrder.findFirst({
@@ -882,38 +806,9 @@ export class NativeHqEngine {
       await event(prisma, runtime, cycle, { eventType: 'skill_loaded', title: `I am taking the next item: ${readyTodo.title}`, summary: selectedSkill.description, skillRef: skillId, details: { todo_id: readyTodo.id } });
       const rooms = await prisma.hyperRoom.findMany({ where: { orgId: runtime.orgId, archivedAt: null }, orderBy: { updatedAt: 'desc' } });
       const boundedObjective = specialistWorkObjective(readyTodo, skillId);
-      const adminStatusRun = await prisma.runtimePlaybookRun.findFirst({
-        where: {
-          orgId: runtime.orgId,
-          playbookId: 'operations.browser-admin-checkin-to-status',
-          status: 'COMPLETED',
-          trigger: { path: ['runtime_epoch'], equals: runtime.epoch },
-        },
-        include: { artifacts: { orderBy: { createdAt: 'desc' } } },
-        orderBy: { updatedAt: 'desc' },
-      });
-      const adminCurrentStatus = adminStatusRun?.artifacts
-        ?.find((artifact) => artifact.artifactKey === 'user_current_status') || null;
-      const lifecycleCatalog = this.runtimePlaybooks?.registry.descriptors({ scopeKey: 'global' })
-        .filter((entry) => entry.status === 'ACTIVE')
-        .map((entry) => ({
-          playbook_id: entry.playbook_id,
-          version: entry.version,
-          owner_room_tag: entry.metadata?.owner_room_tag || null,
-          supported_actions: Array.isArray(entry.metadata?.supported_actions) ? entry.metadata.supported_actions : [],
-          effect_class: entry.metadata?.effect_class || null,
-          purpose: entry.metadata?.purpose || entry.description || '',
-          terminal_states: entry.terminal_states,
-        }));
       const lifecycleContext = {
         company: compactCompanyOperatingContext(context.company),
         baseline: context.evidence?.baseline || null,
-        admin_current_status: adminCurrentStatus ? {
-          artifact_id: adminCurrentStatus.artifactId,
-          data: adminCurrentStatus.data || {},
-          source_refs: adminCurrentStatus.sourceRefs || [],
-        } : null,
-        lifecycle_catalog: lifecycleCatalog || [],
         target: {
           ...(readyTodo.context?.target || {}),
           ...(readyTodo.context?.location ? { location: readyTodo.context.location } : {}),
@@ -1142,10 +1037,7 @@ export class NativeHqEngine {
       }
     }
 
-    // Runtime playbooks promote and wake their next eligible proposal only from
-    // the verified expansion paths above. A terminal mismatch, input request,
-    // or safety stop must never fall through into an unrelated READY row.
-    if (trigger.type === 'work_result' && capabilityState.todos.some((todo) => todo.status === 'READY')) {
+    if (['work_result', 'runtime_playbook_result'].includes(trigger.type) && capabilityState.todos.some((todo) => todo.status === 'READY')) {
       await scheduleHqWake({
         prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
         idempotencyKey: `queue-advance:${cycle.id}`, triggerType: 'queue_advance', dueAt: new Date(),
@@ -1153,16 +1045,9 @@ export class NativeHqEngine {
       });
     }
 
-    const finalReadyTodo = await prisma.hqTodo.findFirst({
-      where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'READY' },
-      orderBy: [{ priority: 'asc' }, { position: 'asc' }], select: { id: true },
-    });
     const stageCheckpoint = context.growth.active_stage?.checkpoint_at
       ? new Date(context.growth.active_stage.checkpoint_at) : null;
-    const declaredDueAt = stageCheckpoint && Number.isFinite(stageCheckpoint.getTime()) ? stageCheckpoint : null;
-    // A measurement date cannot outrank executable preparation. Measurement begins
-    // only after launch or an explicit playbook monitoring checkpoint.
-    const dueAt = finalReadyTodo || queueContinuationScheduled ? null : declaredDueAt;
+    const dueAt = stageCheckpoint && Number.isFinite(stageCheckpoint.getTime()) ? stageCheckpoint : null;
     if (dueAt) await scheduleHqWake({
       prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
       idempotencyKey: `checkpoint:${runtime.activeStageId}:${dueAt.toISOString()}`,

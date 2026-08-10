@@ -16,7 +16,6 @@ import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables } from '../vector/mneme/driver.js';
-import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
 // row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
@@ -2544,7 +2543,6 @@ Every item must include a non-empty content field and one or more valid support_
     // All other paths (enterprise, connector) still block via their own assertKbAllowedForOrg calls.
     if (!orgIsRemote(opts?.orgId)) assertKbAllowedForOrg(opts?.orgId);
     const { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
-    const ingestMode = metadata.ingest_mode === 'evidence' ? 'evidence' : 'both';
     const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
     // TRUE unit count, read straight from the container (slides / sheets / PDF
@@ -2762,17 +2760,13 @@ Every item must include a non-empty content field and one or more valid support_
         parseStatus: parseResult.success ? 'parsed' : 'failed',
         parseEngine: parseResult.engine,
         parseMetadata: parseResult.metadata || {},
-        ingestMode,
         structureExtracted: parseResult.success,
         tags: _docTags,
         checksum,
         contentType,
         filename,
         createdAt: new Date().toISOString(),
-        metadata: {
-          ...metadata, ingest_mode: ingestMode,
-          document_type: documentType, document_type_confidence: documentClassification.confidence,
-        },
+        metadata: { ...metadata, document_type: documentType, document_type_confidence: documentClassification.confidence },
       };
       await amrKbDoc(orgId, docPayload);
       knowledgeDoc = { id: docId };
@@ -2787,7 +2781,6 @@ Every item must include a non-empty content field and one or more valid support_
           }
         },
         create: {
-          ingestMode,
           userId,
           orgId,
           sourceArtifactId: sourceArtifact.id,
@@ -2813,7 +2806,6 @@ Every item must include a non-empty content field and one or more valid support_
           // Backfill provenance on pre-existing rows so document filters and
           // memory citations expose the same classification after re-upload.
           documentType,
-          ingestMode,
           // Backfill canonical identity on legacy rows (idempotent).
           canonicalIngestKey: _canonicalIngestKey,
           sourceExternalId: _scopedSourceId,
@@ -2986,57 +2978,6 @@ Every item must include a non-empty content field and one or more valid support_
       console.warn(`[kb-tables] persist skipped (ingest unaffected): ${e.message}`);
     }
 
-    // Intentional evidence-only ingest stops at the durable hybrid evidence
-    // boundary. Lexical recall reads these scope-stamped segment rows (or the
-    // corresponding AMR rows); semantic recall requires every segment vector.
-    // Do not enter any memory-generation, curator, entity, relationship, or
-    // claim-structuring path below this return.
-    if (ingestMode === 'evidence') {
-      if (!_evEmbedCov && !orgIsRemote(orgId)) {
-        const embedded = await this.db.knowledgeSegment.count({
-          where: { documentId: knowledgeDoc.id, vectorStored: true },
-        });
-        _evEmbedCov = {
-          total: segments.length,
-          embedded,
-          failed: Math.max(0, segments.length - embedded),
-          healed: 0,
-        };
-      }
-      const semanticReady = Number(_evEmbedCov?.total || 0) === segments.length
-        && Number(_evEmbedCov?.embedded || 0) === segments.length
-        && Number(_evEmbedCov?.failed || 0) === 0;
-      const lexicalReady = segments.length > 0;
-      if (!semanticReady || !lexicalReady) {
-        const err = new Error(
-          `Evidence indexing incomplete: semantic=${Number(_evEmbedCov?.embedded || 0)}/${segments.length}, lexical=${lexicalReady ? segments.length : 0}/${segments.length}`,
-        );
-        err.code = 'EVIDENCE_INDEX_INCOMPLETE';
-        throw err;
-      }
-      const pages = _truePageCount
-        || Number(parseResult?.metadata?.pages)
-        || new Set(segments.map((s) => s.startPage).filter((p) => p != null && p > 0)).size
-        || 1;
-      const coverage = {
-        evidence_embed: _evEmbedCov,
-        evidence_lexical: { total: segments.length, indexed: segments.length, failed: 0 },
-      };
-      this.logger.info?.(`[kb-unified] EVIDENCE-ONLY doc=${String(knowledgeDoc.id).slice(0, 8)} `
-        + `segments=${segments.length} semantic=${_evEmbedCov.embedded} lexical=${segments.length}; memory pipeline skipped`);
-      return {
-        documentId: knowledgeDoc.id,
-        segmentCount: segments.length,
-        candidateCount: 0,
-        promotedCount: 0,
-        promotedMemoryIds: [],
-        evidenceOnlyReason: 'user_selected',
-        pages,
-        coverage,
-        timings: { parse: _msParse, segment: _msSeg, embed: _msEmbed, promote: 0 },
-      };
-    }
-
     // Step 6: Promote candidate memories
     emit('promoting', 80, { segments: segments.length });
     const _tPromote = Date.now();
@@ -3116,9 +3057,6 @@ Every item must include a non-empty content field and one or more valid support_
       candidateCount: _cands,
       promotedCount: promoted.memories.length,
       promotedMemoryIds: promoted.memories.map(m => m.id),
-      evidenceOnlyReason: promoted.memories.length === 0
-        ? (promoted.coverage?.promotion_failed ? 'promotion_failed' : 'extraction_yield_zero')
-        : null,
       // REAL page count so the durable kbPages meter settles true pages, not
       // `Math.max(1, result.pages ?? 1)` = always 1. parseResult.metadata.pages
       // is the docling page-array length (PDFs, office decks); fall back to the
@@ -3452,7 +3390,6 @@ Every item must include a non-empty content field and one or more valid support_
 
     const prov = normalizeProvenance(envelope);
     const mode = detectMode(envelope);
-    const ingestMode = envelope.ingestMode === 'evidence' ? 'evidence' : 'both';
     const sourceType = envelope.source.type;
     const callerTags = Array.isArray(envelope.tags) ? envelope.tags : [];
 
@@ -3470,7 +3407,6 @@ Every item must include a non-empty content field and one or more valid support_
       // every distilled fact (source_metadata + filename/doc-id tags).
       const docMeta = {
         ...(envelope.metadata || {}),
-        ingest_mode: ingestMode,
         source_platform: prov.sourcePlatform,
         source_id: prov.sourceMetadata.source_id,
         source_url: prov.sourceMetadata.source_url,
@@ -4294,9 +4230,7 @@ Every item must include a non-empty content field and one or more valid support_
         const segment = segments[_qi++];
         const segOrgId = callerOrgId || segment.orgId;
         try {
-          // Embed the chunk WITH its document/heading anchor, not bare. Stored content is
-          // untouched -- the prefix exists only in the vector. See contextual-embed-input.js.
-          const embedding = await this.embeddingService.embed(contextualEmbedInputForSegment(segment));
+          const embedding = await this.embeddingService.embed(segment.content);
           if (_isRemote) {
             // remoteKbSegment returns true | null (null = failed after its own
             // retries). It was AWAITED but the result IGNORED — so a segment that
@@ -4309,8 +4243,6 @@ Every item must include a non-empty content field and one or more valid support_
           } else {
             _vectorRows.push({
               orgId: segment.orgId,
-              segment,
-              segOrgId,
               point: {
                 id: segment.id, vector: embedding,
                 payload: {
@@ -4321,6 +4253,7 @@ Every item must include a non-empty content field and one or more valid support_
                 },
               },
             });
+            _embeddedIds.push(segment.id);
           }
         } catch (error) {
           _failed += 1;
@@ -4336,10 +4269,9 @@ Every item must include a non-empty content field and one or more valid support_
       for (const row of _vectorRows) {
         const collectionName = PER_TENANT ? await resolveCollectionForOrg(row.orgId) : legacyEvidence;
         if (!byCollection.has(collectionName)) byCollection.set(collectionName, []);
-        byCollection.get(collectionName).push(row);
+        byCollection.get(collectionName).push(row.point);
       }
-      for (const [collectionName, rows] of byCollection) {
-        const points = rows.map((row) => row.point);
+      for (const [collectionName, points] of byCollection) {
         try {
           if (typeof this.embeddingService.storeVectors === 'function') {
             await this.embeddingService.storeVectors({ collectionName, points });
@@ -4349,22 +4281,17 @@ Every item must include a non-empty content field and one or more valid support_
               collectionName, id: point.id, vector: point.vector, payload: point.payload,
             })));
           }
-          _embeddedIds.push(...rows.map((row) => row.segment.id));
         } catch (error) {
           console.error(`[DocumentFirstIngestion] batched vector upsert failed (${collectionName}): ${error.message}`);
-          _failed += rows.length;
-          _failedSegs.push(...rows.map((row) => ({ segment: row.segment, segOrgId: row.segOrgId })));
         }
       }
       // ONE update instead of 45.
-      if (_embeddedIds.length) {
-        try {
-          await this.db.knowledgeSegment.updateMany({
-            where: { id: { in: _embeddedIds } }, data: { vectorStored: true },
-          });
-        } catch (error) {
-          console.error(`[DocumentFirstIngestion] vectorStored updateMany failed: ${error.message}`);
-        }
+      try {
+        await this.db.knowledgeSegment.updateMany({
+          where: { id: { in: _embeddedIds } }, data: { vectorStored: true },
+        });
+      } catch (error) {
+        console.error(`[DocumentFirstIngestion] vectorStored updateMany failed: ${error.message}`);
       }
     }
     // ── P1b INGEST-TIME HEAL ──────────────────────────────────────────────────
@@ -4377,9 +4304,7 @@ Every item must include a non-empty content field and one or more valid support_
       const _healRows = [];
       for (const { segment, segOrgId } of _failedSegs) {
         try {
-          // Heal path must embed the SAME text as the primary path, or a healed segment
-          // would sit in a different vector space from its neighbours.
-          const emb = await this.embeddingService.embed(contextualEmbedInputForSegment(segment));
+          const emb = await this.embeddingService.embed(segment.content);
           if (orgIsRemote(segOrgId)) {
             const ok = await amrKbSegment(segOrgId, _remotePayload(segment), Array.isArray(emb) ? emb : []);
             if (ok) _healed += 1;

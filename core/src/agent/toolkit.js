@@ -25,11 +25,8 @@ const BASIC_GROUP = 'basic';
 const TRUSTED_INTERNAL_ARGUMENTS = new Set([
   '_explicit_mode',
   '_structured_intent',
-  '_include_full_memory_content',
   '_source_id',
   '_original_content',
-  'semantic_recovery',
-  'allow_semantic_source_recovery',
 ]);
 
 export class Toolkit {

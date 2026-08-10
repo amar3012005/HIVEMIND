@@ -57,19 +57,6 @@ test('v3 first start promotes only the recommendation', async () => {
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED', 'PROPOSED']);
 });
 
-test('v5 internal bootstrap starts only the evidence-only recommendation', async () => {
-  const rows = [
-    todo('strategy', 'PROPOSED', 1, 'internal', true),
-    todo('external-1', 'PROPOSED', 2, 'external'),
-  ];
-  rows.forEach((row) => { row.context.first_life_policy_version = 5; });
-  const result = await activateEligibleFirstLifeWork({
-    prisma: prismaFor(rows), runtime, expansionTrigger: 'internal_bootstrap',
-  });
-  assert.deepEqual(result.promoted.map((item) => item.id), ['strategy']);
-  assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED']);
-});
-
 test('v2 first start retains the historical companion-work policy', async () => {
   const rows = [
     todo('external-1', 'PROPOSED', 1, 'external', true),
@@ -201,22 +188,4 @@ test('first-life projection exposes evidence and requested outcomes without disp
   assert.deepEqual(result.items[0].evidence_refs, ['baseline-1', 'signal-2']);
   assert.equal(result.items[0].requested_outcome, 'verified_outcome');
   assert.equal(result.items[0].execution, null);
-});
-
-test('first-life projection does not call an incompatible terminal outcome completed', async () => {
-  const rows = [todo('proposal-1', 'BLOCKED', 1, 'external', true)];
-  const prisma = {
-    hqTodo: { findMany: async () => rows },
-    hqRuntime: { findUnique: async () => ({ id: 'runtime-1', epoch: 'epoch-1', authorityPolicy: {} }) },
-    runtimePlaybookRun: { findMany: async () => [{
-      id: 'run-1', status: 'COMPLETED', terminalState: 'campaign_needs_input',
-      trigger: { todo_id: 'proposal-1' }, context: {
-        playbook_selection: { acceptable_terminal_states: ['reviewed'] },
-      }, artifacts: [], checkpoints: [], authorities: [], completedStageIds: [], stageAttempts: {},
-    }] },
-  };
-
-  const result = await projectCurrentFirstLife({ prisma, orgId: 'org-1' });
-  assert.equal(result.items[0].status, 'NEEDS_ATTENTION');
-  assert.equal(result.completed_count, 0);
 });

@@ -93,7 +93,6 @@ const DEFAULT_DOCUMENT_THRESHOLD = 1200;
  * @property {string} [projectId]
  * @property {string} [primaryTeamId]
  * @property {('document'|'atomic'|'evidence')} [mode]  override; auto-detected when omitted. 'evidence' = one recall-excluded, non-distilled memory (transcripts/raw evidence)
- * @property {('both'|'evidence')} [ingestMode] document materialization policy; independent from legacy mode
  * @property {string[]} [tags]
  * @property {Object} [metadata]
  * @property {number} [documentThreshold]   override DEFAULT_DOCUMENT_THRESHOLD
@@ -129,9 +128,6 @@ export function validateEnvelope(env) {
   }
   if (env.mode && env.mode !== 'document' && env.mode !== 'atomic' && env.mode !== 'evidence') {
     return { ok: false, error: 'mode must be document|atomic|evidence' };
-  }
-  if (env.ingestMode && env.ingestMode !== 'both' && env.ingestMode !== 'evidence') {
-    return { ok: false, error: 'ingestMode must be both|evidence' };
   }
   const memoryType = env.metadata?.memory_type || env.metadata?.memoryType;
   if (memoryType && !CANONICAL_MEMORY_TYPES.includes(memoryType)) {

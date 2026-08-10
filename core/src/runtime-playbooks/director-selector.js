@@ -80,9 +80,9 @@ export class DirectorPlaybookSelector {
   }
 
   async select({ objective, context = {}, scopeKey = 'global' } = {}) {
-    // The upstream Director has already selected the accountable Room from the
-    // complete company catalog. Keep lifecycle selection inside that ownership
-    // boundary so a missing playbook cannot silently substitute another Room.
+    // The planner's requested owner is advisory context, not a routing key. The
+    // Director must see every active lifecycle and choose by semantic contract;
+    // the selected playbook's metadata owns the eventual Room assignment.
     const active = this.registry.descriptors({ scopeKey }).filter((entry) => entry.status === 'ACTIVE');
     // New assignments always use the newest active version. Existing runs remain
     // pinned to their immutable version through RuntimePlaybookRun.
@@ -91,17 +91,6 @@ export class DirectorPlaybookSelector {
       return latest;
     }, new Map()).values()];
     const requested = asObject(asObject(context).request);
-    const requestedOwner = String(requested.owner_room_tag || '').trim().toLowerCase();
-    if (requestedOwner) {
-      catalog = catalog.filter((entry) => String(entry.metadata?.owner_room_tag || '').trim().toLowerCase() === requestedOwner);
-      if (catalog.length === 0) {
-        return {
-          playbook_id: null,
-          version: null,
-          reason: `no_active_playbook_for_selected_room:${requestedOwner}`,
-        };
-      }
-    }
     if (requested.playbook_id) {
       catalog = catalog.filter((entry) => entry.playbook_id === requested.playbook_id
         && (requested.playbook_version == null || entry.version === Number(requested.playbook_version)));
@@ -119,7 +108,7 @@ export class DirectorPlaybookSelector {
           messages: [
             {
               role: 'system',
-              content: 'Select one executable playbook from the supplied registry only when its complete lifecycle and metadata directly implement the exact requested action and terminal outcome. The objective may be written in any language. Prioritize request.requested_action and request.acceptance_criteria over a merely related business outcome. A lifecycle that can facilitate an upstream or downstream result is not compatible unless its supported_actions directly include the requested provider effect. The upstream Director has already selected the accountable Room, so every supplied playbook is inside that ownership boundary. Never infer an identifier that is absent from the registry. Return matched_supported_action as one exact value from the selected playbook metadata.supported_actions. Return acceptable_terminal_states as a non-empty subset of the selected playbook terminal_states that genuinely satisfy the original request; a prepared state cannot satisfy a requested external delivery. Bind only declared input_contract fields from the objective and supplied context, keyed by exact field path. If none fits, return {"playbook_id":null,"version":null,"reason":"brief reason"}. Otherwise return {"playbook_id":"exact registry id","version":integer,"matched_supported_action":"exact supported action","reason":"brief evidence-based reason","acceptable_terminal_states":["exact terminal"],"bindings":{"declared.path":value}}. Return one complete JSON object only.',
+              content: 'Select one executable playbook from the supplied registry only when its complete lifecycle and metadata directly implement the exact requested action and terminal outcome. The objective may be written in any language. Prioritize request.requested_action and request.acceptance_criteria over a merely related business outcome. A lifecycle that can facilitate an upstream or downstream result is not compatible unless its supported_actions directly include the requested provider effect. The suggested Room owner is advisory; the selected playbook metadata owns execution. Never infer an identifier that is absent from the registry. Return matched_supported_action as one exact value from the selected playbook metadata.supported_actions. Return acceptable_terminal_states as a non-empty subset of the selected playbook terminal_states that genuinely satisfy the original request; a prepared state cannot satisfy a requested external delivery. Bind only declared input_contract fields from the objective and supplied context, keyed by exact field path. If none fits, return {"playbook_id":null,"version":null,"reason":"brief reason"}. Otherwise return {"playbook_id":"exact registry id","version":integer,"matched_supported_action":"exact supported action","reason":"brief evidence-based reason","acceptable_terminal_states":["exact terminal"],"bindings":{"declared.path":value}}. Return one complete JSON object only.',
             },
             { role: 'user', content: JSON.stringify({
               objective: String(objective || '').slice(0, 8000), context, playbooks: catalog,

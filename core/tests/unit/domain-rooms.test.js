@@ -43,13 +43,9 @@ test('domain room provisioning is idempotent and marks system homes', async () =
 
   assert.equal(rooms.length, 11);
   assert.equal(creates.length, 9);
-  assert.deepEqual(updates, [
-    { where: { id: 'existing-general' }, data: { name: 'Acme HQ', roomMode: 'runtime' } },
-    { where: { id: 'existing-research' }, data: { roomMode: 'runtime' } },
-  ]);
+  assert.deepEqual(updates, [{ where: { id: 'existing-general' }, data: { name: 'Acme HQ' } }]);
   assert.equal(rooms.find((room) => room.room_tag === 'research').created, false);
   assert.ok(creates.every((data) => data.agentConnectors._domain_home === true));
-  assert.ok(creates.every((data) => data.roomMode === 'runtime'));
   assert.ok(creates.every((data) => data.participantIds.join(',') === 'b,a'));
   assert.match(creates[0].goal, /Acme/);
 });
@@ -72,6 +68,4 @@ test('control plane exposes tenant-scoped domain backfill and permanent-room pro
   assert.match(source, /current\.session\.orgId/);
   assert.match(source, /DOMAIN_HOME_ROOM/);
   assert.match(source, /is_domain_home/);
-  assert.match(source, /Company Intelligence Room history is retained as durable company context/);
-  assert.match(source, /data: \{ roomJournal: \[\] \}/);
 });

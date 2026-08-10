@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from hivemind_employees.hyper.engine import Director, _work_order_activity
+from hivemind_employees.hyper.engine import Director
 from hivemind_employees.hyper.domains.seo.reporting import render_remediation_report
 
 
@@ -579,8 +579,8 @@ def test_work_orders_execute_as_independent_agent_results(monkeypatch):
         assert kwargs["max_tokens"] == 220
         return {"content": (
             "Recommendation: lead with the compliance workflow. Evidence: company context.\n\n"
-            "This deliberately long second paragraph must remain visible in the worker chat bubble so the "
-            "user can inspect the complete bounded contribution."
+            "This deliberately long second paragraph must stay on the evidence board and out of the visible "
+            "worker chat bubble so the Room remains readable for the user."
         )}
 
     monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", create)
@@ -600,139 +600,8 @@ def test_work_orders_execute_as_independent_agent_results(monkeypatch):
     assert any(event.get("t") == "work_order" and event.get("status") == "completed" for event in events)
     worker_react = next(event for event in events if event.get("t") == "react")
     assert worker_react["content"].startswith("Completed Choose positioning:")
-    assert "deliberately long second paragraph" in worker_react["content"]
-    assert "complete bounded contribution" in worker_react["content"]
-
-
-def test_work_room_turn_plan_runs_dependencies_before_dependent_steps(monkeypatch):
-    director, _events = _director(message="Assess our product direction")
-    director.room_mode = "work"
-    director.is_work_room = True
-    director.blackboard = ["COMPANY: Acme provides compliance software."]
-    calls = []
-
-    async def create(**kwargs):
-        calls.append(("create", kwargs["plan_step_id"], kwargs["depends_on"]))
-        return None
-
-    async def start(*_args, **_kwargs):
-        return False
-
-    async def complete(**_kwargs):
-        return False
-
-    async def worker_call(messages, **_kwargs):
-        calls.append(("worker", messages[-1]["content"]))
-        return {"content": "Recommendation: validate the compliance wedge. Evidence: company context."}
-
-    monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", create)
-    monkeypatch.setattr("hivemind_employees.hyper.engine.start_hyper_work_order", start)
-    monkeypatch.setattr("hivemind_employees.hyper.engine.complete_hyper_work_order", complete)
-    monkeypatch.setattr(director, "_groq", worker_call)
-
-    results = asyncio.run(director._run_work_orders({"turn_plan": [
-        {"id": "evidence", "depends_on": [], "kind": "research", "owner_lane": "Researcher",
-         "title": "Inspect evidence", "objective": "Identify the strongest customer signal.",
-         "required_evidence": ["company"], "acceptance_criteria": ["One grounded signal"]},
-        {"id": "decision", "depends_on": ["evidence"], "kind": "decision", "owner_lane": "Strategist",
-         "title": "Choose validation", "objective": "Recommend the next product validation.",
-         "required_evidence": ["signal"], "acceptance_criteria": ["One explicit decision"]},
-    ]}))
-
-    assert [result["step_id"] for result in results] == ["evidence", "decision"]
-    assert [(entry[0], entry[1], entry[2]) for entry in calls if entry[0] == "create"] == [
-        ("create", "evidence", []), ("create", "decision", ["evidence"]),
-    ]
-    worker_inputs = [entry[1] for entry in calls if entry[0] == "worker"]
-    assert "COMPLETED PREREQUISITES" not in worker_inputs[0]
-    assert "COMPLETED PREREQUISITES" in worker_inputs[1]
-
-
-def test_work_room_waits_without_starting_worker_and_preserves_handoff(monkeypatch):
-    director, events = _director(message="Prepare the decision and wait for confirmation")
-    director.room_mode = "work"
-    director.is_work_room = True
-    calls = []
-
-    async def create(**kwargs):
-        calls.append(("create", kwargs["wait_for"], kwargs["handoff"]))
-        return {"id": "11111111-1111-1111-1111-111111111111", "status": "queued", "attempt": 0}
-
-    async def pause(**kwargs):
-        calls.append(("pause", kwargs["status"], kwargs["wait_for"], kwargs["handoff"]))
-        return True
-
-    async def should_not_run(*_args, **_kwargs):
-        raise AssertionError("a waiting work step must not invoke a worker")
-
-    monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", create)
-    monkeypatch.setattr("hivemind_employees.hyper.engine.pause_hyper_work_order", pause)
-    monkeypatch.setattr(director, "_groq", should_not_run)
-
-    results = asyncio.run(director._run_work_orders({"turn_plan": [{
-        "id": "propose", "depends_on": [], "kind": "decision", "owner_lane": "Strategist",
-        "title": "Propose next move", "objective": "Prepare the evidence-backed recommendation.",
-        "required_evidence": ["company"], "acceptance_criteria": ["Clear recommendation"],
-        "wait": {"kind": "approval", "reason": "A decision is required before work continues.",
-                 "prompt": "Confirm the recommendation.", "resume_key": "recommendation-confirmed"},
-        "handoff": {"owner": "runtime", "objective": "Consider the approved recommendation.",
-                    "rationale": "The proposal affects the operating queue."},
-    }]}))
-
-    assert results[0]["status"] == "waiting_for_approval"
-    assert results[0]["handoff"]["owner"] == "runtime"
-    assert calls[0][0] == "create"
-    assert calls[1][0:2] == ("pause", "waiting_for_approval")
-    assert any(event.get("t") == "work_order" and event.get("status") == "waiting_for_approval" for event in events)
-
-
-def test_work_room_resume_executes_existing_work_order_once(monkeypatch):
-    director, events = _director(message="Continue the paused work step")
-    director.room_mode = "work"
-    director.is_work_room = True
-    director.company_brief = "Acme provides compliance software."
-    director.work_room_resume = {
-        "contract": "work-room-resume.v1",
-        "work_order_id": "11111111-1111-1111-1111-111111111111",
-        "resume_key": "answer-received",
-        "resolution": {"answer": "Target regulated operators first."},
-        "step": {
-            "id": "recommend", "depends_on": ["evidence"], "kind": "decision", "owner_lane": "Strategist",
-            "title": "Choose next move", "objective": "Select the evidence-backed next move.",
-            "required_evidence": ["company"], "acceptance_criteria": ["One explicit choice"],
-        },
-    }
-    calls = []
-
-    async def start(work_order_id, _org_id):
-        calls.append(("start", work_order_id))
-        return True
-
-    async def complete(**kwargs):
-        calls.append(("complete", kwargs["work_order_id"], kwargs["status"]))
-        return True
-
-    async def worker_call(*_args, **_kwargs):
-        return {"content": "Recommendation: validate the regulated-operator segment first."}
-
-    async def should_not_create(**_kwargs):
-        raise AssertionError("a resumed step must retain its original work-order identity")
-
-    monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", should_not_create)
-    monkeypatch.setattr("hivemind_employees.hyper.engine.start_hyper_work_order", start)
-    monkeypatch.setattr("hivemind_employees.hyper.engine.complete_hyper_work_order", complete)
-    monkeypatch.setattr(director, "_groq", worker_call)
-
-    result = asyncio.run(director._run_resumed_work_step(0.0))
-
-    assert result["work_results"][0]["id"] == "11111111-1111-1111-1111-111111111111"
-    assert result["work_results"][0]["status"] == "completed"
-    assert result["work_results"][0]["depends_on"] == []
-    assert calls == [
-        ("start", "11111111-1111-1111-1111-111111111111"),
-        ("complete", "11111111-1111-1111-1111-111111111111", "completed"),
-    ]
-    assert any(event.get("resumed") is True for event in events)
+    assert len(worker_react["content"]) <= 180
+    assert "second paragraph" not in worker_react["content"]
 
 
 def test_post_output_action_uses_global_connected_toolkit(monkeypatch):
@@ -785,99 +654,6 @@ def test_director_rejects_non_explicit_connector_action(monkeypatch):
     plan = asyncio.run(director._plan_gather())
 
     assert plan["post_output_actions"] == []
-
-
-def test_director_rejects_document_write_without_explicit_destination(monkeypatch):
-    director, _events = _director(
-        message="Build Regulated Enterprise Audience Persona",
-        enabled_connectors=["gmail"],
-    )
-    payload = {
-        "recall_queries": ["regulated enterprise audience"],
-        "connector_calls": [], "web_query": None,
-        "seo_audit_url": None, "seo_audit_scope": "none", "seo_task": "none",
-        "places_query": None, "needs_debate": True, "method_skills": [],
-        "campaign_method_assignments": [], "turn_mode": "task",
-        "collaboration_intensity": "standard", "response_depth": "focused",
-        "evidence_mode": "standard",
-        "post_output_actions": [{
-            "capability": "google_docs.create_document", "explicit": True,
-            "target_hint": "Audience Persona",
-        }],
-        "campaign_request": None,
-    }
-
-    async def plan_call(*_args, **_kwargs):
-        return {"content": json.dumps(payload)}
-
-    monkeypatch.setattr(director, "_groq", plan_call)
-    plan = asyncio.run(director._plan_gather())
-
-    assert plan["post_output_actions"] == []
-
-
-def test_director_preserves_explicit_google_docs_destination(monkeypatch):
-    director, _events = _director(
-        message="Create this audience persona in Google Docs",
-        enabled_connectors=["google-docs"],
-    )
-    payload = {
-        "recall_queries": [], "connector_calls": [], "web_query": None,
-        "seo_audit_url": None, "seo_audit_scope": "none", "seo_task": "none",
-        "places_query": None, "needs_debate": False, "method_skills": [],
-        "campaign_method_assignments": [], "turn_mode": "task",
-        "collaboration_intensity": "light", "response_depth": "direct",
-        "evidence_mode": "standard",
-        "post_output_actions": [{
-            "capability": "google_docs.create_document", "explicit": True,
-            "target_hint": "Google Docs",
-        }],
-        "campaign_request": None,
-    }
-
-    async def plan_call(*_args, **_kwargs):
-        return {"content": json.dumps(payload)}
-
-    monkeypatch.setattr(director, "_groq", plan_call)
-    plan = asyncio.run(director._plan_gather())
-
-    assert plan["post_output_actions"] == [{
-        "capability": "google_docs.create_document",
-        "connector": "google-docs",
-        "operation": "create_document",
-        "artifact_kind": "doc",
-        "target_hint": "Google Docs",
-        "explicit": True,
-        "connected": True,
-    }]
-
-
-def test_gmail_connection_exposes_only_its_available_read_tools(monkeypatch):
-    director, _events = _director(
-        message="Summarize the latest reply",
-        enabled_connectors=["gmail"],
-    )
-
-    asyncio.run(director._init_connector_tools())
-
-    assert set(director._connector_routes) == {
-        "gmail_search", "gmail_get", "gmail_get_thread",
-    }
-    assert "drive_search" not in director._connector_routes
-    assert "docs_get" not in director._connector_routes
-
-
-def test_worker_discussion_keeps_the_complete_bounded_note():
-    note = (
-        "Recommendation: prioritize compliance-led messaging. "
-        "Evidence: the retained ICP names regulated CIOs and procurement leaders. "
-        "Unresolved gap: LinkedIn role-level audience data was not observed."
-    )
-
-    activity = _work_order_activity("Develop the audience persona", note)
-
-    assert activity == "Completed Develop the audience persona: " + note
-    assert "..." not in activity
 
 
 def test_runtime_emits_resumable_connection_event_but_keeps_final_output(monkeypatch):

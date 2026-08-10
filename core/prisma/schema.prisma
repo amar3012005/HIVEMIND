@@ -128,7 +128,6 @@ model Organization {
   seoSearchConsoleSnapshots    SeoSearchConsoleSnapshot[] @relation("OrgSeoSearchConsoleSnapshots")
   zernioExecutionProfile       ZernioOrgProfile? @relation("OrgZernioExecutionProfile")
   zernioWebhookEvents          ZernioWebhookEvent[]
-  enterpriseInvitation         EnterpriseInvitation? @relation("RedeemedEnterpriseInvitation")
 
   @@map("organizations")
 }
@@ -1701,7 +1700,6 @@ model KnowledgeDocument {
   // which ingestion pipeline produced this row — makes selective re-ingestion possible.
   // NOT processing_version, which is a retry counter on the job.
   pipelineVersion    Int                  @default(1) @map("pipeline_version")
-  ingestMode         String               @default("both") @map("ingest_mode") @db.VarChar(16)
   userId             String               @map("user_id") @db.Uuid
   orgId              String               @map("org_id") @db.Uuid
   sourceArtifactId   String?              @map("source_artifact_id") @db.Uuid
@@ -1754,7 +1752,6 @@ model KnowledgeDocument {
   @@index([parentDocumentId])
   @@index([documentDate(sort: Desc)])
   @@index([parseStatus])
-  @@index([orgId, ingestMode])
   @@index([tags], type: Gin)
   @@index([createdAt(sort: Desc)])
   // V5: idempotent source-version lookup. Unique per org so a re-ingest of the
@@ -1866,8 +1863,6 @@ model KnowledgeIngestJob {
   filename          String    @db.VarChar(500)
   contentType       String?   @map("content_type") @db.VarChar(160)
   mediaKind         String    @map("media_kind") @db.VarChar(24)
-  ingestMode        String    @default("both") @map("ingest_mode") @db.VarChar(16)
-  evidenceOnlyReason String?  @map("evidence_only_reason") @db.VarChar(32)
   checksum          String    @db.VarChar(64)
   status            String    @default("queued") @db.VarChar(32)
   stage             String    @default("accepted") @db.VarChar(48)
@@ -1892,7 +1887,6 @@ model KnowledgeIngestJob {
   @@index([orgId, userId, createdAt(sort: Desc)])
   @@index([orgId, status, updatedAt])
   @@index([orgId, scopeKey, checksum])
-  @@index([orgId, ingestMode, status])
   @@index([queueJobId])
   @@map("knowledge_ingest_jobs")
 }
@@ -2793,77 +2787,6 @@ model PromotionRedemption {
   @@map("promotion_redemptions")
 }
 
-/// Platform-issued B2B onboarding invitation. The access code and activation
-/// link are represented only by keyed digests; the workspace does not exist
-/// until the invited owner redeems it successfully.
-model EnterpriseInvitation {
-  id                   String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  companyName          String        @map("company_name") @db.VarChar(255)
-  workspaceName        String?       @map("workspace_name") @db.VarChar(255)
-  recipientEmail       String        @map("recipient_email") @db.VarChar(255)
-  recipientEmailHash   String        @map("recipient_email_hash") @db.Char(64)
-  recipientEmailHint   String        @map("recipient_email_hint") @db.VarChar(160)
-  accountType          String        @map("account_type") @db.VarChar(32)
-  hostingMode          String        @map("hosting_mode") @db.VarChar(24)
-  storageMode          String        @map("storage_mode") @db.VarChar(32)
-  onboardingDays       Int           @default(14) @map("onboarding_days")
-  onboardingLimits     Json          @default("{}") @map("onboarding_limits")
-  configSnapshot       Json          @default("{}") @map("config_snapshot")
-  welcomeMessage       String?       @map("welcome_message") @db.Text
-  privateNotes         String?       @map("private_notes") @db.Text
-  status               String        @default("draft") @db.VarChar(24)
-  deliveryStatus       String        @default("not_sent") @map("delivery_status") @db.VarChar(24)
-  lastDeliveryError    String?       @map("last_delivery_error") @db.VarChar(240)
-  accessCodeHash       String        @unique @map("access_code_hash") @db.Char(64)
-  accessCodeHint       String        @map("access_code_hint") @db.VarChar(16)
-  accessCodeVersion    Int           @default(1) @map("access_code_version")
-  linkTokenHash        String        @unique @map("link_token_hash") @db.Char(64)
-  linkVersion          Int           @default(1) @map("link_version")
-  invitationExpiresAt  DateTime      @map("invitation_expires_at") @db.Timestamptz(6)
-  sentAt               DateTime?     @map("sent_at") @db.Timestamptz(6)
-  lastSentAt           DateTime?     @map("last_sent_at") @db.Timestamptz(6)
-  redeemedAt           DateTime?     @map("redeemed_at") @db.Timestamptz(6)
-  redeemedByUserId     String?       @map("redeemed_by_user_id") @db.Uuid
-  orgId                String?       @unique @map("org_id") @db.Uuid
-  revokedAt            DateTime?     @map("revoked_at") @db.Timestamptz(6)
-  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  organization         Organization? @relation("RedeemedEnterpriseInvitation", fields: [orgId], references: [id], onDelete: Restrict)
-
-  @@index([recipientEmailHash, status])
-  @@index([status, invitationExpiresAt])
-  @@map("enterprise_invitations")
-}
-
-/// Pre-organization access request captured from Singulance public surfaces.
-/// It contains no tenant data and becomes tenant-linked only after an approved
-/// invitation is redeemed.
-model AccessApplication {
-  id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email                  String   @db.VarChar(255)
-  emailHash              String   @map("email_hash") @db.Char(64)
-  name                   String   @db.VarChar(160)
-  accountType            String   @map("account_type") @db.VarChar(24)
-  companyName            String?  @map("company_name") @db.VarChar(255)
-  useCase                String?  @map("use_case") @db.VarChar(120)
-  niche                  String?  @db.VarChar(120)
-  message                String?  @db.Text
-  source                 String   @default("singulancelabs.com") @db.VarChar(160)
-  status                 String   @default("pending") @db.VarChar(24)
-  reviewNote             String?  @map("review_note") @db.Text
-  reviewedBy             String?  @map("reviewed_by") @db.VarChar(160)
-  reviewedAt             DateTime? @map("reviewed_at") @db.Timestamptz(6)
-  invitationType         String?  @map("invitation_type") @db.VarChar(24)
-  enterpriseInvitationId String?  @map("enterprise_invitation_id") @db.Uuid
-  invitationSentAt       DateTime? @map("invitation_sent_at") @db.Timestamptz(6)
-  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt              DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-
-  @@unique([emailHash, accountType])
-  @@index([accountType, status, createdAt])
-  @@map("access_applications")
-}
-
 /// Provider-neutral checkout intent. The browser can request an offer but only
 /// a provider confirmation transitions it to paid and creates entitlements.
 model BillingCheckout {
@@ -3057,9 +2980,6 @@ model HyperRoom {
   /// Dedicated expertise pack (general plus versioned SEO, marketing, brand, capital, product, design, legal, and research packs).
   /// Orthogonal to template: a SEO room may still collaborate via debate/swarm/etc.
   roomTag            String       @default("general") @map("room_tag") @db.VarChar(40)
-  /// Ownership boundary. Work rooms are human-facing, Director-led workspaces;
-  /// runtime rooms are bounded specialist operators invoked by an HQ playbook.
-  roomMode           String       @default("work") @map("room_mode") @db.VarChar(16)
   permanentLeadId    String?      @map("permanent_lead_id") @db.Uuid
   permanentSkepticId String?      @map("permanent_skeptic_id") @db.Uuid
   /// Per-character connector grants (legacy P2, superseded by enabledConnectors).
@@ -3092,7 +3012,6 @@ model HyperRoom {
   @@index([userId, orgId])
   @@index([archivedAt])
   @@index([projectId])
-  @@index([orgId, roomMode])
   @@map("hyper_rooms")
 }
 
@@ -3109,10 +3028,8 @@ model HyperWorkOrder {
   runtimeEpoch        String?  @map("runtime_epoch") @db.Uuid
   growthDelegationId  String?  @map("growth_delegation_id") @db.Uuid
   orderKey            String   @map("order_key") @db.VarChar(80)
-  planStepId          String?  @map("plan_step_id") @db.VarChar(80)
-  dependsOn           Json     @default("[]") @map("depends_on") @db.JsonB
   kind                String   @db.VarChar(40)
-  status              String   @default("queued") @db.VarChar(40)
+  status              String   @default("queued") @db.VarChar(20)
   title               String   @db.VarChar(180)
   objective           String   @db.Text
   ownerEmployeeId     String?  @map("owner_employee_id") @db.Uuid
@@ -3122,8 +3039,6 @@ model HyperWorkOrder {
   requiredEvidence    Json     @default("[]") @map("required_evidence") @db.JsonB
   acceptanceCriteria  Json     @default("[]") @map("acceptance_criteria") @db.JsonB
   inputSnapshot       Json     @default("{}") @map("input_snapshot") @db.JsonB
-  waitFor             Json     @default("{}") @map("wait_for") @db.JsonB
-  handoff             Json     @default("{}") @db.JsonB
   artifactRefs        Json     @default("[]") @map("artifact_refs") @db.JsonB
   evidenceRefs        Json     @default("[]") @map("evidence_refs") @db.JsonB
   attempt             Int      @default(0)
@@ -3140,7 +3055,6 @@ model HyperWorkOrder {
   @@unique([hqCycleId, orderKey])
   @@index([orgId, roomId, status])
   @@index([turnId])
-  @@index([turnId, planStepId])
   @@index([hqCycleId, status])
   @@index([orgId, runtimeEpoch, status])
   @@index([status, leaseExpiresAt], map: "hyper_work_orders_status_lease_idx")

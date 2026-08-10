@@ -8,7 +8,7 @@ import {
   transitionHqRuntime,
 } from './repository.js';
 import { reconcileTodoCapabilities } from './instruction-loop.js';
-import { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot, terminalOutcomeSatisfied } from '../runtime-playbooks/snapshot.js';
+import { loadRuntimePlaybookSnapshot, projectRuntimePlaybookSnapshot } from '../runtime-playbooks/snapshot.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 import { projectCurrentActivationSprint } from './activation-sprint.js';
 import { activateEligibleFirstLifeWork } from './first-life-control.js';
@@ -169,7 +169,6 @@ export function playbookQueueStatus(run) {
     return waitingTypes.includes('capability.connected') ? 'WAITING_FOR_CONNECTOR' : 'MONITORING';
   }
   if (status === 'WAITING_AUTHORITY') return 'WAITING_FOR_AUTHORITY';
-  if (status === 'COMPLETED' && !terminalOutcomeSatisfied(run)) return 'NEEDS_ATTENTION';
   if (status === 'NEEDS_INTERVENTION' || status === 'TERMINATED') return 'NEEDS_ATTENTION';
   return queueStatus(status);
 }
@@ -342,7 +341,7 @@ export function projectFirstLifeExperience({ runtime, firstLife, growthBrief, ta
   };
 }
 
-export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse, wakeScheduler = null, runtimePlaybooks = null, logger = console }) {
+export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePrivilegedAgentAccess, parseBody, jsonResponse, wakeScheduler = null, emailLifecycle = null, runtimePlaybooks = null, logger = console }) {
   return async function handleHqRuntimeRoute(req, res, url) {
     const pathname = url.pathname;
     if (!pathname.startsWith('/v1/hq/')) return false;
@@ -539,6 +538,18 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
       if (pathname === '/v1/hq/restart' && req.method === 'POST') {
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
+        const lifecycle = typeof emailLifecycle === 'function' ? emailLifecycle() : emailLifecycle;
+        if (lifecycle?.deleteCheckpoints) {
+          const workflows = await prisma.hqWorkflow.findMany({
+            where: { runtimeId: runtime.id, orgId },
+            select: { id: true, context: true },
+          });
+          for (const workflow of workflows) {
+            if (workflow.context?.email_lifecycle?.execution_id) {
+              await lifecycle.deleteCheckpoints({ organizationId: orgId, executionId: workflow.id });
+            }
+          }
+        }
         await prisma.runtimePlaybookRun?.deleteMany?.({ where: { orgId } }).catch?.(() => {});
         const reset = await resetHqForCompanyReplacement({ prisma, orgId });
         return jsonResponse(res, {

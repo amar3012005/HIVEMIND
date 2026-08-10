@@ -772,12 +772,7 @@ const routes = {
     const documentIds = Array.isArray(f.documentIds) ? [...new Set(f.documentIds.filter(Boolean))] : [];
     if (f.documentId) { args.push(f.documentId); conds.push(`s.document_id=$${args.length}::uuid`); }
     else if (documentIds.length) { args.push(documentIds); conds.push(`s.document_id = ANY($${args.length}::uuid[])`); }
-    // Prefer the EXPLICIT top-level `access` (the contract remoteKbRecall already used);
-    // fall back to filter.access for callers/deployments still on the old shape. A missing
-    // access silently fails the whole query closed (appendDocumentAccess: no userId -> FALSE),
-    // so accepting only one shape here is how a caller matching the OTHER route's convention
-    // gets an empty result set with no error -- exactly what happened investigating this.
-    appendDocumentAccess(conds, args, 'd', (b.access || f.access));
+    appendDocumentAccess(conds, args, 'd', f.access);
     args.push(Number(b.limit) || 20);
     const { rows } = await pg.query(
       `SELECT s.id AS segment_id, s.document_id, s.content,

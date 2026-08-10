@@ -123,36 +123,6 @@ function verifyCapability(token, secret) {
 function eventId() { return crypto.randomUUID(); }
 function plainObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function boundedString(value, max) { return typeof value === 'string' ? value.trim().slice(0, max) : null; }
-
-export function runtimeAdminEvidenceBriefing(context = {}) {
-  const company = plainObject(context.company) ? context.company : {};
-  const baseline = plainObject(context.baseline) ? context.baseline : {};
-  const request = plainObject(context.request) ? context.request : {};
-  const evidence = {
-    company: {
-      name: boundedString(company.name, 160),
-      mission: boundedString(company.mission, 800),
-      website: boundedString(company.website, 500),
-      location: boundedString(company.location, 300),
-      profile: plainObject(company.profile) ? company.profile : null,
-    },
-    baseline: {
-      id: boundedString(baseline.id, 160),
-      as_of: baseline.as_of || baseline.created_at || null,
-      website_pages: baseline.website_pages ?? null,
-      social_accounts: baseline.social_accounts ?? null,
-      recent_posts: baseline.recent_posts ?? null,
-      data_gaps: Array.isArray(baseline.data_gaps) ? baseline.data_gaps.slice(0, 20) : [],
-    },
-    operating_requirement: boundedString(request.instruction || request.objective, 1200),
-  };
-  return boundedString([
-    'Persisted Runtime evidence collected before this check-in follows.',
-    'Treat observed values as provisional company evidence, limitations as unknowns, and the administrator\'s words as corrections or current context. Do not invent missing values.',
-    JSON.stringify(evidence),
-    'Use this evidence to ask the smallest useful follow-up questions about current status, priorities, blockers, customers, offer, and go-to-market. Do not form or announce the Growth Plan during this call.',
-  ].join('\n'), 8_000) || '';
-}
 function validatedGrokConfig(base, patch = {}) {
   if (!plainObject(patch)) throw Object.assign(new Error('invalid_grok_config'), { statusCode: 400 });
   for (const key of Object.keys(patch)) {
@@ -231,25 +201,6 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
       const configuredPrompt = interactionProfile === 'runtime_operator'
         ? RUNTIME_OPERATOR_PROMPT
         : mode === 'internal' ? taraConfig?.internal_prompt : [taraConfig?.system_prompt, taraConfig?.clinical_prompt].filter(Boolean).join('\n\n');
-      let runtimeContextRef = null;
-      let runtimeEvidenceContext = '';
-      if (interactionProfile === 'runtime_operator') {
-        runtimeContextRef = boundedString(body.runtime_context_ref, 64);
-        if (runtimeContextRef) {
-          const contextRun = await prisma.runtimePlaybookRun.findFirst({
-            where: {
-              id: runtimeContextRef,
-              orgId,
-              playbookId: 'operations.browser-admin-checkin-to-status',
-            },
-            select: { context: true, trigger: true },
-          });
-          if (!contextRun?.trigger?.first_life_admin_checkin) {
-            return reply(res, { error: 'runtime_admin_context_invalid' }, 409);
-          }
-          runtimeEvidenceContext = runtimeAdminEvidenceBriefing(contextRun.context);
-        }
-      }
       const profileContext = await (async () => {
         if (!prisma || !userId) return '';
         try {
@@ -281,9 +232,7 @@ export function createTaraGrokRuntime({ prisma, recallFn, memoryStore, getTaraCo
         skill_id: interactionProfile === 'runtime_operator' ? 'runtime_operator.v1' : selectedSkillId || null,
         interaction_profile: interactionProfile,
         config_revision: current.revision,
-        instructions: boundedString([configuredPrompt, runtimeEvidenceContext].filter(Boolean).join('\n\n'), 20_000) || '',
-        runtime_context_ref: runtimeContextRef,
-        runtime_evidence_context: runtimeEvidenceContext,
+        instructions: boundedString(configuredPrompt, 12_000) || '',
         profile_context: boundedString(profileContext, 2_000) || '',
         // Compact org brief in EVERY new browser session's snapshot, so the very
         // first instruction already says who this workspace is. profile_context is

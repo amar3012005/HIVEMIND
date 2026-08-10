@@ -29,12 +29,6 @@
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
-import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
-import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
-import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
-import { chooseSynthesisModel, isCandidateSynthesisAcceptable, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
-import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
-import { citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 import {
   chatCompletionFetch,
@@ -134,7 +128,7 @@ function languageName(code) {
 
 // ── Provider-aware JSON helper ─────────────────────────────────────────
 
-async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy, promptCacheKey }) {
+async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort }) {
   const resp = await chatCompletionFetch(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -151,8 +145,6 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
       // the job is to WRITE a cited answer. Pass a low/medium effort when the
       // caller asks. Harmless on non-reasoning providers (ignored field).
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-      ...(providerPolicy ? { provider: providerPolicy } : {}),
-      ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     }),
     signal,
   }, { fallbackApiKey: apiKey });
@@ -731,7 +723,7 @@ function _deterministicOptimize(message, plan) {
 async function optimizeRecallQueries({ message, plan, model, apiKey, signal }) {
   const fallback = _deterministicOptimize(message, plan);
   try {
-    const { parsed, usage } = await callJsonLLM({
+    const { parsed } = await callJsonLLM({
       messages: [
         { role: 'system', content: 'You rewrite a user message into search queries for an ENGLISH memory store. Output STRICT JSON {"queries":[...]} with 1-3 queries. Rules: ALWAYS English (translate any other language, including technical nouns); DROP question words and filler ("when is", "what is the", "tell me about"); each query = the entity/proper-noun + the specific attribute asked; 2-6 words; no punctuation; broadest entity-only query first. Examples: "when is the launch day for solvis pia?" -> {"queries":["Solvis PIA","Solvis PIA launch date"]}; "was ist der Umsatz von Solvis 2021?" -> {"queries":["Solvis","Solvis revenue 2021"]}.' },
         { role: 'user', content: String(message || '').slice(0, 800) },
@@ -741,9 +733,9 @@ async function optimizeRecallQueries({ message, plan, model, apiKey, signal }) {
     const qs = Array.isArray(parsed?.queries)
       ? parsed.queries.filter((q) => typeof q === 'string' && q.trim()).map((q) => q.trim().slice(0, 120))
       : [];
-    return { queries: qs.length ? [...new Set(qs)].slice(0, 3) : fallback, usage };
+    return qs.length ? [...new Set(qs)].slice(0, 3) : fallback;
   } catch {
-    return { queries: fallback, usage: null };
+    return fallback;
   }
 }
 
@@ -786,16 +778,6 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
 
   const recallExtras = {
     _structured_intent: true,
-    // Keep a bounded semantic rerank pool when the legacy weighted floor has
-    // no viable rows. This is part of the first structured-chat recall so a
-    // failed fast path cannot consume the deadline before recovery runs. It
-    // is language-neutral, changes no normally viable result set, and avoids
-    // paying for a duplicate recall solely to recover small buried details.
-    semantic_recovery: true,
-    // Internal-only delivery mode: ranking still runs on the canonical recall
-    // path, but answer synthesis receives the complete authorized rows so its
-    // semantic projector can recover details beyond the public 400-char preview.
-    _include_full_memory_content: true,
     ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
     ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
     ...(plan.time?.range ? { date_range: plan.time.range } : {}),
@@ -1139,27 +1121,21 @@ export function buildChatCitationSources(recallPackets = [], claims = []) {
         .filter((section) => section?.segment_id)
         .map((section) => [section.segment_id, section]),
     );
-    const factsById = new Map(
-      (packet?.facts || [])
-        .filter((fact) => fact?.id || fact?.memory_id || fact?.memoryId)
-        .map((fact) => [fact.id || fact.memory_id || fact.memoryId, fact]),
-    );
     for (const citation of (packet?.citations || [])) {
       if (!citation?.id) continue;
       const citationId = `P${packetIndex + 1}-${citation.id}`;
       if (!usedIds.has(citationId) || seen.has(citationId)) continue;
       seen.add(citationId);
       const section = sectionsById.get(citation.segment_id) || {};
-      const fact = factsById.get(citation.memory_id) || {};
       sources.push({
-        id: citation.segment_id || citation.memory_id || citationId,
+        id: citation.segment_id || citationId,
         citation_id: citationId,
         segment_id: citation.segment_id || null,
         document_id: citation.document_id || section.document_id || null,
         title: citation.title || citation.source_label || section.document_title || 'Workspace source',
-        snippet: section.snippet || section.content || citation.snippet || fact.content || '',
+        snippet: section.snippet || section.content || citation.snippet || '',
         page: citation.page ?? section.page ?? null,
-        source_type: citation.source_type || (citation.memory_id ? 'memory_evidence' : 'document_evidence'),
+        source_type: citation.source_type || 'document_evidence',
         score: Number.isFinite(section.score) ? section.score : null,
       });
     }
@@ -1219,7 +1195,7 @@ function unavailableEvidenceResponse({ message, evidence, language }) {
       de: `Ich habe ${context || 'etwas Kontext'} dazu gefunden — aber nichts, was deine Frage direkt beantwortet. Wenn du mir das passende Dokument, die Entscheidung oder die Nachricht dazu gibst, verbinde ich es mit dem, was ich schon weiss.`,
       fr: `J'ai trouve ${context || 'du contexte'} a ce sujet — mais rien qui reponde directement a ta question. Partage le document, la decision ou le message concerne et je le relierai a ce que je sais deja.`,
       es: `Encontre ${context || 'algo de contexto'} sobre esto — pero nada que responda directamente a tu pregunta. Compárteme el documento, la decision o el mensaje relacionado y lo conectare con lo que ya se.`,
-      en: `I found ${context || 'some related context'} that may be useful, but the specific detail you asked for is not covered yet. If you tell me which person, project, date, document, or message you mean, I'll narrow it down and connect it with what I already know.`,
+      en: `I found ${context || 'some related context'} — but nothing that directly answers your question. Share the document, decision, or message behind it and I'll connect it with what I already know.`,
     };
     return responses[lang] || responses.en;
   }
@@ -1246,7 +1222,7 @@ function unavailableEvidenceResponse({ message, evidence, language }) {
     de: `Dazu habe ich noch nichts in meinem Gedaechtnis — "${topic}" taucht bisher in keiner Quelle auf. Lade ein Dokument hoch oder erzaehl mir kurz davon, dann merke ich es mir und kann beim naechsten Mal antworten.`,
     fr: `Je n'ai encore rien en memoire a ce sujet — "${topic}" n'apparait dans aucune source pour l'instant. Importe un document ou raconte-le-moi, je m'en souviendrai la prochaine fois.`,
     es: `Todavia no tengo nada en mi memoria sobre eso — "${topic}" no aparece en ninguna fuente. Sube un documento o cuentamelo y lo recordare para la proxima vez.`,
-    en: `I couldn't find a matching detail for "${topic}" in the sources I can currently see. If you can be more specific about the person, project, date, document, or message, I'll search that angle; you can also tell me the missing context and I'll remember it.`,
+    en: `I don't have anything in my memory about that yet — "${topic}" doesn't appear in any source so far. Upload a document or just tell me about it, and I'll remember it for next time.`,
   };
   return responses[lang] || responses.en;
 }
@@ -1264,7 +1240,7 @@ function sourceUnavailableResponse({ evidence, language }) {
 }
 
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '' }) {
-  const synthesisPrompt = buildSynthesisPromptArtifact({ language, operation: plan.operation, recallMode: plan.recall_mode });
+  const sys = answerPrompt({ language, assistantName, orgName });
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
       && Number.isInteger(evidence.aggregate?.count)) {
     const count = evidence.aggregate.count;
@@ -1468,103 +1444,21 @@ export async function answerStep({ message, history, evidence, plan, language, a
     .slice(evidenceTopK)
     .filter((m) => m && (m._superseded_predecessor || m._diff_removed))
     .slice(0, 6);
-  // Adaptive per-memory output budget. Selection scans the COMPLETE content
-  // semantically before applying this output cap; it is no longer a prefix
-  // slice. Thus a small fact near the end of a long ranked memory remains
-  // visible while the final synthesis prompt stays bounded.
+  // Adaptive per-memory content budget. A flat 240-char slice was too small
+  // for any rich single memory (a KB chunk, a long note, a one-memory meeting
+  // record): everything past char 240 became invisible to synthesis, so the
+  // model answered "the record doesn't include that" about content that WAS
+  // retrieved. When the result set is small (the common case for a specific
+  // question) the whole memory fits with room to spare; when it is large we
+  // tighten per-memory so the total prompt stays bounded (worst case ~5-6k
+  // chars either way). Language/tenant-neutral — pure length policy.
   const _evCount = _topSlice.length + _flaggedMissed.length;
   const _contentBudget = _evCount <= 4 ? 1400 : (_evCount <= 8 ? 700 : 300);
-  const _selectedMemories = [..._topSlice, ..._flaggedMissed];
-  const _projectionQuery = [
-    message,
-    plan?.query_canonical_en,
-    ...(Array.isArray(plan?.sub_queries) ? plan.sub_queries : []),
-  ].filter((value) => typeof value === 'string' && value.trim()).join('\n');
-  let _projectedMemories;
-  try {
-    const configuredEvidenceBudget = Number(process.env.HIVEMIND_ANSWER_EVIDENCE_CHAR_BUDGET || 12000);
-    const projectionBudget = Math.max(1000, Math.min(
-      Number.isFinite(configuredEvidenceBudget) ? configuredEvidenceBudget : 12000,
-      Math.max(6000, _contentBudget * _selectedMemories.length),
-    ));
-    const cacheEligible = process.env.HIVEMIND_CHAT_CAG_ENABLED === 'true'
-      && plan.operation === 'recall'
-      && ctx?._chatUseTools !== true;
-    const projectionCacheKey = cacheEligible ? buildProjectionCacheKey({
-      orgId: ctx?.orgId,
-      userId: ctx?.userId,
-      projectIds: ctx?.accessContext?.projectIds || (ctx?.projectId ? [ctx.projectId] : []),
-      scope: ctx?.scopeFilter || plan.scope_filter || '',
-      query: _projectionQuery,
-      budget: projectionBudget,
-      recallMode,
-      temporalControls: plan?.time || plan?.time_travel || null,
-      contextRevision: ctx?.contextRevision || ctx?.accessContext?.contextRevision || null,
-      projectorVersion: 'adaptive-v2',
-      memories: _selectedMemories,
-    }) : null;
-    if (projectionCacheKey) {
-      _projectedMemories = await getSharedChatProjectionCache().get(projectionCacheKey);
-      if (ctx?._trace) ctx._trace.cag = { phase: 'projection-only', projection: _projectedMemories ? 'hit' : 'miss', key_version: 2 };
-    }
-    const embed = ctx?._embedEvidence || (async (texts) => {
-      const { getEmbedService } = await import('../embeddings/factory.js');
-      return getEmbedService().embed(texts);
-    });
-    if (!_projectedMemories) {
-      const timeoutMs = Number(process.env.HIVEMIND_EVIDENCE_PROJECTION_TIMEOUT_MS || 3500);
-      let timer;
-      try {
-        _projectedMemories = await Promise.race([
-          projectAdaptiveRankedMemoryEvidence({
-            query: _projectionQuery,
-            memories: _selectedMemories,
-            totalBudget: projectionBudget,
-            lowerRankBudget: _contentBudget,
-            embed,
-          }),
-          new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error('semantic evidence projection timed out')), timeoutMs);
-          }),
-        ]);
-      } finally {
-        clearTimeout(timer);
-      }
-      if (projectionCacheKey) await getSharedChatProjectionCache().set(projectionCacheKey, _projectedMemories);
-    }
-    if (ctx?._trace) {
-      ctx._trace.evidence_projection = {
-        mode: 'semantic',
-        memories: _selectedMemories.length,
-        input_chars: _selectedMemories.reduce((sum, memory) => sum + String(memory?.content || '').length, 0),
-        output_chars: _projectedMemories.reduce((sum, item) => sum + String(item?.excerpt || '').length, 0),
-      };
-    }
-  } catch (error) {
-    // Availability fallback only. Preserve the complete highest-ranked row
-    // under one global prompt budget instead of prefix-truncating every row.
-    const warning = `evidence_projection_degraded:${error.message}`;
-    console.warn(`[answerStep] ${warning}`);
-    if (ctx?._trace) {
-      if (!Array.isArray(ctx._trace.warnings)) ctx._trace.warnings = [];
-      ctx._trace.warnings.push(warning);
-      ctx._trace.evidence_projection = { mode: 'rank-preserving-fallback', memories: _selectedMemories.length };
-    }
-    _projectedMemories = projectRankedMemoryFallback(_selectedMemories, {
-      totalBudget: Math.min(12000, Math.max(6000, _contentBudget * _selectedMemories.length)),
-    });
-  }
-  // Every delivered memory carries its server-owned citation ID inline. This
-  // replaces the old duplicate MEMORY + citation-registry representation: the
-  // model sees the passage once, together with the only ID it may cite.
-  evidence = { ...evidence, recall_packets: ensureMemoryCitationPackets(evidence.recall_packets || [], _selectedMemories, { mode: recallMode }) };
-  const citationPacket = buildChatCitationPacket(evidence.recall_packets || []);
-  const evidenceLines = _projectedMemories.map(({ memory: m, excerpt, tags: projectedTags }) => {
+  const evidenceLines = [..._topSlice, ..._flaggedMissed].map((m, i) => {
     const id8 = (m.id || '').slice(0, 8);
-    const citationId = citationIdForMemory(citationPacket.citations, m);
     const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
-    const content = String(excerpt || '').replace(/\n/g, ' ');
-    const tags = projectedTags.join(', ');
+    const content = (m.content || '').replace(/\n/g, ' ').slice(0, _contentBudget);
+    const tags = (m.tags || []).slice(0, 3).join(', ');
     // Synthesis detection: source_metadata.source_type OR tag fallback (FTS path).
     const srcType = m.source_metadata?.source_type || null;
     const memTags = m.tags || [];
@@ -1588,8 +1482,8 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const rawDate = m.document_date || m.created_at || m.createdAt || m.valid_from;
     const date = rawDate ? new Date(rawDate).toISOString().slice(0, 10) : '?';
     const src = m.source_metadata?.source_platform || m.source_platform || m.memory_type || 'memory';
-    return citationId ? `${synthTag}{citation_id:${citationId}, rank:${id8 ? _projectedMemories.findIndex((item) => item.memory?.id === m.id) + 1 : '?'} source:${src}, date:${date}}${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}` : '';
-  }).filter(Boolean).join('\n');
+    return `${synthTag}[${id8}]${conf}${rev}${xClusterBoost} (${date}·${src}) "${title}" — ${content}${tags ? ' :: ' + tags : ''}`;
+  }).join('\n');
 
   // Live Workspace block — Gmail / Drive / Calendar fetched in this turn.
   // Fresher than memory snapshots; agent should cite these when the user asks
@@ -1654,6 +1548,11 @@ export async function answerStep({ message, history, evidence, plan, language, a
     ).join('\n');
     return `  ▶ ${head}\n${evRows}`;
   }).join('\n');
+
+  const citationPacket = buildChatCitationPacket(evidence.recall_packets || []);
+  const citationLines = citationPacket.citations.map((citation) =>
+    `[${citation.id}] ${citation.source_label || citation.title || 'Workspace source'}${citation.page ? ` p.${citation.page}` : ''}`,
+  ).join('\n');
 
   // When event-time ranking pre-filtered the evidence to the asked window,
   // tell the model these rows ARE "what happened" — docs/decisions/notes count
@@ -1739,15 +1638,17 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // against 772 completion tokens: 90% of chat's cost is this input block,
   // not the model's output.
   //
-  // groundedEvidence (memories + document segments) is NEVER dropped — each
-  // delivered passage carries its own citation ID, so there is no separate
-  // registry to duplicate. Only the four sections below are subject to the budget,
+  // groundedEvidence (memories + document segments) and the citation registry
+  // are NEVER dropped — they are the ground truth an answer cites and the ID
+  // contract validateChatAnswer checks against; dropping either would trade a
+  // token saving for a grounding regression, which is not the trade this
+  // phase is making. Only the four sections below are subject to the budget,
   // dropped WHOLE (never mid-string — a partial synthesis chain or a citation
   // id cut in half is worse than the section being absent), lowest priority
   // first, until the remainder fits.
   const EVIDENCE_CHAR_BUDGET = Number(process.env.HIVEMIND_ANSWER_EVIDENCE_CHAR_BUDGET || 12000);
   const alwaysKept = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
-${groundedEvidence}`;
+${groundedEvidence}${citationLines ? `\n\nCITATION REGISTRY (server-owned IDs; claims may cite only these):\n${citationLines}` : ''}`;
   // Highest priority first — this is the drop order, last entry drops first.
   const optionalSections = [
     { text: chainLines && `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` },
@@ -1766,52 +1667,12 @@ ${groundedEvidence}`;
   }
   const evidenceBlock = alwaysKept + _kept.join('');
 
-  const assistantContext = `\n\nASSISTANT CONTEXT: You are ${assistantName || 'HIVE'}, serving ${orgName || 'this HIVEMIND workspace'}.`;
-  const userBlock = `${evidenceBlock}${assistantContext}${capabilityHint}${windowNote}${personaNote}${coverageNote}
+  const userBlock = `${evidenceBlock}${capabilityHint}${windowNote}${personaNote}${coverageNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 
 USER MESSAGE:
 ${message}`;
-  if (ctx?._trace) {
-    const seenExcerpts = new Set();
-    const duplicateChars = _projectedMemories.reduce((sum, item) => {
-      const excerpt = String(item?.excerpt || '');
-      if (!excerpt || !seenExcerpts.has(excerpt)) {
-        if (excerpt) seenExcerpts.add(excerpt);
-        return sum;
-      }
-      return sum + excerpt.length;
-    }, 0);
-    ctx._trace.evidence_delivery = {
-      ranked_chars: _selectedMemories.reduce((sum, memory) => sum + String(memory?.content || '').length, 0),
-      delivered_chars: _projectedMemories.reduce((sum, item) => sum + String(item?.excerpt || '').length, 0),
-      duplicate_chars: duplicateChars,
-      citation_chars: citationPacket.citations.reduce((sum, citation) => sum + String(citation?.id || '').length, 0),
-      delivery_modes: [...new Set(_projectedMemories.map((item) => item?.projection).filter(Boolean))],
-      memories: _projectedMemories.map(({ memory: item, excerpt, projection, selected_passage_indexes }, index) => ({
-        rank: index + 1,
-        memory_id: item?.id || null,
-        full_chars: String(item?.content || '').length,
-        delivered_chars: String(excerpt || '').length,
-        projection,
-        selected_passage_indexes: selected_passage_indexes || null,
-      })),
-    };
-    ctx._trace.synthesis_prompt = {
-      static_chars: synthesisPrompt.static_prompt.length,
-      dynamic_system_chars: synthesisPrompt.dynamic_prompt.length,
-      evidence_chars: evidenceBlock.length,
-      profile_chars: personaNote.length,
-      history_chars: tail.reduce((sum, item) => sum + String(item?.content || '').length, 0),
-      total_user_chars: userBlock.length,
-      static_prompt_cag: synthesisPrompt.cache,
-      provider_prefix: promptContributionTelemetry({
-        staticPrompt: synthesisPrompt.static_prompt,
-        dynamicPrompt: `${synthesisPrompt.dynamic_prompt}\n${tail.map((item) => String(item?.content || '')).join('\n')}\n${userBlock}`,
-      }),
-    };
-  }
 
   // Mode-aware answer-token cap. GPT-OSS is a reasoning model — it spends
   // hidden reasoning_tokens up toward the ceiling regardless of how short
@@ -1831,28 +1692,18 @@ ${message}`;
   // full reconstruction gets 'medium', everything else 'low'. Env-overridable.
   const answerReasoning = process.env.HIVEMIND_ANSWER_REASONING_EFFORT
     || (answerMode === 'full' ? 'medium' : 'low');
-  const finalSynthesisProviderOrder = String(
-    process.env.OPENROUTER_DEEPSEEK_SYNTHESIS_PROVIDER_ORDER || 'baidu,digitalocean,streamlake',
-  ).split(',').map((value) => value.trim()).filter(Boolean);
-  const finalSynthesisProviderPolicy = String(model || '').startsWith('deepseek/')
-    && finalSynthesisProviderOrder.length
-    ? { order: finalSynthesisProviderOrder }
-    : undefined;
 
   const { parsed, usage } = await callJsonLLM({
     // temperature:0 — grounded synthesis over already-ranked evidence must be
     // DETERMINISTIC. At 0.1 the model occasionally picked a competing memory
     // (e.g. the Feb "Kommunikation" phase over the 18-Aug "Launch PIA" event)
     // for the same query on different turns — the flakiness users saw.
-    messages: [...synthesisPrompt.messages, ...tail, { role: 'user', content: userBlock }],
-    model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
-    providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
-    promptCacheKey: synthesisPrompt.cache.key,
+    messages: [{ role: 'system', content: sys }, ...tail, { role: 'user', content: userBlock }],
+    model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning, temperature: 0,
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
   let answerPayload = parsed;
-  response = appendGapClarification(response, answerPayload.gaps, language);
   let validated = validateChatAnswer({
     answer: response,
     claims: parsed.claims,
@@ -1863,7 +1714,7 @@ ${message}`;
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
   if (!validated.claims.length && hasGroundedPacketEvidence(evidence)) {
-    const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
+    const repairInstruction = `${sys}\n\nREPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return the strongest concise synthesis that the evidence supports, then name the specific part of the user's question that remains uncovered. Every sentence must be a grounded claim with one or more IDs from the CITATION REGISTRY. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
     // stateless API call — it must still see the full evidence in userBlock
     // (already shrunk by the combined budget above) or it has nothing left to
@@ -1875,20 +1726,12 @@ ${message}`;
     // need 'medium' reasoning to re-cite the same facts).
     const repairCap = Math.min(answerCap, Number(process.env.HIVEMIND_REPAIR_MAX_TOKENS || 1500));
     const repaired = await callJsonLLM({
-      messages: [
-        { role: 'system', content: synthesisPrompt.static_prompt },
-        { role: 'system', content: `${synthesisPrompt.dynamic_prompt}\n${repairInstruction}` },
-        ...tail,
-        { role: 'user', content: userBlock },
-      ],
-      model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low',
-      providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
-      promptCacheKey: synthesisPrompt.cache.key,
+      messages: [{ role: 'system', content: repairInstruction }, ...tail, { role: 'user', content: userBlock }],
+      model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low', temperature: 0,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;
     response = typeof repaired.parsed.response === 'string' ? repaired.parsed.response.trim() : '';
-    response = appendGapClarification(response, answerPayload.gaps, language);
     validated = validateChatAnswer({
       answer: response,
       claims: repaired.parsed.claims,
@@ -1905,15 +1748,11 @@ ${message}`;
       confidence: 0,
       gaps: ['No citation-valid claim could be produced from the final recall packet.'],
       usage: repairUsage || usage,
-      usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
     };
   }
 
   return {
-    // Validation deliberately reconstructs prose from factual claims, which
-    // drops non-factual clarification questions. Re-attach only the bounded
-    // gap question after claims have passed the fail-closed citation check.
-    response: appendGapClarification(validated.answer, answerPayload.gaps, language),
+    response: validated.answer,
     claims: validated.claims,
     rejected_claims: validated.rejected_claims,
     grounded: validated.grounded,
@@ -1921,7 +1760,6 @@ ${message}`;
     confidence:    Number.isFinite(answerPayload.confidence) ? Math.max(0, Math.min(1, answerPayload.confidence)) : 0.5,
     gaps:          Array.isArray(answerPayload.gaps) ? answerPayload.gaps : [],
     usage: repairUsage || usage,
-    usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
   };
 }
 
@@ -2402,16 +2240,9 @@ export async function runReactAgentV2({
   }
   if (!message) throw new Error('message required');
   const abortCtrl = new AbortController();
-  const requestedAnswerModel = resolveAnswerModel(model);
-  let answerModel = requestedAnswerModel;
+  const answerModel = resolveAnswerModel(model);
   const budgetTimer = setTimeout(() => abortCtrl.abort(), TURN_BUDGET_MS);
   const usages = [];
-  const usageStages = {};
-  const recordUsage = (stage, usage) => {
-    if (!usage) return;
-    usages.push(usage);
-    usageStages[stage] = usage;
-  };
   const steps = [];
   // Structured trace — enterprise observability layer.
   // Anthropic / DeepMind 2025-26 pattern: every agent turn carries a
@@ -2430,12 +2261,10 @@ export async function runReactAgentV2({
     },
     failure_mode: null,
     confidence_path: [],
-    warnings: [],
     models: {
       planner: INTENT_MODEL,
-      synthesis: requestedAnswerModel,
+      synthesis: answerModel,
     },
-    usage_stages: usageStages,
   };
   let eventSequence = 0;
   const userOnEvent = onEvent;
@@ -2467,8 +2296,6 @@ export async function runReactAgentV2({
     _signal: abortCtrl.signal,
     _apiKey: apiKey,
     _internalModel: INTERNAL_MODEL,
-    _chatUseTools: useTools === true,
-    _originalUserMessage: message,
   };
 
   try {
@@ -2532,98 +2359,21 @@ export async function runReactAgentV2({
     // the 6-tool Cerebras-direct progressive router. The adapter returns the
     // SAME decision shape, so intentDecisionToPlan + everything downstream is
     // unchanged. Default (unset/any other value) = the current parseChatIntent.
-    let intentParsed;
-    if (process.env.CHAT_ROUTER === 'progressive') {
-      if (useTools && process.env.HOSTED_COMPOSIO_PLANNER_ENABLED === 'true') {
-        try {
-          const { planHostedComposioWorkflow } = await import('./hosted-composio-planner.js');
-          const hostedPlan = await planHostedComposioWorkflow({
-            request: message,
-            history,
-            language,
-            apiKey,
-            signal: abortCtrl.signal,
-            orgId: ctx?.orgId,
-          });
-          intentParsed = {
-            decision: {
-              ...hostedPlan._decision,
-              _hosted_planner: true,
-              _hosted_plan_id: hostedPlan.plan_id,
-              _connected_providers: hostedPlan.connected_providers,
-            },
-            usage: hostedPlan.usage,
-          };
-        } catch (hostedPlannerError) {
-          // Explicit compatibility fallback: preserve the pre-existing
-          // progressive planner if connection discovery or hosted planning
-          // fails before any tool has executed. The trace carries the reason;
-          // this is never a silent downgrade.
-          console.warn(`[chat:hosted-planner] fallback: ${hostedPlannerError.message}`);
-          const progressive = await import('./chat-progressive-router.js');
-          intentParsed = await progressive.parseChatIntentProgressive({
-            message, history, language, apiKey, signal: abortCtrl.signal, useTools,
-          });
-          intentParsed.decision = {
-            ...intentParsed.decision,
-            _hosted_planner: false,
-            _hosted_planner_fallback: hostedPlannerError.message,
-          };
-        }
-      } else {
-        intentParsed = await (await import('./chat-progressive-router.js')).parseChatIntentProgressive({
-          message, history, language, apiKey, signal: abortCtrl.signal, useTools,
+    const intentParsed = process.env.CHAT_ROUTER === 'progressive'
+      ? await (await import('./chat-progressive-router.js')).parseChatIntentProgressive({
+          message, history, language, apiKey, signal: abortCtrl.signal,
+        })
+      : await parseChatIntent({
+          message, history, language,
+          groupCatalog,
+          projectCatalog,
+          model: INTENT_MODEL,
+          apiKey,
+          signal: abortCtrl.signal,
         });
-      }
-    } else {
-      intentParsed = await parseChatIntent({
-        message, history, language,
-        groupCatalog,
-        projectCatalog,
-        model: INTENT_MODEL,
-        apiKey,
-        signal: abortCtrl.signal,
-      });
-    }
     _pt('intent_parse_ms', _ps);
-    let intentDecision = intentParsed.decision;
-    // `use_tools` is an authority boundary, not a prompt hint. A legacy or
-    // malformed router decision therefore cannot disclose or execute an
-    // external capability unless the API caller opted in for this turn.
-    if (!useTools && ['connector_read', 'connector_write', 'compound'].includes(intentDecision.operation)) {
-      intentDecision = {
-        ...intentDecision,
-        operation: 'recall',
-        connector_provider: null,
-        tool_groups: ['hivemind-recall'],
-        subtasks: undefined,
-        queries: intentDecision.queries?.length ? intentDecision.queries : [message],
-      };
-    }
-    // A single connected-app intent is an external execution plan with one
-    // step. Route it through the same Composio-backed path as multi-step plans
-    // so `use_tools:true` works for ordinary Gmail/Calendar/Docs reads too.
-    if (useTools
-        && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
-        && ['connector_read', 'connector_write'].includes(intentDecision.operation)
-        && intentDecision.connector_provider) {
-      const isWrite = intentDecision.operation === 'connector_write';
-      intentDecision = {
-        ...intentDecision,
-        operation: 'compound',
-        subtasks: [{
-          operation: isWrite ? 'write' : 'read',
-          tool_groups: [intentDecision.connector_provider],
-          depends_on: null,
-          message: intentDecision.queries?.[0] || message,
-          retrieval: intentDecision.connector_retrieval || {
-            result_order: 'provider_default', result_limit: null, has_explicit_filter: false,
-          },
-        }],
-        tool_groups: [],
-      };
-    }
-    recordUsage('router', intentParsed.usage);
+    const intentDecision = intentParsed.decision;
+    if (intentParsed.usage) usages.push(intentParsed.usage);
     // Resolve the parallel profile preload (kicked off before the planner).
     const preloadedProfileContext = await profilePreloadPromise;
     _ps = Date.now();
@@ -2657,12 +2407,6 @@ export async function runReactAgentV2({
       source: recallSource,
       time: recallTime || intentDecision.relation?.time || intentDecision.time,
     });
-    const modelPolicy = chooseSynthesisModel({
-      currentModel: requestedAnswerModel,
-    });
-    answerModel = modelPolicy.served;
-    trace.models.synthesis = answerModel;
-    trace.model_policy = modelPolicy;
 
     // API/UI recall controls are server-owned requirements, not hints for the
     // intent model. A direct-answer plan must never bypass an explicit source,
@@ -2695,59 +2439,15 @@ export async function runReactAgentV2({
         && useTools === true
         && Array.isArray(intentDecision.subtasks) && intentDecision.subtasks.length > 0) {
       const { runCompoundOrchestrator } = await import('./compound-orchestrator.js');
-      const priorAssistantContext = [...(Array.isArray(history) ? history : [])]
-        .reverse()
-        .find((turn) => turn?.role === 'assistant' && typeof turn?.content === 'string' && turn.content.trim())
-        ?.content.trim().slice(0, 6000) || null;
       const compound = await runCompoundOrchestrator({
         subtasks: intentDecision.subtasks,
         ctx,
         apiKey,
         signal: abortCtrl.signal,
         onEvent,
-        conversationContext: priorAssistantContext,
       });
-      let continuation = null;
-      if (compound.status === 'needs_input' && compound.resumeState && compound.inputRequests?.length) {
-        const { createChatContinuation } = await import('./chat-continuation-store.js');
-        const stored = await createChatContinuation({
-          userId: ctx.userId, orgId: ctx.orgId, message, language,
-          resumeState: compound.resumeState,
-        });
-        continuation = {
-          schema_version: 1,
-          token: stored.token,
-          expires_at: stored.expires_at,
-          requests: compound.inputRequests,
-        };
-        onEvent?.({ type: 'orchestration_input_required', schema_version: 1, ...continuation });
-      }
       steps.push(...compound.steps);
-      let finalText = compound.summary;
-      if (compound.status === 'completed'
-          && ((compound.readResults?.length || 0) > 0 || (compound.recallResults?.length || 0) > 0)) {
-        try {
-          const boundedResults = JSON.stringify(compound.synthesisPayload || {}).slice(0, 28000);
-          const synthesized = await callJsonLLM({
-            messages: [
-              { role: 'system', content: `Return strict JSON {"response":string}. Answer naturally as HIVE using only the completed HIVE-MIND recall and live connector results supplied. Answer every requested part and include useful closely related grounded details when they add context. If one detail is missing, first explain what the results do establish, then identify only the missing part and invite the user to be more specific; never replace partial knowledge with "unknown", a blank value, or a blanket absence response. Preserve exact counts, dates, names, relationships, and uncertainty. Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
-              { role: 'user', content: `USER REQUEST:\n${message}\n\nCOMPLETED GOVERNED RESULTS:\n${boundedResults}` },
-            ],
-            model: requestedAnswerModel,
-            apiKey,
-            maxTokens: 800,
-            signal: abortCtrl.signal,
-            reasoningEffort: 'low',
-            temperature: 0,
-          });
-          if (typeof synthesized.parsed?.response === 'string' && synthesized.parsed.response.trim()) {
-            finalText = synthesized.parsed.response.trim();
-            recordUsage('connector_synthesis', synthesized.usage);
-          }
-        } catch (error) {
-          trace.warnings.push(`connector_synthesis_degraded:${error.message}`);
-        }
-      }
+      const finalText = compound.summary;
       onEvent?.({ type: 'finish', text: finalText });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'compound', success: compound.status !== 'error' });
       // UNIFIED compound response: retains the normal chat evidence fields
@@ -2778,15 +2478,12 @@ export async function runReactAgentV2({
         usage: sumUsage(usages),
         trace: finalizeTrace(trace, usages),
         draft_ids: compound.draftIds,
-        pending_actions: compound.pendingActions || [],
         compound_status: compound.status,
         execution: {
           status: compound.status,
           steps: compound.steps,
           draft_ids: compound.draftIds,
-          pending_actions: compound.pendingActions || [],
         },
-        continuation,
       };
     }
 
@@ -2799,7 +2496,7 @@ export async function runReactAgentV2({
         plannerDraft: plan._direct_answer,
         profileContext: preloadedProfileContext,
       });
-      recordUsage('direct', usage);
+      if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct' });
       return {
@@ -3102,7 +2799,7 @@ export async function runReactAgentV2({
         model: answerModel, apiKey, signal: abortCtrl.signal,
         profileContext: preloadedProfileContext,
       });
-      recordUsage('direct', usage);
+      if (usage) usages.push(usage);
       onEvent?.({ type: 'finish', text: response });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct', success: true });
       return {
@@ -3125,17 +2822,11 @@ export async function runReactAgentV2({
     // The answer LLM still receives the user's original message.
     const _dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read'
       || plan.operation === 'relation_between' || plan.operation === 'profile';
-    let queryOptimizerRan = false;
-    if (!_dedicatedLane
-        && shouldOptimizeRecallQuery({ router: intentDecision._router, canonicalQuery: plan.query_canonical_en })
-        && Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
+    if (!_dedicatedLane && Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
       try {
-        const optimizedResult = await optimizeRecallQueries({
+        const optimized = await optimizeRecallQueries({
           message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
         });
-        const optimized = optimizedResult.queries;
-        queryOptimizerRan = true;
-        recordUsage('query_optimizer', optimizedResult.usage);
         if (optimized.length) {
           plan.query_canonical_en = optimized[0];
           const fileQueries = plan.sub_queries.filter((q) => typeof q === 'string' && /\.\w{2,4}\b/.test(q));
@@ -3154,7 +2845,7 @@ export async function runReactAgentV2({
       aggregate: plan.aggregate || null,
     });
     _ps = Date.now();
-    let evidence = await gatherEvidence({
+    const evidence = await gatherEvidence({
       plan,
       ctx,
       onEvent,
@@ -3164,28 +2855,6 @@ export async function runReactAgentV2({
     });
     _pt('gather_evidence_ms', _ps);
     steps.push(...evidence.steps);
-    if (!_dedicatedLane && shouldRetryAfterZeroCoverage({
-      router: intentDecision._router,
-      canonicalQuery: plan.query_canonical_en,
-      coverage: evidence.coverage,
-      alreadyOptimized: queryOptimizerRan,
-    })) {
-      const retryResult = await optimizeRecallQueries({
-        message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
-      });
-      recordUsage('query_optimizer_retry', retryResult.usage);
-      queryOptimizerRan = true;
-      if (retryResult.queries.length) {
-        plan.query_canonical_en = retryResult.queries[0];
-        plan.sub_queries = [...new Set(retryResult.queries)].slice(0, 3);
-        onEvent?.({ type: 'query_optimized', queries: plan.sub_queries, reason: 'zero_coverage_retry' });
-        const retried = await gatherEvidence({
-          plan, ctx, onEvent, deadlineAt: Date.now() + RETRIEVAL_BUDGET_MS,
-        });
-        steps.push(...retried.steps);
-        evidence = retried;
-      }
-    }
     trace.recall = {
       coverage: evidence.coverage,
       escalation_count: evidence.escalation_count,
@@ -3194,63 +2863,13 @@ export async function runReactAgentV2({
 
     // STEP 4 — Answer with the caller-selected user-facing model.
     _ps = Date.now();
-    const answerInput = {
+    let answer = await answerStep({
       message, history, evidence, plan, language, assistantName, orgName,
-      apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge, preloadedProfileContext,
-    };
-    let answer;
-    try {
-      answer = await answerStep({ ...answerInput, model: answerModel });
-    } catch (error) {
-      if (answerModel !== requestedAnswerModel) {
-        trace.model_policy = { ...modelPolicy, fallback_reason: error.message || 'candidate_synthesis_failed' };
-        answerModel = requestedAnswerModel;
-        trace.models.synthesis = answerModel;
-        answer = await answerStep({ ...answerInput, model: answerModel });
-      } else {
-        throw error;
-      }
-    }
-    if (answerModel !== requestedAnswerModel && !isCandidateSynthesisAcceptable(answer)) {
-      trace.model_policy = { ...modelPolicy, fallback_reason: 'candidate_synthesis_validation_failed' };
-      answerModel = requestedAnswerModel;
-      trace.models.synthesis = answerModel;
-      answer = await answerStep({ ...answerInput, model: answerModel });
-    }
-    if (modelPolicy.shadow) {
-      const servedSummary = {
-        claim_count: answer.claims?.length || 0,
-        citation_count: (answer.claims || []).reduce((sum, claim) => sum + (claim.citation_ids?.length || 0), 0),
-      };
-      scheduleShadowEvaluation({
-        timeoutMs: Number(process.env.HIVEMIND_DEEPSEEK_SHADOW_TIMEOUT_MS || 15000),
-        execute: (shadowSignal) => answerStep({
-          ...answerInput,
-          signal: shadowSignal,
-          ctx: { ...ctx, _trace: { warnings: [] } },
-          model: modelPolicy.shadow,
-        }),
-        onResult: (result) => {
-          const shadow = result.answer;
-          console.log('[chat-shadow-evaluation]', JSON.stringify({
-            model: modelPolicy.shadow,
-            ms: result.ms,
-            ok: result.ok,
-            valid_json_contract: result.ok && Array.isArray(shadow?.claims),
-            grounded: shadow?.grounded === true,
-            claim_count: shadow?.claims?.length || 0,
-            citation_count: (shadow?.claims || []).reduce((sum, claim) => sum + (claim.citation_ids?.length || 0), 0),
-            ...servedSummary,
-            usage: shadow?.usage || null,
-            error: result.ok ? null : (result.error?.message || 'shadow_failed'),
-          }));
-        },
-      });
-    }
+      model: answerModel, apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge,
+      preloadedProfileContext,
+    });
     _pt('answer_step_ms', _ps);
-    for (const [stage, usage] of Object.entries(answer.usage_stages || { synthesis: answer.usage })) {
-      recordUsage(stage, usage);
-    }
+    if (answer.usage) usages.push(answer.usage);
     onEvent?.({
       type: 'answer_validated',
       grounded: answer.grounded,
@@ -3471,7 +3090,6 @@ function finalizeTrace(trace, usages) {
   trace.cost.completion_tokens = u.completion_tokens || 0;
   trace.cost.total_tokens = u.total_tokens || 0;
   trace.cost.usd = estimateCostUsd(u);
-  trace.usage_breakdown = summarizeUsage(trace.usage_stages || {});
   trace.ended_at = new Date().toISOString();
   trace.total_ms = new Date(trace.ended_at).getTime() - new Date(trace.started_at).getTime();
   return trace;

@@ -740,7 +740,7 @@ if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma && shouldRunRe
     try {
       // Find segments without any linked memory_evidence_link — re-evaluate them
       const orphans = await prisma.knowledgeSegment.findMany({
-        where: { memoryLinks: { none: {} }, document: { ingestMode: { not: 'evidence' } } },
+        where: { memoryLinks: { none: {} } },
         select: { id: true, documentId: true, userId: true, orgId: true, content: true },
         take: PROMOTION_BATCH,
         orderBy: { createdAt: 'desc' },
@@ -2218,8 +2218,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
           if (metadata.media_kind !== 'image') {
             return documentFirstIngestion.ingestSource({
               userId, orgId, source: { type: 'kb', filename },
-              file: { buffer: fileBuffer, contentType, filename }, metadata,
-              ingestMode: metadata?.ingest_mode || 'both', onProgress,
+              file: { buffer: fileBuffer, contentType, filename }, metadata, onProgress,
             });
           }
           onProgress({ stage: 'extracting', progress: 25 });
@@ -10897,18 +10896,6 @@ exit \$RC
                   botToken, 'POST');
                 placeholderTs = ph?.ts || null;
               } catch (e) { /* non-fatal: fall back to a fresh post below */ }
-              let progressReporter = null;
-              if (placeholderTs) {
-                const { createSlackProgressReporter } = await import('./connectors/slack-agent-progress.js');
-                progressReporter = createSlackProgressReporter({
-                  minIntervalMs: Number(process.env.SLACK_AGENT_PROGRESS_INTERVAL_MS || 900),
-                  update: async (progressText) => {
-                    await bridge._call('chat.update', {
-                      channel: qChannel, ts: placeholderTs, text: progressText,
-                    }, botToken, 'POST');
-                  },
-                });
-              }
 
               // Per-conversation history so multi-turn flows work — e.g.
               // "save this" → "which project?" → reply names a project → saves —
@@ -10918,43 +10905,28 @@ exit \$RC
               const priorHistory = globalThis._slackHistory.get(convKey) || [];
 
               const accessCtx = await buildAccessContext(runUserId, runOrgId);
-              let result;
-              try {
-                result = await runReactAgent({
-                  message: effectiveQuestion,
-                  history: priorHistory.map((h) => ({ role: h.role, content: h.content })),
-                  model: 'openai/gpt-oss-120b',
-                  apiKey: groqKey,
-                  language: 'en',
-                  // Default OFF: the hosted/compound tool-use path was
-                  // leaking its raw step trace ("Step 1 (recall): done")
-                  // as the final Slack reply instead of a synthesized
-                  // answer. Slack stays on plain recall/chat until that's
-                  // fixed and explicitly re-enabled per org.
-                  useTools: process.env.SLACK_CHAT_USE_TOOLS === 'true',
-                  onEvent: (event) => progressReporter?.onEvent(event),
-                  ctx: {
-                    userId: runUserId,
-                    orgId: runOrgId,
-                    projectId: null,
-                    prisma,
-                    persistentMemoryStore,
-                    persistentMemoryEngine,
-                    evidenceRetrieval,
-                    smartIngestRouter,
-                    buildRoutedIngestPayloads,
-                    ingestRoutedPayload,
-                    ingestCanonicalPayload,
-                    accessContext: accessCtx,
-                    webIntelligence: globalThis.webIntelligence || null,
-                  },
-                });
-              } finally {
-                // Drain every queued Slack update before replacing the same
-                // message with the final answer. Otherwise a delayed progress
-                // write can race and overwrite the completed response.
-                await progressReporter?.stop();
-              }
+              const result = await runReactAgent({
+                message: effectiveQuestion,
+                history: priorHistory.map((h) => ({ role: h.role, content: h.content })),
+                model: 'openai/gpt-oss-120b',
+                apiKey: groqKey,
+                language: 'en',
+                ctx: {
+                  userId: runUserId,
+                  orgId: runOrgId,
+                  projectId: null,
+                  prisma,
+                  persistentMemoryStore,
+                  persistentMemoryEngine,
+                  evidenceRetrieval,
+                  smartIngestRouter,
+                  buildRoutedIngestPayloads,
+                  ingestRoutedPayload,
+                  ingestCanonicalPayload,
+                  accessContext: accessCtx,
+                  webIntelligence: globalThis.webIntelligence || null,
+                },
+              });
               let answer = toSlackMrkdwn(String(result?.response || '').trim() || 'I could not find an answer.');
               // When a save is deferred for project selection, offer real
               // clickable buttons (same hm_save_pick action_id/value shape the
@@ -12600,18 +12572,12 @@ exit \$RC
                 const document = await prisma.knowledgeDocument.findFirst({
                   where: { id: documentId, orgId },
                   select: {
-                    id: true, userId: true, ingestMode: true, title: true, documentType: true, sourcePlatform: true,
+                    id: true, userId: true, title: true, documentType: true, sourcePlatform: true,
                     sourceId: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
                     segments: { orderBy: { segmentIndex: 'asc' }, select: { id: true, content: true, segmentIndex: true } },
                   },
                 });
                 if (!document) return jsonResponse(res, { error: 'Document not found' }, 404);
-                if (document.ingestMode === 'evidence') {
-                  return jsonResponse(res, {
-                    error: 'intentional_evidence_only',
-                    message: 'This document was intentionally uploaded as evidence only and cannot be promoted by repair.',
-                  }, 409);
-                }
                 const unpromoted = document.segments.filter((segment) => segment.content?.trim());
                 const result = await documentFirstIngestion._promoteMemories({
                   documentId: document.id,
@@ -12635,10 +12601,7 @@ exit \$RC
               const since = body.since ? new Date(body.since) : new Date(Date.now() - 30 * 86400000);
               const limit = Math.min(Number(body.limit || 100), 500);
               const segments = await prisma.knowledgeSegment.findMany({
-                where: {
-                  orgId, createdAt: { gte: since }, memoryLinks: { none: {} },
-                  document: { ingestMode: { not: 'evidence' } },
-                },
+                where: { orgId, createdAt: { gte: since }, memoryLinks: { none: {} } },
                 take: limit,
                 orderBy: { createdAt: 'asc' },
               });
@@ -22983,37 +22946,6 @@ exit \$RC
         // dispatched below via regex match outside the switch
 
         // ==========================================
-        // COMPOSIO HOSTED PLANNER — plan only, never execute
-        // POST /api/composio/plan
-        // ==========================================
-        case '/api/composio/plan':
-          if (req.method === 'POST') {
-            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
-              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
-            }
-            const request = String(body?.request || body?.message || '').trim();
-            if (!request) return jsonResponse(res, { error: 'request is required' }, 400);
-            const plannerKey = process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY || process.env.CEREBRAS_API_KEY;
-            if (!plannerKey) return jsonResponse(res, { error: 'planner unavailable — no LLM API key configured' }, 503);
-            try {
-              const { planHostedComposioWorkflow } = await import('./agent/hosted-composio-planner.js');
-              const plan = await planHostedComposioWorkflow({
-                request,
-                history: Array.isArray(body?.history) ? body.history : [],
-                language: body?.language || null,
-                apiKey: plannerKey,
-                orgId,
-              });
-              const { _decision, ...publicPlan } = plan;
-              return jsonResponse(res, publicPlan);
-            } catch (error) {
-              console.warn(`[hosted-composio-planner] failed org=${orgId}: ${error.message}`);
-              return jsonResponse(res, { error: 'hosted_planner_failed', detail: error.message }, 502);
-            }
-          }
-          break;
-
-        // ==========================================
         // CHAT — Talk to HIVE (memory-augmented LLM)
         // ==========================================
         case '/api/chat':
@@ -23084,82 +23016,6 @@ exit \$RC
             const groqKey = process.env.GROQ_API_KEY || null;
             if (!groqKey && !process.env.OPENROUTER_API_KEY && !process.env.CEREBRAS_API_KEY) {
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
-            }
-
-            // Resume a paused compound run from server-owned state. The opaque
-            // token is single-use, tenant-bound, short-lived, and never carries
-            // connector results in the browser. Completed reads are reused, so
-            // choosing an option does not repeat recall or provider executions.
-            if (body?.continuation_token) {
-              const { consumeChatContinuation, createChatContinuation } = await import('./agent/chat-continuation-store.js');
-              const stored = await consumeChatContinuation(body.continuation_token, { userId, orgId });
-              if (!stored) return jsonResponse(res, { error: 'continuation_expired_or_invalid' }, 409);
-              const choice = body?.continuation_response || {};
-              const stepIndex = Number(choice.step_index);
-              const pending = stored.resumeState?.results?.[stepIndex]?.inputRequest;
-              if (!pending) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
-              const allowed = pending?.options?.find((option) => option.id === choice.option_id || option.value === choice.value);
-              const declaredFields = Array.isArray(pending?.fields) ? pending.fields : [];
-              const submittedValues = choice?.values && typeof choice.values === 'object' && !Array.isArray(choice.values)
-                ? choice.values : {};
-              const fieldValues = Object.fromEntries(declaredFields.map((field) => [
-                field.name,
-                typeof submittedValues[field.name] === 'string' ? submittedValues[field.name].trim() : submittedValues[field.name],
-              ]));
-              const validFields = declaredFields.length > 0 && declaredFields.every((field) => (
-                !field.required || (fieldValues[field.name] != null && String(fieldValues[field.name]).trim() !== '')
-              ));
-              if (!allowed && !validFields) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
-
-              const execute = async (emit) => {
-                const { runCompoundOrchestrator } = await import('./agent/compound-orchestrator.js');
-                const resumeState = {
-                  ...stored.resumeState,
-                  choice: allowed
-                    ? { stepIndex, field: pending.field, value: allowed.value }
-                    : { stepIndex, retryStep: true, values: fieldValues },
-                };
-                const compound = await runCompoundOrchestrator({
-                  subtasks: stored.resumeState.subtasks,
-                  ctx: {
-                    userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
-                    prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
-                    smartIngestRouter, buildRoutedIngestPayloads, accessContext: agentAccessCtx,
-                    webIntelligence: globalThis.webIntelligence || null,
-                    _trace: { traceId: crypto.randomUUID() },
-                  },
-                  apiKey: groqKey, onEvent: emit,
-                  resumeState,
-                });
-                let continuation = null;
-                if (compound.status === 'needs_input' && compound.resumeState && compound.inputRequests?.length) {
-                  const next = await createChatContinuation({
-                    userId, orgId, message: stored.message, language: stored.language,
-                    resumeState: compound.resumeState,
-                  });
-                  continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: compound.inputRequests };
-                  emit?.({ type: 'orchestration_input_required', ...continuation });
-                }
-                return {
-                  response: compound.summary, answer_mode: 'compound', sources: [], citations: [],
-                  steps: compound.steps, grounded: compound.status === 'completed',
-                  confidence: compound.status === 'completed' ? 1 : 0.5,
-                  gaps: compound.status === 'error' ? ['compound_step_failed'] : [], scopes_found: [],
-                  draft_ids: compound.draftIds, compound_status: compound.status,
-                  pending_actions: compound.pendingActions || [],
-                  execution: { status: compound.status, steps: compound.steps, draft_ids: compound.draftIds, pending_actions: compound.pendingActions || [] },
-                  continuation,
-                };
-              };
-              if (wantStream) {
-                res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-                const emit = (evt) => { try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {} };
-                try { emit({ type: 'done', ...(await execute(emit)) }); }
-                catch (error) { emit({ type: 'error', error: error.message }); }
-                try { res.end(); } catch {}
-                return;
-              }
-              return jsonResponse(res, await execute(null));
             }
 
             // ─── Two-Loop ReAct Agent (default path) ─────────────────────

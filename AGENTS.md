@@ -23,28 +23,6 @@ You are running unattended. The operator will not respond until the final review
   not to overwrite unrelated work remain mandatory. Autonomy never authorizes
   destructive cleanup, credential invention, policy bypass, or unsafe deployment.
 
-## RELEASE COORDINATION (mandatory for production work)
-
-Parallel sessions may build and commit independently, but must not silently
-supersede one another in production. Before any release work, inspect the shared
-mailbox:
-
-```bash
-/root/hivemind/scripts/release-presence.sh status
-```
-
-To receive live pings while waiting, use:
-
-```bash
-/root/hivemind/scripts/release-presence.sh status --watch
-```
-
-Canonical releases publish an atomic service claim automatically. A conflicting
-claim exits `75`; wait for its `completed` event, fetch canonical again, and
-rebase or merge before attempting a new release. Set `RELEASE_SESSION_ID` to a
-short unique session label so other sessions can identify the owner. Never bypass
-`release-canonical.sh` for production container replacement.
-
 ## HANDOFF PROTOCOL (when context runs low)
 
 Before stopping:

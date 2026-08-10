@@ -134,14 +134,11 @@ test('DELIVERY GUARD: the stage that needs the strict schema actually receives i
       run_id: 'r', playbook_id: 'p', playbook_version: 1, stage_id: stage.id, objective: stage.objective,
       expected_artifacts: stage.expected_artifacts, checks: stage.completion_checks,
       execution_config: config, inputs: {}, runtime_context: {},
-      retry_policy: { owner: 'playbook', stage_attempt: 1, max_stage_attempts: stage.max_attempts || 1 },
     };
     const envelope = config.contract === 'room-phase.v1' ? roomPhaseEnvelope(request) : runtimeStageEnvelope(request);
     const delivered = envelope.strict_response_schema || envelope.lifecycle?.strict_response_schema;
     assert.ok(delivered, `${fixture}:${stage.id} derives a strict schema but the ${envelope.contract} envelope does not carry it`);
     assert.equal(delivered.name, derived.name, `${fixture}:${stage.id} delivered a different schema than was derived`);
-    assert.equal((envelope.retry_policy || envelope.lifecycle?.retry_policy)?.owner, 'playbook',
-      `${fixture}:${stage.id} must declare playbook retry ownership`);
     checked += 1;
   }
   assert.ok(checked >= 1, 'no stage exercised the delivery path');
@@ -154,7 +151,6 @@ test('both envelopes carry the derived contract, so neither path can drift', asy
     expected_artifacts: ['marketing_strategy'],
     checks: [{ predicate: 'all_have_nonempty_field', select: 'marketing_strategy', path: 'data.channel_mix' }],
     execution_config: {}, inputs: {}, runtime_context: {},
-    retry_policy: { owner: 'playbook', stage_attempt: 1, max_stage_attempts: 3, room_outer_replays: 0 },
   };
   const direct = runtimeStageEnvelope(request);
   assert.ok(direct.artifact_schemas, 'runtime-stage.v1 must carry artifact_schemas');
@@ -162,29 +158,4 @@ test('both envelopes carry the derived contract, so neither path can drift', asy
   const phase = roomPhaseEnvelope({ ...request, execution_config: { contract: 'room-phase.v1' } });
   assert.ok(phase.lifecycle.artifact_schemas, 'room-phase.v2 must carry artifact_schemas');
   assert.ok('strict_response_schema' in phase.lifecycle, 'room-phase.v2 must carry strict_response_schema');
-  assert.equal(direct.retry_policy.owner, 'playbook');
-  assert.equal(phase.lifecycle.retry_policy.owner, 'playbook');
-});
-
-test('MULTI-ARTIFACT DELIVERY GUARD: every producer sees every expected key and predicate selector', async () => {
-  const { roomPhaseEnvelope, runtimeStageEnvelope } = await import('../../src/runtime-playbooks/room-director.js');
-  let multiKeyStages = 0;
-  for (const { fixture, stage } of stages()) {
-    const expected = (stage.expected_artifacts || []).map(String);
-    if (expected.length > 1) multiKeyStages += 1;
-    const request = {
-      run_id: 'r', playbook_id: 'p', playbook_version: 1, stage_id: stage.id,
-      objective: stage.objective, expected_artifacts: expected, checks: stage.completion_checks,
-      execution_config: {}, inputs: {}, runtime_context: {}, retry_policy: { owner: 'playbook' },
-    };
-    for (const envelope of [runtimeStageEnvelope(request), roomPhaseEnvelope(request)]) {
-      const schemas = envelope.artifact_schemas || envelope.lifecycle?.artifact_schemas;
-      const selectors = (stage.completion_checks || []).flatMap((check) =>
-        (Array.isArray(check.select) ? check.select : [check.select]).filter(Boolean).map(String));
-      for (const key of new Set([...expected, ...selectors])) {
-        assert.ok(schemas?.[key], `${fixture}:${stage.id} ${envelope.contract} omitted contract for ${key}`);
-      }
-    }
-  }
-  assert.ok(multiKeyStages >= 5, `expected meaningful multi-artifact coverage, saw ${multiKeyStages}`);
 });

@@ -339,6 +339,14 @@ async function runInteractiveAction(entry, input) {
     const tree = await page.locator('body').ariaSnapshot();
     return { ok: true, snapshot: tree };
   }
+  if (action === 'extract') {
+    // Reuses the exact same DOM-read extractPage() /v1/crawl already relies
+    // on — pure read, no click/type involved. This is what turns "I can see
+    // the post grid in a screenshot" into "here are the 13 post URLs" once a
+    // scroll action has hydrated lazy-loaded content like a social grid.
+    const evidence = await extractPage(page, null, { source: 'interactive', depth: 0, discovered_from: null });
+    return { ok: true, ...evidence };
+  }
   throw Object.assign(new Error(`unknown_action: ${action}`), { status: 400 });
 }
 

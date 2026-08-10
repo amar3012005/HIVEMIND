@@ -147,6 +147,10 @@ test('explicit recall modes use the bounded context service and return a RecallP
         return ({
         memories: [{ id: 'm1', content: 'grounded fact' }],
         evidence: [{ segment_id: 's1', content: 'source quote' }],
+        ranked_candidates: [
+          { kind: 'evidence', segment_id: 's1', rank: 1, score: 0.96 },
+          { kind: 'memory', memory_id: 'm1', rank: 2, score: 0.91 },
+        ],
         live: [],
         trace: { cutoff_reason: null },
         });
@@ -161,6 +165,11 @@ test('explicit recall modes use the bounded context service and return a RecallP
   assert.equal(result.body.mode_used, 'explain');
   assert.equal(result.body.evidence_packet, packet);
   assert.equal(result.body.evidence_packet.citations[0].id, 'C1');
+  assert.deepEqual(result.body.results.map((row) => `${row.kind}:${row.id}`), [
+    'evidence:s1', 'memory:m1',
+  ]);
+  assert.equal(result.body.results[0].score, 0.96);
+  assert.equal(result.body.results[0].citation_id, 'evidence:s1');
   assert.deepEqual(forwardedOptions.source, {
     requested: true,
     document_id: 'doc-1',

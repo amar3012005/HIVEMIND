@@ -2,6 +2,9 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright';
 
@@ -12,6 +15,26 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.PLAYWRIGHT_CRAWL_CONCURRENCY || 2));
 const IDLE_CLOSE_MS = Math.max(10_000, Number(process.env.PLAYWRIGHT_BROWSER_IDLE_MS || 60_000));
 const NAVIGATION_TIMEOUT_MS = Math.max(3_000, Number(process.env.PLAYWRIGHT_NAVIGATION_TIMEOUT_MS || 15_000));
+
+// Named, pre-captured sessions (storageState JSON: cookies + localStorage) for
+// platforms that gate anonymous access — e.g. LinkedIn/X/Instagram. Captured
+// OUT OF BAND via local-login-capture/social-login-capture.mjs, which the user
+// runs on their own machine (real login, never handled here). Read-only reuse
+// only — this must never grow into a click/post/follow automation surface.
+const SESSIONS_DIR = process.env.PLAYWRIGHT_SESSIONS_DIR
+  || path.join(path.dirname(fileURLToPath(import.meta.url)), 'sessions');
+const SESSION_NAME_RE = /^[a-z0-9_-]{1,40}$/i;
+function sessionStatePath(name) {
+  if (!name || !SESSION_NAME_RE.test(name)) return null; // reject before touching the filesystem — no path traversal surface
+  const file = path.join(SESSIONS_DIR, `${name}.json`);
+  try {
+    // Refuse symlinks and non-files so a named session cannot escape the
+    // read-only mount even if the host directory is accidentally polluted.
+    return fs.lstatSync(file).isFile() ? file : null;
+  } catch {
+    return null;
+  }
+}
 
 let browserPromise = null;
 let idleTimer = null;
@@ -172,12 +195,27 @@ async function crawl(input) {
   // Homepage capture is opt-in so ordinary SEO crawls retain their compact
   // responses. Onboarding requests exactly one bounded browser visual.
   const captureScreenshot = Boolean(input.capture_screenshot);
+  // Optional named session (LinkedIn/X/Instagram). A requested session must
+  // resolve to a regular file. Falling back to anonymous would make callers
+  // believe an authenticated crawl ran when it actually hit a login wall.
+  const sessionName = typeof input.session === 'string' ? input.session : null;
+  if (sessionName && !SESSION_NAME_RE.test(sessionName)) {
+    throw Object.assign(new Error('invalid_session_name'), { status: 400 });
+  }
+  const sessionFile = sessionName ? sessionStatePath(sessionName) : null;
+  if (sessionName && !sessionFile) {
+    throw Object.assign(new Error('session_not_found'), { status: 409 });
+  }
   const queue = seeds.map((url, index) => ({ url, depth: 0, source: index ? 'sitemap' : 'seed', from: null }));
   const visited = new Set();
   const pages = [];
   const errors = [];
   const browser = await browserInstance();
-  const context = await browser.newContext({ serviceWorkers: 'block', userAgent: 'HIVEMIND-SEO-Renderer/1.0' });
+  const context = await browser.newContext({
+    serviceWorkers: 'block',
+    userAgent: 'HIVEMIND-SEO-Renderer/1.0',
+    ...(sessionFile ? { storageState: sessionFile } : {}),
+  });
   const hostPolicy = new Map();
   await context.route('**/*', async (route) => {
     const requestUrl = route.request().url();
@@ -222,7 +260,10 @@ async function crawl(input) {
   } finally {
     await context.close().catch(() => {});
   }
-  return { pages, errors, runtime_used: 'playwright-service' };
+  return {
+    pages, errors, runtime_used: 'playwright-service',
+    session_used: sessionFile ? sessionName : null,
+  };
 }
 
 const server = http.createServer(async (req, res) => {

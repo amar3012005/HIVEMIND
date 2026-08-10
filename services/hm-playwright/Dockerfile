@@ -9,6 +9,7 @@ RUN npm init -y >/dev/null 2>&1 \
     && npm i "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
     && npx "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" install-browser chrome-for-testing
 COPY server.mjs /app/server.mjs
+RUN mkdir -p /app/sessions
 EXPOSE 8931 8932
 # server.mjs keeps the existing isolated MCP endpoint on :8931 and adds a
 # scoped, lazy-browser crawl API on :8932 for deterministic SEO capabilities.

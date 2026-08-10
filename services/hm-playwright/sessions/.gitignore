@@ -1,0 +1,6 @@
+# Captured login sessions (storageState JSON: cookies + localStorage) land
+# here via scp from local-login-capture/social-login-capture.mjs. Each file
+# grants read access to a real account until it expires — treat exactly like
+# a password. NEVER remove this ignore rule, NEVER commit a session file.
+*.json
+!.gitignore

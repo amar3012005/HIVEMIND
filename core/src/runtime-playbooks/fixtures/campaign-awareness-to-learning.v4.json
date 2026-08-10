@@ -37,7 +37,7 @@
         {"predicate": "all_have_nonempty_field", "select": "campaign_record", "path": "data.room_id"}
       ],
       "waits_for_event": {"types": ["campaign.contract_ready", "campaign.contract_needs_repair", "campaign.contract_failed"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 1200},
-      "presentation": {"waiting": {"title": "Campaign contract is being prepared", "summary": "Campaign Intelligence is preparing the persisted contract before any launch decision.", "task_status": "RUNNING"}},
+      "presentation": {"waiting": {"title": "Campaign contract is being prepared", "summary": "Campaign Intelligence is preparing the persisted contract before any launch decision."}},
       "transitions": [{"default": true, "to_stage": "inspect_campaign_contract"}],
       "on_failure": "ESCALATE"
     },
@@ -71,7 +71,7 @@
         {"predicate": "all_have_nonempty_field", "select": "campaign_observation", "path": "data.correlation_ref"}
       ],
       "waits_for_event": {"types": ["campaign.contract_ready", "campaign.contract_needs_repair", "campaign.contract_failed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 1200},
-      "presentation": {"waiting": {"title": "Campaign contract is being repaired", "summary": "Campaign Intelligence retained the accepted dashboard and is repairing only rejected actions.", "task_status": "RUNNING"}},
+      "presentation": {"waiting": {"title": "Campaign contract is being repaired", "summary": "Campaign Intelligence retained the accepted dashboard and is repairing only rejected actions."}},
       "transitions": [{"default": true, "to_stage": "inspect_campaign_contract"}],
       "on_failure": "ESCALATE"
     },

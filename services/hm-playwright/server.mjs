@@ -24,9 +24,16 @@ const NAVIGATION_TIMEOUT_MS = Math.max(3_000, Number(process.env.PLAYWRIGHT_NAVI
 const SESSIONS_DIR = process.env.PLAYWRIGHT_SESSIONS_DIR
   || path.join(path.dirname(fileURLToPath(import.meta.url)), 'sessions');
 const SESSION_NAME_RE = /^[a-z0-9_-]{1,40}$/i;
-function sessionStatePath(name) {
+// Sessions are per-ORG, not global-per-platform: without this, tenant B
+// requesting session:"linkedin" would silently ride as tenant A's real,
+// authenticated identity — the first two people to use this on more than one
+// org would have hit it. orgId follows the same UUID shape used everywhere
+// else in this codebase (core/src/server.js route matchers: [0-9a-f-]{36}).
+const ORG_ID_RE = /^[0-9a-f-]{36}$/i;
+function sessionStatePath(orgId, name) {
+  if (!orgId || !ORG_ID_RE.test(orgId)) return null;
   if (!name || !SESSION_NAME_RE.test(name)) return null; // reject before touching the filesystem — no path traversal surface
-  const file = path.join(SESSIONS_DIR, `${name}.json`);
+  const file = path.join(SESSIONS_DIR, orgId, `${name}.json`);
   try {
     // Refuse symlinks and non-files so a named session cannot escape the
     // read-only mount even if the host directory is accidentally polluted.
@@ -195,14 +202,23 @@ async function crawl(input) {
   // Homepage capture is opt-in so ordinary SEO crawls retain their compact
   // responses. Onboarding requests exactly one bounded browser visual.
   const captureScreenshot = Boolean(input.capture_screenshot);
-  // Optional named session (LinkedIn/X/Instagram). A requested session must
-  // resolve to a regular file. Falling back to anonymous would make callers
-  // believe an authenticated crawl ran when it actually hit a login wall.
+  // Optional named session (LinkedIn/X/Instagram), scoped to the calling org.
+  // A requested session must resolve to a regular file under THAT org's own
+  // directory. Falling back to anonymous would make callers believe an
+  // authenticated crawl ran when it actually hit a login wall; falling back
+  // to another org's session would be a real cross-tenant identity leak.
   const sessionName = typeof input.session === 'string' ? input.session : null;
+  const orgId = typeof input.org_id === 'string' ? input.org_id : null;
   if (sessionName && !SESSION_NAME_RE.test(sessionName)) {
     throw Object.assign(new Error('invalid_session_name'), { status: 400 });
   }
-  const sessionFile = sessionName ? sessionStatePath(sessionName) : null;
+  if (sessionName && !orgId) {
+    throw Object.assign(new Error('org_id_required_for_session'), { status: 400 });
+  }
+  if (sessionName && !ORG_ID_RE.test(orgId)) {
+    throw Object.assign(new Error('invalid_org_id'), { status: 400 });
+  }
+  const sessionFile = sessionName ? sessionStatePath(orgId, sessionName) : null;
   if (sessionName && !sessionFile) {
     throw Object.assign(new Error('session_not_found'), { status: 409 });
   }

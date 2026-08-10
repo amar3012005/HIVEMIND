@@ -307,6 +307,31 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
 }
 
 /**
+ * Send a workspace invitation to the member and a separate confirmation to the
+ * inviting administrator. The confirmation never contains the invitation URL
+ * or token, so forwarding an admin receipt cannot grant workspace access.
+ */
+export async function sendTeamInvitationEmails({ memberEmail, adminEmail, vars = {} } = {}) {
+  const member = await sendSystemEmail({
+    templateId: 'team_invite',
+    to: memberEmail,
+    vars,
+  });
+  const admin = adminEmail
+    ? await sendSystemEmail({
+        templateId: 'team_invite_admin_confirmation',
+        to: adminEmail,
+        vars: {
+          ...vars,
+          inviteeEmail: memberEmail,
+          deliveryState: member.ok ? (member.deliveryStatus || 'accepted') : 'failed',
+        },
+      })
+    : { ok: false, skipped: true, error: 'no_admin_email' };
+  return { member, admin };
+}
+
+/**
  * Send the same template to many recipients, throttled to respect Gmail's
  * send quota. Sequential with a per-message delay (not parallel) — keeps us
  * well under rate limits and avoids burst spam-flagging. Never throws.

@@ -10,7 +10,7 @@ const originalEnv = {
   SYSTEM_EMAIL_FROM: process.env.SYSTEM_EMAIL_FROM,
 };
 
-const { sendSystemEmail } = await import('../../src/email/email-service.js');
+const { sendSystemEmail, sendTeamInvitationEmails } = await import('../../src/email/email-service.js');
 
 function setEnv(values) {
   for (const key of Object.keys(originalEnv)) {
@@ -70,4 +70,34 @@ test('no configured provider fails safely without attempting a network call', as
   global.fetch = async () => { throw new Error('network must not run'); };
   const result = await sendSystemEmail({ templateId: 'welcome_login', to: 'owner@example.com' });
   assert.deepEqual(result, { ok: false, skipped: true, error: 'no_email_provider' });
+});
+
+test('team invitation sends the secure link only to the member and a separate admin confirmation', async () => {
+  setEnv({
+    CLOUDFLARE_EMAIL_API_TOKEN: 'unit-token',
+    CLOUDFLARE_ACCOUNT_ID: 'unit-account',
+    CLOUDFLARE_EMAIL_FROM: 'Singulance Support <support@singulancelabs.com>',
+  });
+  const messages = [];
+  global.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    messages.push(body);
+    return new Response(JSON.stringify({ success: true, result: { delivered: [], queued: [body.to], permanent_bounces: [] } }), { status: 200 });
+  };
+  const result = await sendTeamInvitationEmails({
+    memberEmail: 'member@example.com',
+    adminEmail: 'admin@example.com',
+    vars: {
+      orgName: 'Example Org', inviterName: 'Admin',
+      joinUrl: 'https://next.example.test/secret-invite', expiresOn: 'Aug 20, 2026',
+    },
+  });
+  assert.equal(result.member.ok, true);
+  assert.equal(result.admin.ok, true);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].to, 'member@example.com');
+  assert.match(messages[0].html, /secret-invite/);
+  assert.equal(messages[1].to, 'admin@example.com');
+  assert.doesNotMatch(messages[1].html, /secret-invite/);
+  assert.match(messages[1].html, /member@example\.com/);
 });

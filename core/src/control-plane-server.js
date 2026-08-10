@@ -84,7 +84,7 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { renderTemplate, sendSystemEmail, sendSystemEmailBatch } from './email/email-service.js';
+import { renderTemplate, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails } from './email/email-service.js';
 import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
@@ -2041,7 +2041,7 @@ async function upsertUserFromZitadel(userInfo) {
     return updated;
   }
 
-  return prisma.user.create({
+  const created = await prisma.user.create({
     data: {
       zitadelUserId: userInfo.sub,
       email: userInfo.email,
@@ -2051,6 +2051,19 @@ async function upsertUserFromZitadel(userInfo) {
       lastActiveAt: new Date()
     }
   });
+  const firstName = (created.displayName || created.email?.split('@')[0] || 'there').split(' ')[0];
+  sendSystemEmail({
+    templateId: 'welcome_signup',
+    to: created.email,
+    vars: { name: firstName, email: created.email },
+  }).then((delivery) => {
+    if (!delivery.ok) {
+      console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'signup_welcome_failed', userId: created.id, error: delivery.error }));
+    }
+  }).catch((error) => {
+    console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'signup_welcome_failed', userId: created.id, error: error.message }));
+  });
+  return created;
 }
 
 function resolveCoreTarget(req, org = null) {
@@ -4285,6 +4298,9 @@ const server = http.createServer(async (req, res) => {
     // dedup above already prevents repeats.
     const ageMs = user.createdAt ? Date.now() - new Date(user.createdAt).getTime() : Infinity;
     const isNewAccount = ageMs < 15 * 60 * 1000;
+    if (isNewAccount) {
+      return jsonResponse(res, { ok: true, template: 'welcome_signup', deduped: true, source: 'user_creation' });
+    }
     const templateId = isNewAccount ? 'welcome_signup' : 'welcome_login';
     // Don't await the send — return immediately so login UX is never delayed.
     sendSystemEmail({
@@ -4665,16 +4681,18 @@ const server = http.createServer(async (req, res) => {
           },
         });
         const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
-        let emailOk = false; let emailError = null;
+        let emailOk = false; let emailError = null; let adminEmailOk = false;
         try {
-          await sendSystemEmail({
-            templateId: 'team_invite',
-            to: email,
+          const delivery = await sendTeamInvitationEmails({
+            memberEmail: email,
+            adminEmail: inviter?.email,
             vars: { orgName, inviterName, joinUrl, expiresOn },
           });
-          emailOk = true;
+          emailOk = Boolean(delivery.member?.ok);
+          adminEmailOk = Boolean(delivery.admin?.ok);
+          emailError = delivery.member?.ok ? null : delivery.member?.error || 'delivery_failed';
         } catch (mailErr) { emailError = mailErr.message; }
-        results.push({ email, status: 'invited', invite_id: invite.id, join_url: joinUrl, email_sent: emailOk, ...(emailError ? { email_error: emailError } : {}) });
+        results.push({ email, status: 'invited', invite_id: invite.id, join_url: joinUrl, email_sent: emailOk, admin_confirmation_sent: adminEmailOk, ...(emailError ? { email_error: emailError } : {}) });
         audit({
           organizationId: orgId, userId: current.session.userId,
           eventType: 'org.invite_created', eventCategory: 'org', action: 'create',
@@ -4789,9 +4807,9 @@ const server = http.createServer(async (req, res) => {
           where: { id: current.session.userId },
           select: { email: true, displayName: true },
         }).catch(() => null);
-        await sendSystemEmail({
-          templateId: 'team_invite',
-          to: inviteEmail,
+        const delivery = await sendTeamInvitationEmails({
+          memberEmail: inviteEmail,
+          adminEmail: inviter?.email,
           vars: {
             orgName: membership.org.name || 'your team',
             inviterName: inviter?.displayName || inviter?.email || 'your admin',
@@ -4799,7 +4817,14 @@ const server = http.createServer(async (req, res) => {
             expiresOn: expiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
           },
         });
-        emailReport = { attempted: true, ok: true };
+        emailReport = {
+          attempted: true,
+          ok: Boolean(delivery.member?.ok),
+          provider: delivery.member?.provider || null,
+          delivery_status: delivery.member?.deliveryStatus || null,
+          admin_confirmation_sent: Boolean(delivery.admin?.ok),
+          ...(delivery.member?.ok ? {} : { error: delivery.member?.error || 'delivery_failed' }),
+        };
       } catch (mailErr) {
         emailReport = { attempted: true, ok: false, error: mailErr.message };
       }
@@ -5018,9 +5043,9 @@ const server = http.createServer(async (req, res) => {
         where: { id: current.session.userId },
         select: { email: true, displayName: true },
       }).catch(() => null);
-      await sendSystemEmail({
-        templateId: 'team_invite',
-        to: invite.email,
+      const delivery = await sendTeamInvitationEmails({
+        memberEmail: invite.email,
+        adminEmail: inviter?.email,
         vars: {
           orgName: membership.org.name || 'your team',
           inviterName: inviter?.displayName || inviter?.email || 'your admin',
@@ -5028,7 +5053,14 @@ const server = http.createServer(async (req, res) => {
           expiresOn: newExpiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
         },
       });
-      dispatch = { attempted: true, ok: true };
+      dispatch = {
+        attempted: true,
+        ok: Boolean(delivery.member?.ok),
+        provider: delivery.member?.provider || null,
+        delivery_status: delivery.member?.deliveryStatus || null,
+        admin_confirmation_sent: Boolean(delivery.admin?.ok),
+        ...(delivery.member?.ok ? {} : { error: delivery.member?.error || 'delivery_failed' }),
+      };
     } catch (mailErr) {
       dispatch = { attempted: true, ok: false, error: mailErr.message };
     }

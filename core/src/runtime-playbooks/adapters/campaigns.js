@@ -97,6 +97,14 @@ function statusArtifact(context, key, campaign, extra = {}) {
   };
 }
 
+export function projectCampaignContractState({ status, assetsReady, repairExhausted, preparationOnly }) {
+  if (status === 'READY_FOR_APPROVAL' && assetsReady) return preparationOnly ? 'reviewed' : 'ready';
+  if (status === 'READY_FOR_APPROVAL') return 'waiting_assets';
+  if (status === 'NEEDS_REPAIR') return repairExhausted ? 'needs_input' : 'needs_repair';
+  if (['NEEDS_INPUT', 'FAILED', 'CANCELLED'].includes(status)) return 'needs_input';
+  return 'preparing';
+}
+
 export function createCampaignRuntimeAdapter({ prisma } = {}) {
   if (!prisma) throw new Error('runtime_campaign_prisma_required');
   return {
@@ -228,13 +236,13 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
         }) : [];
       const repairAttempts = repairPlans.length;
       const repairExhausted = repairPlans[0]?.validation?.repair_exhausted === true || repairAttempts >= 3;
+      const request = asObject(value(input, 'context.request'));
+      const preparationOnly = request.external_action_requested !== true;
       const requiredAssets = actions.filter((item) => item.payload?.creative_brief?.required === true);
       const assetsReady = requiredAssets.every((item) => item.payload?.asset_id);
-      const contractState = campaign.status === 'READY_FOR_APPROVAL' && assetsReady ? 'ready'
-        : campaign.status === 'READY_FOR_APPROVAL' ? 'waiting_assets'
-          : campaign.status === 'NEEDS_REPAIR' && repairExhausted ? 'needs_input'
-            : campaign.status === 'NEEDS_REPAIR' ? 'needs_repair'
-            : ['NEEDS_INPUT', 'FAILED', 'CANCELLED'].includes(campaign.status) ? 'needs_input' : 'preparing';
+      const contractState = projectCampaignContractState({
+        status: campaign.status, assetsReady, repairExhausted, preparationOnly,
+      });
       return { artifacts: [statusArtifact(context, 'campaign_status', campaign, {
         contract_state: contractState, action_count: actions.length, repair_attempt_count: repairAttempts,
         required_asset_count: requiredAssets.length,

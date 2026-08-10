@@ -59,6 +59,35 @@ test('recipient output contract resolves one address and rejects ambiguity', () 
   assert.deepEqual(many.candidates, ['one@example.com', 'two@example.com']);
 });
 
+test('a successful connector envelope with null provider data fails safely', () => {
+  const result = validateSemanticStepOutput('record', null);
+  assert.equal(result.status, 'failed');
+  assert.match(result.error, /returned no result data/i);
+  assert.deepEqual(result.outputFields, {});
+});
+
+test('compound connector read reports null provider data without throwing', async () => {
+  const composio = makeComposio({
+    tools: [{ name: 'composio_instagram_list_posts', slug: 'INSTAGRAM_GET_IG_USER_MEDIA', description: 'list posts' }],
+    executeImpl: async () => ({ successful: true, data: null, error: null }),
+  });
+  const result = await runCompoundOrchestrator({
+    subtasks: [{
+      operation: 'list_posts', authority: 'read', output_kind: 'record',
+      tool_groups: ['instagram'], message: 'list all posts',
+    }],
+    ctx: { userId: 'u1', orgId: 'o1', _trace: { traceId: 'instagram-null' } },
+    apiKey: 'k', composio,
+    selectTool: makeSelector(() => ({
+      toolName: 'composio_instagram_list_posts', args: { ig_user_id: 'me', limit: 100 },
+      schema: { properties: { ig_user_id: { type: 'string' }, limit: { type: 'integer' } } },
+    })),
+  });
+  assert.equal(result.status, 'error');
+  assert.equal(result.steps[0].status, 'failed');
+  assert.match(result.steps[0].summary, /returned no result data/i);
+});
+
 test('email destination normalization rejects display names and uses one governed lookup address', () => {
   const schema = {
     type: 'object', required: ['recipient_email'],
@@ -415,6 +444,9 @@ test('human-input summaries explain progress, safety pause, and resumability', (
 
 test('tool input policy requires complete grounded content instead of placeholders', () => {
   const prompt = buildToolInputSystemPrompt();
+  assert.match(prompt, /fields needed to answer the full instruction/i);
+  assert.match(prompt, /largest safe bounded page/i);
+  assert.match(prompt, /Do not add a content filter/i);
   assert.match(prompt, /complete useful final content/);
   assert.match(prompt, /never substitute a generic placeholder/);
   assert.match(prompt, /Do not execute/);

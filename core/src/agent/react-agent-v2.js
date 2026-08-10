@@ -32,7 +32,7 @@ import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalati
 import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
 import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
-import { chooseSynthesisModel, isCandidateSynthesisAcceptable, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
+import { chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
 import {
@@ -169,14 +169,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
   }
   const data = await resp.json();
   const raw = data.choices?.[0]?.message?.content || '{}';
-  let parsed;
-  try { parsed = JSON.parse(raw); }
-  catch {
-    // Recover by extracting the first {...} block.
-    const m = raw.match(/\{[\s\S]+\}/);
-    parsed = m ? JSON.parse(m[0]) : {};
-  }
-  return { parsed, usage: data.usage };
+  return { parsed: parseJsonObjectContent(raw), usage: data.usage };
 }
 
 // ── STEP 1 — quick direct-answer for greetings / smalltalk / self-Q ───

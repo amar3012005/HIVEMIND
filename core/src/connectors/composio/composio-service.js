@@ -256,9 +256,10 @@ export async function createConnectLink(toolkitSlug, orgId, opts = {}) {
  * @returns {Promise<{ successful: boolean, data: any, error: string|null }>}
  */
 export async function executeTool(orgId, toolSlug, args = {}) {
-  const result = await composioPost(`/api/v3/tools/execute/${encodeURIComponent(toolSlug)}`, {
+  const result = await composioPost(`/api/v3.1/tools/execute/${encodeURIComponent(toolSlug)}`, {
     user_id: orgId,
     arguments: args || {},
+    version: 'latest',
   });
   return {
     successful: Boolean(result?.successful),

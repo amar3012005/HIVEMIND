@@ -42,6 +42,17 @@ function valueMatches(field, value) {
   return typeof value === field.type;
 }
 
+function selectionRequirementsSatisfied(playbook, context) {
+  const requirements = asObject(playbook?.metadata?.selection_requirements);
+  const exactTargets = Array.isArray(asObject(context).request?.exact_targets)
+    ? asObject(context).request.exact_targets.filter(Boolean) : [];
+  const minimum = Number(requirements.min_exact_targets);
+  const maximum = Number(requirements.max_exact_targets);
+  if (Number.isInteger(minimum) && minimum >= 0 && exactTargets.length < minimum) return false;
+  if (Number.isInteger(maximum) && maximum >= 0 && exactTargets.length > maximum) return false;
+  return true;
+}
+
 function bindContext(playbook, selected, context) {
   const fields = playbook.input_contract?.fields || [];
   if (!fields.length) return null;
@@ -80,9 +91,8 @@ export class DirectorPlaybookSelector {
   }
 
   async select({ objective, context = {}, scopeKey = 'global' } = {}) {
-    // The upstream Director has already selected the accountable Room from the
-    // complete company catalog. Keep lifecycle selection inside that ownership
-    // boundary so a missing playbook cannot silently substitute another Room.
+    // Runtime selects a lifecycle from the complete catalog, then derives the
+    // accountable Company Room from immutable playbook metadata.
     const active = this.registry.descriptors({ scopeKey }).filter((entry) => entry.status === 'ACTIVE');
     // New assignments always use the newest active version. Existing runs remain
     // pinned to their immutable version through RuntimePlaybookRun.
@@ -106,6 +116,7 @@ export class DirectorPlaybookSelector {
       catalog = catalog.filter((entry) => entry.playbook_id === requested.playbook_id
         && (requested.playbook_version == null || entry.version === Number(requested.playbook_version)));
     }
+    catalog = catalog.filter((entry) => selectionRequirementsSatisfied(entry, context));
     if (catalog.length === 0) throw new Error('runtime_playbook_catalog_empty');
     let previousError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -119,7 +130,7 @@ export class DirectorPlaybookSelector {
           messages: [
             {
               role: 'system',
-              content: 'Select one executable playbook from the supplied registry only when its complete lifecycle and metadata directly implement the exact requested action and terminal outcome. The objective may be written in any language. Prioritize request.requested_action and request.acceptance_criteria over a merely related business outcome. A lifecycle that can facilitate an upstream or downstream result is not compatible unless its supported_actions directly include the requested provider effect. The upstream Director has already selected the accountable Room, so every supplied playbook is inside that ownership boundary. Never infer an identifier that is absent from the registry. Return matched_supported_action as one exact value from the selected playbook metadata.supported_actions. Return acceptable_terminal_states as a non-empty subset of the selected playbook terminal_states that genuinely satisfy the original request; a prepared state cannot satisfy a requested external delivery. Bind only declared input_contract fields from the objective and supplied context, keyed by exact field path. If none fits, return {"playbook_id":null,"version":null,"reason":"brief reason"}. Otherwise return {"playbook_id":"exact registry id","version":integer,"matched_supported_action":"exact supported action","reason":"brief evidence-based reason","acceptable_terminal_states":["exact terminal"],"bindings":{"declared.path":value}}. Return one complete JSON object only.',
+              content: 'Select one executable playbook from the supplied registry only when its complete lifecycle and metadata directly implement the exact requested action and terminal outcome. The objective may be written in any language. Runtime, not the task-producing Room, owns this selection and derives the accountable Company Room from the chosen playbook. Prioritize request.requested_action and request.acceptance_criteria over a merely related business outcome. A lifecycle that can facilitate an upstream or downstream result is not compatible unless its supported_actions directly include the requested provider effect. Never infer an identifier that is absent from the registry. Return matched_supported_action as one exact value from the selected playbook metadata.supported_actions. Return acceptable_terminal_states as a non-empty subset of the selected playbook terminal_states that genuinely satisfy the original request; a prepared state cannot satisfy a requested external delivery. Bind only declared input_contract fields from the objective and supplied context, keyed by exact field path. If none fits, return {"playbook_id":null,"version":null,"reason":"brief reason"}. Otherwise return {"playbook_id":"exact registry id","version":integer,"matched_supported_action":"exact supported action","reason":"brief evidence-based reason","acceptable_terminal_states":["exact terminal"],"bindings":{"declared.path":value}}. Return one complete JSON object only.',
             },
             { role: 'user', content: JSON.stringify({
               objective: String(objective || '').slice(0, 8000), context, playbooks: catalog,

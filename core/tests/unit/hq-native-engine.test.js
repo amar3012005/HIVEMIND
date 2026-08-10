@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -65,6 +65,12 @@ test('admin check-in result wakes can auto-start the durable internal bootstrap'
   assert.equal(shouldAutoStartFirstLifeBootstrap({
     activationStatus: 'READY', policy: { auto_start_internal_bootstrap: false }, todo,
   }), false);
+});
+
+test('only a policy-created bootstrap may retain a preselected lifecycle', () => {
+  assert.equal(isPolicyBootstrapTodo({ context: { proposal_origin: 'first_life_bootstrap', planned_playbook_id: 'marketing.strategy-to-growth-brief' } }), true);
+  assert.equal(isPolicyBootstrapTodo({ context: { proposal_origin: 'strategy_program', planned_playbook_id: 'outreach.direct-message' } }), false);
+  assert.equal(isPolicyBootstrapTodo({ context: { proposal_origin: 'user_instruction' } }), false);
 });
 
 test('first-life fallback narration does not require a Growth Plan artifact', () => {

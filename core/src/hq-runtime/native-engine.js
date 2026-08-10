@@ -106,6 +106,10 @@ export function shouldAutoStartFirstLifeBootstrap({ activationStatus, policy, to
     && Number.isInteger(Number(todo.context?.planned_playbook_version));
 }
 
+export function isPolicyBootstrapTodo(todo = {}) {
+  return String(todo?.context?.proposal_origin || '') === 'first_life_bootstrap';
+}
+
 export function operatingDecisionEvidenceRefs(evidence = {}) {
   return [evidence?.baseline?.id, evidence?.latest_growth_plan?.id].filter(Boolean);
 }
@@ -1030,6 +1034,7 @@ export class NativeHqEngine {
           purpose: entry.metadata?.purpose || entry.description || '',
           terminal_states: entry.terminal_states,
         }));
+      const policyBootstrap = isPolicyBootstrapTodo(readyTodo);
       const lifecycleContext = {
         mode: readyTodo.context?.execution_mode || null,
         company: compactCompanyOperatingContext(context.company),
@@ -1058,21 +1063,29 @@ export class NativeHqEngine {
           instruction_id: readyTodo.instructionId || null,
         },
         request: {
-          owner_room_tag: String(readyTodo.context?.room_tag || readyTodo.kind || '').trim().toLowerCase() || null,
-          instruction: readyTodo.context?.source_instruction || readyTodo.objective,
+          owner_room_tag: policyBootstrap
+            ? String(readyTodo.context?.room_tag || readyTodo.kind || '').trim().toLowerCase() || null
+            : null,
+          instruction: readyTodo.objective,
           objective: readyTodo.objective,
-          requested_action: readyTodo.context?.requested_action || 'complete_requested_outcome',
-          requested_terminal_outcome: readyTodo.context?.requested_terminal_outcome || 'completed_as_requested',
-          playbook_id: readyTodo.context?.planned_playbook_id || null,
-          playbook_version: readyTodo.context?.planned_playbook_version || null,
+          // A direct user instruction may retain its requested effect as input to
+          // Runtime selection. A Company Room proposal never gets to carry one.
+          requested_action: policyBootstrap || readyTodo.context?.proposal_origin === 'user_instruction'
+            ? readyTodo.context?.requested_action || null : null,
+          requested_terminal_outcome: readyTodo.context?.requested_terminal_outcome || readyTodo.context?.expected_outcome || 'completed_as_requested',
+          playbook_id: policyBootstrap ? readyTodo.context?.planned_playbook_id || null : null,
+          playbook_version: policyBootstrap ? readyTodo.context?.planned_playbook_version || null : null,
           external_action_requested: readyTodo.context?.external_action_requested === true || readyTodo.context?.authority_mode === 'EXECUTE',
-          exact_targets: Array.isArray(readyTodo.context?.exact_targets) ? readyTodo.context.exact_targets : [],
+          exact_targets: Array.isArray(readyTodo.context?.exact_targets)
+            ? readyTodo.context.exact_targets
+            : Array.isArray(readyTodo.context?.suggested_targets) ? readyTodo.context.suggested_targets : [],
           acceptance_criteria: readyTodo.context?.acceptance_criteria || [],
         },
       };
       let selectionError = null;
       let selectedLifecycle = null;
-      if (this.runtimePlaybooks && readyTodo.context?.planned_playbook_id && readyTodo.context?.planned_playbook_version) {
+      if (this.runtimePlaybooks && policyBootstrap
+        && readyTodo.context?.planned_playbook_id && readyTodo.context?.planned_playbook_version) {
         try {
           const declared = this.runtimePlaybooks.registry.get(
             readyTodo.context.planned_playbook_id,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const fixtureUrl = new URL('../../src/runtime-playbooks/fixtures/marketing-strategy-to-growth-brief.v5.json', import.meta.url);
+const runtimeOwnedFixtureUrl = new URL('../../src/runtime-playbooks/fixtures/marketing-strategy-to-growth-brief.v6.json', import.meta.url);
 
 test('marketing v5 performs one Room synthesis and deterministic materialization', async () => {
   const playbook = JSON.parse(await readFile(fixtureUrl, 'utf8'));
@@ -30,4 +31,15 @@ test('marketing v5 requires strategy depth and an executable portfolio in the sa
     'data.evidence_summary', 'data.niche_wedge', 'data.positioning', 'data.audience',
     'data.offer_framing', 'data.messaging_pillars', 'data.channel_mix', 'data.measures', 'data.motions',
   ]) assert.ok(paths.has(path), `missing completion check for ${path}`);
+});
+
+test('marketing v6 keeps business proposals provider-neutral for Runtime assignment', async () => {
+  const playbook = JSON.parse(await readFile(runtimeOwnedFixtureUrl, 'utf8'));
+  const objective = playbook.stages.find((stage) => stage.id === 'form_strategy_program').objective;
+
+  assert.equal(playbook.version, 6);
+  assert.equal(playbook.stages.find((stage) => stage.id === 'materialize_strategy_program')
+    .execution.config.first_life_policy_version, 8);
+  assert.match(objective, /Runtime task proposals/i);
+  assert.match(objective, /Do not select a playbook, Company Room, provider, channel, or supported action/i);
 });

@@ -1,0 +1,80 @@
+{
+  "playbook_id": "outreach.direct-message",
+  "version": 2,
+  "status": "ACTIVE",
+  "name": "Direct message delivery",
+  "description": "Prepare and govern one or more messages for exact recipients already supplied by the operator, without prospect rediscovery.",
+  "metadata": {
+    "owner_room_tag": "outreach",
+    "supported_actions": ["prepare_message", "deliver_message"],
+    "unsupported_actions": ["discover_prospects", "place_voice_call"],
+    "selection_requirements": {"min_exact_targets": 1},
+    "purpose": "Use only when exact recipients are supplied and the requested work is message preparation or delivery."
+  },
+  "input_contract": {
+    "fields": [
+      { "path": "constraints.delivery_requested", "type": "boolean", "description": "Whether the requested terminal outcome requires provider delivery.", "required": true, "default_value": false }
+    ]
+  },
+  "initial_stage_id": "prepare_message",
+  "terminal_states": ["prepared", "delivered", "no_deliverable_recipients"],
+  "stages": [
+    {
+      "id": "prepare_message",
+      "objective": "Prepare the exact requested message for every supplied recipient using relevant company context and retained evidence. Do not discover unrelated recipients and do not send from the Room.",
+      "input_refs": ["trigger.payload", "context.company", "context.baseline", "context.request", "context.target", "context.constraints"],
+      "expected_artifacts": ["message_record"],
+      "execution": { "mode": "room", "config": { "contract": "room-phase.v1", "phase_kind": "prepare" } },
+      "completion_checks": [
+        { "predicate": "has_min_count", "select": "message_record", "value": 1 },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.recipient" },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.subject" },
+        { "predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.body" }
+      ],
+      "transitions": [{ "default": true, "to_stage": "prepare_provider_drafts" }],
+      "on_failure": "REPAIR",
+      "max_attempts": 2
+    },
+    {
+      "id": "prepare_provider_drafts",
+      "objective": "Create one provider draft for every accepted message and retain an independent terminal outcome for every input.",
+      "input_refs": ["artifacts.message_record"],
+      "expected_artifacts": ["draft_record", "draft_rejection", "draft_uncertain"],
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": { "action": "prepare_drafts", "input_key": "message_record", "output_key": "draft_record", "rejection_key": "draft_rejection", "uncertain_key": "draft_uncertain" } },
+      "completion_checks": [
+        { "predicate": "references_cover_all", "select": ["draft_record", "draft_rejection", "draft_uncertain"], "path": "data.input_ref", "target_select": "message_record", "target_path": "id" },
+        { "predicate": "has_max_count", "select": "draft_uncertain", "value": 0 },
+        { "predicate": "has_min_count", "select": "draft_record", "value": 0 },
+        { "predicate": "has_min_count", "select": "draft_rejection", "value": 0 }
+      ],
+      "verifications": [{ "adapter_id": "gmail", "operation": "verify", "select": "draft_record" }],
+      "transitions": [
+        { "when": { "predicate": "has_max_count", "select": "draft_record", "value": 0 }, "to_terminal": "no_deliverable_recipients" },
+        { "when": { "predicate": "field_equals", "select": "draft_record", "path": "data.delivery_requested", "value": false, "mode": "all" }, "to_terminal": "prepared" },
+        { "default": true, "to_stage": "deliver_message" }
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "deliver_message",
+      "objective": "Deliver each exact authority-approved draft independently and retain its provider outcome.",
+      "input_refs": ["artifacts.draft_record"],
+      "expected_artifacts": ["delivery_receipt", "delivery_rejection", "delivery_uncertain"],
+      "authority_gate": "external_write",
+      "authority_policy_key": "outbound_messages",
+      "authority_binding": "stage_inputs",
+      "execution": { "mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": { "action": "deliver", "input_key": "draft_record", "output_key": "delivery_receipt", "rejection_key": "delivery_rejection", "uncertain_key": "delivery_uncertain" } },
+      "completion_checks": [
+        { "predicate": "references_cover_all", "select": ["delivery_receipt", "delivery_rejection", "delivery_uncertain"], "path": "data.input_ref", "target_select": "draft_record", "target_path": "id" },
+        { "predicate": "has_max_count", "select": "delivery_uncertain", "value": 0 },
+        { "predicate": "has_min_count", "select": "delivery_receipt", "value": 0 },
+        { "predicate": "has_min_count", "select": "delivery_rejection", "value": 0 }
+      ],
+      "transitions": [
+        { "when": { "predicate": "has_max_count", "select": "delivery_receipt", "value": 0 }, "to_terminal": "no_deliverable_recipients" },
+        { "default": true, "to_terminal": "delivered" }
+      ],
+      "on_failure": "ESCALATE"
+    }
+  ]
+}

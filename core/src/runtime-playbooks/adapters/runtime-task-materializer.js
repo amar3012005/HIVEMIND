@@ -3,15 +3,22 @@ import crypto from 'node:crypto';
 const asArray = (value) => (Array.isArray(value) ? value : []);
 const asObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
 
+const ASSIGNMENT_CONTRACT_VERSION = 2;
+
 function stableKey(...parts) {
-  return `strategy-motion:${crypto.createHash('sha256').update(parts.map(String).join('\u0000')).digest('hex')}`;
+  return `runtime-task-proposal:v${ASSIGNMENT_CONTRACT_VERSION}:${crypto.createHash('sha256').update(parts.map(String).join('\u0000')).digest('hex')}`;
 }
 
 function reject(motion, reason) {
   return { motion_id: String(motion?.motion_id || ''), reason };
 }
 
-export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () => null } = {}) {
+function proposalIsComplete(motion) {
+  return ['motion_id', 'title', 'objective', 'reason', 'expected_outcome', 'success_measure']
+    .every((field) => String(motion?.[field] || '').trim().length > 0);
+}
+
+export function createRuntimeTaskMaterializerAdapter({ prisma } = {}) {
   if (!prisma) throw new Error('runtime_task_materializer_prisma_required');
   return {
     id: 'runtime-task-materializer',
@@ -26,8 +33,6 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
       const motions = asArray(portfolio.data?.motions).slice(0, 4);
       if (motions.length < 2) throw new Error('runtime_task_materializer_minimum_motions_required');
 
-      const service = getService();
-      if (!service?.registry) throw new Error('runtime_task_materializer_registry_unavailable');
       const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: context.runId, orgId: context.orgId } });
       if (!run) throw new Error('runtime_task_materializer_run_not_found');
       const runPolicyVersion = Number(asObject(run.context).policy?.first_life_policy_version);
@@ -57,36 +62,13 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
         for (const [index, raw] of motions.entries()) {
           const motion = asObject(raw);
           const motionId = String(motion.motion_id || '').trim();
-          const playbookId = String(motion.playbook_id || '').trim();
-          const version = Number(motion.playbook_version);
-          const supportedAction = String(motion.supported_action || '').trim();
           const evidenceRefs = asArray(motion.evidence_refs).map(String).filter(Boolean);
-          if (!motionId || !playbookId || !Number.isInteger(version) || !supportedAction) {
-            rejected.push(reject(motion, 'identity_or_lifecycle_fields_missing')); continue;
+          if (!motionId || !proposalIsComplete(motion)) {
+            rejected.push(reject(motion, 'runtime_task_proposal_fields_missing')); continue;
           }
           if (!evidenceRefs.length || evidenceRefs.some((ref) => !sourceRefs.has(ref))) {
             rejected.push(reject(motion, 'evidence_reference_not_in_strategy_lineage')); continue;
           }
-          let playbook;
-          try {
-            playbook = service.registry.get(playbookId, version, { scopeKey: run.scopeKey });
-          } catch {
-            rejected.push(reject(motion, 'playbook_version_unavailable')); continue;
-          }
-          if (playbookId === run.playbookId
-            && version === Number(run.playbookVersion)
-            && playbook.metadata?.allow_recursive_children !== true) {
-            rejected.push(reject(motion, 'recursive_playbook_not_allowed')); continue;
-          }
-          const supported = asArray(playbook.metadata?.supported_actions).map(String);
-          const roomTag = String(playbook.metadata?.owner_room_tag || '').trim().toLowerCase();
-          if (!supported.includes(supportedAction) || !roomTag) {
-            rejected.push(reject(motion, 'action_or_room_not_supported')); continue;
-          }
-          const room = await tx.hyperRoom.findFirst({
-            where: { orgId: context.orgId, archivedAt: null, roomTag }, select: { id: true },
-          });
-          if (!room) { rejected.push(reject(motion, 'owner_room_unavailable')); continue; }
 
           const materializationKey = stableKey(context.runId, portfolio.id, motionId);
           let todo = await tx.hqTodo.findFirst({
@@ -99,13 +81,14 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
               instructionId: trigger.instruction_id || null,
               title: String(motion.title || motionId).slice(0, 240),
               objective: String(motion.objective || motion.expected_outcome || motion.title || motionId),
-              kind: roomTag.slice(0, 60),
+              kind: 'runtime_task',
               status: 'PROPOSED',
               priority: Number.isFinite(Number(motion.priority)) ? Number(motion.priority) : index + 1,
               position: index,
               requiredCapabilities: asArray(motion.required_capabilities),
               context: {
                 strategy_motion_key: materializationKey,
+                assignment_contract_version: ASSIGNMENT_CONTRACT_VERSION,
                 strategy_run_id: context.runId,
                 strategy_stage_id: context.stageId,
                 strategy_artifact_id: strategy?.id || null,
@@ -118,18 +101,16 @@ export function createRuntimeTaskMaterializerAdapter({ prisma, getService = () =
                 activation_sprint_id: `strategy-program:${context.runId}`,
                 recommendation_rank: index + 1,
                 recommended: index === 0,
-                room_tag: roomTag,
                 effect_class: motion.effect_class === 'external' ? 'external' : 'internal',
                 external_action_requested: motion.effect_class === 'external',
-                planned_playbook_id: playbookId,
-                planned_playbook_version: version,
-                requested_action: supportedAction,
-                requested_terminal_outcome: String(motion.expected_outcome || supportedAction),
+                requested_terminal_outcome: String(motion.expected_outcome),
                 expected_outcome: motion.expected_outcome || null,
                 success_measure: motion.success_measure || null,
                 dependencies: asArray(motion.dependencies),
                 evidence_refs: evidenceRefs,
-                source_instruction: String(asObject(run.context).request?.instruction || motion.objective || ''),
+                suggested_targets: asArray(motion.exact_targets),
+                source_instruction: String(motion.objective),
+                strategy_source_instruction: String(asObject(run.context).request?.instruction || ''),
               },
             } });
           }

@@ -685,6 +685,55 @@ test('Director may decline every registered playbook instead of forcing a bad fi
   assert.equal(calls.length, 1, 'selection must still use the Director when one playbook is registered');
 });
 
+test('Director excludes a lifecycle whose generic exact-target requirement is unmet', async () => {
+  const fixture = await loadFixture();
+  fixture.metadata = {
+    ...(fixture.metadata || {}),
+    owner_room_tag: 'outreach',
+    supported_actions: ['prepare_message'],
+    selection_requirements: { min_exact_targets: 1 },
+  };
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(fixture);
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => { throw new Error('selector must not receive an ineligible lifecycle'); },
+  });
+  await assert.rejects(() => selector.select({
+    objective: 'Prepare a message for a future audience.',
+    context: { request: { exact_targets: [] } },
+  }), /runtime_playbook_catalog_empty/);
+});
+
+test('Director retains an eligible exact-target lifecycle without a Room filter', async () => {
+  const fixture = await loadFixture();
+  fixture.metadata = {
+    ...(fixture.metadata || {}),
+    owner_room_tag: 'outreach',
+    supported_actions: ['prepare_message'],
+    selection_requirements: { min_exact_targets: 1 },
+  };
+  const registry = new RuntimePlaybookRegistry();
+  registry.register(fixture);
+  const selector = new DirectorPlaybookSelector({
+    registry,
+    completionFetch: async () => ({
+      ok: true,
+      async json() { return { choices: [{ message: { content: JSON.stringify({
+        playbook_id: fixture.playbook_id,
+        version: fixture.version,
+        matched_supported_action: 'prepare_message',
+        acceptable_terminal_states: [fixture.terminal_states[0]],
+      }) } }] }; },
+    }),
+  });
+  const selected = await selector.select({
+    objective: 'Prepare a message for the supplied contact.',
+    context: { request: { exact_targets: [{ type: 'email', value: 'person@example.test' }] } },
+  });
+  assert.equal(selected.playbook_id, fixture.playbook_id);
+});
+
 test('Director does not substitute another Room when the selected owner has no lifecycle', async () => {
   const fixture = await loadFixture();
   fixture.metadata = { ...(fixture.metadata || {}), owner_room_tag: 'operator-room' };

@@ -12,16 +12,6 @@ function effectClass(todo) {
     ? 'external' : 'internal';
 }
 
-function hasPlannedLifecycle(todo) {
-  const context = asObject(todo.context);
-  return typeof context.planned_playbook_id === 'string'
-    && context.planned_playbook_id.length > 0
-    && Number.isInteger(Number(context.planned_playbook_version))
-    && Number(context.planned_playbook_version) > 0
-    && typeof context.requested_action === 'string'
-    && context.requested_action.length > 0;
-}
-
 function bootstrapIdentity(policy, runtime) {
   return `${policy.policy_id}.v${policy.version}:${runtime.epoch}:bootstrap`;
 }
@@ -314,8 +304,10 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
       - countedExternal.length);
     let internalAvailable = Math.max(0, Number(policy.internal_execution_limit || 1)
       - active.filter((todo) => effectClass(todo) === 'internal').length);
-    const ordered = proposals.filter((todo) => todo.status === 'PROPOSED'
-      && (asObject(todo.context).proposal_origin === 'user_instruction' || hasPlannedLifecycle(todo)))
+    // Promotion is intentionally independent of how a proposal was authored.
+    // Assignment happens later, through the Runtime-owned selector; filtering
+    // here would strand historical proposals before that generic decision.
+    const ordered = proposals.filter((todo) => todo.status === 'PROPOSED')
       .sort((left, right) => Number(left.priority || 0) - Number(right.priority || 0)
         || Number(asObject(left.context).recommendation_rank || left.position || 0)
           - Number(asObject(right.context).recommendation_rank || right.position || 0));

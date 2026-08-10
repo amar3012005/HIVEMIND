@@ -42,3 +42,18 @@ test('semantic recovery preserves a bounded rerank pool when the ordinary releva
   assert.equal(recovered.length, 24);
   assert.equal(recovered[0].memory.id, 'm-0');
 });
+
+test('documented quick recall includes evidence while memory mode remains memory-only', async () => {
+  const { shouldRecallEvidence } = await import('../../src/routes/recall.js');
+  assert.equal(shouldRecallEvidence('quick'), true);
+  assert.equal(shouldRecallEvidence('auto'), true);
+  assert.equal(shouldRecallEvidence('hybrid'), true);
+  assert.equal(shouldRecallEvidence('memory'), false);
+});
+
+test('answer delivery gives complete rank-one evidence before bounded lower-ranked snippets', async () => {
+  const { evidenceExcerptForAnswer } = await import('../../src/agent/react-agent-v2.js');
+  const full = 'Date 14 October 2026. Bring the blue referral letter, medication list, and blood-pressure diary.';
+  assert.equal(evidenceExcerptForAnswer({ content: full, snippet: 'Bring the blue r…' }, 0), full);
+  assert.equal(evidenceExcerptForAnswer({ content: full, snippet: 'lower-ranked snippet' }, 1), 'lower-ranked snippet');
+});

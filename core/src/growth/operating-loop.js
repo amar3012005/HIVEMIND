@@ -287,6 +287,7 @@ export async function commitGrowthPlan({ prisma, orgId, userId, turnId = null, h
           first_life_policy_id: item.first_life_policy_id || firstLife?.policy_id || null,
           first_life_policy_version: item.first_life_policy_version || firstLife?.policy_version || null,
           recommendation_rank: Number(item.recommendation_rank || index + 1),
+          proposal_kind: item.proposal_kind || item.kind || null,
           recommended: String(item.id || '') === recommendedSourceId,
           effect_class: item.effect_class,
           effect_basis: item.effect_basis || null,

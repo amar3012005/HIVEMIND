@@ -1,12 +1,12 @@
 import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
-const CURRENT_POLICY_VERSION = 13;
+const CURRENT_POLICY_VERSION = 14;
 const cachedPolicies = new Map();
 
 export async function loadFirstLifePolicy(version = CURRENT_POLICY_VERSION) {
   const selectedVersion = Number(version || CURRENT_POLICY_VERSION);
-  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(selectedVersion)) throw new Error(`first_life_policy_version_unavailable:${selectedVersion}`);
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].includes(selectedVersion)) throw new Error(`first_life_policy_version_unavailable:${selectedVersion}`);
   if (!cachedPolicies.has(selectedVersion)) {
     const policyUrl = new URL(`./fixtures/first-life-policy.v${selectedVersion}.json`, import.meta.url);
     cachedPolicies.set(selectedVersion, JSON.parse(await readFile(policyUrl, 'utf8')));
@@ -34,6 +34,45 @@ export function applyFirstLifePolicy(plan, context, policy, lifecycleCatalog = [
   const maximum = Math.max(1, Number(policy.proposal_target || 4));
   const minimum = Math.max(1, Number(policy.proposal_minimum || 2));
   let queue = sourceQueue.filter((item) => hasEvidence(item, constraints, baselineId));
+  const sequence = Array.isArray(policy.first_life_sequence) ? policy.first_life_sequence : [];
+  if (sequence.length) {
+    const sequenceByKind = new Map(sequence.map((entry, index) => [String(entry?.kind || '').trim(), { ...entry, index }])
+      .filter(([kind]) => kind));
+    const seenKinds = new Set();
+    queue = queue.filter((item) => {
+      const kind = String(item?.kind || '').trim();
+      if (!sequenceByKind.has(kind) || !sequenceByKind.get(kind).unique) return true;
+      if (seenKinds.has(kind)) return false;
+      seenKinds.add(kind);
+      return true;
+    });
+    for (const entry of sequence.filter((candidate) => candidate?.required === true)) {
+      if (!queue.some((item) => String(item?.kind || '').trim() === String(entry.kind))) {
+        throw new Error(`growth_plan_first_life_required_task_kind_missing:${entry.kind}`);
+      }
+    }
+    queue.sort((left, right) => {
+      const leftOrder = sequenceByKind.get(String(left?.kind || '').trim())?.index ?? Number.MAX_SAFE_INTEGER;
+      const rightOrder = sequenceByKind.get(String(right?.kind || '').trim())?.index ?? Number.MAX_SAFE_INTEGER;
+      return leftOrder - rightOrder
+        || Number(left?.position ?? left?.priority ?? 0) - Number(right?.position ?? right?.priority ?? 0);
+    });
+    queue = queue.map((item) => {
+      const entry = sequenceByKind.get(String(item?.kind || '').trim());
+      if (!entry) return item;
+      return {
+        ...item,
+        objective: [item.objective, entry.workload_instruction].filter(Boolean).join('\n\n'),
+        effect_class: entry.effect_class || item.effect_class,
+        requested_terminal_outcome: entry.requested_terminal_outcome || item.requested_terminal_outcome,
+      };
+    });
+    const recommended = queue.find((item) => sequenceByKind.get(String(item?.kind || '').trim())?.index === 0);
+    if (recommended) {
+      plan.stage = { ...plan.stage, name: recommended.title, objective: recommended.objective, queue_item_id: recommended.id };
+      plan.primary_constraint_id = recommended.constraint_id;
+    }
+  }
   const selector = policy.initial_bootstrap_selector;
   if (selector?.metadata_flag) {
     const eligible = new Set(lifecycleCatalog.filter((entry) => entry?.[selector.metadata_flag] === true
@@ -58,6 +97,7 @@ export function applyFirstLifePolicy(plan, context, policy, lifecycleCatalog = [
     first_life_policy_id: policy.policy_id,
     first_life_policy_version: policy.version,
     recommendation_rank: index + 1,
+    proposal_kind: item.kind || null,
     effect_class: item.effect_class,
     external_action_requested: item.effect_class === 'external',
     execution_defaults: policy.execution_defaults || null,

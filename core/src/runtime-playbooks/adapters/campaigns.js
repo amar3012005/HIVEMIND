@@ -32,6 +32,21 @@ export function resolveRuntimeCampaignChannels({ request = {}, target = {}, poli
   const available = new Set(plannable);
   return [...allowed].filter((channel) => available.has(channel)).slice(0, 3);
 }
+
+export function buildRuntimeCampaignInstruction({ baseInstruction, campaignDefaults = {}, target = {} } = {}) {
+  const formatInstruction = campaignDefaults.creative_format === 'single_image_post'
+    ? 'Create standalone single-image posts only. Each scheduled action is one complete post with at most one image. Do not create carousels, multi-slide copy, numbered slide sequences, or threads.'
+    : '';
+  const durationDays = Number(campaignDefaults.duration_days || target.duration_days || 7);
+  const maximumPosts = Number(campaignDefaults.maximum_posts || 0);
+  const horizonInstruction = maximumPosts > 0
+    ? `Create one ${durationDays}-day campaign only, with no more than ${maximumPosts} scheduled posts in total.`
+    : `Create one ${durationDays}-day campaign only.`;
+  return {
+    durationDays,
+    instruction: [String(baseInstruction || '').trim(), horizonInstruction, formatInstruction].filter(Boolean).join('\n\n'),
+  };
+}
 function campaignRef(input) {
   return asArray(value(input, 'artifacts.campaign_record'))[0]?.data?.campaign_id
     || asArray(value(input, 'artifacts.campaign_status'))[0]?.data?.campaign_id
@@ -135,10 +150,7 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
         const channels = resolveRuntimeCampaignChannels({ request, target, policy, plannable: [...plannable] });
         if (!channels.length) throw new Error('runtime_campaign_no_plannable_organic_channel');
         const baseInstruction = String(request.instruction || request.objective || 'Create a focused awareness campaign').trim();
-        const formatInstruction = campaignDefaults.creative_format === 'single_image_post'
-          ? 'Create standalone single-image posts only. Each scheduled action is one complete post with at most one image. Do not create carousels, multi-slide copy, numbered slide sequences, or threads.'
-          : '';
-        const instruction = [baseInstruction, formatInstruction].filter(Boolean).join('\n\n');
+        const { durationDays, instruction } = buildRuntimeCampaignInstruction({ baseInstruction, campaignDefaults, target });
         const destinationUrl = String(
           baseline?.company?.website || baseline?.website?.url || value(input, 'context.company')?.website || '',
         ).trim();
@@ -147,7 +159,7 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
           goal: instruction,
           objective: 'AWARENESS',
           channels,
-          duration_days: Number(target.duration_days || 7),
+          duration_days: durationDays,
           intensity: 'FOCUSED',
           geography: [target.location || baseline?.company?.location].filter(Boolean),
           // INPUT PREFLIGHT, decided here rather than discovered by rejection. The contract

@@ -162,16 +162,18 @@ test('v6 retains one policy-selected program builder and leaves portfolio design
   assert.equal(result.first_life.proposal_count, 1);
 });
 
-test('current first-life policy routes first-life through Growth Planning and leaves lifecycle selection to Runtime', async () => {
+test('current first-life policy orders one campaign, outreach, and research task before deferred work', async () => {
   const policy = await loadFirstLifePolicy();
-  assert.equal(policy.version, 13);
+  assert.equal(policy.version, 14);
   assert.equal(policy.initial_lifecycle, undefined);
   assert.equal(policy.runtime_selects_lifecycle, true);
   assert.equal(policy.auto_start_initial_plan, true);
   assert.equal(policy.initial_execution_limit, 1);
-  assert.equal(policy.first_life_outcome_preferences.length, 3);
+  assert.equal(policy.first_life_outcome_preferences.length, 4);
   assert.deepEqual(policy.execution_defaults.campaign.channels, ['x_organic']);
   assert.equal(policy.execution_defaults.campaign.creative_format, 'single_image_post');
+  assert.equal(policy.execution_defaults.campaign.duration_days, 7);
+  assert.equal(policy.execution_defaults.campaign.maximum_posts, 7);
 
   const baselineId = 'baseline-current';
   const plan = applyFirstLifePolicy({
@@ -179,16 +181,39 @@ test('current first-life policy routes first-life through Growth Planning and le
     constraints: [
       { id: 'c1', evidence_refs: [baselineId] },
       { id: 'c2', evidence_refs: [baselineId] },
+      { id: 'c3', evidence_refs: [baselineId] },
+      { id: 'c4', evidence_refs: [baselineId] },
     ],
-    stage: { queue_item_id: 'q1' },
+    primary_constraint_id: 'c1',
+    stage: { name: 'Initial', objective: 'Initial.', queue_item_id: 'q1' },
     operating_queue: [
-      { id: 'q1', constraint_id: 'c1', title: 'Find nearby prospects', objective: 'Prepare verified prospects.', room_tag: 'outreach', playbook_id: 'wrong.playbook', playbook_version: 9, requested_action: 'wrong', effect_class: 'external' },
-      { id: 'q2', constraint_id: 'c2', title: 'Prepare awareness campaign', objective: 'Prepare campaign assets.', room_tag: 'campaign', playbook_id: 'wrong.playbook', playbook_version: 9, requested_action: 'wrong', effect_class: 'external' },
+      { id: 'q1', constraint_id: 'c1', kind: 'outreach', title: 'Find nearby prospects', objective: 'Prepare verified prospects.', room_tag: 'outreach', playbook_id: 'wrong.playbook', playbook_version: 9, requested_action: 'wrong', effect_class: 'internal' },
+      { id: 'q2', constraint_id: 'c2', kind: 'campaign', title: 'Prepare awareness campaign', objective: 'Prepare campaign assets.', room_tag: 'campaign', playbook_id: 'wrong.playbook', playbook_version: 9, requested_action: 'wrong', effect_class: 'internal' },
+      { id: 'q2-duplicate', constraint_id: 'c2', kind: 'campaign', title: 'Schedule campaign', objective: 'Schedule campaign assets.', effect_class: 'external' },
+      { id: 'q3', constraint_id: 'c3', kind: 'research', title: 'Research competitors', objective: 'Resolve one market question.', effect_class: 'internal' },
+      { id: 'q4', constraint_id: 'c4', kind: 'fundraising', title: 'Prepare fundraising later', objective: 'Prepare a future brief.', effect_class: 'internal' },
     ],
   }, { baseline: { resource_id: baselineId } }, policy);
   assert.equal(plan.first_life.runtime_selects_lifecycle, true);
-  assert.equal(plan.operating_queue.length, 2);
+  assert.deepEqual(plan.operating_queue.map((item) => item.proposal_kind), ['campaign', 'outreach', 'research', 'fundraising']);
+  assert.equal(plan.first_life.recommended_todo_source_id, 'q2');
+  assert.equal(plan.operating_queue[0].effect_class, 'external');
+  assert.equal(plan.operating_queue[0].requested_terminal_outcome, 'launched');
+  assert.match(plan.operating_queue[0].objective, /seven-day X organic awareness campaign/);
   assert.ok(plan.operating_queue.every((item) => item.room_tag === null
     && item.playbook_id === null && item.playbook_version === null && item.requested_action === null));
   assert.ok(plan.operating_queue.every((item) => item.execution_defaults === policy.execution_defaults));
+});
+
+test('current first-life policy rejects a missing mandatory sequence kind for bounded planner repair', async () => {
+  const policy = await loadFirstLifePolicy();
+  assert.throws(() => applyFirstLifePolicy({
+    mode: 'initial_full',
+    constraints: [{ id: 'c1', evidence_refs: ['baseline-1'] }, { id: 'c2', evidence_refs: ['baseline-1'] }],
+    stage: { queue_item_id: 'q1' },
+    operating_queue: [
+      { id: 'q1', constraint_id: 'c1', kind: 'campaign', effect_class: 'external' },
+      { id: 'q2', constraint_id: 'c2', kind: 'research', effect_class: 'internal' },
+    ],
+  }, { baseline: { resource_id: 'baseline-1' } }, policy), /growth_plan_first_life_required_task_kind_missing:outreach/);
 });

@@ -1,0 +1,69 @@
+name: Release Windows App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 1.0.0)'
+        required: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: electron-app/package-lock.json
+
+      - name: Install electron-app deps
+        working-directory: electron-app
+        run: npm ci
+
+      - name: Build & publish (signs only if a Windows cert secret is present)
+        working-directory: electron-app
+        shell: bash
+        env:
+          # EV/OV code-signing (base64 .pfx + password). If absent -> unsigned
+          # build — installable, but SmartScreen warns "unknown publisher" on
+          # first run. Add these secrets once a cert is purchased; no config
+          # change needed here, electron-builder picks them up automatically.
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$CSC_LINK" ]; then
+            echo "→ signing build"
+          else
+            echo "→ UNSIGNED build (no WIN_CSC_LINK secret) — SmartScreen will warn on first run"
+          fi
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            npx electron-builder build --win --publish always
+          else
+            npx electron-builder build --win --publish never
+          fi
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SINGULANCE-windows-x64
+          path: |
+            electron-app/dist/*.exe
+            electron-app/dist/*.exe.blockmap
+          if-no-files-found: error
+        # NOTE: on tags, electron-builder (--publish always) creates/updates
+        # the SAME GitHub release the Mac workflow publishes to, uploading
+        # the .exe/.blockmap/latest.yml — the electron-updater feed for
+        # Windows. No separate release step (avoids double-publish).

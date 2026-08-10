@@ -18,6 +18,7 @@ test('the prior-attempt draft is injected on retries and only on retries', async
   assert.match(source, /if \(!\(attempt > 1\)\) return \{\};/);
   // Namespaced so it can never collide with a declared input_ref.
   assert.match(source, /`prior_attempt\.\$\{key\}`/);
+  assert.match(source, /`prior_attempt_all\.\$\{key\}`/);
   // Both dispatch sites (the normal path and the error/repair path) must carry it, keyed
   // by the REPAIR-scoped attempt counter (repairAttempt), not the raw stage-attempt count.
   // They diverged on purpose: a WAITING_EVENT resumption no longer bumps stageAttempts (an
@@ -35,10 +36,14 @@ test('the prior draft is the LAST draft of each expected artifact, upstream inpu
   const resolved = {};
   for (const key of stage.expected_artifacts) {
     const rows = grouped[key];
-    if (Array.isArray(rows) && rows.length) resolved[`prior_attempt.${key}`] = rows[rows.length - 1];
+    if (Array.isArray(rows) && rows.length) {
+      resolved[`prior_attempt.${key}`] = rows[rows.length - 1];
+      resolved[`prior_attempt_all.${key}`] = rows;
+    }
   }
-  assert.deepEqual(Object.keys(resolved), ['prior_attempt.marketing_strategy']);
+  assert.deepEqual(Object.keys(resolved), ['prior_attempt.marketing_strategy', 'prior_attempt_all.marketing_strategy']);
   assert.equal(resolved['prior_attempt.marketing_strategy'].id, 'b', 'must take the latest draft');
+  assert.equal(resolved['prior_attempt_all.marketing_strategy'].length, 2, 'must retain the complete accepted set');
   // An expected artifact with no draft yet contributes nothing rather than a null.
   assert.equal('prior_attempt.absent_key' in resolved, false);
 });

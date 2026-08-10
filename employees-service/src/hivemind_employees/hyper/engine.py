@@ -2608,11 +2608,15 @@ class Director:
         outreach = dict(plan.get("outreach_request")) if isinstance(plan.get("outreach_request"), dict) else {}
         if self.room_kind == "outreach" and self.room_phase:
             target = (self.work_order or {}).get("target") if isinstance((self.work_order or {}).get("target"), dict) else {}
+            phase_context = self.room_phase.get("context") if isinstance(self.room_phase.get("context"), dict) else {}
+            prior_phase_artifacts = phase_context.get("prior_artifacts") if isinstance(phase_context.get("prior_artifacts"), dict) else {}
+            retained_stage_leads = prior_phase_artifacts.get("prior_attempt_all.lead_record")
+            retained_stage_leads = retained_stage_leads if isinstance(retained_stage_leads, list) else []
             # The phase declares outcomes, not a fixed tool sequence. Preserve
             # the Director's approach while preventing omitted Room work and
             # model-invented quotas.
-            outreach["discover"] = outreach.get("discover") is True or "lead_record" in phase_expected
-            outreach["persist"] = outreach.get("persist") is True or "lead_record" in phase_expected
+            outreach["discover"] = not retained_stage_leads and (outreach.get("discover") is True or "lead_record" in phase_expected)
+            outreach["persist"] = not retained_stage_leads and (outreach.get("persist") is True or "lead_record" in phase_expected)
             outreach["draft"] = outreach.get("draft") is True or "message_record" in phase_expected
             outreach["requested_count"] = target.get("quantity")
             outreach["geography"] = outreach.get("geography") or target.get("location") or target.get("geography")
@@ -2620,7 +2624,7 @@ class Director:
             outreach["audience"] = outreach.get("audience") or target.get("audience")
             contactable_retained = sum(1 for row in self._retained_prospect_rows if str(row.get("email") or "").strip())
             requested_count = outreach.get("requested_count")
-            if isinstance(requested_count, int) and requested_count > 0 and contactable_retained >= requested_count:
+            if retained_stage_leads or (isinstance(requested_count, int) and requested_count > 0 and contactable_retained >= requested_count):
                 planned_calls = [call for call in planned_calls if call.get("name") != "places_search"]
                 plan["places_query"] = None
         prospect_work = bool(outreach.get("discover") or outreach.get("persist") or plan.get("places_query"))

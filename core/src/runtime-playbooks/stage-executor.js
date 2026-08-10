@@ -72,7 +72,10 @@ function priorAttemptInputs(run, stage, attempt) {
   const resolved = {};
   for (const key of stage.expected_artifacts || []) {
     const rows = grouped[key];
-    if (Array.isArray(rows) && rows.length) resolved[`prior_attempt.${key}`] = rows[rows.length - 1];
+    if (Array.isArray(rows) && rows.length) {
+      resolved[`prior_attempt.${key}`] = rows[rows.length - 1];
+      resolved[`prior_attempt_all.${key}`] = rows;
+    }
   }
   return resolved;
 }

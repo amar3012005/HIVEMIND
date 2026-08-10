@@ -8,6 +8,8 @@ import { buildCampaignImagePrompt, creativeBriefErrors, normalizeCreativeBrief }
 const STORAGE_ROOT = path.resolve(process.env.HIVEMIND_DATA_DIR || '/app/data', 'campaign-assets');
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const DAILY_GENERATION_LIMIT = 40;
+const ACTIVE_GENERATION_STATUSES = ['GENERATING', 'READY', 'APPROVED', 'FAILED'];
+const PENDING_GENERATION_STATUSES = ['QUEUED', 'GENERATING', 'WAITING_QUOTA'];
 const IMAGE_TYPES = new Map([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/webp', 'webp']]);
 const MUTABLE_CAMPAIGN_STATUSES = new Set(['PREPARING_ASSETS', 'READY_FOR_APPROVAL', 'NEEDS_INPUT', 'NEEDS_REPAIR']);
 
@@ -135,7 +137,7 @@ async function finalizeCampaignAssets(prisma, campaignId) {
   if (!identity?.currentPlanVersionId) return;
   const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, include: { actions: { where: { planVersionId: identity.currentPlanVersionId }, include: { assets: { where: { deletedAt: null } } } }, runs: { orderBy: { createdAt: 'desc' }, take: 1 } } });
   if (!campaign || !['PREPARING_ASSETS', 'READY_FOR_APPROVAL'].includes(campaign.status)) return;
-  if (campaign.actions.some((action) => action.assets.some((asset) => ['QUEUED', 'GENERATING'].includes(asset.status)))) return;
+  if (campaign.actions.some((action) => action.assets.some((asset) => PENDING_GENERATION_STATUSES.includes(asset.status)))) return;
   const currentActions = campaign.actions;
   const missing = currentActions.filter((action) => action.payload?.creative_brief?.required === true && !action.payload?.asset_id);
   if (missing.length) {
@@ -164,6 +166,27 @@ async function finalizeCampaignAssets(prisma, campaignId) {
 
 export async function processQueuedCampaignAssets({ prisma, limit = 1, provider = generateCampaignImage } = {}) {
   await prisma.campaignAsset.updateMany({ where: { status: 'GENERATING', updatedAt: { lt: new Date(Date.now() - 10 * 60 * 1000) }, deletedAt: null }, data: { status: 'QUEUED' } });
+  const quotaWait = await prisma.campaignAsset.findFirst({
+    where: { status: 'WAITING_QUOTA', deletedAt: null },
+    orderBy: { updatedAt: 'asc' },
+    include: { campaign: true },
+  });
+  if (quotaWait) {
+    const generatedToday = await prisma.campaignAsset.count({
+      where: {
+        campaign: { orgId: quotaWait.campaign.orgId },
+        provider: 'openrouter',
+        createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        status: { in: ACTIVE_GENERATION_STATUSES },
+      },
+    });
+    if (generatedToday < DAILY_GENERATION_LIMIT) {
+      await prisma.campaignAsset.updateMany({
+        where: { id: quotaWait.id, status: 'WAITING_QUOTA' },
+        data: { status: 'QUEUED', metadata: { ...(quotaWait.metadata || {}), resumed_at: new Date().toISOString() } },
+      });
+    }
+  }
   let processed = 0;
   while (processed < Math.max(1, Math.min(Number(limit) || 1, 4))) {
     const queued = await prisma.campaignAsset.findFirst({ where: { status: 'QUEUED', deletedAt: null }, orderBy: { createdAt: 'asc' }, include: { campaign: true, action: true } });
@@ -171,7 +194,7 @@ export async function processQueuedCampaignAssets({ prisma, limit = 1, provider 
     const claimed = await prisma.campaignAsset.updateMany({ where: { id: queued.id, status: 'QUEUED' }, data: { status: 'GENERATING' } });
     if (!claimed.count) continue;
     try {
-      const generatedToday = await prisma.campaignAsset.count({ where: { campaign: { orgId: queued.campaign.orgId }, provider: 'openrouter', createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }, status: { in: ['GENERATING', 'READY', 'APPROVED', 'FAILED'] } } });
+      const generatedToday = await prisma.campaignAsset.count({ where: { campaign: { orgId: queued.campaign.orgId }, provider: 'openrouter', createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }, status: { in: ACTIVE_GENERATION_STATUSES } } });
       if (generatedToday > DAILY_GENERATION_LIMIT) throw campaignError(`The organization image limit of ${DAILY_GENERATION_LIMIT} generations per 24 hours has been reached`, 429, 'campaign_image_daily_limit');
       const generated = await provider({ prompt: queued.prompt, aspectRatio: queued.metadata?.aspect_ratio || '16:9', model: queued.model || DEFAULT_CAMPAIGN_IMAGE_MODEL });
       if (!generated.bytes.length || generated.bytes.length > MAX_UPLOAD_BYTES) throw campaignError('Generated image exceeds the 5 MB campaign limit', 400, 'campaign_asset_too_large');
@@ -190,7 +213,19 @@ export async function processQueuedCampaignAssets({ prisma, limit = 1, provider 
         data: { action_id: queued.actionId, asset_id: queued.id },
       }).catch(() => {});
     } catch (error) {
-      await prisma.campaignAsset.update({ where: { id: queued.id }, data: { status: 'FAILED', metadata: { ...(queued.metadata || {}), error: String(error?.message || error).slice(0, 1000), error_code: error?.code || null } } });
+      const quotaLimited = error?.code === 'campaign_image_daily_limit';
+      const status = quotaLimited ? 'WAITING_QUOTA' : 'FAILED';
+      await prisma.campaignAsset.update({ where: { id: queued.id }, data: { status, metadata: { ...(queued.metadata || {}), error: String(error?.message || error).slice(0, 1000), error_code: error?.code || null, ...(quotaLimited ? { waiting_since: new Date().toISOString() } : {}) } } });
+      if (quotaLimited) {
+        await prisma.campaignEvent.create({ data: { campaignId: queued.campaignId, orgId: queued.campaign.orgId, eventType: 'campaign_asset_generation_deferred', data: { action_id: queued.actionId, asset_id: queued.id, reason: 'capacity', code: error.code } } });
+        const { notifyRuntimeCampaignProjection } = await import('./runtime-bridge.js');
+        await notifyRuntimeCampaignProjection({
+          prisma,
+          campaignId: queued.campaignId,
+          type: 'campaign.visuals_waiting',
+          data: { action_id: queued.actionId, asset_id: queued.id, reason: 'capacity' },
+        }).catch(() => {});
+      }
     }
     await finalizeCampaignAssets(prisma, queued.campaignId);
     processed += 1;

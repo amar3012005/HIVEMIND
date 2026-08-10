@@ -11,6 +11,32 @@
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
 
+export function fuseRemoteEvidenceHits(vectorHits = [], lexicalHits = [], { rankConstant = 60 } = {}) {
+  const byId = new Map();
+  const add = (hit, lane, rank) => {
+    const id = hit?.segment_id || hit?.segmentId || hit?.id;
+    if (!id) return;
+    const current = byId.get(id) || { ...hit, segment_id: id, _rrf: 0 };
+    current._rrf += 1 / (rankConstant + rank);
+    if (lane === 'semantic') {
+      current._semantic = true;
+      current.semantic_score = Number(hit.score) || 0;
+    } else {
+      current._lexical = true;
+      current.lexical_score = Number(hit.score) || 0;
+    }
+    byId.set(id, current);
+  };
+  vectorHits.forEach((hit, index) => add(hit, 'semantic', index + 1));
+  lexicalHits.forEach((hit, index) => add(hit, 'lexical', index + 1));
+  const maxFusion = 2 / (rankConstant + 1);
+  return [...byId.values()].map(({ _rrf, ...hit }) => ({
+    ...hit,
+    score: Number((_rrf / maxFusion).toFixed(6)),
+    fusion_score: Number((_rrf / maxFusion).toFixed(6)),
+  })).sort((left, right) => right.score - left.score);
+}
+
 /**
  * Which SCOPE TIER does a document belong to, for display?
  *
@@ -228,19 +254,10 @@ export class EvidenceRetrievalService {
             + `unavailable — this answer is built from the remaining lane only, so recall is `
             + `degraded, NOT empty. Check the .amr agent build (is it in sync with byod/?).`);
         }
-        const byId = new Map();
-        for (const hit of vectorHits || []) byId.set(hit.segment_id, { ...hit, _lexical: false });
-        for (const hit of lexicalHits || []) {
-          const current = byId.get(hit.segment_id);
-          const score = Math.max(0.7, Number(hit.score) || 0);
-          if (!current || score > (Number(current.score) || 0)) byId.set(hit.segment_id, { ...hit, score, _lexical: true });
-          else current._lexical = true;
-        }
-        const hits = [...byId.values()];
+        const hits = fuseRemoteEvidenceHits(vectorHits || [], lexicalHits || []);
         if (!hits.length) return [];
         const hydrated = await amrKbHydrate(orgId, hits.map((h) => h.segment_id), access);
         // Build a score lookup from the merged vector and lexical hits.
-        const scoreMap = new Map(hits.map((h) => [h.segment_id, h.score]));
         const hydrateMap = new Map((hydrated || []).map((s) => [s.id, s]));
         const remoteResults = hits
           .map((h) => {
@@ -248,14 +265,17 @@ export class EvidenceRetrievalService {
             if (!s) return null;
             // Filter by docIdSet when multiple docs requested (agent-side only filtered single-doc).
             if (docIdSet && docIdSet.length > 1 && !docIdSet.includes(s.document_id)) return null;
-            const score = scoreMap.get(h.segment_id) ?? h.score;
             return {
               type: 'evidence_segment',
               segmentId: s.id,
               documentId: s.document_id,
               content: s.content,
               snippet: this._extractSnippet(s.content, query),
-              score,
+              score: h.score,
+              fusion_score: h.fusion_score,
+              semantic_score: h.semantic_score ?? null,
+              lexical_score: h.lexical_score ?? null,
+              ...(h._semantic ? { _semantic: true } : {}),
               ...(h._lexical ? { _lexical: true } : {}),
               document: { id: s.document_id, title: s.title || h.title || null },
               metadata: {

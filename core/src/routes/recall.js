@@ -5,6 +5,10 @@ export function normalizeRecallLimit(value, fallback = 15) {
   return Math.min(Math.max(Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback, 1), 50);
 }
 
+export function shouldRecallEvidence(mode = 'auto') {
+  return String(mode || 'auto').toLowerCase() !== 'memory';
+}
+
 // PROJECT-SCOPE FILTER — one authority for BOTH recall branches (bounded
 // fact/explain/full AND legacy). Hydrates scope/project/owner from the DB, then:
 //   caller WITH project  → org-plane memories + that project's memories;
@@ -458,7 +462,7 @@ export async function handleRecallRoute(ctx = {}) {
     };
 
     const mode = body.mode || 'auto';
-    const wantEvidence = mode === 'evidence' || mode === 'hybrid' || mode === 'auto';
+    const wantEvidence = shouldRecallEvidence(mode);
     const memoryHits = Array.isArray(result.memories) ? result.memories : [];
     result.mode_used = mode;
 

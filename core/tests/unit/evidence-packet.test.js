@@ -1,7 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildEvidencePacket, hop2Evidence, loadTypedGraphEvidence, recallEnhance } from '../../src/memory/recall-router.js';
-import { EvidenceRetrievalService } from '../../src/knowledge/evidence-retrieval.js';
+import { EvidenceRetrievalService, fuseRemoteEvidenceHits } from '../../src/knowledge/evidence-retrieval.js';
+
+test('remote evidence fusion preserves semantic and lexical provenance without flat lexical scores', () => {
+  const fused = fuseRemoteEvidenceHits(
+    [{ segment_id: 'relevant', score: 0.82 }, { segment_id: 'semantic-only', score: 0.71 }],
+    [{ segment_id: 'relevant', score: 4.2 }, { segment_id: 'distractor', score: 1.1 }],
+  );
+  assert.equal(fused[0].segment_id, 'relevant');
+  assert.equal(fused[0]._semantic, true);
+  assert.equal(fused[0]._lexical, true);
+  assert.equal(fused[0].semantic_score, 0.82);
+  assert.equal(fused[0].lexical_score, 4.2);
+  assert.notEqual(fused[1].score, fused[2].score);
+  assert.ok(fused.every((row) => row.score !== 0.7));
+});
 
 test('full evidence packet preserves a bounded raw source window', () => {
   const evidence = Array.from({ length: 20 }, (_, i) => ({

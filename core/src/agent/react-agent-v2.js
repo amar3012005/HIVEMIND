@@ -123,6 +123,13 @@ export function resolveAnswerModel(selectedModel) {
   return resolveChatSynthesisModel(selectedModel);
 }
 
+export function evidenceExcerptForAnswer(item = {}, index = 0) {
+  const full = String(item.content || '');
+  const snippet = String(item.snippet || '');
+  if (index === 0 && full) return full.slice(0, 2400);
+  return (snippet || full).slice(0, 800);
+}
+
 // ISO 639-1 → human-readable name. Same map as v1 — keep in sync.
 const LANGUAGE_NAMES = {
   en: 'English',  de: 'German',  es: 'Spanish',  fr: 'French',  it: 'Italian',
@@ -1633,13 +1640,13 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // knowledge_segment evidence collection. Lets the agent ground on full
   // pitch decks / catalogs even when only 5-20 chunks made it into the
   // canonical memory layer.
-  const evLines = (evidence.evidence || []).slice(0, 8).map((e) => {
+  const evLines = (evidence.evidence || []).slice(0, 8).map((e, index) => {
     const doc = (e.document_title || 'unknown.pdf').replace(/\n/g, ' ').slice(0, 80);
     const page = e.page ? ` p.${e.page}` : '';
     // Evidence retrieval produces a query-centred snippet. Prefer it over the
     // start of a long source segment so exact policy questions retain the
     // matching sentence in the bounded answer prompt.
-    const body = (e.snippet || e.content || '').replace(/\n/g, ' ').slice(0, 520);
+    const body = evidenceExcerptForAnswer(e, index).replace(/\n/g, ' ');
     const citationId = citationIdForEvidence(citationPacket.citations, e);
     const rank = e._progressive_rank || '?';
     return citationId ? `{citation_id:${citationId}, rank:${rank} source:document} [DOC/${doc}${page}] ${body}` : '';

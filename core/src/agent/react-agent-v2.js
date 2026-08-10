@@ -782,7 +782,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // so Step 1 is a byte-identical wrapper: same Map/array references, existing
   // inline `if(!has)set` fragments keep compiling. Step 2 routes each fragment
   // through the bus.merge* methods one accumulator at a time.
-  const { memoriesById, liveItems, evidenceItems, edgesByKey, synthesisChains, recallPackets, coMentions } = bus;
+  const { memoriesById, liveItems, evidenceItems, edgesByKey, synthesisChains, recallPackets, coMentions, rankedCandidates } = bus;
   let relationChecked = false;
   let activeDeadlineAt = deadlineAt;
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());

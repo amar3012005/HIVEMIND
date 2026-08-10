@@ -1939,6 +1939,9 @@ class RoomTurnResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
     summary: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
+    # Runtime audit field. Human Work Rooms may omit it; Runtime-owned turns
+    # report how much of the playbook-owned attempt budget was consumed.
+    rounds_used: Optional[int] = None
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -4224,8 +4227,30 @@ def _goalkeeper_max_rounds() -> int:
         return 3
 
 
-def _goalkeeper_rounds_for_room(room_kind: str, *, work_order: bool = False) -> int:
+def _execution_attempt_budget(execution_context: str) -> tuple[Optional[int], Optional[int]]:
+    """Return the playbook attempt budget from either current or legacy envelopes."""
+    try:
+        envelope = json.loads(str(execution_context or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(envelope, dict):
+        return None, None
+    lifecycle = envelope.get("lifecycle") if isinstance(envelope.get("lifecycle"), dict) else {}
+    retry = lifecycle.get("retry_policy") or envelope.get("retry_policy") or {}
+    attempt = envelope.get("attempt", lifecycle.get("attempt", retry.get("stage_attempt") if isinstance(retry, dict) else None))
+    maximum = envelope.get("max_attempts", retry.get("max_stage_attempts") if isinstance(retry, dict) else None)
+    try:
+        return max(1, int(attempt)), max(1, int(maximum))
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _goalkeeper_rounds_for_room(room_kind: str, *, work_order: bool = False,
+                                execution_context: str = "") -> int:
     """Campaign contracts own their repair pass; other Rooms use the goalkeeper."""
+    attempt, maximum = _execution_attempt_budget(execution_context)
+    if work_order and attempt is not None and maximum is not None:
+        return max(1, maximum - attempt)
     return 1 if work_order or str(room_kind or "").strip().lower() == "campaign" else _goalkeeper_max_rounds()
 
 
@@ -4379,7 +4404,8 @@ async def post_room_turn(
     # burns tokens, and can replace a nearly-complete campaign with a later draft.
     # Every other specialist Room keeps its independent goalkeeper policy.
     is_work_order = _is_hq_work_order_context(req.execution_context)
-    max_rounds = _goalkeeper_rounds_for_room(room_kind, work_order=is_work_order)
+    max_rounds = _goalkeeper_rounds_for_room(
+        room_kind, work_order=is_work_order, execution_context=req.execution_context or "")
     orig_msg = req.user_message
     total_cost = 0
     resp: Optional[RoomTurnResponse] = None
@@ -4455,6 +4481,8 @@ async def post_room_turn(
     if resp is None:  # defensive — loop always runs ≥1
         resp = RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
     resp.cost_tokens = total_cost
+    if is_work_order:
+        resp.rounds_used = max(1, rnd)
 
     # Always surface queued approvals — outward SENDS (gmail send/reply, trash)
     # are force-queued regardless of policy, so they must appear even under

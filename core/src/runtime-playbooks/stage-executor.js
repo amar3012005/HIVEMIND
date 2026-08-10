@@ -303,7 +303,8 @@ export class GenericStageExecutor {
         if (HALTED_STATUSES.has(run.status) && !allowInterventionRetry) return run;
         const playbook = this.registry.get(run.playbookId, run.playbookVersion, { scopeKey: run.scopeKey });
 
-        if (run.status === 'WAITING_EVENT') {
+        const resumedFromEventWait = run.status === 'WAITING_EVENT';
+        if (resumedFromEventWait) {
           const eventId = String(event?.id || event?.event_id || '').trim();
           if (eventId && (asObject(run.context).consumed_event_ids || []).includes(eventId)) return run;
           if (!eventMatches(run.waitingFor, event)) return run;
@@ -366,7 +367,9 @@ export class GenericStageExecutor {
           return this.store.loadRun(runId, orgId);
         }
 
-        const attempts = { ...asObject(run.stageAttempts), [stage.id]: Number(asObject(run.stageAttempts)[stage.id] || 0) + 1 };
+        const priorAttempt = Number(asObject(run.stageAttempts)[stage.id] || 0);
+        const stageAttempt = resumedFromEventWait && priorAttempt > 0 ? priorAttempt : priorAttempt + 1;
+        const attempts = { ...asObject(run.stageAttempts), [stage.id]: stageAttempt };
         await this.store.updateRun(runId, orgId, { stageAttempts: attempts });
         const executionRequest = {
           run_id: run.id,
@@ -387,6 +390,7 @@ export class GenericStageExecutor {
           checks: stage.completion_checks,
           unmet: asObject(run.lastVerdict).unmet || [],
           stage_attempts: attempts,
+          max_attempts: Number(stage.max_attempts || 1),
           retry_policy: {
             owner: 'playbook',
             stage_attempt: attempts[stage.id],
@@ -540,6 +544,7 @@ export class GenericStageExecutor {
           status: verdict.passed ? (warnings.length ? 'PASSED_WITH_WARNINGS' : 'PASSED') : 'FAILED',
           verdict,
           artifactRefs: persisted.map((artifact) => artifact.id),
+          state: { attempt: attempts[stage.id], rounds_used: Math.max(1, Number(result?.rounds_used || 1)) },
         });
         await notifyStage(this.onStageState, { phase: verdict.passed ? 'ACCEPTED' : 'REJECTED', run, stage, artifacts: persisted, verdict });
 

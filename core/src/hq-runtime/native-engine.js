@@ -10,6 +10,7 @@ import { resolveAuthorityPreference } from './contracts.js';
 import { publishHqRuntimeTransient } from './event-bus.js';
 import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
 import { getHyperagentsRuntimeConnectorProvider, runtimeConnectorConnectPath } from '../connectors/runtime-provider-policy.js';
+import { bindPlaybookContext } from '../runtime-playbooks/director-selector.js';
 
 const DAY = 86400000;
 
@@ -1041,6 +1042,7 @@ export class NativeHqEngine {
           first_life_program_builder: entry.metadata?.first_life_program_builder === true,
           purpose: entry.metadata?.purpose || entry.description || '',
           terminal_states: entry.terminal_states,
+          input_contract: entry.input_contract || null,
         }));
       const policyBootstrap = isPolicyBootstrapTodo(readyTodo);
       const lifecycleContext = {
@@ -1110,6 +1112,12 @@ export class NativeHqEngine {
             { scopeKey: 'global' },
           );
           const requestedAction = String(readyTodo.context?.requested_action || '');
+          const supportedActions = Array.isArray(declared.metadata?.supported_actions)
+            ? declared.metadata.supported_actions : [];
+          if (!requestedAction || !supportedActions.includes(requestedAction)) {
+            throw new Error(`runtime_bootstrap_action_unsupported:${requestedAction || 'missing'}`);
+          }
+          const contextPatch = bindPlaybookContext(declared, readyTodo.context?.input_bindings, lifecycleContext);
           const actionTerminals = declared.metadata?.terminal_states_by_action?.[requestedAction];
           selectedLifecycle = {
             matched: true,
@@ -1121,13 +1129,14 @@ export class NativeHqEngine {
               acceptable_terminal_states: Array.isArray(actionTerminals) && actionTerminals.length
                 ? actionTerminals : declared.terminal_states,
               reason: 'The persisted Growth Plan already selected this exact registered lifecycle.',
+              ...(contextPatch ? { context_patch: contextPatch } : {}),
             },
           };
         } catch (error) {
           selectionError = error;
         }
       }
-      if (!selectedLifecycle && this.runtimePlaybooks) selectedLifecycle = await this.runtimePlaybooks.selectAssignment({
+      if (!selectedLifecycle && !selectionError && this.runtimePlaybooks) selectedLifecycle = await this.runtimePlaybooks.selectAssignment({
         objective: selectionObjective, context: lifecycleContext,
       }).catch((error) => {
         selectionError = error;
@@ -1252,6 +1261,7 @@ export class NativeHqEngine {
           first_life_program_builder: entry.metadata?.first_life_program_builder === true,
           purpose: entry.metadata?.purpose || entry.description || '',
           terminal_states: entry.terminal_states,
+          input_contract: entry.input_contract || null,
         })) || [];
       let result;
       try {

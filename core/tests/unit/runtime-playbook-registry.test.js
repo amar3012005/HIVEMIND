@@ -6,6 +6,7 @@ import {
   PredicateEngine,
   GenericStageExecutor,
   DirectorPlaybookSelector,
+  bindPlaybookContext,
   RuntimeAdapterRegistry,
   RuntimeRoomDirector,
   roomPhaseEnvelope,
@@ -17,6 +18,30 @@ import {
   defaultPredicateNames,
   runtimePlaybookContentHash,
 } from '../../src/runtime-playbooks/index.js';
+
+test('shared playbook input binding accepts durable context and rejects missing required inputs', () => {
+  const playbook = {
+    input_contract: { fields: [
+      { path: 'request.exact_targets', type: 'array', required: true },
+      { path: 'constraints.delivery_requested', type: 'boolean', required: true, default_value: false },
+    ] },
+  };
+  assert.deepEqual(bindPlaybookContext(playbook, {}, {
+    request: { exact_targets: [{ type: 'email', value: 'person@example.test' }] },
+    constraints: {},
+  }), {
+    request: { exact_targets: [{ type: 'email', value: 'person@example.test' }] },
+    constraints: { delivery_requested: false },
+  });
+  assert.throws(() => bindPlaybookContext(playbook, {}, { request: {}, constraints: {} }),
+    /runtime_playbook_binding_required:request.exact_targets/);
+  assert.deepEqual(bindPlaybookContext({ input_contract: { fields: [
+    { path: 'context.company', type: 'object', required: true },
+    { path: 'request.instruction', type: 'string', required: true },
+  ] } }, {}, { company: { name: 'Acme' }, request: { instruction: 'Operate' } }), {
+    company: { name: 'Acme' }, request: { instruction: 'Operate' },
+  });
+});
 
 class TestRuntimeStore {
   constructor() {
@@ -1115,6 +1140,40 @@ test('Outreach lifecycle delegates provider execution and event monitoring to ad
   assert.equal(run.status, 'COMPLETED');
   assert.equal(run.terminalState, 'conversation_started');
   assert.equal(seenEvents[0].data.correlation_ref, 'thread-1');
+});
+
+test('event resumption re-enters the same stage without consuming another semantic attempt', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.wait-resume', version: 1, status: 'ACTIVE', name: 'Wait resume',
+    description: 'Exercise same-stage event resumption.', initial_stage_id: 'work', terminal_states: ['done'],
+    stages: [{
+      id: 'work', objective: 'Wait once, then persist the result.', input_refs: [], expected_artifacts: ['result_record'],
+      completion_checks: [{ predicate: 'has_exact_count', select: 'result_record', value: 1 }],
+      transitions: [{ default: true, to_terminal: 'done' }], on_failure: 'REPAIR', max_attempts: 2,
+    }],
+  });
+  const store = new TestRuntimeStore();
+  const seenAttempts = [];
+  const director = { async execute(request) {
+    seenAttempts.push(request.stage_attempts.work);
+    if (seenAttempts.length === 1) return { artifacts: [], waiting_for: { type: 'evidence.ready' } };
+    return { artifacts: [{ id: 'result-1', key: 'result_record', data: { ready: true } }], rounds_used: 1 };
+  } };
+  const executor = new GenericStageExecutor({ registry, predicates: new PredicateEngine(), store, director, workerId: 'wait-resume' });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.wait-resume', playbookVersion: 1,
+    idempotencyKey: 'wait-resume-1', trigger: {},
+  });
+  let run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'WAITING_EVENT');
+  assert.equal(run.stageAttempts.work, 1);
+  run = await executor.run(run.id, { orgId: run.orgId, event: { id: 'event-1', type: 'evidence.ready' } });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.stageAttempts.work, 1);
+  assert.deepEqual(seenAttempts, [1, 1]);
+  const after = store.checkpoints.find((entry) => entry.phase === 'AFTER_EXECUTION');
+  assert.deepEqual(after.state, { attempt: 1, rounds_used: 1 });
 });
 
 test('registry enforces immutable versions, scope precedence, and schema integrity', async () => {

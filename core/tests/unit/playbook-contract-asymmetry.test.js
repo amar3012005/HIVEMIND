@@ -165,6 +165,10 @@ test('both envelopes carry the derived contract, so neither path can drift', asy
   assert.ok('strict_response_schema' in phase.lifecycle, 'room-phase.v2 must carry strict_response_schema');
   assert.equal(direct.retry_policy.owner, 'playbook');
   assert.equal(phase.lifecycle.retry_policy.owner, 'playbook');
+  assert.equal(direct.attempt, 1);
+  assert.equal(direct.max_attempts, 3);
+  assert.equal(phase.attempt, 1);
+  assert.equal(phase.max_attempts, 3);
 });
 
 test('room-phase.v2 is negotiated as a machine phase instead of a human runtime-stage turn', async () => {

@@ -13,6 +13,7 @@
   },
   "input_contract": {
     "fields": [
+      { "path": "request.exact_targets", "type": "array", "description": "Exact recipient targets explicitly retained by Runtime.", "required": true },
       { "path": "constraints.delivery_requested", "type": "boolean", "description": "Whether the requested terminal outcome requires provider delivery.", "required": true, "default_value": false }
     ]
   },

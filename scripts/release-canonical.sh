@@ -4,7 +4,7 @@
 #   release-canonical.sh --sha <merged-singulance-main-sha> \
 #                        --services core,tara-grok,tara-deepgram,control-plane,employees,frontend \
 #                        [--canary-url https://next.singulancelabs.com/hivemind/app] \
-#                        [--skip-canary] [--dry-run]
+#                        [--skip-canary] [--dry-run] [--allow-divergence]
 #
 # Enforces the canonical parallel workflow:
 #   * one deploy = one canonical SHA = one release manifest
@@ -19,13 +19,14 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; DRY=0
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; DRY=0; ALLOW_DIVERGENCE=0
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
   --canary-url) CANARY_URL="$2"; shift 2;;
   --skip-canary) SKIP_CANARY=1; shift;;
   --dry-run) DRY=1; shift;;
+  --allow-divergence) ALLOW_DIVERGENCE=1; shift;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
 [ -n "$SHA" ] || { echo "FATAL: --sha required"; exit 2; }
@@ -87,6 +88,36 @@ git -C "$CANON" merge-base --is-ancestor "$FULLSHA" "$CANON_REMOTE/singulance-ma
 SHORT=$(git -C "$CANON" rev-parse --short "$FULLSHA")
 SHA="$FULLSHA"
 echo "[gate] $SHORT is on canonical ✓"
+
+# Core, Control Plane, Employees and frontend share Runtime/Room contracts. A
+# partial release is safe only when every omitted member is already running the
+# exact target revision. An ancestor check is insufficient here: an older
+# ancestor can still speak an incompatible envelope. The explicit override is
+# reserved for incident response and leaves a conspicuous release-log record.
+COUPLED=(core control-plane employees frontend)
+declare -A REQUESTED=()
+for s in "${SVCS[@]}"; do REQUESTED[$s]=1; done
+coupled_requested=0
+for s in "${COUPLED[@]}"; do [ -n "${REQUESTED[$s]:-}" ] && coupled_requested=1; done
+if [ "$coupled_requested" = 1 ] && [ "$ALLOW_DIVERGENCE" != 1 ]; then
+  for s in "${COUPLED[@]}"; do
+    [ -n "${REQUESTED[$s]:-}" ] && continue
+    c="${CONTAINER[$s]}"
+    live_sha=$(docker inspect "$c" --format '{{ index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)
+    if [ -z "$live_sha" ]; then
+      live_image=$(docker inspect "$c" --format '{{.Config.Image}}' 2>/dev/null || true)
+      live_short=$(printf '%s' "$live_image" | sed -n 's/.*:sha-\([0-9a-fA-F]\{7,40\}\).*/\1/p')
+      [ -n "$live_short" ] && live_sha=$(git -C "$CANON" rev-parse "$live_short^{commit}" 2>/dev/null || true)
+    fi
+    [ "$live_sha" = "$FULLSHA" ] || {
+      echo "FATAL: contract-coupled service '$s' runs ${live_sha:-unknown}, target is $FULLSHA; include core,control-plane,employees,frontend or pass --allow-divergence for incident response"
+      exit 1
+    }
+  done
+  echo "[gate] omitted contract-coupled services already run $SHORT ✓"
+elif [ "$coupled_requested" = 1 ]; then
+  echo "WARNING: --allow-divergence bypassed the Runtime contract atomicity gate"
+fi
 
 # ── detached immutable worktree ────────────────────────────────────────────
 REL="/root/releases/builds/$FULLSHA"

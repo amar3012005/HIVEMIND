@@ -53,15 +53,17 @@ function selectionRequirementsSatisfied(playbook, context) {
   return true;
 }
 
-function bindContext(playbook, selected, context) {
+export function bindPlaybookContext(playbook, bindings = {}, context = {}) {
   const fields = playbook.input_contract?.fields || [];
   if (!fields.length) return null;
-  const supplied = asObject(selected.bindings);
+  const supplied = asObject(bindings);
   const patch = {};
   for (const field of fields) {
+    const patchPath = String(field.path).startsWith('context.') ? String(field.path).slice(8) : field.path;
     // Durable runtime context is canonical. The Director may fill absent fields,
     // but it cannot replace tenant evidence with an inferred value.
     let value = getPath(context, field.path);
+    if ((value === undefined || value === null) && patchPath !== field.path) value = getPath(context, patchPath);
     if (value === undefined || value === null) value = supplied[field.path];
     if (value === null) value = undefined;
     if (value === undefined && Object.prototype.hasOwnProperty.call(field, 'default_value')) value = field.default_value;
@@ -71,7 +73,7 @@ function bindContext(playbook, selected, context) {
     }
     if (!valueMatches(field, value)) throw new Error(`runtime_playbook_binding_type_invalid:${field.path}:${field.type}`);
     if (field.enum && !field.enum.includes(value)) throw new Error(`runtime_playbook_binding_value_invalid:${field.path}`);
-    setPath(patch, field.path, value);
+    setPath(patch, patchPath, value);
   }
   return patch;
 }
@@ -171,7 +173,7 @@ export class DirectorPlaybookSelector {
           throw new Error('runtime_playbook_acceptable_terminal_states_required');
         }
         if (!acceptableTerminalStates.length) acceptableTerminalStates = [...playbook.terminal_states];
-        const contextPatch = bindContext(playbook, selected, context);
+        const contextPatch = bindPlaybookContext(playbook, selected.bindings, context);
         return {
           playbook_id: playbookId,
           version,

@@ -168,6 +168,14 @@ function artifactContractFields(request) {
   };
 }
 
+function attemptBudget(request) {
+  const retry = asObject(request.retry_policy);
+  return {
+    attempt: Number(asObject(request.stage_attempts)[request.stage_id] || retry.stage_attempt || 1),
+    max_attempts: Number(request.max_attempts || retry.max_stage_attempts || 1),
+  };
+}
+
 export function runtimeStageEnvelope(request) {
   return {
     contract: 'runtime-stage.v1',
@@ -175,6 +183,7 @@ export function runtimeStageEnvelope(request) {
     playbook_id: request.playbook_id,
     playbook_version: request.playbook_version,
     stage_id: request.stage_id,
+    ...attemptBudget(request),
     objective: request.objective,
     inputs: asObject(request.inputs),
     expected_artifacts: asArray(request.expected_artifacts),
@@ -190,6 +199,7 @@ export function runtimeStageEnvelope(request) {
     result_contract: {
       contract: 'runtime-stage-result.v1',
       artifacts: ['id', 'key', 'status', 'data', 'source_refs', 'external_ref'],
+      audit: ['rounds_used'],
       rule: 'Return only artifacts actually produced during this Room turn. State exact gaps when evidence is insufficient.',
     },
   };
@@ -202,6 +212,7 @@ export function roomPhaseEnvelope(request) {
     playbook_id: request.playbook_id,
     playbook_version: request.playbook_version,
     phase_id: request.stage_id,
+    ...attemptBudget(request),
     phase_kind: String(asObject(request.execution_config).phase_kind || 'execute'),
     instruction: String(request.instruction || request.objective || '').trim(),
     context: roomPhaseContext(request),
@@ -230,6 +241,7 @@ export function roomPhaseEnvelope(request) {
     output_contract: {
       contract: 'room-phase-result.v1',
       artifacts: ['id', 'key', 'status', 'data', 'source_refs', 'external_ref'],
+      audit: ['rounds_used'],
       rule: 'Return append-only artifacts actually produced by this Room phase and exact unresolved gaps.',
     },
   };
@@ -370,6 +382,9 @@ export class RuntimeRoomDirector {
       source: 'runtime-room-director',
       metadata: { status: gaps.length ? 'COMPLETED_WITH_GAPS' : 'COMPLETED', artifact_count: artifacts.length },
     });
-    return { artifacts, gaps, warnings: gaps, turn_id: turnId, usage: asObject(body?.usage) };
+    return {
+      artifacts, gaps, warnings: gaps, turn_id: turnId, usage: asObject(body?.usage),
+      rounds_used: Math.max(1, Number(body?.rounds_used || 1)),
+    };
   }
 }

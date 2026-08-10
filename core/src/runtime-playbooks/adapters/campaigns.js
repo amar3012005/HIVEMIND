@@ -221,13 +221,18 @@ export function createCampaignRuntimeAdapter({ prisma } = {}) {
       }
       const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
       const actions = campaign.actions || [];
-      const repairAttempts = campaign.status === 'NEEDS_REPAIR'
-        ? await prisma.campaignPlanVersion.count({ where: { campaignId: id, status: 'NEEDS_REPAIR' } }) : 0;
+      const repairPlans = campaign.status === 'NEEDS_REPAIR'
+        ? await prisma.campaignPlanVersion.findMany({
+          where: { campaignId: id, status: 'NEEDS_REPAIR' },
+          orderBy: { version: 'desc' }, take: 3, select: { validation: true },
+        }) : [];
+      const repairAttempts = repairPlans.length;
+      const repairExhausted = repairPlans[0]?.validation?.repair_exhausted === true || repairAttempts >= 3;
       const requiredAssets = actions.filter((item) => item.payload?.creative_brief?.required === true);
       const assetsReady = requiredAssets.every((item) => item.payload?.asset_id);
       const contractState = campaign.status === 'READY_FOR_APPROVAL' && assetsReady ? 'ready'
         : campaign.status === 'READY_FOR_APPROVAL' ? 'waiting_assets'
-          : campaign.status === 'NEEDS_REPAIR' && repairAttempts >= 3 ? 'needs_input'
+          : campaign.status === 'NEEDS_REPAIR' && repairExhausted ? 'needs_input'
             : campaign.status === 'NEEDS_REPAIR' ? 'needs_repair'
             : ['NEEDS_INPUT', 'FAILED', 'CANCELLED'].includes(campaign.status) ? 'needs_input' : 'preparing';
       return { artifacts: [statusArtifact(context, 'campaign_status', campaign, {

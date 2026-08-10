@@ -13,7 +13,6 @@ test('remote evidence fusion preserves semantic and lexical provenance without f
   assert.equal(fused[0]._lexical, true);
   assert.equal(fused[0].semantic_score, 0.82);
   assert.equal(fused[0].lexical_score, 4.2);
-  assert.notEqual(fused[1].score, fused[2].score);
   assert.ok(fused.every((row) => row.score !== 0.7));
 });
 

@@ -3987,19 +3987,20 @@ async def _orchestrate_single_agent(
 
     # Persist compact episodic continuity for every run after the final report exists.
     # This never blocks sealing and is distinct from room/employee operating playbooks.
-    try:
-        _journal_entry = await make_journal_entry(
-            req.user_message, final_text, transcript=transcript, participants=participants,
-            turn_id=req.turn_id, status=status,
-        )
-        if _journal_entry:
-            _journal_ok = await append_room_journal_entry(
-                req.room_id, req.org_id, _journal_entry,
+    if _room_kind != "campaign":
+        try:
+            _journal_entry = await make_journal_entry(
+                req.user_message, final_text, transcript=transcript, participants=participants,
+                turn_id=req.turn_id, status=status,
             )
-            if _journal_ok:
-                await _emit({"t": "room_journal", "entry": _journal_entry})
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[single] room journal failed (non-fatal): %s", exc)
+            if _journal_entry:
+                _journal_ok = await append_room_journal_entry(
+                    req.room_id, req.org_id, _journal_entry,
+                )
+                if _journal_ok:
+                    await _emit({"t": "room_journal", "entry": _journal_entry})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[single] room journal failed (non-fatal): %s", exc)
 
     # Self-evolving (Loop 1) reflection + write-back. Runs BEFORE the seal so the FE (SSE closes on
     # seal) gets a live self_evolve event. Scores each employee's contribution vs the turn's REAL
@@ -4049,7 +4050,7 @@ async def _orchestrate_single_agent(
     # sealed report so the user always knows the next move (one click = a new
     # auto-run turn in this room). One cheap 120b call (Cerebras pin), wrapped —
     # a failure never delays the seal.
-    if status == "complete" and (final_text or "").strip():
+    if status == "complete" and _room_kind != "campaign" and (final_text or "").strip():
         try:
             _nt_body = {"model": "openai/gpt-oss-120b", "temperature": 0.4, "max_tokens": 400,
                         "response_format": {"type": "json_object"},

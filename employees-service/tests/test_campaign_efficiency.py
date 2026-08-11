@@ -19,6 +19,13 @@ def test_campaign_acceptance_requires_bundle_without_governance_errors():
     assert api_hyper_rooms._campaign_result_accepted({"campaign_bundle": bundle}) is False
 
 
+def test_campaign_turn_skips_generic_journal_and_follow_up_generation():
+    source = __import__("inspect").getsource(api_hyper_rooms._orchestrate_single_agent)
+
+    assert 'if _room_kind != "campaign":\n        try:\n            _journal_entry' in source
+    assert 'status == "complete" and _room_kind != "campaign"' in source
+
+
 def _employee(employee_id, lane, *, name=None, persona=""):
     return {
         "id": employee_id,

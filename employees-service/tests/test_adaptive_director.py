@@ -32,7 +32,10 @@ def _director(*, message: str, room_kind: str = "general", company_brief: str = 
 
 
 def test_source_evidence_excludes_skills_and_agent_work_results():
-    director, _events = _director(message="Compare two options")
+    director, _events = _director(
+        message="Compare two options",
+        company_brief="Singulance Labs provides HIVEMIND and TARA.",
+    )
     director.blackboard = [
         "COMPANY CONTEXT[authoritative]: verified company fact",
         "- Retained metric: 12 observed users",
@@ -45,6 +48,7 @@ def test_source_evidence_excludes_skills_and_agent_work_results():
     evidence = director._source_evidence_snapshot()
 
     assert any("verified company fact" in row for row in evidence)
+    assert any("provides HIVEMIND and TARA" in row for row in evidence)
     assert any("12 observed users" in row for row in evidence)
     assert any("verified connector text" in row for row in evidence)
     assert not any("SKILL[" in row for row in evidence)

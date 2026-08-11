@@ -1,6 +1,7 @@
 const apiBase = process.env.API_BASE || 'https://api.singulancelabs.com';
 const roomId = process.env.ROOM_ID;
 const token = process.env.SESSION_TOKEN;
+const canaryRevision = process.env.CANARY_REVISION || 'v1';
 
 if (!roomId || !token) throw new Error('ROOM_ID and SESSION_TOKEN are required');
 
@@ -34,7 +35,7 @@ for (const item of cases) {
     method: 'POST',
     body: JSON.stringify({
       user_message: item.request,
-      idempotency_key: `codex-work-room-${item.id}-20260811-v1`,
+      idempotency_key: `codex-work-room-${item.id}-20260811-${canaryRevision}`,
     }),
   });
   const turnId = created.turn_id;

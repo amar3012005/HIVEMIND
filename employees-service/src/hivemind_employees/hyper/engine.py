@@ -1379,12 +1379,15 @@ class Director:
     def _source_evidence_snapshot(self) -> List[str]:
         """Return durable inputs and tool observations, never agent assertions."""
         excluded = ("WORK_RESULT[", "SKILL[")
-        return [
+        evidence = [
             str(item) for item in self.blackboard
             if str(item).strip()
             and not str(item).startswith(excluded)
             and "NOT AUTHORIZED" not in str(item)
         ]
+        if self.company_brief.strip():
+            evidence.insert(0, "COMPANY CONTEXT[authoritative]: " + self.company_brief[:8000])
+        return evidence
 
     @staticmethod
     def _parse_work_order_envelope(raw: str) -> Optional[Dict[str, Any]]:

@@ -2944,11 +2944,13 @@ async def _repair_final_text(
     unsafe = [str(item)[:300] for item in (verdict.get("unsupported_claims") or []) if str(item).strip()][:10]
     prompt = (
         "You are the final report editor. Return ONLY the revised report in the same useful format. "
-        "Preserve supported strategy and recommendations, but remove every assertion that lacks support. "
-        "Do not replace an unsupported claim with a different fact. A suggested future measure is allowed only "
-        "when labelled 'proposed validation target'; a compliance or positioning statement that lacks proof must "
-        "be labelled 'subject to legal and technical validation'. Do not introduce new numbers, dates, owners, "
-        "sources, guarantees, certifications, competitors, or market claims.\n\n"
+        "Preserve supported strategy and recommendations, but DELETE every unsupported number, date, named person, "
+        "performance result, source, customer, certification, or market claim. Never make an unsafe factual claim "
+        "acceptable merely by appending a disclaimer. Do not replace it with a different fact. When comparative "
+        "outcome evidence is absent, say that no verified comparison exists and base the recommendation on explicit "
+        "operational tradeoffs. Future measures may be qualitative or labelled 'proposed validation target', but do "
+        "not invent a numeric threshold. Use role labels instead of invented owners. Do not introduce new numbers, "
+        "dates, sources, guarantees, certifications, competitors, or market claims.\n\n"
         f"VERIFIER GAPS:\n{json.dumps(verdict.get('gaps') or [], ensure_ascii=False)}\n"
         f"UNSAFE CLAIMS:\n{json.dumps(unsafe, ensure_ascii=False)}\n"
         f"EVIDENCE AVAILABLE:\n{json.dumps(facts, ensure_ascii=False)}\n\n"

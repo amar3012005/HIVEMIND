@@ -921,6 +921,13 @@ def test_campaign_governance_repair_adds_exact_cadence_shortfall(monkeypatch):
     assert '"instagram": 2' in calls[1][1]["content"]
 
 
+def test_campaign_sequence_labels_are_not_treated_as_unsupported_metrics():
+    from hivemind_employees.hyper.campaign_contract import _unsupported_evidence_markers
+
+    assert _unsupported_evidence_markers("1/ Start here. Day 2: explain the product. Post 3.", []) == []
+    assert _unsupported_evidence_markers("Increase conversion by 20% in 30 days.", []) == ["20%", "30"]
+
+
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():
     director = Director(
         user_message='AUDIENCE_POLICY_JSON: {"discover_if_insufficient": false} run a company campaign',

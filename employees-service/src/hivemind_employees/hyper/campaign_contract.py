@@ -32,8 +32,22 @@ _NO_CLAIM_OUTCOME_RE = re.compile(
 def _unsupported_evidence_markers(copy: str, evidence_claims: list[str]) -> list[str]:
     public_copy = str(copy or "").lower()
     support = " ".join(str(claim or "").lower() for claim in evidence_claims)
-    numeric = re.findall(r"\b\d+(?:[.,]\d+)?\s*(?:%|ms|x|k|m|b)?\b", public_copy)
-    markers = [value for value in numeric if value not in support]
+    numeric_matches = list(re.finditer(r"\b\d+(?:[.,]\d+)?\s*(?:%|ms|x|k|m|b)?(?=\W|$)", public_copy))
+    markers = []
+    for match in numeric_matches:
+        value = match.group(0)
+        compact = value.strip()
+        before = public_copy[max(0, match.start() - 12):match.start()]
+        after = public_copy[match.end():match.end() + 2]
+        # Sequence labels are presentation, not performance claims: ``1/``,
+        # ``2.``, ``Day 3`` and ``Post 4`` must not require business evidence.
+        is_sequence_label = bool(
+            re.fullmatch(r"\d", compact)
+            and (after.startswith(("/", ".", ")", ":"))
+                 or re.search(r"\b(?:day|post|part|step|week)\s*$", before))
+        )
+        if not is_sequence_label and compact not in support:
+            markers.append(compact)
     markers.extend(term for term in _HIGH_RISK_CLAIM_TERMS if re.search(rf"\b{re.escape(term)}\b", public_copy) and not re.search(rf"\b{re.escape(term)}\b", support))
     return sorted(set(markers))
 

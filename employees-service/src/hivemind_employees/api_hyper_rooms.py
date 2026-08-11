@@ -2436,8 +2436,18 @@ async def _verify_turn(
     # ── Deterministic company-grounding gate (does NOT trust the LLM verdict) ──
     # A company-scoped turn with NO company context cannot be grounded: the room
     # had nothing real to stand on, so a plausible-sounding deliverable is exactly
-    # the failure mode to block. Same when a known canonical company name never
-    # appears in a company-scoped deliverable (identity substitution).
+    # the failure mode to block. This ONE check stays deterministic because "we
+    # have zero context" is a fact, not a judgment call.
+    #
+    # A second check used to also hard-block on `company_name.lower() not in
+    # final_text.lower()` ("identity substitution"). Removed 2026-08-12: verified
+    # via a live 5x-repeat probe that it false-positived on drafts that named the
+    # company correctly multiple times — the substring check ran against a stale
+    # or mismatched text snapshot inside the repair loop, not the version actually
+    # judged. The LLM verifier prompt already has an explicit "COMPANY IDENTITY"
+    # rule (asserts facts under a DIFFERENT org name → grounded_ok=false) that
+    # covers real identity substitution without the snapshot-mismatch failure
+    # mode. Judgment calls belong to the judge, not a brittle string check.
     _company_scoped = bool(re.search(r"\b(our|we|us|company)\b", f"{req.room_goal or ''} {req.user_message or ''}", re.I))
     if _company_scoped and company_context_missing:
         verdict["grounded_ok"] = False
@@ -2445,11 +2455,6 @@ async def _verify_turn(
         verdict["gaps"] = (verdict.get("gaps") or [])[:7] + [
             "company context missing — the room had no company brief/canon, so company-specific claims cannot be grounded"]
         verdict["company_context_missing"] = True
-    elif _company_scoped and company_name and company_name.lower() not in (final_text or "").lower():
-        verdict["grounded_ok"] = False
-        verdict["met"] = False
-        verdict["gaps"] = (verdict.get("gaps") or [])[:7] + [
-            f"deliverable never references the company's canonical name ({company_name}) — possible identity substitution"]
     unsupported_specifics = _unsupported_specific_claims(
         final_text,
         [str(item) for item in ((blackboard or {}).get("facts") or [])],
@@ -4004,34 +4009,19 @@ async def _orchestrate_single_agent(
                     blackboard=_quality_board, model=_m_recon,
                 )
                 if repaired:
+                    # ONE repair + ONE recheck, full stop — never chain further.
+                    # This used to cascade up to 3 repair/recheck rounds (a second
+                    # repair, then a line-sanitize pass, each with its own recheck
+                    # call): up to 6 sequential LLM calls per turn, and the empirical
+                    # 5x-repeat probe showed the extra rounds didn't reliably improve
+                    # anything — one run's recheck already said grounded_ok=true and
+                    # a further round still fired (driven by the now-removed
+                    # deterministic company-name gate flipping grounded_ok back to
+                    # false after the fact). One governance pass, accept its verdict.
                     rechecked = await _verify_and_emit(
                         req, lead, final_text=repaired, blackboard=_quality_board, model=_m_recon,
                         company_name=_company_name, company_context_missing=_company_ctx_missing,
                     )
-                    # One additional editor pass is cheaper and safer than
-                    # replaying the Director. It receives only the still-rejected
-                    # lines and cannot perform tools or external writes.
-                    if isinstance(rechecked, dict) and not _should_commit_quality_repair(rechecked):
-                        second = await _repair_final_text(
-                            req, lead, final_text=repaired, verdict=rechecked,
-                            blackboard=_quality_board, model=_m_recon,
-                        )
-                        if second:
-                            repaired = second
-                            rechecked = await _verify_and_emit(
-                                req, lead, final_text=repaired, blackboard=_quality_board, model=_m_recon,
-                                company_name=_company_name, company_context_missing=_company_ctx_missing,
-                            )
-                    if isinstance(rechecked, dict) and not _should_commit_quality_repair(rechecked):
-                        sanitized = _remove_rejected_lines(
-                            repaired, rechecked.get("unsupported_claims") or [],
-                        )
-                        if sanitized and sanitized != repaired:
-                            repaired = sanitized
-                            rechecked = await _verify_and_emit(
-                                req, lead, final_text=repaired, blackboard=_quality_board, model=_m_recon,
-                                company_name=_company_name, company_context_missing=_company_ctx_missing,
-                            )
                     if isinstance(rechecked, dict):
                         rechecked["repair_attempted"] = True
                         plan = _PLAN_BY_TURN.get(req.turn_id)

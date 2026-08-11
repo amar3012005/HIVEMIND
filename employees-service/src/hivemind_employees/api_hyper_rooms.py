@@ -2465,7 +2465,8 @@ async def _verify_turn(
 _SPECIFIC_CLAIM_RE = re.compile(
     r"(?<![\w.])(?:€|\$|£)\s*\d+(?:[.,]\d+)?|"
     r"(?<![\w.])(?:\d+(?:[.,]\d+)?)\s*(?:%|percent|days?|weeks?|months?|years?|"
-    r"fte|people|employees?|companies|enterprises|leads?|meetings?|calls?|emails?|posts?|touches?)\b|"
+    r"fte|people|employees?|companies|enterprises|leads?|meetings?|calls?|emails?|posts?|touches?|d|wks?)\b|"
+    r"\b(?:art(?:icle)?\.?|section|§)\s*\d+(?:[.\-–]\d+)*\b|"
     r"\b(?:q[1-4]\s*20\d{2}|20\d{2}(?:[-/]\d{1,2}[-/]\d{1,2})?)\b",
     re.IGNORECASE,
 )

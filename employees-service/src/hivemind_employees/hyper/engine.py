@@ -1390,21 +1390,22 @@ class Director:
         return evidence
 
     def _synthesis_context(self, source_limit: int) -> str:
-        """Separate factual sources from methods and unverified team analysis."""
+        """Expose only factual sources and method guidance to final synthesis.
+
+        Worker prose remains in the visible discussion and durable board, but
+        it is not an evidence transport. The final model re-derives its answer
+        from the same authoritative inputs instead of copying worker claims.
+        """
         sources = "\n".join(self._source_evidence_snapshot())[:source_limit]
         methods = "\n".join(
             str(item) for item in self.blackboard if str(item).startswith("SKILL[")
         )[:4000]
-        analysis = "\n".join(
-            str(item) for item in self.blackboard if str(item).startswith("WORK_RESULT[")
-        )[:6000]
         return (
             "SOURCE EVIDENCE (the only factual authority):\n"
             f"{sources or '(no source evidence was gathered)'}\n\n"
             "METHOD GUIDANCE (instructions only; never evidence):\n"
             f"{methods or '(none)'}\n\n"
-            "TEAM ANALYSIS (candidate reasoning only; verify every factual premise against SOURCE EVIDENCE):\n"
-            f"{analysis or '(none)'}"
+            "The team's unverified candidate prose is intentionally omitted. Re-derive the answer from SOURCE EVIDENCE."
         )
 
     @staticmethod

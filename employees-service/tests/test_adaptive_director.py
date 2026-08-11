@@ -73,8 +73,9 @@ def test_synthesis_context_keeps_agent_claims_out_of_source_evidence():
     assert "GDPR-native operating layer" in source
     assert "provides HIVEMIND and TARA" in source
     assert "38 percent" not in source
-    assert "38 percent" in remainder
+    assert "38 percent" not in remainder
     assert "instructions only; never evidence" in context
+    assert "candidate prose is intentionally omitted" in context
 
 
 def test_light_intensity_is_a_bounded_director_contract(monkeypatch):

@@ -31,44 +31,32 @@ const CHUNK_CONFIG = {
  * Parse a file buffer into raw text based on mime type.
  */
 export async function parseFile(buffer, mimeType, filename) {
+  // ROUTED THROUGH THE ONE SEAM. This function used to carry its OWN extraction for pdf/docx/csv
+  // plus a catch-all `buffer.toString('utf-8')`, making it a SECOND source of format truth beside
+  // server.js's tier chain. That duplication is what let the same PPTX ingest as 270 segments on one
+  // path and 13 on the other, and what made a DOCX heading fix land here — on a path only
+  // /api/enterprise/upload/detect calls — and do nothing for real uploads.
+  //
+  // The seam owns format knowledge and the markdown contract. PDF keeps its dedicated extractor
+  // because it returns page structure this caller uses; everything else defers.
   const ext = (filename || '').split('.').pop()?.toLowerCase();
-
-  // PDF
   if (mimeType === 'application/pdf' || ext === 'pdf') {
     return extractPdfDocument(buffer, filename);
   }
-
-  // DOCX
-  if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || ext === 'docx') {
-    const mammothMod = await import('mammoth');
-    const mammoth = mammothMod.default || mammothMod;
-    const result = await mammoth.extractRawText({ buffer });
-    return {
-      text: String(result?.value || ''),
-      metadata: { title: filename },
-    };
+  const { normalize } = await import('./normalize.js');
+  const out = await normalize(buffer, { mime: mimeType || '', filename });
+  if (!out.ok) {
+    // Fail loudly. The predecessor returned success with raw bytes as "text".
+    const err = new Error(out.error || 'unparseable file');
+    err.code = 'UNPARSEABLE';
+    err.tier = out.tier;
+    err.meta = out.meta;
+    throw err;
   }
-
-  // CSV
-  if (mimeType === 'text/csv' || ext === 'csv') {
-    const text = buffer.toString('utf-8');
-    const lines = text.split('\n');
-    const headers = lines[0] || '';
-    return {
-      text: String(text),
-      metadata: {
-        title: filename,
-        headers: headers.split(',').map(h => h.trim()),
-        rowCount: lines.length - 1,
-      },
-    };
-  }
-
-  // TXT, MD, and fallback
-  const text = buffer.toString('utf-8');
   return {
-    text: String(text),
-    metadata: { title: filename },
+    text: out.text,
+    markdown: out.markdown,
+    metadata: { title: filename, tier: out.tier, ...(out.meta || {}) },
   };
 }
 
@@ -302,9 +290,22 @@ export function chunkText(text, options = {}) {
     if (currentChunk.length + section.length > targetSize && currentChunk.length >= minSize) {
       chunks.push({ text: currentChunk.trim(), index: chunkIndex++ });
 
-      // Overlap: carry last N chars into next chunk
+      // Overlap: carry last N chars into next chunk.
+      // `slice(-overlapSize)` lands wherever the count says — measured live: the next
+      // segment began "val from Martina Berger", i.e. mid-word inside "approval".
+      // Overlap is DUPLICATED content (the previous chunk holds it whole), so moving
+      // the seam forward to a sentence/word boundary is lossless. A segment that
+      // starts mid-word poisons embeddings and citations with a fragment.
       if (overlapSize > 0 && currentChunk.length > overlapSize) {
-        currentChunk = currentChunk.slice(-overlapSize) + '\n' + section;
+        let tail = currentChunk.slice(-overlapSize);
+        const sentenceSeam = tail.match(/[.!?]["')\]]*\s+\S/);
+        if (sentenceSeam && sentenceSeam.index > 0) {
+          tail = tail.slice(sentenceSeam.index + sentenceSeam[0].length - 1);
+        } else {
+          const wordSeam = tail.match(/\s/);
+          if (wordSeam && wordSeam.index > 0) tail = tail.slice(wordSeam.index + 1);
+        }
+        currentChunk = tail + '\n' + section;
       } else {
         currentChunk = section;
       }
@@ -414,26 +415,43 @@ export function getSectionForChunk(chunkText, sections, fullText) {
 // ── Document-level summary generation ────────────────────
 
 /**
- * Generate a brief document summary from the first ~2000 chars.
+ * Generate a DETAILED whole-document summary. This is the one 'document-summary'
+ * memory that represents the entire ingestion in recall/lists, so it walks the
+ * WHOLE document (a snippet per section across its full length), not just the
+ * opening — deterministic, no extra LLM call.
  */
 export function generateDocumentSummary(text, metadata) {
-  const preview = text.slice(0, 2000);
-  const sections = extractSections(text);
-  const headings = sections.map(s => s.title).slice(0, 10);
+  const full = String(text || '');
+  const sections = extractSections(full);
+  const words = full.split(/\s+/).filter(Boolean).length;
 
-  const parts = [
-    `Document: ${metadata.title || 'Untitled'}`,
-  ];
-
+  const parts = [`Document: ${metadata.title || 'Untitled'}`];
   if (metadata.author) parts.push(`Author: ${metadata.author}`);
   if (metadata.pages) parts.push(`Pages: ${metadata.pages}`);
   if (metadata.rowCount) parts.push(`Rows: ${metadata.rowCount}`);
-  if (headings.length > 0) parts.push(`Sections: ${headings.join(', ')}`);
+  parts.push(`Length: ~${words.toLocaleString()} words${sections.length ? `, ${sections.length} sections` : ''}`);
 
-  // First paragraph as preview
-  const firstParagraph = preview.split(/\n\s*\n/)[0]?.trim();
-  if (firstParagraph && firstParagraph.length > 50) {
-    parts.push('', firstParagraph.slice(0, 500));
+  if (sections.length > 0) {
+    parts.push(`Sections: ${sections.map(s => s.title).slice(0, 20).join(', ')}`);
+    // Section-by-section walkthrough — a snippet of each section's own body so
+    // the summary reflects the entire document, not just the first page.
+    parts.push('', 'Overview:');
+    const maxSections = Math.min(sections.length, 14);
+    for (let i = 0; i < maxSections; i += 1) {
+      const start = sections[i].offset;
+      const end = i + 1 < sections.length ? sections[i + 1].offset : full.length;
+      const body = full.slice(start, end)
+        .replace(/^#{1,4}\s+.+$/m, '')        // drop the heading line itself
+        .replace(/\s+/g, ' ').trim();
+      const snippet = body.slice(0, 220).trim();
+      parts.push(`• ${sections[i].title}${snippet ? `: ${snippet}${body.length > 220 ? '…' : ''}` : ''}`);
+    }
+    if (sections.length > maxSections) parts.push(`• …and ${sections.length - maxSections} more section(s).`);
+  } else {
+    // No headings — sample a longer opening excerpt so the summary still carries
+    // substance from the body.
+    const excerpt = full.slice(0, 1500).replace(/\s+/g, ' ').trim();
+    if (excerpt.length > 50) parts.push('', excerpt + (full.length > 1500 ? '…' : ''));
   }
 
   return parts.join('\n');

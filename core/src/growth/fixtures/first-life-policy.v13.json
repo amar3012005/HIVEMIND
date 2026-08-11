@@ -1,0 +1,51 @@
+{
+  "policy_id": "runtime.first-life-policy",
+  "version": 13,
+  "proposal_target": 4,
+  "proposal_minimum": 2,
+  "runtime_selects_lifecycle": true,
+  "initial_execution_limit": 1,
+  "preparation_execution_limit": 1,
+  "external_execution_limit": 1,
+  "internal_execution_limit": 1,
+  "initial_status": "PROPOSED",
+  "require_initial_start_decision": false,
+  "optional_admin_checkin": true,
+  "admin_checkin_before_planning": true,
+  "auto_start_initial_plan": true,
+  "first_result_target_minutes": 5,
+  "task_style": {
+    "language": "plain_natural_language",
+    "title_max_words": 10,
+    "one_bounded_outcome_per_task": true,
+    "prefer_visible_preparation": true,
+    "forbid_unsupported_revenue_or_conversion_promises": true
+  },
+  "execution_defaults": {
+    "campaign": {
+      "channels": ["x_organic"],
+      "creative_format": "single_image_post"
+    }
+  },
+  "first_life_outcome_preferences": [
+    "Find relevant prospective customers near the company's retained location and prepare personalized written and voice outreach using verified contact evidence.",
+    "Create an evidence-backed X organic campaign made only of standalone single-image posts, then continue to its governed launch approval instead of stopping after preparation.",
+    "Research a bounded market or competitor question only when it materially improves the first customer or campaign motion."
+  ],
+  "ongoing_operation": {
+    "growth_plan_enabled": true,
+    "mode": "operate",
+    "after": "first_life_outcomes"
+  },
+  "expansion_triggers": [
+    "initial_plan_ready",
+    "user_start",
+    "internal_bootstrap",
+    "strategy_program_ready",
+    "verified_preparation_checkpoint",
+    "verified_result",
+    "verified_monitoring_checkpoint",
+    "user_instruction",
+    "organization_policy"
+  ]
+}

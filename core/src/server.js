@@ -13,13 +13,113 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
+import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
+import { groqFetch } from './llm/groq-fallback.js';
+import { transcribeAudio } from './llm/stt-route.js';
+import { OAuthStateStore } from './oauth/oauth-state-store.js';
+import { buildChatRecallContext } from './routes/chat.js';
+import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
+import { KnowledgeUploadService } from './knowledge/upload-service.js';
+import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
+import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
+import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
+import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
+import {
+  getRuntimeRole,
+  shouldRunConnectorBackground,
+  shouldRunRecurringMaintenanceJobs,
+  shouldRunWarmupsAndSidecars,
+  shouldStartHttpServer,
+} from './runtime/runtime-role.js';
+import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
+import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
+import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
+import { isOrganizationAdmin } from './workspace/access-policy.js';
+import { createWorkspaceNotification } from './workspace/notifications.js';
+import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
+import { handleXAdsRequest } from './x-ads/routes.js';
+import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
+import { handleCampaignRequest } from './campaigns/routes.js';
+import { completeCampaignConnectionRedirect } from './campaigns/zernio-execution.js';
+import { acceptZernioWebhook } from './campaigns/zernio-webhook.js';
+import { processDueCampaignActions } from './campaigns/worker.js';
+import { processQueuedCampaignAssets } from './campaigns/image-service.js';
+import { canTransition as canTransitionTaraAttempt } from './tara/call-attempt-state.js';
+import { SEO_SITE_INTELLIGENCE, runSeoSiteIntelligence } from './capabilities/seo-site-intelligence.js';
+import { SeoSearchConsoleService } from './capabilities/seo-search-console.js';
+
+// TARA end-of-call analysis — official lead-finding + tracking. Faithful to the
+// transcript, oriented to the call goal. Powers the Insights + Leads dashboard.
+const TARA_INSIGHT_PROMPT = `You are TARA's post-call analyst. Analyze this voice call against its goal and return STRICT JSON only:
+{
+ "summary": string (2-4 sentence outcome),
+ "goal_outcome": "achieved" | "partial" | "missed" | "n/a",
+ "key_points": string[],
+ "action_items": [{"task": string, "owner": string|null, "due": string|null}],
+ "topics": string[],
+ "questions": string[],
+ "sentiment": "positive" | "neutral" | "negative",
+ "tara_learnings": string[] (what TARA should do better next time — objections it handled poorly, info it lacked, moments it drifted from the goal),
+ "lead_found": boolean,
+ "leads": [{"name": string|null, "contact": string|null, "company": string|null, "interest": "hot"|"warm"|"cold", "priority_stars": 1-5, "budget": string|null, "timeline": string|null, "notes": string, "next_step": string}]
+}
+Rules: faithful to the transcript, never invent facts or contact details. priority_stars: 5 = ready to buy/decision-maker+budget+timeline, 3 = genuine interest, 1 = weak/unqualified. If no real lead, lead_found=false and leads=[]. Empty arrays where nothing applies.`;
+
+// TARA-MEMORY: one reserved, admin-only project per org that holds every call
+// transcript as a HIVEMIND memory. Hidden from Workspace Admin (control-plane
+// filters slug 'tara-memory'); policy 'private' → only admins/creator see it.
+const _taraMemProjectCache = new Map(); // orgId → projectId
+async function ensureTaraMemoryProject(orgId, userId) {
+  if (!orgId || !prisma) return null;
+  if (_taraMemProjectCache.has(orgId)) return _taraMemProjectCache.get(orgId);
+  try {
+    let p = await prisma.project.findFirst({ where: { orgId, slug: 'tara-memory' } });
+    if (!p) {
+      p = await prisma.project.create({ data: {
+        orgId, name: 'TARA-MEMORY', slug: 'tara-memory',
+        description: 'TARA call transcripts — system-managed, admin-only.',
+        policy: 'private', selfEvolveEnabled: false,
+        createdBy: userId || orgId,
+      }});
+    }
+    _taraMemProjectCache.set(orgId, p.id);
+    return p.id;
+  } catch (e) { console.warn('[tara/mem] ensure project failed:', e.message); return null; }
+}
+
+// Global resilience: route EVERY Groq chat call (incl. the ~25 hardcoded api.groq.com sites) through
+// groqFetch, which honors LLM_PRIMARY=openrouter and falls back to OpenRouter on Groq outage/billing
+// blocks. groqFetch uses a captured original fetch internally, so this wrap does not recurse. Non-Groq
+// fetches are untouched. One seam → the whole engine survives a Groq provider failure.
+if (!globalThis.__hmGroqFetchWrapped) {
+  globalThis.__hmGroqFetchWrapped = true;
+  const _nativeFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = (input, init) => {
+    const u = typeof input === 'string' ? input : (input && input.url) || '';
+    if (u.includes('api.groq.com') && u.includes('/chat/completions')) return groqFetch(input, init);
+    return _nativeFetch(input, init);
+  };
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
 const REPO_ROOT = path.join(PROJECT_ROOT, '..');
 const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
+
+// Cognition is an organization-administration surface. Keep its route gates on
+// the same active-membership and canonical-role interpretation as Workspace
+// Admin; legacy one-off role checks caused settings and status to disagree.
+async function canManageCognition(prismaClient, { orgId, userId, principal }) {
+  if (principal?.master) return true;
+  const membership = await prismaClient?.userOrganization.findUnique({
+    where: { userId_orgId: { userId, orgId } },
+  }).catch(() => null);
+  return !!(membership?.isActive && isOrganizationAdmin(membership));
+}
 
 function loadLocalEnv(envPath) {
   if (!fs.existsSync(envPath)) {
@@ -51,7 +151,7 @@ loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
 
 const { MemoryEngine } = await import('./engine.local.js');
 const { getGroqClient } = await import('../config/groq.js');
-const { getPrismaClient, ensureTenantContext } = await import('./db/prisma.js');
+const { getPrismaClient, ensureTenantContext, enterOrgContext, runWithOrg } = await import('./db/prisma.js');
 const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-streamer.js');
 
 // Start capturing logs for this container (hm-core)
@@ -88,6 +188,7 @@ const { ZitadelOidcClient } = await import('./control-plane/zitadel.js');
 const { WebJobStore } = await import('./web/web-job-store.js');
 const { BrowserRuntime, getTelemetry } = await import('./web/browser-runtime.js');
 const { validateDomain, filterContent, UserRateLimiter, detectAbuse, getRobotsWarning, normalizeWebUrl } = await import('./web/web-policy.js');
+const { startGmailWatcherScheduler } = await import('./connectors/providers/gmail/gmail-watcher-service.js');
 
 // Derive a one-line title for a Tavily research report. Prefer the first
 // non-empty H1/H2 in the markdown; fall back to the original input
@@ -126,7 +227,8 @@ const { renderAdminLogsPage } = await import('./admin/logs-dashboard.js');
 // Billing / usage tracking
 const { UsageTracker, setUsageTracker } = await import('./billing/usage-tracker.js');
 const { PlanStore } = await import('./billing/plan-store.js');
-const { PlanEnforcer } = await import('./billing/plan-enforcer.js');
+const { PlanEnforcer, planLimitBody } = await import('./billing/plan-enforcer.js');
+const { UsageService } = await import('./billing/usage-service.js');
 
 // Audit logging (Scale / Enterprise plans)
 const { AuditLogger } = await import('./audit/audit-logger.js');
@@ -141,7 +243,8 @@ const { SmartIngestRouter } = await import('./memory/smart-ingest-router.js');
 const { SyncScheduler } = await import('./connectors/framework/sync-scheduler.js');
 
 // Three-Tier Retrieval imports
-const { ThreeTierRetrieval } = await import('./external/search/three-tier-retrieval.js');
+// ThreeTierRetrieval import retired — no longer used in any request path (see note
+// at the former instantiation site). Kept out of the server bundle entirely.
 
 // Hosted MCP Service imports
 const {
@@ -186,25 +289,26 @@ const { EnterpriseChatService } = await import('./enterprise/chat/service.js');
 const { createEnterpriseChatRoutes } = await import('./enterprise/chat/routes.js');
 
 // TARA Voice Agent imports
-const { TaraStreamHandler } = await import('./tara/stream-handler.js');
+const { TaraStreamHandler, createTaraRecallFn } = await import('./tara/stream-handler.js');
 const { TaraConfigStore } = await import('./tara/config-store.js');
 const { TaraSkillsStore } = await import('./tara/skills-store.js');
 const { SessionManager } = await import('./tara/session-manager.js');
 const { SessionAnalytics } = await import('./tara/session-analytics.js');
 const { isTaraRoute } = await import('./tara/routes.js');
+const { createTaraGrokRuntime } = await import('./tara/grok-runtime.js');
 
 // Phase 1: Document-Backed Memory Architecture
 const { DocumentFirstIngestionService } = await import('./knowledge/document-first-ingestion.js');
 const { EvidenceRetrievalService } = await import('./knowledge/evidence-retrieval.js');
-const { parseWithDocling, chunkWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
+const { parseWithDocling, chunkWithDocling, collapseLetterSpacing } = await import('./knowledge/enterprise/docling-adapter.js');
 
 // Session analytics instance (lazy init)
 let taraAnalytics = null;
 
-// Evaluation imports
-const { RetrievalEvaluator } = await import('./external/evaluation/retrieval-evaluator.js');
-const { TEST_QUERIES, getSampleQueries, getQueriesByCategory, getQueriesByDifficulty, getQueriesForDataset } = await import('./external/evaluation/test-dataset.js');
-const { generateEvalQueries } = await import('./evaluation/auto-dataset-generator.js');
+// Evaluation imports RETIRED (2026-07-23): the offline retrieval-evaluator +
+// /api/evaluate/* endpoints depended on the duplicate ThreeTier/hybrid engine,
+// which is now deleted. Recall quality is measured against the single canonical
+// engine (recallPersistedMemories) instead.
 
 // Decision Intelligence imports
 const { detectDecisionCandidate } = await import('./executor/decision/detect-heuristics.js');
@@ -250,31 +354,77 @@ const DATA_DIR = path.join(PROJECT_ROOT, 'data');
 const API_KEYS_FILE_PATH = path.join(DATA_DIR, 'api-keys.json');
 const EVALUATION_REPORTS_DIR = path.join(DATA_DIR, 'evaluation-reports');
 const OAUTH_CLIENTS_FILE_PATH = path.join(DATA_DIR, 'oauth-clients.json');
-const OAUTH_REFRESH_TOKENS_FILE_PATH = path.join(DATA_DIR, 'oauth-refresh-tokens.json');
 
 // Web Intelligence
 const WEB_JOBS_FILE = path.join(DATA_DIR, 'web-jobs.json');
-const webJobStore = new WebJobStore(WEB_JOBS_FILE);
 const browserRuntime = new BrowserRuntime();
 const WEB_SEARCH_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_SEARCH_DAILY_LIMIT || 50);
 const WEB_CRAWL_DAILY_LIMIT = Number(process.env.HIVEMIND_WEB_CRAWL_DAILY_LIMIT || 100);
+const RUNTIME_ROLE = getRuntimeRole();
 
 installConsoleCapture('core');
 
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
+// Production Web Intelligence must use durable tenant-scoped state. The
+// constructor retains a file fallback only for local development with no DB.
+const webJobStore = new WebJobStore({ prisma, filePath: WEB_JOBS_FILE });
 const usageTracker = prisma ? new UsageTracker(prisma) : null;
 if (usageTracker) setUsageTracker(usageTracker); // expose to deep chokepoints via meter* helpers
 const planStore = prisma ? new PlanStore(prisma) : null;
 const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(prisma, planStore, usageTracker) : null;
+const usageService = (prisma && planEnforcer && usageTracker) ? new UsageService({ prisma, planEnforcer, usageTracker }) : null;
+planEnforcer?.setUsageService(usageService);
+
+// One durable settlement marker prevents a completed/retried/polled Web job
+// from being billed twice. Provider receipts remain on the job attempt manifest;
+// this marker owns the customer-facing plan counter.
+async function settleWebIntelUsage({ orgId, userId, jobId, planMetric }) {
+  if (!orgId || !userId || !jobId || !planMetric) return false;
+  const settled = await webJobStore.settleUsage({
+    orgId,
+    userId,
+    jobId,
+    metric: `plan:${planMetric}`,
+    metadata: { plan_metric: planMetric },
+  });
+  if (settled.settled && planEnforcer) planEnforcer.recordUsage(orgId, planMetric, 1, { userId, feature: 'web-intel', idempotencyKey: `web-job:${jobId}:${planMetric}` });
+  return settled.settled;
+}
 const auditLogger = prisma ? new AuditLogger(prisma) : null;
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
+  scheduleRecurringMaintenanceJob({
+    enabled: ['1', 'true', 'yes', 'on'].includes(String(process.env.CAMPAIGNS_V2_WORKER_ENABLED || '').toLowerCase()),
+    prisma,
+    jobName: 'campaign-actions',
+    initialDelayMs: 15_000,
+    intervalMs: 30_000,
+    singleton: false,
+    run: async () => { await processDueCampaignActions({ prisma, limit: 20 }); },
+  });
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'campaign-images',
+    initialDelayMs: 10_000,
+    intervalMs: 15_000,
+    singleton: false,
+    run: async () => { await processQueuedCampaignAssets({ prisma, limit: 2 }); },
+  });
+}
 // Periodic signed audit checkpoints (H5 tail-truncation defense). First run
 // after 10min warm-up, then hourly. Best-effort; no-ops when PQC keys absent.
-if (auditLogger) {
+if (auditLogger && shouldRunRecurringMaintenanceJobs()) {
   const AUDIT_CHECKPOINT_INTERVAL_MS = parseInt(process.env.AUDIT_CHECKPOINT_INTERVAL_MS || String(60 * 60 * 1000), 10);
-  setTimeout(() => { auditLogger.checkpointAllOrgs().catch(() => {}); }, 10 * 60 * 1000);
-  setInterval(() => { auditLogger.checkpointAllOrgs().catch(() => {}); }, AUDIT_CHECKPOINT_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'audit-checkpoint',
+    initialDelayMs: 10 * 60 * 1000,
+    intervalMs: AUDIT_CHECKPOINT_INTERVAL_MS,
+    run: async () => { await auditLogger.checkpointAllOrgs().catch(() => {}); },
+  });
 }
 const webhookManager = prisma ? new WebhookManager(prisma) : null;
 const ingestTracker = new IngestTracker();
@@ -300,12 +450,25 @@ async function getTeamStore() {
 // Cached per-request access context: { projectIds, teamIds }
 // Cache TTL 60s to avoid hitting DB on every recall in tight loops.
 const _accessContextCache = new Map();
+// Recently-active tenants, so the recall keep-warm probe hits REAL orgs (keeping
+// their Qdrant collection + connection + collectionReady cache hot) instead of a
+// fixed dummy org. Keyed by orgId; holds a representative user + projectIds +
+// lastSeen. Pruned by the keep-warm sweep to a recent window.
+const _activeOrgs = new Map();
+function _recordActiveOrg(userId, orgId, value) {
+  if (!userId || !orgId) return;
+  _activeOrgs.set(orgId, {
+    userId,
+    projectIds: Array.isArray(value?.projectIds) ? value.projectIds.slice(0, 1) : [],
+    lastSeen: Date.now(),
+  });
+}
 async function buildAccessContext(userId, orgId) {
   if (!userId || !orgId) return null;
   const key = `${userId}:${orgId}`;
   const cached = _accessContextCache.get(key);
   const now = Date.now();
-  if (cached && cached.expiresAt > now) return cached.value;
+  if (cached && cached.expiresAt > now) { _recordActiveOrg(userId, orgId, cached.value); return cached.value; }
   const ts = await getTeamStore();
   if (!ts) return null;
   try {
@@ -346,6 +509,7 @@ async function buildAccessContext(userId, orgId) {
     }
     const value = { projectIds: effectiveProjectIds, teamIds, orgRole, crossProject: crossProject !== false };
     _accessContextCache.set(key, { value, expiresAt: now + 60_000 });
+    _recordActiveOrg(userId, orgId, value);
     return value;
   } catch (err) {
     console.warn('[access-context] build failed:', err.message);
@@ -457,6 +621,8 @@ let syncScheduler = null;
 // Hoisted Phase1 service handle (initialized lower, referenced by webhookProcessor)
 let documentFirstIngestion = null;
 let kbIngestQueue = null;
+let knowledgeUploadJobStore = null;
+let knowledgeUploadService = null;
 
 // Hoisted Nango token resolver — used by syncScheduler + webhookProcessor
 const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
@@ -468,7 +634,7 @@ const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
 
 let connectorStore = null;
 let schedulerSyncEngine = null;
-if (persistentMemoryEngine && persistentMemoryStore && prisma) {
+if (persistentMemoryEngine && persistentMemoryStore && prisma && shouldRunConnectorBackground()) {
   const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
   const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
   const schedulerConnStore = new ConnectorStore(prisma);
@@ -481,6 +647,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
     smartIngestRouter,
     externalRefStore,
     entityResolver,
+    getCanonicalIngestion: () => documentFirstIngestion,
     // qdrantClient injected post-construction (see below) — not yet defined
     // at this point in file load order.
   });
@@ -496,7 +663,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
 }
 
 // ─── WebhookProcessor boot ───────────────────────────────────────────────────
-{
+if (shouldRunConnectorBackground()) {
   const { WebhookProcessor } = await import('./connectors/framework/webhook-processor.js');
   const adapterRegistryModule = await import('./connectors/framework/adapter-registry.js');
   const adapterRegistry = adapterRegistryModule.default;
@@ -531,7 +698,7 @@ if (persistentMemoryEngine && persistentMemoryStore && prisma) {
 // (was opt-in; legacy ENABLE_COGNITION_LOOP=true still works).
 const COGNITION_LOOP_ENABLED = process.env.ENABLE_COGNITION_LOOP !== 'false';
 let cognitionLoop = null;
-if (prisma) {
+if (prisma && shouldRunRecurringMaintenanceJobs()) {
   setImmediate(async () => {
     try {
       const { CognitionLoop } = await import('./memory/cognition-loop.js');
@@ -561,7 +728,7 @@ if (prisma) {
 // ─── Memory Promotion Jobs cron (Wave 5 / P1 #5) ────────────────────────────
 // Late-resolution: documentFirstIngestion is initialized later (line ~1028).
 // Use setImmediate so this block runs after module-init completes.
-if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma) {
+if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma && shouldRunRecurringMaintenanceJobs()) {
   const PROMOTION_INTERVAL_MS = Number(process.env.PROMOTION_INTERVAL_MS || 6 * 60 * 60 * 1000); // 6h
   const PROMOTION_BATCH = Number(process.env.PROMOTION_BATCH || 50);
   const STALE_AFTER_DAYS = Number(process.env.MEMORY_STALE_AFTER_DAYS || 90);
@@ -573,7 +740,7 @@ if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma) {
     try {
       // Find segments without any linked memory_evidence_link — re-evaluate them
       const orphans = await prisma.knowledgeSegment.findMany({
-        where: { memoryLinks: { none: {} } },
+        where: { memoryLinks: { none: {} }, document: { ingestMode: { not: 'evidence' } } },
         select: { id: true, documentId: true, userId: true, orgId: true, content: true },
         take: PROMOTION_BATCH,
         orderBy: { createdAt: 'desc' },
@@ -609,13 +776,19 @@ if (process.env.ENABLE_MEMORY_PROMOTION_JOBS === 'true' && prisma) {
       console.error('[promotion-cron] tick failed:', err.message);
     }
   };
-  setTimeout(runPromotion, 10 * 60 * 1000); // first run +10min
-  setInterval(runPromotion, PROMOTION_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'promotion-cron',
+    initialDelayMs: 10 * 60 * 1000,
+    intervalMs: PROMOTION_INTERVAL_MS,
+    run: runPromotion,
+  });
   console.log(`[promotion-cron] scheduled — every ${PROMOTION_INTERVAL_MS / 3600000}h`);
 }
 
 // ─── Memory Synthesizer cron (P3 #21) ────────────────────────────────────────
-if (process.env.ENABLE_MEMORY_SYNTHESIS === 'true' && prisma) {
+if (process.env.ENABLE_MEMORY_SYNTHESIS === 'true' && prisma && shouldRunRecurringMaintenanceJobs()) {
   const SYNTH_INTERVAL_MS = Number(process.env.SYNTHESIS_INTERVAL_MS || 24 * 60 * 60 * 1000);
   let synthesizer = null;
   const runSynth = async () => {
@@ -649,13 +822,19 @@ if (process.env.ENABLE_MEMORY_SYNTHESIS === 'true' && prisma) {
       console.error('[memory-synth] tick failed:', err.message);
     }
   };
-  setTimeout(runSynth, 20 * 60 * 1000);
-  setInterval(runSynth, SYNTH_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'memory-synth',
+    initialDelayMs: 20 * 60 * 1000,
+    intervalMs: SYNTH_INTERVAL_MS,
+    run: runSynth,
+  });
   console.log(`[memory-synth] scheduled — every ${SYNTH_INTERVAL_MS / 3600000}h`);
 }
 
 // ─── Contradiction Scanner cron (Wave 5 / P1 5.2) ───────────────────────────
-if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma) {
+if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma && shouldRunRecurringMaintenanceJobs()) {
   const CONTRADICTION_INTERVAL_MS = Number(process.env.CONTRADICTION_INTERVAL_MS || 24 * 60 * 60 * 1000);
   let contradictionScanner = null;
   const runContradictions = async () => {
@@ -694,15 +873,21 @@ if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma) {
       console.error('[contradiction-cron] tick failed:', err.message);
     }
   };
-  setTimeout(runContradictions, 15 * 60 * 1000);
-  setInterval(runContradictions, CONTRADICTION_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'contradiction-cron',
+    initialDelayMs: 15 * 60 * 1000,
+    intervalMs: CONTRADICTION_INTERVAL_MS,
+    run: runContradictions,
+  });
   console.log(`[contradiction-cron] scheduled — every ${CONTRADICTION_INTERVAL_MS / 3600000}h`);
 }
 
 // ─── Hygiene Scanner cron (P1 #7) ────────────────────────────────────────────
 // Runs nightly across recently active tenants. Generates proposals only —
 // nothing auto-executes (executeProposals still requires admin approval).
-if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
+if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma && shouldRunRecurringMaintenanceJobs()) {
   const HYGIENE_INTERVAL_MS = Number(process.env.HYGIENE_INTERVAL_MS || 24 * 60 * 60 * 1000); // 24h
   const HYGIENE_USER_LIMIT = Number(process.env.HYGIENE_USER_LIMIT || 25);
   const runHygieneCron = async () => {
@@ -749,8 +934,14 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
     }
   };
   // First run after 5min (post-boot warm-up), then every interval
-  setTimeout(runHygieneCron, 5 * 60 * 1000);
-  setInterval(runHygieneCron, HYGIENE_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'hygiene-cron',
+    initialDelayMs: 5 * 60 * 1000,
+    intervalMs: HYGIENE_INTERVAL_MS,
+    run: runHygieneCron,
+  });
   console.log(`[hygiene-cron] scheduled — every ${HYGIENE_INTERVAL_MS / 3600000}h, top ${HYGIENE_USER_LIMIT} tenants`);
 }
 
@@ -759,7 +950,7 @@ if (process.env.ENABLE_HYGIENE_CRON === 'true' && hygieneScanner && prisma) {
 // own DIRTY-GATE skips any user with no new memories since their last dream, so a
 // run only spends LLM calls on users with fresh evidence — bounded cost at scale.
 // Requires PROFILE_DREAM_ENABLED + PROFILE_DREAM_APPLY (the dreamer's own gates).
-if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma) {
+if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma && shouldRunRecurringMaintenanceJobs()) {
   const PROFILE_DREAM_INTERVAL_MS = Number(process.env.PROFILE_DREAM_INTERVAL_MS || 24 * 60 * 60 * 1000); // 24h
   const PROFILE_DREAM_ORG_LIMIT = Number(process.env.PROFILE_DREAM_ORG_LIMIT || 25);
   const runProfileDreamCron = async () => {
@@ -798,8 +989,14 @@ if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma
     }
   };
   // First run after 10min (post-boot warm-up), then every interval.
-  setTimeout(runProfileDreamCron, 10 * 60 * 1000);
-  setInterval(runProfileDreamCron, PROFILE_DREAM_INTERVAL_MS);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'profile-dream-cron',
+    initialDelayMs: 10 * 60 * 1000,
+    intervalMs: PROFILE_DREAM_INTERVAL_MS,
+    run: runProfileDreamCron,
+  });
   console.log(`[profile-dream-cron] scheduled — every ${PROFILE_DREAM_INTERVAL_MS / 3600000}h, top ${PROFILE_DREAM_ORG_LIMIT} orgs`);
 }
 
@@ -1236,8 +1433,14 @@ const taraHandler = persistentMemoryStore ? new TaraStreamHandler({
   qdrantClient: null, // Set after qdrantClient init
   llmBaseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
   llmApiKey: process.env.GROQ_API_KEY || '',
-  defaultModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+  defaultModel: process.env.GROQ_MODEL || 'cerebras/gpt-oss-120b',
 }) : null;
+const taraGrokRuntime = createTaraGrokRuntime({
+  prisma,
+  recallFn: recallPersistedMemories,
+  memoryStore: persistentMemoryStore,
+  getTaraConfig: async ({ userId, orgId }) => taraHandler?.configStore?.getConfig('default', 'default', { userId, orgId }),
+});
 // TARA Skills store — named prompt presets; select copies prompts into config.
 if (taraHandler) {
   taraHandler.skillsStore = new TaraSkillsStore({
@@ -1283,7 +1486,7 @@ let evidenceRetrieval = null;
 let doclingAdapter = null;
 if (process.env.DOCLING_URL) {
   doclingAdapter = {
-    parseBuffer: async (fileBuffer, { filename, contentType, smart = false, picture_descriptions = false } = {}) => {
+    parseBuffer: async (fileBuffer, { filename, contentType, smart: smartOpt, picture_descriptions: picDescOpt } = {}) => {
       const tempDir = '/tmp/hivemind-docling';
       fs.mkdirSync(tempDir, { recursive: true });
       const tempPath = path.join(tempDir, `${crypto.randomUUID()}_${filename}`);
@@ -1291,25 +1494,109 @@ if (process.env.DOCLING_URL) {
       try {
         fs.writeFileSync(tempPath, fileBuffer);
         const ext = (filename || '').split('.').pop()?.toLowerCase();
+        // `smart = false` was the destructure default and the KB upload never
+        // passes the flag, so EVERY document took the non-smart path. Concretely,
+        // the Tier-1 guard below reads `if (!smart && ...)`: fast pdf-parse ran
+        // first, succeeded on any PDF with a text layer, and returned — so Docling
+        // was never invoked for a text-native document, no matter how much layout
+        // it carried. Measured on a real 54-page deck: `tier=fast-pdf ms=757`,
+        // its 7-row inverter matrix flattened to loose text, every figure gone.
+        //
+        // fast-pdf is the right FALLBACK, not the right default. Layout-bearing
+        // formats now default to smart, which routes them to Docling for table
+        // structure + picture descriptions; fast-pdf still catches the case where
+        // Docling errors or times out. Set smart:false explicitly to force speed.
+        // NOTE: the opt-out is the env var, NOT a false argument. Every layer on
+        // the upload path coerces this to a strict boolean — the route computes
+        // `smartFlag = value === 'true'`, then document-first-ingestion passes
+        // `smart: metadata?.smart === true` — so an absent form field arrives here
+        // as an explicit `false`, indistinguishable from a deliberate opt-out.
+        // Guarding on `smartOpt !== false` therefore disabled the default for
+        // every real upload (verified: still `tier=fast-pdf ms=800`).
+        // PER-FORMAT PROFILES, not one bucket. Collapsing every layout format into
+        // a single LAYOUT_EXTS set and running the full enrichment stack on all of
+        // them was wrong, and PPTX proved it in production: "Nutzen und Vorteile des
+        // Leo.pptx" spent 479s, returned chunks=0 with `chunker error: fetch failed`,
+        // recorded a nonsense word_count of 463,080, and produced ZERO memories.
+        // A spreadsheet has no figures to describe and no OCR to run — it has cells.
+        // A deck is mostly images with sparse text. Ask each format only for what it
+        // actually has.
+        //   ocr    — raster text needs recognising (scans; slide images)
+        //   tables — cell structure matters (PDF, XLSX)
+        //   pics   — figures carry meaning worth describing (PDF, PPTX)
+        const FORMAT_PROFILES = {
+          pdf:  { smart: true,  ocr: true,  tables: true,  pics: true  },
+          // Macro-enabled and OpenDocument siblings behave identically to their
+          // mainstream twins in every parser we use, but were rejected client-side
+          // by ACCEPTED_EXTS — a user with an .xlsm got "unsupported file type" for
+          // a workbook SheetJS reads natively.
+          xlsm: { smart: true,  ocr: false, tables: true,  pics: false },
+          ods:  { smart: true,  ocr: false, tables: true,  pics: false },
+          docm: { smart: true,  ocr: false, tables: true,  pics: false },
+          odt:  { smart: true,  ocr: false, tables: true,  pics: false },
+          rtf:  { smart: true,  ocr: false, tables: true,  pics: false },
+          epub: { smart: true,  ocr: false, tables: false, pics: false },
+          pptm: { smart: true,  ocr: false, tables: false, pics: false },
+          odp:  { smart: true,  ocr: false, tables: false, pics: false },
+          docx: { smart: true,  ocr: false, tables: true,  pics: false }, // text layer; best yield in prod (21 mem/1k)
+          doc:  { smart: true,  ocr: false, tables: true,  pics: false },
+          xlsx: { smart: true,  ocr: false, tables: true,  pics: false }, // cells, never prose or OCR
+          xls:  { smart: true,  ocr: false, tables: true,  pics: false },
+          // pics:false is deliberate and measured. With picture description ON, a
+          // real .pptx ran the convert to the full 600s ceiling and TIMED OUT —
+          // Docling issues one vision call per slide image, serially. It produced
+          // memories only because the hybrid chunker finished separately and the
+          // chunk-survival path kept its output. Slide TEXT already carries the
+          // substance and the chunker returns it in seconds.
+          // The right way to get slide figures is one vision pass over the whole
+          // deck (as figure-rich PDFs do), which needs a PPTX→PDF render step that
+          // does not exist yet. Until then a fast, complete text extraction beats a
+          // 10-minute one that times out. Re-enable per deployment with
+          // KB_PPTX_PICTURE_DESC=true once that path exists.
+          pptx: { smart: true,  ocr: false, tables: false,
+                  pics: String(process.env.KB_PPTX_PICTURE_DESC || '').toLowerCase() === 'true' },
+          ppt:  { smart: true,  ocr: false, tables: false,
+                  pics: String(process.env.KB_PPTX_PICTURE_DESC || '').toLowerCase() === 'true' },
+        };
+        const profile = FORMAT_PROFILES[ext] || null;
+        const smart = smartOpt === true
+          || (!!profile?.smart
+              && String(process.env.KB_SMART_BY_FORMAT ?? 'true').toLowerCase() !== 'false');
+        const LAYOUT_EXTS = new Set(Object.keys(FORMAT_PROFILES));
+        // Exactly the same defect as `smart` above, one identifier along:
+        // `picture_descriptions = false` in this destructure, and the upload route
+        // never passes it — so do_picture_description was NEVER sent to Docling and
+        // every figure, chart and diagram in every PDF was dropped. The whole path
+        // is otherwise live and configured (adapter ~line 103: do_picture_description
+        // + enable_remote_services + a Groq vision config, and GROQ_API_KEY is set).
+        // This is the last capability gap against supermemory, whose chunks carry
+        // "Diagram showing energy flow within a home system…" for this same deck.
+        // Opt out via env, NOT a false argument — the upload path coerces to a
+        // strict boolean, so an absent field is indistinguishable from a deliberate
+        // false (the mistake that made my first `smart` fix a no-op).
+        // Now driven by the profile: only formats whose figures actually carry
+        // meaning ask for descriptions. XLSX/DOCX no longer pay for a vision pass
+        // they have nothing to gain from.
+        const picture_descriptions = picDescOpt === true
+          || (!!profile?.pics
+              && String(process.env.KB_PICTURE_DESC ?? 'true').toLowerCase() !== 'false');
         const tParse = Date.now();
 
-        // ── Audio (mp3/wav/m4a/ogg/flac) → Groq Whisper transcription ──
-        if (['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext) && process.env.GROQ_API_KEY) {
+        // ── Audio (mp3/wav/m4a/ogg/flac) → STT via the single ground-truth route ──
+        //    (sttRoute / STT_PROVIDER); this feature's model = INGEST_STT_MODEL.
+        if (['mp3', 'wav', 'm4a', 'ogg', 'flac'].includes(ext) && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
           try {
-            const fd = new FormData();
-            fd.append('file', new Blob([fs.readFileSync(tempPath)]), filename);
-            fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
-            fd.append('response_format', 'verbose_json');
-            const wRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-              body: fd,
-              signal: AbortSignal.timeout(180_000),
+            const t = await transcribeAudio({
+              audio: fs.readFileSync(tempPath),
+              filename,
+              contentType: `audio/${ext === 'm4a' ? 'mp4' : ext}`,
+              model: process.env.INGEST_STT_MODEL,
+              response_format: 'verbose_json',
+              timeoutMs: 180_000,
             });
-            if (!wRes.ok) throw new Error(`Whisper ${wRes.status}: ${(await wRes.text()).slice(0, 200)}`);
-            const wJson = await wRes.json();
-            const transcript = wJson.text || '';
-            const segments = Array.isArray(wJson.segments) ? wJson.segments : [];
+            if (!t.ok) throw new Error(`STT ${t.status}: ${(t.detail || '').slice(0, 200)}`);
+            const transcript = t.text || '';
+            const segments = Array.isArray(t.segments) ? t.segments : [];
             // One chunk per Whisper segment so timestamps survive into memory.
             const hybridChunks = segments.length
               ? segments.map(s => ({
@@ -1320,9 +1607,10 @@ if (process.env.DOCLING_URL) {
               : [{ text: transcript.trim(), headings: [filename], page: 1 }];
             console.log(`[docling-adapter] tier=whisper file=${filename} chars=${transcript.length} segs=${hybridChunks.length} ms=${Date.now() - tParse}`);
             return {
-              text: transcript, markdown: transcript, json: { segments: wJson.segments, language: wJson.language },
+              // whisper transcript — prose, no structure
+              text: transcript, markdown: null, json: { segments, language: t.language },
               tables: [], pages: 1, confidence: null, error: null,
-              hybridChunks, chunkerError: null, engine: 'groq-whisper',
+              hybridChunks, chunkerError: null, engine: `stt-${t.provider}`,
             };
           } catch (audioErr) {
             console.warn(`[docling-adapter] whisper failed: ${audioErr.message}`);
@@ -1361,7 +1649,8 @@ if (process.env.DOCLING_URL) {
               }
               console.log(`[docling-adapter] tier=plain-text file=${filename} chars=${raw.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
               return {
-                text: raw, markdown: raw, json: null,
+                // plain text / md passthrough — markdown only if it has #
+                text: raw, markdown: /(^|\n)#{1,6}\s/.test(raw) ? raw : null, json: null,
                 tables: [], pages: 1, confidence: null, error: null,
                 hybridChunks, chunkerError: null, engine: 'plain-text',
               };
@@ -1373,7 +1662,7 @@ if (process.env.DOCLING_URL) {
 
         // ── Image-only files (PNG/JPG/TIFF/WebP) → direct Groq vision OCR ──
         // Cheaper + faster than full Docling pipeline for a single bitmap.
-        if (['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp'].includes(ext) && process.env.GROQ_API_KEY) {
+        if (['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp'].includes(ext) && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
           try {
             const { ocrSingleImage } = await import('./knowledge/enterprise/groq-vision-parser.js');
             if (typeof ocrSingleImage === 'function') {
@@ -1394,6 +1683,51 @@ if (process.env.DOCLING_URL) {
         }
 
         // ── CSV/TSV → row-as-segment (no LLM, structure-preserving) ──
+        // ── SPREADSHEET TIER: read the sheet, keep the GRID ──────────────────
+        // Docling flattens a workbook to prose ("Persona 4 Index = 105. Online
+        // (Internet, Mobile, App), Persona 1 Index = 105…"), so by the time the
+        // pipeline sees it the rows and columns are gone and no downstream fix can
+        // recover them. Measured: engine=docling-chunks-only returned ZERO
+        // structured tables for Solvis-Mediennutzung.xlsx.
+        //
+        // SheetJS is already a dependency and reads the workbook natively. Emit the
+        // same {sheet, headers, rows} shape the csv-direct tier below produces, so
+        // the tabular lane persists a real grid AND the markdown still feeds
+        // semantic recall. Falls through to Docling on any failure.
+        if (['xlsx', 'xls', 'xlsm', 'ods'].includes(ext)) {
+          try {
+            const XLSX = (await import('xlsx')).default || (await import('xlsx'));
+            const wb = XLSX.read(fileBuffer, { type: 'buffer' });
+            const tables = [];
+            const mdParts = [];
+            for (const sheetName of (wb.SheetNames || []).slice(0, 50)) {
+              const ws = wb.Sheets[sheetName];
+              if (!ws) continue;
+              const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: null });
+              if (!aoa.length) continue;
+              const headers = (aoa[0] || []).map((h) => String(h ?? '').trim());
+              const rows = aoa.slice(1).filter((r) => Array.isArray(r) && r.some((c) => c !== null && String(c).trim() !== ''));
+              if (!rows.length) continue;
+              tables.push({ sheet: sheetName, headers, rows });
+              // Markdown keeps the sheet readable for recall; the grid above keeps
+              // it countable. Both, not either.
+              mdParts.push(`## ${sheetName}\n\n${XLSX.utils.sheet_to_csv(ws).slice(0, 200000)}`);
+            }
+            if (tables.length) {
+              const md = mdParts.join('\n\n');
+              console.log(`[docling-adapter] tier=sheet-direct file=${filename} sheets=${tables.length} `
+                + `rows=${tables.reduce((n, t) => n + t.rows.length, 0)} ms=${Date.now() - tParse}`);
+              return {
+                // sheet-direct — builds real markdown tables
+                text: md, markdown: md /* real markdown tables */, json: null, tables,
+                pages: tables.length, confidence: null, error: null,
+                hybridChunks: [], chunkerError: null, engine: 'sheet-direct',
+              };
+            }
+          } catch (sheetErr) {
+            console.warn(`[docling-adapter] sheet-direct failed (${sheetErr.message}) — falling through to Docling`);
+          }
+        }
         if (['csv', 'tsv'].includes(ext)) {
           try {
             const raw = fileBuffer.toString('utf-8');
@@ -1413,7 +1747,8 @@ if (process.env.DOCLING_URL) {
               }
               console.log(`[docling-adapter] tier=csv file=${filename} rows=${hybridChunks.length} ms=${Date.now() - tParse}`);
               return {
-                text: raw, markdown: raw, json: { headers, rowCount: hybridChunks.length },
+                // csv — pipe rows, not markdown headings
+                text: raw, markdown: null, json: { headers, rowCount: hybridChunks.length },
                 tables: [{ sheet: 'sheet1', headers, rows: lines.slice(1).map(l => l.split(delim)) }],
                 pages: 1, confidence: null, error: null,
                 hybridChunks, chunkerError: null, engine: 'csv-direct',
@@ -1429,14 +1764,33 @@ if (process.env.DOCLING_URL) {
         // — NEVER Docling's local EasyOCR — in BOTH smart and non-smart mode.
         // Text-native PDFs use fast pdf-parse (non-smart) or Docling (smart,
         // for table/structure enrichment; the text layer means no OCR is run).
+        // Hoisted probe result: the fast-pdf probe runs inside the pdf-only block below,
+        // but its result is ALSO needed later at the Docling call site to decide ocr/pics.
+        // Referencing the block-scoped `fast` from out there threw
+        // `ReferenceError: fast is not defined` on EVERY pdf upload — swallowed by the
+        // outer catch and surfaced only as NO_RECALLABLE_CONTENT in 18s.
+        let _pdfProbe = null;
         if (ext === 'pdf') {
           try {
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
+            _pdfProbe = fast;
             // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
             // Runs first + regardless of smart so a scanned/image PDF never
             // falls to Docling's slow local OCR.
-            if (fast.isImageHeavy && process.env.GROQ_API_KEY) {
+            // FIGURE-RICH decks join this tier. They have a text layer, so they were
+            // never image-heavy and always fell through to Docling — where figures
+            // are dropped. Vision reads chart and diagram content a text extractor
+            // cannot see at any setting, and it is fast and already proven here
+            // (3-10s on real branding PDFs). KB_FIGURE_RICH_TO_VISION=false reverts.
+            const _visionWanted = fast.isImageHeavy
+              || (fast.isFigureRich
+                  && String(process.env.KB_FIGURE_RICH_TO_VISION ?? 'true').toLowerCase() !== 'false');
+            if (_visionWanted && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
+              if (fast.isFigureRich && !fast.isImageHeavy) {
+                console.log(`[docling-adapter] figure-rich ${filename} (${Math.round(fast.avgPerPage)} chars/page over `
+                  + `${fast.pages}p) → vision for figure content`);
+              }
               const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
               const vision = await parsePdfWithGroqVision(tempPath);
               if (!vision.error && vision.text.length > 200) {
@@ -1449,8 +1803,30 @@ if (process.env.DOCLING_URL) {
               }
               console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
             }
-            // ── Tier 1: text-native PDF (non-smart) → fast pdf-parse, no OCR ──
-            if (!smart && !fast.error && !fast.isImageHeavy && fast.text.length > 200) {
+            // ── Tier 1: TEXT-NATIVE PDF → fast pdf-parse, no OCR ──────────────────
+            // Was `if (!smart && ...)`. Uploads always pass smart:true (FORMAT_PROFILES
+            // pdf.smart), so this tier COULD NEVER FIRE for a real upload and every PDF —
+            // including ones with a perfectly good text layer — went to Docling.
+            //
+            // What Docling actually bought for that: measured today, three PDFs, three
+            // times `chunks=0`, costing 18s, 33s and 606s before falling back. The 606s
+            // case then fell through to a vision pass that inflated an 11-page paper to
+            // 246KB. `smart` was meant to buy table/structure enrichment; on PDFs it buys
+            // nothing here.
+            //
+            // Figure-rich and image-heavy PDFs already routed to vision ABOVE this point,
+            // so reaching here with a text layer means fast-pdf IS the right answer:
+            // ~800ms, already computed, and it keeps page markers for page-aware chunks.
+            // Docling remains the engine for DOCX/PPTX/ODT/RTF/EPUB, where it parses
+            // ZIP+XML natively and vision physically cannot read the format.
+            // Reversible: KB_PDF_TEXTLAYER_FIRST=false restores docling-for-smart.
+            const _textLayerFirst = String(process.env.KB_PDF_TEXTLAYER_FIRST ?? 'true').toLowerCase() !== 'false';
+            if ((!smart || _textLayerFirst) && !fast.error && !fast.isImageHeavy && fast.text.length > 200) {
+              if (smart && _textLayerFirst) {
+                console.log(`[docling-adapter] ${filename}: text layer present `
+                  + `(${fast.text.length} chars / ${fast.pages}p) → fast-pdf, SKIPPING docling `
+                  + `(measured: docling returns chunks=0 on text PDFs and costs 18-606s)`);
+              }
               // Page-aware chunking: pdf-parse v2 inserts `-- N of M --` page markers.
               // Split by page → smaller mid-page chunks (~1500 chars) so segments
               // map cleanly to pages. Heading derived from first line of each page.
@@ -1501,10 +1877,21 @@ if (process.env.DOCLING_URL) {
                 console.warn(`[fast-pdf] page-chunk failed: ${chkErr.message}`);
               }
               console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
+              // COLLAPSE LETTER-SPACING. collapseLetterSpacing() has always existed in
+              // docling-adapter.js and was applied ONLY to Docling's own responses — never
+              // to fast-pdf. Measured consequence on a 46 MB PDF that fell back here:
+              // segments read "S O L V I S  G E M E I N W O H L - B I L A N Z", the
+              // extractor returned 0-1 facts per window ("sparse extraction (0/6)"), and the
+              // document produced 240 SEGMENTS AND ZERO MEMORIES. Letter-spaced text also
+              // defeats both embeddings and lexical matching, so recall could not reach it
+              // either. The fix existed; it was simply not wired to this tier.
+              const _ft = collapseLetterSpacing(fast.text || '');
               return {
-                text: fast.text, markdown: fast.text, json: null,
+                // fast-pdf — flat text layer, no structure
+                text: _ft, markdown: null, json: null,
                 tables: [], pages: fast.pages, confidence: null, error: null,
-                hybridChunks, chunkerError: null, engine: 'pdf-parse',
+                hybridChunks: hybridChunks.map((c) => ({ ...c, text: collapseLetterSpacing(c.text || '') })),
+                chunkerError: null, engine: 'pdf-parse',
               };
             }
           } catch (tierErr) {
@@ -1512,23 +1899,169 @@ if (process.env.DOCLING_URL) {
           }
         }
 
+        // ── Tier 1.5: THE SEAM, for formats where it demonstrably beats docling ──
+        // Measured on a valid 2-heading DOCX: docling returned `chars=173 chunks=0` and logged
+        // "TIER FAILED EMPTY", so the document became ONE segment with no section structure. The
+        // seam's mammoth.convertToHtml path returned proper markdown for the same bytes:
+        //     # Marktumfeld und Wettbewerb  /  ## Technische Daten
+        // Word stores headings as styles, which convertToHtml preserves and extractRawText (and
+        // docling, here) drop. HTML is the same story — <h1>-<h6> are already structure.
+        // ALSO md/markdown/txt/text. Sending markdown THROUGH docling is self-defeating: the source
+        // already IS the target format, and re-parsing it discards the '#' headings it arrived with.
+        // Measured: 14 .md and 5 .txt documents took the docling path, and 55 of the 61 docling
+        // documents carry no heading_path at all. For these the seam returns markdown only when real
+        // headings are present and text with markdown:null otherwise, so nothing gains structure it
+        // did not have.
+        // PDF keeps its probe/vision/fast-pdf chain; PPTX/XLSX stay with docling because it reads
+        // their ZIP+XML natively (xlsx is additionally served by the earlier sheet-direct tier) and
+        // the seam deliberately refuses to guess at either. CSV stays on its existing tier.
+        // On any failure this falls through to the docling chain below rather than failing the upload.
+        const _seamExts = String(process.env.KB_SEAM_FORMATS || 'docx,html,htm,md,markdown,txt,text').split(',').map((x) => x.trim());
+        if (_seamExts.includes(ext)) {
+          try {
+            const { normalize: _normalize } = await import('./knowledge/normalize.js');
+            const _seam = await _normalize(fileBuffer, { mime: '', filename });  // mime is not in scope here; the seam keys off the extension, which IS (`ext`).
+            if (_seam.ok && (_seam.markdown || _seam.text)) {
+              const _body = _seam.markdown || _seam.text;
+              console.log(`[docling-adapter] tier=seam:${_seam.tier} file=${filename} chars=${_body.length} `
+                + `markdown=${_seam.markdown ? 'yes' : 'no'} ms=${Date.now() - tParse}`);
+              return {
+                text: _seam.text, markdown: _seam.markdown, json: null,
+                tables: [], pages: null, confidence: null, error: null,
+                hybridChunks: [], chunkerError: null, engine: `seam:${_seam.tier}`,
+              };
+            }
+            console.warn(`[docling-adapter] seam declined ${filename} (${_seam.error || 'no text'}) — trying docling`);
+          } catch (e) {
+            console.warn(`[docling-adapter] seam threw for ${filename}: ${e.message} — trying docling`);
+          }
+        }
+
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
         const useSmart = smart === true;
+        // Text-bearing and not image-heavy → neither OCR nor picture description is
+        // needed. Only a scan (no extractable text) or an image-heavy doc requires them.
+        const _hasTextLayer = ext === 'pdf' && !!(_pdfProbe && !_pdfProbe.error && _pdfProbe.text && _pdfProbe.text.length > 200);
+        const _doclingHeavyOk = ext !== 'pdf' ? true : (!_hasTextLayer || !!_pdfProbe?.isImageHeavy);
+        if (ext === 'pdf' && !_doclingHeavyOk) {
+          console.log(`[docling-adapter] ${filename}: text layer present (${_pdfProbe.text.length} chars / ${_pdfProbe.pages}p) → docling WITHOUT ocr/picture-description`);
+        }
+        const _tDoclingStart = Date.now();
         const [parseResult, chunkResult] = await Promise.all([
-          parseWithDocling(tempPath, filename, { smart: useSmart, picture_descriptions }),
-          chunkWithDocling(tempPath, filename).catch(e => ({ chunks: [], error: e.message })),
+          // Pass the format profile through so the adapter can skip passes this
+          // format has nothing to gain from (slides need picture description, not
+          // a document-wide OCR + accurate-table sweep). Undefined for unknown
+          // formats, which the adapter treats as "run everything" — unchanged.
+          parseWithDocling(tempPath, filename, {
+            smart: useSmart,
+            // OCR AND PICTURE DESCRIPTION ARE THE ENTIRE COST. `pdf` was the only format
+            // with both unconditionally on, and both are wasted when the PDF already
+            // carries a text layer: OCR rasterises and re-reads pages whose text we can
+            // read directly, and picture-description runs a vision model per embedded
+            // image. Measured: 606s on a 46MB PDF that then returned chunks=0.
+            // `fast` is the fast-pdf probe already run above (~800ms) — it knows whether
+            // a text layer exists and whether the doc is image-heavy. Use it instead of a
+            // static per-format guess.
+            picture_descriptions: _doclingHeavyOk ? picture_descriptions : false,
+            ocr: _doclingHeavyOk ? (profile ? profile.ocr : undefined) : false,
+            tables: profile ? profile.tables : undefined,
+          }),
+          // chunkWithDocling REMOVED. It was a SECOND full Docling conversion of the same
+          // file in the same Promise.all, and its output is discarded whenever
+          // KB_SEMANTIC_SEGMENTS is on (the default) because the semantic re-slice works
+          // from the clean markdown instead. Docling's HybridChunker also cuts MID-WORD
+          // ("visBruno7kW", "nschluss an SolvisMax"), which is why the re-slice exists.
+          // Halves Docling cost per file and removes two failure modes: chunkerError and
+          // the 180s chunker abort. hybridChunks still arrive on the parse response for the
+          // KB_SEMANTIC_SEGMENTS=false fallback path.
+          Promise.resolve({ chunks: [], skipped: 'single-conversion' }),
         ]);
         console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
-        // Smart-mode timeout fallback: if Docling failed AND we still have a
+        // Smart-mode timeout fallback: if the PARSE failed AND we still have a
         // PDF, try Tier 1 fast-pdf so the upload isn't lost.
-        if ((parseResult?.error || (parseResult?.text || '').length < 200) && ext === 'pdf') {
+        //
+        // Deliberately keyed on the PARSE only. A failed chunker must NOT trigger
+        // this: parse and chunk run concurrently above and each re-converts the
+        // document, so on a heavy file the chunker can abort while the parse
+        // succeeds. Observed on a 54-page deck — `parseError=none chunkerError=The
+        // operation was aborted due to timeout` — and the good Docling markdown,
+        // with its table structure and picture descriptions intact, was thrown away
+        // in favour of fast-pdf's flattened text. Losing layout because a SECOND
+        // call was slow is strictly worse than shipping the parse we already have;
+        // segmentation can re-chunk the markdown itself.
+        //
+        // "Usable" means text OR markdown OR chunks — not text alone. Docling can
+        // return a rich markdown body (and the hybrid chunker a full chunk list)
+        // while `text` stays short, and keying only on `text` threw all of it away:
+        // observed `chunks=81 parseError=none chunkerError=none` on a 54-page deck
+        // that STILL fell back to fast-pdf, discarding 81 layout-aware chunks —
+        // the same granularity supermemory achieves on this file — in favour of
+        // flattened text. Fall back only when we genuinely have nothing.
+        const usableChars = Math.max(
+          (parseResult?.text || '').length,
+          (parseResult?.markdown || '').length,
+        );
+        const usableChunks = chunkResult?.chunks?.length || 0;
+        // A parse ERROR is not a reason to fall back when the chunker still
+        // returned usable chunks. Parse and chunk run concurrently and each
+        // re-converts the document, so on a slow file the async convert can time
+        // out while the chunker completes — observed live:
+        //   parseError=Docling async polling timeout after 600000ms
+        //   chunks=42 chunkerError=none
+        // and 42 layout-aware Docling chunks were discarded in favour of fast-pdf's
+        // flattened text. My previous fix keyed on parseResult.error alone and so
+        // still lost them. Fall back only when there is genuinely nothing usable
+        // from EITHER call.
+        const _doclingMs = Date.now() - _tDoclingStart;
+        // Docling returning NOTHING after minutes is the worst outcome: the time is spent
+        // AND the pipeline must re-parse. A 606s run that yielded chunks=0 was previously
+        // invisible except as a mysteriously slow upload.
+        if (usableChunks === 0 && usableChars < 200) {
+          console.warn(`[docling-adapter] TIER FAILED EMPTY: ${filename} spent ${_doclingMs}ms in docling and returned `
+            + `chars=${usableChars} chunks=${usableChunks} — falling back. Time wasted, not an error path.`);
+        } else if (_doclingMs > 120_000) {
+          console.warn(`[docling-adapter] SLOW: ${filename} ${_doclingMs}ms in docling (chars=${usableChars} chunks=${usableChunks})`);
+        }
+        const parseFailed = usableChunks === 0
+          && (Boolean(parseResult?.error) || usableChars < 200);
+        if (parseResult?.error && usableChunks > 0) {
+          console.warn(`[docling-adapter] parse errored (${String(parseResult.error).slice(0, 80)}) but `
+            + `${usableChunks} chunks survived — using them instead of falling back for ${filename}`);
+        }
+        if (parseFailed && ext === 'pdf') {
           try {
+            // PREFER VISION OVER FAST-PDF ON FALLBACK. fast-pdf is measurably worse:
+            // on a real 46MB PDF it emitted letter-spaced display text
+            // ("S O L V I S  G E M E I N W O H L") plus page furniture, the extractor
+            // logged "sparse extraction (0/6)" on every window, and the document produced
+            // 240 SEGMENTS AND ZERO MEMORIES. Vision on the same class of document gave
+            // clean markdown with headings and pages in 74s. Try vision first; keep
+            // fast-pdf as the last resort so a missing vision key still degrades rather
+            // than fails.
+            if (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) {
+              try {
+                const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
+                const vfb = await parsePdfWithGroqVision(tempPath);
+                if (!vfb.error && vfb.text.length > 200) {
+                  console.warn(`[docling-adapter] tier=docling failed/empty → VISION fallback for ${filename} (chars=${vfb.text.length})`);
+                  return {
+                    text: vfb.text, markdown: vfb.markdown, json: null,
+                    tables: [], pages: vfb.pages, confidence: null, error: null,
+                    hybridChunks: [], chunkerError: null, engine: 'docling-fallback-vision',
+                  };
+                }
+                console.warn(`[docling-adapter] vision fallback also empty (${vfb.error || 'no text'}) → fast-pdf`);
+              } catch (vErr) {
+                console.warn(`[docling-adapter] vision fallback threw: ${vErr.message} → fast-pdf`);
+              }
+            }
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fb = await fastPdfExtract(tempPath);
             if (!fb.error && fb.text.length > 200) {
               console.warn(`[docling-adapter] tier=docling failed/empty → falling back to fast-pdf for ${filename}`);
+              const _fbt = collapseLetterSpacing(fb.text || '');
               return {
-                text: fb.text, markdown: fb.text, json: null,
+                text: _fbt, markdown: _fbt, json: null,
                 tables: [], pages: fb.pages, confidence: null, error: null,
                 hybridChunks: chunkResult?.chunks?.length ? chunkResult.chunks : [],
                 chunkerError: chunkResult?.error || null,
@@ -1538,6 +2071,40 @@ if (process.env.DOCLING_URL) {
           } catch (fbErr) {
             console.warn(`[docling-adapter] fallback fast-pdf also failed: ${fbErr.message}`);
           }
+        }
+        // EMPTY EXTRACTION IS A FAILURE, NOT A SUCCESS — for every format, not just PDF.
+        //
+        // The fallback ladder above is gated on `ext === 'pdf'`, so a PDF that comes
+        // back empty retries through vision and fast-pdf. Every OTHER format had no
+        // such path AND no guard: docling would answer HTTP 200 / status success with
+        // a near-empty body, that body would flow on to chunking and embedding, and
+        // the document would finish marked `ready` while holding nothing. Recall
+        // cannot return what was never extracted, and nothing anywhere said so — a
+        // green tick over an empty document is worse than a visible failure.
+        //
+        // Measured on this deployment: a 3-page image-only PDF returned 46 chars
+        // (three `<!-- image -->` markers and nothing else), and 104 chars even with
+        // do_ocr=true. That case is caught by the PDF branch. The same shape on a
+        // pptx/docx/xlsx — a deck of pure images, a docx of scanned pages — was not.
+        //
+        // There is no vision fallback for those formats (it needs a render step that
+        // does not exist), so the honest outcome is to FAIL LOUDLY: surface an error
+        // the queue can retry and the user can see, instead of silently indexing
+        // nothing. Same 200-char floor as parseFailed above, so the two agree.
+        if (parseFailed) {
+          const _why = parseResult?.error
+            ? String(parseResult.error).slice(0, 160)
+            : `docling returned ${usableChars} chars and ${usableChunks} chunks`;
+          console.warn(`[docling-adapter] EMPTY EXTRACTION ${filename} (.${ext}) — ${_why}. `
+            + `Failing the parse instead of indexing an empty document.`);
+          return {
+            ...parseResult,
+            hybridChunks: chunkResult?.chunks || [],
+            chunkerError: chunkResult?.error || null,
+            error: parseResult?.error
+              || `empty extraction: docling produced ${usableChars} chars for .${ext} `
+                 + `(floor 200). Nothing was indexed.`,
+          };
         }
         return {
           ...parseResult,
@@ -1568,6 +2135,22 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         embed: async (text) => {
           // Use the existing Qdrant client's embedding pipeline
           return qdrantClient.generateEmbedding(String(text).slice(0, 8000));
+        },
+        // BATCHED upsert: Qdrant accepts many points per PUT. The single-point path
+        // below, called once per segment with wait=true, was ~1/3 of a 630s embed stage.
+        storeVectors: async ({ collectionName, points }) => {
+          const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
+          const qKey = process.env.QDRANT_API_KEY || '';
+          const hdrs = { 'Content-Type': 'application/json' };
+          if (qKey) hdrs['api-key'] = qKey;
+          const CHUNK = Math.max(1, Number(process.env.QDRANT_UPSERT_BATCH || 64));
+          for (let i = 0; i < points.length; i += CHUNK) {
+            const slice = points.slice(i, i + CHUNK);
+            const r = await fetch(`${qUrl}/collections/${collectionName}/points?wait=true`, {
+              method: 'PUT', headers: hdrs, body: JSON.stringify({ points: slice }),
+            });
+            if (!r.ok) throw new Error(`Qdrant batch upsert ${r.status}: ${await r.text()}`);
+          }
         },
         storeVector: async ({ collectionName, id, vector, payload }) => {
           // qdrantClient has no .upsert() method — call REST endpoint directly
@@ -1612,16 +2195,52 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
     // pipeline above — worker calls documentFirstIngestion unchanged.
     try {
       const { KbIngestQueue } = await import('./knowledge/kb-ingest-queue.js');
+      knowledgeUploadJobStore = new KnowledgeUploadJobStore({ prisma, planEnforcer, logger: console });
       kbIngestQueue = new KbIngestQueue({
         documentFirstIngestion,
         ingestTracker,
-        recordUsage: (orgId, result) => {
-          if (planEnforcer && orgId) {
-            planEnforcer.recordUsage(orgId, 'kbPages', result.pages || result.segmentCount || 1);
-            planEnforcer.recordUsage(orgId, 'uploads', 1);
+        jobStore: knowledgeUploadJobStore,
+        validateJob: async ({ trackerJobId, userId, orgId, metadata }) => {
+          const durable = await knowledgeUploadJobStore.findOwned(trackerJobId, { orgId, userId });
+          if (!durable || durable.status === 'cancelled') throw Object.assign(new Error('Upload authorization is no longer valid.'), { code: 'UPLOAD_NOT_AUTHORIZED' });
+          const scope = await authorizeKnowledgeScope({
+            prisma, userId, orgId, targetScope: durable.scopeType,
+            projectIds: durable.scopeType === 'project' ? [durable.scopeId] : [],
+            primaryTeamId: durable.scopeType === 'team' ? durable.scopeId : null,
+          });
+          if (!scope.ok) throw Object.assign(new Error('Upload scope is no longer accessible.'), { code: 'UPLOAD_SCOPE_REVOKED' });
+          const org = await prisma.organization.findFirst({ where: { id: orgId }, select: { memoryStorageMode: true } });
+          if (!org || org.memoryStorageMode !== durable.storageMode || !isMemoryStorageReady(orgId, durable.storageMode)) {
+            throw Object.assign(new Error('The configured memory storage is unavailable.'), { code: 'STORAGE_UNAVAILABLE' });
           }
         },
+        processUpload: async ({ userId, orgId, filename, contentType, fileBuffer, metadata, onProgress }) => {
+          if (metadata.media_kind !== 'image') {
+            return documentFirstIngestion.ingestSource({
+              userId, orgId, source: { type: 'kb', filename },
+              file: { buffer: fileBuffer, contentType, filename }, metadata,
+              ingestMode: metadata?.ingest_mode || 'both', onProgress,
+            });
+          }
+          onProgress({ stage: 'extracting', progress: 25 });
+          const { buildImageMemoryPayload } = await import('./services/image-ingest.js');
+          const { payload } = await buildImageMemoryPayload({
+            imageBuffer: fileBuffer, mimeType: contentType, hint: metadata.hint,
+            userId, orgId, projectId: metadata.project_ids?.[0] || null, filename,
+          });
+          const saved = await ingestCanonicalPayload(payload, { sourceType: 'api', platform: 'knowledge_upload', mode: 'atomic' });
+          const ids = saved?.memoryIds?.length ? saved.memoryIds : [saved?.memoryId].filter(Boolean);
+          return {
+            documentId: saved?.documentId || ids[0] || null, promotedMemoryIds: ids,
+            promotedCount: Math.max(1, ids.length), segmentCount: saved?.segmentCount || 0,
+            candidateCount: Math.max(1, ids.length), pages: 1,
+          };
+        },
         logger: console,
+      });
+      knowledgeUploadService = new KnowledgeUploadService({
+        prisma, queue: kbIngestQueue, jobStore: knowledgeUploadJobStore,
+        planEnforcer, storageReady: isMemoryStorageReady,
       });
       process.once('SIGTERM', () => { kbIngestQueue?.close().catch(() => {}); });
     } catch (err) {
@@ -1644,12 +2263,31 @@ if (process.env.ENABLE_EVIDENCE_RECALL === 'true' && prisma && qdrantClient) {
   }
 }
 
+// TARA uses the same bounded internal recall service as chat/MCP, with the
+// latency-sensitive fact plan and live expansion disabled by default.
+if (taraHandler && persistentMemoryStore) {
+  const { RecallRouter } = await import('./memory/recall-router.js');
+  const taraRecallRouter = new RecallRouter({ persistentMemoryStore, evidenceRetrieval, prisma });
+  taraHandler.recallFn = createTaraRecallFn(taraRecallRouter);
+}
+
+// Durable outbox push worker (Phase 4 — remote/self-host orgs).
+// Safe no-op for central-only deployments: the worker only fires for orgIsRemote
+// orgs.  Wired here so it shares the same Redis probe pattern as KbIngestQueue.
+try {
+  const { startPushWorker } = await import('./memory/outbox.js');
+  await startPushWorker();
+  console.log('[boot] Memory outbox push worker started');
+} catch (err) {
+  console.warn('[boot] Memory outbox push worker failed to start (non-fatal):', err.message);
+}
+
 // Initialize Three-Tier Retrieval
-const threeTierRetrieval = new ThreeTierRetrieval({
-  vectorStore: qdrantClient,
-  graphStore: persistentMemoryStore,
-  llmClient: groqClient.isAvailable() ? groqClient : null
-});
+// ThreeTierRetrieval RETIRED from all request paths (2026-07-23). Every /api/search/*
+// endpoint now routes through the single canonical engine, recallPersistedMemories —
+// one recall implementation, so tuning it improves every surface (no more "which
+// engine am I tuning?"). The three-tier/hybrid files remain only for the offline
+// retrieval-evaluator benchmark; they no longer serve any live request.
 
 // Initialize PageIndex Searcher (optional optimization layer)
 let pageindexSearcher = null;
@@ -1676,12 +2314,7 @@ try {
   console.log('[server] PageIndexIntegration not available, skipping PageIndex ingestion:', err.message);
 }
 
-// Initialize Retrieval Evaluator
-const retrievalEvaluator = new RetrievalEvaluator({
-  vectorStore: qdrantClient,
-  graphStore: persistentMemoryStore,
-  llmClient: groqClient.isAvailable() ? groqClient : null
-});
+// Retrieval Evaluator RETIRED (2026-07-23) — see note at the evaluation imports.
 
 // Default user/org for local mode
 const DEFAULT_USER = process.env.HIVEMIND_DEFAULT_USER_ID || '00000000-0000-4000-8000-000000000001';
@@ -1689,15 +2322,7 @@ const DEFAULT_ORG = process.env.HIVEMIND_DEFAULT_ORG_ID || '00000000-0000-4000-8
 // SECURITY: HIVEMIND_ADMIN_SECRET MUST be set in production. We refuse to boot
 // with the legacy fallback so an unset env cannot leave admin endpoints open.
 // Local/dev still allowed: set HIVEMIND_ADMIN_SECRET=local-… explicitly.
-const ADMIN_SECRET = (() => {
-  const v = process.env.HIVEMIND_ADMIN_SECRET;
-  if (v && v !== 'local-admin-secret-change-me') return v;
-  if (process.env.NODE_ENV === 'production') {
-    console.error('[FATAL] HIVEMIND_ADMIN_SECRET must be set in production (and not the legacy default). Refusing to boot.');
-    process.exit(1);
-  }
-  return v || 'local-admin-secret-change-me';
-})();
+const ADMIN_SECRET = requireAdminSecret();
 
 // SECURITY: HMAC-signed state for OAuth callbacks. Without this the state
 // blob (which carries userId/orgId) is trivially mintable, letting an attacker
@@ -1774,11 +2399,9 @@ const OAUTH_SCOPE_ALIASES = {
 const OAUTH_ACCESS_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_ACCESS_TOKEN_TTL_SECONDS || 15 * 60);
 const OAUTH_REFRESH_TOKEN_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_REFRESH_TOKEN_TTL_SECONDS || 30 * 24 * 60 * 60);
 const OAUTH_SESSION_COOKIE_NAME = process.env.HIVEMIND_OAUTH_SESSION_COOKIE || 'hm_oauth_session';
-const OAUTH_SESSION_SECRET = process.env.HIVEMIND_OAUTH_SESSION_SECRET || process.env.SESSION_SECRET || 'change-me';
+const OAUTH_SESSION_SECRET = requireSessionSecret('HIVEMIND_OAUTH_SESSION_SECRET', ['SESSION_SECRET']);
 const OAUTH_AUTH_STATE_TTL_SECONDS = Number(process.env.HIVEMIND_OAUTH_AUTH_STATE_TTL_SECONDS || 10 * 60);
 const OAUTH_RESOURCE_DEFAULT = process.env.HIVEMIND_OAUTH_RESOURCE_DEFAULT || OAUTH_BASE_URL;
-const oauthCodeStore = new Map(); // code -> { clientId, redirectUri, scopes, codeChallenge, codeChallengeMethod, userId, orgId, workspaceId, resource, expiresAt, state }
-const oauthRefreshStore = new Map(); // refreshHash -> { ...metadata, expiresAt, revokedAt, rotatedFrom, accessTokenHash }
 const OAUTH_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const oauthSessionStore = new ControlPlaneSessionStore({
   sessionTtlSeconds: Number(process.env.HIVEMIND_OAUTH_SESSION_TTL_SECONDS || 60 * 60 * 8),
@@ -1787,6 +2410,14 @@ const oauthSessionStore = new ControlPlaneSessionStore({
   redisHost: process.env.REDIS_HOST || null,
   redisPort: Number(process.env.REDIS_PORT || 6379),
   redisPassword: process.env.REDIS_PASSWORD || null
+});
+const oauthStateStore = new OAuthStateStore({
+  codeTtlSeconds: Math.ceil(OAUTH_CODE_TTL_MS / 1000),
+  refreshTtlSeconds: OAUTH_REFRESH_TOKEN_TTL_SECONDS,
+  redisUrl: process.env.HIVEMIND_OAUTH_REDIS_URL || process.env.REDIS_URL || null,
+  redisHost: process.env.REDIS_HOST || null,
+  redisPort: Number(process.env.REDIS_PORT || 6379),
+  redisPassword: process.env.REDIS_PASSWORD || null,
 });
 const oauthZitadelClient = (
   process.env.ZITADEL_ISSUER_URL
@@ -1817,17 +2448,6 @@ let oauthClientRegistryCache = {
   clients: LOCAL_DEFAULT_OAUTH_CLIENTS
 };
 
-function cleanExpiredOAuthCodes() {
-  const now = Date.now();
-  for (const [code, entry] of oauthCodeStore) {
-    if (now > entry.expiresAt) oauthCodeStore.delete(code);
-  }
-  for (const [refreshHash, entry] of oauthRefreshStore) {
-    if (entry.revokedAt || now > entry.expiresAt) oauthRefreshStore.delete(refreshHash);
-  }
-}
-setInterval(cleanExpiredOAuthCodes, 60_000);
-
 // Audit retention purge — daily at midnight UTC. Uses session GUC to unblock
 // the delete trigger that protects audit_logs from ad-hoc DELETE.
 const AUDIT_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -1846,8 +2466,16 @@ async function runAuditRetentionPurge() {
     console.warn('[audit-retention] Purge failed:', err.message);
   }
 }
-setInterval(runAuditRetentionPurge, AUDIT_PURGE_INTERVAL_MS);
-setTimeout(runAuditRetentionPurge, 60_000); // first run 60s after boot
+if (shouldRunRecurringMaintenanceJobs()) {
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'audit-retention',
+    initialDelayMs: 60_000,
+    intervalMs: AUDIT_PURGE_INTERVAL_MS,
+    run: runAuditRetentionPurge,
+  });
+}
 
 const ALLOWED_ORIGINS = (process.env.HIVEMIND_ALLOWED_ORIGINS || 'https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu,https://claude.ai,https://www.claude.ai,https://anthropic.com,https://chatgpt.com,https://chat.openai.com')
   .split(',')
@@ -2112,6 +2740,57 @@ async function ingestRoutedPayload(routedPayload, engine) {
   return engine.ingestMemory(cleanPayload);
 }
 
+// V5 Phase 5B — /api/memories via the canonical envelope. Routes each routed
+// (non-tree) payload through ingestCanonicalPayload (scope-resolve → envelope →
+// ingestSource) so the highest-traffic write path gains provenance tags, canonical
+// entity persistence, async claim structuring and the coverage ledger, while the
+// engine-internal smart routing (same flags) keeps behavior identical. Trees keep
+// the engine path (ingestSource has no tree mode). Fallback to the engine path is
+// LOUD (warn log) — kept during migration for enterprise robustness; the legacy
+// path is deleted in the Phase 11 sweep once telemetry shows zero fallbacks.
+async function ingestRoutedPayloadCanonical(routedPayload, engine) {
+  const v5 = (process.env.V5_MEMORIES_CANONICAL || 'true').toLowerCase() !== 'false';
+  if (!v5 || routedPayload?.__ingest_tree) return ingestRoutedPayload(routedPayload, engine);
+  try {
+    const r = await ingestCanonicalPayload(routedPayload, { sourceType: 'api', mode: 'atomic' });
+    if (r?.skipped) return { skipped: true, operation: 'skipped_redundant', reason: r.reason || 'redundant', memoryId: r.memoryId || null };
+    return { ...r, operation: r.operation || 'created' };
+  } catch (e) {
+    console.warn('[v5-memories-canonical] envelope path failed, using engine path:', e.message);
+    return ingestRoutedPayload(routedPayload, engine);
+  }
+}
+
+// V5 Phase 5C — Tara voice saves via the canonical envelope (evidence mode:
+// ONE row, no fact-splitting — transcripts/logs are deliberate raw evidence).
+// Adds provenance + claim identity + the engine chokepoint; loud fallback to the
+// raw store write during migration (removed in the Phase 11 sweep).
+async function taraCanonicalSave(payload) {
+  try {
+    const r = await ingestCanonicalPayload(payload, { sourceType: 'meeting', mode: 'evidence' });
+    if (r?.memoryId || r?.id) return r;
+    throw new Error('canonical evidence save returned no id');
+  } catch (e) {
+    console.warn('[v5-tara-canonical] envelope path failed, raw store fallback:', e.message);
+    return persistentMemoryStore.createMemory({ id: crypto.randomUUID(), ...payload });
+  }
+}
+
+async function ingestCanonicalPayload(payload, options = {}) {
+  const scoped = await resolveScopedIngestPayload(payload);
+  const envelope = legacyPayloadToEnvelope(scoped, options);
+  if (documentFirstIngestion?.ingestSource && envelope) {
+    const result = await documentFirstIngestion.ingestSource(envelope);
+    if (!result?.ok) throw new Error(result?.error || 'canonical ingest failed');
+    return {
+      ...result,
+      memoryId: result.memoryId || result.memoryIds?.[0] || null,
+      id: result.memoryId || result.memoryIds?.[0] || result.documentId || null,
+    };
+  }
+  throw new Error('canonical ingestion service unavailable');
+}
+
 export async function resolveScopedIngestPayload(payload, options = {}) {
   if (!payload?.user_id || !payload?.org_id) return payload;
 
@@ -2183,6 +2862,52 @@ export function normalizeScopeIds(values = []) {
       .filter(value => typeof value === 'string' && value.trim())
       .map(value => value.trim())
   ));
+}
+
+function isUuidLike(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+async function countDerivedMemoriesByDocumentIds(documentIds = [], orgId = null) {
+  const ids = normalizeScopeIds(documentIds).filter(isUuidLike);
+  if (!ids.length || !prisma?.$queryRawUnsafe) return {};
+  const placeholders = ids.map((_, idx) => `$${idx + 2}::uuid`).join(',');
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT doc_id::text AS document_id, count(DISTINCT memory_id)::int AS c
+         FROM (
+           SELECT mel.document_id::text AS doc_id, mel.memory_id
+             FROM hivemind.memory_evidence_links mel
+             JOIN hivemind.memories m ON m.id = mel.memory_id
+            WHERE mel.document_id IN (${placeholders})
+              AND m.org_id = $1::uuid
+              AND m.deleted_at IS NULL
+           UNION
+           SELECT sm.metadata->>'document_id' AS doc_id, sm.memory_id
+             FROM hivemind.source_metadata sm
+             JOIN hivemind.memories m ON m.id = sm.memory_id
+            WHERE sm.metadata->>'document_id' = ANY($${ids.length + 2}::text[])
+              AND m.org_id = $1::uuid
+              AND m.deleted_at IS NULL
+           UNION
+           SELECT regexp_replace(t.tag, '^doc-id:', '') AS doc_id, m.id AS memory_id
+             FROM hivemind.memories m
+             CROSS JOIN LATERAL unnest(m.tags) AS t(tag)
+            WHERE t.tag = ANY($${ids.length + 3}::text[])
+              AND m.org_id = $1::uuid
+              AND m.deleted_at IS NULL
+         ) derived
+        GROUP BY doc_id`,
+      orgId,
+      ...ids,
+      ids,
+      ids.map(id => `doc-id:${id}`),
+    );
+    return Object.fromEntries((rows || []).map(row => [row.document_id, Number(row.c) || 0]));
+  } catch (err) {
+    console.warn('[documents] derived memory count failed:', err.message);
+    return {};
+  }
 }
 
 function countTopValues(values = [], limit = 5) {
@@ -2308,31 +3033,24 @@ async function buildProfileSummary({ userId, orgId, project = null }) {
     };
     if (project) where.project = project;
 
-    const [memoryCount, recentMemories] = await Promise.all([
-      prisma.memory.count({ where }).catch(() => 0),
-      prisma.memory.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        take: 20,
-        select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
-      }).catch(() => []),
+    // Counts via the ONE uniform seam (getOrgCounts routes central-vs-agent internally) — no per-type
+    // branch here. recentMemories (for tags/titles) stays a central sample; it's empty for remote orgs
+    // (a cosmetic follow-up), but the headline counts are now correct for every org type.
+    const [{ memories: memoryCount, relationships }, recentMemories] = await Promise.all([
+      getOrgCounts(prisma, orgId, userId),
+      // Remote (self-host) orgs have NO central memory rows — sample recent titles/tags from the agent.
+      (orgId && orgIsRemote(orgId))
+        ? remoteList(orgId, { is_latest: true }, null, 15).then(({ memories }) => (memories || []).map((m) => ({
+            id: m.id, title: m.title, tags: m.tags || [], sourcePlatform: m.source_platform || null,
+            memoryType: m.memory_type || null, content: m.content || '', createdAt: m.created_at,
+          }))).catch(() => [])
+        : prisma.memory.findMany({
+            where,
+            orderBy: { createdAt: 'desc' },
+            take: 20,
+            select: { id: true, title: true, tags: true, sourcePlatform: true, memoryType: true, content: true, createdAt: true },
+          }).catch(() => []),
     ]);
-    // Relationship count — use raw query against mapped table name, scoped to user.
-    // Also excludes edges originating from extracted-fact children so the count
-    // reconciles with the graph view.
-    let relationships = 0;
-    try {
-      const relRows = await prisma.$queryRawUnsafe(
-        `SELECT COUNT(*)::int as c FROM "relationships" r
-         JOIN "memories" m ON r."from_id" = m."id"
-         WHERE m."user_id" = $1::uuid
-           AND m."deleted_at" IS NULL
-           AND m."is_latest" = true
-           AND NOT (m."tags" && ARRAY['tara-turn','tara-insight','tara-call-log','tara-session','tara-config','tara-skill','internal-audit','governance','reflection','hyper-rooms','hyper-room','room-decision']::text[])`,
-        userId
-      );
-      relationships = relRows?.[0]?.c || 0;
-    } catch { relationships = 0; }
 
     // Count observations from recent memories tags
     const observationCount = recentMemories.filter(m => (m.tags || []).includes('observation')).length;
@@ -2820,26 +3538,6 @@ async function createOAuthSession(res, payload) {
   );
 }
 
-function ensureOAuthRefreshTokenStore() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(OAUTH_REFRESH_TOKENS_FILE_PATH)) {
-    fs.writeFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, JSON.stringify({ tokens: [] }, null, 2), 'utf-8');
-  }
-}
-
-function loadOAuthRefreshTokenStore() {
-  ensureOAuthRefreshTokenStore();
-  const raw = fs.readFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, 'utf-8');
-  return JSON.parse(raw || '{"tokens":[]}');
-}
-
-function saveOAuthRefreshTokenStore(store) {
-  ensureOAuthRefreshTokenStore();
-  fs.writeFileSync(OAUTH_REFRESH_TOKENS_FILE_PATH, JSON.stringify(store, null, 2), 'utf-8');
-}
-
 function generateRawRefreshToken() {
   return `hmr_live_${crypto.randomBytes(32).toString('hex')}`;
 }
@@ -2893,47 +3591,28 @@ async function createOAuthAccessToken({
   return { accessToken: rawKey, accessTokenId: record.id, expiresAt };
 }
 
-function persistRefreshTokenRecord(rawToken, record) {
-  oauthRefreshStore.set(record.refreshHash, record);
-  const store = loadOAuthRefreshTokenStore();
-  store.tokens = (Array.isArray(store.tokens) ? store.tokens : []).filter(t => t.refreshHash !== record.refreshHash);
-  store.tokens.push({
+async function persistRefreshTokenRecord(rawToken, record) {
+  const encryptedRecord = {
     ...record,
-    refreshTokenEncrypted: encryptToken(rawToken)
-  });
-  saveOAuthRefreshTokenStore(store);
+    refreshTokenEncrypted: encryptToken(rawToken),
+  };
+  await oauthStateStore.storeRefreshTokenRecord(encryptedRecord);
 }
 
-function loadRefreshTokenRecord(rawToken) {
+async function loadRefreshTokenRecord(rawToken) {
   if (!rawToken) return null;
   const refreshHash = hashRefreshToken(rawToken);
-  const inMemory = oauthRefreshStore.get(refreshHash);
-  if (inMemory) return inMemory;
-
-  const store = loadOAuthRefreshTokenStore();
-  const found = (store.tokens || []).find(t => t.refreshHash === refreshHash);
+  const found = await oauthStateStore.loadRefreshTokenRecord(refreshHash);
   if (!found) return null;
   if (found.refreshTokenEncrypted && decryptToken(found.refreshTokenEncrypted) !== rawToken) {
     return null;
   }
-  oauthRefreshStore.set(refreshHash, found);
   return found;
 }
 
-function markRefreshTokenRevoked(refreshHash) {
+async function markRefreshTokenRevoked(refreshHash) {
   const now = new Date().toISOString();
-  const inMemory = oauthRefreshStore.get(refreshHash);
-  if (inMemory) {
-    inMemory.revokedAt = now;
-    oauthRefreshStore.set(refreshHash, inMemory);
-  }
-  const store = loadOAuthRefreshTokenStore();
-  store.tokens = (store.tokens || []).map(entry => (
-    entry.refreshHash === refreshHash
-      ? { ...entry, revokedAt: now }
-      : entry
-  ));
-  saveOAuthRefreshTokenStore(store);
+  await oauthStateStore.revokeRefreshToken(refreshHash, now);
 }
 
 async function revokeAccessTokenByHash(keyHash, reason = 'oauth_revoke') {
@@ -3264,6 +3943,46 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
 
+  // ─── Connector Runtime V1 — capability endpoint + stateless MCP gateway ───
+  // Flag-gated (CONNECTOR_RUNTIME_ENABLED). Default OFF → this block is skipped
+  // entirely and has ZERO effect on any existing route. When on, it serves only
+  // the two new paths. The gateway self-authenticates via the capability token
+  // (Bearer); the capability endpoint uses the normal API-key principal. The
+  // ConnectorExecutionContext is derived server-side only. See
+  // docs/connector-runtime/. Additive — Chat/HyperAgents/TARA are untouched
+  // until their own surface flags + adapters are cut over.
+  if (process.env.CONNECTOR_RUNTIME_ENABLED === 'true'
+      && (pathname === '/api/connectors/runtime/capabilities' || pathname.startsWith('/mcp/connectors/'))) {
+    try {
+      const [{ getConnectorRuntime }, { handleCapabilityRequest, handleGatewayRequest }, { makeRevocationStore }] = await Promise.all([
+        import('./connectors/runtime/index.js'),
+        import('./connectors/runtime/mcp-routes.js'),
+        import('./connectors/runtime/capability-token.js'),
+      ]);
+      const runtime = getConnectorRuntime({ db: prisma, prisma, auditLogger });
+      if (pathname === '/api/connectors/runtime/capabilities') {
+        if (req.method !== 'POST') return jsonResponse(res, { error: 'method not allowed' }, 405);
+        const auth = await authenticateApiKey(req);
+        if (!auth.ok) return jsonResponse(res, { error: auth.error || 'unauthorized' }, auth.status || 401);
+        const capBody = await parseBody(req).catch(() => ({}));
+        const r = handleCapabilityRequest({ body: capBody, principal: auth.principal, runtime });
+        return jsonResponse(res, r.body, r.status);
+      }
+      const gm = /^\/mcp\/connectors\/([^/?]+)/.exec(pathname);
+      if (gm && req.method === 'POST') {
+        const gwBody = await parseBody(req).catch(() => ({}));
+        const redis = (typeof qdrantClient !== 'undefined' && qdrantClient?.redis) || null;
+        const rev = redis ? makeRevocationStore(redis) : null;
+        const r = await handleGatewayRequest({ connectorId: gm[1], authHeader: req.headers.authorization, request: gwBody, runtime, isRevoked: rev ? rev.isRevoked : undefined });
+        if (r.body === null) { res.writeHead(r.status); res.end(); return; }
+        return jsonResponse(res, r.body, r.status);
+      }
+      return jsonResponse(res, { error: 'not found' }, 404);
+    } catch (err) {
+      return jsonResponse(res, { error: 'connector_runtime_error', detail: err.message }, 500);
+    }
+  }
+
   // ─── ChatGPT Connector adapter (one-click integration layer) ─
   // Public spec at /v1/chatgpt/openapi.yaml; tool endpoints under
   // /v1/chatgpt/* authed via existing Bearer / API key pipeline.
@@ -3306,6 +4025,7 @@ const server = http.createServer(async (req, res) => {
       smartIngestRouter,
       buildRoutedIngestPayloads,
       ingestRoutedPayload,
+      ingestCanonicalPayload,
       webIntelligence: globalThis.webIntelligence || null,
       prisma,
       accessContext: null,
@@ -3793,6 +4513,14 @@ const server = http.createServer(async (req, res) => {
             data: { usedAt: new Date(), usedBy: userId }
           });
           continue;
+        }
+
+        if (planEnforcer) {
+          const seatCheck = await planEnforcer.checkLimit(invite.orgId, 'users', 1);
+          if (!seatCheck.allowed) {
+            results.push({ orgId: invite.orgId, status: 'plan_limit', error: seatCheck.reason });
+            continue;
+          }
         }
         
         // Create org membership
@@ -4918,9 +5646,8 @@ exit \$RC
       state,
       expiresAt: Date.now() + OAUTH_CODE_TTL_MS
     };
-    const code = await oauthSessionStore.createAuthState({ kind: 'oauth_code', payload: codeEntry });
-    // Keep an in-memory mirror as a same-replica fast path / Redis-down safety net.
-    oauthCodeStore.set(code, codeEntry);
+    const code = crypto.randomUUID();
+    await oauthStateStore.storeAuthorizationCode(code, codeEntry);
 
     const callbackUrl = new URL(redirectUri);
     callbackUrl.searchParams.set('code', code);
@@ -4985,18 +5712,7 @@ exit \$RC
       const redirectUri = tokenParams.redirect_uri || '';
       const codeVerifier = tokenParams.code_verifier || '';
 
-      // Read from the Redis-shared store first so any replica can redeem a
-      // code issued by any other replica. Fall back to the in-memory mirror
-      // (same-replica fast path / Redis-down). consumeAuthState deletes on
-      // read (single-use); also clear the local mirror.
-      let entry = null;
-      const sharedCode = await oauthSessionStore.consumeAuthState(code);
-      if (sharedCode && sharedCode.kind === 'oauth_code' && sharedCode.payload) {
-        entry = sharedCode.payload;
-      } else {
-        entry = oauthCodeStore.get(code) || null;
-      }
-      oauthCodeStore.delete(code);
+      const entry = await oauthStateStore.consumeAuthorizationCode(code);
       if (!entry) {
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Authorization code is invalid or expired.' }, 400);
       }
@@ -5061,7 +5777,7 @@ exit \$RC
         revokedAt: null,
         rotatedFrom: null
       };
-      persistRefreshTokenRecord(refreshToken, refreshRecord);
+      await persistRefreshTokenRecord(refreshToken, refreshRecord);
 
       return jsonResponse(res, {
         access_token: accessToken,
@@ -5086,7 +5802,7 @@ exit \$RC
       if (!refreshToken) {
         return jsonResponse(res, { error: 'invalid_request', error_description: 'refresh_token is required.' }, 400);
       }
-      const record = loadRefreshTokenRecord(refreshToken);
+      const record = await loadRefreshTokenRecord(refreshToken);
       if (!record) {
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Refresh token is invalid.' }, 400);
       }
@@ -5097,7 +5813,7 @@ exit \$RC
         return jsonResponse(res, { error: 'invalid_grant', error_description: 'Refresh token expired or revoked.' }, 400);
       }
 
-      markRefreshTokenRevoked(record.refreshHash);
+      await markRefreshTokenRevoked(record.refreshHash);
       await revokeAccessTokenByHash(record.accessTokenHash, 'oauth_refresh_rotation');
 
       const { accessToken, accessTokenId, expiresAt } = await createOAuthAccessToken({
@@ -5121,7 +5837,7 @@ exit \$RC
         revokedAt: null,
         rotatedFrom: record.refreshHash
       };
-      persistRefreshTokenRecord(rotatedRefreshToken, rotatedRecord);
+      await persistRefreshTokenRecord(rotatedRefreshToken, rotatedRecord);
 
       const oauthScopes = normalizeRequestedScopes(record.scopes || [], ['memory.read']);
       return jsonResponse(res, {
@@ -5157,9 +5873,9 @@ exit \$RC
       return jsonResponse(res, { error: 'invalid_request', error_description: 'token is required' }, 400);
     }
 
-    const refreshRecord = loadRefreshTokenRecord(token);
+    const refreshRecord = await loadRefreshTokenRecord(token);
     if (refreshRecord && !refreshRecord.revokedAt) {
-      markRefreshTokenRevoked(refreshRecord.refreshHash);
+      await markRefreshTokenRevoked(refreshRecord.refreshHash);
       await revokeAccessTokenByHash(refreshRecord.accessTokenHash, 'oauth_revoke');
       return jsonResponse(res, { revoked: true, token_type: 'refresh_token' });
     }
@@ -5191,6 +5907,65 @@ exit \$RC
       org_id: principal.orgId || null,
       key_id: principal.keyId || null
     });
+  }
+
+  // ── Grok voice adapter internal callbacks (service-token authed) ─────────
+  // MUST sit OUTSIDE the `/api/` block below. These paths start with /internal/,
+  // so while this dispatch was nested inside `if (pathname.startsWith('/api/'))`
+  // it could never run: every consume/events/tools call 404'd and the whole Grok
+  // voice path was unreachable (the adapter rejected the WS handshake with 403
+  // after its consume failed). The runtime authenticates with the narrowly
+  // scoped TARA_GROK_SERVICE_TOKEN — never the master key — so it correctly
+  // sits above the user-facing API auth gate.
+  if (pathname.startsWith('/internal/v1/tara/calls/')) {
+    let body = {};
+    if (req.method !== 'GET') {
+      try {
+        body = await parseBody(req);
+      } catch {
+        return jsonResponse(res, { error: 'invalid_json_body' }, 400);
+      }
+    }
+    const handled = await taraGrokRuntime({
+      pathname, method: req.method, body, url, req, res,
+      userId: null, orgId: null, jsonResponse, accessContext: null,
+    });
+    if (handled) return;
+    return jsonResponse(res, { error: 'not_found' }, 404);
+  }
+
+  // Native X OAuth callbacks are intentionally outside the user API auth gate.
+  // Their random, one-time server-side state resolves the exact org/user owner.
+  if (pathname === '/api/x-ads/oauth/oauth2/callback' || pathname === '/api/x-ads/oauth/oauth1/callback') {
+    await handleXAdsOAuthCallback({ pathname, url, res, prisma });
+    return;
+  }
+
+  // Zernio delivers one team-level webhook for every tenant profile. Verify the
+  // signature over the untouched bytes, persist the event, and acknowledge fast;
+  // profile-scoped reconciliation continues asynchronously.
+  if (pathname === '/api/campaigns/webhooks/zernio' && req.method === 'POST') {
+    try {
+      const rawBody = await readBoundedBuffer(req, 1024 * 1024);
+      const result = await acceptZernioWebhook({
+        prisma, rawBody,
+        signature: req.headers['x-zernio-signature'] || req.headers['x-late-signature'],
+        eventIdHeader: req.headers['x-zernio-event-id'] || req.headers['x-late-event-id'],
+      });
+      return jsonResponse(res, result, 200);
+    } catch (error) {
+      return jsonResponse(res, { error: error.code || 'campaign_webhook_failed', message: error.message }, error.status || 500);
+    }
+  }
+
+  if (pathname === '/api/campaigns/connections/callback' && req.method === 'GET') {
+    try {
+      const location = completeCampaignConnectionRedirect(req.url);
+      res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+      return res.end();
+    } catch (error) {
+      return jsonResponse(res, { error: error.code || 'campaign_connection_callback_failed', message: error.message }, error.status || 400);
+    }
   }
 
   // API Routes
@@ -5260,6 +6035,43 @@ exit \$RC
         } catch { return null; }
       };
 
+      // pyannoteAI speaker IDENTIFICATION — same media:// upload, but /v1/identify
+      // with enrolled voiceprints → turns labeled with REAL names (not SPEAKER_xx).
+      // voiceprints: [{ label, voiceprint(base64) }]. Returns null on any failure.
+      const pyannoteIdentify = async (audio, contentType, voiceprints) => {
+        const token = process.env.PYANNOTE_API_TOKEN;
+        if (!token || !Array.isArray(voiceprints) || !voiceprints.length) return null;
+        const PB = 'https://api.pyannote.ai';
+        const H = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+        try {
+          const objectKey = `media://hm-meeting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const inRes = await fetch(`${PB}/v1/media/input`, { method: 'POST', headers: H, body: JSON.stringify({ url: objectKey }), signal: AbortSignal.timeout(30_000) });
+          if (!inRes.ok) return null;
+          const presigned = (await inRes.json())?.url;
+          if (!presigned) return null;
+          const putRes = await fetch(presigned, { method: 'PUT', headers: { 'Content-Type': contentType || 'audio/webm' }, body: audio, signal: AbortSignal.timeout(120_000) });
+          if (!putRes.ok) return null;
+          const subRes = await fetch(`${PB}/v1/identify`, {
+            method: 'POST', headers: H,
+            body: JSON.stringify({ url: objectKey, model: process.env.PYANNOTE_MODEL || 'precision-2', voiceprints: voiceprints.slice(0, 50) }),
+            signal: AbortSignal.timeout(30_000),
+          });
+          if (!subRes.ok) return null;
+          const jobId = (await subRes.json())?.jobId;
+          if (!jobId) return null;
+          const deadline = Date.now() + 240_000;
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 4000));
+            const jr = await fetch(`${PB}/v1/jobs/${jobId}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });
+            if (!jr.ok) continue;
+            const jj = await jr.json();
+            if (jj.status === 'succeeded') return jj.output?.identification || jj.output?.diarization || null;
+            if (jj.status === 'failed' || jj.status === 'canceled') return null;
+          }
+          return null;
+        } catch { return null; }
+      };
+
       // Assign each Whisper segment the diarization turn with max temporal
       // overlap, then merge consecutive same-speaker segments.
       const alignSegmentsToSpeakers = (segments, turns) => {
@@ -5284,93 +6096,277 @@ exit \$RC
         return merged;
       };
 
+      // Speaker-attributed transcript ("Speaker: text") from aligned segments — fed
+      // to insights + saved to memory so meeting recall knows WHO said what.
+      const buildSpeakerTranscript = (speakerSegments) => {
+        if (!Array.isArray(speakerSegments) || !speakerSegments.length) return null;
+        return speakerSegments.map((s) => `${s.speaker}: ${(s.text || '').trim()}`).join('\n\n');
+      };
+
+      // Talk-time / participation per speaker. Computed from pyannote turns alone,
+      // so it survives even when STT returned no segments (OpenRouter path).
+      const computeTalkTime = (turns) => {
+        if (!Array.isArray(turns) || !turns.length) return null;
+        const by = {};
+        let total = 0;
+        for (const tn of turns) {
+          const d = Math.max(0, (Number(tn.end) || 0) - (Number(tn.start) || 0));
+          const sp = tn.speaker || 'SPEAKER_00';
+          by[sp] = by[sp] || { speaker: sp, seconds: 0, turns: 0 };
+          by[sp].seconds += d;
+          by[sp].turns += 1;
+          total += d;
+        }
+        return Object.values(by)
+          .map((x) => ({ ...x, seconds: Math.round(x.seconds), pct: total > 0 ? Math.round((x.seconds / total) * 100) : 0 }))
+          .sort((a, b) => b.seconds - a.seconds);
+      };
+
+      // ── Mandatory auth gate for write families that sit above the global gate ──
+      // /api/meetings*, /api/tara*, /api/autofill* handlers live ABOVE the global
+      // authenticateApiKey check (~line 7062). Without this gate they fall back to a
+      // spoofable x-hm-org-id header → unauthenticated cross-tenant writes. We require
+      // auth here and pin the tenant strictly to the authenticated principal.
+      // Master-key callers: authenticateApiKey folds x-hm-org-id/x-hm-user-id INTO
+      // principal (line ~3191-3194), so control-plane proxy calls keep working.
+      // NOTE: do NOT add any public webhook paths (/api/connectors/*/webhook etc.) here.
+      // (The Grok adapter's /internal/v1/tara/calls/* dispatch lives ABOVE this
+      // `/api/` block — it was unreachable while nested here.)
+
+      let _mAuth = null;
+      if (/^\/api\/(meetings|tara|autofill)(\/|$)/.test(pathname)) {
+        _mAuth = await authenticateApiKey(req).catch(() => null);
+        if (!_mAuth?.ok) return jsonResponse(res, { error: 'unauthorized' }, 401);
+      }
+      const _mUserId = _mAuth?.principal?.userId || null;
+      const _mOrgId  = _mAuth?.principal?.orgId  || null;
+      if (pathname.startsWith('/api/meetings')) {
+        const meetingMembership = await prisma?.userOrganization.findUnique({
+          where: { userId_orgId: { userId: _mUserId, orgId: _mOrgId } },
+          select: { isActive: true },
+        }).catch(() => null);
+        if (!meetingMembership?.isActive) return jsonResponse(res, { error: 'not_found' }, 404);
+      }
+      let _mProjectIds = null;
+      const meetingProjectIds = async () => {
+        if (_mProjectIds) return _mProjectIds;
+        const memberships = await prisma?.projectMember.findMany({
+          where: { userId: _mUserId, project: { orgId: _mOrgId, archivedAt: null } },
+          select: { projectId: true },
+        }).catch(() => []);
+        _mProjectIds = (memberships || []).map((row) => row.projectId);
+        return _mProjectIds;
+      };
+      const meetingRecordAccessible = async (meeting) => {
+        if (!meeting || (meeting.org_id && meeting.org_id !== _mOrgId)) return false;
+        if (meeting.user_id === _mUserId || meeting.scope == null || meeting.scope === 'organization' || meeting.scope === 'team') return true;
+        const participants = Array.isArray(meeting.participants) ? meeting.participants : [];
+        if (participants.some((participant) => (
+          (typeof participant === 'string' ? participant : participant?.id) === _mUserId
+        ))) return true;
+        return meeting.scope === 'project' && (await meetingProjectIds()).includes(meeting.project_id);
+      };
+      const remoteMeetingForCaller = async (id) => {
+        const meeting = await amrMeetingGet(_mOrgId, id);
+        return (await meetingRecordAccessible(meeting)) ? meeting : null;
+      };
+      const centralMeetingForCaller = async (id) => {
+        if (!prisma) return null;
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, user_id, org_id, project_id, participants, scope
+             FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
+          id, _mOrgId,
+        ).catch(() => []);
+        return (await meetingRecordAccessible(rows?.[0])) ? rows[0] : null;
+      };
+      if (pathname.startsWith('/api/tara/')) {
+        const membership = await prisma?.userOrganization.findUnique({
+          where: { userId_orgId: { userId: _mUserId, orgId: _mOrgId } },
+        }).catch(() => null);
+        const requestedProjectId = typeof body?.project_id === 'string' ? body.project_id : null;
+        const projectMembership = await prisma?.projectMember.findFirst({
+          where: {
+            ...(requestedProjectId ? { projectId: requestedProjectId } : {}),
+            userId: _mUserId,
+            role: 'owner',
+            project: { orgId: _mOrgId, archivedAt: null },
+          },
+          select: { role: true },
+        }).catch(() => null);
+        const projectRole = projectMembership?.role || null;
+        if (!membership?.isActive || !canUsePrivilegedAgent(effectiveRoles(membership), projectRole)) {
+          return jsonResponse(res, {
+            error: 'forbidden',
+            code: 'PRIVILEGED_AGENT_ROLE_REQUIRED',
+          }, 403);
+        }
+      }
+
+      if (pathname.startsWith('/api/tara/')) {
+        const handled = await taraGrokRuntime({ pathname, method: req.method, body, url, req, res, userId: _mUserId, orgId: _mOrgId, jsonResponse, accessContext: null });
+        if (handled) return;
+      }
+      // RESIDENCY: meetings + tara are now routed to the org's agent for remote (self-host) orgs.
+      // The 501 block is gone — each endpoint below branches on orgIsRemote(_mOrgId) and calls
+      // amrMeeting*/amrTaraCall instead of Prisma/raw-SQL. Central/managed orgs are BYTE-UNCHANGED.
+
       // ── AI Meeting Notes ──────────────────────────────────────────────
+      if (pathname === '/api/meetings/usage' && req.method === 'GET') {
+        if (!planEnforcer) return jsonResponse(res, { error: 'billing_unavailable' }, 503);
+        const usage = await planEnforcer.getUsageSummary(_mOrgId);
+        const meter = usage.meetingMinutes || { usedSeconds: 0, limit: -1 };
+        if (orgIsRemote(_mOrgId)) {
+          const remoteMeetings = await amrMeetingList(_mOrgId, { limit: 5000 });
+          if (!remoteMeetings) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const monthStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1);
+          meter.usedSeconds = remoteMeetings.reduce((total, meeting) => (
+            new Date(meeting.created_at || 0).getTime() >= monthStart
+              ? total + Math.max(0, Number(meeting.duration_sec) || 0)
+              : total
+          ), 0);
+        }
+        const limitSeconds = meter.limit === -1 ? -1 : Math.max(0, Number(meter.limit) * 60);
+        const usedSeconds = Math.max(0, Number(meter.usedSeconds) || 0);
+        return jsonResponse(res, {
+          plan: usage.plan,
+          used_seconds: usedSeconds,
+          limit_seconds: limitSeconds,
+          remaining_seconds: limitSeconds === -1 ? -1 : Math.max(0, limitSeconds - usedSeconds),
+          reset_at: new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1)).toISOString(),
+        });
+      }
+
+      if (pathname === '/api/meetings/sessions' && req.method === 'POST') {
+        if (body?.consent !== true) {
+          return jsonResponse(res, {
+            error: 'recording_consent_required',
+            message: 'Confirm recording consent before starting a meeting.',
+          }, 400);
+        }
+        if (!planEnforcer) return jsonResponse(res, { error: 'billing_unavailable' }, 503);
+        const usage = await planEnforcer.getUsageSummary(_mOrgId);
+        const meter = usage.meetingMinutes || { usedSeconds: 0, limit: -1 };
+        if (orgIsRemote(_mOrgId)) {
+          const remoteMeetings = await amrMeetingList(_mOrgId, { limit: 5000 });
+          if (!remoteMeetings) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const monthStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1);
+          meter.usedSeconds = remoteMeetings.reduce((total, meeting) => (
+            new Date(meeting.created_at || 0).getTime() >= monthStart
+              ? total + Math.max(0, Number(meeting.duration_sec) || 0)
+              : total
+          ), 0);
+        }
+        const limitSeconds = meter.limit === -1 ? -1 : Math.max(0, Number(meter.limit) * 60);
+        const usedSeconds = Math.max(0, Number(meter.usedSeconds) || 0);
+        const remainingSeconds = limitSeconds === -1 ? -1 : Math.max(0, limitSeconds - usedSeconds);
+        if (remainingSeconds === 0) {
+          return jsonResponse(res, planLimitBody({
+            allowed: false, current: Math.ceil(usedSeconds / 60), limit: meter.limit,
+            plan: usage.plan, reason: 'Meeting notes monthly allowance reached.',
+          }, 'meetingMinutes'), 402);
+        }
+        return jsonResponse(res, {
+          session_id: crypto.randomUUID(),
+          remaining_seconds: remainingSeconds,
+          consent_recorded: true,
+        }, 201);
+      }
+
       // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.
       // Optional ?diarize=true → pyannote multi-speaker labels (graceful fallback).
       if (pathname === '/api/meetings/transcribe' && req.method === 'POST') {
-        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'stt_unavailable' }, 503);
+        // Meeting-notes minutes are a plan limit (see src/billing/plans.js —
+        // meetingMinutesPerMonth). Checked BEFORE we burn a transcription call,
+        // and charged 1 minute here as the admission floor; the real duration is
+        // derived from meetings.duration_sec, so this gate only has to stop an
+        // org that is already at the ceiling.
+        if (planEnforcer && _mOrgId) {
+          const minCheck = await planEnforcer.checkLimit(_mOrgId, 'meetingMinutes', 0);
+          if (!minCheck.allowed) {
+            return jsonResponse(res, planLimitBody(minCheck, 'meetingMinutes'), minCheck.status || 402);
+          }
+        }
         try {
+          if (!_ct.startsWith('audio/')) return jsonResponse(res, { error: 'audio_unsupported' }, 415);
           const chunks = [];
-          for await (const c of req) chunks.push(c);
+          const maxMb = Number(process.env.MEETING_STT_MAX_MB || process.env.GROQ_WHISPER_MAX_MB || 24);
+          const maxBytes = maxMb * 1024 * 1024;
+          let receivedBytes = 0;
+          for await (const c of req) {
+            receivedBytes += c.length;
+            if (receivedBytes > maxBytes) {
+              return jsonResponse(res, {
+                error: 'audio_too_large',
+                message: `This recording segment exceeds the ${maxMb} MB transcription limit.`,
+              }, 413);
+            }
+            chunks.push(c);
+          }
           const audio = Buffer.concat(chunks);
           if (!audio.length) return jsonResponse(res, { error: 'empty_audio' }, 400);
           // Groq Whisper hard file cap (25 MB free / 100 MB dev tier). Catch it
           // HERE with a clear message instead of letting Groq 413 surface as an
           // opaque "whisper model issue" — a long meeting is the #1 cause.
-          const maxMb = Number(process.env.GROQ_WHISPER_MAX_MB || 24);
           if (audio.length > maxMb * 1024 * 1024) {
             return jsonResponse(res, {
               error: 'audio_too_large',
               message: `Recording is ${(audio.length / 1048576).toFixed(1)} MB — over the ${maxMb} MB transcription limit. Record shorter segments or split the meeting.`,
             }, 413);
           }
-          const ext = ((_ct.split('/')[1] || 'webm').split(';')[0]) || 'webm';
-          const fd = new FormData();
-          fd.append('file', new Blob([audio], { type: _ct || 'audio/webm' }), `meeting.${ext}`);
-          // Accuracy config (Groq Whisper): whisper-large-v3 is the lowest-WER
-          // model (10.3% vs turbo 12%); verbose_json yields segment timestamps
-          // (needed for diarization alignment); temperature 0 = deterministic,
-          // most-accurate decoding. LANGUAGE is intentionally OMITTED → Whisper
-          // auto-detects the spoken language (surfaced back as wJson.language).
-          fd.append('model', process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3');
-          fd.append('response_format', 'verbose_json');
-          fd.append('temperature', '0');
-          // Optional meeting context (?prompt=) — biases Whisper toward the
-          // correct spelling of names/companies/jargon the user typed before
-          // the meeting (Whisper prompt cap ~224 tokens → hard-slice).
+          // STT via the single ground-truth route (sttRoute / STT_PROVIDER);
+          // this feature's model = MEETING_STT_MODEL. transcribeAudio() owns the
+          // provider request shapes, retries, + one-shot cross-provider failover.
+          // Optional ?prompt= biases Groq Whisper toward names/jargon (cap ~224 tok).
           const ctxPrompt = (url.searchParams.get('prompt') || '').toString().slice(0, 800);
-          if (ctxPrompt) fd.append('prompt', ctxPrompt);
-          // Resilient Groq call — retry transient failures (429 rate-limit,
-          // 5xx, network/timeout) with exponential backoff. A single un-retried
-          // call meant any momentary Groq blip surfaced as a user-facing 502
-          // ("whisper model issue"). Up to 3 attempts; honor Retry-After on 429.
-          let wRes = null;
-          let lastDetail = '';
-          let lastStatus = 0;
-          const maxAttempts = 3;
-          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-              const r = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-                body: fd,
-                signal: AbortSignal.timeout(300_000),
-              });
-              if (r.ok) { wRes = r; break; }
-              lastStatus = r.status;
-              lastDetail = (await r.text().catch(() => '')).slice(0, 200);
-              // Retry only transient classes; client errors (400/413/415) are terminal.
-              const transient = r.status === 429 || r.status >= 500;
-              if (!transient || attempt === maxAttempts) break;
-              const retryAfter = Number(r.headers.get('retry-after')) || 0;
-              const backoffMs = retryAfter > 0 ? retryAfter * 1000 : Math.min(800 * 2 ** (attempt - 1), 4000);
-              await new Promise((rs) => setTimeout(rs, backoffMs));
-            } catch (netErr) {
-              lastStatus = 0;
-              lastDetail = netErr.name === 'TimeoutError' ? 'groq timeout (300s)' : netErr.message;
-              if (attempt === maxAttempts) break;
-              await new Promise((rs) => setTimeout(rs, Math.min(800 * 2 ** (attempt - 1), 4000)));
-            }
-          }
-          if (!wRes) {
+          const t = await transcribeAudio({
+            audio,
+            contentType: _ct,
+            filename: `meeting.${((_ct.split('/')[1] || 'webm').split(';')[0]) || 'webm'}`,
+            model: process.env.MEETING_STT_MODEL,
+            prompt: ctxPrompt || undefined,
+            temperature: 0,
+            response_format: 'verbose_json',
+            timeoutMs: 300_000,
+          });
+          if (!t.ok) {
             // Specific, actionable errors instead of one opaque 502.
-            if (lastStatus === 429) {
+            if (t.status === 429) {
               return jsonResponse(res, { error: 'transcription_busy', message: 'Transcription service is busy right now — please try again in a moment.' }, 503);
             }
-            if (lastStatus === 400 || lastStatus === 415) {
-              return jsonResponse(res, { error: 'audio_unsupported', message: 'Could not process this audio format. Try recording again.', detail: process.env.NODE_ENV === 'production' ? undefined : lastDetail }, 400);
+            if (t.status === 402) {
+              // Provider billing (e.g. OpenRouter "requires $0.50 balance for audio",
+              // Groq overdue-payment restriction) — an ops problem, not a user one.
+              return jsonResponse(res, { error: 'stt_billing', message: 'Transcription provider account needs attention (billing/balance). Contact your administrator.' }, 503);
             }
-            return jsonResponse(res, { error: 'whisper_failed', message: 'Transcription failed after retries — please try again.', detail: process.env.NODE_ENV === 'production' ? undefined : `status=${lastStatus} ${lastDetail}` }, 502);
+            if (t.status === 400 || t.status === 415) {
+              return jsonResponse(res, { error: 'audio_unsupported', message: 'Could not process this audio format. Try recording again.', detail: process.env.NODE_ENV === 'production' ? undefined : t.detail }, 400);
+            }
+            return jsonResponse(res, { error: 'whisper_failed', message: 'Transcription failed after retries — please try again.', detail: process.env.NODE_ENV === 'production' ? undefined : `status=${t.status} ${t.detail}` }, 502);
           }
-          const wJson = await wRes.json();
-          const baseOut = { transcript: wJson.text || '', language: wJson.language || null, segments: wJson.segments || [], bytes: audio.length };
-          // Opt-in multi-speaker diarization. Requires ?diarize=true AND the
-          // PYANNOTE_API_TOKEN env; any failure falls through to plain transcript.
-          if (url.searchParams.get('diarize') === 'true' && process.env.PYANNOTE_API_TOKEN) {
-            const turns = await pyannoteDiarize(audio, _ct);
-            const speakerSegments = alignSegmentsToSpeakers(wJson.segments || [], turns);
-            if (speakerSegments) {
-              return jsonResponse(res, { ...baseOut, diarized: true, speakerSegments });
+          const wJson = { text: t.text, language: t.language, segments: t.segments };
+          const baseOut = { transcript: t.text || '', language: t.language || null, segments: t.segments || [], bytes: audio.length, stt_provider: t.provider, stt_model: t.model };
+          // Multi-speaker — DEFAULT ON when PYANNOTE_API_TOKEN is set (disable per
+          // request with ?diarize=false). Speaker IDENTIFICATION (real names) when
+          // org voiceprints are enrolled; else anonymous SPEAKER_xx diarization.
+          // pyannote runs on the raw audio independent of STT, so talk-time/
+          // participation survives even when STT returned no segments (OpenRouter).
+          if (url.searchParams.get('diarize') !== 'false' && process.env.PYANNOTE_API_TOKEN) {
+            // Staged: voiceprints come from the per-org enrollment store (follow-up).
+            // When present → identify (real names); empty until enrollment ships.
+            const voiceprints = [];
+            const turns = voiceprints.length
+              ? await pyannoteIdentify(audio, _ct, voiceprints)
+              : await pyannoteDiarize(audio, _ct);
+            if (Array.isArray(turns) && turns.length) {
+              const speakerSegments = alignSegmentsToSpeakers(wJson.segments || [], turns);
+              return jsonResponse(res, {
+                ...baseOut,
+                diarized: true,
+                identified: voiceprints.length > 0,
+                speakerSegments,                                   // null when STT had no segments (OpenRouter)
+                speakerTranscript: buildSpeakerTranscript(speakerSegments), // null when no aligned segments
+                talkTime: computeTalkTime(turns),                  // present whenever turns exist
+              });
             }
           }
           return jsonResponse(res, baseOut);
@@ -5381,8 +6377,10 @@ exit \$RC
 
       // POST /api/meetings/insights — { transcript, notes? } → LLM → structured insights.
       if (pathname === '/api/meetings/insights' && req.method === 'POST') {
-        if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'llm_unavailable' }, 503);
-        const transcript = (body.transcript || '').toString().trim();
+        // Prefer the speaker-attributed transcript (from /transcribe speakerTranscript)
+        // when the caller sends it → action items/quotes get attributed to speakers;
+        // falls back to the plain transcript. Both carry SPEAKER_xx labels the prompt maps.
+        const transcript = (body.speakerTranscript || body.transcript || '').toString().trim();
         if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
         const notes = (body.notes || '').toString().slice(0, 4000);
         // Participants captured at meeting start — names feed speaker_names
@@ -5394,10 +6392,44 @@ exit \$RC
           ? `PARTICIPANTS (real names of attendees — use these to map SPEAKER_xx diarization labels to real people in speaker_names):\n${participantNames.join(', ')}\n\n`
           : '';
         const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
+        // P3 — entity canonicalization. Feed the org's existing global entities so
+        // the model maps STT variants/misspellings ("Amar"/"Amer" → "Amar Sai Gadde")
+        // to the canonical name in entities/owners/speakers. Central only (remote
+        // org entities live on the agent; skip rather than transit central).
+        const mOrg = _mOrgId;
+        let _canonEnts = [];
+        try {
+          if (!orgIsRemote(mOrg) && prisma) {
+            const erows = await prisma.$queryRawUnsafe(
+              `SELECT tag, count(*) c FROM (
+                 SELECT unnest(tags) tag FROM hivemind.memories
+                  WHERE org_id=$1::uuid AND deleted_at IS NULL AND is_latest=true
+               ) t WHERE tag LIKE 'entity:%' OR tag LIKE 'person:%'
+               GROUP BY tag ORDER BY c DESC LIMIT 80`,
+              mOrg,
+            );
+            const seen = new Set();
+            for (const r of (erows || [])) {
+              // Humanize the slug tag → proper canonical: "borealis-freight" →
+              // "Borealis Freight", "nadia_khan" → "Nadia Khan". Hyphens AND
+              // underscores → spaces, then Title Case (was only stripping _ →
+              // the LLM echoed the ugly hyphenated slug + didn't map first-names).
+              const name = String(r.tag).replace(/^(entity|person):/, '').replace(/[-_]+/g, ' ').trim()
+                .replace(/\b\w/g, (c) => c.toUpperCase());
+              const k = name.toLowerCase();
+              if (name.length > 1 && !seen.has(k)) { seen.add(k); _canonEnts.push(name); }
+              if (_canonEnts.length >= 50) break;
+            }
+          }
+        } catch (ee) { console.warn('[meeting-insights] canon-entities fetch failed:', ee.message); }
+        const entHint = _canonEnts.length
+          ? `\n\nKNOWN ORGANIZATION ENTITIES (canonical): ${_canonEnts.join('; ')}.\nWhen the transcript clearly refers to a variant, abbreviation, first-name-only, or transcription-misspelling of one of these, NORMALIZE it to the canonical name in entities, action_items.owner, quotes.speaker and speaker_names. Only normalize a confident match — do NOT force unrelated names onto this list.`
+          : '';
+        const sysEnt = sys + entHint;
         const MODEL = process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b';
         const GROQ = `${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`;
         const callLLM = async (messages, ms = 120_000) => {
-          const resp = await fetch(GROQ, {
+          const resp = await groqFetch(GROQ, {
             method: 'POST',
             headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages }),
@@ -5416,7 +6448,7 @@ exit \$RC
         try {
           if (transcript.length <= WINDOW) {
             const usr = participantsBlock + (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript}`;
-            const insights = await callLLM([{ role: 'system', content: sys }, { role: 'user', content: usr }]);
+            const insights = await callLLM([{ role: 'system', content: sysEnt }, { role: 'user', content: usr }]);
             return jsonResponse(res, { insights });
           }
           // Split on paragraph/sentence boundaries near each window edge.
@@ -5431,7 +6463,7 @@ exit \$RC
             i = end - WINDOW; // align next start to the (possibly shifted) boundary
           }
           const parts = await Promise.all(windows.map((w, idx) => callLLM([
-            { role: 'system', content: sys },
+            { role: 'system', content: sysEnt },
             { role: 'user', content: `${participantsBlock}${notes ? `USER NOTES:\n${notes}\n\n` : ''}TRANSCRIPT (part ${idx + 1}/${windows.length}):\n${w}` },
           ]).catch(() => null)));
           const ok = parts.filter(Boolean);
@@ -5480,24 +6512,27 @@ exit \$RC
 
       // ── Persistent org-level meetings (Postgres `meetings` table) ──────────
       // Raw SQL so it works without a Prisma client regen on the running image.
-      // Resolve the real tenant from the authenticated API key (the FE's
-      // apiClient.core sends only X-API-Key — no x-hm-* headers — so without
-      // this every meeting fell back to the placeholder DEFAULT tenant and
-      // meeting-intelligence recall hit an empty org. Named _mAuth to avoid
-      // the `principal` TDZ (a const principal is declared later in this scope).
-      const _mAuth = await authenticateApiKey(req).catch(() => null);
-      const _mUserId = _mAuth?.principal?.userId || null;
-      const _mOrgId = _mAuth?.principal?.orgId || null;
+      // _mAuth/_mUserId/_mOrgId are declared above in the mandatory auth gate
+      // (they are null for non-meetings/tara/autofill paths, populated + validated
+      // for these families). No duplicate declaration here.
       // GET  /api/meetings        → list org's meetings (newest first)
       // POST /api/meetings        → persist a meeting + its insights
       if (pathname === '/api/meetings' && req.method === 'GET') {
+        // tenant pinned to authenticated principal (mandatory auth gate above)
+        const mOrg = _mOrgId;
+        // Remote (self-host) orgs: list from agent (simplified scope — org + deleted_at + limit).
+        if (orgIsRemote(mOrg)) {
+          const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
+          const rows = await amrMeetingList(mOrg, { limit });
+          if (!rows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          const visible = [];
+          for (const meeting of rows) if (await meetingRecordAccessible(meeting)) visible.push(meeting);
+          return jsonResponse(res, { meetings: visible });
+        }
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-        // userId/orgId from the control-plane-injected headers (principal is
-        // initialized later in this handler — avoid the TDZ).
-        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
         try {
           const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '40', 10)));
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mUser = _mUserId;
           // Scope-aware Past list: a meeting shows for a user if they are the
           // creator, a selected participant (member id in participants jsonb),
           // or the scope grants access (organization/team → all org members;
@@ -5530,17 +6565,134 @@ exit \$RC
       }
 
       if (pathname === '/api/meetings' && req.method === 'POST') {
-        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-        const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
-        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-        const ins = body.insights || {};
+        const mUser = _mUserId;
+        const mOrg = _mOrgId;
+        // A finalized meeting is tenant-owned.  Do not let an incomplete scoped
+        // principal fall through to a database NOT NULL error: the recorder has
+        // already persisted its transcript segments by session_id and needs a
+        // recoverable response, not an opaque 500.
+        const sessionId = typeof body.session_id === 'string'
+          && /^[0-9a-fA-F-]{36}$/.test(body.session_id)
+          ? body.session_id
+          : null;
+        if (!mUser || !mOrg) {
+          console.warn('[meetings] rejected save without tenant principal', {
+            has_user_id: Boolean(mUser),
+            has_org_id: Boolean(mOrg),
+            session_id: sessionId,
+          });
+          return jsonResponse(res, {
+            error: 'no_active_organization',
+            recoverable: Boolean(sessionId),
+            session_id: sessionId,
+          }, 400);
+        }
+        const ins = {
+          ...(body.insights && typeof body.insights === 'object' && !Array.isArray(body.insights) ? body.insights : {}),
+          recording_consent: body.consent === true,
+        };
         const title = (body.title || ins.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).toString().slice(0, 300);
-        const transcript = (body.transcript || '').toString();
+        let transcript = (body.transcript || '').toString();
+        // A client may retry finalization after a network or database failure
+        // without retaining the assembled transcript in the tab. Rebuild it
+        // only from the caller's own durably persisted segments.
+        if (!transcript.trim() && sessionId && !orgIsRemote(mOrg) && prisma) {
+          try {
+            const segments = await prisma.$queryRawUnsafe(
+              `SELECT text FROM hivemind.meeting_segments
+                WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+                ORDER BY idx ASC`,
+              sessionId, mOrg, mUser,
+            );
+            transcript = (segments || []).map((segment) => segment.text).filter(Boolean).join('\n').trim();
+          } catch (error) {
+            console.warn('[meetings] segment recovery failed', {
+              org_id: mOrg, user_id: mUser, session_id: sessionId,
+              error: error?.message || String(error),
+            });
+          }
+        }
+        // Finalization retries are expected after a lost response. A session
+        // whose transcript segments already point at a meeting returns that
+        // meeting instead of creating another row or charging its duration twice.
+        if (sessionId && !orgIsRemote(mOrg) && prisma) {
+          const existing = await prisma.$queryRawUnsafe(
+            `SELECT meeting_id FROM hivemind.meeting_segments
+              WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+                AND meeting_id IS NOT NULL LIMIT 1`,
+            sessionId, mOrg, mUser,
+          ).catch(() => []);
+          if (existing?.[0]?.meeting_id) {
+            return jsonResponse(res, { ok: true, id: existing[0].meeting_id, existing: true }, 200);
+          }
+        }
         if (!transcript.trim() && !ins.summary) return jsonResponse(res, { error: 'empty_meeting' }, 400);
         const J = (v) => JSON.stringify(Array.isArray(v) ? v : (v || []));
+        const SCOPES = ['personal', 'project', 'team', 'organization'];
+        const mScope = SCOPES.includes(String(body.scope || '').toLowerCase()) ? String(body.scope).toLowerCase() : null;
+        if (mScope === 'project') {
+          const projectId = typeof body.project_id === 'string' ? body.project_id : '';
+          const projectAccess = projectId ? await prisma?.projectMember.findFirst({
+            where: {
+              projectId,
+              userId: mUser,
+              project: { orgId: mOrg, archivedAt: null },
+            },
+            select: { projectId: true },
+          }).catch(() => null) : null;
+          if (!projectAccess) return jsonResponse(res, { error: 'not_found' }, 404);
+        }
+        // Remote (self-host) orgs: write to agent instead of central Postgres.
+        if (orgIsRemote(mOrg)) {
+          try {
+            const meeting = {
+              user_id: mUser, project_id: body.project_id || null, title,
+              session_id: sessionId,
+              summary: ins.summary || null, transcript,
+              language: body.language || null,
+              duration_sec: Number.isFinite(body.duration_sec) ? body.duration_sec : null,
+              multi_speaker: !!body.multi_speaker,
+              speaker_count: Number.isFinite(body.speaker_count) ? body.speaker_count : null,
+              action_items: ins.action_items || [], decisions: ins.decisions || [],
+              key_points: ins.key_points || [], questions: ins.questions || [],
+              segments: body.segments || null,
+              topics: Array.isArray(ins.topics) ? ins.topics.slice(0, 20) : [],
+              sentiment: ins.sentiment || null,
+              source_memory_id: body.source_memory_id || null,
+              notes: (body.notes || '').toString().slice(0, 8000) || null,
+              insights: (ins != null && typeof ins === 'object' && !Array.isArray(ins)) ? ins : {},
+              participants: Array.isArray(body.participants) ? body.participants.slice(0, 50) : [],
+              scope: mScope,
+            };
+            const result = await amrMeetingWrite(mOrg, meeting);
+            if (!result?.ok) {
+              console.error('[meetings] remote save failed', {
+                org_id: mOrg,
+                user_id: mUser,
+                session_id: sessionId,
+                transcript_chars: transcript.length,
+                result: result?.error || result?.message || 'unknown',
+              });
+              return jsonResponse(res, {
+                error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+              }, 500);
+            }
+            const _newId = result.id;
+            if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
+            return jsonResponse(res, { ok: true, id: result.id, created_at: result.created_at }, 201);
+          } catch (e) {
+            console.error('[meetings] remote save failed', {
+              org_id: mOrg, user_id: mUser, session_id: sessionId,
+              transcript_chars: transcript.length, error: e?.message || String(e),
+            });
+            return jsonResponse(res, {
+              error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+              message: process.env.NODE_ENV === 'production' ? undefined : e.message,
+            }, 500);
+          }
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
-          const SCOPES = ['personal', 'project', 'team', 'organization'];
-          const mScope = SCOPES.includes(String(body.scope || '').toLowerCase()) ? String(body.scope).toLowerCase() : null;
           const rows = await prisma.$queryRawUnsafe(
             `INSERT INTO meetings
                (user_id, org_id, project_id, title, summary, transcript, language, duration_sec,
@@ -5565,10 +6717,243 @@ exit \$RC
             mScope,
           );
           const _newId = rows?.[0]?.id;
+          // P1: link any durably-persisted recording segments (by client session_id)
+          // to this finalized meeting row, so the crash-recovery cache is tied to it.
+          if (_newId && body.session_id && /^[0-9a-fA-F-]{36}$/.test(String(body.session_id))) {
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.meeting_segments SET meeting_id=$1::uuid
+                WHERE session_id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid AND meeting_id IS NULL`,
+              _newId, body.session_id, mOrg, mUser,
+            ).catch((e) => console.warn('[meetings] segment link failed:', e.message));
+          }
           if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
         } catch (e) {
-          return jsonResponse(res, { error: 'meetings_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          console.error('[meetings] postgres save failed', {
+            org_id: mOrg, user_id: mUser, session_id: sessionId,
+            transcript_chars: transcript.length, error: e?.message || String(e),
+          });
+          return jsonResponse(res, {
+            error: 'meetings_save_error', recoverable: Boolean(sessionId), session_id: sessionId,
+            message: process.env.NODE_ENV === 'production' ? undefined : e.message,
+          }, 500);
+        }
+      }
+
+      // POST /api/meetings/segments — P1 durable transcript. Persist ONE recording
+      // segment as it transcribes (keyed by client session_id), so a long meeting
+      // survives a tab crash. Residency: self-host (remote) orgs keep segments
+      // in-browser — never persisted central. Idempotent upsert on (session_id, idx).
+      if (pathname === '/api/meetings/segments' && req.method === 'POST') {
+        const mUser = _mUserId, mOrg = _mOrgId;
+        const sid = (body.session_id || '').toString();
+        const idx = Number(body.idx);
+        const text = (body.text || '').toString();
+        if (!/^[0-9a-fA-F-]{36}$/.test(sid) || !Number.isInteger(idx) || idx < 0 || !text.trim()) {
+          return jsonResponse(res, { error: 'bad_segment' }, 400);
+        }
+        if (orgIsRemote(mOrg)) {
+          const stored = await amrMeetingSegmentWrite(mOrg, {
+            session_id: sid, user_id: mUser, idx, text,
+            speakers: body.speakers || null,
+            start_ms: Number.isFinite(body.start_ms) ? body.start_ms : null,
+            end_ms: Number.isFinite(body.end_ms) ? body.end_ms : null,
+          });
+          if (!stored?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          return jsonResponse(res, { ok: true });
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        try {
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO hivemind.meeting_segments (session_id, org_id, user_id, idx, text, speakers, start_ms, end_ms)
+               VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::jsonb,$7,$8)
+             ON CONFLICT (session_id, idx) DO UPDATE
+               SET text=EXCLUDED.text, speakers=EXCLUDED.speakers, start_ms=EXCLUDED.start_ms, end_ms=EXCLUDED.end_ms`,
+            sid, mOrg, mUser, idx, text.slice(0, 200000),
+            body.speakers ? JSON.stringify(body.speakers) : null,
+            Number.isFinite(body.start_ms) ? body.start_ms : null,
+            Number.isFinite(body.end_ms) ? body.end_ms : null,
+          );
+          // P2: fire-and-forget Stage-1 extraction — runs DURING the meeting so
+          // Stop only reduces, never extracts. fetch→groqFetch openrouter failover.
+          (async () => {
+            try {
+              const sys = 'Extract from this meeting transcript SEGMENT. STRICT JSON {"entities":{"people":string[],"organizations":string[]},"decisions":string[],"actions":[{"task":string,"owner":string|null}],"topics":string[]}. Faithful — never invent. Empty arrays when none.';
+              const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: process.env.MEETING_EXTRACT_MODEL || process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: text.slice(0, 20000) }] }),
+                signal: AbortSignal.timeout(60_000),
+              });
+              if (!r.ok) throw new Error(`llm ${r.status}`);
+              const ex = JSON.parse((await r.json()).choices[0].message.content);
+              await prisma.$executeRawUnsafe(
+                `UPDATE hivemind.meeting_segments SET extraction=$1::jsonb, extraction_status='done' WHERE session_id=$2::uuid AND idx=$3`,
+                JSON.stringify(ex), sid, idx,
+              );
+            } catch (_e) {
+              await prisma.$executeRawUnsafe(`UPDATE hivemind.meeting_segments SET extraction_status='error' WHERE session_id=$1::uuid AND idx=$2`, sid, idx).catch(() => {});
+            }
+          })();
+          return jsonResponse(res, { ok: true });
+        } catch (e) {
+          return jsonResponse(res, { error: 'segment_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
+      // GET /api/meetings/session/:sid/segments — recover an in-progress session's
+      // persisted segments (e.g. after a tab crash), ordered. Org-scoped.
+      {
+        const mSeg = pathname.match(/^\/api\/meetings\/session\/([0-9a-fA-F-]{36})\/segments$/);
+        if (mSeg && req.method === 'GET') {
+          const mOrg = _mOrgId, mUser = _mUserId;
+          if (orgIsRemote(mOrg)) {
+            const rows = await amrMeetingSegmentList(mOrg, { session_id: mSeg[1], user_id: mUser });
+            if (!rows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+            return jsonResponse(res, { segments: rows, stitched: rows.map((row) => row.text).join('\n').trim() });
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT idx, text, speakers, start_ms, end_ms, status, meeting_id, extraction, extraction_status
+                 FROM hivemind.meeting_segments
+                WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+                ORDER BY idx ASC`,
+              mSeg[1], mOrg, mUser,
+            );
+            return jsonResponse(res, { segments: rows || [], stitched: (rows || []).map((r) => r.text).join('\n').trim() });
+          } catch (e) {
+            return jsonResponse(res, { error: 'segments_read_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          }
+        }
+      }
+
+      // GET /api/meetings/entities — the org's global entities (humanized from
+      // entity:/person: tags) for WIDE highlighting in meeting text. Highlight-only
+      // (no recall yet). Central only (remote entities live on the agent).
+      if (pathname === '/api/meetings/entities' && req.method === 'GET') {
+        const mOrg = _mOrgId;
+        if (orgIsRemote(mOrg) || !prisma) return jsonResponse(res, { entities: [] });
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT tag, count(*) c FROM (
+               SELECT unnest(tags) tag FROM hivemind.memories
+                WHERE org_id=$1::uuid AND deleted_at IS NULL AND is_latest=true
+             ) t WHERE tag LIKE 'entity:%' OR tag LIKE 'person:%'
+             GROUP BY tag ORDER BY c DESC LIMIT 400`,
+            mOrg,
+          );
+          const seen = new Set();
+          const entities = [];
+          for (const r of (rows || [])) {
+            const name = String(r.tag).replace(/^(entity|person):/, '').replace(/[-_]+/g, ' ').trim()
+              .replace(/\b\w/g, (c) => c.toUpperCase());
+            const k = name.toLowerCase();
+            if (name.length > 1 && !seen.has(k)) {
+              seen.add(k);
+              entities.push({ name, kind: String(r.tag).startsWith('person:') ? 'person' : 'entity', count: Number(r.c) });
+            }
+            if (entities.length >= 200) break;
+          }
+          return jsonResponse(res, { entities });
+        } catch (e) {
+          return jsonResponse(res, { entities: [] });
+        }
+      }
+
+      // GET /api/meetings/entity-recall?name=<entity> — entity-level recall for
+      // the click-through popover: recent memories where this org entity is
+      // mentioned (tag match on slug OR title/content match), newest-first,
+      // evidence excluded. Central only (remote entities on agent).
+      if (pathname === '/api/meetings/entity-recall' && req.method === 'GET') {
+        const mOrg = _mOrgId;
+        const name = (url.searchParams.get('name') || '').toString().trim().slice(0, 80);
+        if (!name || name.length < 2) return jsonResponse(res, { name, mentions: [] });
+        if (orgIsRemote(mOrg) || !prisma) return jsonResponse(res, { name, mentions: [], skipped: 'remote' });
+        try {
+          const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT id, title, memory_type, created_at, left(content, 220) AS snippet
+               FROM hivemind.memories
+              WHERE org_id=$1::uuid AND deleted_at IS NULL AND is_latest=true
+                AND NOT (tags && ARRAY['evidence'])
+                AND ( tags && ARRAY[$2,$3] OR title ILIKE $4 OR content ILIKE $4 )
+              ORDER BY created_at DESC LIMIT 8`,
+            mOrg, `entity:${slug}`, `person:${slug}`, `%${name}%`,
+          );
+          return jsonResponse(res, {
+            name,
+            mentions: (rows || []).map((r) => ({
+              id: r.id, title: r.title, memory_type: r.memory_type,
+              date: r.created_at, snippet: r.snippet,
+            })),
+          });
+        } catch (e) {
+          return jsonResponse(res, { name, mentions: [] });
+        }
+      }
+
+      // GET /api/meetings/obligations — P6.3 obligation register. Flattens every
+      // meeting's action_items into a cross-meeting view of commitments with
+      // owner · due · status (open/overdue/done) · source meeting. The legal-grade
+      // "who owes what, by when" register. Central only (remote = agent follow-up).
+      if (pathname === '/api/meetings/obligations' && req.method === 'GET') {
+        const mOrg = _mOrgId;
+        const mUser = _mUserId;
+        if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { obligations: [], counts: {} });
+        try {
+          const projectIds = await meetingProjectIds();
+          let rows;
+          if (orgIsRemote(mOrg)) {
+            const remoteRows = await amrMeetingList(mOrg, { limit: 200 });
+            if (!remoteRows) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+            rows = [];
+            for (const meeting of remoteRows) {
+              if (await meetingRecordAccessible(meeting) && Array.isArray(meeting.action_items) && meeting.action_items.length) rows.push(meeting);
+            }
+          } else rows = await prisma.$queryRawUnsafe(
+            `SELECT id, title, created_at, action_items
+               FROM hivemind.meetings
+              WHERE org_id=$1::uuid AND deleted_at IS NULL
+                AND action_items IS NOT NULL AND jsonb_array_length(action_items) > 0
+                AND (
+                     user_id=$2::uuid
+                  OR participants @> $3::jsonb
+                  OR scope IS NULL
+                  OR scope IN ('organization','team')
+                  OR (scope='project' AND project_id=ANY($4::uuid[]))
+                )
+              ORDER BY created_at DESC LIMIT 200`,
+            mOrg, mUser, JSON.stringify([{ id: mUser }]), projectIds,
+          );
+          const today = new Date().toISOString().slice(0, 10);
+          const obligations = [];
+          for (const r of (rows || [])) {
+            const items = Array.isArray(r.action_items) ? r.action_items : [];
+            for (const a of items) {
+              const task = (typeof a === 'string' ? a : (a?.task || '')).toString().trim();
+              if (!task) continue;
+              const owner = (typeof a === 'object' && a?.owner) ? String(a.owner) : null;
+              const due = (typeof a === 'object' && a?.due) ? String(a.due) : null;
+              const done = (typeof a === 'object' && (a?.status === 'done' || a?.done === true));
+              const status = done ? 'done' : (due && due.slice(0, 10) < today ? 'overdue' : 'open');
+              obligations.push({
+                task, owner, due, status,
+                source_meeting_id: r.id, source_meeting_title: r.title, meeting_date: r.created_at,
+              });
+            }
+          }
+          const rank = { overdue: 0, open: 1, done: 2 };
+          obligations.sort((x, y) => (rank[x.status] - rank[y.status]) || String(x.due || '9999').localeCompare(String(y.due || '9999')));
+          const counts = {
+            total: obligations.length,
+            open: obligations.filter((o) => o.status === 'open').length,
+            overdue: obligations.filter((o) => o.status === 'overdue').length,
+            done: obligations.filter((o) => o.status === 'done').length,
+          };
+          return jsonResponse(res, { obligations, counts });
+        } catch (e) {
+          return jsonResponse(res, { obligations: [], counts: {} });
         }
       }
 
@@ -5577,7 +6962,7 @@ exit \$RC
       // (fires when the organizer clicks Start with externals entered). Org
       // members are NOT emailed — only externals with a valid email address.
       if (pathname === '/api/meetings/invite' && req.method === 'POST') {
-        const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+        const mOrg = _mOrgId;
         const externals = Array.isArray(body.participants)
           ? body.participants
               .filter((p) => p && p.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(p.email)))
@@ -5613,9 +6998,15 @@ exit \$RC
       {
         const mGet = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mGet && req.method === 'GET') {
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
+          // Remote (self-host) orgs: fetch from agent.
+          if (orgIsRemote(mOrg)) {
+            const meeting = await remoteMeetingForCaller(mGet[1]);
+            if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { meeting: { ...meeting, intelligence: meeting.intelligence || null, intelligence_status: meeting.intelligence_status || 'none', intelligence_generated_at: null } });
+          }
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
           try {
             // Same access predicate as the list: creator / participant / scope.
             let myProjectIds = [];
@@ -5660,9 +7051,18 @@ exit \$RC
       {
         const mPrev = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/delete-preview$/);
         if (mPrev && req.method === 'GET') {
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
+          // Remote (self-host) orgs: fetch from agent. Memory cluster preview is skipped
+          // (memories already live on the agent; the delete flow still works correctly).
+          if (orgIsRemote(mOrg)) {
+            const meeting = await remoteMeetingForCaller(mPrev[1]);
+            if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+            const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+            if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
+            return jsonResponse(res, { meeting: { id: meeting.id, title: meeting.title }, can_delete: true, ingested: !!meeting.source_memory_id, memory_count: 0, memories: [] });
+          }
           if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
           try {
             const rows = await prisma.$queryRawUnsafe(
               `SELECT id, user_id, title, source_memory_id FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
@@ -5671,6 +7071,7 @@ exit \$RC
             if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
             const m = rows[0];
             const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+            if (m.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
             let memories = [];
             if (m.source_memory_id) {
               memories = await prisma.$queryRawUnsafe(
@@ -5683,7 +7084,7 @@ exit \$RC
             }
             return jsonResponse(res, {
               meeting: { id: m.id, title: m.title },
-              can_delete: (m.user_id === mUser) || !!isAdmin,
+              can_delete: true,
               ingested: !!m.source_memory_id,
               memory_count: memories.length,
               memories: memories.map((x) => ({ id: x.id, title: x.title })),
@@ -5705,12 +7106,41 @@ exit \$RC
       {
         const mDel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mDel && req.method === 'DELETE') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
           const id = mDel[1];
           const scope = (url.searchParams.get('scope') || 'both').toLowerCase();
           const hard = url.searchParams.get('hard') === 'true';
+          // Remote (self-host) orgs: memory cluster lives on agent; delete via agent.
+          if (orgIsRemote(mOrg)) {
+            try {
+              const meeting = await amrMeetingGet(mOrg, id);
+              if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+              const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
+              if (meeting.user_id !== mUser && !isAdmin) return jsonResponse(res, { error: 'not_found' }, 404);
+              let deletedMemories = 0;
+              const tagged = await remoteList(mOrg, { tags: [`meeting:${id}`] }, null, 1000).catch(() => null);
+              const memoryIds = new Set((tagged?.memories || []).map((memory) => memory.id).filter(Boolean));
+              if (meeting.source_memory_id) memoryIds.add(meeting.source_memory_id);
+              for (const memoryId of memoryIds) {
+                const removed = await amrDelete(mOrg, memoryId, hard);
+                if (!removed) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+                deletedMemories += 1;
+              }
+              if (scope === 'both') {
+                const removed = await amrMeetingDelete(mOrg, id, hard);
+                if (!removed?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+              } else {
+                // memories-only → clear the cluster link, keep the row.
+                const patched = await amrMeetingPatch(mOrg, id, { source_memory_id: null });
+                if (!patched?.ok) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+              }
+              return jsonResponse(res, { ok: true, scope, hard, deleted_memories: deletedMemories, meeting_deleted: scope === 'both' });
+            } catch (e) {
+              return jsonResponse(res, { error: 'meeting_delete_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+            }
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
           try {
             const rows = await prisma.$queryRawUnsafe(
               `SELECT id, user_id, org_id, title, source_memory_id FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid`,
@@ -5720,23 +7150,38 @@ exit \$RC
             const m = rows[0];
             const isAdmin = _mAuth?.principal?.master || _mAuth?.principal?.scopes?.includes('admin');
             if (m.user_id !== mUser && !isAdmin) {
-              let owner = null;
-              try { const u = await prisma.user.findUnique({ where: { id: m.user_id }, select: { displayName: true, email: true } }); if (u) owner = { name: u.displayName || null, email: u.email || null }; } catch { /* best-effort */ }
-              return jsonResponse(res, { error: 'Only the meeting owner can delete it.', code: 'not_owner', owner }, 403);
+              return jsonResponse(res, { error: 'not_found' }, 404);
             }
-            // Collect the memory cluster (parent + section children).
-            let clusterIds = [];
+            // Collect the meeting's memory set. Canonical ingest tags EVERY
+            // meeting memory (distilled facts + transcript-evidence) with
+            // `meeting:<id>`, so the tag is the authoritative key. Also union the
+            // legacy cluster (source_memory_id parent + PartOf children) for
+            // meetings saved before the canonical-ingest cutover.
+            const meetingTag = `meeting:${id}`;
+            const idSet = new Set();
+            const byTag = await prisma.$queryRawUnsafe(
+              `SELECT id FROM memories WHERE org_id = $1::uuid AND $2 = ANY(tags)`,
+              mOrg, meetingTag,
+            );
+            for (const r of byTag) idSet.add(r.id);
             if (m.source_memory_id) {
               const cl = await prisma.$queryRawUnsafe(
                 `SELECT id FROM memories WHERE id = $1::uuid OR id IN (SELECT from_id FROM relationships WHERE to_id = $1::uuid AND type = 'PartOf')`,
                 m.source_memory_id,
               );
-              clusterIds = cl.map((r) => r.id);
+              for (const r of cl) idSet.add(r.id);
             }
+            const clusterIds = [...idSet];
             let deletedMemories = 0;
             if (clusterIds.length) {
               if (hard && typeof persistentMemoryStore.hardDeleteMemories === 'function') {
-                await persistentMemoryStore.hardDeleteMemories(clusterIds);
+                // The return value was discarded and success reported regardless —
+                // so a backend that removed nothing still answered 200. Keep it and
+                // gate on BEHAVIOUR below rather than trusting any single store.
+                const _hardRemoved = await persistentMemoryStore.hardDeleteMemories(clusterIds);
+                if (_hardRemoved === 0 && clusterIds.length > 0) {
+                  console.warn(`[delete] hardDeleteMemories removed 0 of ${clusterIds.length} for org=${mOrg}`);
+                }
                 try {
                   const qUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
                   const qColl = (process.env.QDRANT_PER_TENANT === 'true' && mOrg) ? `org_${mOrg}` : 'HIVEMIND_PERSONAL';
@@ -5749,10 +7194,40 @@ exit \$RC
               } else {
                 for (const cid of clusterIds) { try { await persistentMemoryStore.deleteMemory(cid); } catch { /* continue */ } }
               }
-              deletedMemories = clusterIds.length;
+              // BEHAVIOUR-BASED HONESTY GATE. This used to report
+              // clusterIds.length unconditionally — the count of what we ASKED to
+              // delete, not what was deleted. Combined with hardDeleteMemories
+              // silently removing nothing for a remote org, the API answered
+              // "deleted 5" while all 5 were still being served by the agent.
+              //
+              // Re-read instead of trusting any store's return value, so a future
+              // backend that fails to delete surfaces here rather than lying.
+              let _stillPresent = 0;
+              for (const cid of clusterIds) {
+                try {
+                  const still = await persistentMemoryStore.getMemory?.(cid);
+                  if (still && !still.deletedAt) _stillPresent += 1;
+                } catch { /* absent → treat as deleted, which is the goal */ }
+              }
+              deletedMemories = clusterIds.length - _stillPresent;
+              if (_stillPresent > 0) {
+                console.error(`[delete] INCOMPLETE: ${_stillPresent}/${clusterIds.length} memories survived `
+                  + `hard=${hard} org=${mOrg} — reporting failure rather than a false success`);
+                return jsonResponse(res, {
+                  error: 'delete_incomplete',
+                  message: `${_stillPresent} of ${clusterIds.length} memories could not be deleted. `
+                    + 'Nothing was reported as removed that still exists.',
+                  requested: clusterIds.length,
+                  deleted: deletedMemories,
+                }, 500);
+              }
             }
             let meetingDeleted = false;
             if (scope === 'both') {
+              await prisma.$queryRawUnsafe(
+                `DELETE FROM hivemind.meeting_segments WHERE meeting_id=$1::uuid AND org_id=$2::uuid`,
+                id, mOrg,
+              );
               if (hard) await prisma.$queryRawUnsafe(`DELETE FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
               else await prisma.$queryRawUnsafe(`UPDATE meetings SET deleted_at = now() WHERE id = $1::uuid AND org_id = $2::uuid`, id, mOrg);
               meetingDeleted = true;
@@ -5775,9 +7250,15 @@ exit \$RC
       {
         const mIntel = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/intelligence$/);
         if (mIntel && req.method === 'POST') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
+          if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (orgIsRemote(mOrg)) {
+            if (!await remoteMeetingForCaller(mIntel[1])) return jsonResponse(res, { error: 'not_found' }, 404);
+          } else {
+            const meeting = await centralMeetingForCaller(mIntel[1]);
+            if (!meeting) return jsonResponse(res, { error: 'not_found' }, 404);
+          }
           runMeetingIntelligence(mIntel[1], mUser, mOrg).catch(() => {});
           return jsonResponse(res, { ok: true, status: 'pending' }, 202);
         }
@@ -5792,9 +7273,9 @@ exit \$RC
       if (pathname === '/api/autofill/plan' && req.method === 'POST') {
         if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'vision_unavailable' }, 503);
         try {
-          const auth = await authenticateApiKey(req).catch(() => null);
-          const afUser = auth?.principal?.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
-          const afOrg = auth?.principal?.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          // tenant pinned to authenticated principal from mandatory auth gate above
+          const afUser = _mUserId;
+          const afOrg = _mOrgId;
           const screenshot = (body.screenshot_b64 || '').toString();
           const afPrompt = (body.prompt || '').toString().slice(0, 600);
           const fields = Array.isArray(body.fields) ? body.fields.slice(0, 60) : [];
@@ -5832,7 +7313,7 @@ exit \$RC
           const mapUser = JSON.stringify(recalls.map((t) => ({ key: t.key, value_query: t.value_query, memories: t._mems })));
           let fillMap = [];
           try {
-            const mr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+            const mr = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({ model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: mapSys }, { role: 'user', content: mapUser }] }),
@@ -5866,9 +7347,9 @@ exit \$RC
       if (pathname === '/api/autofill/table' && req.method === 'POST') {
         if (!process.env.GROQ_API_KEY) return jsonResponse(res, { error: 'llm_unavailable' }, 503);
         try {
-          const auth = await authenticateApiKey(req).catch(() => null);
-          const tUser = auth?.principal?.userId || req.headers['x-hm-user-id'] || DEFAULT_USER;
-          const tOrg = auth?.principal?.orgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          // tenant pinned to authenticated principal from mandatory auth gate above
+          const tUser = _mUserId;
+          const tOrg = _mOrgId;
           const tPrompt = (body.prompt || '').toString().slice(0, 600);
           if (!tPrompt.trim()) return jsonResponse(res, { error: 'no_prompt' }, 400);
 
@@ -5879,7 +7360,7 @@ exit \$RC
             return ((r?.memories || r || []) || []).filter((m) => !isJunk(m)).map((m) => ({ id: m.id, text: `${m.title || ''} ${m.content || ''}`.replace(/\s+/g, ' ').trim().slice(0, 280) }));
           };
           const groqJSON = async (sys, usr) => {
-            const lr = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+            const lr = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({ model: process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: usr }] }),
@@ -5931,16 +7412,32 @@ exit \$RC
       {
         const mPatch = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})$/);
         if (mPatch && req.method === 'PATCH') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
+          const mOrg = _mOrgId;
           const id = mPatch[1];
+          const patchFields = {};
+          if (typeof body.source_memory_id === 'string' && body.source_memory_id) patchFields.source_memory_id = body.source_memory_id;
+          if (typeof body.title === 'string' && body.title.trim()) patchFields.title = body.title.slice(0, 300);
+          if (typeof body.summary === 'string') patchFields.summary = body.summary;
+          if (!Object.keys(patchFields).length) return jsonResponse(res, { error: 'no_fields' }, 400);
+          // Remote (self-host) orgs: patch on agent.
+          if (orgIsRemote(mOrg)) {
+            if (!await remoteMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
+            try {
+              const r = await amrMeetingPatch(mOrg, id, patchFields);
+              if (!r?.ok) return jsonResponse(res, { error: 'not_found' }, 404);
+              return jsonResponse(res, { ok: true, id });
+            } catch (e) {
+              return jsonResponse(res, { error: 'meetings_update_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+            }
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!await centralMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
           const sets = [];
           const vals = [];
           let i = 1;
-          if (typeof body.source_memory_id === 'string' && body.source_memory_id) { sets.push(`source_memory_id = $${i++}::uuid`); vals.push(body.source_memory_id); }
-          if (typeof body.title === 'string' && body.title.trim()) { sets.push(`title = $${i++}`); vals.push(body.title.slice(0, 300)); }
-          if (typeof body.summary === 'string') { sets.push(`summary = $${i++}`); vals.push(body.summary); }
-          if (!sets.length) return jsonResponse(res, { error: 'no_fields' }, 400);
+          if (patchFields.source_memory_id) { sets.push(`source_memory_id = $${i++}::uuid`); vals.push(patchFields.source_memory_id); }
+          if (patchFields.title) { sets.push(`title = $${i++}`); vals.push(patchFields.title); }
+          if (patchFields.summary !== undefined) { sets.push(`summary = $${i++}`); vals.push(patchFields.summary); }
           vals.push(id, mOrg);
           try {
             const rows = await prisma.$queryRawUnsafe(
@@ -5962,12 +7459,17 @@ exit \$RC
       // persists the result to the meeting row. Best-effort, never throws.
       async function runMeetingIntelligence(meetingId, mUser, mOrg) {
         try {
-          const rows = await prisma.$queryRawUnsafe(
-            `SELECT id, title, insights, summary, topics, decisions, action_items, key_points
-               FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
-            meetingId, mOrg,
-          );
-          const meeting = rows?.[0];
+          let meeting;
+          if (orgIsRemote(mOrg)) {
+            meeting = await amrMeetingGet(mOrg, meetingId);
+          } else {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT id, title, insights, summary, topics, decisions, action_items, key_points, notes
+                 FROM meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`,
+              meetingId, mOrg,
+            );
+            meeting = rows?.[0];
+          }
           if (!meeting) return;
           // Normalize: many meetings store structure in the dedicated COLUMNS
           // (topics/decisions/...) with an EMPTY insights blob. Merge columns
@@ -5987,7 +7489,7 @@ exit \$RC
               const text = [meeting.summary, ...arr(meeting.key_points).map(String)].filter(Boolean).join('\n').slice(0, 4000);
               if (text.trim()) {
                 try {
-                  const er = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                  const er = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
                     method: 'POST',
                     headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -6006,9 +7508,13 @@ exit \$RC
             }
             meeting.insights = { ...baseIns, topics, decisions, entities: entities || { people: [], organizations: [] } };
           }
-          await prisma.$executeRawUnsafe(
-            `UPDATE meetings SET intelligence_status='pending' WHERE id=$1::uuid`, meetingId,
-          );
+          if (orgIsRemote(mOrg)) {
+            await amrMeetingPatch(mOrg, meetingId, { intelligence_status: 'pending' }).catch(() => {});
+          } else {
+            await prisma.$executeRawUnsafe(
+              `UPDATE meetings SET intelligence_status='pending' WHERE id=$1::uuid`, meetingId,
+            );
+          }
           const { generateIntelligence } = await import('./knowledge/meeting-intelligence.js');
           const recall = async (query, opts = {}) => {
             // recallPersistedMemories takes SNAKE_CASE params (query_context,
@@ -6032,14 +7538,16 @@ exit \$RC
           };
           const judge = async (payload) => {
             let sys;
-            if (payload.task === 'entity_briefs') {
+            if (payload.task === 'synthesis') {
+              sys = 'You are the chief-of-staff intelligence layer for THIS organization. Inputs: the meeting (summary/decisions/actions/risks), the user\'s own NOTES (their intent — HIGHEST priority, reflect their framing), and what HIVEMIND already knows about this org (entity_briefs, continuity = how this meeting\'s decisions relate to PRIOR org decisions, open_loops = still-open items from before, related = related org memories). Produce HIGH-LEVEL, ORG-SPECIFIC strategic intelligence — NOT a generic recap of the meeting. Every point MUST be grounded in the provided meeting/notes/memories and name the connection (e.g. "contradicts the March pricing decision", "advances the open Acme integration loop"). Honor the NOTES as primary intent. If grounding is thin, return FEWER points — never pad with generic advice. STRICT JSON {"synthesis":{"headline": string (one punchy org-specific sentence), "strategic_points": string[] (3-6, each grounded + names its source), "whats_changed": string[] (what this shifts vs prior org memory — cite the prior), "risks_opportunities": [{"type":"risk"|"opportunity","text":string}], "recommended_focus": string[] (1-4 concrete next priorities for THIS org)}}. Empty arrays when nothing is grounded.';
+            } else if (payload.task === 'entity_briefs') {
               sys = 'You write one-line factual briefs about named entities, grounded ONLY in the provided dated snippets. Rules: (1) Use ONLY facts where the named entity is the EXPLICIT subject. (2) If NO snippet is clearly about that entity, output an EMPTY string "" for it — never guess, never infer a relationship that is not stated. (3) When snippets conflict or evolve over time, the MOST RECENT dated fact wins (snippets are prefixed [YYYY-MM-DD]). (4) One sentence, concrete, no fluff. Output STRICT JSON {"briefs":{"<name>":"<brief or empty string>"}}.';
             } else if (payload.task === 'resolve_loops') {
               sys = 'For each {action, evidence[]} item, decide the action\'s current status using ONLY the dated evidence snippets (dated AFTER the action was raised). "done" ONLY if a snippet clearly shows the action was completed. "in_progress" if a snippet shows partial movement toward it. Otherwise "open". NEVER mark done without explicit completion evidence. For in_progress, write a one-line progress note citing the evidence and set evidence_index to the snippet index used (else -1). STRICT JSON {"results":[{"status":"done|in_progress|open","progress":"<one line or empty>","evidence_index":<int>}]} in item order.';
             } else {
               sys = 'For each {decision,prior} pair, decide if the decision is NEW, UPDATES, or CONFLICTS relative to the prior memory. Be STRICT: only UPDATES if the decision clearly changes a value/state stated in the prior; only CONFLICTS if it directly contradicts the prior; otherwise NEW. When the prior is not clearly about the same thing, NEW with low confidence. Never invent a relationship. STRICT JSON {"results":[{"relation":"NEW|UPDATES|CONFLICTS","reason":"<short, cite the change>","confidence":0..1}]} in pair order.';
             }
-            const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+            const resp = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -6056,13 +7564,20 @@ exit \$RC
           // items + risks become the precise "still-open from before" source.
           let priorItems = [];
           try {
-            const priorRows = await prisma.$queryRawUnsafe(
-              `SELECT id, title, created_at, action_items, insights
-                 FROM meetings
-                WHERE org_id=$1::uuid AND deleted_at IS NULL AND id <> $2::uuid
-                ORDER BY created_at DESC LIMIT 10`,
-              mOrg, meetingId,
-            );
+            let priorRows;
+            if (orgIsRemote(mOrg)) {
+              // Simplified: fetch recent meetings from agent and filter self out.
+              const agentMeetings = await amrMeetingList(mOrg, { limit: 11 }) || [];
+              priorRows = agentMeetings.filter((r) => r.id !== meetingId).slice(0, 10);
+            } else {
+              priorRows = await prisma.$queryRawUnsafe(
+                `SELECT id, title, created_at, action_items, insights
+                   FROM meetings
+                  WHERE org_id=$1::uuid AND deleted_at IS NULL AND id <> $2::uuid
+                  ORDER BY created_at DESC LIMIT 10`,
+                mOrg, meetingId,
+              );
+            }
             for (const pr of (priorRows || [])) {
               const ins = (pr.insights && typeof pr.insights === 'object') ? pr.insights : {};
               const acts = Array.isArray(pr.action_items) && pr.action_items.length ? pr.action_items
@@ -6080,46 +7595,65 @@ exit \$RC
           } catch (pe) { console.warn('[meeting-intel] prior-loops fetch failed:', pe.message); }
 
           const intel = await generateIntelligence(meeting, { recall, judge, priorItems });
-          await prisma.$executeRawUnsafe(
-            `UPDATE meetings SET intelligence=$1::jsonb, intelligence_status=$2, intelligence_generated_at=now() WHERE id=$3::uuid`,
-            JSON.stringify(intel), intel.status, meetingId,
-          );
+          if (orgIsRemote(mOrg)) {
+            await amrMeetingPatch(mOrg, meetingId, { intelligence: intel, intelligence_status: intel.status }).catch(() => {});
+          } else {
+            await prisma.$executeRawUnsafe(
+              `UPDATE meetings SET intelligence=$1::jsonb, intelligence_status=$2, intelligence_generated_at=now() WHERE id=$3::uuid`,
+              JSON.stringify(intel), intel.status, meetingId,
+            );
+          }
         } catch (e) {
           console.warn('[meeting-intel] generate failed:', e.message);
-          try { await prisma.$executeRawUnsafe(`UPDATE meetings SET intelligence_status='error' WHERE id=$1::uuid`, meetingId); } catch { /* ignore */ }
+          try {
+            if (orgIsRemote(mOrg)) {
+              await amrMeetingPatch(mOrg, meetingId, { intelligence_status: 'error' }).catch(() => {});
+            } else {
+              await prisma.$executeRawUnsafe(`UPDATE meetings SET intelligence_status='error' WHERE id=$1::uuid`, meetingId);
+            }
+          } catch { /* ignore */ }
         }
       }
 
-      // POST /api/meetings/:id/ingest — "Save to HIVEMIND" the SMART way.
-      // Instead of one flat markdown blob, build an ingest TREE from the
-      // insights we already extracted: a parent `event` memory (summary +
-      // participant/org entity tags + meeting-date temporal anchor) plus
-      // first-class typed children — each decision → `decision`, each action
-      // item → `goal`, key points / risks → `fact`, next steps → `goal`, and
-      // the transcript as ONE low-priority grounding child. Every node runs
-      // the SAME canonical pipeline (smart-router → embed → Qdrant → relation
-      // classify) so a decision here auto-links (Updates/Contradicts) to prior
-      // decisions on the same topic, and entity tags connect it to existing
-      // people/org clusters. Idempotent via meetings.source_memory_id.
+      // POST /api/meetings/:id/ingest — "Save to HIVEMIND" via the CANONICAL
+      // front door. Build ONE hard-facts markdown of only STATED, attributable
+      // content (decisions, action items, next steps, open questions, notable
+      // quotes + participants/orgs + event date) and hand it to
+      // documentFirstIngestion.ingestSource(mode:'document') — the SAME
+      // _promoteMemories distill + entity-extract + relationship-classify path
+      // as KB/connectors. No bespoke meeting ingest tree. Everything INFERRED
+      // (summary, sentiment, risks, key-points, and the synthesis/entity-brief/
+      // continuity/open-loop ANALYSIS) stays display-only in meetings.intelligence
+      // and is NEVER ingested. The transcript goes as a separate evidence-layer
+      // envelope (mode:'evidence', recall-excluded). authority_level:'claimed' +
+      // the 'unverified' tag rank these below verified facts in recall. The whole
+      // set is addressable by the `meeting:<id>` tag. Idempotent via
+      // meetings.source_memory_id.
       {
         const mIngest = pathname.match(/^\/api\/meetings\/([0-9a-fA-F-]{36})\/ingest$/);
         if (mIngest && req.method === 'POST') {
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          if (!persistentMemoryEngine) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
-          const mOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-          const mUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+          if (!documentFirstIngestion) return jsonResponse(res, { error: 'memory_unavailable' }, 503);
+          const mOrg = _mOrgId;
+          const mUser = _mUserId;
           const id = mIngest[1];
           try {
-            const rows = await prisma.$queryRawUnsafe(
-              `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
-                      action_items, decisions, key_points, questions, topics, insights,
-                      participants, scope, project_id,
-                      source_memory_id, created_at
-               FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
-              id, mOrg,
-            );
-            if (!rows?.length) return jsonResponse(res, { error: 'not_found' }, 404);
-            const m = rows[0];
+            let m;
+            if (orgIsRemote(mOrg)) {
+              m = await remoteMeetingForCaller(id);
+            } else {
+              if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+              if (!await centralMeetingForCaller(id)) return jsonResponse(res, { error: 'not_found' }, 404);
+              const rows = await prisma.$queryRawUnsafe(
+                `SELECT id, title, summary, transcript, language, multi_speaker, speaker_count,
+                        action_items, decisions, key_points, questions, topics, insights,
+                        participants, scope, project_id,
+                        source_memory_id, created_at
+                 FROM meetings WHERE id = $1::uuid AND org_id = $2::uuid AND deleted_at IS NULL`,
+                id, mOrg,
+              );
+              m = rows?.[0] || null;
+            }
+            if (!m) return jsonResponse(res, { error: 'not_found' }, 404);
 
             // Idempotent — already ingested unless caller forces a re-ingest.
             if (m.source_memory_id && !body?.force) {
@@ -6181,26 +7715,20 @@ exit \$RC
             const entityTags = [...people.map((p) => `entity:${p}`), ...orgs.map((o) => `entity:${o}`)];
             const meetingTag = `meeting:${id}`;
 
-            // ── Meeting context stamp — "<title> @ <YYYY-MM-DD HH:MM> — <topic>"
-            // Prefixed onto EVERY memory title so a recalled meeting memory is
-            // self-identifying (which meeting, when) without a graph walk.
+            // ── Meeting event-date stamp (display + provenance) ──────────────
             const _d = meetingDate ? new Date(meetingDate) : new Date();
             const pad = (n) => String(n).padStart(2, '0');
             const stamp = `${_d.getUTCFullYear()}-${pad(_d.getUTCMonth() + 1)}-${pad(_d.getUTCDate())} ${pad(_d.getUTCHours())}:${pad(_d.getUTCMinutes())}`;
-            const topicName = (topics[0] || title).toString().slice(0, 60);
-            const ctxPrefix = `${title} @ ${stamp} — ${topicName}`;
             // Provenance: these are MEETING INSIGHTS — claims made in a meeting,
-            // NOT verified ground truth. Tagged + metadata-flagged so recall and
-            // conflict-resolution rank them BELOW authoritative facts and surface
-            // them as "stated in meeting X" rather than as truth.
-            const provLine = `From meeting "${title}" on ${stamp}. These are meeting insights (claims stated in the meeting) — not verified facts.`;
+            // NOT verified ground truth. authority_level:'claimed' + the
+            // 'unverified' tag make recall + conflict-resolution rank them BELOW
+            // authoritative facts and surface them as "stated in meeting X".
             const baseMeta = {
               meeting_id: id, source: 'meeting-notes',
               provenance: 'meeting', authority_level: 'claimed', meeting_stamp: stamp,
             };
-            const INSIGHT_TAGS = ['meeting-insight', 'unverified', meetingTag];
 
-            // ── Cross-section dedup (within the cluster) ──────────────────────
+            // ── Cross-section dedup (within the meeting) ──────────────────────
             const seenClaims = new Set();
             const claimKey = (s) => String(s || '')
               .toLowerCase().normalize('NFKD')
@@ -6220,113 +7748,168 @@ exit \$RC
               }
               return out;
             };
-            const bulletBlock = (lines) => lines.map((l) => `• ${l}`).join('\n');
 
-            // ── SECTION CLUSTER: parent + ≤4 section memories ─────────────────
-            // Instead of ~20 atomic children (recall noise + dreaming hairball),
-            // each meeting becomes a SMALL cluster: one parent (overview) plus a
-            // memory per section that holds the WHOLE deduped list. This keeps
-            // recall list-coherent ("what did we decide" → one hit, full list)
-            // and the noise floor low, while the rich parent still anchors
-            // cross-meeting dreaming links. Knowledge that needs claim-grain
-            // belongs in standalone notes, not meeting minutes.
+            // ── Canonical ingest: ONE hard-facts markdown → document mode ─────
+            // Only STATED, attributable content enters memory: decisions, action
+            // items, next steps, open questions, notable quotes + participants/
+            // orgs + the event date. Everything INFERRED — summary, sentiment,
+            // risks, key-points, and the synthesis/entity-brief/continuity/
+            // open-loop ANALYSIS — stays display-only in meetings.intelligence and
+            // is NEVER ingested. The markdown goes through ingestSource(mode:
+            // 'document') → the SAME _promoteMemories distill+entity+relationship
+            // path as KB/connectors, so there is no bespoke meeting ingest tree.
             const openQuestions = arr(m.questions).length ? arr(m.questions) : arr(ins.open_questions || ins.questions);
             const quotes = arr(ins.quotes);
-
-            const mkSection = (label, memory_type, lines, extraTags = []) => ({
-              user_id: mUser,
-              org_id: mOrg,
-              ...scopeFields,
-              title: `${ctxPrefix} — ${label}`.slice(0, 200),
-              content: `${provLine}\n\n${label}:\n${bulletBlock(lines)}`,
-              memory_type,
-              tags: [...INSIGHT_TAGS, ...extraTags].filter(Boolean),
-              ...(meetingDate ? { document_date: meetingDate } : {}),
-              metadata: { ...baseMeta, section: label },
-            });
-
-            // Parent (event) — summary/overview + participants + notable quotes.
-            // Quotes ride along as grounding here (not a separate recall row).
-            const quoteBlock = quotes.length
-              ? `\n\nNotable quotes:\n${quotes.slice(0, 6).map((q) => `“${(typeof q === 'string' ? q : (q?.quote || '')).toString().trim()}”${(q?.speaker ? ` — ${q.speaker}` : '')}`).filter((s) => s.length > 3).join('\n')}`
-              : '';
-            const parent = {
-              user_id: mUser,
-              org_id: mOrg,
-              ...scopeFields,
-              title: `${ctxPrefix} — Overview`.slice(0, 200),
-              content: provLine + '\n\n' + summary
-                + (people.length ? `\n\nParticipants: ${people.join(', ')}` : '')
-                + (orgs.length ? `\nOrganizations: ${orgs.join(', ')}` : '')
-                + quoteBlock,
-              memory_type: 'event',
-              tags: ['meeting', 'ai-meeting-notes', 'meeting-insight', meetingTag,
-                ...(m.multi_speaker ? ['multi-speaker'] : []),
-                ...topics, ...entityTags].filter(Boolean),
-              ...(meetingDate ? { document_date: meetingDate } : {}),
-              metadata: { ...baseMeta, force_entity_linking: true, participant_count: people.length },
-            };
-
-            const children = [];
-            // 1) Decisions
-            const decisionLines = dedupeBullets(decisions.slice(0, 12), (d) => (typeof d === 'string' ? d : (d?.text || '')));
-            if (decisionLines.length) children.push(mkSection('Decisions', 'decision', decisionLines, ['decision', ...topics.slice(0, 2)]));
-            // 2) Action items + Next steps (one actionable list)
-            const actionLines = dedupeBullets(actionItems.slice(0, 12), (a) => {
-              const taskText = typeof a === 'string' ? a : (a?.task || '');
-              if (!taskText) return '';
+            const fmtAction = (a) => {
+              const t = (typeof a === 'string' ? a : (a?.task || '')).toString();
+              if (!t.trim()) return '';
               const owner = (typeof a === 'object' && a?.owner) ? a.owner : null;
               const due = (typeof a === 'object' && a?.due) ? a.due : null;
-              return `${taskText}${owner ? ` (owner: ${owner})` : ''}${due ? ` (due: ${due})` : ''}`;
-            }).concat(dedupeBullets(nextSteps.slice(0, 8), (n) => String(n || '')));
-            if (actionLines.length) children.push(mkSection('Action items & next steps', 'goal', actionLines, ['action-item', 'open-loop']));
-            // 3) Key points + Risks (the substantive discussion)
-            const knowledgeLines = dedupeBullets(keyPoints.slice(0, 10), (k) => String(k || ''))
-              .concat(dedupeBullets(risks.slice(0, 8), (r) => `Risk: ${String(r || '')}`));
-            if (knowledgeLines.length) children.push(mkSection('Key points & risks', 'fact', knowledgeLines, ['key-point', 'risk']));
-            // 4) Open questions → open-loop lane (dreaming + meeting-intel)
+              const meta = [owner ? `owner: ${owner}` : null, due ? `due: ${due}` : null].filter(Boolean).join(', ');
+              return meta ? `${t.trim()} — ${meta}` : t.trim();
+            };
+            const fmtQuote = (q) => {
+              const text = (typeof q === 'string' ? q : (q?.quote || '')).toString().trim();
+              if (text.length < 3) return '';
+              const speaker = (typeof q === 'object' && q?.speaker) ? ` — ${q.speaker}` : '';
+              return `"${text}"${speaker}`;
+            };
+            const decisionLines = dedupeBullets(decisions.slice(0, 12), (d) => (typeof d === 'string' ? d : (d?.text || '')));
+            const actionLines = dedupeBullets(actionItems.slice(0, 12), fmtAction);
+            const nextStepLines = dedupeBullets(nextSteps.slice(0, 8), (n) => String(n || ''));
             const questionLines = dedupeBullets(openQuestions.slice(0, 8), (q) => (typeof q === 'string' ? q : (q?.text || q?.question || '')));
-            if (questionLines.length) children.push(mkSection('Open questions', 'fact', questionLines, ['open-loop', 'question']));
+            const quoteLines = dedupeBullets(quotes.slice(0, 6), fmtQuote);
+            const mdSection = (label, lines) => (lines.length ? `\n## ${label}\n${lines.map((l) => `- ${l}`).join('\n')}\n` : '');
+            const factsMarkdown =
+              `# Meeting: ${title} — ${stamp}\n`
+              + `Participants: ${people.join(', ') || '—'}   Organizations: ${orgs.join(', ') || '—'}\n`
+              + `> Meeting insights — claims stated in the meeting, not verified facts.\n`
+              + mdSection('Decisions', decisionLines)
+              + mdSection('Action items', actionLines)
+              + mdSection('Next steps', nextStepLines)
+              + mdSection('Open questions', questionLines)
+              + mdSection('Notable quotes', quoteLines);
 
-            // Transcript — EVIDENCE only, recall-excluded, grounds by meeting id.
+            const hasFacts = !!(decisionLines.length || actionLines.length || nextStepLines.length || questionLines.length || quoteLines.length);
+            if (!hasFacts && !transcript.trim()) {
+              return jsonResponse(res, { error: 'nothing_to_ingest' }, 400);
+            }
+
+            const scopeEnvelope = {
+              ...(scopeFields.scope ? { scope: scopeFields.scope } : {}),
+              ...(saveProjectIds[0] ? { projectId: saveProjectIds[0] } : {}),
+              ...(savePrimaryTeamId ? { primaryTeamId: savePrimaryTeamId } : {}),
+            };
+
+            // ── V5: meeting → typed PartOf section-tree ────────────────────
+            // The insights step (POST /insights) ALREADY structured the meaning,
+            // so we do NOT re-distill with a second LLM curator pass (that
+            // fragmented one meeting into re-generated claims AND dropped the
+            // quotes). Instead every non-empty section becomes its OWN
+            // deterministically-typed memory (decision / goal / fact / event)
+            // PartOf-linked to a parent meeting memory. This makes each
+            // section-specific question ("what did we decide", "action items",
+            // "notable quotes") answerable from the RIGHT memory — recall surfaces
+            // the matching section, and each section fits the synthesis budget.
+            // Section TYPES come from the insight STRUCTURE, never from heading
+            // text, so it is language-neutral. Each memory goes through the atomic
+            // path (skip_fact_extraction:true = verbatim, no re-gen; smartIngest:
+            // false = not re-chunked/superseded) which still runs entity extraction
+            // + canonical linking (defer_entity_linking-gated) so participants /
+            // orgs / products link across HIVEMIND.
+            let factIds = [];
+            if (hasFacts) {
+              // Pure-insert: skip_fact_extraction + smartIngest:false + skip_contradiction_detection
+              // + skip_relationship_classification + skipAdvisoryLock ⇒ graph-engine _pureInsert path.
+              // Verbatim, no post-commit dedup/supersede/contradiction (which under the concurrent
+              // multi-section ingest intermittently mangled section content). Entity linking is
+              // defer_entity_linking-gated (NOT set here) so entities + typed edges still land.
+              const baseChildMeta = { ...baseMeta, skip_fact_extraction: true, smartIngest: false, skipPredictCalibrate: true, skip_contradiction_detection: true, skip_relationship_classification: true, skipAdvisoryLock: true, force_entity_linking: true };
+              const ingestOne = async (content, memory_type, sectionKey, extraTags = []) => {
+                const r = await documentFirstIngestion.ingestSource({
+                  userId: mUser, orgId: mOrg, content,
+                  source: { type: 'meeting', platform: 'ai-meeting-notes', sourceId: id, title },
+                  occurredAt: meetingDate || undefined, mode: 'atomic', ...scopeEnvelope,
+                  tags: ['meeting', 'unverified', meetingTag, `section:${sectionKey}`, ...extraTags, ...entityTags, ...topics].filter(Boolean),
+                  metadata: { ...baseChildMeta, memory_type, section: sectionKey, ...(saveScope === 'organization' ? { visibility: 'organization' } : {}) },
+                });
+                return r?.memoryIds?.[0] || null;
+              };
+
+              // Parent — meeting identity + participants (+ 1-line summary for
+              // doc-level recall). Answers "who was in / what was the meeting".
+              const summaryLine = (typeof ins.summary === 'string' && ins.summary.trim()) ? `\n${ins.summary.trim()}` : '';
+              const parentContent =
+                `# Meeting: ${title} — ${stamp}\n`
+                + `Participants: ${people.join(', ') || '—'}   Organizations: ${orgs.join(', ') || '—'}`
+                + summaryLine;
+              const parentId = await ingestOne(parentContent, 'event', 'overview', ['meeting-insight']);
+              if (parentId) factIds.push(parentId);
+
+              // Typed section children, each PartOf → parent. Type from structure.
+              const sectionSpecs = [
+                { key: 'decisions', label: 'Decisions', type: 'decision', lines: decisionLines },
+                { key: 'action_items', label: 'Action items', type: 'goal', lines: actionLines },
+                { key: 'next_steps', label: 'Next steps', type: 'goal', lines: nextStepLines },
+                { key: 'open_questions', label: 'Open questions', type: 'fact', lines: questionLines },
+                { key: 'notable_quotes', label: 'Notable quotes', type: 'event', lines: quoteLines },
+              ];
+              for (const sec of sectionSpecs) {
+                if (!sec.lines.length) continue;
+                const content = `Meeting: ${title} — ${sec.label}\n` + sec.lines.map((l) => `- ${l}`).join('\n');
+                const childId = await ingestOne(content, sec.type, sec.key);
+                if (!childId) continue;
+                factIds.push(childId);
+                if (parentId) {
+                  try {
+                    await documentFirstIngestion.memoryGraphEngine.store.createRelationship({
+                      id: crypto.randomUUID(), from_id: childId, to_id: parentId,
+                      type: 'PartOf', confidence: 1.0, org_id: mOrg,
+                      metadata: { source: 'meeting', section: sec.key },
+                    });
+                  } catch (edgeErr) { console.warn('[meeting-ingest] PartOf edge failed:', edgeErr.message); }
+                }
+              }
+            }
+
+            // Transcript → evidence-layer envelope: recall-excluded, never
+            // distilled. Grounds the facts by the shared meeting:<id> tag.
+            let transcriptResult = null;
             if (transcript.trim()) {
-              children.push({
-                user_id: mUser,
-                org_id: mOrg,
-                ...scopeFields,
-                title: `${ctxPrefix} — Transcript`.slice(0, 200),
+              transcriptResult = await documentFirstIngestion.ingestSource({
+                userId: mUser, orgId: mOrg,
                 content: transcript.slice(0, 16000),
-                memory_type: 'event',
+                source: { type: 'meeting', platform: 'ai-meeting-notes', sourceId: id, title: `${title} — transcript` },
+                occurredAt: meetingDate || undefined,
+                mode: 'evidence',
+                ...scopeEnvelope,
                 tags: [meetingTag, 'transcript', 'evidence'],
-                ...(meetingDate ? { document_date: meetingDate } : {}),
                 metadata: { ...baseMeta, recall_exclude: true, evidence_only: true },
-                skip_fact_extraction: true,
               });
             }
 
-            const tree = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
-            const parentId = tree?.parentId || null;
-
-            // Structured enrichment on the parent (fire-and-forget).
-            if (parentId && enrichmentQueue) {
-              enrichmentQueue.enqueue(parentId, { content: parent.content, title: parent.title, tags: parent.tags });
+            // Link the meeting to its memory set via the first distilled fact —
+            // the idempotency flag + "already ingested?" check. The FULL set is
+            // addressable by the meeting:<id> tag (delete + recall grounding key).
+            const linkId = factIds[0] || transcriptResult?.memoryIds?.[0] || null;
+            if (linkId) {
+              if (orgIsRemote(mOrg)) {
+                amrMeetingPatch(mOrg, id, { source_memory_id: linkId }).catch(() => { /* link best-effort */ });
+              } else {
+                await prisma.$queryRawUnsafe(
+                  `UPDATE meetings SET source_memory_id = $1::uuid WHERE id = $2::uuid AND org_id = $3::uuid`,
+                  linkId, id, mOrg,
+                ).catch(() => { /* link best-effort */ });
+              }
             }
-            // Link the meeting row back to the parent memory (idempotent).
-            if (parentId) {
-              await prisma.$queryRawUnsafe(
-                `UPDATE meetings SET source_memory_id = $1::uuid WHERE id = $2::uuid AND org_id = $3::uuid`,
-                parentId, id, mOrg,
-              ).catch(() => { /* link best-effort */ });
-            }
-            // Sectioned cluster: 1 parent (Overview) + ≤4 section memories +
-            // optional transcript-evidence. Report the section labels emitted.
-            const emitted = children.map((c) => (c.metadata?.section || (c.tags?.includes('transcript') ? 'transcript' : 'other')));
             return jsonResponse(res, {
               ok: true,
-              parent_id: parentId,
-              child_ids: tree?.childIds || [],
-              memory_count: 1 + children.length,
-              sections: emitted,
+              parent_id: linkId,
+              memory_ids: factIds,
+              fact_count: factIds.length,
+              transcript_evidence: !!transcriptResult,
+              source: 'meeting',
+              mode: 'document',
             }, 201);
           } catch (e) {
             console.error('[meeting-ingest] failed:', e && (e.stack || e.message || JSON.stringify(e)));
@@ -6441,14 +8024,54 @@ exit \$RC
 
       // ── TARA call history / turns / insights / usage (org-scoped, real-time) ──
       if (pathname.startsWith('/api/tara/calls')) {
-        const tOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-        const tUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const tOrg = _mOrgId;
+        const tUser = _mUserId;
+
+        // ── Live-listen capability ──────────────────────────────────────────
+        // Lets the dashboard hear an IN-FLIGHT call without ever handing the
+        // browser TARA_DG_API_KEY — that key authorizes DIALING, so it must
+        // never leave the server. Instead mint a short-lived token scoped to ONE
+        // session. Tenant isolation is enforced HERE at mint time (you may only
+        // listen to a call your own org owns), so the adapter only has to verify
+        // the signature and expiry — no extra round-trip per listener.
+        if (pathname === '/api/tara/calls/listen-token' && req.method === 'POST') {
+          const sessionId = String(body.session_id || '').trim();
+          if (!sessionId) return jsonResponse(res, { error: 'session_id required' }, 400);
+          const listenSecret = process.env.TARA_DG_LISTEN_SECRET || '';
+          if (!listenSecret) return jsonResponse(res, { error: 'listen_not_configured' }, 503);
+          const call = await prisma.taraCall.findFirst({
+            where: { sessionId, orgId: tOrg }, select: { id: true },
+          }).catch(() => null);
+          // 404 (not 403) so a probe can't enumerate other orgs' session ids.
+          if (!call) return jsonResponse(res, { error: 'not_found' }, 404);
+          const exp = Date.now() + 120_000; // 2 min: enough to open the socket
+          const claims = Buffer.from(JSON.stringify({ sid: sessionId, org: tOrg, uid: tUser, exp }))
+            .toString('base64url');
+          const sig = crypto.createHmac('sha256', listenSecret).update(claims).digest('base64url');
+          return jsonResponse(res, {
+            token: `${claims}.${sig}`,
+            expires_at: new Date(exp).toISOString(),
+          });
+        }
 
         if (pathname === '/api/tara/calls/start' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          const talkLimit = await planEnforcer.checkLimit(tOrg, 'taraSeconds', 1);
+          if (!talkLimit.allowed) return jsonResponse(res, planLimitBody(talkLimit, 'taraSeconds'), talkLimit.status || 429);
+          // Remote (self-host) orgs: ledger on agent.
+          if (orgIsRemote(tOrg)) {
+            try {
+              const r = await amrTaraCall(tOrg, { op: 'upsert', session_id: String(body.session_id), user_id: tUser, status: 'active', metadata: { mode: body.mode || 'external', voice_id: body.voice_id || null, language: body.language || 'en' } });
+              return jsonResponse(res, { call_id: r?.id || null });
+            } catch (e) { return jsonResponse(res, { error: 'start_failed', message: e.message }, 500); }
+          }
           try {
             const call = await prisma.taraCall.upsert({
-              where: { sessionId: String(body.session_id) },
+              // Uniqueness is (org_id, session_id) — the single-column unique on
+              // session_id was dropped by the tara_grok migration. A bare
+              // { sessionId } here throws "needs at least one of id or
+              // orgId_sessionId" and every call record is silently lost.
+              where: { orgId_sessionId: { orgId: tOrg, sessionId: String(body.session_id) } },
               update: { mode: body.mode || 'external', voiceId: body.voice_id || null, language: body.language || 'en', status: 'active' },
               create: { orgId: tOrg, userId: tUser, sessionId: String(body.session_id), mode: body.mode || 'external', voiceId: body.voice_id || null, language: body.language || 'en' },
             });
@@ -6456,10 +8079,43 @@ exit \$RC
           } catch (e) { return jsonResponse(res, { error: 'start_failed', message: e.message }, 500); }
         }
 
+        // Token usage from the voice shim (per turn) — increments call token
+        // counters WITHOUT creating a turn row (the bridge owns turn rows). Keeps
+        // the Usage/Tokens dashboard live regardless of cross-process state.
+        if (pathname === '/api/tara/calls/token-usage' && req.method === 'POST') {
+          if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
+          try { planEnforcer?.recordUsage(tOrg, 'tokens', pt + ct); } catch { /* meter */ }
+          if (orgIsRemote(tOrg)) {
+            try { await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), prompt_tokens_inc: pt, completion_tokens_inc: ct }); } catch { /* best-effort */ }
+            return jsonResponse(res, { ok: true });
+          }
+          try {
+            const call = await prisma.taraCall.findUnique({ where: { orgId_sessionId: { orgId: tOrg, sessionId: String(body.session_id) } } });
+            if (call && call.orgId === tOrg) await prisma.taraCall.update({ where: { id: call.id }, data: { promptTokens: { increment: pt }, completionTokens: { increment: ct } } });
+          } catch { /* best-effort */ }
+          return jsonResponse(res, { ok: true });
+        }
+
         if (pathname === '/api/tara/calls/turn' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          // Remote (self-host) orgs: counters + full turn text on agent (Call History parity).
+          if (orgIsRemote(tOrg)) {
+            try {
+              const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
+              try { planEnforcer?.recordUsage(tOrg, 'tara', 1); if (pt + ct > 0) planEnforcer?.recordUsage(tOrg, 'tokens', pt + ct); } catch { /* meter */ }
+              await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), turn_count_inc: 1, prompt_tokens_inc: pt, completion_tokens_inc: ct });
+              await amrTaraCall(tOrg, {
+                op: 'turn', session_id: String(body.session_id),
+                seq: Number(body.seq) || null,
+                user_text: body.user_text || '', agent_text: body.agent_text || '',
+                llm_ttfb_ms: body.llm_ttfb_ms ?? null,
+              });
+              return jsonResponse(res, { ok: true });
+            } catch (e) { return jsonResponse(res, { error: 'turn_failed', message: e.message }, 500); }
+          }
           try {
-            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            const call = await prisma.taraCall.findUnique({ where: { orgId_sessionId: { orgId: tOrg, sessionId: String(body.session_id) } } });
             if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
             const pt = Number(body.prompt_tokens) || 0, ct = Number(body.completion_tokens) || 0;
             try { planEnforcer?.recordUsage(tOrg, 'tara', 1); if (pt + ct > 0) planEnforcer?.recordUsage(tOrg, 'tokens', pt + ct); } catch { /* meter */ }
@@ -6477,21 +8133,128 @@ exit \$RC
 
         if (pathname === '/api/tara/calls/end' && req.method === 'POST') {
           if (!body.session_id) return jsonResponse(res, { error: 'session_id required' }, 400);
+          const meteredDurationSeconds = Math.max(0, Math.ceil(Number(body.duration_sec) || 0));
+          // Remote (self-host) orgs: mark completed, then generate the same
+          // post-call insight as central — stored in the agent's call metadata
+          // (the agent has no tara_insights table; detail maps metadata.insight).
+          if (orgIsRemote(tOrg)) {
+            try {
+              const durSec = Number(body.duration_sec) || 0;
+              const pTok = Number(body.prompt_tokens) || 0, cTok = Number(body.completion_tokens) || 0;
+              await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id),
+                status: 'completed',
+                ...(pTok ? { prompt_tokens_inc: pTok } : {}), ...(cTok ? { completion_tokens_inc: cTok } : {}),
+                metadata_merge: { duration_sec: durSec } });
+              if (meteredDurationSeconds > 0) planEnforcer.recordUsage(tOrg, 'taraSeconds', meteredDurationSeconds);
+              // Value-action metering: completed call on a remote (self-host) org.
+              try { const { meterTara } = await import('./billing/usage-tracker.js'); meterTara(tOrg); } catch { /* non-fatal */ }
+              (async () => {
+                try {
+                  const g = await amrTaraCall(tOrg, { op: 'get', session_id: String(body.session_id) });
+                  const callId = g?.call?.id;
+                  if (!callId || !process.env.GROQ_API_KEY) return;
+                  const d = await amrTaraCall(tOrg, { op: 'detail', id: callId });
+                  const goal = g?.call?.metadata?.goal || d?.call?.metadata?.goal || '';
+                  const transcript = (d?.turns || []).map(t => {
+                    let p = {}; try { p = typeof t.content === 'string' ? JSON.parse(t.content) : (t.content || {}); } catch { /* raw */ }
+                    return `User: ${p.user_text || ''}\nTARA: ${p.agent_text || ''}`;
+                  }).join('\n');
+                  if (!transcript.trim()) return;
+                  const r = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                    method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
+                      messages: [
+                        { role: 'system', content: TARA_INSIGHT_PROMPT },
+                        { role: 'user', content: `Call goal: ${goal || '(none set)'}\n\nTranscript:\n${transcript.slice(0, 40000)}` },
+                      ] }),
+                    signal: AbortSignal.timeout(60_000),
+                  });
+                  if (!r.ok) return;
+                  const j = await r.json();
+                  let parsed; try { parsed = JSON.parse(j.choices[0].message.content); } catch { parsed = {}; }
+                  if (parsed?.summary) {
+                    await amrTaraCall(tOrg, { op: 'update', session_id: String(body.session_id), metadata_merge: { insight: parsed } });
+                  }
+                  // Save the FULL transcript as a HIVEMIND memory in the reserved
+                  // admin-only TARA-MEMORY project (dedicated, out of org memories).
+                  if (persistentMemoryStore) {
+                    try {
+                      const pid = await ensureTaraMemoryProject(tOrg, tUser);
+                      await taraCanonicalSave({
+                        id: crypto.randomUUID(), user_id: tUser, org_id: tOrg,
+                        project: 'tara-memory', project_ids: pid ? [pid] : [],
+                        scope: 'project',
+                        title: `TARA transcript — ${new Date().toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
+                        content: `TARA call transcript (goal: ${goal || 'n/a'}):\n\n${transcript.slice(0, 40000)}`,
+                        tags: ['tara-transcript', `sid:${body.session_id}`],
+                        memory_type: 'event', document_date: new Date().toISOString(),
+                        metadata: { session_id: body.session_id, call_id: callId, kind: 'tara-transcript' },
+                      });
+                    } catch (e4) { console.warn('[tara/mem] transcript save failed:', e4.message); }
+                  }
+                } catch (e) { console.warn('[tara/calls] remote insight failed:', e.message); }
+              })();
+              return jsonResponse(res, { ok: true, duration_ms: durSec * 1000, turns: 0 });
+            } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
+          }
           try {
-            const call = await prisma.taraCall.findUnique({ where: { sessionId: String(body.session_id) } });
+            const call = await prisma.taraCall.findUnique({ where: { orgId_sessionId: { orgId: tOrg, sessionId: String(body.session_id) } } });
             if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'call_not_found' }, 404);
+            if (call.status === 'completed') {
+              return jsonResponse(res, { ok: true, already_completed: true, duration_ms: call.durationMs || 0, turns: call.turnCount || 0 });
+            }
             const durationMs = Math.max(0, Date.now() - new Date(call.startedAt).getTime());
-            await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs } });
+            // Populate estimated_cost_micros at call end (was 0 on every row). Rates
+            // live in ONE config (billing/tara-rates.js); provider + duration + the
+            // row's accumulated tokens drive the number. Never throws — cost is
+            // reporting, not correctness.
+            let estimatedCostMicros = 0;
+            try {
+              const { computeTaraCostMicros } = await import('./billing/tara-rates.js');
+              estimatedCostMicros = computeTaraCostMicros({ provider: call.provider, durationMs, promptTokens: call.promptTokens, completionTokens: call.completionTokens });
+            } catch (e) { console.warn('[tara/cost] compute failed:', e.message); }
+            await prisma.taraCall.update({ where: { id: call.id }, data: { status: 'completed', endedAt: new Date(), durationMs, estimatedCostMicros } });
+            const campaignAttempt = await prisma.taraCallAttempt.findFirst({ where: { orgId: tOrg, sessionId: String(body.session_id) } }).catch(() => null);
+            if (campaignAttempt) {
+              let attemptStatus = campaignAttempt.status;
+              for (const next of ['connected', 'completed', 'done']) {
+                if (!canTransitionTaraAttempt(attemptStatus, next)) continue;
+                await prisma.taraCallAttempt.update({ where: { id: campaignAttempt.id }, data: { status: next, ...(next === 'done' ? { endedAt: new Date(), disposition: 'completed' } : {}) } });
+                attemptStatus = next;
+              }
+              await prisma.taraCampaignContact.update({ where: { id: campaignAttempt.contactId }, data: { status: 'done' } }).catch(() => {});
+            }
+            if (durationMs > 0) planEnforcer.recordUsage(tOrg, 'taraSeconds', Math.ceil(durationMs / 1000));
+            // Value-action metering: one completed TARA call (OrgUsage.taraUsage
+            // was defined but never wired). Fire-and-forget, success-path only.
+            try {
+              const { meterTara } = await import('./billing/usage-tracker.js');
+              meterTara(call.orgId);
+              const { getUsageTrackerInstance } = await import('./billing/usage-tracker.js');
+              getUsageTrackerInstance()?.recordDaily?.(call.orgId, 'tara')?.catch?.(() => {});
+            } catch { /* never break call end */ }
+            // Closed-loop ledger: a room-initiated outbound call completed. Mark
+            // its outbound_actions row completed (insight below may upgrade to
+            // booked). Raw SQL + fire-and-forget — never breaks call end.
+            try {
+              await prisma.$executeRawUnsafe(
+                `UPDATE "hivemind"."outbound_actions"
+                    SET outcome = 'completed', outcome_at = now()
+                  WHERE org_id = $1::uuid AND channel = 'call'
+                    AND meta->>'session_id' = $2 AND outcome IS NULL`,
+                call.orgId, String(body.session_id),
+              );
+            } catch { /* ledger optional */ }
             const turns = await prisma.taraTurn.findMany({ where: { callId: call.id }, orderBy: { seq: 'asc' } });
             const transcript = turns.map(t => `User: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
             if (transcript.trim() && process.env.GROQ_API_KEY) {
               try {
-                const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                const r = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
                   method: 'POST', headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
                   body: JSON.stringify({ model: 'openai/gpt-oss-120b', temperature: 0.2, response_format: { type: 'json_object' },
                     messages: [
-                      { role: 'system', content: 'Summarize this voice conversation. STRICT JSON: {"summary": string (2-4 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null}], "topics": string[], "questions": string[], "sentiment": string}. Empty arrays if none. Faithful — no invention.' },
-                      { role: 'user', content: transcript.slice(0, 40000) },
+                      { role: 'system', content: TARA_INSIGHT_PROMPT },
+                      { role: 'user', content: `Call goal: ${call.goal || '(none set)'}\n\nTranscript:\n${transcript.slice(0, 40000)}` },
                     ] }),
                   signal: AbortSignal.timeout(60_000),
                 });
@@ -6499,6 +8262,20 @@ exit \$RC
                   const j = await r.json();
                   let parsed; try { parsed = JSON.parse(j.choices[0].message.content); } catch { parsed = {}; }
                   await prisma.taraInsight.upsert({ where: { callId: call.id }, update: { summary: parsed.summary || null, data: parsed }, create: { callId: call.id, orgId: tOrg, userId: tUser, summary: parsed.summary || null, data: parsed } });
+                  // Closed-loop ledger upgrade: insight says a meeting was booked
+                  // (or a concrete lead landed) → outcome=booked on the room call.
+                  try {
+                    const booked = /book/i.test(String(parsed.goal_outcome || '')) || parsed.lead_found === true;
+                    if (booked) {
+                      await prisma.$executeRawUnsafe(
+                        `UPDATE "hivemind"."outbound_actions"
+                            SET outcome = 'booked', outcome_at = now()
+                          WHERE org_id = $1::uuid AND channel = 'call'
+                            AND meta->>'session_id' = $2 AND outcome IS DISTINCT FROM 'booked'`,
+                        tOrg, String(body.session_id),
+                      );
+                    }
+                  } catch { /* ledger optional */ }
 
                   // ONE call-log summary memory per call (replaces the old per-turn
                   // + per-insight memory spam). Postgres-only via store.createMemory
@@ -6511,35 +8288,216 @@ exit \$RC
                         ? `\n\nKey points:\n- ${parsed.key_points.slice(0, 8).join('\n- ')}` : '';
                       const tp = Array.isArray(parsed.topics) && parsed.topics.length
                         ? `\n\nTopics: ${parsed.topics.slice(0, 12).join(', ')}` : '';
-                      await persistentMemoryStore.createMemory({
+                      const pid = await ensureTaraMemoryProject(tOrg, tUser);
+                      const fullTranscript = turns.map(t => `You: ${t.userText || ''}\nTARA: ${t.agentText || ''}`).join('\n');
+                      // The first "Talk to Runtime" admin check-in is a runtime_operator call.
+                      // Tag its transcript `Admin_feedback` (org-scoped, org-wide) so ANY
+                      // Company Room director can ground on the administrator's own words —
+                      // status, what they sell, sales, niche, go-to-market — later.
+                      const _isAdminCheckin = await prisma.taraVoiceSession
+                        .findFirst({ where: { sessionId: String(body.session_id) }, select: { snapshot: true } })
+                        .then((s) => s?.snapshot?.interaction_profile === 'runtime_operator')
+                        .catch(() => false);
+                      await taraCanonicalSave({
                         id: crypto.randomUUID(),
                         user_id: tUser,
                         org_id: tOrg,
-                        project: `tara/${call.tenantId || 'default'}`,
-                        content: `TARA call (${call.mode || 'external'}, ${turns.length} turns): ${parsed.summary}${kp}${tp}`,
-                        title: `TARA Call Log — ${new Date(call.startedAt).toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
-                        tags: ['tara-call-log', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`],
+                        project: 'tara-memory',  // reserved admin-only project (hidden from Workspace Admin)
+                        project_ids: pid ? [pid] : [],
+                        scope: _isAdminCheckin ? 'organization' : 'project',
+                        content: `TARA call (${call.mode || 'external'}, ${turns.length} turns): ${parsed.summary}${kp}${tp}\n\n--- Transcript ---\n${fullTranscript.slice(0, 38000)}`,
+                        title: _isAdminCheckin
+                          ? `Admin_feedback — first Runtime check-in — ${new Date(call.startedAt).toISOString().slice(0, 10)}`
+                          : `TARA Call Log — ${new Date(call.startedAt).toISOString().slice(0, 10)} — ${String(body.session_id).slice(0, 16)}`,
+                        tags: [
+                          ...(_isAdminCheckin ? ['Admin_feedback', 'admin-checkin'] : []),
+                          'tara-call-log', 'tara-transcript', `sid:${body.session_id}`, `mode:${call.mode || 'external'}`,
+                        ],
                         memory_type: 'event',
                         document_date: new Date().toISOString(),
-                        metadata: { session_id: body.session_id, call_id: call.id, turns: turns.length, sentiment: parsed.sentiment || null, node_color: 'teal' },
+                        metadata: { session_id: body.session_id, call_id: call.id, turns: turns.length, sentiment: parsed.sentiment || null, node_color: 'teal', admin_feedback: _isAdminCheckin },
                       });
                     } catch (e3) { console.warn('[tara/call-log] memory save failed:', e3.message); }
                   }
+
+                  // ── Outreach learnings loop ────────────────────────────────
+                  // If this call was an OUTREACH CAMPAIGN dial (ledger row keyed by
+                  // session_id, via=outreach-campaign), distill the insight into a
+                  // RECALL-VISIBLE org learning memory (unlike the call log above,
+                  // which is deliberately recall-excluded). Next campaign's email +
+                  // call-goal generation pulls these via the outreach-learning tag
+                  // lane — the loop that makes outreach compound instead of repeat.
+                  try {
+                    const oa = await prisma.$queryRawUnsafe(
+                      `SELECT id, recipient, meta FROM "hivemind"."outbound_actions"
+                        WHERE org_id = $1::uuid AND channel = 'call'
+                          AND meta->>'session_id' = $2 AND meta->>'via' = 'outreach-campaign' LIMIT 1`,
+                      tOrg, String(body.session_id),
+                    );
+                    const hasLearnings = Array.isArray(parsed.tara_learnings) && parsed.tara_learnings.length;
+                    if (persistentMemoryStore && oa?.length && (hasLearnings || parsed.goal_outcome || parsed.lead_found)) {
+                      // Idempotent per session: skip if the learning already exists.
+                      const dup = await prisma.$queryRawUnsafe(
+                        `SELECT id FROM "hivemind"."memories"
+                          WHERE org_id = $1::uuid AND deleted_at IS NULL
+                            AND tags @> ARRAY['outreach-learning', $2]::text[] LIMIT 1`,
+                        tOrg, `sid:${body.session_id}`,
+                      ).catch(() => []);
+                      if (!dup?.length) {
+                        const companyName = String(oa[0].meta?.company || oa[0].meta?.contact_name || oa[0].recipient || 'prospect');
+                        const companySlug = companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'prospect';
+                        const bits = [];
+                        if (parsed.goal_outcome) bits.push(`Outcome: ${parsed.goal_outcome}`);
+                        if (hasLearnings) bits.push(`Learnings:\n- ${parsed.tara_learnings.slice(0, 6).join('\n- ')}`);
+                        const lead = Array.isArray(parsed.leads) ? parsed.leads[0] : null;
+                        if (lead) {
+                          bits.push(`Lead: ${[lead.name, lead.company, lead.contact].filter(Boolean).join(' · ')}`
+                            + (lead.next_step ? ` — next: ${lead.next_step}` : ''));
+                        }
+                        if (parsed.sentiment) bits.push(`Sentiment: ${parsed.sentiment}`);
+                        await taraCanonicalSave({
+                          id: crypto.randomUUID(),
+                          user_id: tUser,
+                          org_id: tOrg,
+                          content: `Outreach call to ${companyName}: ${bits.join('\n') || parsed.summary || 'call completed'}`,
+                          title: `Outreach learning — ${companyName} — ${new Date().toISOString().slice(0, 10)}`,
+                          tags: ['outreach-learning', `company:${companySlug}`, `sid:${body.session_id}`],
+                          memory_type: 'knowledge',
+                          document_date: new Date().toISOString(),
+                          metadata: { session_id: body.session_id, call_id: call.id, lead_found: parsed.lead_found === true },
+                        });
+                        console.log(`[outreach-learning] saved for ${companyName} (sid ${String(body.session_id).slice(0, 12)})`);
+                      }
+                    }
+                  } catch (e4) { console.warn('[outreach-learning] save failed:', e4.message); }
                 }
               } catch (e2) { console.warn('[tara/insights]', e2.message); }
             }
+            // Resume the exact Outreach call sequence after the durable call and
+            // insight rows exist. This is a best-effort event edge; the control
+            // plane drain also reconciles active calls, so a transient network
+            // failure cannot strand the campaign or cause a duplicate dial.
+            fetch(`${process.env.HIVEMIND_CP_URL || 'http://control-plane:3000'}/internal/hyper/outreach/calls/reconcile`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-API-Key': MASTER_API_KEY,
+              },
+              body: JSON.stringify({ org_id: tOrg, session_id: String(body.session_id) }),
+              signal: AbortSignal.timeout(8000),
+            }).catch((error) => console.warn('[tara/outreach-reconcile]', error.message));
             return jsonResponse(res, { ok: true, duration_ms: durationMs, turns: turns.length });
           } catch (e) { return jsonResponse(res, { error: 'end_failed', message: e.message }, 500); }
         }
 
         if (pathname === '/api/tara/calls' && req.method === 'GET') {
+          // Remote (self-host) orgs: list from the agent ledger, mapped to the FE shape.
+          if (orgIsRemote(tOrg)) {
+            try {
+              const r = await amrTaraCall(tOrg, { op: 'list', limit: Number(url.searchParams.get('limit')) || 30 });
+              const calls = (r?.calls || []).map(c => ({
+                id: c.id, sessionId: c.session_id, status: c.status,
+                mode: c.metadata?.mode || 'external', language: c.metadata?.language || 'en',
+                voiceId: c.metadata?.voice_id || null,
+                turnCount: Number(c.turn_count) || 0,
+                promptTokens: Number(c.prompt_tokens) || 0,
+                completionTokens: Number(c.completion_tokens) || 0,
+                startedAt: c.created_at,
+                durationMs: c.metadata?.duration_sec ? c.metadata.duration_sec * 1000 : null,
+                // Insight summary for the Leads/Insights dashboard (no per-call fetch).
+                insight: c.metadata?.insight
+                  ? { summary: c.metadata.insight.summary || null,
+                      sentiment: c.metadata.insight.sentiment || null,
+                      goal_outcome: c.metadata.insight.goal_outcome || null,
+                      lead_found: !!c.metadata.insight.lead_found,
+                      leads: Array.isArray(c.metadata.insight.leads) ? c.metadata.insight.leads : [],
+                      tara_learnings: Array.isArray(c.metadata.insight.tara_learnings) ? c.metadata.insight.tara_learnings : [] }
+                  : null,
+              }));
+              return jsonResponse(res, { calls });
+            } catch { return jsonResponse(res, { calls: [] }); }
+          }
           const limit = Math.min(100, Number(url.searchParams.get('limit')) || 30);
-          const calls = await prisma.taraCall.findMany({ where: { orgId: tOrg }, orderBy: { startedAt: 'desc' }, take: limit });
-          return jsonResponse(res, { calls });
+          // Optional ?session_ids=a,b,c — the campaign panel knows session ids,
+          // not call ids, and needs post-call state for ITS targets only rather
+          // than pulling the org's whole call history on every poll.
+          const _sids = String(url.searchParams.get('session_ids') || '')
+            .split(',').map((s) => s.trim()).filter(Boolean).slice(0, 100);
+          const calls = await prisma.taraCall.findMany({
+            where: { orgId: tOrg, ...(_sids.length ? { sessionId: { in: _sids } } : {}) },
+            orderBy: { startedAt: 'desc' },
+            take: _sids.length || limit,
+          });
+          // Attach each call's post-call insight (summary + outcome + LEADS) so the
+          // dashboard Leads/Insights tabs populate the instant a call ends. The list
+          // previously returned bare call rows and never joined tara_insights, so on
+          // hybrid orgs leads/insights only appeared in the per-call detail view —
+          // the board + insights tab (which read the LIST) stayed empty. Mirrors the
+          // remote-org branch's flat insight shape. Batched single query; optional.
+          const _insById = new Map();
+          try {
+            if (calls.length) {
+              const _ins = await prisma.taraInsight.findMany({ where: { callId: { in: calls.map((c) => c.id) } } });
+              for (const i of _ins) _insById.set(i.callId, i.data || {});
+            }
+          } catch (e) { console.warn('[tara/calls] insight join failed:', e.message); }
+          const callsOut = calls.map((c) => {
+            const d = _insById.get(c.id);
+            // Post-call state the UI can trust. `processing` means the call has
+            // genuinely ended and the insight pass has not landed yet — derived
+            // from real rows, never a timer, so a spinner shown from this is
+            // telling the truth rather than decorating a wait.
+            const ended = c.status === 'completed' || !!c.endedAt;
+            // A call that ended long ago with no insight is not "processing" —
+            // the pass either failed or never ran (e.g. the call died before any
+            // turns). Time-box it so the UI stops spinning forever and says so,
+            // and so the client's poller can terminate.
+            const endedAtMs = c.endedAt ? new Date(c.endedAt).getTime()
+              : (c.startedAt ? new Date(c.startedAt).getTime() : Date.now());
+            const staleNoInsight = Date.now() - endedAtMs > 3 * 60 * 1000;
+            const postCall = !ended
+              ? 'live'
+              : (d ? 'ready' : (staleNoInsight ? 'none' : 'processing'));
+            return {
+              ...c,
+              post_call: postCall,
+              insight: d ? {
+                summary: d.summary || null,
+                sentiment: d.sentiment || null,
+                goal_outcome: d.goal_outcome || null,
+                lead_found: !!d.lead_found,
+                leads: Array.isArray(d.leads) ? d.leads : [],
+                tara_learnings: Array.isArray(d.tara_learnings) ? d.tara_learnings : [],
+              } : null,
+            };
+          });
+          return jsonResponse(res, { calls: callsOut });
         }
 
         const cm = pathname.match(/^\/api\/tara\/calls\/([0-9a-f-]{36})$/i);
         if (cm && req.method === 'GET') {
+          // Remote (self-host) orgs: detail from the agent ledger (turns stored as JSON rows).
+          if (orgIsRemote(tOrg)) {
+            try {
+              const r = await amrTaraCall(tOrg, { op: 'detail', id: cm[1] });
+              if (!r?.call) return jsonResponse(res, { error: 'not_found' }, 404);
+              const c = r.call;
+              const turns = (r.turns || []).map((t, i) => {
+                let p = {};
+                try { p = typeof t.content === 'string' ? JSON.parse(t.content) : (t.content || {}); } catch { /* raw */ }
+                return { seq: p.seq || i + 1, userText: p.user_text || '', agentText: p.agent_text || '',
+                         llmTtfbMs: p.llm_ttfb_ms ?? null, createdAt: t.created_at };
+              });
+              const ins = c.metadata?.insight || null;
+              return jsonResponse(res, {
+                call: { id: c.id, sessionId: c.session_id, status: c.status,
+                        mode: c.metadata?.mode || 'external', language: c.metadata?.language || 'en',
+                        turnCount: Number(c.turn_count) || 0, startedAt: c.created_at },
+                turns,
+                insight: ins ? { summary: ins.summary || null, data: ins } : null,
+              });
+            } catch { return jsonResponse(res, { error: 'not_found' }, 404); }
+          }
           const call = await prisma.taraCall.findUnique({ where: { id: cm[1] } });
           if (!call || call.orgId !== tOrg) return jsonResponse(res, { error: 'not_found' }, 404);
           const [turns, insight] = await Promise.all([
@@ -6554,8 +8512,8 @@ exit \$RC
       // skill's prompts into the live config; runtime is unchanged. ──
       if (pathname.startsWith('/api/tara/skills')) {
         if (!taraHandler?.skillsStore) return jsonResponse(res, { error: 'TARA not available' }, 503);
-        const sOrg = _mOrgId || req.headers['x-hm-org-id'] || DEFAULT_ORG;
-        const sUser = _mUserId || req.headers['x-hm-user-id'] || DEFAULT_USER;
+        const sOrg = _mOrgId;
+        const sUser = _mUserId;
         const ss = taraHandler.skillsStore;
         const ctx = { userId: sUser, orgId: sOrg };
         try {
@@ -6908,6 +8866,7 @@ exit \$RC
             'https://www.googleapis.com/auth/tasks.readonly':         'google-tasks',
             'https://www.googleapis.com/auth/tasks':                  'google-tasks',
             'https://www.googleapis.com/auth/forms.body.readonly':    'google-forms',
+            'https://www.googleapis.com/auth/webmasters.readonly':    'google-search-console',
           };
           // SHORT short-form (state) → canonical (hyphen, matching SCOPE_TO_SERVICE)
           const SHORT_TO_CANON = {
@@ -6921,6 +8880,7 @@ exit \$RC
             chat: 'google-chat',
             tasks: 'google-tasks',
             forms: 'google-forms',
+            'search-console': 'google-search-console',
           };
 
           const grantedScopes = (tokens.scope || '').split(' ').filter(Boolean);
@@ -6931,6 +8891,9 @@ exit \$RC
           let filtered = requestedSet.size > 0
             ? grantedServices.filter(s => requestedSet.has(s))
             : grantedServices;
+          if (filtered.length === 0 && requestedSet.size > 0) {
+            throw new Error('Google did not grant any of the requested service scopes');
+          }
           if (filtered.length === 0) filtered = ['gmail'];
 
           for (const service of filtered) {
@@ -6966,7 +8929,9 @@ exit \$RC
             }
           }
 
-          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=gmail&needs_config=true&email=${encodeURIComponent(tokens.email || '')}&target_scope=${encodeURIComponent(stateTargetScope)}` });
+          const connectedService = filtered.length === 1 && filtered[0] === 'google-search-console'
+            ? 'google-search-console' : 'gmail';
+          res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?connected=${encodeURIComponent(connectedService)}&needs_config=true&email=${encodeURIComponent(tokens.email || '')}&target_scope=${encodeURIComponent(stateTargetScope)}` });
           res.end();
           return;
         } catch (err) {
@@ -7009,6 +8974,15 @@ exit \$RC
       }
       const principal = auth.principal;
       const userId = principal.userId || DEFAULT_USER;
+      // Per-org routing seam: enter the org context in THIS handler's async scope (enterWith inside the
+      // awaited authenticateApiKey would not propagate back here). Every downstream handler + synchronous
+      // write in this request now resolves getPrismaClient() to the org's store — self-host → customer PG,
+      // managed → central (unchanged). Async ingest jobs are covered by the worker's runWithOrg wrap.
+      // Thread the resolved API key id alongside the org so the LLM chokepoint attributes every
+      // completion in this request to the org's HIVEMIND API key. principal.keyId is set by
+      // resolveKeyAccess (persisted keys) + the file-store path; master/test/consumer principals
+      // have no keyId → null → org-level (system) attribution, which is correct for those.
+      enterOrgContext(principal.orgId, principal.keyId || null, principal.userId || null);
       const orgId = principal.orgId || DEFAULT_ORG;
 
       // ── Container Tag (multi-tenant namespace) resolution ──
@@ -7031,6 +9005,60 @@ exit \$RC
       // Effective container: explicit request > single-scoped key default > null
       const effectiveContainerTag = resolvedContainerTag
         || (keyContainerTags && keyContainerTags.length === 1 ? keyContainerTags[0] : null);
+
+      if (pathname === '/api/campaigns' || pathname.startsWith('/api/campaigns/')) {
+        await handleCampaignRequest({
+          pathname, method: req.method, body, url, req, res, prisma, userId, orgId,
+          jsonResponse, auditLogger,
+        });
+        return;
+      }
+
+      // Standalone X paid-campaign workspace. It shares the authenticated
+      // control-plane proxy but is intentionally outside HyperAgents/TARA.
+      if (pathname.startsWith('/api/x-ads/')) {
+        await handleXAdsRequest({
+          pathname, method: req.method, body, url, req, res, prisma, userId, orgId,
+          jsonResponse, parseMultipart, auditLogger,
+        });
+        return;
+      }
+
+      // ── HyperAgents director LLM-usage report (cross-service metering bridge) ──
+      // The HyperAgents director runs in the Python employees-service, off core's JS metering
+      // chokepoint. It POSTs its per-turn token spend here so usage records against the org's HIVEMIND
+      // API key — org from the principal/emulation headers, api key from principal.keyId via the ALS
+      // context set above (master-key engine calls → null → sentinel). Best-effort: never 5xx a meter.
+      if (pathname === '/api/usage/llm-report' && req.method === 'POST') {
+        try {
+          const supplied = Array.isArray(body?.entries) && body.entries.length
+            ? body.entries.slice(0, 16)
+            : [body || {}];
+          let recorded = 0;
+          for (let index = 0; index < supplied.length; index += 1) {
+            const entry = supplied[index] || {};
+            const promptTokens = Number(entry.prompt_tokens || 0);
+            const completionTokens = Number(entry.completion_tokens || 0);
+            const total = Number(entry.total_tokens || promptTokens + completionTokens || 0);
+            if (!planEnforcer || !orgId || !(total > 0)) continue;
+            const reportKey = String(body?.idempotency_key || '').slice(0, 150);
+            planEnforcer.recordUsage(orgId, 'tokens', total, {
+              model: String(entry.model || body?.model || 'hyperagents-director').slice(0, 128),
+              feature: String(entry.feature || body?.feature || 'hyperagents-room').slice(0, 64),
+              promptTokens,
+              completionTokens,
+              cachedTokens: Number(entry.cached_tokens || 0),
+              requestCount: Number(entry.requests || 1),
+              idempotencyKey: reportKey ? `${reportKey}:${index}` : undefined,
+              metadata: { usage_report: 'room-turn.v2' },
+            });
+            recorded += total;
+          }
+          return jsonResponse(res, { ok: true, recorded }, 200);
+        } catch (e) {
+          return jsonResponse(res, { ok: false, error: e.message }, 200);
+        }
+      }
 
       // ── Consumer URL generation (authenticated) ──
       if (pathname === '/api/mcp/consumer-url' && req.method === 'POST') {
@@ -7197,6 +9225,45 @@ exit \$RC
       if (pathname.match(/^\/api\/memories\/[^/]+\/evolution$/) && req.method === 'GET') {
         const memoryId = pathname.split('/')[3];
         try {
+          // Remote (self-host) orgs have NO central rows — BFS the agent's node+edge snapshot instead.
+          if (orgId && orgIsRemote(orgId)) {
+            const { nodes: rNodes, edges: rEdges } = await amrGraph(orgId, { limit: 5000, filter: {} }) || { nodes: [], edges: [] };
+            const nodeMap = new Map(rNodes.map((n) => [n.id, n]));
+            const rRoot = nodeMap.get(memoryId);
+            if (!rRoot) return jsonResponse(res, { error: 'Memory not found' }, 404);
+            const rTypes = ['Updates', 'Extends', 'Derives', 'Contradicts'];
+            const rVisited = new Set([memoryId]);
+            const rQueue = [memoryId];
+            const rTimeline = [{ ...rRoot, _role: 'current' }];
+            const rEdgesOut = [];
+            while (rQueue.length > 0 && rVisited.size < 20) {
+              const currentId = rQueue.shift();
+              const rels = rEdges.filter((e) => rTypes.includes(e.type) && (e.from_id === currentId || e.to_id === currentId));
+              for (const rel of rels) {
+                rEdgesOut.push({
+                  from: rel.from_id,
+                  to: rel.to_id,
+                  type: rel.type,
+                  confidence: rel.confidence,
+                  metadata: null,
+                  created_at: undefined,
+                });
+                const otherId = rel.from_id === currentId ? rel.to_id : rel.from_id;
+                if (!rVisited.has(otherId)) {
+                  rVisited.add(otherId);
+                  rQueue.push(otherId);
+                  const other = nodeMap.get(otherId);
+                  if (other) rTimeline.push({ ...other, _role: rel.type === 'Updates' ? 'superseded' : 'related' });
+                }
+              }
+            }
+            rTimeline.sort((a, b) => {
+              const da = new Date(a.document_date || a.created_at || 0);
+              const db = new Date(b.document_date || b.created_at || 0);
+              return da - db;
+            });
+            return jsonResponse(res, { memory: rRoot, timeline: rTimeline, edges: rEdgesOut, chain_length: rTimeline.length });
+          }
           const memory = await persistentMemoryStore.getMemory(memoryId);
           if (!memory) return jsonResponse(res, { error: 'Memory not found' }, 404);
 
@@ -7398,31 +9465,65 @@ exit \$RC
           const draftId = pwMatch[1];
           const action = pwMatch[2];
           try {
-            const row = await prisma.pendingWrite.findUnique({ where: { id: draftId } });
+            const row = await prisma.pendingWrite.findFirst({ where: { id: draftId, userId, orgId } });
             if (!row) return jsonResponse(res, { error: 'draft not found' }, 404);
-            if (row.userId !== userId) return jsonResponse(res, { error: 'forbidden' }, 403);
             if (row.status !== 'draft') {
               return jsonResponse(res, { error: `draft already ${row.status}` }, 409);
             }
+            if (!row.expiresAt || new Date(row.expiresAt).getTime() <= Date.now()) {
+              await prisma.pendingWrite.updateMany({
+                where: { id: draftId, userId, orgId, status: 'draft' }, data: { status: 'expired' },
+              });
+              return jsonResponse(res, { error: 'draft expired' }, 410);
+            }
             if (action === 'cancel') {
-              await prisma.pendingWrite.update({
-                where: { id: draftId },
+              const cancelled = await prisma.pendingWrite.updateMany({
+                where: { id: draftId, userId, orgId, status: 'draft' },
                 data: { status: 'cancelled' },
               });
+              if (cancelled.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
               return jsonResponse(res, { ok: true, status: 'cancelled', id: draftId });
             }
             // Approve → mark approved, then re-dispatch tool with
             // _approval_token. Middleware verifies + flips to sent.
-            await prisma.pendingWrite.update({
-              where: { id: draftId },
+            const approved = await prisma.pendingWrite.updateMany({
+              where: { id: draftId, userId, orgId, status: 'draft', expiresAt: { gt: new Date() } },
               data: { status: 'approved', approvedAt: new Date() },
             });
+            if (approved.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
             try {
+              // COMPOSIO drafts: the toolName is a Composio slug (e.g.
+              // GOOGLEDOCS_CREATE_DOCUMENT) and the connection lives in
+              // Composio's connected_accounts (keyed by orgId as user_id) —
+              // NOT the legacy toolkit. Execute via the Composio service
+              // directly; the toolkit has no composio group/tool.
+              if (row.provider === 'composio') {
+                const { executeTool: composioExecute } = await import('./connectors/composio/composio-service.js');
+                const slug = row.toolName || row.toolArgs?._composio_slug;
+                const args = { ...(row.toolArgs || {}) };
+                delete args._composio_slug;
+                const result = await composioExecute(orgId, slug, args);
+                const ok = Boolean(result?.successful);
+                const final = await prisma.pendingWrite.update({
+                  where: { id: draftId },
+                  data: { status: ok ? 'sent' : 'failed', sentAt: ok ? new Date() : null, result: result?.data || null, errorMsg: ok ? null : (result?.error || 'composio execution failed') },
+                }).catch(() => null);
+                return jsonResponse(res, {
+                  ok,
+                  status: ok ? 'sent' : 'failed',
+                  tool_status: ok ? 'completed' : 'failed',
+                  text: ok ? JSON.stringify(result?.data || {}).slice(0, 500) : (result?.error || 'composio execution failed'),
+                  draft: final,
+                });
+              }
               const { buildToolkitForUser } = await import('./agent/toolkit-factory.js');
-              const tk = await buildToolkitForUser({ prisma, userId, orgId, hivemindTools: [] });
-              tk.resetEquippedTools([row.provider]);
+              const groupName = row.toolGroup || row.provider;
+              const tk = await buildToolkitForUser({ prisma, userId, orgId, selectedGroups: [groupName] });
+              tk.resetEquippedTools([groupName]);
               const execArgs = { ...(row.toolArgs || {}), _approval_token: draftId };
-              const resp = await tk.execute(row.toolName, execArgs, { userId, orgId, prisma });
+              const resp = await tk.execute(row.toolName, execArgs, {
+                userId, orgId, projectId: row.projectId || null, prisma, _approvalFlow: true,
+              });
               const final = await prisma.pendingWrite.findUnique({ where: { id: draftId } });
               return jsonResponse(res, {
                 ok: resp.status !== 'error',
@@ -7578,6 +9679,18 @@ exit \$RC
       if (relsMatch && req.method === 'GET') {
         if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/relationships')) return;
         const memoryId = relsMatch[1];
+
+        // RESIDENCY: remote org — relationships live on the agent, not central.
+        if (orgIsRemote(orgId)) {
+          try {
+            const remRels = await amrMemRelationships(orgId, memoryId);
+            if (!remRels) return jsonResponse(res, { error: 'Not found' }, 404);
+            return jsonResponse(res, remRels);
+          } catch (remRelsErr) {
+            return jsonResponse(res, { error: remRelsErr.message }, 500);
+          }
+        }
+
         try {
           // Tenant + ownership check via the canonical store
           const mem = await persistentMemoryStore.getMemory(memoryId);
@@ -8113,6 +10226,7 @@ exit \$RC
             externalRefStore,
             entityResolver,
             qdrantClient,
+            getCanonicalIngestion: () => documentFirstIngestion,
           });
 
           const incremental = body.incremental !== false;
@@ -8198,29 +10312,27 @@ exit \$RC
           if (!Array.isArray(turns) || turns.length === 0) {
             return jsonResponse(res, { error: 'turns[] or transcript required' }, 400);
           }
-          const { GeminiAdapter } = await import('./connectors/providers/gemini/adapter.js');
-          const adapter = new GeminiAdapter();
-          const payloads = adapter.normalize({
-            session_id: body.session_id,
-            title: body.title,
-            model: body.model,
-            exported_at: body.exported_at,
-            turns,
-          }, { user_id: userId, org_id: orgId });
-          let imported = 0;
-          for (const p of payloads) {
-            if (p?._tree?.parent) {
-              const routed = await smartIngestRouter.route(p);
-              if (routed?.parent) {
-                const result = await persistentMemoryEngine.ingestMemoryTree(routed);
-                if (result?.parentId) imported++;
-              }
-            } else {
-              await persistentMemoryEngine.ingestMemory(p);
-              imported++;
-            }
-          }
-          return jsonResponse(res, { success: true, imported, turn_count: turns.length }, 200);
+          const sessionId = body.session_id || crypto.randomUUID();
+          const transcript = turns.map((turn, index) => {
+            const role = turn.role === 'assistant' ? 'Gemini' : 'User';
+            return `[${index + 1}] ${role}: ${String(turn.content || '').trim()}`;
+          }).join('\n\n');
+          const result = await documentFirstIngestion.ingestSource({
+            userId, orgId, content: transcript,
+            title: body.title || 'Gemini conversation',
+            occurredAt: body.exported_at || undefined,
+            mode: 'document', scope: 'personal',
+            metadata: { memory_type: 'conversation', model: body.model || null },
+            source: {
+              type: 'connector', provider: 'gemini', sourceId: sessionId,
+              title: body.title || 'Gemini conversation',
+            },
+          });
+          if (!result?.ok) throw new Error(result?.error || 'canonical Gemini ingest failed');
+          return jsonResponse(res, {
+            success: true, imported: result.promotedCount || result.memoryIds?.length || 0,
+            document_id: result.documentId, turn_count: turns.length,
+          }, 200);
         } catch (err) {
           console.warn('[gemini-ingest-paste] failed:', err.message);
           return jsonResponse(res, { error: err.message }, 500);
@@ -8358,9 +10470,8 @@ exit \$RC
             },
             skip_fact_extraction: true,
           };
-          buildRoutedIngestPayloads(slackPayload, { smartIngestRouter }).then(([routed]) =>
-            persistentMemoryEngine.ingestMemory(routed)
-          ).catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
+          ingestCanonicalPayload(slackPayload, { sourceType: 'connector', provider: 'slack' })
+            .catch(err => console.warn('[slack-action] auto-ingest failed:', err.message));
         }
 
         return jsonResponse(res, { ok: true, result });
@@ -8395,9 +10506,7 @@ exit \$RC
               project_ids: p ? [p] : [],
               source_metadata: { source_platform: 'slack', via: 'slack-save-button' },
             };
-            const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
-            if (ingestRoutedPayload) await ingestRoutedPayload(routed, persistentMemoryEngine);
-            else await persistentMemoryEngine.ingestMemory(routed);
+            await ingestCanonicalPayload(payload, { sourceType: 'connector', provider: 'slack' });
             let label = 'personal';
             if (p) {
               try {
@@ -8597,11 +10706,21 @@ exit \$RC
               const saveConvKey = `${qChannel}:${askerSlackId || ''}`;
               globalThis._slackPendingSave = globalThis._slackPendingSave || new Map();
 
+              // The agent answers in GitHub-flavored markdown (**bold**,
+              // [text](url), # headers) — Slack's mrkdwn only understands
+              // *bold* (single asterisk), <url|text> links, and has no
+              // headers. Without this conversion every reply showed literal
+              // "**...**" instead of bold text.
+              const toSlackMrkdwn = (text) => String(text || '')
+                .replace(/\*\*(.+?)\*\*/g, '*$1*')
+                .replace(/__(.+?)__/g, '*$1*')
+                .replace(/^#{1,6}\s+(.+)$/gm, '*$1*')
+                .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<$2|$1>');
               const postSlack = async (text) => {
                 try {
                   const bt = await bridge.connectorStore.getAccessToken(evUserId, 'slack');
                   await bridge._call('chat.postMessage',
-                    { channel: qChannel, text, ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) }, bt, 'POST');
+                    { channel: qChannel, text: toSlackMrkdwn(text), ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) }, bt, 'POST');
                 } catch (e) { /* noop */ }
               };
               const resolveProject = async (raw) => {
@@ -8628,13 +10747,10 @@ exit \$RC
                   project_ids: projectId ? [projectId] : [],
                   source_metadata: { source_platform: 'slack', via: 'slack-save' },
                 };
-                const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
-                return ingestRoutedPayload
-                  ? ingestRoutedPayload(routed, persistentMemoryEngine)
-                  : persistentMemoryEngine.ingestMemory(routed);
+                return ingestCanonicalPayload(payload, { sourceType: 'connector', provider: 'slack' });
               };
               const summarize = async (transcript) => {
-                const resp = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
+                const resp = await groqFetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
                   method: 'POST',
                   headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -8781,6 +10897,18 @@ exit \$RC
                   botToken, 'POST');
                 placeholderTs = ph?.ts || null;
               } catch (e) { /* non-fatal: fall back to a fresh post below */ }
+              let progressReporter = null;
+              if (placeholderTs) {
+                const { createSlackProgressReporter } = await import('./connectors/slack-agent-progress.js');
+                progressReporter = createSlackProgressReporter({
+                  minIntervalMs: Number(process.env.SLACK_AGENT_PROGRESS_INTERVAL_MS || 900),
+                  update: async (progressText) => {
+                    await bridge._call('chat.update', {
+                      channel: qChannel, ts: placeholderTs, text: progressText,
+                    }, botToken, 'POST');
+                  },
+                });
+              }
 
               // Per-conversation history so multi-turn flows work — e.g.
               // "save this" → "which project?" → reply names a project → saves —
@@ -8790,33 +10918,74 @@ exit \$RC
               const priorHistory = globalThis._slackHistory.get(convKey) || [];
 
               const accessCtx = await buildAccessContext(runUserId, runOrgId);
-              const result = await runReactAgent({
-                message: effectiveQuestion,
-                history: priorHistory.map((h) => ({ role: h.role, content: h.content })),
-                model: 'openai/gpt-oss-120b',
-                apiKey: groqKey,
-                language: 'en',
-                ctx: {
-                  userId: runUserId,
-                  orgId: runOrgId,
-                  projectId: null,
-                  prisma,
-                  persistentMemoryStore,
-                  persistentMemoryEngine,
-                  evidenceRetrieval,
-                  smartIngestRouter,
-                  buildRoutedIngestPayloads,
-                  ingestRoutedPayload,
-                  accessContext: accessCtx,
-                  webIntelligence: globalThis.webIntelligence || null,
-                },
-              });
-              let answer = String(result?.response || '').trim() || 'I could not find an answer.';
-              // When a save is deferred for project selection, name the projects
-              // so the user can just reply with one (the agent's continuation
-              // logic + the history below turn that reply into the save).
+              let result;
+              try {
+                result = await runReactAgent({
+                  message: effectiveQuestion,
+                  history: priorHistory.map((h) => ({ role: h.role, content: h.content })),
+                  model: 'openai/gpt-oss-120b',
+                  apiKey: groqKey,
+                  language: 'en',
+                  // Default OFF: the hosted/compound tool-use path was
+                  // leaking its raw step trace ("Step 1 (recall): done")
+                  // as the final Slack reply instead of a synthesized
+                  // answer. Slack stays on plain recall/chat until that's
+                  // fixed and explicitly re-enabled per org.
+                  useTools: process.env.SLACK_CHAT_USE_TOOLS === 'true',
+                  onEvent: (event) => progressReporter?.onEvent(event),
+                  ctx: {
+                    userId: runUserId,
+                    orgId: runOrgId,
+                    projectId: null,
+                    prisma,
+                    persistentMemoryStore,
+                    persistentMemoryEngine,
+                    evidenceRetrieval,
+                    smartIngestRouter,
+                    buildRoutedIngestPayloads,
+                    ingestRoutedPayload,
+                    ingestCanonicalPayload,
+                    accessContext: accessCtx,
+                    webIntelligence: globalThis.webIntelligence || null,
+                  },
+                });
+              } finally {
+                // Drain every queued Slack update before replacing the same
+                // message with the final answer. Otherwise a delayed progress
+                // write can race and overwrite the completed response.
+                await progressReporter?.stop();
+              }
+              let answer = toSlackMrkdwn(String(result?.response || '').trim() || 'I could not find an answer.');
+              // When a save is deferred for project selection, offer real
+              // clickable buttons (same hm_save_pick action_id/value shape the
+              // explicit "save this" flow above already uses) instead of just
+              // naming the projects in text — typing the project name back
+              // still works too (the history below carries the draft forward).
               const pcProjects = result?.project_choice?.projects;
-              if (Array.isArray(pcProjects) && pcProjects.length) {
+              const pcDraft = result?.project_choice?.draft;
+              let pcBlocks = null;
+              if (Array.isArray(pcProjects) && pcProjects.length && pcDraft) {
+                const mkVal = (pid) => JSON.stringify({
+                  t: String(pcDraft.title || 'Memory').slice(0, 120),
+                  s: String(pcDraft.content || '').slice(0, 1500),
+                  p: pid || null,
+                  u: runUserId,
+                  o: runOrgId || null,
+                }).slice(0, 1999);
+                const buttons = [
+                  ...pcProjects.map((p) => ({
+                    type: 'button',
+                    text: { type: 'plain_text', text: String(p.name || p.slug || p.id).slice(0, 75) },
+                    value: mkVal(p.id),
+                    action_id: `hm_save_pick:${p.id}`,
+                  })),
+                  { type: 'button', text: { type: 'plain_text', text: 'Personal' }, value: mkVal(null), action_id: 'hm_save_pick:personal' },
+                ].slice(0, 25);
+                pcBlocks = [
+                  { type: 'section', text: { type: 'mrkdwn', text: answer } },
+                  { type: 'actions', block_id: 'hm_save_actions', elements: buttons },
+                ];
+              } else if (Array.isArray(pcProjects) && pcProjects.length) {
                 const names = pcProjects.map((p) => p.name || p.slug || p.id).filter(Boolean);
                 if (names.length) answer += `\n\n*Projects:* ${names.join(' · ')} — reply with one (or "personal") to save.`;
               }
@@ -8836,10 +11005,17 @@ exit \$RC
 
               // Reply in the SAME conversation — update the placeholder if we
               // posted one, else post fresh (stay in-thread only if originally
-              // threaded). Never redirect to the app DM.
+              // threaded). Never redirect to the app DM. blocks (project-pick
+              // buttons) take priority over plain text when present — _call
+              // form-encodes, so blocks must be a JSON STRING, not an array.
               if (placeholderTs) {
                 await bridge._call('chat.update',
-                  { channel: qChannel, ts: placeholderTs, text: answer }, botToken, 'POST');
+                  { channel: qChannel, ts: placeholderTs, text: answer, ...(pcBlocks ? { blocks: JSON.stringify(pcBlocks) } : {}) },
+                  botToken, 'POST');
+              } else if (pcBlocks) {
+                await bridge._call('chat.postMessage',
+                  { channel: qChannel, text: answer, blocks: JSON.stringify(pcBlocks), ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) },
+                  botToken, 'POST');
               } else {
                 const threadTs = ev.thread_ts || undefined;
                 await bridge.postMessage(evUserId, qChannel, answer, threadTs ? { threadTs } : {});
@@ -8861,41 +11037,74 @@ exit \$RC
       // ── Usage tracking + plan enforcement (PlanEnforcer) ──
       if (planEnforcer && orgId) {
         // Pre-flight: check the relevant limit type for this request
-        let enforcementType = null;
-        let enforcementAmount = 1;
+        // Route → meters, resolved in ONE place on purpose. Many different FE
+        // surfaces (Overview, Talk to HIVE, the mobile chat, the widget) hit the
+        // same endpoints, so metering per call-site guarantees a surface gets
+        // missed. Anything that costs money is charged HERE, at the door.
+        //
+        // A request may consume more than one meter: creating a memory spends
+        // tokens AND consumes a memory slot, and those have different limits.
+        const meters = [];
+        const charTokens = (text, floor = 0) =>
+          Math.max(floor, Math.ceil((typeof text === 'string' ? text.length : 0) / 4));
 
-        if (req.method === 'POST' && (pathname === '/api/memories')) {
-          enforcementType = 'tokens';
-          enforcementAmount = body?.content ? Math.ceil(body.content.length / 4) : 100;
+        if (req.method === 'POST' && pathname === '/api/memories') {
+          // Both, not either. Charging only tokens here meant maxMemories — the
+          // headline limit on every plan card — was never enforced on the path
+          // that actually creates memories.
+          meters.push({ type: 'memories', amount: 1 });
+          meters.push({ type: 'tokens', amount: charTokens(body?.content, 100) });
+        } else if (req.method === 'POST' && (pathname === '/api/chat' || pathname === '/api/chat/stream')) {
+          // Talk to HIVE. This was UNMETERED: the fallthrough below keys off
+          // body.content, but chat sends body.message, so the most expensive
+          // surface in the product charged nothing. A chat turn also runs recall
+          // internally, hence the search meter alongside the tokens.
+          // CHECK only, never charge. Chat already records its ACTUAL token spend
+          // at completion (see the recordUsage calls at the end of this handler)
+          // and its searches via routes/recall.js. Charging on admission here as
+          // well double-billed the org: measured on a live call, the counter moved
+          // by the real spend PLUS my estimate. Pre-flight gating and recording
+          // are different jobs — gate at the door, bill on the true amount.
+          meters.push({ type: 'tokens', amount: charTokens(body?.message, 250) });
+          meters.push({ type: 'searches', amount: 1 });
         } else if (pathname.includes('/search') || pathname.includes('/recall')) {
-          enforcementType = 'searches';
+          meters.push({ type: 'searches', amount: 1 });
         } else if (body?.content) {
-          enforcementType = 'tokens';
-          enforcementAmount = Math.ceil((body.content.length || 0) / 4);
+          meters.push({ type: 'tokens', amount: charTokens(body.content) });
         }
 
-        if (enforcementType) {
-          const check = await planEnforcer.checkLimit(orgId, enforcementType, enforcementAmount);
+        for (const meter of meters) {
+          const check = await planEnforcer.checkLimit(orgId, meter.type, meter.amount);
           if (!check.allowed) {
-            return jsonResponse(res, {
-              error: 'Plan limit exceeded',
-              reason: check.reason,
-              limit: check.limit,
-              current: check.current,
-              plan: check.plan,
-              upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing',
-            }, 429);
+            // Quota exhaustion is a PLAN limit, not a rate limit → 402 contract,
+            // which is what the FE PlanLimitModal keys off to offer the upgrade.
+            return jsonResponse(res, planLimitBody(check, meter.type), check.status || 402);
           }
           // Set warning header for overage plans
           if (check.overage) {
             res.setHeader('X-HiveMind-Usage-Warning', 'Overage billing active — usage exceeds plan allocation');
+          }
+          // CHARGE ON ADMISSION for meters nothing else records. Chat recorded
+          // NOTHING anywhere in the codebase, so its counter never moved and its
+          // limit could never trip — a check with no matching record is a limit
+          // that does not exist. Recording here, at the same single place the
+          // check happens, is what makes the two impossible to drift apart.
+          //
+          // Deliberately NOT done for 'memories': checkLimit('memories') reads the
+          // live row count from the DB rather than a counter, so recording would
+          // double-count. Same for meters whose handlers already record
+          // (kbPages, tara, deepResearch) — those are charged at completion where
+          // the real amount is known.
+          if (meter.charge) {
+            try { planEnforcer.recordUsage(orgId, meter.type, meter.amount, { feature: meter.feature }); }
+            catch { /* metering must never break the request */ }
           }
         }
 
         // Legacy warning headers from UsageTracker
         if (usageTracker && planStore) {
           const orgPlan = await planStore.getOrgPlan(orgId);
-          const limits = await usageTracker.checkLimits(orgId, orgPlan.id);
+          const limits = await usageTracker.checkLimits(orgId, orgPlan);
           if (limits.warnings.length > 0) {
             res.setHeader('X-HiveMind-Usage-Warning', limits.warnings[0]);
           }
@@ -8910,6 +11119,21 @@ exit \$RC
           // }
           if (pathname.includes('/swarm') && !orgPlan.features.agentSwarm) {
             return jsonResponse(res, { error: 'Agent Swarm requires Scale plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
+          }
+          // Cognitive layer / dreaming — Scale and Enterprise only (capability
+          // gate, not a meter; see features.cognitiveDreaming in plans.js). 402
+          // rather than 403 so the FE PlanLimitModal offers the upgrade inline
+          // instead of the user hitting an opaque "forbidden".
+          if (!orgPlan.features.cognitiveDreaming
+              && (pathname.startsWith('/api/cognition') || pathname.startsWith('/api/cognitive') || pathname.startsWith('/api/dream'))
+              && req.method !== 'GET') {
+            return jsonResponse(res, {
+              error: 'Cognitive layer (dreaming) requires the Scale plan or higher',
+              code: 'plan_limit_exceeded', reason: 'PLAN_FEATURE',
+              message: 'Cognitive layer (dreaming) requires the Scale plan or higher',
+              resource: 'cognitiveDreaming', plan: orgPlan.id,
+              suggested_plan: 'scale', upgrade_url: '/hivemind/app/billing',
+            }, 402);
           }
         }
       }
@@ -9051,6 +11275,13 @@ exit \$RC
           if (invite.expiresAt < new Date()) return jsonResponse(res, { error: 'Invite expired' }, 410);
           const existing = await prisma.userOrganization.findFirst({ where: { userId, orgId: invite.orgId } });
           if (existing) return jsonResponse(res, { error: 'Already a member of this organization' }, 409);
+
+          if (planEnforcer) {
+            const seatCheck = await planEnforcer.checkLimit(invite.orgId, 'users', 1);
+            if (!seatCheck.allowed) {
+              return jsonResponse(res, planLimitBody(seatCheck, 'users'), seatCheck.status || 402);
+            }
+          }
           
           // Create org membership
           await prisma.userOrganization.create({
@@ -9458,7 +11689,18 @@ exit \$RC
         }
 
         const documentId = pathname.split('/')[3];
-        
+
+        // RESIDENCY: remote org — KB doc + segments + promoted memories live on the agent.
+        if (orgIsRemote(orgId)) {
+          try {
+            const remDetail = await amrKbDocDetail(orgId, documentId, { userId });
+            if (!remDetail) return jsonResponse(res, { error: 'Document not found or access denied' }, 404);
+            return jsonResponse(res, remDetail);
+          } catch (remErr) {
+            return jsonResponse(res, { error: remErr.message }, 500);
+          }
+        }
+
         try {
           const document = await prisma.knowledgeDocument.findFirst({
             where: {
@@ -9514,13 +11756,14 @@ exit \$RC
             confidence: link.confidence,
             excerpt: link.excerpt
           }));
+          const derivedCountMap = await countDerivedMemoriesByDocumentIds([documentId], orgId);
 
           return jsonResponse(res, {
             document,
             segments,
             promotedMemories,
             segmentCount: segments.length,
-            promotedCount: promotedMemories.length
+            promotedCount: derivedCountMap[documentId] ?? promotedMemories.length
           });
         } catch (err) {
           console.error('[documents/:id] Failed:', err.message);
@@ -9557,6 +11800,12 @@ exit \$RC
 
         case '/api/ingest/image':
           if (req.method === 'POST') {
+            res.setHeader('Deprecation', 'true');
+            res.setHeader('Link', '</api/knowledge/upload>; rel="successor-version"');
+            return handleKnowledgeUploadRoute({
+              req, res, userId, orgId, readBoundedBuffer, MULTIPART_MAX_BYTES,
+              parseMultipart, normalizeScopeIds, jsonResponse, knowledgeUploadService,
+            });
             if (!persistentMemoryEngine) {
               return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
             }
@@ -9607,12 +11856,25 @@ exit \$RC
                 filename: filePart.filename,
               });
 
-              const [routed] = await buildRoutedIngestPayloads(payload, { smartIngestRouter });
-              const saved = await ingestRoutedPayload(routed, persistentMemoryEngine);
+              // An image is ONE thing — keep it as ONE canonical memory. Atomic
+              // mode inserts the full visual evidence as a single memory (content
+              // preserved verbatim) while the canonical path still resolves
+              // entities, tags, and the embedding. This replaces the old
+              // 'document' mode, which chunked the description and promoted N
+              // fragmented durable facts + a thin summary (3 memories per image).
+              const saved = await ingestCanonicalPayload(payload, {
+                sourceType: 'api',
+                platform: 'image-upload',
+                mode: 'atomic',
+              });
 
               return jsonResponse(res, {
                 success: true,
-                memory_id: saved?.parentId || saved?.id || saved?.memoryId || null,
+                memory_id: saved?.memoryId || saved?.memoryIds?.[0] || null,
+                memory_ids: saved?.memoryIds || [],
+                document_id: saved?.documentId || null,
+                promoted_count: saved?.promotedCount || 0,
+                segment_count: saved?.segmentCount || 0,
                 title: payload.title,
                 classification,
                 extraction_preview: {
@@ -9666,6 +11928,71 @@ exit \$RC
           }
           break;
 
+        // Canonical ingest front door — the SINGLE entry where memory creation
+        // starts. KB / connector / MCP / meeting / chat / raw-API all normalize
+        // into ONE envelope (see canonical-ingest.js) and dispatch identically.
+        // Provenance (source, source_id, url, event date, scope) is required in
+        // a fixed schema, so every memory carries uniform provenance regardless
+        // of source. Org context is already established for this handler; the
+        // dispatcher also re-enters runWithOrg(orgId) for residency.
+        case '/api/ingest/source':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/ingest/source')) {
+              return;
+            }
+            if (!documentFirstIngestion) {
+              return jsonResponse(res, {
+                ok: false,
+                error: '/api/ingest/source is not available in this runtime.'
+              }, 503);
+            }
+            const src = body.source || {};
+            const envelope = {
+              userId,
+              orgId,
+              content: body.content,
+              title: body.title,
+              mode: body.mode,
+              source: {
+                type: src.type,
+                platform: src.platform,
+                provider: src.provider,
+                sourceId: src.source_id || src.sourceId,
+                url: src.url,
+                title: src.title,
+                filename: src.filename,
+              },
+              occurredAt: body.occurred_at || body.occurredAt,
+              scope: body.scope,
+              projectId: body.project_id || body.projectId,
+              primaryTeamId: body.primary_team_id || body.primaryTeamId,
+              // Atomic-save supersession (MCP save_memory / chat autosave).
+              relationship: body.relationship,
+              relatedTo: body.related_to || body.relatedTo,
+              tags: body.tags,
+              metadata: body.metadata,
+            };
+            // Optional inline file (base64) — text payloads use `content`.
+            if (body.file && typeof body.file.data === 'string') {
+              envelope.file = {
+                buffer: Buffer.from(body.file.data, 'base64'),
+                contentType: body.file.content_type || body.file.contentType,
+                filename: body.file.filename,
+              };
+            }
+            try {
+              const result = await documentFirstIngestion.ingestSource(envelope);
+              return jsonResponse(res, result, result.ok ? 200 : 400);
+            } catch (error) {
+              return jsonResponse(res, {
+                ok: false,
+                error: 'Ingestion failed',
+                message: error.message,
+              }, 500);
+            }
+          }
+          break;
+
         case '/api/ingest/status':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/ingest/status')) {
@@ -9701,12 +12028,211 @@ exit \$RC
           }
           break;
 
+        case '/api/knowledge/upload-capabilities':
+          if (req.method === 'GET') return jsonResponse(res, knowledgeUploadCapabilities());
+          break;
+
+        // Cheap duplicate pre-check BEFORE the bytes go over the wire.
+        //
+        // Today the FE must upload the entire file to learn it is a duplicate —
+        // on a 8.3 MB deck that is a full transfer spent to be told "already have
+        // it", and on a 27-file batch it is most of the upload time. The client
+        // can hash locally (crypto.subtle.digest) and ask here first.
+        //
+        // Deliberately does NOT accept file bytes: it takes only a checksum, so it
+        // is O(1) and cannot be used to smuggle content past validation. Scoped by
+        // the caller's org exactly like findDuplicate on the upload path, so it can
+        // never reveal whether ANOTHER tenant holds that checksum.
+        // List ingest jobs for this org, newest first — DISCOVERABILITY.
+        // A job that exhausted its attempts was recorded as failed/dead and then
+        // never surfaced anywhere: no endpoint listed it, so a document could be
+        // permanently un-ingested with nobody informed. Defaults to the terminal
+        // failure states because that is the case an operator needs to find.
+        case '/api/knowledge/jobs':
+          if (req.method === 'GET') {
+            if (!knowledgeUploadJobStore || !prisma) return jsonResponse(res, { error: 'job store unavailable' }, 503);
+            const wanted = String(url.searchParams.get('status') || 'failed,dead')
+              .split(',').map((s) => s.trim()).filter(Boolean)
+              .filter((s) => ['queued', 'processing', 'ready', 'failed', 'dead', 'cancelled'].includes(s));
+            const lim = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50));
+            try {
+              const rows = await prisma.knowledgeIngestJob.findMany({
+                where: { orgId, ...(wanted.length ? { status: { in: wanted } } : {}) },
+                orderBy: { createdAt: 'desc' },
+                take: lim,
+                select: {
+                  id: true, filename: true, status: true, stage: true, progress: true,
+                  checksum: true, documentId: true, errorCode: true, errorMessage: true,
+                  createdAt: true, updatedAt: true, processingVersion: true,
+                },
+              });
+              // Say up front whether each one can actually be replayed. Without this
+              // the UI would offer Retry on jobs whose bytes are gone.
+              const jobs = rows.map((j) => ({
+                ...j,
+                replayable: !!kbIngestQueue?.rawFilePath({ orgId, checksum: j.checksum, filename: j.filename }),
+              }));
+              return jsonResponse(res, { jobs, count: jobs.length, statuses: wanted });
+            } catch (e) {
+              return jsonResponse(res, { error: 'job_list_failed', message: e.message }, 500);
+            }
+          }
+          break;
+
+        // Replay a terminally-failed ingest from its RETAINED bytes.
+        //
+        // Re-uploading the same file already retries (upload-service resets a
+        // failed/dead/cancelled job and re-enqueues with processingVersion+1), so
+        // this deliberately reuses that exact state machine rather than inventing a
+        // second one — it only removes the need to send the bytes again.
+        //
+        // Terminal failures retain their raw file now; anything that failed before
+        // that, or aged past KB_RAW_RETENTION_HOURS, answers 409 raw_file_unavailable
+        // instead of enqueueing a job that would die on a missing file.
+        case '/api/knowledge/jobs/retry':
+          if (req.method === 'POST') {
+            if (!knowledgeUploadJobStore || !kbIngestQueue) return jsonResponse(res, { error: 'job store unavailable' }, 503);
+            const jobId = String(body?.job_id || body?.jobId || '').trim();
+            if (!jobId) return jsonResponse(res, { error: 'job_id is required' }, 400);
+            try {
+              const job = await knowledgeUploadJobStore.findOwned(jobId, { orgId });
+              if (!job) return jsonResponse(res, { error: 'job_not_found' }, 404);
+              if (!['failed', 'dead', 'cancelled'].includes(job.status)) {
+                // Never restart something that is live or already succeeded — that
+                // would duplicate a document or interrupt an in-flight ingest.
+                return jsonResponse(res, {
+                  error: 'job_not_retryable', status: job.status,
+                  message: `Only failed, dead or cancelled jobs can be replayed (this one is "${job.status}").`,
+                }, 409);
+              }
+              const filePath = kbIngestQueue.rawFilePath({ orgId, checksum: job.checksum, filename: job.filename });
+              if (!filePath) {
+                return jsonResponse(res, {
+                  error: 'raw_file_unavailable', job_id: job.id, filename: job.filename,
+                  message: 'The original bytes are no longer on disk (the job failed before raw-file '
+                    + 'retention, or passed the retention window). Re-upload the file to ingest it.',
+                }, 409);
+              }
+              const processingVersion = (job.processingVersion || 1) + 1;
+              await knowledgeUploadJobStore.updateOwned(job.id, orgId, {
+                status: 'queued', stage: 'queued', progress: 0, processingVersion,
+                attempt: 0, errorCode: null, errorMessage: null, completedAt: null,
+              });
+              const queued = await kbIngestQueue.enqueue({
+                userId: job.userId || userId, orgId,
+                filename: job.filename, contentType: job.contentType, checksum: job.checksum,
+                filePath, trackerJobId: job.id, processingVersion,
+                metadata: { ...(job.metadata || {}), replay_of_version: job.processingVersion || 1 },
+              });
+              if (queued?.backpressure) {
+                await knowledgeUploadJobStore.fail(job.id, orgId,
+                  Object.assign(new Error('Ingestion queue is saturated.'), { code: 'QUEUE_SATURATED' }));
+                return jsonResponse(res, { error: 'queue_saturated', retry_after: 30 }, 429);
+              }
+              await knowledgeUploadJobStore.updateOwned(job.id, orgId, { queueJobId: queued?.queue_job_id });
+              console.log(`[knowledge/jobs/retry] replaying ${job.filename} job=${job.id} org=${String(orgId).slice(0, 8)} v${processingVersion}`);
+              return jsonResponse(res, {
+                success: true, job_id: job.id, status: 'queued',
+                processing_version: processingVersion, filename: job.filename,
+              });
+            } catch (e) {
+              console.error('[knowledge/jobs/retry] failed:', e.message);
+              return jsonResponse(res, { error: 'retry_failed', message: e.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/knowledge/upload/precheck':
+          if (req.method === 'POST') {
+            if (!knowledgeUploadJobStore) return jsonResponse(res, { error: 'job store unavailable' }, 503);
+            const checksum = String(body?.checksum || '').trim().toLowerCase();
+            if (!/^[a-f0-9]{64}$/.test(checksum)) {
+              return jsonResponse(res, { error: 'checksum must be a hex sha256 of the file bytes' }, 400);
+            }
+            // DUPLICATES ARE PER-SCOPE, and the pre-check has to answer the same
+            // question the upload will. The same file legitimately exists in a
+            // user's own space AND in a project — findDuplicate is scope-aware and
+            // the upload path passes scope.scopeKey, but this route only accepted a
+            // pre-built scope_key that the client never sent. With none, the lookup
+            // widens to "anywhere in this org", so uploading a file to a project
+            // was reported as a duplicate because a copy existed in My Space, and
+            // the client skipped it before the scope-aware upload was ever asked.
+            //
+            // Accept the same inputs the upload takes (target_scope + project_id)
+            // and build the key with the same `${scopeType}:${scopeId}` shape
+            // authorizeKnowledgeScope produces, so pre-check and upload agree.
+            let scopeKey = String(body?.scope_key || body?.scopeKey || '').trim() || null;
+            if (!scopeKey) {
+              const _ts = String(body?.target_scope || body?.targetScope || '').trim().toLowerCase();
+              const _pid = String(body?.project_id || body?.projectId || '').trim();
+              const _tid = String(body?.primary_team_id || body?.primaryTeamId || '').trim();
+              if (_ts === 'project' && _pid) scopeKey = `project:${_pid}`;
+              else if (_ts === 'team' && _tid) scopeKey = `team:${_tid}`;
+              else if (_ts === 'organization') scopeKey = `organization:${orgId}`;
+              else if (_ts === 'personal') scopeKey = `personal:${userId}`;
+              // Anything else stays null — the old org-wide answer, which is the
+              // right default when the caller genuinely has no scope in mind.
+            }
+            try {
+              const existing = await knowledgeUploadJobStore.findDuplicate({ orgId, scopeKey, checksum });
+              if (existing?.status === 'ready') {
+                // A 'ready' job row PERSISTS after the user deletes the document,
+                // so trusting the job alone reported "Already in your knowledge
+                // base" for a file that no longer exists — blocking a legitimate
+                // re-upload forever. Verify the document is still LIVE in
+                // knowledge_documents (hard delete, no soft-delete flag) before
+                // calling it a duplicate. Indexed PK lookup, tenant-scoped, quick.
+                let docLives = false;
+                if (existing.documentId && prisma?.knowledgeDocument) {
+                  try {
+                    docLives = !!(await prisma.knowledgeDocument.findFirst({
+                      where: { id: existing.documentId, orgId }, select: { id: true },
+                    }));
+                  } catch { docLives = false; }
+                }
+                if (docLives) {
+                  return jsonResponse(res, {
+                    duplicate: true,
+                    status: 'existing',
+                    message: 'Already in your knowledge base — skip the upload or force a re-ingest.',
+                    job_id: existing.id,
+                    existing_document_id: existing.documentId || null,
+                    existing_title: existing.filename || null,
+                    promoted_count: existing.promotedCount ?? null,
+                  });
+                }
+                // Stale 'ready' job whose document was deleted — not a live
+                // duplicate. Fall through to allow the upload rather than block it.
+                return jsonResponse(res, { duplicate: false, in_progress: false, stale_job: existing.id });
+              }
+              // In flight for this tenant — uploading again would just queue a
+              // second copy behind the first.
+              if (existing && !['failed', 'dead', 'cancelled'].includes(existing.status)) {
+                return jsonResponse(res, {
+                  duplicate: false, in_progress: true, status: existing.status,
+                  stage: existing.stage || null, job_id: existing.id,
+                  message: 'This file is already being processed.',
+                });
+              }
+              return jsonResponse(res, { duplicate: false, in_progress: false });
+            } catch (e) {
+              // Never block an upload because the pre-check failed — fail open.
+              return jsonResponse(res, { duplicate: false, in_progress: false, precheck_error: e.message });
+            }
+          }
+          break;
+
         case '/api/knowledge/status':
           if (req.method === 'GET') {
             const jobId = url.searchParams.get('job_id');
             const docId = url.searchParams.get('document_id');
             if (!jobId && !docId) {
               return jsonResponse(res, { error: 'job_id or document_id is required' }, 400);
+            }
+            if (jobId && knowledgeUploadJobStore) {
+              const durable = await knowledgeUploadJobStore.findOwned(jobId, { orgId, userId });
+              if (!durable) return jsonResponse(res, { error: 'Job not found' }, 404);
+              return jsonResponse(res, KnowledgeUploadJobStore.response(durable));
             }
             // Live in-memory progress (per-stage counts) while the job runs.
             if (jobId) {
@@ -9862,6 +12388,23 @@ exit \$RC
                 console.warn('[connectors/status] nango overlay failed:', nangoErr.message);
               }
 
+              try {
+                const nativeXRows = await prisma.xAdsCredential.findMany({
+                  where: { userId, orgId, status: 'active' },
+                  select: { id: true, authKind: true, connectedAt: true, xUsername: true },
+                });
+                for (const row of nativeXRows) {
+                  const connectorId = row.authKind === 'OAUTH2' ? 'x-account' : (row.authKind === 'OAUTH1' ? 'x-ads' : null);
+                  if (connectorId) byProvider[connectorId] = {
+                    provider: connectorId, status: 'connected', lastSyncAt: null,
+                    createdAt: row.connectedAt, metadata: { username: row.xUsername },
+                    connectionId: row.id, source: 'official_x',
+                  };
+                }
+              } catch (xError) {
+                console.warn('[connectors/status] native X overlay failed:', xError.message);
+              }
+
               const merged = CONNECTOR_CATALOG.map(c => ({
                 id: c.id,
                 name: c.name,
@@ -9902,6 +12445,11 @@ exit \$RC
         case '/api/connectors/mcp/inspect':
           if (req.method === 'POST') {
             try {
+              if (String(process.env.HYPERAGENTS_RUNTIME_CONNECTORS || 'nango').toLowerCase() === 'composio') {
+                const { inspectComposioToolkit } = await import('./connectors/composio/runtime-adapter.js');
+                const inspection = await inspectComposioToolkit(body.name);
+                return jsonResponse(res, { success: true, inspection });
+              }
               const inspection = await mcpIngestionService.inspectEndpoint(body.name, {
                 user_id: userId,
                 org_id: orgId
@@ -9927,6 +12475,19 @@ exit \$RC
           }
           break;
 
+        case '/api/connectors/runtime/connected':
+          if (req.method === 'GET' || req.method === 'POST') {
+            try {
+              const { getHyperagentsRuntimeConnectorProvider, listRuntimeConnectedCapabilities } = await import('./connectors/runtime-provider-policy.js');
+              const provider = getHyperagentsRuntimeConnectorProvider();
+              const connectors = await listRuntimeConnectedCapabilities({ prisma, orgId, userId, provider });
+              return jsonResponse(res, { provider, connectors });
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 502);
+            }
+          }
+          break;
+
         case '/api/connectors/mcp/exec':
           // P3 bridge (HyperAgents×Connectors): execute one live tool call on a
           // granted connector, scoped to the caller's tenant (Nango token
@@ -9936,6 +12497,11 @@ exit \$RC
             try {
               if (!body?.name || !body?.operation?.type) {
                 return jsonResponse(res, { error: 'name + operation.type are required' }, 400);
+              }
+              if (String(process.env.HYPERAGENTS_RUNTIME_CONNECTORS || 'nango').toLowerCase() === 'composio') {
+                const { executeComposioConnector } = await import('./connectors/composio/runtime-adapter.js');
+                const result = await executeComposioConnector(orgId, body.name, body.operation);
+                return jsonResponse(res, { success: true, result });
               }
               const result = await mcpIngestionService.executeTool(body.name, body.operation, {
                 user_id: userId,
@@ -9963,6 +12529,11 @@ exit \$RC
           if (req.method === 'POST') {
             try {
               if (!body?.tool) return jsonResponse(res, { error: 'tool is required' }, 400);
+              if (String(process.env.HYPERAGENTS_RUNTIME_CONNECTORS || 'nango').toLowerCase() === 'composio') {
+                const { executeComposioGoogleTool } = await import('./connectors/composio/runtime-adapter.js');
+                const result = await executeComposioGoogleTool(orgId, body.tool, body.arguments || {});
+                return jsonResponse(res, { success: true, result });
+              }
               const { runGoogleTool } = await import('./connectors/google-native.js');
               const result = await runGoogleTool(body.tool, body.arguments || {}, {
                 user_id: userId,
@@ -10046,13 +12617,56 @@ exit \$RC
           // P3 #20 — re-process historical segments through current pipeline
           if (req.method === 'POST') {
             try {
+              if (!principal?.master && !principal?.scopes?.includes('admin')) {
+                return jsonResponse(res, { error: 'Admin access required' }, 403);
+              }
               if (!documentFirstIngestion) {
                 return jsonResponse(res, { error: 'Document-first not enabled' }, 503);
+              }
+              const documentId = typeof body.document_id === 'string' ? body.document_id : null;
+              if (documentId) {
+                const document = await prisma.knowledgeDocument.findFirst({
+                  where: { id: documentId, orgId },
+                  select: {
+                    id: true, userId: true, ingestMode: true, title: true, documentType: true, sourcePlatform: true,
+                    sourceId: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
+                    segments: { orderBy: { segmentIndex: 'asc' }, select: { id: true, content: true, segmentIndex: true } },
+                  },
+                });
+                if (!document) return jsonResponse(res, { error: 'Document not found' }, 404);
+                if (document.ingestMode === 'evidence') {
+                  return jsonResponse(res, {
+                    error: 'intentional_evidence_only',
+                    message: 'This document was intentionally uploaded as evidence only and cannot be promoted by repair.',
+                  }, 409);
+                }
+                const unpromoted = document.segments.filter((segment) => segment.content?.trim());
+                const result = await documentFirstIngestion._promoteMemories({
+                  documentId: document.id,
+                  userId: document.userId,
+                  orgId,
+                  segments: unpromoted,
+                  metadata: {
+                    filename: document.title || '', documentTitle: document.title || '',
+                    document_type: document.documentType, source_platform: document.sourcePlatform,
+                    source_id: document.sourceId, source_url: document.sourceUrl,
+                    document_date: document.documentDate, tags: document.tags || [],
+                    ...(document.parseMetadata || {}),
+                  },
+                  promotionStrategy: 'admin_document_repair',
+                });
+                return jsonResponse(res, {
+                  success: true, document_id: document.id, scanned: unpromoted.length,
+                  promoted: (result?.memories || []).filter((memory) => memory?.id).length,
+                });
               }
               const since = body.since ? new Date(body.since) : new Date(Date.now() - 30 * 86400000);
               const limit = Math.min(Number(body.limit || 100), 500);
               const segments = await prisma.knowledgeSegment.findMany({
-                where: { orgId, createdAt: { gte: since }, memoryLinks: { none: {} } },
+                where: {
+                  orgId, createdAt: { gte: since }, memoryLinks: { none: {} },
+                  document: { ingestMode: { not: 'evidence' } },
+                },
                 take: limit,
                 orderBy: { createdAt: 'asc' },
               });
@@ -10166,6 +12780,19 @@ exit \$RC
         case '/api/admin/entities/merge':
           // P3 #22 — manual entity merge tool
           if (req.method === 'POST') {
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/admin/entities/merge',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
+            }
             try {
               const { canonical_id, duplicate_ids } = body;
               if (!canonical_id || !Array.isArray(duplicate_ids) || !duplicate_ids.length) {
@@ -10203,6 +12830,19 @@ exit \$RC
         case '/api/admin/contradictions':
           // P3 #23 — review pending Contradicts edges
           if (req.method === 'GET') {
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/admin/contradictions',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
+            }
             try {
               const limit = Math.min(Number(url.searchParams.get('limit') || 50), 200);
               const rows = await prisma.relationship.findMany({
@@ -10294,6 +12934,44 @@ exit \$RC
           // roadmap fixes touch: salience coverage (P2), supersession/forgetting
           // (P3), and DB↔Qdrant vector drift. Cheap counts only, no scan.
           try {
+            // Remote (self-host) orgs have NO central rows — derive metrics from the agent
+            // (stats + a bounded list sample). Metrics not computable remotely stay 0/null.
+            if (orgId && orgIsRemote(orgId)) {
+              const [rStats, rListed] = await Promise.all([
+                amrStats(orgId, {}),
+                remoteList(orgId, {}, null, 5000),
+              ]);
+              const rRows = rListed?.memories || [];
+              const rLatest = rRows.filter((m) => m.is_latest !== false);
+              const rScored = rLatest.filter((m) => typeof m.importance_score === 'number' && m.importance_score !== 0.5).length;
+              const rReinforced = rLatest.filter((m) => (m.recall_count || 0) > 0).length;
+              const rAvg = (arr, key) => {
+                const vals = arr.map((m) => m[key]).filter((v) => typeof v === 'number');
+                return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+              };
+              return jsonResponse(res, {
+                org_id: orgId,
+                remote: true,
+                counts: {
+                  total: rStats?.memories ?? rRows.length,
+                  latest: rLatest.length,
+                  superseded: rRows.length - rLatest.length,
+                  deleted: 0, // agent list excludes deleted rows; not computable centrally
+                },
+                salience: {
+                  scored_off_default: rScored,
+                  coverage_pct: rLatest.length > 0 ? Math.round((rScored / rLatest.length) * 1000) / 10 : 0,
+                  avg_importance_latest: rAvg(rLatest, 'importance_score'),
+                  avg_strength_latest: rAvg(rLatest, 'strength'),
+                },
+                reinforcement: {
+                  recalled_at_least_once: rReinforced,
+                  max_recall_count: rLatest.reduce((mx, m) => Math.max(mx, m.recall_count || 0), 0),
+                },
+                vector_drift: null, // vectors live on the agent's .amr, not central Qdrant
+                generated_at: new Date().toISOString(),
+              });
+            }
             if (!prisma?.memory) return jsonResponse(res, { error: 'memory store unavailable' }, 503);
             const baseWhere = { orgId, deletedAt: null };
             // Types NOT vectorized by design (born via direct-save paths,
@@ -10359,19 +13037,21 @@ exit \$RC
           }
 
         case '/api/cognition/status':
-          // Read-only — any authenticated caller can see loop health.
+          // Workspace administration only. Status never includes another
+          // tenant's runtime state or existence.
           // In-memory _status carries current-process state; cognition_status
           // table carries per-org persistent history that survives restart.
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const { getCognitionStatus } = await import('./memory/cognition-loop.js');
             const st = getCognitionStatus();
-            // Per-org rows: caller's own org first, then top-5 by recent tick.
-            let perOrg = [];
+            let callerOrg = null;
             if (prisma?.cognitionStatus) {
               try {
-                const rows = await prisma.cognitionStatus.findMany({
-                  orderBy: { lastTickAt: 'desc' },
-                  take: 20,
+                callerOrg = await prisma.cognitionStatus.findUnique({
+                  where: { orgId },
                   select: {
                     orgId: true,
                     lastTickAt: true,
@@ -10386,13 +13066,10 @@ exit \$RC
                     lastErrorAt: true,
                   },
                 });
-                perOrg = rows;
               } catch (dbErr) {
                 console.warn('[/api/cognition/status] db read failed:', dbErr.message);
               }
             }
-            // Caller's org-specific row pulled to top of payload.
-            const callerOrg = perOrg.find(r => r.orgId === orgId) || null;
             return jsonResponse(res, {
               enabled: COGNITION_LOOP_ENABLED,
               interval_ms: Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000),
@@ -10400,19 +13077,38 @@ exit \$RC
               cluster_min: Number(process.env.SYNTHESIS_CLUSTER_MIN || 4),
               cluster_max: Number(process.env.SYNTHESIS_CLUSTER_MAX || 30),
               drift_threshold: Number(process.env.DRIFT_COMPACT_THRESHOLD || 12),
-              model: process.env.SYNTHESIS_MODEL || 'llama-3.3-70b-versatile',
+              model: process.env.SYNTHESIS_MODEL || 'cerebras/gpt-oss-120b',
               ...st,
               caller_org: callerOrg,
-              per_org_recent: perOrg,
             });
           } catch (err) {
-            return jsonResponse(res, { error: err.message }, 500);
+            return jsonResponse(res, { error: 'Unable to load cognition status' }, 500);
           }
 
         case '/api/cognition/recent':
           // Last N synthesis + summary memories the loop produced. Read-only.
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const limit = Math.min(20, Math.max(1, parseInt(url.searchParams.get('limit') || '5', 10)));
+            // Remote (self-host) orgs have NO central rows — list synthesis/summary memories from the agent.
+            if (orgId && orgIsRemote(orgId)) {
+              const { memories: rRows } = await remoteList(orgId, { memory_type: ['synthesis', 'summary'] }, null, 200);
+              const rItems = (rRows || [])
+                .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
+                .slice(0, limit)
+                .map((r) => ({
+                  id: r.id,
+                  title: r.title,
+                  type: r.memory_type,
+                  preview: (r.content || '').slice(0, 280),
+                  full_chars: (r.content || '').length,
+                  tags: r.tags,
+                  created_at: r.created_at,
+                }));
+              return jsonResponse(res, { count: rItems.length, items: rItems });
+            }
             const rows = await prisma.memory.findMany({
               where: {
                 orgId,
@@ -10449,17 +13145,8 @@ exit \$RC
           // stop the loop without a redeploy. Admin/master only.
           if (req.method !== 'POST') break;
           {
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([
-              ...(m?.role ? [m.role] : []),
-              ...(Array.isArray(m?.roles) ? m.roles : []),
-            ]);
-            const adminOk = ['admin','owner','org_admin','org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!cognitionLoop) {
               return jsonResponse(res, { stopped: true, was_running: false });
@@ -10481,17 +13168,11 @@ exit \$RC
           // dead in Postgres (superseded/soft-deleted) past the grace window.
           if (req.method !== 'POST') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!cognitionLoop || typeof cognitionLoop.dreamRetentionForOrg !== 'function') {
               return jsonResponse(res, { error: 'cognition loop unavailable' }, 503);
-            }
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([...(m?.role ? [m.role] : []), ...(Array.isArray(m?.roles) ? m.roles : [])]);
-            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
             }
             const result = await cognitionLoop.dreamRetentionForOrg(orgId, { apply: body?.apply === true });
             return jsonResponse(res, result);
@@ -10504,6 +13185,9 @@ exit \$RC
           // Audit history of dream runs for the caller's org (single-line stack).
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!prisma?.cognitionRun) return jsonResponse(res, { runs: [] });
             const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get('limit') || '20', 10)));
             const runs = await prisma.cognitionRun.findMany({
@@ -10537,6 +13221,9 @@ exit \$RC
           // The dreams a specific run produced (show-past-dreams). ?run_id=<uuid>
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!prisma?.cognitionRun) return jsonResponse(res, { dreams: [] });
             const runId = url.searchParams.get('run_id');
             if (!runId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) return jsonResponse(res, { error: 'valid run_id required' }, 400);
@@ -10573,17 +13260,8 @@ exit \$RC
           // hard-deletes the dreams that run produced (cascades to vectors).
           if (req.method !== 'POST' && req.method !== 'DELETE') break;
           try {
-            const m = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const rs = new Set([
-              ...(m?.role ? [m.role] : []),
-              ...(Array.isArray(m?.roles) ? m.roles : []),
-            ]);
-            const adminOk = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => rs.has(r));
-            if (!adminOk && !principal.master) {
-              return jsonResponse(res, { error: 'admin/owner role required' }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!prisma?.cognitionRun) return jsonResponse(res, { error: 'cognition runs unavailable' }, 503);
             const runId = url.searchParams.get('run_id') || body?.run_id;
@@ -10618,25 +13296,8 @@ exit \$RC
           // Admin-gated manual trigger — runs one tick immediately.
           if (req.method !== 'POST') break;
           try {
-            const membership = await prisma.userOrganization.findUnique({
-              where: { userId_orgId: { userId, orgId } },
-              select: { role: true, roles: true },
-            }).catch(() => null);
-            const roles = new Set([
-              ...(membership?.role ? [membership.role] : []),
-              ...(Array.isArray(membership?.roles) ? membership.roles : []),
-            ]);
-            // Accept both legacy short forms (admin/owner) and the canonical
-            // long forms our invite + RBAC layer issues (org_owner/org_admin).
-            // Same bug pattern fixed in invites commit a9c61dd — keep these
-            // gates in sync until we centralise role parsing.
-            const ADMIN_ROLES = ['admin', 'owner', 'org_admin', 'org_owner'];
-            const isAdmin = ADMIN_ROLES.some(r => roles.has(r));
-            if (!isAdmin && !principal.master) {
-              return jsonResponse(res, {
-                error: 'admin/owner role required',
-                role_seen: Array.from(roles),
-              }, 403);
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
             }
             if (!cognitionLoop) {
               return jsonResponse(res, { error: 'cognition loop not running (set ENABLE_COGNITION_LOOP!=false and ensure prisma is wired)' }, 503);
@@ -10673,6 +13334,12 @@ exit \$RC
               const raced = await Promise.race([runPromise, softTimeout]);
               if (softTimer) clearTimeout(softTimer);
               if (raced === '__timeout') {
+                void createWorkspaceNotification(prisma, {
+                  orgId, userId, type: 'cognition.run_started',
+                  title: 'Cognitive Layer is running',
+                  body: 'Your organization synthesis is continuing in the background.',
+                  resourceType: 'cognition_run', dedupeKey: `cognition-running:${orgId}`,
+                }).catch(() => null);
                 return jsonResponse(res, {
                   triggered: true,
                   async: true,
@@ -10681,8 +13348,18 @@ exit \$RC
                 }, 202);
               }
               if (raced && raced.__error) {
+                void createWorkspaceNotification(prisma, {
+                  orgId, userId, type: 'cognition.run_failed', title: 'Cognitive Layer needs attention',
+                  body: 'The run could not complete. You can retry it from Workspace Admin.',
+                  resourceType: 'cognition_run', dedupeKey: `cognition-failed:${orgId}`,
+                }).catch(() => null);
                 return jsonResponse(res, { error: raced.__error }, 500);
               }
+              void createWorkspaceNotification(prisma, {
+                orgId, userId, type: 'cognition.run_completed', title: 'Cognitive Layer completed',
+                body: `Created ${raced?.synth ?? 0} synthesis item(s) from permitted workspace memory.`,
+                resourceType: 'cognition_run', dedupeKey: `cognition-completed:${orgId}:${Date.now()}`,
+              }).catch(() => null);
               return jsonResponse(res, {
                 triggered: true,
                 async: false,
@@ -10709,9 +13386,54 @@ exit \$RC
           // deleted. Read-only; org-scoped to the caller.
           if (req.method !== 'GET') break;
           try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             const memoryId = url.searchParams.get('memory_id');
             if (!memoryId) return jsonResponse(res, { error: 'memory_id required' }, 400);
             const maxDepth = Math.min(parseInt(url.searchParams.get('depth'), 10) || 3, 6);
+
+            // Remote (self-host) orgs have NO central rows — resolve the memory on the agent and
+            // walk Derives edges from the agent's graph snapshot. Snapshot edges carry no created_by,
+            // so cross-synthesis dependency links can't be split out: everything counts as grounding.
+            if (orgId && orgIsRemote(orgId)) {
+              const [rRows, rGraph] = await Promise.all([
+                remoteHydrate(orgId, [memoryId]),
+                amrGraph(orgId, { limit: 5000, filter: {} }),
+              ]);
+              const rRoot = (rRows || [])[0];
+              if (!rRoot) return jsonResponse(res, { error: 'memory not found in your org' }, 404);
+              const { nodes: rNodes, edges: rEdges } = rGraph || { nodes: [], edges: [] };
+              const rNodeIds = new Set(rNodes.map((n) => n.id));
+              const rVisited = new Set([memoryId]);
+              let rFrontier = [memoryId];
+              const rGrounded = new Set();
+              for (let depth = 0; depth < maxDepth && rFrontier.length; depth++) {
+                const frontierSet = new Set(rFrontier);
+                const next = [];
+                for (const e of rEdges) {
+                  if (e.type !== 'Derives' || !frontierSet.has(e.from_id)) continue;
+                  rGrounded.add(e.to_id);
+                  if (!rVisited.has(e.to_id)) { rVisited.add(e.to_id); next.push(e.to_id); }
+                }
+                rFrontier = next;
+              }
+              const rEvidence = Array.isArray(rRoot.synthesis_evidence_ids) ? rRoot.synthesis_evidence_ids : [];
+              const rAllSources = Array.from(new Set([...rGrounded, ...rEvidence]));
+              const rLive = rAllSources.filter((id) => rNodeIds.has(id)).length;
+              const rStatus = rAllSources.length === 0 ? 'ungrounded' : rLive === rAllSources.length ? 'grounded' : 'partial';
+              return jsonResponse(res, {
+                memory_id: rRoot.id,
+                claim: rRoot.title || (rRoot.content || '').slice(0, 200),
+                role: rRoot.cognitive_layer_role ?? null,
+                confidence: rRoot.synthesis_confidence ?? null,
+                depends_on: [],
+                grounded_in: rAllSources,
+                grounding_status: rStatus,
+                sources_live: rLive,
+                sources_total: rAllSources.length,
+              });
+            }
 
             const root = await prisma.memory.findFirst({
               where: { id: memoryId, orgId, deletedAt: null },
@@ -10794,6 +13516,51 @@ exit \$RC
               : typeFilter === 'synthesis-bridge'
                 ? { hasSome: ['synthesis:bridge'] }
                 : { hasSome: ['synthesis:canonical', 'synthesis:bridge'] };
+
+            // Remote (self-host) orgs have NO central rows — over-fetch latest memories from the
+            // agent (its /v1/list has no tag/cluster-hash filter) and apply the synthesis filters JS-side.
+            if (orgId && orgIsRemote(orgId)) {
+              const { memories: rAll } = await remoteList(orgId, { is_latest: true, user_id: userId }, null, 2000);
+              const rSynth = (rAll || []).filter((m) => m.synthesis_cluster_hash != null
+                && (m.tags || []).some((t) => t === 'synthesis:canonical' || t === 'synthesis:bridge'));
+              const wantTag = typeFilter === 'canonical-fact' ? 'synthesis:canonical'
+                : typeFilter === 'synthesis-bridge' ? 'synthesis:bridge' : null;
+              const rFiltered = wantTag ? rSynth.filter((m) => (m.tags || []).includes(wantTag)) : rSynth;
+              rFiltered.sort((a, b) =>
+                ((b.synthesis_revision ?? 1) - (a.synthesis_revision ?? 1))
+                || ((b.synthesis_confidence ?? 0) - (a.synthesis_confidence ?? 0))
+                || (new Date(b.updated_at || 0) - new Date(a.updated_at || 0)));
+              const rPage = rFiltered.slice(offset, offset + limit);
+              const rEvidenceIds = [...new Set(rPage.flatMap((r) => (r.synthesis_evidence_ids || []).slice(0, 3)))];
+              const rEvidenceCache = new Map();
+              if (rEvidenceIds.length > 0) {
+                for (const ev of await remoteHydrate(orgId, rEvidenceIds)) rEvidenceCache.set(ev.id, ev);
+              }
+              const rGetType = (tags) => (tags || []).includes('synthesis:canonical') ? 'canonical-fact'
+                : (tags || []).includes('synthesis:bridge') ? 'synthesis-bridge' : 'unknown';
+              return jsonResponse(res, {
+                synthesis: rPage.map((r) => ({
+                  id: r.id,
+                  type: rGetType(r.tags),
+                  claim: r.content || '',
+                  confidence: r.synthesis_confidence ?? null,
+                  revision: r.synthesis_revision ?? 1,
+                  evidence_count: (r.synthesis_evidence_ids || []).length,
+                  cluster_hash: r.synthesis_cluster_hash,
+                  created_at: r.created_at,
+                  updated_at: r.updated_at ?? r.created_at,
+                  evidence_recent: (r.synthesis_evidence_ids || []).slice(0, 3)
+                    .map((eid) => rEvidenceCache.get(eid))
+                    .filter(Boolean)
+                    .map((ev) => ({ id: ev.id, title: ev.title || '', snippet: (ev.content || '').slice(0, 200), created_at: ev.created_at })),
+                })),
+                total: rFiltered.length,
+                by_type: {
+                  'canonical-fact':   rSynth.filter((m) => (m.tags || []).includes('synthesis:canonical')).length,
+                  'synthesis-bridge': rSynth.filter((m) => (m.tags || []).includes('synthesis:bridge')).length,
+                },
+              });
+            }
 
             // Fetch synthesis memories: isLatest=true, clusterHash NOT NULL, tenant-scoped
             const [rows, total] = await Promise.all([
@@ -11078,15 +13845,20 @@ exit \$RC
                 const content = rec.content || rec.body || rec.text || null;
                 if (!content) continue;
                 try {
-                  const result = await documentFirstIngestion.ingestConnectorRecord({
+                  // Canonical front door — bulk backfill normalizes each record
+                  // into the same IngestEnvelope as webhook + KB + MCP.
+                  const result = await documentFirstIngestion.ingestSource({
                     userId: targetUserId,
                     orgId: targetOrgId,
-                    providerKey,
-                    sourceId: String(rec.resource_id || rec.id || `${providerKey}-${Date.now()}-${Math.random()}`),
-                    title: rec.title || null,
                     content,
-                    sourceUrl: rec.refs?.url || null,
-                    documentDate: rec.ts ? new Date(rec.ts) : null,
+                    source: {
+                      type: 'connector',
+                      provider: providerKey,
+                      sourceId: String(rec.resource_id || rec.id || `${providerKey}-${Date.now()}-${Math.random()}`),
+                      url: rec.refs?.url || null,
+                      title: rec.title || null,
+                    },
+                    occurredAt: rec.ts ? new Date(rec.ts) : null,
                     metadata: { resource_type: rec.resource_type, refs: rec.refs || null },
                   });
                   ingested.push({ resource_id: rec.resource_id, ...result });
@@ -11130,13 +13902,14 @@ exit \$RC
 
         case '/api/connectors/gmail/connect':
           if (req.method === 'GET') {
-            const { buildAuthUrl, AVAILABLE_SERVICES } = await import('./connectors/providers/gmail/oauth.js');
+            const { buildAuthUrl, AVAILABLE_SERVICES, DEFAULT_SERVICES } = await import('./connectors/providers/gmail/oauth.js');
             const gmailRedirectUri = `${process.env.HIVEMIND_BASE_URL || getHostedApiBaseUrl(req)}/api/connectors/gmail/callback`;
             const targetScope = url.searchParams.get('target_scope') === 'organization' ? 'organization' : 'personal';
 
             // Services opt-in: ?services=gmail,drive,calendar,docs
-            // Default to all available (full Workspace) for new connections.
-            const requestedServices = (url.searchParams.get('services') || AVAILABLE_SERVICES.join(','))
+            // Default to Workspace services only. Search Console is a separate,
+            // explicit consent because it exposes company search performance.
+            const requestedServices = (url.searchParams.get('services') || DEFAULT_SERVICES.join(','))
               .split(',')
               .map(s => s.trim().toLowerCase())
               .filter(s => AVAILABLE_SERVICES.includes(s));
@@ -11170,6 +13943,12 @@ exit \$RC
               const connectorId = body.connector_id;
               if (!connectorId) {
                 return jsonResponse(res, { error: 'connector_id is required' }, 400);
+              }
+              if (connectorId === 'x-account' || connectorId === 'x-ads') {
+                return jsonResponse(res, {
+                  error: 'native_x_oauth_required',
+                  message: 'Connect X from Your Campaigns using the official X authorization flow.',
+                }, 409);
               }
 
               // Resolve which Nango provider this connector maps to.
@@ -11240,6 +14019,17 @@ exit \$RC
 
               if (!prisma) {
                 return jsonResponse(res, { error: 'Database unavailable' }, 503);
+              }
+
+              const existingConnection = await prisma.nangoConnection.findUnique({
+                where: { userId_providerKey_orgId: { userId, providerKey, orgId } },
+                select: { status: true },
+              });
+              if (existingConnection?.status !== 'active' && planEnforcer && orgId) {
+                const connectorCheck = await planEnforcer.checkLimit(orgId, 'connectors', 1);
+                if (!connectorCheck.allowed) {
+                  return jsonResponse(res, planLimitBody(connectorCheck, 'connectors'), connectorCheck.status || 402);
+                }
               }
 
               await prisma.nangoConnection.upsert({
@@ -11473,6 +14263,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -11511,6 +14302,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   const result = await engine.runSync({
                     adapter, userId, orgId, provider: nangoProviderKey, mode: 'incremental',
@@ -11577,6 +14369,7 @@ exit \$RC
                     externalRefStore,
                     entityResolver,
                     qdrantClient,
+                    getCanonicalIngestion: () => documentFirstIngestion,
                   });
                   await engine.runSync({
                     adapter,
@@ -11611,7 +14404,7 @@ exit \$RC
           // Lets FE render per-service tiles with connected/disconnect status.
           if (req.method === 'GET') {
             try {
-              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms'];
+              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms', 'google-search-console'];
               const rows = await prisma.platformIntegration.findMany({
                 where: { userId, platformType: { in: services } },
                 select: {
@@ -11664,7 +14457,7 @@ exit \$RC
                 return jsonResponse(res, { error: 'provider required (or "all")' }, 400);
               }
 
-              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms'];
+              const services = ['gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets', 'google_slides', 'google_contacts', 'google_chat', 'google_tasks', 'google_forms', 'google-search-console'];
               const toRevoke = targetProvider === 'all' ? services : [targetProvider];
 
               const result = await prisma.platformIntegration.updateMany({
@@ -11876,67 +14669,50 @@ exit \$RC
                   const thread = await adapter._gmailFetch(`/threads/${threadId}?format=full`, token);
                   const payloads = adapter.normalize(thread, context);
 
-                  // Enterprise schema: multi-message threads ingest as a
-                  // tree (Thread parent + Message children) so the agent
-                  // can recall the whole thread by parent-id and each
-                  // message keeps its own entity/temporal extraction.
-                  // Detect the consolidated thread payload (type=gmail_thread)
-                  // and the per-message payloads from adapter output.
+                  // One Gmail thread is one evidence-backed source document.
+                  // Raw messages remain ordered segments; only a bounded set of
+                  // durable claims is promoted into memory.
                   const threadParent = payloads.find(p => p.metadata?.type === 'gmail_thread');
                   const messageChildren = payloads.filter(p => p.metadata?.gmail_message_id && !p.metadata?.is_thread_summary);
-                  if (threadParent && messageChildren.length >= 2) {
-                    // Stamp force_entity_linking on every child for the
-                    // canonical LLM operator + entity-co-mention pass.
-                    const children = messageChildren.map(c => ({
-                      ...c,
-                      metadata: {
-                        ...(c.metadata || {}),
-                        force_entity_linking: true,
-                        ingest_tree_role: 'child',
-                        parent_title: threadParent.title,
+                  if (threadParent && messageChildren.length) {
+                    const transcript = messageChildren.map((message, index) =>
+                      `[${index + 1}] ${message.title || 'Message'}\n${message.content || ''}`).join('\n\n');
+                    const canonicalResult = await documentFirstIngestion.ingestSource({
+                      userId, orgId, content: transcript,
+                      title: threadParent.title || 'Gmail thread', mode: 'document',
+                      scope: threadParent.scope || 'personal',
+                      projectId: threadParent.project_ids?.[0] || undefined,
+                      tags: [...new Set([...(threadParent.tags || []), 'gmail', 'email-thread'])],
+                      metadata: { memory_type: 'conversation', message_count: messageChildren.length },
+                      source: {
+                        type: 'connector', provider: 'gmail', sourceId: threadId,
+                        title: threadParent.title || 'Gmail thread',
                       },
-                    }));
-                    const parent = {
-                      ...threadParent,
-                      metadata: {
-                        ...(threadParent.metadata || {}),
-                        force_entity_linking: true,
-                        ingest_tree_role: 'parent',
-                        child_count: children.length,
-                      },
-                    };
-                    const treeResult = await persistentMemoryEngine.ingestMemoryTree({ parent, children });
+                    });
+                    if (!canonicalResult?.ok) throw new Error(canonicalResult?.error || 'canonical Gmail ingest failed');
                     treesIngested += 1;
-                    ingested += 1 + children.length;
-                    // Post-commit structured enrichment on parent thread
-                    // — fire-and-forget so HTTP response doesn't wait.
-                    // Adds summary / action_items / decisions / urgency
-                    // fields + kind:* / urgency:* / owner:* tags.
-                    if (treeResult?.parentId && enrichmentQueue) {
-                      enrichmentQueue.enqueue(treeResult.parentId, {
-                        content: parent.content,
-                        title: parent.title,
-                        tags: parent.tags,
+                    ingested += canonicalResult.promotedCount || canonicalResult.memoryIds?.length || 0;
+                    const primaryId = canonicalResult.memoryId || canonicalResult.memoryIds?.[0];
+                    if (primaryId && enrichmentQueue) {
+                      enrichmentQueue.enqueue(primaryId, {
+                        content: transcript, title: threadParent.title,
+                        tags: threadParent.tags, orgId,
                       });
-                    }
-                    // Skip residual summary memory if adapter also produced one.
-                    const summary = payloads.find(p => p.metadata?.is_thread_summary);
-                    if (summary) {
-                      await persistentMemoryEngine.ingestMemory(summary);
-                      ingested += 1;
                     }
                     continue;
                   }
 
                   // Single-message thread or per-message mode → flat ingest.
                   for (const p of payloads) {
-                    const flatResult = await persistentMemoryEngine.ingestMemory(p);
+                    if (p.metadata?.is_thread_summary) continue;
+                    const flatResult = await ingestCanonicalPayload(p, { sourceType: 'connector', provider: 'gmail' });
                     ingested += 1;
                     if (flatResult?.memoryId && enrichmentQueue) {
                       enrichmentQueue.enqueue(flatResult.memoryId, {
                         content: p.content,
                         title: p.title,
                         tags: p.tags,
+                        orgId: p.org_id,
                       });
                     }
                   }
@@ -12079,6 +14855,52 @@ exit \$RC
               const soft = url.searchParams.get('soft') === 'true' || body.soft === true;
               const hard = !soft;
 
+              // Remote (self-host) orgs have NO central memory rows — the data lives on the agent.
+              // Over-fetch the agent's list, match the same gmail tag/source conditions JS-side,
+              // then delete each matched id on the agent (soft or hard per the caller's flag).
+              if (orgId && orgIsRemote(orgId)) {
+                const { memories: rAll } = await remoteList(orgId, { user_id: userId }, null, 5000);
+                const gmailTags = ['gmail', 'gmail_thread', 'gmail-thread'];
+                const rMatches = (rAll || []).filter((m) =>
+                  (m.tags || []).some((t) => gmailTags.includes(t))
+                  || m.source_type === 'gmail' || m.source_platform === 'gmail'
+                  || m.metadata?.source_type === 'gmail' || m.metadata?.source_platform === 'gmail');
+                let rDeleted = 0;
+                for (const m of rMatches) {
+                  if (await amrDelete(orgId, m.id, hard)) rDeleted++;
+                }
+                if (hard) {
+                  // Reset the central gmail sync cursor so "Start fresh" truly resets (connector
+                  // sync state is central even for remote orgs).
+                  try {
+                    const { ConnectorStore } = await import('./connectors/framework/connector-store.js');
+                    const cs = new ConnectorStore(prisma);
+                    await cs.updateMetadata(userId, 'gmail', { cursor: null, historyId: null });
+                    await prisma.platformIntegration.update({
+                      where: { userId_platformType: { userId, platformType: 'gmail' } },
+                      data: { syncStatus: 'idle', lastSyncedAt: null },
+                    }).catch(() => {});
+                  } catch (curErr) {
+                    console.warn('[gmail-flush:remote] cursor reset failed (non-fatal):', curErr.message);
+                  }
+                }
+                try { invalidateAggregateCache({ userId, orgId, project: null }); } catch { /* noop */ }
+                auditLog({
+                  organizationId: orgId, userId,
+                  actorType: 'user', actorUserId: userId,
+                  eventType: hard ? 'connector.gmail.flush.hard' : 'connector.gmail.flush', eventCategory: 'connector',
+                  action: hard ? 'purge' : 'flush', resourceType: 'memory_bulk', resourceId: 'gmail',
+                  metadata: { deleted_count: rDeleted, hard, remote: true },
+                });
+                return jsonResponse(res, {
+                  ok: true,
+                  deleted: rDeleted,
+                  ...(hard ? { qdrant_deleted: 0 } : {}),
+                  mode: hard ? 'hard' : 'soft',
+                  message: `${hard ? 'Hard' : 'Soft'}-deleted ${rDeleted} Gmail-sourced memor${rDeleted === 1 ? 'y' : 'ies'} on the self-host agent (vectors purged agent-side).`,
+                });
+              }
+
               if (!hard) {
                 // ── Soft delete (default, recoverable) ──
                 const result = await prisma.memory.updateMany({
@@ -12112,10 +14934,8 @@ exit \$RC
               }
 
               // 2. Cascade-cleanup FK references then delete rows
-              await prisma.auditLog.updateMany({
-                where: { resourceId: { in: ids } },
-                data: { resourceId: null },
-              });
+              // Audit rows are append-only. Historical resource IDs are kept
+              // after an erasure instead of rewriting the compliance trail.
               await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
               await prisma.memoryVersion.updateMany({
                 where: { relatedMemoryId: { in: ids } },
@@ -12686,6 +15506,20 @@ exit \$RC
           }
           break;
 
+        case '/api/connectors/gmail/watcher/run':
+          if (req.method === 'POST') {
+            try {
+              const { reconcileGmailWatchForTenant } = await import('./connectors/providers/gmail/gmail-watcher-service.js');
+              const result = await reconcileGmailWatchForTenant({
+                prisma, userId, orgId, reason: 'api', register: body.mode === 'register',
+              });
+              return jsonResponse(res, { ok: true, result });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, err.message === 'gmail_watcher_connection_not_found' ? 400 : 500);
+            }
+          }
+          break;
+
         case '/api/connectors/gmail/pubsub-webhook':
           // Pub/Sub push target. Google sends a JSON payload with the base64
           // Gmail notification + an OIDC token in Authorization header.
@@ -12710,45 +15544,29 @@ exit \$RC
                 return jsonResponse(res, { ack: true, reason: 'malformed' });
               }
 
-              // Find the user whose Gmail account matches this notification
+              const { handleGmailPushNotification } = await import('./connectors/providers/gmail/gmail-watcher-service.js');
+              const watcher = await handleGmailPushNotification({
+                prisma, emailAddress: decoded.emailAddress, historyId: decoded.historyId,
+              });
+
+              // Preserve the existing memory-ingest path. The watcher handles
+              // operational replies; SyncEngine remains the source of truth for
+              // Gmail memories and contact extraction.
               const { ConnectorStore, decryptToken } = await import('./connectors/framework/connector-store.js');
               const cs = new ConnectorStore(prisma);
               const conn = await cs.findByEmail?.('gmail', decoded.emailAddress);
-              if (!conn) {
-                console.warn(`[gmail-pubsub] No connection for ${decoded.emailAddress}`);
-                return jsonResponse(res, { ack: true, reason: 'no-connection' });
+              if (conn) {
+                const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
+                const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
+                const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient, getCanonicalIngestion: () => documentFirstIngestion });
+                const accessToken = decryptToken(conn.access_token_encrypted);
+                engine.runSync({
+                  adapter: new GmailAdapter(), userId: conn.userId, orgId: conn.orgId, provider: 'gmail',
+                  cursor: conn.metadata?.cursor || decoded.historyId, incremental: true, accessToken,
+                  context: { user_id: conn.userId, org_id: conn.orgId, user_account_ref: decoded.emailAddress, target_scope: conn.target_scope || 'personal', gmail_thread_mode: conn.metadata?.gmail_thread_mode || 'thread' },
+                }).catch((syncError) => console.error(`[gmail-pubsub] sync failed for ${decoded.emailAddress}:`, syncError.message));
               }
-
-              // Trigger incremental sync from stored historyId → notification's historyId.
-              // SyncEngine handles the heavy lifting (fetch threads, normalize, ingest).
-              const { SyncEngine } = await import('./connectors/framework/sync-engine.js');
-              const { GmailAdapter } = await import('./connectors/providers/gmail/adapter.js');
-              const adapter = new GmailAdapter();
-              const engine = new SyncEngine({ connectorStore: cs, memoryStore: persistentMemoryStore, memoryEngine: persistentMemoryEngine, smartIngestRouter, externalRefStore, entityResolver, qdrantClient });
-
-              const cursor = conn.metadata?.cursor || decoded.historyId;
-              const accessToken = decryptToken(conn.access_token_encrypted);
-
-              // Run async — Pub/Sub waits up to 10s for ack, don't block
-              engine.runSync({
-                adapter,
-                userId: conn.userId,
-                orgId: conn.orgId,
-                provider: 'gmail',
-                cursor,
-                incremental: true,
-                accessToken,
-                context: {
-                  user_id: conn.userId,
-                  org_id: conn.orgId,
-                  user_account_ref: decoded.emailAddress,
-                  target_scope: conn.target_scope || 'personal',
-                  gmail_thread_mode: conn.metadata?.gmail_thread_mode || 'thread',
-                },
-              }).catch(err => console.error(`[gmail-pubsub] sync failed for ${decoded.emailAddress}:`, err.message));
-
-              // Ack immediately so Pub/Sub doesn't retry
-              return jsonResponse(res, { ack: true, triggered_sync: true });
+              return jsonResponse(res, { ...watcher, memory_sync_triggered: Boolean(conn) });
             } catch (err) {
               console.error('[gmail-pubsub] webhook error:', err.message);
               // Return 2xx anyway — retries cause duplicates
@@ -12914,6 +15732,7 @@ exit \$RC
                 externalRefStore,
                 entityResolver,
                 qdrantClient,
+                getCanonicalIngestion: () => documentFirstIngestion,
               });
               const syncId = crypto.randomUUID();
               setImmediate(async () => {
@@ -12953,6 +15772,57 @@ exit \$RC
               // Resolve the cluster (doc + chunks + facts) per docId using same
               // strategies as DELETE handler.
               const out = {};
+              // REMOTE: every read below is central Prisma. `prisma.memory.findFirst` returns null for
+              // an .amr org, so the cluster collapsed to one id, the relationship grouping hit an empty
+              // central table and the fact count read 0 — the FE KnowledgeBase page showed "0 relations"
+              // against every document for those tenants.
+              // Built only from VERIFIED shapes: persistentMemoryStore.getMemory is already routed
+              // (remoteHydrate) so it yields the memory's tags, and the agent's /v1/mem-relationships
+              // already returns `by_type` and `counts` — so no aggregation is reimplemented here.
+              if (orgIsRemote(orgId)) {
+                const TYPE_SAMPLE = Math.max(1, Number(process.env.RELATIONS_SUMMARY_SAMPLE || 10));
+                for (const docId of reqIds.slice(0, 100)) {
+                  try {
+                    const seed = await persistentMemoryStore.getMemory(docId).catch(() => null);
+                    const docTag = (seed?.tags || []).find((t) => typeof t === 'string' && t.startsWith('doc-id:')) || null;
+                    let clusterIds = [docId];
+                    let factCount = 0;
+                    if (docTag) {
+                      const { memories: sibs } = await persistentMemoryStore.listMemories({
+                        user_id: userId, org_id: orgId, tags: [docTag], limit: 500, offset: 0,
+                      });
+                      const ids = (sibs || []).map((m) => m.id).filter(Boolean);
+                      if (ids.length) clusterIds = [...new Set([docId, ...ids])];
+                      factCount = (sibs || []).filter((m) => (m.tags || []).includes('distilled-from-kb')).length;
+                    }
+                    // Totals: ONE batched call, summing `out` only so an edge whose both ends sit
+                    // inside the cluster is not counted twice.
+                    const counts = await amrMemEdgeCounts(orgId, clusterIds).catch(() => null);
+                    let total = 0;
+                    if (counts) for (const id of clusterIds) total += Number(counts[id]?.out || 0);
+                    // byType needs one call per memory, so it is SAMPLED and SAID to be sampled. A
+                    // partial aggregate presented as complete is the failure shape this repo keeps
+                    // producing.
+                    const byType = {};
+                    const sample = clusterIds.slice(0, TYPE_SAMPLE);
+                    for (const id of sample) {
+                      const r = await amrMemRelationships(orgId, id).catch(() => null);
+                      for (const [t, arr] of Object.entries(r?.by_type || {})) {
+                        byType[t] = (byType[t] || 0) + (Array.isArray(arr) ? arr.length : 0);
+                      }
+                    }
+                    out[docId] = {
+                      total, byType, cluster_size: clusterIds.length, facts: factCount,
+                      storage_mode: 'amr',
+                      ...(clusterIds.length > sample.length
+                        ? { byType_sampled: true, byType_sample_size: sample.length } : {}),
+                    };
+                  } catch (e) {
+                    out[docId] = { total: 0, byType: {}, cluster_size: 0, facts: 0, storage_mode: 'amr', error: e.message };
+                  }
+                }
+                return jsonResponse(res, { summaries: out, count: Object.keys(out).length, storage_mode: 'amr' });
+              }
               for (const docId of reqIds.slice(0, 100)) {
                 let docMemory = null;
                 try {
@@ -13084,6 +15954,31 @@ exit \$RC
               else deleteUploadId = rawId;
             }
 
+            // ── Remote (self-host) orgs: the doc + segments + fact memories live on the AGENT,
+            // central Prisma holds no rows — the 600-line cascade below would resolve nothing and
+            // silently no-op ("delete button does nothing" / memories survive doc deletion). One
+            // agent call runs the FULL cascade against whichever storage engine the box runs
+            // (.amr or pg-qdrant) — features identical across backends by construction.
+            if (orgId && orgIsRemote(orgId)) {
+              try {
+                const { amrKbDocDelete } = await import('./vector/mneme/driver.js');
+                const out = await amrKbDocDelete(orgId, {
+                  documentId: deleteMemoryId || rawId || null,
+                  filename: body.filename || body.title || null,
+                });
+                if (out?.ok) {
+                  return jsonResponse(res, {
+                    success: true, deleted: out.deleted_memories,
+                    deleted_count: out.deleted_memories, deleted_segments: out.deleted_segments,
+                    document_id: out.document_id, strategy: 'remote-agent-cascade',
+                  });
+                }
+                return jsonResponse(res, { error: out?.error || 'document not found on the org agent' }, 404);
+              } catch (remErr) {
+                return jsonResponse(res, { error: `agent delete failed: ${remErr.message}` }, 502);
+              }
+            }
+
             try {
               let memoryIds = [];
               let resolutionStrategy = null;
@@ -13190,8 +16085,9 @@ exit \$RC
                   prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } }));
                 await cascade('relationships', () =>
                   prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } }));
-                await cascade('audit_log_refs', () =>
-                  prisma.auditLog.updateMany({ where: { resourceId: { in: ids } }, data: { resourceId: null } }));
+                // Audit records are append-only compliance evidence. Keep their
+                // historical resource IDs rather than mutating them during an
+                // erasure; the production schema intentionally has no FK here.
                 // Defensive child-row purge via raw SQL: the Prisma schema says
                 // onDelete:Cascade for these, but the LIVE DB constraints have
                 // drifted on some tables (memories deleteMany failed with an FK
@@ -13692,27 +16588,23 @@ exit \$RC
                 return jsonResponse(res, { error: 'No file uploaded' }, 400);
               }
 
-              // Validate size
-              if (filePart.data.length > 100 * 1024 * 1024) {
-                return jsonResponse(res, { error: 'File too large. Maximum 100MB.' }, 413);
+              const filename = safeUploadFilename(filePart.filename);
+              const checked = validateKnowledgeFile({ filename, contentType: filePart.contentType, bytes: filePart.data.length, buffer: filePart.data });
+              if (!checked.ok || checked.kind !== 'document') {
+                const invalid = uploadError(checked.ok ? 'UNSUPPORTED_FILE_TYPE' : checked.code, { limits: checked.limits });
+                return jsonResponse(res, invalid.body, invalid.status);
               }
-
-              // Validate file type (add xlsx/xls to existing types)
-              const ext = (filePart.filename || '').split('.').pop()?.toLowerCase();
-              const allowedExts = ['pdf', 'docx', 'txt', 'md', 'csv', 'xlsx', 'xls'];
-              if (!allowedExts.includes(ext)) {
-                return jsonResponse(res, { error: `Unsupported: ${ext}. Allowed: PDF, DOCX, TXT, MD, CSV, XLSX, XLS` }, 415);
-              }
+              const ext = checked.ext;
 
               const uploadId = crypto.randomUUID();
               // Write to temp storage immediately instead of keeping raw buffer in RAM.
               const fs = await import('fs');
               const path = await import('path');
               const os = await import('os');
-              const tempDir = path.join(os.tmpdir(), 'hivemind-enterprise');
-              fs.mkdirSync(tempDir, { recursive: true });
-              const tempPath = path.join(tempDir, `${uploadId}_${filePart.filename}`);
-              fs.writeFileSync(tempPath, filePart.data);
+              const tempDir = path.join(os.tmpdir(), 'hivemind-enterprise', orgId, userId);
+              fs.mkdirSync(tempDir, { recursive: true, mode: 0o700 });
+              const tempPath = path.join(tempDir, `${uploadId}_${filename}`);
+              fs.writeFileSync(tempPath, filePart.data, { mode: 0o600 });
 
               let parsedText = '';
               let sheets = null;
@@ -13721,7 +16613,7 @@ exit \$RC
               // Try Docling sidecar for rich parsing (non-blocking — fallback on failure)
               try {
                 const { parseWithDocling } = await import('./knowledge/enterprise/docling-adapter.js');
-                doclingOutput = await parseWithDocling(tempPath, filePart.filename, { smart: true });
+                doclingOutput = await parseWithDocling(tempPath, filename, { smart: true });
                 if (doclingOutput.error) {
                   console.warn(`[enterprise] Docling fallback: ${doclingOutput.error}`);
                   doclingOutput = null;
@@ -13748,7 +16640,7 @@ exit \$RC
                   const parsed = await parseFile(
                     filePart.data,
                     filePart.contentType || `text/${ext}`,
-                    filePart.filename
+                    filename
                   );
                   parsedText = typeof parsed?.text === 'string'
                     ? parsed.text
@@ -13772,7 +16664,7 @@ exit \$RC
                 const topType = Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'spreadsheet';
                 detected = { type: topType, confidence: sheetDetections[0]?.confidence || 0.5, reasoning: 'Excel workbook — per-sheet detection' };
               } else {
-                detected = await detectDocumentType(parsedText, { filename: filePart.filename });
+                detected = await detectDocumentType(parsedText, { filename });
               }
 
               // Store in pending uploads map (10 min TTL)
@@ -13782,33 +16674,36 @@ exit \$RC
                 setInterval(() => {
                   const now = Date.now();
                   for (const [id, entry] of global._enterprisePendingUploads) {
-                    if (now - entry.createdAt > 10 * 60 * 1000) global._enterprisePendingUploads.delete(id);
+                    if (entry.expiresAt <= now) {
+                      try { fs.unlinkSync(entry.tempPath); } catch { /* best effort */ }
+                      global._enterprisePendingUploads.delete(id);
+                    }
                   }
                 }, 60_000).unref();
               }
 
               global._enterprisePendingUploads.set(uploadId, {
                 tempPath,
-                filename: filePart.filename,
+                filename,
                 mimeType: filePart.contentType || `application/${ext}`,
                 ext,
-                sheets,
-                parsedText,
                 detectedType: detected.type,
                 confidence: detected.confidence,
-                doclingOutput,
-                buffer: filePart.data, // Phase 1: preserve buffer for document-first path
+                orgId,
+                userId,
+                checksum: crypto.createHash('sha256').update(filePart.data).digest('hex'),
                 createdAt: Date.now(),
+                expiresAt: Date.now() + 10 * 60 * 1000,
               });
 
-              console.log(`[enterprise] Detect id=${uploadId} file=${filePart.filename} type=${detected.type} confidence=${detected.confidence}`);
+              console.log(`[enterprise] Detect id=${uploadId} file=${filename} type=${detected.type} confidence=${detected.confidence}`);
 
               return jsonResponse(res, {
                 upload_id: uploadId,
                 detected_type: detected.type,
                 confidence: detected.confidence,
                 reasoning: detected.reasoning,
-                filename: filePart.filename,
+                filename,
                 size_bytes: filePart.data.length,
                 sheets: sheetDetections || null,
                 model: getDefaultModel(),
@@ -13835,12 +16730,9 @@ exit \$RC
             if (!confirmed_type) return jsonResponse(res, { error: 'confirmed_type is required' }, 400);
 
             const pending = global._enterprisePendingUploads?.get(upload_id);
-            if (!pending) {
+            if (!pending || pending.orgId !== orgId || pending.userId !== userId || pending.expiresAt <= Date.now()) {
               return jsonResponse(res, { error: 'Upload not found or expired. Please re-upload.' }, 404);
             }
-
-            // Remove from pending
-            global._enterprisePendingUploads.delete(upload_id);
 
             const userTags = ingestTags ? (Array.isArray(ingestTags) ? ingestTags : ingestTags.split(',').map(t => t.trim()).filter(Boolean)) : [];
             const visibility = targetScope === 'organization' ? 'organization' : 'private';
@@ -13850,6 +16742,30 @@ exit \$RC
               ...(Array.isArray(body.project_ids) ? body.project_ids : []),
             ]);
             const primaryTeamId = body.primary_team_id || null;
+
+            if (!knowledgeUploadService) return jsonResponse(res, { error: 'canonical_ingest_unavailable' }, 503);
+            try {
+              const fs = await import('fs');
+              const fileBuffer = fs.readFileSync(pending.tempPath);
+              const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+              if (checksum !== pending.checksum) throw new Error('Preview artifact checksum mismatch.');
+              const admitted = await knowledgeUploadService.admit({
+                userId, orgId,
+                file: { filename: pending.filename, contentType: pending.mimeType, data: fileBuffer },
+                targetScope: targetScope || 'personal', projectIds, primaryTeamId,
+                metadata: {
+                  tags: userTags, smart: true, enterprise: true, confirmed_type,
+                  visibility, scope: targetScope || 'personal', project,
+                },
+              });
+              if (!admitted.ok) return jsonResponse(res, admitted.body, admitted.status);
+              global._enterprisePendingUploads.delete(upload_id);
+              try { fs.unlinkSync(pending.tempPath); } catch { /* best effort */ }
+              return jsonResponse(res, { upload_id, ...KnowledgeUploadJobStore.response(admitted.job) }, 202);
+            } catch (error) {
+              console.error('[enterprise] canonical admission failed:', error.message);
+              return jsonResponse(res, { error: 'canonical_ingest_failed' }, 500);
+            }
 
             // ─── Phase 1: Document-First Enterprise Ingestion (feature-flagged) ───
             if (documentFirstIngestion && pending.buffer) {
@@ -13883,10 +16799,22 @@ exit \$RC
                   promotedMemoryIds: result.promotedMemoryIds
                 }, 202);
               } catch (phase1Err) {
-                console.error('[enterprise] Phase1 upload failed, falling back to legacy path:', phase1Err.message);
-                // Fall through to legacy path
+                console.error('[enterprise] Canonical document ingestion failed:', phase1Err.message);
+                return jsonResponse(res, {
+                  error: 'Canonical document ingestion failed',
+                  code: phase1Err.code || 'CANONICAL_INGEST_FAILED',
+                  detail: phase1Err.message,
+                }, phase1Err.statusCode || 500);
               }
             }
+
+            // The old schema/chunk writer is intentionally unreachable. Keeping
+            // two enterprise ingestion implementations creates divergent
+            // memories, provenance, and relationship semantics.
+            return jsonResponse(res, {
+              error: 'canonical_ingest_unavailable',
+              message: 'Enterprise document ingestion is temporarily unavailable.',
+            }, 503);
 
             try {
               const { extractSchema } = await import('./knowledge/enterprise/extractor.js');
@@ -13965,7 +16893,7 @@ exit \$RC
                     // Ingest parent schema memory
                     const parentPayload = { ...result.parent, skip_fact_extraction: true };
                     const [routedParent] = await buildRoutedIngestPayloads(parentPayload, { smartIngestRouter });
-                    const parentResult = await persistentMemoryEngine.ingestMemory(routedParent);
+                    const parentResult = await ingestRoutedPayloadCanonical(routedParent, persistentMemoryEngine);
                     const parentId = parentResult?.memoryId;
                     console.log(`[enterprise] Parent ingested: id=${parentId} operation=${parentResult?.operation}`);
 
@@ -13998,7 +16926,7 @@ exit \$RC
                           routedChunk.relationship = 'Extends';
                           routedChunk.related_to = parentId;
                         }
-                        const chunkResult = await persistentMemoryEngine.ingestMemory(routedChunk);
+                        const chunkResult = await ingestRoutedPayloadCanonical(routedChunk, persistentMemoryEngine);
                         const chunkMemoryId = chunkResult?.memoryId;
                         // Deterministic previous-chunk edge
                         if (prevChunkId && chunkMemoryId) {
@@ -14109,6 +17037,11 @@ exit \$RC
           // True multi-file multipart endpoint. Accepts N file parts +
           // shared tags/project. Concurrency-limited fanout (default 3).
           if (req.method !== 'POST') break;
+          return jsonResponse(res, {
+            error: 'bulk_endpoint_retired',
+            message: 'Submit each file to /api/knowledge/upload. Every accepted file receives its own durable job.',
+            endpoint: '/api/knowledge/upload',
+          }, 410);
           if (!persistentMemoryEngine || !documentFirstIngestion) {
             return jsonResponse(res, { error: 'Bulk ingest requires Phase1' }, 503);
           }
@@ -14138,8 +17071,30 @@ exit \$RC
             const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
             const projectIdRaw = parts.find(p => p.name === 'projectId')?.value || null;
             const primaryTeamId = parts.find(p => p.name === 'primaryTeamId')?.value || null;
-            const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'organization' ? 'organization' : 'personal';
+            const targetScopeRaw = parts.find(p => p.name === 'targetScope')?.value || '';
+            const targetScope = targetScopeRaw === 'organization'
+              ? 'organization'
+              : targetScopeRaw === 'project'
+                ? 'project'
+                : 'personal';
             const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
+            const bulkProjectIds = normalizeScopeIds([projectIdRaw]);
+            if (bulkProjectIds.length === 0 && containerTag && targetScope === 'project') {
+              try {
+                const proj = await prisma.project.findFirst({
+                  where: {
+                    orgId,
+                    OR: [
+                      ...(isUuidLike(containerTag) ? [{ id: containerTag }] : []),
+                      { slug: containerTag.toLowerCase() },
+                      { name: { equals: containerTag, mode: 'insensitive' } },
+                    ],
+                  },
+                  select: { id: true },
+                }).catch(() => null);
+                if (proj) bulkProjectIds.push(proj.id);
+              } catch (e) { console.warn('[knowledge-bulk] containerTag project resolve failed:', e.message); }
+            }
 
             // 3-tier enforcement (mirrors /api/knowledge/upload): org-wide
             // (organization scope with NO project + NO team) is admin-only.
@@ -14154,6 +17109,17 @@ exit \$RC
                   error: 'org_scope_admin_only',
                   message: 'Organization-wide uploads are reserved for org admins. Pick a project or upload to your personal space.',
                   role: bulkRole,
+                }, 403);
+              }
+            }
+
+            if (projectIdRaw || targetScope === 'project') {
+              const accessCtx = await buildAccessContext(userId, orgId);
+              const allowed = Array.isArray(accessCtx?.projectIds) ? accessCtx.projectIds : [];
+              if (!bulkProjectIds.length || bulkProjectIds.some(id => !allowed.includes(id))) {
+                return jsonResponse(res, {
+                  error: 'project_scope_required',
+                  message: 'Project-scoped uploads require an accessible projectId.',
                 }, 403);
               }
             }
@@ -14175,23 +17141,23 @@ exit \$RC
                       continue;
                     }
                   }
-                  const r = await documentFirstIngestion.ingestKnowledgeDocument({
+                  const r = await documentFirstIngestion.ingestSource({
                     userId, orgId,
-                    filename: fp.filename,
-                    fileBuffer: fp.data,
-                    contentType: fp.contentType || 'application/octet-stream',
+                    source: { type: 'kb', filename: fp.filename },
+                    file: { buffer: fp.data, contentType: fp.contentType || 'application/octet-stream', filename: fp.filename },
                     metadata: {
                       tags: userTags,
                       project: containerTag,
-                      project_id: projectIdRaw,
-                      project_ids: projectIdRaw ? [projectIdRaw] : [],
+                      project_id: bulkProjectIds[0] || null,
+                      project_ids: bulkProjectIds,
                       primary_team_id: primaryTeamId,
                       visibility: targetScope === 'organization' ? 'organization' : 'private',
+                      scope: bulkProjectIds.length ? 'project' : (targetScope === 'organization' ? 'organization' : undefined),
                       smart: smartFlag,
                     },
                   });
                   if (planEnforcer && orgId) {
-                    planEnforcer.recordUsage(orgId, 'kbPages', r.pages || r.segmentCount || 1);
+                    planEnforcer.recordUsage(orgId, 'kbPages', Math.max(1, Number(r.pages) || 1));
                     planEnforcer.recordUsage(orgId, 'uploads', 1);
                   }
                   results[idx] = {
@@ -14219,549 +17185,25 @@ exit \$RC
 
         case '/api/knowledge/upload':
           if (req.method === 'POST') {
-            if (!persistentMemoryEngine) {
-              return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
-            }
-            try { planEnforcer?.recordUsage(orgId, 'uploads', 1); } catch { /* meter */ }
-
-            try {
-              // Parse multipart form data manually (no external dep)
-              const contentType = req.headers['content-type'] || '';
-              if (!contentType.includes('multipart/form-data')) {
-                return jsonResponse(res, { error: 'Content-Type must be multipart/form-data' }, 400);
-              }
-
-              const boundaryMatch = contentType.match(/boundary=(.+)/);
-              if (!boundaryMatch) {
-                return jsonResponse(res, { error: 'Missing boundary in Content-Type' }, 400);
-              }
-
-              let rawBody;
-              try {
-                rawBody = await readBoundedBuffer(req);
-              } catch (sizeErr) {
-                if (sizeErr?.code === 'PAYLOAD_TOO_LARGE') {
-                  return jsonResponse(res, { error: 'payload_too_large', max_bytes: MULTIPART_MAX_BYTES }, 413);
-                }
-                return jsonResponse(res, { error: 'read_failed', message: sizeErr?.message || String(sizeErr) }, 400);
-              }
-
-              // Simple multipart parser
-              const boundary = boundaryMatch[1].trim();
-              const parts = parseMultipart(rawBody, boundary);
-
-              const filePart = parts.find(p => p.filename);
-              if (!filePart) {
-                return jsonResponse(res, { error: 'No file uploaded. Send a file field in multipart form data.' }, 400);
-              }
-
-              // Extract optional form fields
-              const containerTag = parts.find(p => p.name === 'containerTag')?.value || null;
-              // KB uploads default to ORGANIZATION visibility (team knowledge is
-              // shared by default; users opt OUT to 'personal'). Was default
-              // 'personal', which siloed every upload to the uploader.
-              const targetScope = parts.find(p => p.name === 'targetScope')?.value === 'personal'
-                ? 'personal'
-                : 'organization';
-              const customTags = parts.find(p => p.name === 'tags')?.value || '';
-              const userTags = customTags ? customTags.split(',').map(t => t.trim()).filter(Boolean) : [];
-              const projectId = parts.find(p => p.name === 'projectId')?.value || null;
-              const projectIdsRaw = parts.find(p => p.name === 'projectIds')?.value || '';
-              const primaryTeamId = parts.find(p => p.name === 'primaryTeamId')?.value || null;
-              const projectIds = normalizeScopeIds([
-                projectId,
-                ...projectIdsRaw.split(',').map(value => value.trim()).filter(Boolean),
-              ]);
-
-              // The upload-scope modal sends the project SLUG via containerTag
-              // (not a UUID). Without an explicit projectId, resolve the
-              // container slug/name/id → a real project id so derived memories
-              // get scoped (projectId). Otherwise they land org-wide and vanish
-              // from project-filtered Memories / Graph views.
-              const containerTagVal = parts.find(p => p.name === 'containerTag')?.value || null;
-              if (projectIds.length === 0 && containerTagVal) {
-                try {
-                  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(containerTagVal);
-                  const proj = await prisma.project.findFirst({
-                    where: { orgId, OR: [
-                      ...(isUuid ? [{ id: containerTagVal }] : []),
-                      { slug: containerTagVal.toLowerCase() },
-                      { name: { equals: containerTagVal, mode: 'insensitive' } },
-                    ] },
-                    select: { id: true },
-                  });
-                  if (proj) projectIds.push(proj.id);
-                } catch (e) { console.warn('[knowledge] containerTag project resolve failed:', e.message); }
-              }
-
-              // ── 3-tier scope enforcement ──
-              // personal → anyone (private). project → anyone with access to
-              // that project (project list is already role-scoped in the FE +
-              // membership-checked at recall). organization-wide (org scope,
-              // NO project, NO team) → OWNER/ADMIN ONLY: one admin uploads
-              // once and every member sees it; members must file uploads
-              // under a project or their personal space instead.
-              if (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId && prisma && orgId) {
-                const uploaderMembership = await prisma.userOrganization.findUnique({
-                  where: { userId_orgId: { userId, orgId } },
-                  select: { role: true },
-                }).catch(() => null);
-                const uploaderRole = uploaderMembership?.role || null;
-                if (uploaderRole !== 'owner' && uploaderRole !== 'admin') {
-                  return jsonResponse(res, {
-                    error: 'org_scope_admin_only',
-                    message: 'Organization-wide uploads are reserved for org admins. Pick a project or upload to your personal space.',
-                    role: uploaderRole,
-                  }, 403);
-                }
-              }
-
-              // Validate file size (max 100MB)
-              if (filePart.data.length > 100 * 1024 * 1024) {
-                return jsonResponse(res, { error: 'File too large. Maximum 100MB.' }, 413);
-              }
-
-              // Validate file type
-              const allowedTypes = [
-                'application/pdf',
-                'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // docx
-                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // xlsx
-                'application/vnd.openxmlformats-officedocument.presentationml.presentation', // pptx
-                'application/vnd.ms-excel', // xls
-                'application/vnd.ms-powerpoint', // ppt
-                'text/plain', 'text/markdown', 'text/csv', 'text/html',
-                'image/png', 'image/jpeg', 'image/tiff', 'image/webp',
-                'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a',
-              ];
-              const ext = (filePart.filename || '').split('.').pop()?.toLowerCase();
-              const allowedExts = [
-                'pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt',
-                'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm',
-                'png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp',
-                'mp3', 'wav', 'm4a', 'flac', 'ogg',
-              ];
-              if (!allowedTypes.includes(filePart.contentType) && !allowedExts.includes(ext)) {
-                return jsonResponse(res, {
-                  error: `Unsupported file type: ${filePart.contentType || ext}. Allowed: PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, HTML, PNG, JPG, TIFF, MP3, WAV.`
-                }, 415);
-              }
-
-              // Read smart flag — when true, force Docling smart-mode parse
-              // (full enrichment: tables, charts, picture descriptions via
-              // Groq VLM, code/formula extraction). Default false = fast tiers.
-              const smartFlag = (parts.find(p => p.name === 'smart')?.value || '').toLowerCase() === 'true';
-              const pictureDescFlag = (parts.find(p => p.name === 'picture_descriptions')?.value || '').toLowerCase() === 'true';
-              // enterprise = 'auto' | 'true' | 'false'  (default 'auto')
-              //   auto  → detect type; if confidence≥0.7 run schema extract
-              //   true  → force schema extract even on low confidence
-              //   false → skip enterprise pipeline entirely (legacy behavior)
-              const enterpriseFlag = (parts.find(p => p.name === 'enterprise')?.value || 'auto').toLowerCase();
-              const confirmedType = parts.find(p => p.name === 'confirmed_type')?.value || null;
-
-              // Pre-flight pages quota: rough estimate by file size (1 page ≈ 50KB
-              // PDF / 5KB text). Real page count comes after parse; we record
-              // exact then. This pre-check is a cheap "blow up obvious overages".
-              if (planEnforcer && orgId) {
-                const estPages = Math.max(1, Math.ceil(filePart.data.length / 50_000));
-                const check = await planEnforcer.checkLimit(orgId, 'kbPages', estPages);
-                if (!check.allowed) {
-                  return jsonResponse(res, {
-                    error: 'page_budget_exceeded',
-                    reason: check.reason,
-                    limit: check.limit,
-                    current: check.current,
-                    estimated_pages: estPages,
-                  }, 402);
-                }
-              }
-
-              // SCOPE-AWARE duplicate rejection: identical bytes only collide
-              // WITHIN the same scope (personal / project / team / org-wide).
-              // Same file in different scopes is intentional — e.g. an owner
-              // shares a brochure org-wide AND an employee files their own
-              // copy under a project. Old global gate rejected those.
-              //
-              //   scopeKey =
-              //     team:<id>      when primaryTeamId set
-              //     project:<id>   when projectIds[0] set (no team)
-              //     org:<orgId>    when targetScope=organization, no project/team
-              //     personal:<uid> otherwise
-              //
-              // The gate looks for an existing knowledge_document in the same
-              // org that points to the same content (same checksum via the
-              // shared sourceArtifact) AND carries the matching scope-key tag.
-              // Force re-ingest with form field force=true.
-              const uploadChecksum = crypto.createHash('sha256').update(filePart.data).digest('hex');
-              const forceDuplicate = (parts.find(p => p.name === 'force')?.value || '').toLowerCase() === 'true';
-              const uploadScopeKey = primaryTeamId
-                ? `team:${primaryTeamId}`
-                : projectIds[0]
-                  ? `project:${projectIds[0]}`
-                  : (targetScope === 'organization' ? `org:${orgId}` : `personal:${userId}`);
-              if (!forceDuplicate && prisma) {
-                // Per-scope dup: same content already filed in THIS scope.
-                const dupDoc = await prisma.knowledgeDocument.findFirst({
-                  where: {
-                    orgId,
-                    sourcePlatform: 'knowledge_upload',
-                    sourceArtifact: { is: { checksum: uploadChecksum, sourcePlatform: 'knowledge_upload' } },
-                    tags: { has: `scope-key:${uploadScopeKey}` },
-                  },
-                  select: { id: true, title: true, createdAt: true },
-                }).catch(() => null);
-                if (dupDoc) {
-                  return jsonResponse(res, {
-                    duplicate: true,
-                    error: 'duplicate_document',
-                    message: `Identical content already in this scope${dupDoc?.title ? ` as "${dupDoc.title}"` : ''}. Same file in a different scope is allowed — pick another scope to upload again.`,
-                    existing_document_id: dupDoc?.id || null,
-                    existing_title: dupDoc?.title || null,
-                    uploaded_at: dupDoc?.createdAt || null,
-                    scope_key: uploadScopeKey,
-                    filename: filePart.filename,
-                  }, 409);
-                }
-              }
-
-              // Async opt-in: return a job id immediately + process in the
-              // background, so large multi-MB PDFs (150s+ sync pipeline) never
-              // hit the proxy timeout / 502. Default stays sync for FE compat.
-              const asyncMode = (parts.find(p => p.name === 'async')?.value || '').toLowerCase() === 'true'
-                || url.searchParams.get('async') === 'true';
-
-              // ─── Phase 1: Document-First Ingestion Path (feature-flagged) ───
-              if (documentFirstIngestion) {
-                console.log(`[knowledge] Using Phase 1 document-first ingestion for ${filePart.filename}${smartFlag ? ' (smart=true)' : ''}${asyncMode ? ' (async)' : ''}`);
-
-                const phase1Metadata = {
-                  tags: userTags,
-                  project: containerTag,
-                  project_id: projectIds[0] || null,
-                  project_ids: projectIds,
-                  primary_team_id: primaryTeamId,
-                  visibility: targetScope === 'organization' ? 'organization' : 'private',
-                  // Explicit org scope when org-targeted with no project/team — so
-                  // recall's organization tier (visible to ALL org members) matches.
-                  // project/team scopes are derived downstream from the ids.
-                  scope: (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId) ? 'organization' : undefined,
-                  smart: smartFlag,
-                  picture_descriptions: pictureDescFlag,
-                };
-
-                // Durable-queue path (flag-gated by org): accept → persist raw
-                // bytes → enqueue → return job_id. The request does NO heavy
-                // work; a bounded worker pool ingests via the same pipeline.
-                if (kbIngestQueue?.isEnabledFor(orgId)) {
-                  try {
-                    const checksum = uploadChecksum;
-                    const storedPath = kbIngestQueue.persistFile({ orgId, checksum, filename: filePart.filename, fileBuffer: filePart.data });
-                    const q = await kbIngestQueue.enqueue({
-                      userId, orgId,
-                      filename: filePart.filename,
-                      contentType: filePart.contentType || `text/${ext}`,
-                      checksum, filePath: storedPath,
-                      metadata: phase1Metadata,
-                    });
-                    if (q.backpressure) {
-                      res.setHeader('Retry-After', '30');
-                      return jsonResponse(res, { error: 'Ingestion queue saturated — retry shortly', queued_depth: q.depth }, 429);
-                    }
-                    res.setHeader('X-Job-Id', q.job_id);
-                    return jsonResponse(res, { success: true, job_id: q.job_id, status: 'queued', filename: filePart.filename, mode: 'queued' }, 202);
-                  } catch (qErr) {
-                    // Queue trouble must never block uploads — fall through to
-                    // the inline (async/sync) path below.
-                    console.warn('[kb-queue] enqueue failed, falling back inline:', qErr.message);
-                  }
-                }
-
-                if (asyncMode) {
-                  const jobId = crypto.randomUUID();
-                  ingestTracker.createJob(jobId, { userId, orgId, filename: filePart.filename, kind: 'knowledge_upload' });
-                  res.setHeader('X-Job-Id', jobId);
-                  jsonResponse(res, { success: true, job_id: jobId, status: 'queued', filename: filePart.filename }, 202);
-                  // Background ingest — per-stage progress streamed into the tracker.
-                  (async () => {
-                    const tBg = Date.now();
-                    try {
-                      const result = await documentFirstIngestion.ingestKnowledgeDocument({
-                        userId, orgId,
-                        filename: filePart.filename,
-                        fileBuffer: filePart.data,
-                        contentType: filePart.contentType || `text/${ext}`,
-                        metadata: phase1Metadata,
-                        onProgress: (p) => {
-                          const prev = ingestTracker.getJob(jobId)?.metadata || {};
-                          ingestTracker.updateJob(jobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...p } });
-                        },
-                      });
-                      const prev = ingestTracker.getJob(jobId)?.metadata || {};
-                      ingestTracker.updateJob(jobId, {
-                        status: 'indexed', progress: 100, memoryId: result.documentId,
-                        metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, candidateCount: result.candidateCount, promotedCount: result.promotedCount },
-                      });
-                      if (planEnforcer && orgId) {
-                        planEnforcer.recordUsage(orgId, 'kbPages', result.pages || result.segmentCount || 1);
-                        planEnforcer.recordUsage(orgId, 'uploads', 1);
-                      }
-                      console.log(`[knowledge:async] ✓ ${filePart.filename} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tBg}`);
-                    } catch (bgErr) {
-                      console.error(`[knowledge:async] ✗ ${filePart.filename}:`, bgErr.message);
-                      ingestTracker.updateJob(jobId, { status: 'failed', error: bgErr.message });
-                    }
-                  })();
-                  return;
-                }
-
-                const tPhase1 = Date.now();
-                try {
-                  const result = await documentFirstIngestion.ingestKnowledgeDocument({
-                    userId, orgId,
-                    filename: filePart.filename,
-                    fileBuffer: filePart.data,
-                    contentType: filePart.contentType || `text/${ext}`,
-                    metadata: {
-                      tags: userTags,
-                      project: containerTag,
-                      project_id: projectIds[0] || null,
-                      project_ids: projectIds,
-                      primary_team_id: primaryTeamId,
-                      visibility: targetScope === 'organization' ? 'organization' : 'private',
-                      scope: (targetScope === 'organization' && projectIds.length === 0 && !primaryTeamId) ? 'organization' : undefined,
-                      smart: smartFlag,
-                      picture_descriptions: pictureDescFlag,
-                    }
-                  });
-                  console.log(`[knowledge] ✓ Phase1 complete: file=${filePart.filename} docId=${result.documentId} segments=${result.segmentCount} promoted=${result.promotedCount} ms=${Date.now() - tPhase1}`);
-                  // Record actual page usage. Use segmentCount as a page-proxy
-                  // when real pages unknown (txt/csv/etc).
-                  if (planEnforcer && orgId) {
-                    const realPages = result.pages || result.segmentCount || 1;
-                    planEnforcer.recordUsage(orgId, 'kbPages', realPages);
-                    planEnforcer.recordUsage(orgId, 'uploads', 1);
-                  }
-                  // ─── Enterprise schema extraction (auto|true) ───
-                  let enterprise = null;
-                  if (enterpriseFlag !== 'false') {
-                    try {
-                      const [{ detectDocumentType }, { extractSchema }] = await Promise.all([
-                        import('./knowledge/enterprise/detector.js'),
-                        import('./knowledge/enterprise/extractor.js'),
-                      ]);
-                      // Pull representative text from segments
-                      const segText = (await prisma.knowledgeSegment.findMany({
-                        where: { documentId: result.documentId },
-                        orderBy: { segmentIndex: 'asc' },
-                        take: 4,
-                        select: { content: true },
-                      })).map(s => s.content).join('\n\n');
-                      const detection = confirmedType
-                        ? { type: confirmedType, confidence: 1.0, reasoning: 'caller-confirmed' }
-                        : await detectDocumentType(segText, { filename: filePart.filename });
-                      const shouldExtract = enterpriseFlag === 'true'
-                        || (enterpriseFlag === 'auto' && detection.type !== 'general' && (detection.confidence ?? 0) >= 0.7);
-                      if (shouldExtract) {
-                        const extracted = await extractSchema(segText, detection.type, {
-                          filename: filePart.filename,
-                        });
-                        enterprise = {
-                          detected_type: detection.type,
-                          confidence: detection.confidence,
-                          reasoning: detection.reasoning,
-                          schema_fields: extracted,
-                        };
-                        console.log(`[knowledge] enterprise extract type=${detection.type} conf=${detection.confidence.toFixed(2)} fields=${Object.keys(extracted || {}).length}`);
-                      } else {
-                        enterprise = {
-                          detected_type: detection.type,
-                          confidence: detection.confidence,
-                          extracted: false,
-                          reason: 'confidence below 0.7 — pass enterprise=true to force',
-                        };
-                      }
-                    } catch (entErr) {
-                      console.warn(`[knowledge] enterprise extract failed (non-fatal): ${entErr.message}`);
-                    }
-                  }
-                  return jsonResponse(res, {
-                    upload_id: crypto.randomUUID(),
-                    filename: filePart.filename,
-                    mode: 'document_first',
-                    documentId: result.documentId,
-                    segmentCount: result.segmentCount,
-                    candidateCount: result.candidateCount,
-                    promotedCount: result.promotedCount,
-                    promotedMemoryIds: result.promotedMemoryIds,
-                    ...(enterprise ? { enterprise } : {}),
-                  });
-                } catch (phase1Err) {
-                  console.error('[knowledge] ✗ Phase1 failed, falling back to legacy:', phase1Err.message, phase1Err.stack);
-                  // Fall through to legacy path
-                }
-              } else {
-                console.log(`[knowledge] Phase 1 disabled (ENABLE_DOCUMENT_FIRST_INGEST=${process.env.ENABLE_DOCUMENT_FIRST_INGEST}), using legacy path`);
-              }
-
-              const { processDocument } = await import('./knowledge/document-chunker.js');
-              const { summary, chunks } = await processDocument(
-                filePart.data,
-                filePart.contentType || `text/${ext}`,
-                filePart.filename,
-                {
-                  user_id: userId,
-                  org_id: orgId,
-                  project: containerTag,
-                  tags: userTags,
-                  visibility: targetScope === 'organization' ? 'organization' : 'private',
-                }
-              );
-
-              // Ingest summary + chunks in background, return immediately
-              const uploadId = crypto.randomUUID();
-
-              // ── Optimization 1: Document-level fingerprint dedup ──
-              // Compute SHA256 of file bytes. If any existing memory for this user
-              // carries this doc-hash tag, skip ingestion entirely. Avoids running
-              // smart ingest for re-uploaded identical files.
-              const docHash = crypto.createHash('sha256').update(filePart.data).digest('hex').slice(0, 16);
-              const docHashTag = `doc-hash:${docHash}`;
-              try {
-                const existing = await prisma.memory.findFirst({
-                  where: {
-                    userId,
-                    deletedAt: null,
-                    tags: { has: docHashTag },
-                  },
-                  select: { id: true, title: true, createdAt: true },
-                });
-                if (existing) {
-                  console.log(`[knowledge] Upload id=${uploadId} file=${filePart.filename} DEDUPED via ${docHashTag} → existing ${existing.id}`);
-                  return jsonResponse(res, {
-                    upload_id: uploadId,
-                    filename: filePart.filename,
-                    chunks: 0,
-                    deduped: true,
-                    existing_memory_id: existing.id,
-                    message: 'Identical document already ingested. Skipping re-processing.',
-                  });
-                }
-              } catch (dedupErr) {
-                console.warn(`[knowledge] doc-hash dedup check failed (non-fatal):`, dedupErr.message);
-              }
-
-              // Tag every memory we create with the doc-hash so future re-uploads dedupe.
-              const taggedSummary = { ...summary, tags: [...(summary.tags || []), docHashTag] };
-              const taggedChunks = chunks.map(c => ({ ...c, tags: [...(c.tags || []), docHashTag] }));
-
-              console.log(`[knowledge] Upload id=${uploadId} file=${filePart.filename} chunks=${chunks.length} docHash=${docHash}`);
-
-              // Start background ingestion — smart ingest preserved + optimized.
-              (async () => {
-                let ingested = 0;
-                let failed = 0;
-                const collectionName = 'HIVEMIND_PERSONAL';
-
-                // ── Optimization 2: Pre-embed all chunks IN PARALLEL before
-                //   acquiring per-user advisory lock. Embedding is the slow part
-                //   (200ms/chunk via Mistral). Doing it in parallel before
-                //   smart-ingest critical section means the lock holds for
-                //   conflict-detect + relationship work only — not embedding.
-                const preEmbed = async (text) => {
-                  if (!qdrantClient || !text) return null;
-                  try {
-                    return await qdrantClient.generateEmbedding(String(text).slice(0, 8000));
-                  } catch (embedErr) {
-                    console.warn(`[knowledge] Pre-embed failed (non-fatal):`, embedErr.message);
-                    return null;
-                  }
-                };
-
-                const allPayloads = [
-                  { ...taggedSummary, skip_fact_extraction: true },
-                  ...taggedChunks,
-                ];
-
-                console.log(`[knowledge] Upload ${uploadId} pre-embedding ${allPayloads.length} chunks in parallel...`);
-                const t0 = Date.now();
-                const vectors = await Promise.all(
-                  allPayloads.map(p => preEmbed(p.content))
-                );
-                console.log(`[knowledge] Upload ${uploadId} pre-embed done in ${Date.now() - t0}ms`);
-
-                // ── Optimization 3: Batch Qdrant upserts. Collect every memory
-                //   created during smart ingest, then upsert in one bulk call
-                //   instead of N round-trips.
-                const qdrantBatch = [];
-
-                const ingestOne = async (payload, precomputedVector) => {
-                  // Pass cached vector via `precomputedQueryVector` so graph-engine
-                  // can use it for Qdrant dedup search inside the lock without
-                  // re-embedding. Falls back to live embedding if missing.
-                  const basePayload = precomputedVector
-                    ? { ...payload, precomputedQueryVector: precomputedVector }
-                    : payload;
-                  const [enriched] = await buildRoutedIngestPayloads(basePayload, { smartIngestRouter });
-                  const result = await persistentMemoryEngine.ingestMemory(enriched);
-
-                  // Collect memories for batch Qdrant upsert (not per-chunk write)
-                  if (result?.memoryId && qdrantClient) {
-                    const memory = await persistentMemoryStore.getMemory(result.memoryId);
-                    if (memory) {
-                      qdrantBatch.push({ memory, vector: precomputedVector || null });
-                    }
-                  }
-                  if (result?.factMemoryIds?.length > 0 && qdrantClient) {
-                    for (const factId of result.factMemoryIds) {
-                      const factMem = await persistentMemoryStore.getMemory(factId);
-                      if (factMem) qdrantBatch.push({ memory: factMem, vector: null });
-                    }
-                  }
-                };
-
-                try {
-                  // Summary first (no-process), then chunks in order.
-                  for (let i = 0; i < allPayloads.length; i++) {
-                    try {
-                      await ingestOne(allPayloads[i], vectors[i]);
-                      ingested++;
-                    } catch (chunkErr) {
-                      console.warn(`[knowledge] Chunk ${i} failed:`, chunkErr.message);
-                      failed++;
-                    }
-                  }
-
-                  // Bulk Qdrant upsert — single network roundtrip per batch
-                  if (qdrantBatch.length > 0 && qdrantClient) {
-                    try {
-                      const batchT0 = Date.now();
-                      await Promise.all(qdrantBatch.map(({ memory, vector }) =>
-                        qdrantClient.storeMemory(memory, { collectionName, vector })
-                          .catch(err => console.warn(`[knowledge] Qdrant store ${memory.id} failed:`, err.message))
-                      ));
-                      console.log(`[knowledge] Upload ${uploadId} Qdrant batch (${qdrantBatch.length}) in ${Date.now() - batchT0}ms`);
-                    } catch (batchErr) {
-                      console.warn(`[knowledge] Qdrant batch failed:`, batchErr.message);
-                    }
-                  }
-
-                  console.log(`[knowledge] Upload ${uploadId} complete: ingested=${ingested}, failed=${failed}, qdrant=${collectionName}`);
-                } catch (err) {
-                  console.error(`[knowledge] Upload ${uploadId} failed:`, err.message);
-                }
-              })();
-
-              return jsonResponse(res, {
-                upload_id: uploadId,
-                filename: filePart.filename,
-                size_bytes: filePart.data.length,
-                chunks: chunks.length + 1, // +1 for summary
-                status: 'processing',
-                message: `Document "${filePart.filename}" uploaded. ${chunks.length} chunks + 1 summary being ingested.`,
-              });
-            } catch (err) {
-              console.error('[knowledge] Upload failed:', err.message);
-              return jsonResponse(res, { error: err.message }, 500);
-            }
+            return handleKnowledgeUploadRoute({
+              req,
+              res,
+              url,
+              userId,
+              orgId,
+              prisma,
+              persistentMemoryEngine,
+              documentFirstIngestion,
+              planEnforcer,
+              planLimitBody,
+              readBoundedBuffer,
+              MULTIPART_MAX_BYTES,
+              parseMultipart,
+              normalizeScopeIds,
+              buildAccessContext,
+              jsonResponse,
+              knowledgeUploadService,
+            });
           }
           break;
 
@@ -14785,7 +17227,6 @@ exit \$RC
           if (req.method === 'POST') {
             // Web search open to all authenticated users (entitlement gate removed — all keys get access)
             try {
-              try { planEnforcer?.recordUsage(orgId, 'webIntel', 1); } catch { /* meter */ }
               // Rate limit check
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
@@ -14796,22 +17237,16 @@ exit \$RC
               if (planEnforcer && orgId) {
                 const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
                 if (!webIntelCheck.allowed) {
-                  return jsonResponse(res, {
-                    error: 'Plan limit exceeded',
-                    message: webIntelCheck.reason,
-                    limit: webIntelCheck.limit,
-                    current: webIntelCheck.current,
-                    plan: webIntelCheck.plan
-                  }, 403);
+                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), webIntelCheck.status || 402);
                 }
               }
 
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily search quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
               }
               // Monthly limit check
-              const limits = await webJobStore.checkLimits(userId);
+              const limits = await webJobStore.checkLimits({ userId, orgId });
               if (limits.monthly.search.exceeded) {
                 return jsonResponse(res, { error: 'Monthly search quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.search.hard, used: limits.monthly.search.used }, 429);
               }
@@ -14852,10 +17287,7 @@ exit \$RC
                     duration_ms: result.duration_ms,
                   });
 
-                  // Record web intel usage
-                  if (planEnforcer && orgId) {
-                    planEnforcer.recordUsage(orgId, 'webIntel', 1);
-                  }
+                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
                   console.error(`[web-search] job ${job.id} failed:`, err.message);
@@ -14875,19 +17307,20 @@ exit \$RC
         case '/api/web/research/jobs':
           if (req.method === 'POST') {
             try {
-              try { planEnforcer?.recordUsage(orgId, 'deepResearch', 1); } catch { /* meter */ }
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
                 return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
               }
               if (planEnforcer && orgId) {
-                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
-                if (!webIntelCheck.allowed) {
-                  return jsonResponse(res, { error: 'Plan limit exceeded', message: webIntelCheck.reason, limit: webIntelCheck.limit, current: webIntelCheck.current, plan: webIntelCheck.plan }, 403);
+                // Deep research has its OWN monthly budget (deepResearchPerMonth) — was wrongly checking
+                // 'webIntel', so the per-month cap never fired. Check the right type.
+                const drCheck = await planEnforcer.checkLimit(orgId, 'deepResearch', 1);
+                if (!drCheck.allowed) {
+                  return jsonResponse(res, planLimitBody(drCheck, 'deepResearch'), drCheck.status || 402);
                 }
               }
               // Reuse the search quota (research counts as a heavier search).
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               if (usage.web_search_requests >= WEB_SEARCH_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily research quota exceeded', code: 'quota_exceeded', limit: WEB_SEARCH_DAILY_LIMIT, used: usage.web_search_requests }, 429);
               }
@@ -14940,9 +17373,11 @@ exit \$RC
                     });
                   };
 
-                  const watchdog = setTimeout(() => {
-                    throw new Error('Research stream timeout — 8min cap reached');
-                  }, STREAM_TIMEOUT_MS);
+                  // Never throw from a timer callback: that escapes this job's
+                  // error boundary and can terminate the entire Core process.
+                  // The stream is checked at each provider event instead.
+                  let timedOut = false;
+                  const watchdog = setTimeout(() => { timedOut = true; }, STREAM_TIMEOUT_MS);
 
                   try {
                     for await (const evt of tv.researchStream({
@@ -14950,6 +17385,7 @@ exit \$RC
                       model,
                       citationFormat: citation_format,
                     })) {
+                      if (timedOut) throw new Error('Research stream timeout — 8min cap reached');
                       if (evt?.kind === 'done') break;
                       const delta = evt?.choices?.[0]?.delta;
                       if (!delta) continue;
@@ -15029,9 +17465,7 @@ exit \$RC
                     }],
                   });
 
-                  if (planEnforcer && orgId) {
-                    planEnforcer.recordUsage(orgId, 'webIntel', 1);
-                  }
+                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'deepResearch' });
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
                   console.error(`[web-research] job ${job.id} failed:`, err.message);
@@ -15045,11 +17479,129 @@ exit \$RC
           }
           break;
 
+        case '/api/seo/search-console/status':
+          if (req.method === 'GET') {
+            try {
+              const service = new SeoSearchConsoleService({ prisma });
+              return jsonResponse(res, await service.status({ orgId, userId }));
+            } catch (error) {
+              return jsonResponse(res, { error: error.code || 'search_console_status_failed', message: error.message }, error.status || 500);
+            }
+          }
+          break;
+
+        case '/api/seo/search-console/properties':
+          if (req.method === 'GET') {
+            try {
+              const service = new SeoSearchConsoleService({ prisma });
+              return jsonResponse(res, await service.listProperties({ userId }));
+            } catch (error) {
+              return jsonResponse(res, { error: error.code || 'search_console_properties_failed', message: error.message }, error.status || 500);
+            }
+          }
+          break;
+
+        case '/api/seo/search-console/property':
+          if (req.method === 'POST') {
+            try {
+              if (!body.site_url) return jsonResponse(res, { error: 'site_url_required' }, 400);
+              const service = new SeoSearchConsoleService({ prisma });
+              const property = await service.selectProperty({ orgId, userId, siteUrl: String(body.site_url) });
+              return jsonResponse(res, { selected: true, property: {
+                site_url: property.siteUrl, permission_level: property.permissionLevel, selected_at: property.selectedAt,
+              } });
+            } catch (error) {
+              return jsonResponse(res, { error: error.code || 'search_console_property_failed', message: error.message }, error.status || 500);
+            }
+          }
+          break;
+
+        case '/api/seo/search-console/collect':
+          if (req.method === 'POST') {
+            try {
+              const service = new SeoSearchConsoleService({ prisma });
+              const evidence = await service.collect({ orgId, userId });
+              return jsonResponse(res, { evidence });
+            } catch (error) {
+              return jsonResponse(res, { error: error.code || 'search_console_collection_failed', message: error.message }, error.status || 500);
+            }
+          }
+          break;
+
+        case '/api/web/seo-audit/jobs':
+          if (req.method === 'POST') {
+            try {
+              const rlCheck = webRateLimiter.check(userId);
+              if (!rlCheck.allowed) {
+                return jsonResponse(res, { error: 'Rate limit exceeded', code: 'rate_limited', retry_after_ms: rlCheck.retryAfterMs }, 429);
+              }
+              if (planEnforcer && orgId) {
+                const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
+                if (!webIntelCheck.allowed) {
+                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), webIntelCheck.status || 402);
+                }
+              }
+              const seedUrl = normalizeWebUrl(body.url);
+              if (!seedUrl) return jsonResponse(res, { error: 'A valid public website URL is required' }, 400);
+              const domainCheck = validateDomain(seedUrl);
+              if (!domainCheck.allowed) {
+                return jsonResponse(res, { error: 'URL blocked by policy', code: 'domain_blocked', reason: domainCheck.reason }, 403);
+              }
+              const usage = await webJobStore.getUsage({ userId, orgId });
+              if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
+                return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
+              }
+              const requestedLimit = Number(body.page_limit ?? 25);
+              const pageLimit = Math.min(
+                Math.max(Number.isFinite(requestedLimit) ? requestedLimit : 25, 1),
+                50,
+                WEB_CRAWL_DAILY_LIMIT - usage.web_crawl_pages,
+              );
+              const requestedDepth = Number(body.depth ?? 2);
+              const depth = Math.min(Math.max(Number.isFinite(requestedDepth) ? requestedDepth : 2, 0), 3);
+              webRateLimiter.record(userId);
+              const job = await webJobStore.create({
+                type: 'seo_audit', params: { url: seedUrl, urls: [seedUrl], depth, pageLimit }, userId, orgId,
+              });
+              setImmediate(async () => {
+                const started = Date.now();
+                try {
+                  await webJobStore.update(job.id, { status: 'running' });
+                  const execution = await runSeoSiteIntelligence({
+                    seedUrl, depth, pageLimit, browserRuntime, userId, orgId,
+                    searchConsoleService: new SeoSearchConsoleService({ prisma }),
+                    onStage: async (stage) => webJobStore.update(job.id, {
+                      capability: `${SEO_SITE_INTELLIGENCE.id}@${SEO_SITE_INTELLIGENCE.version}`,
+                      capability_stage: stage,
+                    }),
+                  });
+                  const audit = execution.audit;
+                  await webJobStore.update(job.id, {
+                    status: audit.coverage.pages_scanned > 0 ? 'succeeded' : 'failed',
+                    error: audit.coverage.pages_scanned > 0 ? null : (audit.crawl_errors[0]?.message || 'seo_audit_failed'),
+                    results: [audit],
+                    runtime_used: execution.runtime_used,
+                    fallback_applied: execution.fallback_applied,
+                    duration_ms: Date.now() - started,
+                    pages_processed: audit.coverage.pages_scanned,
+                  });
+                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
+                } catch (err) {
+                  await webJobStore.update(job.id, { status: 'failed', error: err.message });
+                  console.error(`[seo-audit] job ${job.id} failed:`, err.message);
+                }
+              });
+              return jsonResponse(res, { job_id: job.id, status: 'queued', type: 'seo_audit' }, 202);
+            } catch (error) {
+              return jsonResponse(res, { error: error.message }, 500);
+            }
+          }
+          break;
+
         case '/api/web/crawl/jobs':
           if (req.method === 'POST') {
             // Web crawl open to all authenticated users (entitlement gate removed — all keys get access)
             try {
-              try { planEnforcer?.recordUsage(orgId, 'webIntel', 1); } catch { /* meter */ }
               // Rate limit check
               const rlCheck = webRateLimiter.check(userId);
               if (!rlCheck.allowed) {
@@ -15060,22 +17612,16 @@ exit \$RC
               if (planEnforcer && orgId) {
                 const webIntelCheck = await planEnforcer.checkLimit(orgId, 'webIntel', 1);
                 if (!webIntelCheck.allowed) {
-                  return jsonResponse(res, {
-                    error: 'Plan limit exceeded',
-                    message: webIntelCheck.reason,
-                    limit: webIntelCheck.limit,
-                    current: webIntelCheck.current,
-                    plan: webIntelCheck.plan
-                  }, 403);
+                  return jsonResponse(res, planLimitBody(webIntelCheck, 'webIntel'), webIntelCheck.status || 402);
                 }
               }
 
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               if (usage.web_crawl_pages >= WEB_CRAWL_DAILY_LIMIT) {
                 return jsonResponse(res, { error: 'Daily crawl quota exceeded', code: 'quota_exceeded', limit: WEB_CRAWL_DAILY_LIMIT, used: usage.web_crawl_pages }, 429);
               }
               // Monthly limit check
-              const limits = await webJobStore.checkLimits(userId);
+              const limits = await webJobStore.checkLimits({ userId, orgId });
               if (limits.monthly.crawl.exceeded) {
                 return jsonResponse(res, { error: 'Monthly crawl quota exceeded', code: 'monthly_quota_exceeded', limit: limits.monthly.crawl.hard, used: limits.monthly.crawl.used }, 429);
               }
@@ -15134,6 +17680,7 @@ exit \$RC
                     duration_ms: result.duration_ms,
                     pages_processed: pagesProcessed,
                   });
+                  await settleWebIntelUsage({ orgId, userId, jobId: job.id, planMetric: 'webIntel' });
                 } catch (err) {
                   await webJobStore.update(job.id, { status: 'failed', error: err.message });
                   console.error(`[web-crawl] job ${job.id} failed:`, err.message);
@@ -15162,7 +17709,7 @@ exit \$RC
         case '/api/web/usage':
           if (req.method === 'GET') {
             try {
-              const usage = await webJobStore.getUsage(userId);
+              const usage = await webJobStore.getUsage({ userId, orgId });
               const now = new Date();
               const resetAt = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
               return jsonResponse(res, {
@@ -15207,19 +17754,25 @@ exit \$RC
                   const p = newJob.params;
                   const result = newJob.type === 'search'
                     ? await browserRuntime.search({ query: p.query, domains: p.domains || [], limit: p.limit || 10 })
+                    : newJob.type === 'seo_audit'
+                      ? await runSeoSiteIntelligence({ seedUrl: p.url || p.urls?.[0], depth: p.depth || 2, pageLimit: p.pageLimit || 25, browserRuntime, userId, orgId, searchConsoleService: new SeoSearchConsoleService({ prisma }) })
                     : await browserRuntime.crawl({ urls: p.urls, depth: p.depth || 1, pageLimit: p.pageLimit || 50, include: p.include, exclude: p.exclude });
-                  const items = newJob.type === 'search' ? result.results : result.pages;
+                  const items = newJob.type === 'search'
+                    ? result.results
+                    : newJob.type === 'seo_audit'
+                      ? [result.audit]
+                      : result.pages;
                   const count = Array.isArray(items) ? items.length : 0;
-                  const errors = Array.isArray(result.errors) ? result.errors : [];
-                  if (count === 0 && errors.length > 0) {
+                  const errors = newJob.type === 'seo_audit'
+                    ? (result.audit?.crawl_errors || []).map((item) => ({ error: item.message }))
+                    : Array.isArray(result.errors) ? result.errors : [];
+                  const seoHasPages = newJob.type !== 'seo_audit' || (items[0]?.coverage?.pages_scanned || 0) > 0;
+                  if (!seoHasPages || (count === 0 && errors.length > 0)) {
                     await webJobStore.update(newJob.id, { status: 'failed', error: errors[0]?.error || `${newJob.type}_failed`, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: 0, results: [] });
                   } else {
-                    await webJobStore.update(newJob.id, { status: 'succeeded', results: items, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: newJob.type === 'crawl' ? count : undefined });
+                    await webJobStore.update(newJob.id, { status: 'succeeded', results: items, runtime_used: result.runtime_used, fallback_applied: result.fallback_applied, duration_ms: result.duration_ms, pages_processed: newJob.type === 'seo_audit' ? (items[0]?.coverage?.pages_scanned || 0) : newJob.type === 'crawl' ? count : undefined });
 
-                    // Record web intel usage
-                    if (planEnforcer && orgId) {
-                      planEnforcer.recordUsage(orgId, 'webIntel', 1);
-                    }
+                    await settleWebIntelUsage({ orgId, userId, jobId: newJob.id, planMetric: newJob.type === 'research' ? 'deepResearch' : 'webIntel' });
                   }
                 } catch (err) {
                   await webJobStore.update(newJob.id, { status: 'failed', error: err.message });
@@ -15274,8 +17827,7 @@ exit \$RC
                     crawled_at: job.created_at
                   }
                 };
-                const [routedWeb] = await buildRoutedIngestPayloads(webPayload, { smartIngestRouter });
-                const ingestResult = await persistentMemoryEngine.ingestMemory(routedWeb);
+                const ingestResult = await ingestCanonicalPayload(webPayload, { sourceType: 'connector', provider: 'web_intelligence' });
                 if (ingestResult?.memoryId) {
                   savedIds.push(ingestResult.memoryId);
                 }
@@ -15310,7 +17862,7 @@ exit \$RC
         case '/api/web/usage/monthly':
           if (req.method === 'GET') {
             try {
-              const monthly = await webJobStore.getMonthlyUsage(userId);
+              const monthly = await webJobStore.getMonthlyUsage({ userId, orgId });
               return jsonResponse(res, monthly);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
@@ -15336,7 +17888,7 @@ exit \$RC
         case '/api/web/limits':
           if (req.method === 'GET') {
             try {
-              const limits = await webJobStore.checkLimits(userId);
+              const limits = await webJobStore.checkLimits({ userId, orgId });
               return jsonResponse(res, limits);
             } catch (error) {
               return jsonResponse(res, { error: error.message }, 500);
@@ -15496,7 +18048,7 @@ exit \$RC
             if (!adminOk && !principal.master) {
               return jsonResponse(res, { error: 'admin/owner role required' }, 403);
             }
-            const result = await profileDreamer.dreamProfilesForOrg(orgId, { apply: body?.apply === true, force: body?.force === true });
+            const result = await profileDreamer.dreamProfilesForOrg(orgId, { apply: body?.apply === true });
             return jsonResponse(res, result);
           } catch (err) {
             console.error('[profiles/dream] failed:', err.message);
@@ -16002,8 +18554,7 @@ exit \$RC
                   source_url: validation.data.source_url || null
                 }
               };
-              const [routedWebappPayload] = await buildRoutedIngestPayloads(webappPayload, { smartIngestRouter });
-              const result = await persistentMemoryEngine.ingestMemory(routedWebappPayload);
+              const result = await ingestCanonicalPayload(webappPayload, { sourceType: 'api', mode: 'atomic' });
               const memory = await persistentMemoryStore.getMemory(result.memoryId);
               if (memory) {
                 await qdrantClient.storeMemory(memory, {
@@ -16045,56 +18596,200 @@ exit \$RC
           break;
 
         case '/api/memories/delete-all':
-          if (req.method === 'DELETE') {
+          // Accept POST as well as DELETE: the "clear all" action is a full-org
+          // erase (memories AND evidence segments AND documents), and clients that
+          // POST to it must get the same evidence-clearing purge, not a no-op. For
+          // .amr this routes to amrPurge → /v1/purge (memories + knowledge_segments
+          // + documents + Qdrant collection). Scoped to clear-all only — prune and
+          // per-item deletes are unaffected.
+          if (req.method === 'DELETE' || req.method === 'POST') {
+            // Clear only data owned by this authenticated workspace identity.
+            // Audit entries deliberately survive as immutable compliance history.
+            // A remote agent is an org-level data plane, so its complete purge is
+            // restricted to organization owners/admins and never removes the agent.
+            if (orgIsRemote(orgId)) {
+              try {
+                const membership = await prisma.userOrganization.findUnique({
+                  where: { userId_orgId: { userId, orgId } }, select: { role: true },
+                });
+                const canPurgeBox = principal?.master || principal?.scopes?.includes('admin')
+                  || membership?.role === 'owner' || membership?.role === 'admin';
+                if (!canPurgeBox) {
+                  return jsonResponse(res, { error: 'Only an organization owner or admin can clear a self-hosted workspace.' }, 403);
+                }
+                const out = await amrPurge(orgId);
+                if (!out) return jsonResponse(res, { error: 'Delete all failed', message: 'agent unreachable' }, 502);
+                invalidateAggregateCache({ userId, orgId, project: null });
+                return jsonResponse(res, { success: true, deleted: out.shard_deleted || out.deleted || 0, remaining: 0, data_plane: 'self_hosted' });
+              } catch (error) {
+                return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
+              }
+            }
             if (!ensurePersistedMemoryOrFail(res, '/api/memories/delete-all')) return;
             try {
               const project = url.searchParams.get('project') || body.project || null;
-              // SECURITY: include orgId so a user in multiple orgs cannot
-              // wipe memories from another org with a key scoped to org A.
-              const memoryWhere = { userId, ...(orgId ? { orgId } : {}), ...(project ? { project } : {}) };
+              const allUsers = url.searchParams.get('all_users') === 'true' || body.all_users === true;
+              if (allUsers && !principal?.master) {
+                return jsonResponse(res, { error: 'all_users=true requires the internal master key' }, 403);
+              }
+              if (allUsers && !orgId) {
+                return jsonResponse(res, { error: 'organization scope is required' }, 400);
+              }
+              // Re-onboarding replaces the company for the whole tenant. The
+              // control plane uses the master-only all_users mode so memories
+              // written by other organization members cannot leak into the new
+              // company context. Normal callers remain scoped to themselves.
+              const ownerWhere = allUsers ? { orgId } : { userId, ...(orgId ? { orgId } : {}) };
+              const memoryWhere = { ...ownerWhere, ...(project ? { project } : {}) };
+              const [allMemories, documents] = await Promise.all([
+                prisma.memory.findMany({ where: memoryWhere, select: { id: true } }),
+                // A project-only cleanup is used by benchmark tooling. Documents
+                // are not project-addressable, so only the Settings full clear
+                // removes source evidence.
+                project ? Promise.resolve([]) : prisma.knowledgeDocument.findMany({
+                  where: ownerWhere, select: { id: true, sourceArtifactId: true },
+                }),
+              ]);
+              const memoryIds = allMemories.map((m) => m.id);
+              const documentIds = documents.map((d) => d.id);
+              const segments = documentIds.length
+                ? await prisma.knowledgeSegment.findMany({ where: { documentId: { in: documentIds }, ...ownerWhere }, select: { id: true } })
+                : [];
+              const segmentIds = segments.map((s) => s.id);
 
-              // Get all IDs first
-              const allMemories = await prisma.memory.findMany({ where: memoryWhere, select: { id: true } });
-              const ids = allMemories.map(m => m.id);
-
-              if (ids.length > 0) {
-                // Bulk Prisma: delete related tables then memories (4 queries total)
-                await prisma.auditLog.updateMany({
-                  where: { resourceId: { in: ids } },
-                  data: { resourceId: null },
+              const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
+              const qdrantKey = process.env.QDRANT_API_KEY || '';
+              const deletePoints = async (collection, points) => {
+                if (!qdrantUrl || points.length === 0) return;
+                const response = await fetch(`${qdrantUrl}/collections/${encodeURIComponent(collection)}/points/delete?wait=true`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                  body: JSON.stringify({ points }),
                 });
-                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: ids } } });
-                await prisma.memoryVersion.updateMany({
-                  where: { relatedMemoryId: { in: ids } },
-                  data: { relatedMemoryId: null },
-                });
-                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } });
-                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } });
-                await prisma.memory.deleteMany({ where: { id: { in: ids } } });
-
-                // Bulk Qdrant: delete all points by user_id filter (1 API call)
-                try {
-                  const qdrantUrl = process.env.QDRANT_URL || process.env.QDRANT_CLOUD_URL;
-                  const qdrantCollection = (process.env.QDRANT_PER_TENANT === 'true' && orgId) ? `org_${orgId}` : 'HIVEMIND_PERSONAL';
-                  const qdrantKey = process.env.QDRANT_API_KEY || '';
-                  if (qdrantUrl) {
-                    const filter = { must: [{ key: 'user_id', match: { value: userId } }] };
-                    if (orgId) filter.must.push({ key: 'org_id', match: { value: orgId } });
-                    if (project) filter.must.push({ key: 'project', match: { value: project } });
-                    await fetch(`${qdrantUrl}/collections/${qdrantCollection}/points/delete`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
-                      body: JSON.stringify({ filter, wait: true }),
-                    });
+                // A legacy collection may not exist; other failures must be
+                // surfaced so this endpoint never falsely reports an erasure.
+                if (!response.ok && response.status !== 404) throw new Error(`Qdrant ${collection} delete failed (${response.status})`);
+              };
+              const collections = Array.from(new Set([
+                ...(process.env.QDRANT_PER_TENANT === 'true' && orgId ? [`org_${orgId}`] : []),
+                'HIVEMIND_PERSONAL',
+                process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence',
+              ]));
+              for (const collection of collections) {
+                await deletePoints(collection, memoryIds);
+                await deletePoints(collection, segmentIds);
+              }
+              // FULL CLEAR MUST LEAVE NOTHING STALE. Deleting by known ID only
+              // removes vectors whose Postgres row still existed to be listed. Any
+              // point orphaned earlier — by a partial delete, a crash mid-pipeline,
+              // or a previous clear that missed it — survives forever and then
+              // POISONS recall: vector search returns orphan ids, hydration against
+              // Postgres finds nothing, every result drops, and fresh memories get
+              // crowded out of top-K by the dead ones.
+              //
+              // Measured on 2026-08-02 after a Settings "Clear All Memories" on org
+              // 1380251c: Postgres held 8 memories and 0 segments while Qdrant still
+              // had 1180 points (148 evidence + 52 memory per 200 sampled). Recall
+              // reported persisted-hybrid — the lane was healthy — and returned 0
+              // hits for content that existed. It looked exactly like a broken
+              // retriever.
+              //
+              // So on a FULL clear (no project filter) sweep the whole tenant by
+              // FILTER, which is authoritative regardless of what Postgres knew.
+              // Project-scoped clears keep the id-only path: other projects' vectors
+              // must survive.
+              let orphansSwept = 0;
+              if (!project && qdrantUrl && orgId) {
+                for (const collection of collections) {
+                  try {
+                    const resp = await fetch(
+                      `${qdrantUrl}/collections/${encodeURIComponent(collection)}/points/delete?wait=true`,
+                      {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', ...(qdrantKey ? { 'api-key': qdrantKey } : {}) },
+                        // Per-tenant collections carry only this org, but filter on
+                        // org_id anyway so a shared collection can never lose
+                        // another tenant's rows.
+                        body: JSON.stringify({
+                          filter: { must: [{ key: 'org_id', match: { value: orgId } }] },
+                        }),
+                      },
+                    );
+                    if (resp.ok) orphansSwept += 1;
+                    else if (resp.status !== 404) {
+                      console.warn(`[delete-all] filter sweep ${collection} → ${resp.status}`);
+                    }
+                  } catch (e) {
+                    console.warn(`[delete-all] filter sweep ${collection} failed: ${e.message}`);
                   }
-                } catch (qdrantErr) {
-                  console.warn('[delete-all] Qdrant bulk delete failed:', qdrantErr.message);
                 }
+              }
+
+              if (memoryIds.length) {
+                const idArr = `ARRAY[${memoryIds.map((id) => `'${id}'`).join(',')}]::uuid[]`;
+                await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: memoryIds } } });
+                await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: memoryIds } }, data: { relatedMemoryId: null } });
+                await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } });
+                await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] } });
+                // The audit trail is append-only. There is no live FK in the
+                // production schema, so historical resource IDs remain intact.
+                for (const sql of [
+                  `DELETE FROM hivemind.memory_evidence_links WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_projects WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_derivations WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_vector_embeddings WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_entity_links WHERE memory_id = ANY(${idArr})`,
+                  `DELETE FROM hivemind.memory_outbox WHERE record_id = ANY(${idArr})`,
+                ]) {
+                  await prisma.$executeRawUnsafe(sql).catch((err) => {
+                    if (!/does not exist/i.test(err.message || '')) throw err;
+                  });
+                }
+                await prisma.memory.deleteMany({ where: { id: { in: memoryIds } } });
+              }
+
+              if (documentIds.length) {
+                await prisma.knowledgeDocument.deleteMany({ where: { id: { in: documentIds }, ...ownerWhere } });
+                // Artifacts hold the original raw payload. Remove only artifacts
+                // no longer referenced by any remaining document in this tenant.
+                await prisma.sourceArtifact.deleteMany({ where: { ...ownerWhere, documents: { none: {} } } });
               }
 
               invalidateAggregateCache({ userId, orgId, project: project || null });
               invalidateAggregateCache({ userId, orgId, project: null });
-              return jsonResponse(res, { success: true, deleted: ids.length, remaining: 0 });
+              // `remaining: 0` was hardcoded — asserted, never checked. On a full
+              // clear, verify it: count what actually survives in Postgres AND report
+              // the live Qdrant point count, so a clear can never claim an erasure it
+              // did not perform. This is the same behaviour-over-assertion rule the
+              // hard-delete honesty gate uses.
+              let verifiedRemaining = 0;
+              let vectorsRemaining = null;
+              if (!project) {
+                try {
+                  verifiedRemaining = await prisma.memory.count({ where: ownerWhere });
+                } catch { verifiedRemaining = 0; }
+                if (qdrantUrl && orgId && process.env.QDRANT_PER_TENANT === 'true') {
+                  try {
+                    const cr = await fetch(`${qdrantUrl}/collections/org_${orgId}`,
+                      { headers: qdrantKey ? { 'api-key': qdrantKey } : {} });
+                    if (cr.ok) vectorsRemaining = (await cr.json())?.result?.points_count ?? null;
+                  } catch { /* reporting only — never fail the clear on this */ }
+                }
+                if (verifiedRemaining > 0 || (vectorsRemaining ?? 0) > 0) {
+                  console.warn(`[delete-all] INCOMPLETE org=${orgId}: ${verifiedRemaining} memories and `
+                    + `${vectorsRemaining} vectors still present after clear`);
+                }
+              }
+              return jsonResponse(res, {
+                success: true,
+                organization_wide: allUsers,
+                deleted: memoryIds.length,
+                deleted_documents: documentIds.length,
+                deleted_segments: segmentIds.length,
+                remaining: verifiedRemaining,
+                vectors_remaining: vectorsRemaining,
+                collections_swept: orphansSwept,
+              });
             } catch (error) {
               return jsonResponse(res, { error: 'Delete all failed', message: error.message }, 500);
             }
@@ -16127,6 +18822,59 @@ exit \$RC
                 if (body.date_to) where.createdAt.lte = new Date(body.date_to);
               }
 
+              // REMOTE (.amr / byod): central `memories` holds ZERO rows for these orgs — their
+              // memories live in the AMR store — so the Prisma query below matched nothing and this
+              // endpoint reported "0 matched" while the user's memories sat untouched. A delete that
+              // silently deletes nothing is the worst shape this API can take, so route it.
+              //
+              // TAG SEMANTICS DIFFER and must be preserved: central uses `hasSome` (ANY of the tags)
+              // while the agent's list filter is `tags @> $n` (ALL of them). Matching ALL would delete
+              // a strict subset — quietly incomplete. So query once per tag and union by id, which
+              // reproduces hasSome exactly. listMemories() is already storage-aware, so this reuses
+              // the routed path instead of adding a second one.
+              if (orgIsRemote(orgId)) {
+                const seen = new Map();
+                for (const tag of requestedTags) {
+                  const { memories: rows } = await persistentMemoryStore.listMemories({
+                    user_id: userId, org_id: orgId, tags: [tag], limit: 5000, offset: 0,
+                  });
+                  for (const m of rows || []) if (m?.id && !seen.has(m.id)) seen.set(m.id, m);
+                }
+                const from = body.date_from ? new Date(body.date_from) : null;
+                const to = body.date_to ? new Date(body.date_to) : null;
+                const rows = [...seen.values()].filter((m) => {
+                  // The agent list has no created-at range filter, so apply it here rather than
+                  // ignoring the caller's date window (which would widen a DELETE).
+                  const t = new Date(m.created_at || m.createdAt || 0);
+                  if (from && !(t >= from)) return false;
+                  if (to && !(t <= to)) return false;
+                  if (project && m.project !== project) return false;
+                  return true;
+                });
+                if (dryRun) {
+                  return jsonResponse(res, {
+                    dry_run: true,
+                    storage_mode: 'amr',
+                    matched_count: rows.length,
+                    filter: { tags: requestedTags, date_from: body.date_from || null, date_to: body.date_to || null, project },
+                    sample: rows.slice(0, 10).map((m) => ({ id: m.id, title: m.title, tags: m.tags, created_at: m.created_at || m.createdAt })),
+                  });
+                }
+                let removed = 0;
+                const failed = [];
+                for (const m of rows) {
+                  try { if (await amrDelete(orgId, m.id, true)) removed += 1; else failed.push(m.id); }
+                  catch (e) { failed.push(m.id); console.warn(`[bulk-delete-by-tag] amr delete failed id=${m.id}: ${e.message}`); }
+                }
+                if (failed.length) {
+                  console.warn(`[bulk-delete-by-tag] org=${orgId} ${failed.length} of ${rows.length} deletes FAILED — reporting the real number`);
+                }
+                return jsonResponse(res, {
+                  dry_run: false, storage_mode: 'amr',
+                  matched_count: rows.length, deleted_count: removed, failed_count: failed.length,
+                });
+              }
+
               const matched = await prisma.memory.findMany({
                 where,
                 select: { id: true, title: true, tags: true, createdAt: true },
@@ -16152,7 +18900,8 @@ exit \$RC
                 for (let i = 0; i < ids.length; i += BATCH) {
                   const chunk = ids.slice(i, i + BATCH);
                   try {
-                    await prisma.auditLog.updateMany({ where: { resourceId: { in: chunk } }, data: { resourceId: null } });
+                    // Keep append-only audit rows unchanged; resource_id is
+                    // deliberately polymorphic and has no live FK in prod.
                     await prisma.sourceMetadata.deleteMany({ where: { memoryId: { in: chunk } } });
                     await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: chunk } }, data: { relatedMemoryId: null } });
                     await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: chunk } } });
@@ -16386,6 +19135,27 @@ exit \$RC
               const statsNoise = { NOT: { tags: { hasSome: statsHiddenTags } } };
               const memWhere = { orgId, deletedAt: null, isLatest: true, OR: tiers, ...statsNoise };
               const relMemScope = { orgId, deletedAt: null, OR: tiers, ...statsNoise };
+              // REMOTE: central memories/relationships hold nothing for .amr orgs, so these counts
+              // read 0 and the FE showed empty counters. The agent's /v1/stats counts its OWN
+              // memories + relationships tables — which only became populated for amr_embedded once
+              // the embedded agent started writing the SQL mirror.
+              // KNOWN DIFFERENCE, stated rather than hidden: the agent has no tag-exclusion filter,
+              // so the remote count does NOT subtract the noise tags central excludes
+              // (tara-*, governance, hyper-room, ...). Remote totals can therefore read slightly
+              // higher than the Memories page. Fixing that means teaching /v1/stats a tag filter.
+              if (orgIsRemote(orgId)) {
+                const rs = await amrStats(orgId, statsCtx?.orgRole === 'guest' ? { user_id: userId } : {});
+                if (rs) {
+                  return jsonResponse(res, {
+                    memories: rs.memories || 0,
+                    relations: rs.relationships || 0,
+                    scope: 'all',
+                    storage_mode: 'amr',
+                    noise_filtered: false,
+                  });
+                }
+                console.warn(`[memory/stats] amr stats unavailable for org ${orgId} — falling through to central (will read 0)`);
+              }
               const [memTotal, relTotal] = await Promise.all([
                 prisma.memory.count({ where: memWhere }),
                 prisma.relationship.count({ where: { OR: [{ fromMemory: relMemScope }, { toMemory: relMemScope }] } }),
@@ -16465,7 +19235,7 @@ exit \$RC
             // owner_only: restrict to the caller's OWN memories (KB "past docs"
             // must show only what THIS user uploaded, not every member's shared docs).
             const ownerOnlyQ = url.searchParams.get('owner_only') === 'true';
-            const { memories, total } = await persistentMemoryStore.listMemories({
+            const { memories, total: listTotal } = await persistentMemoryStore.listMemories({
               user_id: userId,
               org_id: orgId,
               project,
@@ -16481,6 +19251,22 @@ exit \$RC
               ...(ownerOnlyQ ? { owner_only: true } : {}),
               access_context: listAccessCtx,
             });
+
+            // UNIFORM total: the headline "N memories" must be the org-wide count regardless of backend.
+            // listMemories' own total is only the returned PAGE size for the agent (BYOD) backend — which
+            // showed "20" instead of the real org total. For the default (unfiltered) view, source the
+            // total from getOrgCounts — THE single seam that routes central-count vs agent-/v1/stats by org
+            // type (same source /api/profile uses). Filtered/narrowed views keep the list's own total so
+            // the count still reflects the active filter.
+            const _narrowed = (Array.isArray(parsedTags) && parsedTags.length > 0)
+              || filters.memory_type || project || project_id || ownerOnlyQ;
+            let total = (typeof listTotal === 'number') ? listTotal : memories.length;
+            if (!_narrowed) {
+              try {
+                const c = await getOrgCounts(prisma, orgId, userId);
+                if (c && typeof c.memories === 'number') total = c.memories;
+              } catch { /* keep page-based fallback */ }
+            }
 
             return jsonResponse(res, {
               memories,
@@ -16521,13 +19307,7 @@ exit \$RC
             if (planEnforcer && orgId) {
               const memoryLimitCheck = await planEnforcer.checkLimit(orgId, 'memories', 1);
               if (!memoryLimitCheck.allowed) {
-                return jsonResponse(res, {
-                  error: 'Plan limit exceeded',
-                  message: memoryLimitCheck.reason,
-                  limit: memoryLimitCheck.limit,
-                  current: memoryLimitCheck.current,
-                  plan: memoryLimitCheck.plan
-                }, 403);
+                return jsonResponse(res, planLimitBody(memoryLimitCheck, 'memories'), memoryLimitCheck.status || 402);
               }
             }
             
@@ -16572,7 +19352,6 @@ exit \$RC
                 scope: body.scope || undefined,
                 primary_team_id: body.primary_team_id || null,
                 project_ids: Array.isArray(body.project_ids) ? body.project_ids : [],
-                __bypass_membership: body.__bypass_membership === true ? true : undefined,
                 content: validation.data.content,
                 tags: validation.data.tags,
                 memory_type: validation.data.memory_type,
@@ -16631,7 +19410,14 @@ exit \$RC
                 // triple-operator detection) runs HERE, not before 202, so
                 // saves stay sub-second while still auto-building
                 // Update/Extend/Derive edges against existing memories.
-                (async () => {
+                // Wrapped in runWithOrg: this is a DETACHED async context (fire-and-forget after the
+                // 202), where enterWith from the request scope does not survive — re-establish the org
+                // context explicitly so the background writes route to the org's store (self-host → its PG).
+                runWithOrg(orgId, async () => {
+                  // Re-thread the request's API key into this detached context (the request-scope
+                  // enterWith didn't survive) so the deferred enrichment/entity-link LLM calls enqueued
+                  // below attribute their token spend to the originating org key, not the system sentinel.
+                  try { enterOrgContext(orgId, principal.keyId || null); } catch { /* best-effort */ }
                   await ingestAcquire();
                   // Deadlock-proof: release the slot exactly once, and force it
                   // free after INGEST_JOB_TIMEOUT_MS so a hung job (qdrant/pool/
@@ -16668,7 +19454,7 @@ exit \$RC
                         if (p.tree.parent) p.tree.parent.defer_entity_linking = true;
                         if (Array.isArray(p.tree.children)) p.tree.children.forEach((c) => { c.defer_entity_linking = true; });
                       }
-                      const result = await ingestRoutedPayload(p, persistentMemoryEngine);
+                      const result = await ingestRoutedPayloadCanonical(p, persistentMemoryEngine);
 
                       // Handle predict-calibrate skipped memories
                       if (result.operation === 'skipped_redundant') {
@@ -16690,6 +19476,7 @@ exit \$RC
                             content: p.parent?.content || p.content,
                             title: p.parent?.title || p.title,
                             tags: p.parent?.tags || p.tags,
+                            orgId,
                           });
                         }
                         // Deferred entity-link → global bounded queue (parent + children).
@@ -16731,14 +19518,15 @@ exit \$RC
                           content: p.content,
                           title: p.title,
                           tags: p.tags,
+                          orgId,
                         });
                       }
 
                       // Auto-extract profile facts from ingested content
                       if (profileStore && p.content) {
-                        profileStore.extractAndStore(p.content, {
+                        runWithOrg(orgId, () => profileStore.extractAndStore(p.content, {
                           userId, orgId, memoryId: result.memoryId,
-                        }).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
+                        })).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
                       }
 
                       // Embed fact-memories in Qdrant
@@ -16786,7 +19574,7 @@ exit \$RC
                     clearTimeout(_slotSafety);
                     _freeSlot();
                   }
-                })();
+                });
 
                 return;
               }
@@ -16800,7 +19588,7 @@ exit \$RC
               });
               const syncResults = [];
               for (const p of ingestPayloads) {
-                const result = await ingestRoutedPayload(p, persistentMemoryEngine);
+                const result = await ingestRoutedPayloadCanonical(p, persistentMemoryEngine);
 
                 // Handle predict-calibrate skipped memories
                 if (result.operation === 'skipped_redundant') {
@@ -16834,6 +19622,30 @@ exit \$RC
 
                 syncResults.push(result);
 
+                // P0 first-class provenance: populate the queryable columns from the ORIGINAL
+                // payload. The canonical ingest normalizer strips produced_by/turn from
+                // source_metadata before the create, so set them here (post-create) from the
+                // pre-normalization body.source_metadata. Guarded to hyperagents-agent saves +
+                // a strict uuid on produced_by_turn; best-effort (never breaks the save).
+                if (prisma && result.memoryId && body.source_metadata?.produced_by === 'hyperagents-agent') {
+                  try {
+                    const _sm = body.source_metadata;
+                    const _turn = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+                      .test(String(_sm.source_session_id || '')) ? _sm.source_session_id : null;
+                    await prisma.memory.update({
+                      where: { id: result.memoryId },
+                      data: {
+                        producedByTurn: _turn,
+                        producedByAgent: _sm.produced_by,
+                        actionable: typeof _sm.actionable === 'boolean' ? _sm.actionable : null,
+                        provenance: _sm,
+                      },
+                    });
+                  } catch (provErr) {
+                    console.warn('[p0-provenance] column update failed:', provErr.message);
+                  }
+                }
+
                 const memory = await persistentMemoryStore.getMemory(result.memoryId);
                 if (memory) {
                   await qdrantClient.storeMemory(memory, {
@@ -16850,9 +19662,9 @@ exit \$RC
 
                 // Auto-extract profile facts from ingested content
                 if (profileStore && p.content) {
-                  profileStore.extractAndStore(p.content, {
+                  runWithOrg(orgId, () => profileStore.extractAndStore(p.content, {
                     userId, orgId, memoryId: result.memoryId,
-                  }).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
+                  })).catch(err => console.warn('[profile-extract] Auto-extraction failed:', err.message));
                 }
 
                 // Embed fact-memories in Qdrant (they only exist in Prisma after graph-engine creates them)
@@ -17053,8 +19865,9 @@ exit \$RC
                               original_query: validation.data.query,
                             },
                           };
-                          const [routedLive] = await buildRoutedIngestPayloads(livePayload, { smartIngestRouter });
-                          await persistentMemoryEngine.ingestMemory(routedLive);
+                          await ingestCanonicalPayload(livePayload, {
+                            sourceType: 'connector', provider: item._source || 'live_query', mode: 'atomic',
+                          });
                         } catch (promoteErr) {
                           console.warn('[memory-promote] failed:', promoteErr.message);
                         }
@@ -17180,6 +19993,47 @@ exit \$RC
               // (Updates/Extends/Derives only) silently skipped them, so traversals
               // missed provenance + entity-linked context. Caller can still narrow
               // via body.relationship_types.
+              const allowedTypesEarly = (Array.isArray(body.relationship_types) && body.relationship_types.length > 0)
+                ? body.relationship_types
+                : ['Updates', 'Extends', 'Derives', 'PartOf', 'Mentions'];
+
+              // Remote (self-host) orgs have NO central rows — prisma.memory.findFirst always 404'd
+              // ("Memory not found or not accessible") even for memories that genuinely exist on the
+              // agent's shard. BFS over the agent's full node+edge snapshot instead (amrGraph already
+              // exists for the Memory Graph view — same shape, so the exact same BFS logic applies).
+              if (orgId && orgIsRemote(orgId)) {
+                const { nodes: rNodes, edges: rEdges } = await amrGraph(orgId, { limit: 5000, filter: {} }) || { nodes: [], edges: [] };
+                const nodeMap = new Map(rNodes.map((n) => [n.id, n]));
+                if (!nodeMap.has(startId)) {
+                  return jsonResponse(res, { error: 'Memory not found or not accessible' }, 404);
+                }
+                const rVisited = new Set([startId]);
+                const rNodesById = new Map([[startId, nodeMap.get(startId)]]);
+                const rEdgesOut = [];
+                let rFrontier = [startId];
+                for (let d = 0; d < maxDepth && rFrontier.length > 0; d++) {
+                  const frontierSet = new Set(rFrontier);
+                  const hopEdges = rEdges.filter((e) => allowedTypesEarly.includes(e.type) && (frontierSet.has(e.from_id) || frontierSet.has(e.to_id)));
+                  const nextFrontier = new Set();
+                  for (const e of hopEdges) {
+                    rEdgesOut.push(e);
+                    for (const nbr of [e.from_id, e.to_id]) {
+                      if (!rVisited.has(nbr) && nodeMap.has(nbr)) { rVisited.add(nbr); nextFrontier.add(nbr); rNodesById.set(nbr, nodeMap.get(nbr)); }
+                    }
+                  }
+                  rFrontier = [...nextFrontier];
+                }
+                const polishRNode = (m) => ({
+                  id: m.id, title: m.title || '', content: (m.content || '').slice(0, 200),
+                  memory_type: m.memory_type || null, tags: m.tags || [], project: m.project || null,
+                  is_latest: m.is_latest !== false, version: m.version || 1,
+                  created_at: m.created_at, document_date: m.document_date || null,
+                });
+                return jsonResponse(res, {
+                  start_id: startId, depth: maxDepth, relationship_types: allowedTypesEarly,
+                  nodes: [...rNodesById.values()].map(polishRNode), edges: rEdgesOut, paths: [],
+                });
+              }
               const allowedTypes = (Array.isArray(body.relationship_types) && body.relationship_types.length > 0)
                 ? body.relationship_types
                 : ['Updates', 'Extends', 'Derives', 'PartOf', 'Mentions'];
@@ -17290,8 +20144,35 @@ exit \$RC
 
         case '/api/relationships':
           if (req.method === 'POST') {
-            const rel = engine.createRelationship(body);
-            jsonResponse(res, { success: true, relationship: rel });
+            // V5 Phase 11: close the raw-edge bypass. Was engine.createRelationship(body)
+            // — unawaited, unvalidated, and UNSCOPED (arbitrary HTTP body could edge
+            // memory ids across tenants). Now: require from/to/type, validate the type,
+            // and verify BOTH endpoints belong to the caller's org before creating.
+            const _from = body.from_id || body.fromId;
+            const _to = body.to_id || body.toId;
+            const _type = body.type;
+            const _VALID_EDGE = new Set(['Updates', 'Extends', 'Contradicts', 'Derives', 'PartOf', 'Mentions', 'RelatedTo']);
+            if (!_from || !_to || !_type) {
+              return jsonResponse(res, { error: 'from_id, to_id and type are required' }, 400);
+            }
+            if (!_VALID_EDGE.has(_type)) {
+              return jsonResponse(res, { error: `type must be one of ${[..._VALID_EDGE].join('|')}` }, 400);
+            }
+            try {
+              const [mf, mt] = await Promise.all([
+                persistentMemoryStore.getMemory(_from).catch(() => null),
+                persistentMemoryStore.getMemory(_to).catch(() => null),
+              ]);
+              if (!mf || !mt) return jsonResponse(res, { error: 'from_id or to_id not found' }, 404);
+              // Tenant isolation: both memories must be in the caller's org.
+              if ((mf.org_id && mf.org_id !== orgId) || (mt.org_id && mt.org_id !== orgId)) {
+                return jsonResponse(res, { error: 'cross-tenant relationship refused' }, 403);
+              }
+              const rel = await engine.createRelationship({ from_id: _from, to_id: _to, type: _type, confidence: body.confidence, metadata: body.metadata });
+              return jsonResponse(res, { success: true, relationship: rel });
+            } catch (relErr) {
+              return jsonResponse(res, { error: relErr.message }, 500);
+            }
           }
           break;
 
@@ -17915,466 +20796,36 @@ exit \$RC
 
         case '/api/recall':
           if (req.method === 'POST') {
-            const _recallT0 = Date.now(); // DX: server-side recall latency surfaced in the response
-            if (!ensurePersistedMemoryOrFail(res, '/api/recall')) {
-              return;
-            }
-            // Per-org rate limit. Default 120 rpm with 2× burst.
-            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
-              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
-            }
-            try {
-              // Apply dynamic weights from Operator Layer if available
-              let recallWeights = body.weights;
-              if (cognitiveOperator && !recallWeights) {
-                const intent = detectQueryIntent(body.query_context || body.context || '');
-                recallWeights = computeDynamicWeights(intent);
-              }
-
-              const temporalExpansion = expandTemporalQuery(body.query_context || body.context || '');
-
-              // Rewrite query for better semantic coverage
-              const rewritten = rewriteQuery(body.query_context || body.context || '');
-              const effectiveRecallQuery = rewritten.expanded || body.query_context || body.context;
-
-
-              // containerTag → project mapping for recall
-              const recallProject = body.project || effectiveContainerTag || null;
-
-              let recallAccessCtx = await buildAccessContext(userId, orgId);
-              // Project-scoped recall: when a caller (e.g. a project-scoped HyperAgent
-              // room) passes project_id, FORCE the access context to that project. The
-              // store's tier OR clause + the vector filter then return the project's
-              // memories + org-wide + the caller's personal, and EXCLUDE other projects
-              // — regardless of the caller's project membership (the room/caller
-              // explicitly chose this project). Without project_id, behavior is unchanged.
-              if (body.project_id) {
-                // SECURITY: only honor a caller-supplied project_id if the caller
-                // can actually access it (member, or owner/admin via buildAccessContext
-                // expansion). Otherwise a guest could recall any project by id.
-                const _baseCtx = recallAccessCtx || {};
-                const _canAccessProject = Array.isArray(_baseCtx.projectIds)
-                  && _baseCtx.projectIds.includes(body.project_id);
-                if (_canAccessProject) {
-                  recallAccessCtx = { ..._baseCtx, projectIds: [body.project_id], teamIds: _baseCtx.teamIds || [] };
-                } else {
-                  recallAccessCtx = _baseCtx;
-                }
-              }
-
-              // Person-filtered recall ("what did person X update today"): resolve an
-              // author by id, email, or display name (within this org) → userId, then
-              // post-filter results to that author. Combine with date_range for time.
-              let recallAuthorId = null;
-              if (body.author_id && typeof body.author_id === 'string') {
-                recallAuthorId = body.author_id;
-              } else if (body.author && typeof body.author === 'string' && prisma) {
-                const term = body.author.trim();
-                const a = await prisma.user.findFirst({
-                  where: {
-                    organizations: { some: { orgId } },
-                    OR: [{ email: term }, { displayName: { equals: term, mode: 'insensitive' } }],
-                  },
-                  select: { id: true },
-                }).catch(() => null);
-                recallAuthorId = a?.id || null;
-              }
-
-              // Bi-temporal filter: when valid_at is set, return only memories
-              // that were valid at that timestamp (valid_from <= valid_at AND
-              // (valid_to IS NULL OR valid_to > valid_at)). Caller can also
-              // pass transaction_at to filter by when the system learned them.
-              const validAt = body.valid_at ? new Date(body.valid_at) : null;
-              const transactionAt = body.transaction_at ? new Date(body.transaction_at) : null;
-              const bitemporalFilter = (validAt || transactionAt)
-                ? { valid_at: validAt, transaction_at: transactionAt }
-                : null;
-
-              const result = await recallPersistedMemories(persistentMemoryStore, {
-                query_context: effectiveRecallQuery,
-                raw_query: body.query_context || body.context || '', // pre-rewrite phrasing for time-travel intent
-                user_id: userId,
-                org_id: orgId,
-                project: recallProject,
-                source_platforms: body.source_platforms || [],
-                tags: body.tags || [],
-                preferred_project: body.preferred_project || recallProject,
-                preferred_source_platforms: body.preferred_source_platforms || [],
-                preferred_tags: body.preferred_tags || [],
-                date_range: body.date_range || temporalExpansion.dateRange || null,
-                max_memories: body.max_memories || 5,
-                weights: recallWeights,
-                // Type-specific filters (exposed for retrieval routing)
-                is_latest: body.is_latest,              // boolean — filter to latest versions only
-                include_expired: body.include_expired,  // boolean — include expired memories
-                sort: body.sort,                        // 'score' | 'date_asc' | 'date_desc'
-                preference_boost: body.preference_boost,      // boolean — boost preference/opinion memories
-                include_superseded: body.include_superseded,  // boolean — traverse Updates chain for version history
-                access_context: recallAccessCtx,
-                scope_filter: body.scope_filter || null,
-                entity_filter_mode: body.entity_filter_mode || null, // A/B override for the entity lane
-                tiered_view: body.tiered_view ?? null,                // A/B override for the term-overlap reranker
-                cross_rerank: body.cross_rerank ?? null,              // A/B override for the multilingual cross-encoder
-                query_expansion: body.query_expansion ?? null,        // A/B override for cross-lingual query expansion
-                bitemporal: bitemporalFilter,
-              });
-
-              // Post-filter for bi-temporal when retriever doesn't honor it
-              // natively. Drops memories whose creation post-dates transaction_at
-              // OR whose valid_from is after valid_at.
-              if (bitemporalFilter && Array.isArray(result?.memories)) {
-                const filtered = result.memories.filter(m => {
-                  const created = m.created_at ? new Date(m.created_at) : null;
-                  // Read the REAL bi-temporal columns. memories has NO json
-                  // `metadata` column — the old m.metadata?.valid_from path was
-                  // always undefined, silently collapsing valid_from to created_at
-                  // so the validity lower bound never actually applied.
-                  const validFrom = m.valid_from ? new Date(m.valid_from)
-                    : (m.document_date ? new Date(m.document_date) : created);
-                  const validTo = m.valid_to ? new Date(m.valid_to) : null;
-                  if (bitemporalFilter.transaction_at && created && created > bitemporalFilter.transaction_at) return false;
-                  if (bitemporalFilter.valid_at) {
-                    if (validFrom && validFrom > bitemporalFilter.valid_at) return false;
-                    if (validTo && validTo <= bitemporalFilter.valid_at) return false;
-                  }
-                  return true;
-                });
-                result.memories = filtered;
-                result.bitemporal_filter_applied = {
-                  valid_at: bitemporalFilter.valid_at?.toISOString() || null,
-                  transaction_at: bitemporalFilter.transaction_at?.toISOString() || null,
-                  kept: filtered.length,
-                };
-              }
-
-              // Hydrate owner/scope/project_id for the delivered memories (recall paths
-              // can strip these) so attribution display + project/author post-filters are
-              // reliable. One batch query for the ≤N delivered ids.
-              if (Array.isArray(result?.memories) && result.memories.length && prisma) {
-                try {
-                  const ids = result.memories.map(m => m.id).filter(Boolean);
-                  if (ids.length) {
-                    const ph = ids.map((_, i) => `$${i + 2}::uuid`).join(',');
-                    const rows = await prisma.$queryRawUnsafe(
-                      `SELECT m.id, m.user_id, m.scope, m.project_id, u.display_name AS dn, u.email AS em
-                       FROM hivemind.memories m LEFT JOIN hivemind.users u ON u.id = m.user_id
-                       WHERE m.org_id = $1::uuid AND m.id IN (${ph})`,
-                      orgId, ...ids,
-                    );
-                    const byId = Object.fromEntries((rows || []).map(r => [r.id, r]));
-                    for (const m of result.memories) {
-                      const r = byId[m.id];
-                      if (!r) continue;
-                      if (!m.user_id) m.user_id = r.user_id;
-                      if (!m.scope) m.scope = r.scope;
-                      if (m.project_id == null) m.project_id = r.project_id || null;
-                      const nm = r.dn || r.em || null;
-                      if (!m.owner_name) m.owner_name = nm;
-                      if (!m.owner && r.user_id) m.owner = { id: r.user_id, name: nm };
-                    }
-                  }
-                } catch (e) { /* attribution best-effort */ }
-              }
-
-              // Project-scope post-filter (guarantee): when project_id is set, keep
-              // memories that are org-wide/personal/legacy (no project_id) OR belong to
-              // THIS project; drop memories that belong to a DIFFERENT project. Uses the
-              // reliably-present scalar project_id, independent of scope hydration.
-              if (body.project_id && Array.isArray(result?.memories)) {
-                const before = result.memories.length;
-                result.memories = result.memories.filter(
-                  m => !m.project_id || m.project_id === body.project_id,
-                );
-                result.project_scope_applied = { project_id: body.project_id, kept: result.memories.length, dropped: before - result.memories.length };
-              }
-
-              // Author/person post-filter: keep only memories owned by the resolved person.
-              if (recallAuthorId && Array.isArray(result?.memories)) {
-                const before = result.memories.length;
-                result.memories = result.memories.filter(m => m.user_id === recallAuthorId);
-                result.author_filter_applied = { author_id: recallAuthorId, kept: result.memories.length, dropped: before - result.memories.length };
-              }
-
-              // Apply memory type boosts from Operator Layer
-              if (cognitiveOperator && result.memories) {
-                const intent = detectQueryIntent(body.query_context || body.context || '');
-                for (const m of result.memories) {
-                  const boost = getMemoryTypeBoost(intent, m.memory_type || 'fact');
-                  if (boost !== 1.0) {
-                    m.score = (m.score || 0) * boost;
-                    m.operator_boost = boost;
-                  }
-                }
-                // Re-sort after boosts (only if no explicit sort mode requested)
-                if (!body.sort || body.sort === 'score') {
-                  result.memories.sort((a, b) => (b.score || 0) - (a.score || 0));
-                }
-                result.intent = intent;
-              }
-
-              // Phase 3: cross-cluster entity-overlap boost for synthesis memories
-              if (result.memories && result.memories.length > 1) {
-                try {
-                  const clusterIndex = new ClusterIndex({ prisma });
-                  result.memories = await crossClusterEntityBoost(result.memories, {
-                    clusterIndex, organizationId: orgId,
-                  });
-                } catch (boostErr) {
-                  console.warn('[api/recall] cross-cluster boost failed:', boostErr.message);
-                }
-              }
-
-              // Inject parent chunks for fact-memories
-              const injectParentChunks = body.inject_parent_chunks !== false;
-              if (injectParentChunks && result.memories && result.memories.length > 0) {
-                for (const mem of result.memories) {
-                  if ((mem.tags || []).includes('extracted-fact') && mem.metadata?.parent_memory_id) {
-                    try {
-                      const parent = await persistentMemoryStore.getMemory(mem.metadata.parent_memory_id);
-                      if (parent) {
-                        mem.parent_chunk = parent.content;
-                        mem.parent_document_date = parent.document_date;
-                      }
-                    } catch {}
-                  }
-                }
-              }
-
-              // Deduplicate semantically similar memories
-              if (result.memories && result.memories.length > 1) {
-                const before = result.memories.length;
-                result.memories = deduplicateResults(result.memories);
-                result.dedup = { before, after: result.memories.length, collapsed: before - result.memories.length };
-              }
-
-              // Annotate memories that have known contradictions
-              if (persistentMemoryStore && result.memories) {
-                for (const mem of result.memories) {
-                  try {
-                    const contradictions = await persistentMemoryStore.getRelationships(mem.id, 'Contradicts');
-                    if (contradictions && contradictions.length > 0) {
-                      mem._contradictions = contradictions.map(c => ({
-                        contradicts_memory_id: c.from_id === mem.id ? c.to_id : c.from_id,
-                        confidence: c.confidence,
-                        type: c.metadata?.contradiction_type || 'unknown',
-                      }));
-                    }
-                  } catch {}
-                }
-              }
-
-              // Inject user profile context into recall result
-              if (profileStore) {
-                try {
-                  result.user_profile = await profileStore.buildProfileContext(userId, orgId);
-                } catch (profileErr) {
-                  console.warn('[recall] Profile injection failed:', profileErr.message);
-                }
-              }
-
-              // Attach query rewrite metadata for debugging/transparency
-              result.query_rewrite = {
-                expanded: rewritten.expanded,
-                entities: rewritten.entities,
-                stripped: rewritten.stripped,
-              };
-
-              // ─── Recall v3.1: memory-first event-driven fan-out via RecallRouter ───
-              // Keeps /api/recall's enrichment pipeline (bi-temporal, operator
-              // boost, parent-chunk inject, contradictions, profile, dedupe)
-              // and only delegates the evidence/live fan-out to the unified
-              // router so HTTP callers get the same memory-first behavior as
-              // the agent tool (no regex classifier, anchors come from tags).
-              const mode = body.mode || 'auto';
-              const wantEvidence = mode === 'evidence' || mode === 'hybrid' || mode === 'auto';
-              const memoryHits = Array.isArray(result.memories) ? result.memories : [];
-              result.mode_used = mode;
-
-              if (wantEvidence && mode !== 'memory') {
-                // 1. Inline evidence_links per memory (SQL join — independent
-                //    of vector search; required for citation UI).
-                try {
-                  const memIds = memoryHits.map(m => m.id).filter(Boolean);
-                  if (memIds.length) {
-                    const links = await prisma.memoryEvidenceLink.findMany({
-                      where: { memoryId: { in: memIds } },
-                      select: {
-                        memoryId: true,
-                        segmentId: true,
-                        documentId: true,
-                        linkType: true,
-                        confidence: true,
-                        excerpt: true,
-                        document: { select: { id: true, title: true, sourcePlatform: true } },
-                      },
-                    });
-                    const byMemory = new Map();
-                    for (const l of links) {
-                      if (!byMemory.has(l.memoryId)) byMemory.set(l.memoryId, []);
-                      byMemory.get(l.memoryId).push({
-                        segment_id: l.segmentId,
-                        document_id: l.documentId,
-                        document_title: l.document?.title || null,
-                        source_platform: l.document?.sourcePlatform || null,
-                        link_type: l.linkType,
-                        confidence: l.confidence,
-                        excerpt: l.excerpt,
-                      });
-                    }
-                    for (const mem of memoryHits) {
-                      mem.evidence = byMemory.get(mem.id) || [];
-                    }
-                  }
-                } catch (evErr) {
-                  console.warn(`[recall] evidence attach failed: ${evErr.message}`);
-                }
-
-                // 2. Memory-first fan-out via RecallRouter (event-driven).
-                //    Replaces the old "sparseMemories || citationIntent" regex
-                //    heuristic with the tag-driven inspection logic.
-                try {
-                  const { recallEnhance } = await import('./memory/recall-router.js');
-                  const enhanced = await recallEnhance({
-                    memories: memoryHits,
-                    query: body.query_context || body.context || '',
-                    ctx: { userId, orgId },
-                    evidenceService: evidenceRetrieval,
-                    prisma,
-                    includeLive: body.include_live !== false,
-                  });
-                  // Dedup evidence against inline-attached links (same segment
-                  // can't show up twice in the result).
-                  const attachedSegIds = new Set(
-                    memoryHits.flatMap(m => (m.evidence || []).map(e => e.segment_id))
-                  );
-                  result.evidence = (enhanced.evidence || [])
-                    .filter(e => !attachedSegIds.has(e.segmentId));
-                  result.evidence_count = result.evidence.length;
-                  result.live = enhanced.live || [];
-                  result.live_count = result.live.length;
-                  result.recall_trace = enhanced.trace;
-                } catch (enhErr) {
-                  console.warn(`[recall] router enhance failed: ${enhErr.message}`);
-                  result.evidence = [];
-                  result.live = [];
-                }
-              }
-
-              // Record search usage after successful recall
-              if (planEnforcer && orgId) {
-                planEnforcer.recordUsage(orgId, 'searches', 1);
-              }
-
-              // ── Promote synthesized[]/raw[] to top-level response ────────────
-              // recallPersistedMemories now returns both synthesized[] + raw[]
-              // alongside the backwards-compat flat memories[].
-              // Expose them at the top level so callers can use rich rendering.
-              if (Array.isArray(result.synthesized)) {
-                // Already set by persisted-retrieval; just ensure it's present
-              } else {
-                result.synthesized = [];
-              }
-              if (!Array.isArray(result.raw)) {
-                result.raw = [];
-              }
-
-              // Slim response — default ON for mode=auto/memory/hybrid/evidence
-              // Caller can opt back into full payload via body.verbose=true
-              if (!body.verbose) {
-                const SLIM_MEM_KEYS = ['id','title','content','memory_type','tags','score','created_at','document_date','project','project_id','source','evidence','_synthesis_boosted','_cross_cluster_boost','_cross_cluster_overlap','synthesis_cluster_hash','synthesis_revision','synthesis_confidence','synthesis_evidence_ids','source_metadata','tier','last_accessed_at','promoted_at','_ws_match','_entity_match','cognitive_layer_role','_cognitive_role'];
-                const slimMem = (m) => {
-                  const out = {};
-                  for (const k of SLIM_MEM_KEYS) if (m[k] !== undefined) out[k] = m[k];
-                  return out;
-                };
-                result.memories = (result.memories || []).map(slimMem);
-                // Slim synthesized[] — keep claim/type/confidence/evidence/revision
-                result.synthesized = (result.synthesized || []).map(s => ({
-                  id:         s.id,
-                  type:       s.type,
-                  claim:      s.claim,
-                  title:      s.title,
-                  confidence: s.confidence,
-                  revision:   s.revision,
-                  evidence:   (s.evidence || []).map(e => ({
-                    id:      e.id,
-                    title:   e.title,
-                    snippet: (e.snippet || '').slice(0, 200),
-                  })),
-                  score:      s.score,
-                  created_at: s.created_at,
-                }));
-                // Slim raw[] same as memories slim
-                result.raw = (result.raw || []).map(slimMem);
-                // Drop heavy top-level noise
-                delete result.injectionText;
-                delete result.user_profile;
-                delete result.expansion_stats;
-                delete result.dedup;
-                delete result.query_rewrite;
-                delete result.intent;
-                // Trim evidence snippet payloads
-                if (Array.isArray(result.evidence)) {
-                  result.evidence = result.evidence.map(e => ({
-                    segment_id: e.segmentId || e.segment_id,
-                    document_id: e.documentId || e.document_id,
-                    document_title: e.document?.title || e.document_title || null,
-                    score: e.score,
-                    snippet: (e.snippet || e.content || '').slice(0, 200),
-                  }));
-                }
-              }
-
-              // Phase B tiered cache: fire-and-forget hydration + access stamp.
-              //   - Tier 1 row with score ≥ threshold → fetch full body via live tool
-              //   - Every returned memory → bump lastAccessedAt for tier-promotion heuristics
-              try {
-                const hits = Array.isArray(result.memories) ? result.memories : [];
-                if (hits.length > 0 && prisma) {
-                  const ids = hits.map((m) => m.id).filter(Boolean);
-                  if (ids.length > 0) {
-                    // P2 salience feedback: every recall hit reinforces the
-                    // memory — bump lastAccessedAt (tier heuristics), increment
-                    // recall_count (consumed by synthesis-boost + future
-                    // ranking), and nudge strength (consumed by
-                    // applyClusterBoost). strength is read-clamped to [0.1,1.0]
-                    // and decayed by strength-updater.js, so an uncapped small
-                    // increment here is safe.
-                    prisma.memory.updateMany({
-                      where: { id: { in: ids } },
-                      data: {
-                        lastAccessedAt: new Date(),
-                        recallCount: { increment: 1 },
-                        strength: { increment: 0.05 },
-                      },
-                    }).catch(() => {});
-                  }
-                  const HYDRATE_THRESHOLD = 0.6;
-                  const tier1Hits = hits.filter((m) => m.tier === 1 && (m.score || 0) >= HYDRATE_THRESHOLD);
-                  if (tier1Hits.length > 0) {
-                    import('./memory/tier-hydrate.js').then(({ hydrateMemory }) => {
-                      for (const hit of tier1Hits) {
-                        hydrateMemory(
-                          { prisma, qdrantClient },
-                          { memoryId: hit.id, userId, orgId },
-                        ).catch(() => {});
-                      }
-                    }).catch(() => {});
-                  }
-                }
-              } catch (hydrateErr) {
-                console.warn('[recall] tier hydration tap failed:', hydrateErr.message);
-              }
-
-              try { if (result && typeof result === 'object' && !Array.isArray(result)) result.timing_ms = Date.now() - _recallT0; } catch { /* additive only */ }
-              jsonResponse(res, result);
-            } catch (error) {
-              console.error('Auto recall failed:', error);
-              return jsonResponse(res, {
-                error: 'Recall failed',
-                message: error.message
-              }, 500);
-            }
+            return handleRecallRoute({
+              req,
+              res,
+              body,
+              userId,
+              orgId,
+              prisma,
+              jsonResponse,
+              ensurePersistedMemoryOrFail,
+              rateLimitAllowOrgRequest,
+              planEnforcer,
+              cognitiveOperator,
+              detectQueryIntent,
+              computeDynamicWeights,
+              expandTemporalQuery,
+              rewriteQuery,
+              effectiveContainerTag,
+              buildAccessContext,
+              isUuidLike,
+              recallPersistedMemories,
+              persistentMemoryStore,
+              ClusterIndex,
+              crossClusterEntityBoost,
+              deduplicateResults,
+              profileStore,
+              evidenceRetrieval,
+              amrBumpRecall,
+              qdrantClient,
+              getMemoryTypeBoost,
+            });
           }
           break;
 
@@ -18382,6 +20833,45 @@ exit \$RC
           // Rich graph: memories + documents + entities + typed relationships
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/graph/intelligent')) return;
+            // REMOTE: this is the endpoint the FE MemoryGraph page actually calls
+            // (apiClient.getIntelligentGraph -> /v1/proxy/graph/intelligent). Its four central reads
+            // (memories, relationships, evidence links, entity mentions) all return 0 rows for an
+            // .amr org, so the page rendered BLANK. /api/graph was already routed — this one was
+            // simply missed, which is why the graph looked broken only on that page.
+            // Same agent mapping as /api/graph, shaped with this endpoint's `counts` field.
+            // Enrichment (entity mentions, evidence links) is not available from the agent graph, so
+            // those counts are reported as 0 with enrichment:false rather than silently implied.
+            if (orgIsRemote(orgId)) {
+              try {
+                const gLimit = Math.min(Number(url.searchParams.get('limit') || 500), 2000);
+                const g = await amrGraph(orgId, { limit: gLimit, filter: { user_id: userId } });
+                if (g) {
+                  const nodes = (g.nodes || []).map((n) => ({
+                    id: n.id, label: n.title || (n.content || '').slice(0, 60), title: n.title,
+                    content: n.content, tags: n.tags || [], kind: 'memory',
+                    group: n.memory_type || 'memory', memory_type: n.memory_type, createdAt: n.created_at,
+                    importanceScore: n.confidence != null ? Number(n.confidence) : null,
+                    recallCount: n.recall_count ?? 0,
+                    strength: typeof n.strength === 'number' ? n.strength : (n.strength != null ? Number(n.strength) : 1.0),
+                    documentDate: n.document_date || null,
+                  }));
+                  const edges = (g.edges || []).map((e) => ({
+                    source: e.from_id, target: e.to_id, type: e.type || 'Mentions', confidence: e.confidence || 1,
+                  }));
+                  return jsonResponse(res, {
+                    nodes, edges,
+                    counts: {
+                      memories: nodes.length, documents: 0, entities: 0,
+                      relationships: edges.length, evidence_links: 0, mentions: 0,
+                    },
+                    meta: { source: 'agent', storage_mode: 'amr', enrichment: false },
+                  });
+                }
+                console.warn(`[graph/intelligent] agent graph unavailable for org ${orgId} — the central build will return an empty graph`);
+              } catch (e) {
+                console.warn(`[graph/intelligent] agent graph failed for org ${orgId}: ${e.message} — the central build will return an empty graph`);
+              }
+            }
             try {
               const limit = Math.min(Number(url.searchParams.get('limit') || 500), 2000);
               const entityFilter = url.searchParams.get('entity') || null;
@@ -18562,6 +21052,31 @@ exit \$RC
               return;
             }
             try { planEnforcer?.recordUsage(orgId, 'graphQueries', 1); } catch { /* meter */ }
+            // Remote (self-host) org: the graph (memories + relationships) lives on the agent; central
+            // holds 0 rows so the normal build returns an empty graph. Pull nodes+edges from the agent
+            // and map to the FE payload shape (edges: from_id→source, to_id→target).
+            if (orgIsRemote(orgId)) {
+              try {
+                const limit = Number(url.searchParams.get('limit')) || 1000;
+                const g = await amrGraph(orgId, { limit, filter: { user_id: userId } });
+                if (g) {
+                  const nodes = (g.nodes || []).map((n) => ({
+                    id: n.id, label: n.title || (n.content || '').slice(0, 60), title: n.title,
+                    content: n.content, tags: n.tags || [], kind: 'memory',
+                    group: n.memory_type || 'memory', memory_type: n.memory_type, createdAt: n.created_at,
+                    // Scoring fields → FE node detail panel + node size/glow (camelCase).
+                    importanceScore: n.confidence != null ? Number(n.confidence) : null,
+                    recallCount: n.recall_count ?? 0,
+                    strength: typeof n.strength === 'number' ? n.strength : (n.strength != null ? Number(n.strength) : 1.0),
+                    documentDate: n.document_date || null,
+                  }));
+                  const edges = (g.edges || []).map((e) => ({
+                    source: e.from_id, target: e.to_id, type: e.type || 'Mentions', confidence: e.confidence || 1,
+                  }));
+                  return jsonResponse(res, { nodes, edges, meta: { source: 'agent', node_count: nodes.length, edge_count: edges.length } });
+                }
+              } catch { /* fall through to central (empty) on agent failure */ }
+            }
             let releaseSlot = null;
             try {
               const graphProject = url.searchParams.get('project') || null;
@@ -19291,6 +21806,19 @@ exit \$RC
             if (!ensurePersistedMemoryOrFail(res, '/api/graph/hygiene/stats')) {
               return;
             }
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/graph/hygiene/stats',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
+            }
             try {
               const total_memories = await prisma.memory.count({ where: { userId, orgId, isLatest: true } });
               const noise_estimate = await prisma.memory.count({ where: { userId, orgId, content: { contains: 'unsubscribe' } } });
@@ -19362,6 +21890,19 @@ exit \$RC
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/graph/backfill')) {
               return;
+            }
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/graph/backfill',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
             }
             try {
               if (!smartIngestRouter || !persistentMemoryStore) {
@@ -19486,6 +22027,19 @@ exit \$RC
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/graph/quality')) {
               return;
+            }
+            // These maintenance tools read the CENTRAL graph (memories / relationships / canonical
+            // entities). An .amr org's memories live on its agent, so the tool reports zeros — and a
+            // maintainer reads that as "this org's graph is clean" rather than "this tool never looked".
+            // Reimplementing hygiene/quality/merge against the agent's SQL is real work with no FE
+            // surface today, so rather than guess at demand this states the limitation outright.
+            if (orgIsRemote(orgId)) {
+              return jsonResponse(res, {
+                storage_mode: 'amr', supported: false, error: 'not_supported_for_amr_storage',
+                endpoint: '/api/graph/quality',
+                message: 'This endpoint reads the central graph. This org stores its memories on its .amr'
+                  + ' agent, so no numbers are reported rather than misleading zeros.',
+              }, 501);
             }
             try {
               const qualityProject = url.searchParams.get('project') || null;
@@ -19629,15 +22183,19 @@ exit \$RC
                   count: results.length,
                 });
               } else {
-                // Fallback to three-tier quick search
-                const result = await threeTierRetrieval.quickSearch(query, {
-                  userId,
-                  orgId,
-                  limit,
-                  project: searchProject,
+                // Fallback to the unified recall engine (one source of truth —
+                // ThreeTier retired). Same core every other surface uses.
+                const fbAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+                const fbRecall = await recallPersistedMemories(persistentMemoryStore, {
+                  query_context: query, user_id: userId, org_id: orgId,
+                  ...(searchProject ? { project_id: searchProject } : {}),
+                  max_memories: limit || 10, access_context: fbAccessCtx,
+                }).catch((e) => { console.warn('[search/pageindex-fallback] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
+                jsonResponse(res, {
+                  results: fbRecall.memories || [], memories: fbRecall.memories || [],
+                  evidence: fbRecall.evidence || [], count: (fbRecall.memories || []).length,
+                  source: 'unified-recall',
                 });
-
-                jsonResponse(res, result);
               }
             } catch (error) {
               console.error('PageIndex search failed:', error);
@@ -19652,57 +22210,19 @@ exit \$RC
 
         case '/api/search/quick':
           if (req.method === 'POST') {
-            if (!ensurePersistedMemoryOrFail(res, '/api/search/quick')) {
-              return;
-            }
-            try {
-              const { query, memory_type, tags, source_platform, limit, score_threshold, project } = body;
-
-              if (!query || typeof query !== 'string') {
-                return jsonResponse(res, {
-                  error: 'Validation failed',
-                  message: 'query is required and must be a string'
-                }, 400);
-              }
-
-              // containerTag → project mapping for search
-              const searchProject = project || effectiveContainerTag || null;
-
-              // UNIFIED RECALL: route quick-search through the SAME improved core
-              // (recallPersistedMemories) every other surface uses — pool floor
-              // 150, wide-window tiered reranker, cross-lingual expansion, quant
-              // rescore. Previously this used ThreeTierRetrieval/PageIndex, a
-              // divergent path that did NOT reflect recall accuracy upgrades.
-              const sAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
-              const sRecall = await recallPersistedMemories(persistentMemoryStore, {
-                query_context: query,
-                user_id: userId,
-                org_id: orgId,
-                ...(searchProject ? { project_id: searchProject } : {}),
-                tags: Array.isArray(tags) ? tags : (tags ? String(tags).split(',').map((t) => t.trim()).filter(Boolean) : []),
-                source_platforms: source_platform ? [source_platform] : [],
-                memory_type: memory_type || undefined,
-                max_memories: limit || 10,
-                access_context: sAccessCtx,
-              }).catch((e) => { console.warn('[search/quick] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
-
-              if (planEnforcer && orgId) planEnforcer.recordUsage(orgId, 'searches', 1);
-
-              jsonResponse(res, {
-                results: sRecall.memories || [],
-                memories: sRecall.memories || [],
-                evidence: sRecall.evidence || [],
-                count: (sRecall.memories || []).length,
-                source: 'unified-recall',
-              });
-            } catch (error) {
-              console.error('QuickSearch failed:', error);
-              return jsonResponse(res, {
-                error: 'QuickSearch failed',
-                message: error.message,
-                requestId: error.requestId || crypto.randomUUID()
-              }, 500);
-            }
+            return handleQuickSearchRoute({
+              res,
+              body,
+              userId,
+              orgId,
+              jsonResponse,
+              ensurePersistedMemoryOrFail,
+              effectiveContainerTag,
+              buildAccessContext,
+              recallPersistedMemories,
+              persistentMemoryStore,
+              planEnforcer,
+            });
           }
           break;
 
@@ -19731,17 +22251,20 @@ exit \$RC
               }
 
               const searchProject = project || effectiveContainerTag || null;
-              const result = await threeTierRetrieval.panoramaSearch(query, {
-                userId,
-                orgId,
-                project: searchProject,
-                includeExpired: include_expired !== false,
-                includeHistorical: include_historical !== false,
-                dateRange: date_range,
-                temporalStatus: temporal_status,
-                limit: limit || 50,
-                includeTimeline: include_timeline !== false
-              });
+              // Unified recall engine (ThreeTier retired). panorama → temporal/history mode.
+              const pAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const pRecall = await recallPersistedMemories(persistentMemoryStore, {
+                query_context: query, user_id: userId, org_id: orgId,
+                ...(searchProject ? { project_id: searchProject } : {}),
+                recall_mode: 'panorama',
+                ...(date_range ? { date_range } : {}),
+                max_memories: limit || 50, access_context: pAccessCtx,
+              }).catch((e) => { console.warn('[search/panorama] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
+              const result = {
+                results: pRecall.memories || [], memories: pRecall.memories || [],
+                evidence: pRecall.evidence || [], count: (pRecall.memories || []).length,
+                categories: {}, metadata: {}, source: 'unified-recall',
+              };
 
               if (searchProject && Array.isArray(result.results) && result.results.length === 0) {
                 const scopedFallback = await persistentMemoryStore.searchMemories({
@@ -19806,22 +22329,20 @@ exit \$RC
               }
 
               const searchProject = project || effectiveContainerTag || null;
-              const result = await threeTierRetrieval.insightForge(query, {
-                userId,
-                orgId,
-                project: searchProject,
-                simulationRequirement: simulation_requirement,
-                subQueryLimit: sub_query_limit || 5,
-                resultsPerSubQuery: results_per_sub_query || 15,
-                includeAnalysis: include_analysis !== false
-              });
-
-              if (searchProject && Array.isArray(result.results)) {
-                result.results = result.results.filter((entry) => {
-                  const scopedProject = entry?.project || entry?.payload?.project || entry?.memory?.project || null;
-                  return scopedProject === searchProject;
-                });
-              }
+              // Unified recall engine (ThreeTier retired). insight → relationship/synthesis mode.
+              const iAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const iRecall = await recallPersistedMemories(persistentMemoryStore, {
+                query_context: query, user_id: userId, org_id: orgId,
+                ...(searchProject ? { project_id: searchProject } : {}),
+                recall_mode: 'insight',
+                max_memories: results_per_sub_query || 15, access_context: iAccessCtx,
+              }).catch((e) => { console.warn('[search/insight] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
+              const result = {
+                results: iRecall.memories || [], memories: iRecall.memories || [],
+                evidence: iRecall.evidence || [],
+                synthesis_evidence_chains: iRecall.synthesis_evidence_chains || [],
+                count: (iRecall.memories || []).length, source: 'unified-recall',
+              };
 
               jsonResponse(res, result);
             } catch (error) {
@@ -19850,13 +22371,18 @@ exit \$RC
                 }, 400);
               }
 
-              const result = await threeTierRetrieval.compareTiers(query, {
-                userId,
-                orgId,
-                tier: tier || 'auto'
+              // ThreeTier retired — there is now ONE unified engine, so there are no
+              // separate tiers to compare. Return the unified recall result.
+              const cAccessCtx = await buildAccessContext(userId, orgId).catch(() => null);
+              const cRecall = await recallPersistedMemories(persistentMemoryStore, {
+                query_context: query, user_id: userId, org_id: orgId,
+                max_memories: 20, access_context: cAccessCtx,
+              }).catch((e) => { console.warn('[search/compare] unified recall failed:', e.message); return { memories: [], evidence: [] }; });
+              jsonResponse(res, {
+                results: cRecall.memories || [], memories: cRecall.memories || [],
+                evidence: cRecall.evidence || [], count: (cRecall.memories || []).length,
+                engine: 'unified-recall', note: 'tiered comparison retired — single canonical engine',
               });
-
-              jsonResponse(res, result);
             } catch (error) {
               console.error('Tier comparison failed:', error);
               return jsonResponse(res, {
@@ -19867,281 +22393,53 @@ exit \$RC
             }
           }
           break;
-
-        // ==========================================
-        // Retrieval Evaluation API Endpoints
-        // ==========================================
-
-        case '/api/evaluate/retrieval':
-          if (req.method === 'POST') {
-            try {
-              const {
-                query,
-                relevant_memories,
-                method = 'hybrid',
-                category = 'general',
-                limit = 20
-              } = body;
-
-              // Single query evaluation
-              if (query && relevant_memories) {
-                const evaluation = await retrievalEvaluator.evaluateQuery(
-                  query,
-                  relevant_memories,
-                  {
-                    userId,
-                    orgId,
-                    method,
-                    category,
-                    limit
-                  }
-                );
-
-                return jsonResponse(res, {
-                  success: true,
-                  evaluation
-                });
-              }
-
-              // Batch evaluation
-              const {
-                queries,
-                methods = ['hybrid'],
-                sample_size,
-                dataset,
-                category: batchCategory,
-                difficulty
-              } = body;
-
-              let testQueries = queries;
-
-              // Use built-in test dataset if no queries provided
-              if (!testQueries) {
-                // 1. If explicit dataset requested, try that
-                if (dataset) {
-                  try {
-                    testQueries = getQueriesForDataset(dataset);
-                  } catch (error) {
-                    // If 'tenant' or other named dataset fails, fall through to auto-gen
-                    if (dataset !== 'default') testQueries = null;
-                    else throw error;
-                  }
-                }
-
-                // 2. Auto-generate from user's actual memories (works for any user)
-                if (!testQueries && userId) {
-                  try {
-                    testQueries = await generateEvalQueries(userId, orgId, {
-                      maxQueries: sample_size || 20,
-                      maxMemories: 300
-                    });
-                  } catch (autoErr) {
-                    console.warn('[EVAL] Auto-generation failed, falling back to default:', autoErr.message, autoErr.stack);
-                    testQueries = null;
-                  }
-                }
-
-                // 3. Fallback to static dataset
-                if (!testQueries || testQueries.length === 0) {
-                  if (sample_size) {
-                    testQueries = getSampleQueries(sample_size);
-                  } else if (batchCategory) {
-                    testQueries = getQueriesByCategory(batchCategory);
-                  } else if (difficulty) {
-                    testQueries = getQueriesByDifficulty(difficulty);
-                  } else {
-                    testQueries = TEST_QUERIES;
-                  }
-                }
-
-                // Apply sample_size if set
-                if (sample_size && testQueries.length > sample_size) {
-                  testQueries = testQueries.slice(0, sample_size);
-                }
-              }
-
-              const report = await retrievalEvaluator.evaluateBatch(testQueries, {
-                userId,
-                orgId,
-                methods,
-                warmup: true
-              });
-              persistEvaluationReport(report);
-
-              return jsonResponse(res, {
-                success: true,
-                report
-              });
-            } catch (error) {
-              console.error('Retrieval evaluation failed:', error);
-              return jsonResponse(res, {
-                error: 'Evaluation failed',
-                message: error.message,
-                requestId: crypto.randomUUID()
-              }, 500);
-            }
-          }
-          break;
-
-        case '/api/evaluate/results':
-          if (req.method === 'GET') {
-            try {
-              const reportId = url.searchParams.get('evaluation_id');
-              const latestReport = reportId
-                ? getEvaluationReportById(reportId)
-                : retrievalEvaluator.getLatestReport() || loadEvaluationReports().slice(-1)[0];
-
-              if (!latestReport) {
-                return jsonResponse(res, {
-                  error: 'No evaluation results available',
-                  message: 'Run an evaluation first using POST /api/evaluate/retrieval'
-                }, 404);
-              }
-
-              return jsonResponse(res, {
-                success: true,
-                report: latestReport
-              });
-            } catch (error) {
-              console.error('Failed to get evaluation results:', error);
-              return jsonResponse(res, {
-                error: 'Failed to retrieve results',
-                message: error.message
-              }, 500);
-            }
-          }
-          break;
-
-        case '/api/evaluate/history':
-          if (req.method === 'GET') {
-            try {
-              const history = loadEvaluationReports();
-              const limit = parseInt(url.searchParams.get('limit'), 10) || 10;
-
-              return jsonResponse(res, {
-                success: true,
-                count: history.length,
-                history: history.slice(-limit).map(h => ({
-                  evaluationId: h.evaluationId,
-                  timestamp: h.timestamp,
-                  summary: h.summary,
-                  targets: h.targets
-                }))
-              });
-            } catch (error) {
-              console.error('Failed to get evaluation history:', error);
-              return jsonResponse(res, {
-                error: 'Failed to retrieve history',
-                message: error.message
-              }, 500);
-            }
-          }
-          break;
-
-        case '/api/evaluate/compare':
-          if (req.method === 'POST') {
-            try {
-              const { baseline_id, current_id } = body;
-              const history = loadEvaluationReports();
-
-              const baseline = baseline_id
-                ? history.find(h => h.evaluationId === baseline_id)
-                : history.length > 1 ? history[history.length - 2] : null;
-
-              const current = current_id
-                ? history.find(h => h.evaluationId === current_id)
-                : history.length > 0 ? history[history.length - 1] : null;
-
-              if (!baseline || !current) {
-                return jsonResponse(res, {
-                  error: 'Comparison failed',
-                  message: 'Both baseline and current reports are required. Run at least 2 evaluations.'
-                }, 400);
-              }
-
-              const comparison = retrievalEvaluator.compareReports(baseline, current);
-
-              return jsonResponse(res, {
-                success: true,
-                comparison
-              });
-            } catch (error) {
-              console.error('Evaluation comparison failed:', error);
-              return jsonResponse(res, {
-                error: 'Comparison failed',
-                message: error.message
-              }, 500);
-            }
-          }
-          break;
-
-        case '/api/evaluate/dataset':
-          if (req.method === 'GET') {
-            try {
-              const filteredCategory = url.searchParams.get('category');
-              const filteredDifficulty = url.searchParams.get('difficulty');
-              let queries = TEST_QUERIES;
-
-              if (filteredCategory) {
-                queries = queries.filter(query => query.category === filteredCategory);
-              }
-
-              if (filteredDifficulty) {
-                queries = queries.filter(query => query.difficulty === filteredDifficulty);
-              }
-
-              const stats = {
-                total: queries.length,
-                categories: queries.reduce((accumulator, query) => {
-                  accumulator[query.category] = (accumulator[query.category] || 0) + 1;
-                  return accumulator;
-                }, {}),
-                difficulties: queries.reduce((accumulator, query) => {
-                  accumulator[query.difficulty] = (accumulator[query.difficulty] || 0) + 1;
-                  return accumulator;
-                }, {}),
-              };
-
-              return jsonResponse(res, {
-                success: true,
-                dataset: {
-                  stats,
-                  queries: queries.map(q => ({
-                    query: q.query,
-                    category: q.category,
-                    difficulty: q.difficulty,
-                    relevantCount: q.relevantMemories.length,
-                    tags: q.tags
-                  }))
-                }
-              });
-            } catch (error) {
-              console.error('Failed to get dataset info:', error);
-              return jsonResponse(res, {
-                error: 'Failed to retrieve dataset',
-                message: error.message
-              }, 500);
-            }
-          }
-          break;
+        // /api/evaluate/* endpoints RETIRED (2026-07-23) — depended on the deleted
+        // ThreeTier/hybrid duplicate engine + offline retrieval-evaluator harness.
 
         case '/api/billing/usage':
           if (req.method === 'GET') {
+            try {
+              const { resolveTenantAccess } = await import('./auth/tenant-access.js');
+              await resolveTenantAccess(prisma, principal, { resource: 'billing', action: 'read' });
+            } catch {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!planEnforcer) {
               // Fallback to legacy usage tracker if plan enforcer unavailable
               if (!usageTracker || !planStore) return jsonResponse(res, { error: 'Billing not available' }, 503);
               const billingPlan = await planStore.getOrgPlan(orgId);
               const billingUsage = await usageTracker.getUsage(orgId);
-              const billingLimits = await usageTracker.checkLimits(orgId, billingPlan.id);
+              const billingLimits = await usageTracker.checkLimits(orgId, billingPlan);
               return jsonResponse(res, { plan: billingPlan.id, planName: billingPlan.name, usage: billingUsage, limits: billingPlan.limits, warnings: billingLimits.warnings });
             }
             const usageSummary = await planEnforcer.getUsageSummary(orgId);
-            return jsonResponse(res, usageSummary);
+            const memberUsage = usageService && userId
+              ? await usageService.getMemberSummary(orgId, userId).catch(() => [])
+              : [];
+            return jsonResponse(res, {
+              ...usageSummary,
+              member_usage: memberUsage,
+              usage_contract: 'usage-event-ledger-v1',
+            });
+          }
+          break;
+
+        case '/api/billing/plan/refresh':
+          if (req.method === 'POST') {
+            if (!planStore || !orgId) return jsonResponse(res, { error: 'Billing not available' }, 503);
+            planStore.invalidate(orgId);
+            return jsonResponse(res, { ok: true });
           }
           break;
 
         case '/api/billing/usage/daily':
           if (req.method === 'GET') {
+            try {
+              const { resolveTenantAccess } = await import('./auth/tenant-access.js');
+              await resolveTenantAccess(prisma, principal, { resource: 'billing', action: 'read' });
+            } catch {
+              return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
             if (!usageTracker) return jsonResponse(res, { error: 'Billing not available' }, 503);
             const days = Math.max(1, Math.min(120, parseInt(url.searchParams.get('days'), 10) || 30));
             const series = await usageTracker.getDailyUsage(orgId, days);
@@ -20151,13 +22449,22 @@ exit \$RC
 
         case '/api/billing/plans':
           if (req.method === 'GET') {
-            const { getAllPlans } = await import('./billing/plans.js');
-            return jsonResponse(res, { plans: getAllPlans() });
+            const { listCatalogPlans } = await import('./billing/plan-catalog-service.js');
+            return jsonResponse(res, { plans: await listCatalogPlans(prisma) });
           }
           break;
 
         case '/api/billing/upgrade':
           if (req.method === 'POST') {
+            // Paid plans are commercial state. Stripe webhooks or a referral
+            // entitlement grant them; this legacy browser endpoint must never
+            // become a free upgrade button.
+            if (process.env.HIVEMIND_ALLOW_LEGACY_PLAN_UPGRADE !== 'true') {
+              return jsonResponse(res, {
+                error: 'Direct plan changes are disabled. Use checkout, a referral campaign, or an administrator-issued entitlement.',
+                code: 'BILLING_MANAGED_SERVER_SIDE',
+              }, 403);
+            }
             const { plan } = body;
             const validPlans = ['free', 'pro', 'scale', 'enterprise'];
             if (!plan || !validPlans.includes(plan)) {
@@ -20272,6 +22579,8 @@ exit \$RC
         case '/api/tara/stream':
           if (req.method === 'POST') {
             if (!taraHandler) return jsonResponse(res, { error: 'TARA not available' }, 503);
+            const talkLimit = await planEnforcer.checkLimit(orgId, 'taraSeconds', 1);
+            if (!talkLimit.allowed) return jsonResponse(res, planLimitBody(talkLimit, 'taraSeconds'), talkLimit.status || 429);
             // Don't use jsonResponse — stream handler writes NDJSON directly.
             // Build the multi-tier access context (projectIds/teamIds) so Tara's
             // recall sees project/team/org-shared memories, not just personal —
@@ -20292,6 +22601,31 @@ exit \$RC
               agentName,
               { userId, orgId }
             );
+            // A browser Runtime check-in pins its operator skill in the durable
+            // session snapshot. The adapter must receive that exact skill rather
+            // than refetching whichever generic internal skill was later selected.
+            const sessionId = String(url.searchParams.get('session_id') || '').trim();
+            if (sessionId && /^[0-9a-f-]{36}$/i.test(sessionId)) {
+              const session = await prisma?.taraVoiceSession.findFirst({
+                where: { id: sessionId, userId, orgId, mode: 'internal' },
+                select: { configSnapshot: true },
+              }).catch(() => null);
+              const snapshot = session?.configSnapshot && typeof session.configSnapshot === 'object'
+                ? session.configSnapshot
+                : null;
+              if (snapshot?.interaction_profile === 'runtime_operator' && snapshot.instructions) {
+                taraConfig.internal_prompt = String(snapshot.instructions);
+                taraConfig.selected_internal_skill_id = String(snapshot.skill_id || 'runtime_operator.v1');
+              }
+            }
+            // Compact org brief travels with the config the voice adapters already
+            // fetch and cache, so every new conversation — phone or browser widget —
+            // opens knowing who the org IS, for any tenant and any skill. Kept
+            // separate from profile_context, which is the operator's own profile.
+            try {
+              const { buildOrgBrief } = await import('./tara/org-brief.js');
+              taraConfig.org_brief = await buildOrgBrief(prisma, orgId, { userId });
+            } catch { /* brief is optional — never fail the config fetch */ }
             return jsonResponse(res, { config: taraConfig });
           }
           if (req.method === 'POST') {
@@ -20466,7 +22800,7 @@ exit \$RC
                 ? `Voice session — ${topicSnippet}${topicSnippet.length === 80 ? '…' : ''}`
                 : `Voice session ${session_id.slice(0, 8)}`;
 
-              const saved = await persistentMemoryStore.createMemory({
+              const saved = await taraCanonicalSave({
                 user_id: sUserId,
                 org_id: sOrgId,
                 title: summaryTitle,
@@ -20562,9 +22896,7 @@ exit \$RC
                 apiKey: groqKey,
                 ctx: {
                   persistentMemoryStore,
-                  persistentMemoryEngine,
-                  smartIngestRouter,
-                  buildRoutedIngestPayloads,
+                  documentFirstIngestion,
                   accessContext: distillAccessCtx,
                   projectId: ingestProjectId,
                 },
@@ -20573,19 +22905,24 @@ exit \$RC
               // Also save the session-level rollup so /timeline shows the
               // whole conversation as one anchor node.
               try {
-                if (raw_summary && parsed.title && persistentMemoryEngine?.ingestMemory) {
-                  const rollupPayload = {
+                if (raw_summary && parsed.title && documentFirstIngestion?.ingestSource) {
+                  documentFirstIngestion.ingestSource({
+                    userId,
+                    orgId,
                     title: parsed.title.slice(0, 80),
                     content: `${parsed.summary || ''}\n\n${raw_summary}`.slice(0, 8000),
+                    source: {
+                      type: 'chat',
+                      platform: 'ai-chat',
+                      sourceId: url || `${platform || 'chat'}:session`,
+                      url: url || null,
+                      title: parsed.title.slice(0, 80),
+                    },
+                    mode: 'atomic',
                     tags: ['ai-chat-session', `from-${(platform || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '')}`, 'session-rollup'],
-                    memory_type: 'conversation',
-                    user_id: userId,
-                    org_id: orgId,
-                    ...(ingestProjectId ? { project_id: ingestProjectId, project_ids: [ingestProjectId] } : {}),
-                    source_metadata: { source_platform: 'ai-chat', host_platform: platform, url, via: 'chat-ingest-distill' },
-                  };
-                  const [routed] = await buildRoutedIngestPayloads(rollupPayload, { smartIngestRouter });
-                  persistentMemoryEngine.ingestMemory(routed).catch((e) =>
+                    ...(ingestProjectId ? { scope: 'project', projectId: ingestProjectId } : {}),
+                    metadata: { memory_type: 'conversation', host_platform: platform, via: 'chat-ingest-distill' },
+                  }).catch((e) =>
                     console.warn('[ingest/chat-session] rollup save failed:', e.message)
                   );
                 }
@@ -20674,6 +23011,37 @@ exit \$RC
         // dispatched below via regex match outside the switch
 
         // ==========================================
+        // COMPOSIO HOSTED PLANNER — plan only, never execute
+        // POST /api/composio/plan
+        // ==========================================
+        case '/api/composio/plan':
+          if (req.method === 'POST') {
+            if (orgId && !rateLimitAllowOrgRequest(orgId)) {
+              return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
+            }
+            const request = String(body?.request || body?.message || '').trim();
+            if (!request) return jsonResponse(res, { error: 'request is required' }, 400);
+            const plannerKey = process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY || process.env.CEREBRAS_API_KEY;
+            if (!plannerKey) return jsonResponse(res, { error: 'planner unavailable — no LLM API key configured' }, 503);
+            try {
+              const { planHostedComposioWorkflow } = await import('./agent/hosted-composio-planner.js');
+              const plan = await planHostedComposioWorkflow({
+                request,
+                history: Array.isArray(body?.history) ? body.history : [],
+                language: body?.language || null,
+                apiKey: plannerKey,
+                orgId,
+              });
+              const { _decision, ...publicPlan } = plan;
+              return jsonResponse(res, publicPlan);
+            } catch (error) {
+              console.warn(`[hosted-composio-planner] failed org=${orgId}: ${error.message}`);
+              return jsonResponse(res, { error: 'hosted_planner_failed', detail: error.message }, 502);
+            }
+          }
+          break;
+
+        // ==========================================
         // CHAT — Talk to HIVE (memory-augmented LLM)
         // ==========================================
         case '/api/chat':
@@ -20683,13 +23051,45 @@ exit \$RC
             if (orgId && !rateLimitAllowOrgRequest(orgId)) {
               return jsonResponse(res, { error: 'rate_limited', retry_after_seconds: 1 }, 429);
             }
-            const { message, model = 'openai/gpt-oss-120b', history = [], stream: wantStream = false, language = null } = body;
+            let { message, model = null, history = [], stream: wantStream = false, language = null } = body;
+            // ADDITIVE per-turn capability gate (default false). When true,
+            // connected Composio apps / external tools become ELIGIBLE for this
+            // turn (never mandatory — native recall is still preferred when it
+            // is the best answer). Omitted or false keeps the current robust
+            // HIVE-MIND-only path byte-for-byte unchanged.
+            const useTools = body?.use_tools === true;
+            // Legacy clients prepended a '[STRICT LANGUAGE: ...]' directive to the
+            // message itself — it poisoned recall embeddings ('solvis' → 0 hits
+            // because the query was the directive) and echoed back in fallback
+            // copy. Language is a first-class param; strip the prefix defensively.
+            if (typeof message === 'string') {
+              message = message.replace(/^\s*\[STRICT LANGUAGE:[^\]]*\]\s*/i, '').trim();
+            }
             // Project scope from caller — when set, all recall/save tool
             // calls dispatched by the ReAct agent are auto-bound to this
             // project, and the auto-saved conversation memory inherits it.
             const requestProjectId = (body?.project_id || (Array.isArray(body?.project_ids) ? body.project_ids[0] : null)) || null;
+            // Chat scope selector (personal | organization/all | project). Maps to the recall
+            // scope_filter (org+user-scoped, SAME method as memories). 'organization'/'all'/unset
+            // → no filter (everything the user can access in their org); 'personal' → the user's
+            // own private memories; 'project'/'team' → that scope (project_id carries the project).
+            const requestScopeFilter = (() => {
+              const s = String(body?.scope || '').toLowerCase();
+              if (s === 'personal') return 'personal';
+              if (s === 'project') return 'project';
+              if (s === 'team') return 'team';
+              if (s === 'organization') return 'organization'; // org-tier only
+              return null; // all | '' → ALL accessible tiers (my-space + org + projects)
+            })();
             if (!message || typeof message !== 'string') {
               return jsonResponse(res, { error: 'message is required' }, 400);
+            }
+
+            // Authorize the complete chat scope before any working-set tap,
+            // parser call, retrieval, connector discovery, or memory write.
+            const agentAccessCtx = await buildAccessContext(userId, orgId);
+            if (requestProjectId && !(agentAccessCtx.projectIds || []).includes(requestProjectId)) {
+              return jsonResponse(res, { error: 'project_access_denied' }, 403);
             }
 
             // WorkingSet auto-extract — fire-and-forget. Pulls proper-noun
@@ -20709,9 +23109,85 @@ exit \$RC
               }).catch(() => {});
             }
 
-            const groqKey = process.env.GROQ_API_KEY;
-            if (!groqKey) {
+            const groqKey = process.env.GROQ_API_KEY || null;
+            if (!groqKey && !process.env.OPENROUTER_API_KEY && !process.env.CEREBRAS_API_KEY) {
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
+            }
+
+            // Resume a paused compound run from server-owned state. The opaque
+            // token is single-use, tenant-bound, short-lived, and never carries
+            // connector results in the browser. Completed reads are reused, so
+            // choosing an option does not repeat recall or provider executions.
+            if (body?.continuation_token) {
+              const { consumeChatContinuation, createChatContinuation } = await import('./agent/chat-continuation-store.js');
+              const stored = await consumeChatContinuation(body.continuation_token, { userId, orgId });
+              if (!stored) return jsonResponse(res, { error: 'continuation_expired_or_invalid' }, 409);
+              const choice = body?.continuation_response || {};
+              const stepIndex = Number(choice.step_index);
+              const pending = stored.resumeState?.results?.[stepIndex]?.inputRequest;
+              if (!pending) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
+              const allowed = pending?.options?.find((option) => option.id === choice.option_id || option.value === choice.value);
+              const declaredFields = Array.isArray(pending?.fields) ? pending.fields : [];
+              const submittedValues = choice?.values && typeof choice.values === 'object' && !Array.isArray(choice.values)
+                ? choice.values : {};
+              const fieldValues = Object.fromEntries(declaredFields.map((field) => [
+                field.name,
+                typeof submittedValues[field.name] === 'string' ? submittedValues[field.name].trim() : submittedValues[field.name],
+              ]));
+              const validFields = declaredFields.length > 0 && declaredFields.every((field) => (
+                !field.required || (fieldValues[field.name] != null && String(fieldValues[field.name]).trim() !== '')
+              ));
+              if (!allowed && !validFields) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
+
+              const execute = async (emit) => {
+                const { runCompoundOrchestrator } = await import('./agent/compound-orchestrator.js');
+                const resumeState = {
+                  ...stored.resumeState,
+                  choice: allowed
+                    ? { stepIndex, field: pending.field, value: allowed.value }
+                    : { stepIndex, retryStep: true, values: fieldValues },
+                };
+                const compound = await runCompoundOrchestrator({
+                  subtasks: stored.resumeState.subtasks,
+                  ctx: {
+                    userId, orgId, projectId: requestProjectId, scopeFilter: requestScopeFilter,
+                    prisma, persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
+                    smartIngestRouter, buildRoutedIngestPayloads, accessContext: agentAccessCtx,
+                    webIntelligence: globalThis.webIntelligence || null,
+                    _trace: { traceId: crypto.randomUUID() },
+                  },
+                  apiKey: groqKey, onEvent: emit,
+                  resumeState,
+                });
+                let continuation = null;
+                if (compound.status === 'needs_input' && compound.resumeState && compound.inputRequests?.length) {
+                  const next = await createChatContinuation({
+                    userId, orgId, message: stored.message, language: stored.language,
+                    resumeState: compound.resumeState,
+                  });
+                  continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: compound.inputRequests };
+                  emit?.({ type: 'orchestration_input_required', ...continuation });
+                }
+                return {
+                  response: compound.summary, answer_mode: 'compound', sources: [], citations: [],
+                  steps: compound.steps, grounded: compound.status === 'completed',
+                  confidence: compound.status === 'completed' ? 1 : 0.5,
+                  gaps: compound.status === 'error' ? ['compound_step_failed'] : [], scopes_found: [],
+                  draft_ids: compound.draftIds, compound_status: compound.status,
+                  pending_actions: compound.pendingActions || [],
+                  execution: { status: compound.status, steps: compound.steps, draft_ids: compound.draftIds, pending_actions: compound.pendingActions || [] },
+                  continuation,
+                };
+              };
+              if (wantStream) {
+                res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+                const emit = (evt) => { try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {} };
+                try { emit({ type: 'done', ...(await execute(emit)) }); }
+                catch (error) { emit({ type: 'error', error: error.message }); }
+                try { res.end(); } catch {}
+                return;
+              }
+              return jsonResponse(res, await execute(null));
             }
 
             // ─── Two-Loop ReAct Agent (default path) ─────────────────────
@@ -20719,7 +23195,7 @@ exit \$RC
             // tools dynamically (recall, save, update, traverse_graph, at,
             // diff, timeline, web_search, ...). Falls back to legacy
             // recall-then-LLM flow on HIVEMIND_AGENT_MODE=off or on error.
-            const agentEnabled = process.env.HIVEMIND_AGENT_MODE !== 'off';
+            const agentEnabled = true;
             if (agentEnabled) {
               try {
                 // Still honour the onboarding state machine — it cannot be
@@ -20730,7 +23206,7 @@ exit \$RC
                 let agentOrgName = 'your organisation';
                 try {
                   const {
-                    getAssistantName, extractNameIfIntent, buildAssistantNamePayload, ASSISTANT_IDENTITY,
+                    getAssistantName, ASSISTANT_IDENTITY,
                     hasShownOnboardingIntro, markOnboardingShown,
                   } = await import('./services/assistant-identity.js');
                   let agentNameMemoryId = null;
@@ -20749,26 +23225,6 @@ exit \$RC
                     ? await hasShownOnboardingIntro(persistentMemoryStore, { userId, orgId })
                     : false;
 
-                  // Dynamic naming intent (ANY turn) — only (re)name when the user
-                  // EXPLICITLY asks ("call yourself X", "your name is X", quoted).
-                  // A normal question is NEVER consumed as a name. Works after a
-                  // name is set too → user can rename anytime.
-                  const intentName = extractNameIfIntent(message);
-                  if (intentName) {
-                    try {
-                      const payload = buildAssistantNamePayload({ name: intentName, userId, orgId, prevMemoryId: agentNameMemoryId });
-                      if (persistentMemoryEngine?.ingestMemory) {
-                        await persistentMemoryEngine.ingestMemory({ ...payload, skipProcessing: true, smartIngest: false });
-                      }
-                      if (persistentMemoryStore && !introShown) await markOnboardingShown(persistentMemoryStore, { userId, orgId });
-                    } catch {}
-                    return jsonResponse(res, {
-                      response: `Got it — I'll go by **${intentName}** from now on. What can I help you with?`,
-                      sources: [], usage: null, assistant_name: intentName,
-                      onboarding: { step: 'name_saved', name: intentName, org_name: agentOrgName },
-                    });
-                  }
-
                   // One-time greeting (NON-blocking) — surfaced as the agent's
                   // first message via `onboarding.intro`; the user's real query is
                   // still answered below. Shown once, then the sentinel is set.
@@ -20780,15 +23236,9 @@ exit \$RC
                   }
                 } catch {}
 
-                // v2 = plan-then-act pipeline (4 LLM steps, structured
-                // JSON I/O, language-aware, evidence-audited). Default
-                // ON; flip HIVEMIND_AGENT_V1=true to fall back to the
-                // legacy two-loop ReAct path.
-                const useV2 = process.env.HIVEMIND_AGENT_V1 !== 'true';
-                const { runReactAgent } = useV2
-                  ? await import('./agent/react-agent-v2.js').then(m => ({ runReactAgent: m.runReactAgentV2 }))
-                  : await import('./agent/react-agent.js');
-                const agentAccessCtx = await buildAccessContext(userId, orgId);
+                // Canonical structured chat orchestrator for every /api/chat
+                // request. There is no runtime V1 or legacy downgrade.
+                const { runReactAgentV2: runReactAgent } = await import('./agent/react-agent-v2.js');
 
                 // SSE branch — for browser ext + in-app streaming tool timeline.
                 if (wantStream) {
@@ -20806,9 +23256,23 @@ exit \$RC
                       message, history, model, apiKey: groqKey,
                       assistantName: agentAssistantName, orgName: agentOrgName,
                       language,
+                      router: body?.router,
+                      useTools,
+                      recallMode: body?.recall_mode,
+                      recallSource: body?.source || {
+                        document_id: body?.source_document_id,
+                        title: body?.source_title,
+                      },
+                      recallTime: body?.time || {
+                        valid_at: body?.valid_at,
+                        known_at: body?.known_at,
+                        range: body?.date_range,
+                      },
+                      allowGeneralKnowledge: body?.allow_general_knowledge === true,
                       ctx: {
                         userId, orgId,
                         projectId: requestProjectId,
+                        scopeFilter: requestScopeFilter,
                         prisma,
                         persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                         smartIngestRouter,
@@ -20838,14 +23302,29 @@ exit \$RC
                   message, history, model, apiKey: groqKey,
                   assistantName: agentAssistantName, orgName: agentOrgName,
                   language,
+                  router: body?.router,
+                  useTools,
+                  recallMode: body?.recall_mode,
+                  recallSource: body?.source || {
+                    document_id: body?.source_document_id,
+                    title: body?.source_title,
+                  },
+                  recallTime: body?.time || {
+                    valid_at: body?.valid_at,
+                    known_at: body?.known_at,
+                    range: body?.date_range,
+                  },
+                  allowGeneralKnowledge: body?.allow_general_knowledge === true,
                   ctx: {
                     userId, orgId,
                     projectId: requestProjectId,
+                    scopeFilter: requestScopeFilter,
                     prisma,
                     persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                     smartIngestRouter,
                     buildRoutedIngestPayloads,
                     ingestRoutedPayload,                 // tree-aware dispatch
+                    ingestCanonicalPayload,
                     accessContext: agentAccessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
                   },
@@ -20862,7 +23341,8 @@ exit \$RC
                 } catch { /* metering never breaks the response */ }
 
                 // Saving is LLM-decided in the FIRST loop (the planner), not
-                // here. planStep emits `save_intent` (user explicitly said
+                // here. parseChatIntent / intentDecisionToPlan emit `save_intent`
+                // (user explicitly said
                 // "save/remember…") and `auto_save_intent` (proactive durable
                 // fact, confidence ≥ 0.70 fires) — both execute
                 // hivemind_save_memory inside the agent. There is intentionally
@@ -20875,8 +23355,8 @@ exit \$RC
                 }
                 return jsonResponse(res, result);
               } catch (agentErr) {
-                console.warn('[chat:react-agent] failed, falling back to legacy:', agentErr.message);
-                // Fall through to legacy implementation below.
+                console.error('[chat:orchestrator] failed:', agentErr.message);
+                return jsonResponse(res, { error: 'chat_orchestration_failed', traceable: true }, 502);
               }
             }
 
@@ -21043,9 +23523,8 @@ exit \$RC
                           source_metadata: { source_platform: 'slack', channel: p.channel, via: 'talk-to-hive' },
                           skip_fact_extraction: true,
                         };
-                        buildRoutedIngestPayloads(slackPostPayload, { smartIngestRouter }).then(([routed]) =>
-                          persistentMemoryEngine.ingestMemory(routed)
-                        ).catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
+                        ingestCanonicalPayload(slackPostPayload, { sourceType: 'connector', provider: 'slack' })
+                          .catch(err => console.warn('[chat:slack-post] auto-ingest failed:', err.message));
                       }
                     } else if (a === 'slack_react') {
                       result = await bridge._call('reactions.add',
@@ -21103,13 +23582,13 @@ exit \$RC
               // Keep them in the full message for LLM context, but don't extract as facts
               msgTrimmed = msgTrimmed.replace(/<METADATA:[^>]*>[\s\S]*?<\/METADATA:[^>]*>/gi, '').trim();
               
-              const isQuestion = /^(what|when|where|who|how|why|do |does |did |is |are |can |could |tell me|show me|list |describe )/i.test(msgTrimmed);
-              const isMetaQuery = /\b(what do you know|what have (i|you)|tell me about me|who am i|my profile|summarize my|everything about me|about myself)\b/i.test(msgTrimmed);
-              const isAggregateQuery = /\b(what products|what services|list all|everything about|all .{0,20} (we|I|you) (have|know|sell|offer|make))\b/i.test(msgTrimmed);
+              let isQuestion = /^(what|when|where|who|how|why|do |does |did |is |are |can |could |tell me|show me|list |describe )/i.test(msgTrimmed);
+              let isMetaQuery = /\b(what do you know|what have (i|you)|tell me about me|who am i|my profile|summarize my|everything about me|about myself)\b/i.test(msgTrimmed);
+              let isAggregateQuery = /\b(what products|what services|list all|everything about|all .{0,20} (we|I|you) (have|know|sell|offer|make))\b/i.test(msgTrimmed);
               const isDeclarative = !isQuestion && msgTrimmed.length > 5 && !/^(hi|hey|hello|yo|thanks|ok|okay|yes|no|sure)\b/i.test(msgTrimmed);
               const isUpdateStatement = /\b(no longer|not anymore|changed|updated|now (is|uses|works)|switched to|replaced|resigned|quit|left|moved to|new |instead of)\b/i.test(msgTrimmed);
               const hasMemoryKeywords = /\b(remember|save|don't forget|note that|update|my new|i just|i got|i moved|i changed|i bought|i sold|i started|i stopped|i am|i'm)\b/i.test(msgTrimmed);
-              const isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
+              let isRecencyQuery = /\b(latest|newest|most recent|last message|last email|just now|right now|current)\b/i.test(message);
               const toneGuidance = inferChatToneGuidance(message);
 
               // Step 1: Recall memories for context
@@ -21117,232 +23596,43 @@ exit \$RC
               let injectionText = '';
 
               if (persistentMemoryStore) {
-                try {
-                  const chatIntent = detectQueryIntent(message);
-                  const chatWeights = computeDynamicWeights(chatIntent);
-
-                  // Bi-temporal detection — if user references a date or
-                  // says "as of X" / "back in", flip recall into time-travel
-                  // mode via valid_at. Matches hivemind_at MCP semantics.
-                  let chatValidAt = null;
-                  try {
-                    const m = message.match(/\b(?:as of|back in|on|before|by)\s+([A-Za-z]+\s+\d{1,2}(?:,?\s+\d{4})?|\d{4}-\d{2}-\d{2}|\d{4}-\d{2}|Q[1-4]\s+\d{4})/i);
-                    if (m && m[1]) {
-                      const parsed = new Date(m[1]);
-                      if (!Number.isNaN(parsed.getTime())) chatValidAt = parsed;
-                    }
-                  } catch { /* no temporal hint */ }
-
-                  // Auto-infer tags from the query phrasing (decision/bug/refactor/
-                  // file:<path>/fn:<name>/...). These are passed as preferred_tags
-                  // to the recall layer — soft +0.08 score boost per overlap, never
-                  // a hard filter — so the right memories rise to the top without
-                  // hiding paraphrased matches.
-                  let inferredTags = [];
-                  let inferredType = null;
-                  try {
-                    const { inferQueryTags, inferMemoryType } = await import('./services/query-tag-inference.js');
-                    inferredTags = inferQueryTags(message);
-                    inferredType = inferMemoryType(message);
-                    if (inferredTags.length > 0) {
-                      console.log('[chat] inferred preferred_tags:', inferredTags, 'memory_type:', inferredType || '(any)');
-                    }
-                  } catch (tagErr) {
-                    console.warn('[chat] tag inference failed:', tagErr.message);
-                  }
-
-                  // For meta-queries ("what do you know about me"), broaden the search
-                  const recallQueries = isMetaQuery
-                    ? [message, 'personal facts about user', 'user preferences decisions']
-                    : isAggregateQuery
-                    ? [message, message.replace(/\b(what|list|all|everything)\b/gi, '').trim()]
-                    : [message];
-
-                  let allRecalled = [];
-                  const chatAccessCtx = await buildAccessContext(userId, orgId);
-                  for (const q of recallQueries) {
-                    if (!q || q.length < 3) continue;
-                    try {
-                      const recallResult = await recallPersistedMemories(persistentMemoryStore, {
-                        query_context: q,
-                        user_id: userId,
-                        org_id: orgId,
-                        max_memories: isMetaQuery ? 20 : isAggregateQuery ? 15 : isRecencyQuery ? 15 : 10,
-                        inject_parent_chunks: true,
-                        weights: chatWeights,
-                        preference_boost: chatIntent.type === 'preference',
-                        // Boost cognition-loop canonicals (synthesis + drift-compacted
-                        // summaries) — they're the highest-density truth in the graph.
-                        preferred_tags: [
-                          ...inferredTags,
-                          'canonical-summary',
-                          'synthesized',
-                          'cognition-loop',
-                        ],
-                        access_context: chatAccessCtx,
-                        // Bi-temporal time-travel for date-shaped questions
-                        ...(chatValidAt ? { bitemporal: { valid_at: chatValidAt } } : {}),
-                      });
-                      const recalled = recallResult.memories || [];
-                      injectionText = injectionText || recallResult.injectionText || '';
-                      // Merge, dedup by id
-                      const existingIds = new Set(allRecalled.map(m => m.id));
-                      for (const m of recalled) {
-                        if (!existingIds.has(m.id)) {
-                          existingIds.add(m.id);
-                          allRecalled.push(m);
-                        }
-                      }
-                    } catch {}
-                  }
-
-                  let recalledMemories = allRecalled;
-
-                  // Inject parent chunks for fact-memories (richer context)
-                  for (const mem of recalledMemories) {
-                    if ((mem.tags || []).includes('extracted-fact') && mem.metadata?.parent_memory_id) {
-                      try {
-                        const parent = await persistentMemoryStore.getMemory(mem.metadata.parent_memory_id);
-                        if (parent) mem.parent_chunk = parent.content;
-                      } catch {}
-                    }
-                  }
-
-                  // For meta-queries, prioritize facts and personal content
-                  if (isMetaQuery) {
-                    recalledMemories.sort((a, b) => {
-                      const aIsFact = (a.memory_type === 'fact' || (a.tags || []).includes('extracted-fact')) ? 1 : 0;
-                      const bIsFact = (b.memory_type === 'fact' || (b.tags || []).includes('extracted-fact')) ? 1 : 0;
-                      const aIsPersonal = (a.tags || []).includes('sent-by-user') ? 1 : 0;
-                      const bIsPersonal = (b.tags || []).includes('sent-by-user') ? 1 : 0;
-                      return (bIsFact + bIsPersonal) - (aIsFact + aIsPersonal) || (b.score || 0) - (a.score || 0);
-                    });
-                  }
-
-                  // For recency queries, re-sort by created_at descending
-                  if (isRecencyQuery && recalledMemories.length > 0) {
-                    recalledMemories.sort((a, b) => {
-                      const dateA = new Date(a.created_at || a.document_date || 0);
-                      const dateB = new Date(b.created_at || b.document_date || 0);
-                      return dateB - dateA;
-                    });
-                    try {
-                      const newest = await persistentMemoryStore.listLatestMemories({
-                        user_id: userId, org_id: orgId,
-                      });
-                      const recentReal = newest
-                        .filter(m => !(m.tags || []).includes('observation') && !(m.tags || []).includes('longmemeval'))
-                        .slice(0, 5);
-                      const existingIds = new Set(recalledMemories.map(m => m.id));
-                      for (const m of recentReal) {
-                        if (!existingIds.has(m.id)) {
-                          m._recencyInjected = true;
-                          recalledMemories.unshift(m);
-                        }
-                      }
-                    } catch {}
-                  }
-
-                  // Filter out irrelevant results - lower threshold for better recall
-                  const CHAT_MIN_SCORE = 0.05; // Lowered from 0.12 to allow more relevant memories
-                  // Identity / voice-profile config memories must NEVER pollute the
-                  // user-knowledge recall context. They're consumed elsewhere
-                  // (assistant-identity loader + voice-profile loader) and
-                  // including them here causes the LLM to confuse "the user
-                  // named the assistant Sage" with "the user IS named Sage".
-                  const CONFIG_TAGS = new Set(['assistant-name', 'voice-profile', 'org-voice', 'user-voice']);
-                  const relevantMemories = recalledMemories.filter(m => {
-                    const tags = m.tags || [];
-                    if (tags.some(t => CONFIG_TAGS.has(t))) return false;
-                    if (m._recencyInjected) return true;
-                    // Always include high confidence memories, lower threshold for others
-                    return (m.score || 0) >= CHAT_MIN_SCORE || (m.vectorScore || 0) >= 0.3;
-                  });
-
-                  // Debug logging for chat recall
-                  console.log('[chat] Recall stats: %d total, %d relevant, scores:', recalledMemories.length, relevantMemories.length, relevantMemories.slice(0, 3).map(m => ({ score: m.score, vectorScore: m.vectorScore, content: (m.content||'').slice(0,50) })));
-
-                  // Decision-first sort when the user asks about choices.
-                  const isDecisionQuery = /\b(decide|decision|chose|chosen|picked|selected|why did (we|i|you)|why use|why prefer|trade-off)\b/i.test(message);
-                  if (isDecisionQuery) {
-                    relevantMemories.sort((a, b) => {
-                      const aDec = (a.memory_type === 'decision' || (a.tags || []).includes('decision')) ? 1 : 0;
-                      const bDec = (b.memory_type === 'decision' || (b.tags || []).includes('decision')) ? 1 : 0;
-                      return bDec - aDec || (b.score || 0) - (a.score || 0);
-                    });
-                  }
-
-                  // Variable per-memory content limit: top 3 get full reasoning,
-                  // rest get a tighter slice. This prevents "I couldn't find
-                  // info" caused by truncating the most relevant decision/code
-                  // block mid-sentence.
-                  memories = relevantMemories.slice(0, isMetaQuery ? 20 : 15).map((m, idx) => {
-                    const isFact = (m.tags || []).includes('extracted-fact');
-                    const cap = idx < 3 ? 2400 : isFact ? 400 : 700;
-                    return {
-                      id: m.id,
-                      title: m.title || (m.content || '').slice(0, 60),
-                      content: (m.content || '').slice(0, cap),
-                      parent_chunk: m.parent_chunk ? m.parent_chunk.slice(0, idx < 3 ? 1200 : 500) : undefined,
-                      score: m.score || 0,
-                      tags: m.tags || [],
-                      memory_type: m.memory_type,
-                      created_at: m.created_at,
-                      document_date: m.document_date,
-                    };
-                  });
-
-                  // Graph-expand the top match: pull memories linked via
-                  // Updates / Extends / Derives one hop away. This surfaces
-                  // related decisions / refactors / bug fixes the recall
-                  // didn't score high but are structurally connected.
-                  if (memories.length > 0 && prisma) {
-                    try {
-                      const topId = memories[0].id;
-                      const links = await prisma.relationship.findMany({
-                        where: {
-                          OR: [{ fromId: topId }, { toId: topId }],
-                          type: { in: ['Updates', 'Extends', 'Derives'] },
-                          fromMemory: { userId, orgId, deletedAt: null },
-                          toMemory: { userId, orgId, deletedAt: null },
-                        },
-                        select: { fromId: true, toId: true, type: true },
-                        take: 5,
-                      });
-                      const seen = new Set(memories.map(m => m.id));
-                      const connectedIds = [];
-                      for (const r of links) {
-                        const nbr = r.fromId === topId ? r.toId : r.fromId;
-                        if (!seen.has(nbr)) { seen.add(nbr); connectedIds.push(nbr); }
-                      }
-                      if (connectedIds.length > 0) {
-                        const connectedMems = await prisma.memory.findMany({
-                          where: { id: { in: connectedIds }, userId, orgId, deletedAt: null },
-                          select: {
-                            id: true, title: true, content: true, tags: true,
-                            memoryType: true, createdAt: true, documentDate: true
-                          },
-                        });
-                        for (const cm of connectedMems) {
-                          memories.push({
-                            id: cm.id,
-                            title: cm.title || (cm.content || '').slice(0, 60),
-                            content: (cm.content || '').slice(0, 1200),
-                            score: 0.5, // synthetic — graph-expanded
-                            tags: cm.tags || [],
-                            memory_type: cm.memoryType,
-                            created_at: cm.createdAt,
-                            document_date: cm.documentDate,
-                            _graphExpanded: true,
-                          });
-                        }
-                      }
-                    } catch (gErr) {
-                      console.warn('[chat] graph expand failed:', gErr.message);
-                    }
-                  }
-                } catch (recallErr) {
-                  console.warn('[chat] Recall failed:', recallErr.message);
+                const chatRecall = await buildChatRecallContext({
+                  message,
+                  userId,
+                  orgId,
+                  prisma,
+                  persistentMemoryStore,
+                  persistentMemoryEngine,
+                  smartIngestRouter,
+                  buildRoutedIngestPayloads,
+                  recallPersistedMemories,
+                  buildAccessContext,
+                  detectQueryIntent,
+                  computeDynamicWeights,
+                });
+                memories = chatRecall.memories;
+                injectionText = chatRecall.injectionText;
+                isQuestion = chatRecall.isQuestion;
+                isMetaQuery = chatRecall.isMetaQuery;
+                isAggregateQuery = chatRecall.isAggregateQuery;
+                isRecencyQuery = chatRecall.isRecencyQuery;
+                msgTrimmed = chatRecall.msgTrimmed;
+                // COUNT INTENT -> tell the model, in the context it actually reads,
+                // that the sampled memories below cannot answer this question and
+                // which tool can. Without this the model sees N plausible memories
+                // and infers a count from them — the exact failure the refusal
+                // "I cannot determine the exact count from top-K recall" was
+                // avoiding, but with no alternative offered.
+                //
+                // A directive rather than an auto-call: the orchestrator still owns
+                // the decision, and a question that merely LOOKS countable
+                // ("how much do we care about X") is not forced down a scan path.
+                if (chatRecall.isCountQuery) {
+                  injectionText = `${injectionText || ''}\n\n[COUNTING REQUIRED] This question asks HOW MANY / ALL. `
+                    + 'The memories above are the most SIMILAR ones, not every matching one — a count read off them '
+                    + 'would be a guess. Call hivemind_count_where with the appropriate filter to get an exact count, '
+                    + 'or hivemind_aggregate_entities when counting entities under a parent. If neither can answer '
+                    + 'completely, say the count is unavailable rather than estimating from the sample.';
                 }
               }
 
@@ -21425,9 +23715,8 @@ exit \$RC
                             },
                             skip_fact_extraction: true,
                           };
-                          buildRoutedIngestPayloads(slackFallbackPayload, { smartIngestRouter }).then(([routed]) =>
-                            persistentMemoryEngine.ingestMemory(routed)
-                          ).catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
+                          ingestCanonicalPayload(slackFallbackPayload, { sourceType: 'connector', provider: 'slack' })
+                            .catch(err => console.warn('[chat] Slack auto-ingest failed:', err.message));
                         }
                       }
                     }
@@ -21590,7 +23879,7 @@ ${injectionText}`;
               ];
 
               const modelMap = {
-                'llama-3.3-70b-versatile': 'llama-3.3-70b-versatile',
+                'llama-3.3-70b-versatile': 'cerebras/gpt-oss-120b',
                 'gpt-oss-120b': 'openai/gpt-oss-120b',
                 'gpt-oss-20b': 'openai/gpt-oss-20b',
               };
@@ -21611,7 +23900,7 @@ ${injectionText}`;
                 delete groqParams.max_tokens; // Use max_completion_tokens instead
               }
 
-              const groqResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+              const groqResp = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${groqKey}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify(groqParams),
@@ -21659,11 +23948,8 @@ ${injectionText}`;
                     source_metadata: { source_platform: 'chat' },
                     skip_fact_extraction: true,
                   };
-                  buildRoutedIngestPayloads(chatFactPayload, { smartIngestRouter }).then((routedPayloads) => {
-                    for (const routedPayload of routedPayloads) {
-                      persistentMemoryEngine.ingestMemory(routedPayload).catch(err => console.warn('[chat] Fact ingest failed:', err.message));
-                    }
-                  }).catch(err => console.warn('[chat] Smart routing failed:', err.message));
+                  ingestCanonicalPayload(chatFactPayload, { sourceType: 'chat', mode: 'atomic' })
+                    .catch(err => console.warn('[chat] Fact ingest failed:', err.message));
                 }
               }
 
@@ -21716,11 +24002,24 @@ ${injectionText}`;
             if (!evidenceRetrieval) {
               return jsonResponse(res, { error: 'Evidence retrieval not enabled. Set ENABLE_EVIDENCE_RECALL=true' }, 501);
             }
-            const { query, limit, documentId } = body;
+            const { query, limit, documentId, scope: _evScope, projectId: _evProject } = body;
             if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
             try {
+              // SCOPE THE EVIDENCE LENS, same as the memory lane.
+              // This route passed only {query,userId,orgId,limit,documentId}, so it was
+              // org-scoped but NOT tier-scoped: a personal-lens caller could receive
+              // segments drawn from organization or project documents. retrieveEvidence
+              // has accepted projectId/accessContext/scopeFilter all along — the main
+              // recall path (recall-router.js) already passes them; only these direct
+              // endpoints did not. accessContext is passed even when the caller names no
+              // lens, so the result is bounded by what this user can actually read
+              // instead of by the whole org.
+              const _evAccess = await buildAccessContext(userId, orgId);
               const results = await evidenceRetrieval.retrieveEvidence({
-                query, userId, orgId, limit: limit || 10, documentId
+                query, userId, orgId, limit: limit || 10, documentId,
+                projectId: _evProject || null,
+                accessContext: _evAccess || null,
+                scopeFilter: _evScope || null,
               });
               return jsonResponse(res, { success: true, mode: 'evidence', results, count: results.length });
             } catch (err) {
@@ -21736,11 +24035,17 @@ ${injectionText}`;
             if (!evidenceRetrieval) {
               return jsonResponse(res, { error: 'Evidence retrieval not enabled. Set ENABLE_EVIDENCE_RECALL=true' }, 501);
             }
-            const { query, memoryLimit, evidenceLimit } = body;
+            const { query, memoryLimit, evidenceLimit, scope: _hyScope, projectId: _hyProject } = body;
             if (!query) return jsonResponse(res, { error: 'query is required' }, 400);
             try {
+              // Same lens as /api/evidence/search — a hybrid answer that scopes its
+              // memories but not its evidence is still a leak.
+              const _hyAccess = await buildAccessContext(userId, orgId);
               const result = await evidenceRetrieval.retrieveHybrid({
-                query, userId, orgId, memoryLimit: memoryLimit || 5, evidenceLimit: evidenceLimit || 5
+                query, userId, orgId, memoryLimit: memoryLimit || 5, evidenceLimit: evidenceLimit || 5,
+                projectId: _hyProject || null,
+                accessContext: _hyAccess || null,
+                scopeFilter: _hyScope || null,
               });
               return jsonResponse(res, {
                 success: true, mode: 'hybrid',
@@ -21763,7 +24068,7 @@ ${injectionText}`;
             const memoryId = url.searchParams.get('memoryId') || body?.memoryId;
             if (!memoryId) return jsonResponse(res, { error: 'memoryId query parameter is required' }, 400);
             try {
-              const evidenceLinks = await evidenceRetrieval.getMemoryEvidence(memoryId);
+              const evidenceLinks = await evidenceRetrieval.getMemoryEvidence(memoryId, orgId);
               return jsonResponse(res, { success: true, memoryId, evidenceLinks, count: evidenceLinks.length });
             } catch (err) {
               console.error('[evidence/memory] Failed:', err.message);
@@ -21803,6 +24108,20 @@ ${injectionText}`;
         case '/api/documents':
           if (req.method === 'GET') {
             if (!ensurePersistedMemoryOrFail(res, '/api/documents')) return;
+
+            // RESIDENCY: remote org — KB docs live on the agent, not central.
+            if (orgIsRemote(orgId)) {
+              const remLimit = parseInt(url.searchParams.get('limit') || '20');
+              const remOffset = parseInt(url.searchParams.get('offset') || '0');
+              try {
+                const remResult = await amrKbDocs(orgId, { limit: remLimit, offset: remOffset, access: { userId } });
+                if (remResult) return jsonResponse(res, remResult);
+                return jsonResponse(res, { documents: [], pagination: { total: 0, limit: remLimit, offset: remOffset, hasMore: false } });
+              } catch (remErr) {
+                return jsonResponse(res, { error: remErr.message }, 500);
+              }
+            }
+
             if (!documentFirstIngestion) {
               return jsonResponse(res, { error: 'Document-first ingestion not enabled. Set ENABLE_DOCUMENT_FIRST_INGEST=true' }, 501);
             }
@@ -21836,6 +24155,7 @@ ${injectionText}`;
                     wordCount: true,
                     parseStatus: true,
                     parseEngine: true,
+                    parseMetadata: true,
                     structureExtracted: true,
                     tags: true,
                     createdAt: true,
@@ -21851,10 +24171,14 @@ ${injectionText}`;
                 prisma.knowledgeDocument.count({ where })
               ]);
 
+              const derivedCountMap = await countDerivedMemoriesByDocumentIds(documents.map(doc => doc.id), orgId);
               const enriched = documents.map(doc => ({
                 ...doc,
+                // Parser metadata records PDF/DOCX pages and PPTX slides. Every
+                // standalone artifact (including an image) consumes one KB page.
+                pageCount: Math.max(1, Number(doc.parseMetadata?.pages || doc.parseMetadata?.page_count || 1)),
                 segmentCount: doc._count.segments,
-                promotedCount: doc._count.memoryLinks,
+                promotedCount: derivedCountMap[doc.id] ?? doc._count.memoryLinks,
                 _count: undefined
               }));
 
@@ -21887,6 +24211,18 @@ ${injectionText}`;
             if (!query) return jsonResponse(res, { error: 'q query parameter is required' }, 400);
 
             try {
+              // Remote (self-host) orgs have NO central KB rows — list docs from the agent and
+              // apply the same title/tag/platform match JS-side.
+              if (orgId && orgIsRemote(orgId)) {
+                const rOut = await amrKbDocs(orgId, { limit: 200, offset: 0, access: { userId } });
+                const q = query.toLowerCase();
+                const rMatches = (rOut?.documents || []).filter((doc) =>
+                  (doc.title || '').toLowerCase().includes(q)
+                  || (doc.tags || []).includes(query)
+                  || (doc.sourcePlatform || '').toLowerCase().includes(q)
+                  || (doc.filename || '').toLowerCase().includes(q));
+                return jsonResponse(res, { results: rMatches.slice(0, limit) });
+              }
               const documents = await prisma.knowledgeDocument.findMany({
                 where: {
                   userId,
@@ -21990,7 +24326,11 @@ async function writeAuditLog(prisma, {
 function jsonResponse(res, data, status = 200) {
   res.setHeader('Content-Type', 'application/json');
   res.writeHead(status);
-  res.end(JSON.stringify(data));
+  // Prisma can return BigInt columns (for example SourceArtifact.sizeBytes).
+  // Convert only at the HTTP boundary so document/evidence payloads remain readable.
+  res.end(JSON.stringify(data, (_key, value) => (
+    typeof value === 'bigint' ? value.toString() : value
+  )));
 }
 
 function inferChatToneGuidance(text = '') {
@@ -22157,16 +24497,40 @@ async function warmUpRecall() {
   // only; never writes). Falls back to an embed ping if recall is unavailable.
   const warmOrg = process.env.RECALL_WARMUP_ORG || '67503d34-97e9-49a8-8c52-8ee30cc7603e';
   const warmUser = process.env.RECALL_WARMUP_USER || '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
-  const synthRecall = async () => {
+  // Warm a specific tenant's FULL recall pipeline (its Qdrant collection +
+  // connection + reranker + PG pool). Best-effort; falls back to an embed ping.
+  const warmTenant = async (uid, oid, pids) => {
     try {
       if (typeof recallPersistedMemories === 'function' && persistentMemoryStore) {
         await recallPersistedMemories(persistentMemoryStore, {
-          query_context: 'system keep-warm probe', user_id: warmUser, org_id: warmOrg, max_memories: 3,
+          query_context: 'system keep-warm probe', user_id: uid, org_id: oid,
+          ...(Array.isArray(pids) && pids.length ? { project_ids: pids } : {}),
+          max_memories: 3,
         });
-        return;
+        return true;
       }
-    } catch { /* fall through to embed-only warm */ }
+    } catch { /* fall through */ }
     try { await getQdrantClient().generateEmbedding('keep-warm ping'); } catch { /* best-effort */ }
+    return false;
+  };
+  // Keep-warm sweep: warm every RECENTLY-ACTIVE org (so real tenants' Qdrant
+  // collections stay hot, not just a dummy), plus the canonical probe org as a
+  // floor. Prune orgs idle > the active window so the sweep stays bounded.
+  const ACTIVE_WINDOW_MS = Number(process.env.RECALL_ACTIVE_WINDOW_MS || 900_000); // 15 min
+  const MAX_WARM_ORGS = Number(process.env.RECALL_MAX_WARM_ORGS || 12);
+  const synthRecall = async () => {
+    const now = Date.now();
+    for (const [oid, info] of _activeOrgs) {
+      if (now - info.lastSeen > ACTIVE_WINDOW_MS) _activeOrgs.delete(oid);
+    }
+    const targets = [...(_activeOrgs.entries())]
+      .sort((a, b) => b[1].lastSeen - a[1].lastSeen)
+      .slice(0, MAX_WARM_ORGS)
+      .map(([oid, info]) => ({ uid: info.userId, oid, pids: info.projectIds }));
+    // Always include the canonical probe org as a floor (warms shared infra even
+    // when no real org has been active recently).
+    targets.push({ uid: warmUser, oid: warmOrg, pids: [] });
+    for (const t of targets) { await warmTenant(t.uid, t.oid, t.pids); }
   };
   try {
     const qc = getQdrantClient();
@@ -22195,44 +24559,11 @@ async function warmUpRecall() {
 
 const PORT = process.env.PORT || 3000;
 
-server.listen(PORT, () => {
-  console.log(`
-╔════════════════════════════════════════════════════════════╗
-║                                                            ║
-║   🧠 HIVE-MIND Server Running                              ║
-║                                                            ║
-║   Local: http://localhost:${PORT}                          ║
-║                                                            ║
-║   Features:                                                ║
-║   • Triple-Operator Memory (Updates/Extends/Derives)       ║
-║   • Graph Traversal                                        ║
-║   • Ebbinghaus Decay                                       ║
-║   • Auto-Recall                                            ║
-║   • Three-Tier Retrieval (Quick/Panorama/Insight)          ║
-║   • Retrieval Quality Evaluation                           ║
-║                                                            ║
-║   Search API Endpoints:                                    ║
-║   • POST /api/search/quick    - Fast semantic search       ║
-║   • POST /api/search/panorama - Historical search          ║
-║   • POST /api/search/insight  - LLM-powered analysis       ║
-║   • POST /api/search/compare  - Compare all tiers          ║
-║                                                            ║
-║   Evaluation API Endpoints:                                ║
-║   • POST /api/evaluate/retrieval - Run evaluation          ║
-║   • GET  /api/evaluate/results   - Get latest results      ║
-║   • GET  /api/evaluate/history   - Get evaluation history  ║
-║   • POST /api/evaluate/compare   - Compare evaluations     ║
-║   • GET  /api/evaluate/dataset   - Get test dataset info   ║
-║                                                            ║
-║   Open your browser to get started!                        ║
-║                                                            ║
-╚════════════════════════════════════════════════════════════╝
-`);
-
-  ensureQdrantSearchIndexes();
+let appSidecarsStarted = false;
+function startAppSidecars() {
+  if (!shouldRunWarmupsAndSidecars() || appSidecarsStarted) return;
+  appSidecarsStarted = true;
   warmUpRecall(); // fire-and-forget: warms the embedding service so recall isn't empty during cold-start
-
-  // Start DR server in same process — shared memoryStore, prisma, recallFn
   (async () => {
     try {
       const { startDRServer } = await import('./deep-research/dr-server.js');
@@ -22255,4 +24586,132 @@ server.listen(PORT, () => {
       console.error('[DR Server] Failed to start:', err.message);
     }
   })();
-});
+}
+
+if (shouldStartHttpServer()) {
+  server.listen(PORT, () => {
+  console.log(`
+╔════════════════════════════════════════════════════════════╗
+║                                                            ║
+║   🧠 HIVE-MIND Server Running                              ║
+║                                                            ║
+║   Local: http://localhost:${PORT}                          ║
+║                                                            ║
+║   Features:                                                ║
+║   • Triple-Operator Memory (Updates/Extends/Derives)       ║
+║   • Graph Traversal                                        ║
+║   • Ebbinghaus Decay                                       ║
+║   • Auto-Recall                                            ║
+║   • Three-Tier Retrieval (Quick/Panorama/Insight)          ║
+║   • Retrieval Quality Evaluation                           ║
+║                                                            ║
+║   Search API Endpoints:                                    ║
+║   • POST /api/search/quick    - Fast semantic search       ║
+║   • POST /api/search/panorama - Historical search          ║
+║   • POST /api/search/insight  - LLM-powered analysis       ║
+║   • POST /api/search/compare  - unified recall (one engine) ║
+║                                                            ║
+║   Open your browser to get started!                        ║
+║                                                            ║
+╚════════════════════════════════════════════════════════════╝
+`);
+
+  ensureQdrantSearchIndexes();
+
+  // Connector Runtime durable-sync worker loop (Phase 10). Gated by
+  // CONNECTOR_RUNTIME_SYNC (default OFF → inert). Leases + drains one
+  // ConnectorSyncJob batch per tick via the runtime's drainSyncOnce, which runs
+  // plugin.sync() → canonical ingestSource. try/catch so a sync error never
+  // touches the request path. Closes the "drainSyncOnce had no caller" gap.
+  if (process.env.CONNECTOR_RUNTIME_ENABLED === 'true' && process.env.CONNECTOR_RUNTIME_SYNC === 'true') {
+    const _syncEveryMs = Math.max(5000, Number(process.env.CONNECTOR_SYNC_INTERVAL_MS || 30000));
+    const _syncLease = `core-${process.pid}`;
+    let _syncBusy = false;
+    setInterval(async () => {
+      if (_syncBusy) return; // no overlap — a long batch skips the next tick
+      _syncBusy = true;
+      try {
+        const { getConnectorRuntime } = await import('./connectors/runtime/index.js');
+        await getConnectorRuntime({ db: prisma, prisma }).drainSyncOnce(_syncLease);
+      } catch (e) {
+        console.warn('[connector-sync] drain tick failed:', e?.message?.slice(0, 160));
+      } finally { _syncBusy = false; }
+    }, _syncEveryMs).unref();
+    console.log(`[connector-sync] durable-sync worker mounted (every ${_syncEveryMs}ms)`);
+  }
+
+  startGmailWatcherScheduler({ prisma });
+
+  // Embedding reconciler (drift guard). Every persisted memory MUST land in its
+  // org's Qdrant collection, but ~16 save paths write to PG and only some embed
+  // to Qdrant — so a fraction drifted and went invisible to semantic recall (the
+  // "highly-relevant memory never in top-5" bug; audit found up to 100% of an
+  // org un-embedded). This poll loop finds PG memories missing from Qdrant and
+  // embeds them via the same storeMemory pipeline (retry + loud log). Fast recent
+  // window each tick; a wider full sweep every ~20 ticks catches older backlog.
+  // Gated by EMBED_RECONCILE_ENABLED (default ON — this is a correctness guard).
+  if (process.env.EMBED_RECONCILE_ENABLED !== 'false' && prisma && qdrantClient) {
+    const _reconEveryMs = Math.max(60000, Number(process.env.EMBED_RECONCILE_INTERVAL_MS || 3 * 60 * 1000));
+    let _reconBusy = false;
+    let _reconTicks = 0;
+    const _runReconcile = async () => {
+      if (_reconBusy) return; // no overlap — a long sweep skips the next tick
+      _reconBusy = true;
+      try {
+        _reconTicks += 1;
+        const { reconcileEmbeddingsOnce } = await import('./memory/embed-reconciler.js');
+        const fullSweep = _reconTicks % 20 === 0; // ~hourly full sweep at 3min cadence
+        await reconcileEmbeddingsOnce({ prisma, qdrantClient, fullSweep, sinceHours: 72 });
+        // P0.2 — the SEGMENT lane. The pass above guards memories only; an evidence
+        // segment whose ingest-time heal also failed had nothing left to retry it,
+        // so it stayed in Postgres with vectorStored=false — permanently
+        // unsearchable while the document looked complete. Rides the same tick and
+        // the same no-overlap guard. Recent-window on normal ticks, whole backlog
+        // on the full sweep, both bounded so a large backlog drains over several
+        // passes instead of stalling one.
+        if (documentFirstIngestion?.healUnembeddedSegments) {
+          await documentFirstIngestion.healUnembeddedSegments({
+            limit: fullSweep ? 500 : 100,
+            sinceHours: fullSweep ? null : 72,
+          });
+        }
+      } catch (e) {
+        console.warn('[embed-reconciler] tick failed:', e?.message?.slice(0, 160));
+      } finally { _reconBusy = false; }
+    };
+    setInterval(_runReconcile, _reconEveryMs).unref();
+    setTimeout(_runReconcile, 90000).unref(); // first pass ~90s post-boot (after warm-up)
+    console.log(`[embed-reconciler] drift-guard worker mounted (every ${_reconEveryMs / 60000}min, full sweep every 20 ticks)`);
+  }
+
+  // `.amr` shard maintenance (ICARUS Phase A). The shard is the SOLE copy of an
+  // org's memories and NOTHING backed it up — a dead box meant that org's memory
+  // was gone for good. It also never ran the engine's own compact(), so append-only
+  // growth was unbounded (measured: 4.2 MB of shard.vec for 11 live memories).
+  // Snapshot ALWAYS precedes compaction, and only slots snapshotted in the same
+  // pass are compacted — compaction rewrites data, so it never touches an unbacked
+  // slot. Backup defaults ON; compaction is OPT-IN (MNEME_COMPACT_ENABLED).
+  if (String(process.env.MNEME_MAINTENANCE_ENABLED ?? 'true').toLowerCase() !== 'false') {
+    const _maintEveryMs = Math.max(300000, Number(process.env.MNEME_MAINTENANCE_INTERVAL_MS || 60 * 60 * 1000));
+    let _maintBusy = false;
+    const _runMaint = async () => {
+      if (_maintBusy) return; // no overlap — a long sweep skips the next tick
+      _maintBusy = true;
+      try {
+        const { runShardMaintenanceOnce } = await import('./vector/mneme/shard-maintenance.js');
+        await runShardMaintenanceOnce({});
+      } catch (e) {
+        console.warn('[shard-maintenance] tick failed:', e?.message?.slice(0, 160));
+      } finally { _maintBusy = false; }
+    };
+    setInterval(_runMaint, _maintEveryMs).unref();
+    setTimeout(_runMaint, 120000).unref(); // first pass ~2min post-boot
+    console.log(`[shard-maintenance] worker mounted (every ${_maintEveryMs / 60000}min, `
+      + `backup=${process.env.MNEME_BACKUP_ENABLED ?? 'true'} compact=${process.env.MNEME_COMPACT_ENABLED ?? 'false'})`);
+  }
+  });
+} else {
+  console.log(`[runtime] HTTP server disabled for role=${RUNTIME_ROLE}`);
+}
+
+startAppSidecars();

@@ -1,0 +1,262 @@
+"""
+Browser mic ⇄ Deepgram Voice Agent bridge.
+
+Speaks the SAME WebSocket protocol as tara-aaas /voice, so AaasVoiceWidget
+works unchanged when pointed here:
+
+  browser → binary Int16 PCM s16le @16kHz
+  browser ← binary Int16 PCM s16le @16kHz (TTS audio)
+  browser ← JSON {type: ready|transcript|speech_start|turn_done|error}
+
+Deepgram Agent handles STT + turn-taking + barge-in + TTS (Aura-2) in
+linear16@16k both ways; think stage = our HIVEMIND shim (recall-grounded).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Optional
+
+import websockets
+from fastapi import WebSocket, WebSocketDisconnect
+
+from . import config
+from .agent_session import build_settings
+
+# Instant openings when no call goal is set (goal → plan_opening strategist).
+_WIDGET_GREETING_INTERNAL = {
+    "en": "Hi, I'm TARA — your company's HIVEMIND. Ask me anything about what we know.",
+    "de": "Hallo, ich bin TARA — das HIVEMIND Ihres Unternehmens. Fragen Sie mich, was Sie wissen möchten.",
+    "fr": "Bonjour, je suis TARA — le HIVEMIND de votre entreprise. Posez-moi vos questions.",
+    "es": "Hola, soy TARA — el HIVEMIND de su empresa. Pregúnteme lo que quiera saber.",
+    "nl": "Hallo, ik ben TARA — het HIVEMIND van uw bedrijf. Stel me gerust uw vragen.",
+    "it": "Ciao, sono TARA — l'HIVEMIND della vostra azienda. Chiedetemi pure.",
+}
+_WIDGET_GREETING_EXTERNAL = {
+    "en": "Hi, this is TARA. Thanks for taking a moment — how can I help you today?",
+    "de": "Hallo, hier ist TARA. Schön, dass Sie da sind — wie kann ich Ihnen helfen?",
+    "fr": "Bonjour, ici TARA. Merci de votre temps — comment puis-je vous aider ?",
+    "es": "Hola, soy TARA. Gracias por su tiempo — ¿en qué puedo ayudarle?",
+    "nl": "Hallo, dit is TARA. Fijn dat u er bent — waarmee kan ik u helpen?",
+    "it": "Ciao, sono TARA. Grazie per il suo tempo — come posso aiutarla?",
+}
+from .core_client import core_post
+
+log = logging.getLogger("tara_dg.browser")
+
+# Default Aura-2 voice per language (Deepgram voice ids). English fallback.
+# Per-language default Aura-2 voice. NOTE: eos-de / lotte-nl are premium and
+# 403 on the current project — use plan-authorized voices (aurelia-de, beatrix-nl).
+_AURA_BY_LANG = {
+    "en": "aura-2-thalia-en",
+    "de": "aura-2-aurelia-de",
+    "es": "aura-2-celeste-es",
+    "fr": "aura-2-agathe-fr",
+    "nl": "aura-2-beatrix-nl",
+    "it": "aura-2-livia-it",
+    "ja": "aura-2-izanami-ja",
+}
+
+
+def _company_from_brief(org_brief: str) -> str:
+    """First line of the brief is "Organization: <name>" — use the real name."""
+    for line in (org_brief or "").splitlines():
+        if line.lower().startswith("organization:"):
+            return line.split(":", 1)[1].strip()[:120]
+    return ""
+
+
+def _company_from_profile(profile_context: str) -> str:
+    for line in (profile_context or "").splitlines():
+        if line.strip().lower().startswith("company:"):
+            return line.split(":", 1)[1].strip()[:120]
+    return ""
+
+
+def _profile_greeting(*, mode: str, language: str, profile_context: str) -> str:
+    company = _company_from_profile(profile_context)
+    if company:
+        templates = {
+            "en": f"Hi, I'm TARA. I have the company context for {company} ready — what should we work through first?",
+            "de": f"Hallo, ich bin TARA. Ich habe den Kontext von {company} bereit — woran sollen wir zuerst arbeiten?",
+            "fr": f"Bonjour, je suis TARA. J'ai le contexte de {company} prêt — par quoi voulez-vous commencer ?",
+            "es": f"Hola, soy TARA. Tengo listo el contexto de {company} — ¿por dónde empezamos?",
+            "nl": f"Hallo, ik ben TARA. Ik heb de context van {company} klaar — waar zullen we eerst naar kijken?",
+            "it": f"Ciao, sono TARA. Ho pronto il contesto di {company} — da dove iniziamo?",
+        }
+        return templates.get(language, templates["en"])
+    return (_WIDGET_GREETING_INTERNAL if mode == "internal"
+            else _WIDGET_GREETING_EXTERNAL).get(
+        language, (_WIDGET_GREETING_INTERNAL if mode == "internal"
+                   else _WIDGET_GREETING_EXTERNAL)["en"])
+
+
+def _resolve_voice(voice_id: Optional[str], language: str) -> str:
+    if voice_id and voice_id.startswith("aura"):
+        return voice_id  # already a Deepgram voice
+    return _AURA_BY_LANG.get(language, _AURA_BY_LANG["en"])
+
+
+async def handle_browser_voice(ws: WebSocket, *, session_id: str,
+                               user_id: Optional[str], org_id: Optional[str],
+                               language: str, voice_id: Optional[str],
+                               mode: str = "external", goal: str = "") -> None:
+    await ws.accept()
+
+    # Persona = the operator's SELECTED skill (same as the phone path) so the
+    # browser session is skill-driven, not a generic prompt. Goal (if given)
+    # rides the think endpoint URL → seeds the strategist's goal_state +
+    # confidence/phase engine, identical to outbound calls.
+    from .core_client import get_persona
+    persona = await get_persona(user_id, org_id, session_id)
+    skill_prompt = persona.get("internal_prompt" if mode == "internal" else "system_prompt") or ""
+    profile_context = persona.get("profile_context") or ""
+    # Org brief rides the cached /api/tara/config fetch, so the widget also opens
+    # knowing the workspace. profile_context is the OPERATOR's profile, which is a
+    # different thing and cannot stand in for it.
+    org_brief = str(persona.get("org_brief") or "").strip()[:600]
+    prompt = skill_prompt or (
+        "You are TARA, the voice of this company's HIVEMIND. Answer briefly "
+        "(1-3 spoken sentences), warmly and factually. Never invent facts."
+    )
+    if org_brief:
+        prompt += (f"\n\n[ORG] Who you work for:\n{org_brief}\n"
+                   "Speak from this when asked what the company does. "
+                   "Never contradict it and never invent beyond it.")
+    if goal:
+        prompt += f"\n\n[SESSION GOAL] {goal} — steer every turn toward this."
+    settings = build_settings(
+        session_id=session_id, user_id=user_id, org_id=org_id,
+        language=language, voice_id=_resolve_voice(voice_id, language),
+        prompt=prompt, company="the company", goal=goal, mode=mode,
+    )
+    # Browser leg is linear16@16k (widget contract), not phone mulaw.
+    settings["audio"] = {
+        "input":  {"encoding": "linear16", "sample_rate": 16000},
+        "output": {"encoding": "linear16", "sample_rate": 16000, "container": "none"},
+    }
+    # Web widget mode: no phone functions, no outbound telephony disclosure.
+    # (mode + goal already ride the think endpoint URL via build_settings.)
+    settings["agent"]["think"].pop("functions", None)
+    # TARA SPEAKS FIRST — same strategist as outbound dialing: with a goal set,
+    # plan_opening (skill persona + goal) crafts the opening line; without one,
+    # an instant mode-appropriate greeting so the widget never sits silent.
+    opening = ""
+    if goal:
+        from .turn_router import plan_opening
+        plan = await plan_opening(persona_prompt=skill_prompt, goal=goal,
+                                  company=_company_from_brief(org_brief) or "the company",
+                                  language=language, org_brief=org_brief)
+        opening = (plan.get("opening") or "").strip()
+    if not opening:
+        opening = _profile_greeting(mode=mode, language=language, profile_context=profile_context)
+    settings["agent"]["greeting"] = opening
+
+    closed = asyncio.Event()
+    try:
+        async with websockets.connect(
+            config.DEEPGRAM_AGENT_URL,
+            additional_headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}"},
+        ) as dg:
+            await dg.send(json.dumps(settings))
+
+            async def browser_to_dg() -> None:
+                while not closed.is_set():
+                    try:
+                        msg = await ws.receive()
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
+                    if msg.get("type") == "websocket.disconnect":
+                        break
+                    data = msg.get("bytes")
+                    if data:
+                        await dg.send(data)
+                closed.set()
+
+            # Call-history state: pair each assistant reply with the preceding
+            # user utterance and ingest as a turn (same core API as tara-aaas).
+            turn = {"n": 0, "user_text": "", "latency_ms": None}
+
+            async def dg_to_browser() -> None:
+                while not closed.is_set():
+                    try:
+                        frame = await asyncio.wait_for(dg.recv(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    except websockets.ConnectionClosed:
+                        break
+                    if isinstance(frame, bytes):
+                        await ws.send_bytes(frame)
+                        continue
+                    evt = json.loads(frame)
+                    etype = evt.get("type")
+                    if etype == "SettingsApplied":
+                        await ws.send_text(json.dumps({"type": "ready"}))
+                        asyncio.create_task(core_post("/api/tara/calls/start", {
+                            "session_id": session_id, "mode": mode,
+                            "voice_id": voice_id, "language": language,
+                        }, user_id, org_id))
+                    elif etype == "ConversationText":
+                        role, content = evt.get("role"), evt.get("content")
+                        await ws.send_text(json.dumps({
+                            "type": "transcript", "role": role, "text": content,
+                        }))
+                        if role == "user":
+                            turn["user_text"] = content
+                        elif role == "assistant":
+                            turn["n"] += 1
+                            asyncio.create_task(core_post("/api/tara/calls/turn", {
+                                "session_id": session_id, "seq": turn["n"],
+                                "user_text": turn["user_text"], "agent_text": content,
+                                "llm_ttfb_ms": turn["latency_ms"],
+                            }, user_id, org_id))
+                            turn["user_text"] = ""
+                    elif etype == "UserStartedSpeaking":
+                        await ws.send_text(json.dumps({"type": "speech_start"}))
+                    elif etype == "AgentStartedSpeaking":
+                        turn["latency_ms"] = round(float(evt.get("total_latency") or 0) * 1000) or None
+                        log.info("latency session=%s total=%.0fms ttt=%.0fms tts=%.0fms",
+                                 session_id,
+                                 float(evt.get("total_latency") or 0) * 1000,
+                                 float(evt.get("ttt_latency") or 0) * 1000,
+                                 float(evt.get("tts_latency") or 0) * 1000)
+                    elif etype == "AgentAudioDone":
+                        await ws.send_text(json.dumps({"type": "turn_done"}))
+                    elif etype == "Error":
+                        log.error("dg error session=%s: %s", session_id, evt)
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": evt.get("description") or "agent error",
+                        }))
+                closed.set()
+
+            async def keepalive() -> None:
+                while not closed.is_set():
+                    await asyncio.sleep(8)
+                    try:
+                        await dg.send(json.dumps({"type": "KeepAlive"}))
+                    except websockets.ConnectionClosed:
+                        break
+
+            tasks = [asyncio.create_task(t()) for t in (browser_to_dg, dg_to_browser, keepalive)]
+            await closed.wait()
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:  # noqa: BLE001
+        log.exception("browser voice bridge failed session=%s", session_id)
+        try:
+            await ws.send_text(json.dumps({"type": "error", "message": str(e)}))
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        # Finalize call history (+ triggers core-side session insights).
+        try:
+            await core_post("/api/tara/calls/end", {"session_id": session_id}, user_id, org_id)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001
+            pass

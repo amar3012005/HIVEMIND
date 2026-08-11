@@ -31,7 +31,7 @@ from agentscope.formatter import (
 from agentscope.memory import InMemoryMemory
 from agentscope.model import AnthropicChatModel, ChatModelBase, OpenAIChatModel
 
-from .agentscope_tools import build_hivemind_toolkit
+from .agentscope_tools import build_hivemind_toolkit, register_experience_tool
 
 log = logging.getLogger(__name__)
 
@@ -212,15 +212,27 @@ def _resolve_openai_compatible_target(
     has_tools: bool = True,
 ) -> tuple[str, str, str]:
     """Route a model to the right OpenAI-compatible endpoint, MODEL-AWARE:
+      • an EXPLICIT `openrouter` provider → OpenRouter, always (caller opt-in wins);
       • an OpenRouter-native vendor slug (deepseek/…, anthropic/…) or anthropic
         provider → OpenRouter (when a key is present);
-      • gpt-oss-* / llama-* → GROQ DIRECT (even if an OpenRouter key is set).
+      • otherwise gpt-oss-* / llama-* → GROQ DIRECT.
     The Groq llama→gpt-oss-20b swap (llama emits <function=> Llama-tag format → 400
     under strict tool validation) fires ONLY for TOOL-USING agents — tool-less
-    agents (debate reactors, planner, verifier) keep llama / llama-3.1-8b-instant."""
+    agents (debate reactors, planner, verifier) keep llama / llama-3.1-8b-instant.
+
+    An explicit provider request MUST outrank the model-name heuristic. It did not,
+    and the failure was silent and total: `_verify_turn` sets llm_provider="openrouter"
+    for the grounding judge, but gpt-oss force-routed to Groq anyway — so once the Groq
+    account went delinquent EVERY room turn came back met=False/grounded_ok=False
+    ("quality verification was unavailable") and the goalkeeper re-planned to its round
+    cap on every turn: governance permanently closed, plus the token cost of the rework."""
     ml = (model or "").lower()
     openrouter_key = llm_api_key or os.environ.get("OPENROUTER_API_KEY")
-    is_openrouter_model = any(ml.startswith(v) for v in _OPENROUTER_VENDORS) or provider == "anthropic"
+    is_openrouter_model = (
+        provider == "openrouter"
+        or any(ml.startswith(v) for v in _OPENROUTER_VENDORS)
+        or provider == "anthropic"
+    )
     if openrouter_key and is_openrouter_model:
         routed_model = model
         if provider == "anthropic" and "/" not in model:
@@ -311,6 +323,10 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
     # send it for gpt-oss.
     if "gpt-oss" in (routed_model or "").lower():
         _kwargs["reasoning_effort"] = "low"
+        # Do not pass Groq's reasoning_format extension through AgentScope's
+        # OpenAI client. Current openai.AsyncCompletions rejects it as an
+        # unexpected keyword and silently disables the verification pass. The
+        # response normalizer already strips Harmony analysis-channel markers.
     return OpenAIChatModel(**_kwargs)
 
 
@@ -394,6 +410,30 @@ def build_react_agent(
               "approval; an outward send (gmail_send) is held for the user's one-click approval. "
               "No need to ask for IDs."
         )
+    # LEADS & CALLS — tool discipline (list_prospects / save_prospect / propose_call are ALWAYS
+    # available). Reuse-first + human-gated calls. This is the "when to trigger" guidance so the
+    # agent reaches for the RIGHT tool instead of re-discovering or dialing blindly.
+    persona = (
+        persona
+        + "\n\nLEADS & CALLS (tool discipline — follow exactly):\n"
+        "- SEE / REUSE FIRST: any request about 'our leads/prospects', or to contact / reach out to / "
+        "email / call an EXISTING lead, MUST start by calling `list_prospects` (optionally with a query) "
+        "to read the company's shared lead book — each lead carries a note on why it mattered + its real "
+        "contact details. NEVER act on a lead from memory, and never ask the user for details the lead "
+        "book already holds.\n"
+        "- DISCOVERY of brand-new prospects is a ROOM action (Google Places), not a tool you hold: if the "
+        "user asks for NEW/more prospects and the lead book has none that fit, call `list_prospects` "
+        "first, then state that a discovery search is needed — NEVER invent firms.\n"
+        "- SAVE: when you find or qualify a lead worth keeping, call `save_prospect(company, note, phone, "
+        "email, website)` with a short note on WHY it matters right now — so every room reuses it later.\n"
+        "- CALL: when a LIVE phone call is the right next step for a SPECIFIC prospect (a warm/qualified "
+        "lead, a booked-meeting opening, a time-sensitive follow-up — not routine info), call "
+        "`propose_call(company, phone, why)`. It does NOT dial — it queues the call for the user's "
+        "one-click approval (voice, language and strategy are auto-selected). If the user GIVES a phone "
+        "number (or you already have it), call `propose_call` DIRECTLY — do NOT `list_prospects` first; "
+        "only `list_prospects` first when you need a number you don't have. Use a call only when it "
+        "clearly beats an email."
+    ).strip()
     # Default fallback is wider than before — gives a fresh employee
     # the full HIVEMIND reach. Hyper-room agents override via merged_emp.
     requested_tools = employee_row.get("tools") or [
@@ -444,6 +484,20 @@ def build_react_agent(
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("connector group activation failed: %s", exc)
+
+        # GLOBAL learned playbook → lazy `recall_experience` tool + a one-line pointer
+        # (not a wholesale inject). The agent loads the relevant lessons on demand, the
+        # same way it reaches for recall/web. Read-only: private chat never journalises.
+        register_experience_tool(toolkit, org_id, name)
+        _pb = employee_row.get("evo_playbook") or []
+        _pb_n = len([x for x in _pb if str(x).strip()]) if isinstance(_pb, list) else 0
+        if _pb_n:
+            persona = (
+                persona
+                + f"\n\nYou have {_pb_n} learned lesson(s) from your past work across all rooms. "
+                  "When a task resembles something you have handled before, call "
+                  "recall_experience(topic) to load the relevant lessons and apply them."
+            )
 
     model = _resolve_model(employee_row)
     formatter = _resolve_formatter(provider)

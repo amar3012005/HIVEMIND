@@ -6,6 +6,15 @@ type: reference
 
 # Hetzner Operations Skill
 
+> **Current production runbook (2026-07-09):** The legacy Coolify details below are historical.
+> Active production is `root@singulancelabs.com`, live checkout `/root/hivemind`, clean build
+> clone `/root/hivemind-next`, and Compose file
+> `/root/hivemind/infra/docker-compose.hetzner.yml`. Always pass
+> `--env-file /root/hivemind/.env`; never pull/reset the dirty live checkout or use `docker run`
+> for core/control. Health checks are `https://core.singulancelabs.com/health` and
+> `https://api.singulancelabs.com/v1/bootstrap`. Build/tag/rollback details are in
+> `.claude/MEMORY.md`.
+
 ## Overview
 Manage the HIVEMIND deployment on Hetzner Cloud infrastructure.
 

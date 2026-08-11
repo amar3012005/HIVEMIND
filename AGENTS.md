@@ -1,4 +1,223 @@
+## AUTONOMY CLAUSE (overrides default behavior, not safety contracts)
+
+You are running unattended. The operator will not respond until the final review.
+
+- NEVER ask questions. When facing ambiguity, state the options, choose the safest
+  reversible default, record it under DECISIONS in the task output, and continue.
+- NEVER stop at a milestone. Milestones are reporting points, not stopping points.
+  After verifying a milestone, immediately begin the next build-order step.
+- NEVER stop because the remaining work is large. Continue until every build-order
+  step is complete and every acceptance criterion is verified.
+- NEVER summarize and wait. Write a final summary only when all work is done.
+- On test failure, diagnose, fix, and rerun. Attempt up to five bounded fix cycles
+  per distinct failure before recording it as BLOCKED and continuing with the next
+  independent step. Never abandon the whole run because one independent step failed.
+- On uncertainty about business rules, the GENERALITY CONTRACT and ARCHITECTURE
+  CONTRACT are the tie-breakers. Choose the safest reversible option that violates
+  neither.
+- The only legitimate stops are: (a) every acceptance criterion is verified,
+  (b) a hard environment blocker such as a missing credential or unreachable
+  required service is recorded with exact remediation, or (c) estimated context
+  budget is below 15 percent and the handoff protocol below has been completed.
+- Repository safety, production release rules, approval boundaries, and instructions
+  not to overwrite unrelated work remain mandatory. Autonomy never authorizes
+  destructive cleanup, credential invention, policy bypass, or unsafe deployment.
+
+## RELEASE COORDINATION (mandatory for production work)
+
+Parallel sessions may build and commit independently, but must not silently
+supersede one another in production. Before any release work, inspect the shared
+mailbox:
+
+```bash
+/root/hivemind/scripts/release-presence.sh status
+```
+
+To receive live pings while waiting, use:
+
+```bash
+/root/hivemind/scripts/release-presence.sh status --watch
+```
+
+Canonical releases publish an atomic service claim automatically. A conflicting
+claim exits `75`; wait for its `completed` event, fetch canonical again, and
+rebase or merge before attempting a new release. Set `RELEASE_SESSION_ID` to a
+short unique session label so other sessions can identify the owner. Never bypass
+`release-canonical.sh` for production container replacement.
+
+## HANDOFF PROTOCOL (when context runs low)
+
+Before stopping:
+
+1. Write `HANDOFF.md` at the repository root.
+2. Record completed steps with commit hashes and pasted test-command output.
+3. Record the current step and exact file and line where work stopped.
+4. Record every unmet acceptance criterion.
+5. Add a DECISIONS log containing each ambiguity, available options, and selected
+   reversible default.
+6. State the exact next action as one imperative sentence.
+7. Commit the handoff and all completed, verified work on the session branch.
+
+A completion entry without its command and pasted output is void. The resuming
+task must re-verify that entry before relying on it. Never describe uncommitted
+or unverified work as complete.
+
+## ARCHITECTURE CONTRACT
+
+- HQ is an event-driven control plane. It prioritizes, delegates, reconciles,
+  validates artifacts, advances lifecycle state, and applies authority policy.
+  It does not perform specialist domain work.
+- Rooms are adaptive domain operators. Their existing Director chooses relevant
+  skills and tools inside the lifecycle envelope selected by the playbook.
+- Playbooks are immutable, versioned data. They define stages, expected artifacts,
+  predicates, transitions, event waits, repair policy, and authority gates.
+- The executor is domain-agnostic. It checkpoints before execution, validates
+  persisted artifacts after execution, and advances only from predicate verdicts.
+- Prose is never completion evidence. Persisted artifact identifiers, source
+  references, provider receipts, and predicate verdicts are completion evidence.
+- PostgreSQL owns durable workflow and checkpoint state. HIVEMIND owns semantic
+  company memory. Neither substitutes for the other.
+- Channel-specific behavior exists only behind generic adapter interfaces.
+- LangGraph may replace the checkpoint backend only after the plain PostgreSQL
+  executor and swap test pass. It must not change executor semantics.
+
+## RUNTIME BUILD ORDER
+
+Execute these steps in order. A later step may not compensate for an unverified
+earlier step.
+
+1. Build the versioned playbook registry using JSON and database records.
+2. Build the generic predicate engine with a bounded, domain-neutral vocabulary.
+3. Build the generic stage executor with a LangGraph-shaped interface and plain
+   PostgreSQL checkpoints.
+4. Replace keyword routing with Director-selected `playbook_id` and version.
+5. Build the generic adapter interface: `execute`, `verify`, and `monitor`.
+6. Gate integration on the GreenLeaf Bakery swap test using a genuinely different
+   order lifecycle authored as pure data.
+7. Migrate Outreach to a versioned playbook and verify behavioral parity through
+   persisted artifacts and provider receipts.
+8. Delete the superseded domain branches in `native-engine.js` and
+   `outreach-workflow.js`; no fallback may route back to them.
+
+## UNATTENDED TASK PROMPT
+
+```text
+Execute the full RUNTIME BUILD ORDER in AGENTS.md end-to-end, unattended, per
+the AUTONOMY CLAUSE. Do not stop between milestones. Do not ask questions.
+If context runs low, execute the HANDOFF PROTOCOL before stopping.
+Done means all acceptance criteria are verified with pasted command output
+and the GreenLeaf swap test passes. Nothing less.
+```
+
+## RESUMPTION PROMPT
+
+```text
+Read HANDOFF.md at the repository root. Resume from the exact next action stated
+there, per the AUTONOMY CLAUSE. Treat entries without pasted command output as
+unverified and re-run those checks. Do not repeat verified discovery. Continue
+to full completion of the RUNTIME BUILD ORDER.
+```
+
+## GENERALITY CONTRACT (absolute law)
+
+The runtime must be domain-agnostic. It executes playbooks; it does not encode them.
+
+FORBIDDEN in engine/HQ code:
+- if/else branches on company name, industry, vertical, or language
+- String matching on task content ("email", "Berlin", "Instagram", "prospect", "lead")
+- Hard-coded stage lists, stage counts, or stage names
+- Hard-coded completion thresholds (3 prospects, 2 criteria, 5 drafts)
+- Hard-coded artifact types (prospect_record, draft_email, post_copy)
+- Hard-coded channel names (gmail, x, linkedin) anywhere outside adapters/
+- Any logic that would break if the company were a bakery, a law firm, or a biotech
+
+REQUIRED:
+- All domain knowledge lives in versioned playbook DATA, not code.
+- The engine reads stages, checks, and gates from the playbook. It does not know what they mean.
+- Completion = playbook.terminalStates reached + expectedArtifacts validated. Nothing else.
+- Validation checks are named generic predicates (has_min_count, has_field, is_source_backed, has_provider_receipt) executed against artifacts. The playbook maps them; the engine runs them.
+- Channel adapters implement a generic interface (execute, verify, monitor). The engine calls the interface, never the channel.
+- Any company = company profile + playbooks + connected adapters. Zero code changes.
+- Task classification (work order → playbook_id) is done by the Director model, not by keyword routing.
+
+TEST FOR GENERALITY:
+Before merging, the code must pass the swap test: replace SINGULANCE's profile and playbooks with a fictional company's (e.g., "GreenLeaf Bakery" with order-management playbooks). The engine must run without modification. If any code change is needed, the generality contract is violated.
+
+## Generic Executor Reference
+
+```python
+# The entire engine loop. If it grows domain words, it is wrong.
+
+def run_room(room_run_id):
+    run = load(room_run_id)
+    playbook = registry.get(run.playbook_id, run.playbook_version)
+
+    while run.status == "ACTIVE":
+        stage = playbook.stage(run.current_stage_id)
+        checkpoint(run, stage)                       # before, not after
+
+        if stage.authority_gate and not authority_granted(run, stage):
+            return request_authority(run, stage)     # -> WAITING_AUTHORITY
+
+        result = director.execute(                   # existing Room Director
+            objective=stage.objective,
+            context=resolve_artifacts(run, stage.input_refs),
+            checks=stage.completion_checks,
+        )
+
+        artifacts = persist_artifacts(run, stage, result)
+        verdict = predicates.validate(stage.completion_checks, artifacts)
+
+        if verdict.passed:
+            run.completed_stage_ids.append(stage.id)
+            run.current_stage_id = playbook.next(stage, result, run)
+            checkpoint(run, stage)
+        elif stage.on_failure == "REPAIR" and stage.attempts < MAX_REPAIRS:
+            rerun_stage_with_unmet_criteria(run, stage, verdict.unmet)
+        else:
+            return escalate(run, stage, verdict.unmet)  # exact gaps to HQ
+
+        if stage.waits_for_event:
+            return wait(run, stage.waits_for_event)     # -> WAITING_EVENT
+
+    return finalize(run)   # terminal only when playbook.terminal_states all reached
+```
+
+This is the architectural north star. The checkpoint backend may change, but the
+engine contract may not absorb domain concepts from any playbook or adapter.
+
 # HIVEMIND Autonomous Agent System
+
+## Mandatory Deployment Governor
+
+Every production action must use
+[`DEPLOY_GOVERNOR.md`](DEPLOY_GOVERNOR.md) and the
+`singulance-deploy-governor` agent. It is the operational authority for the
+cache-preserving `singulance-main` fast path. The legacy `deploy-operator` is a
+deprecated alias and must not use raw hosts, Coolify, Vercel, or generic
+container restarts.
+
+## Mandatory Production Release Rule
+
+Before feature work, read and follow
+[`docs/BRANCH_PROTOCOL.md`](docs/BRANCH_PROTOCOL.md). Work on a session branch
+or isolated worktree, rebase onto `origin/singulance-main`, and merge only a
+complete tested state into `singulance-main`. Do not commit feature work
+directly to `singulance-main`, and never point the parent repo at an unpushed
+`frontend/Da-vinci` commit.
+
+Before any production edit, build, migration, restart, or deployment, read and follow
+[`docs/PRODUCTION_RELEASE_PROTOCOL.md`](docs/PRODUCTION_RELEASE_PROTOCOL.md). Compare the intended
+commits with [`docs/PRODUCTION_RELEASE.md`](docs/PRODUCTION_RELEASE.md). Stop rather than deploy from
+a dirty checkout, stale frontend gitlink, mutable image tag, unpushed commit, or conflicting session.
+SINGULANCE production is only `ssh singulance`; never use `myserver` for this release path.
+
+## Mandatory Engineering Journal
+
+Read and maintain [`docs/ENGINEERING_JOURNAL.md`](docs/ENGINEERING_JOURNAL.md).
+Git is the source of truth: journal entries must cite pushed SHAs and must
+separate `Committed` from `Accepted release`. Append entries only; never
+rewrite history or describe an uncommitted change as complete.
 
 ## Overview
 

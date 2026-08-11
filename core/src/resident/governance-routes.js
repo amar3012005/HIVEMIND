@@ -13,6 +13,7 @@
  */
 
 import { invalidateCognitionSettings } from './cognition-pilot.js';
+import { requireOrganizationAdmin } from '../workspace/access-policy.js';
 
 function ok(body, statusCode = 200) {
   return { handled: true, statusCode, body };
@@ -36,10 +37,12 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
     async dispatch({ pathname, method, body = {}, query = {}, userId, orgId }) {
       if (!prisma) return ok({ error: 'governance disabled (no prisma client)' }, 503);
       if (!orgId) return ok({ error: 'orgId required (X-HM-Org-Id header)' }, 400);
+      const requireAdmin = async () => requireOrganizationAdmin(prisma, { orgId, userId }).catch(() => null);
 
       // ── GET /api/governance/cognition-settings — toggle state for this org +
       //    its active projects (workspace-admin settings + project cards).
       if (pathname === '/api/governance/cognition-settings' && method === 'GET') {
+        if (!await requireAdmin()) return ok({ error: 'Resource not found' }, 404);
         let orgRow = null;
         let projRows = [];
         try {
@@ -79,16 +82,7 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
       // ── POST /api/governance/cognition-settings — admin/owner sets the toggles.
       //    Body: { org_enabled?, personal_enabled?, project_id?, self_evolve_enabled? }
       if (pathname === '/api/governance/cognition-settings' && method === 'POST') {
-        const mem = await prisma.userOrganization.findUnique({
-          where: { userId_orgId: { userId, orgId } },
-          select: { role: true, roles: true },
-        }).catch(() => null);
-        const roles = new Set([
-          ...(mem?.role ? [mem.role] : []),
-          ...(Array.isArray(mem?.roles) ? mem.roles : []),
-        ]);
-        const isAdmin = ['admin', 'owner', 'org_admin', 'org_owner'].some((r) => roles.has(r));
-        if (!isAdmin) return ok({ error: 'admin/owner role required', roles_seen: [...roles] }, 403);
+        if (!await requireAdmin()) return ok({ error: 'Resource not found' }, 404);
 
         try {
           if (typeof body.org_enabled === 'boolean') {
@@ -177,6 +171,7 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
 
       // ── GET /api/governance/metrics?days=7
       if (pathname === '/api/governance/metrics' && method === 'GET') {
+        if (!await requireAdmin()) return ok({ error: 'Resource not found' }, 404);
         const days = Math.min(Math.max(parseInt(query.days || '7', 10) || 7, 1), 90);
         const since = new Date();
         since.setDate(since.getDate() - days);
@@ -187,7 +182,6 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
           orderBy: [{ day: 'desc' }, { agentName: 'asc' }],
         });
 
-        const agentState = await prisma.governanceAgentState.findMany({});
         const totals = rows.reduce((acc, r) => {
           acc.actions_proposed += r.actionsProposed;
           acc.actions_approved += r.actionsApproved;
@@ -212,20 +206,13 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
             failed: r.actionsFailed,
             latency_ms_p95: r.latencyMsP95,
           })),
-          agent_state: agentState.map((a) => ({
-            agent: a.agentName,
-            last_run_at: a.lastRunAt,
-            last_completed_at: a.lastCompletedAt,
-            cursor_memory_id: a.cursorMemoryId,
-            daily_token_budget: a.dailyTokenBudget,
-            tokens_spent_today: a.tokensSpentToday,
-            circuit_breaker_until: a.circuitBreakerUntil,
-          })),
+          agent_state: [],
         });
       }
 
       // ── GET /api/governance/action-log
       if (pathname === '/api/governance/action-log' && method === 'GET') {
+        if (!await requireAdmin()) return ok({ error: 'Resource not found' }, 404);
         const status = query.status || undefined;
         const limit = Math.min(parseInt(query.limit || '50', 10) || 50, 500);
         const rows = await prisma.governanceActionLog.findMany({
@@ -256,6 +243,7 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
       // ── POST /api/governance/actions/:id/approve
       const approveMatch = pathname.match(/^\/api\/governance\/actions\/([0-9a-f-]+)\/approve$/i);
       if (approveMatch && method === 'POST') {
+        if (!await requireAdmin()) return ok({ error: 'Resource not found' }, 404);
         const id = approveMatch[1];
         if (!isUuid(id)) return ok({ error: 'invalid action id' }, 400);
 
@@ -333,6 +321,7 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
       // ── POST /api/governance/actions/:id/reject
       const rejectMatch = pathname.match(/^\/api\/governance\/actions\/([0-9a-f-]+)\/reject$/i);
       if (rejectMatch && method === 'POST') {
+        if (!await requireAdmin()) return ok({ error: 'Resource not found' }, 404);
         const id = rejectMatch[1];
         if (!isUuid(id)) return ok({ error: 'invalid action id' }, 400);
         const action = await prisma.governanceActionLog.findFirst({ where: { id, orgId } });
@@ -356,6 +345,7 @@ export function createGovernanceRoutes({ prisma, memoryStore, logger = console }
       // ── POST /api/governance/rollback/:batch_id
       const rbMatch = pathname.match(/^\/api\/governance\/rollback\/([0-9a-f-]+)$/i);
       if (rbMatch && method === 'POST') {
+        if (!await requireAdmin()) return ok({ error: 'Resource not found' }, 404);
         const batchId = rbMatch[1];
         if (!isUuid(batchId)) return ok({ error: 'invalid batch_id' }, 400);
 

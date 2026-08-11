@@ -109,14 +109,31 @@ class GroqWhisperConfig:
         """Get the transcription endpoint URL"""
         return f"{self.base_url}/audio/transcriptions"
 
+    # ISO-639-1 codes Whisper-large-v3 + Cartesia sonic-3 both support well.
+    # Pass any of these straight through so STT decodes in the ACTUAL chosen
+    # language instead of being clamped to de/en (which mistranscribed every
+    # other language). Region suffixes ("de-DE", "pt_BR") are normalized off.
+    _SUPPORTED_LANGS = {
+        "en", "de", "es", "fr", "it", "pt", "nl", "pl", "ru", "tr", "sv",
+        "da", "no", "fi", "cs", "el", "hu", "ro", "uk", "bg", "hr", "sk",
+        "ja", "ko", "zh", "hi", "ar", "he", "id", "vi", "th", "ca",
+    }
+    _LANG_ALIASES = {
+        "deu": "de", "ger": "de", "german": "de", "deutsch": "de",
+        "eng": "en", "english": "en",
+        "fra": "fr", "fre": "fr", "french": "fr",
+        "spa": "es", "spanish": "es",
+        "ita": "it", "italian": "it",
+        "por": "pt", "portuguese": "pt",
+        "nld": "nl", "dutch": "nl",
+    }
+
     def resolve_language(self, preferred: Optional[str] = None) -> str:
-        """Normalize and force a stable language choice for transcription requests."""
-        lang = (preferred or self.language or "de").strip().lower()
-        if lang in {"de", "deu", "ger", "german", "deutsch"}:
-            return "de"
-        if lang in {"en", "eng", "english"}:
-            return "en"
-        return "de"
+        """Normalize to a supported ISO-639-1 code; default 'en' if unknown."""
+        raw = (preferred or self.language or "en").strip().lower()
+        lang = raw.split("-")[0].split("_")[0]
+        lang = self._LANG_ALIASES.get(lang, lang)
+        return lang if lang in self._SUPPORTED_LANGS else "en"
 
     def request_language_hint(self, preferred: Optional[str] = None) -> Optional[str]:
         """

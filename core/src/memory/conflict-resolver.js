@@ -6,6 +6,8 @@
  * Uses Groq openai/gpt-oss-20b with include_reasoning: false.
  */
 
+import { memoryChatFetch } from '../llm/groq-fallback.js';
+
 export class ConflictResolver {
   constructor(options = {}) {
     this.groqApiKey = options.groqApiKey || process.env.GROQ_API_KEY;
@@ -24,7 +26,7 @@ export class ConflictResolver {
     }
 
     try {
-      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.groqApiKey}`,

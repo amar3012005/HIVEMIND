@@ -1,59 +1,70 @@
-# Autonomous Goal Queue
+# HIVEMIND build loop — per-org-type parity + billing
 
-The loop works these **top-to-bottom, one at a time**. While any `[ ]`/`[~]` goal
-remains, the Stop hook (`.claude/hooks/goal-loop-stop.py`) blocks the session from
-ending and re-injects the current goal — so "keep going" is the default.
+The loop works these **top-to-bottom, one at a time**. While any `[ ]`/`[~]` remains, the Stop hook
+re-injects the current goal — "keep going" is default. (Archived prior sprint: GOALS.archive.tara-outbound.md)
 
-Status: `[ ]` pending · `[~]` in progress · `[x]` shipped+verified · `[!]` blocked (needs human → pauses the loop)
+Status: `[ ]` pending · `[~]` in progress · `[x]` shipped+verified · `[!]` blocked (human gate → pauses)
 
-**FE per-goal pipeline** (Da-vinci submodule, deploys via Vercel): fix → `npm run build`
-(CI=true, must be clean) → ui-preview screenshot the changed page → commit (author
-amarsai3012005) in `frontend/Da-vinci` + bump the submodule pointer → mark `[x]`. Theme
-bar = `~/.claude/skills/hivemind-frontend` (light ivory #faf9f4, ONE accent #117dff,
-Space Grotesk headings/numbers only, rounded-[10px] cards / [6px] controls, no
-purple/violet, no dark surfaces, near-zero shadow).
+**Test orgs (verify EVERY phase against all 3):**
+- self-host : `b30ead1b-288f-4e79-8399-b3fef63b7cb8` (enterprise, self_host, agent on myserver) — key `/tmp/sh_key.txt`
+- personal  : `33db5150-f2f2-4d99-9c9c-e17602a4af6f` (free, managed, HIVEMIND_PERSONAL)
+- managed   : `1eda3825-b99e-4132-90e9-5eba9f05b6ce` (enterprise, managed, org_<id>)
+
+**PRINCIPLE:** engine uniform; org-type matters ONLY at a storage seam (`memoryBackend`/`getOrgCounts`/
+`amrGraph`). No `if(orgIsRemote)` in feature/endpoint code — route inside a seam helper.
+
+**Plan limits source of truth:** `core/src/billing/plans.js` (`PLANS`). Enforce `plan-enforcer.checkLimit`;
+surface `getUsageSummary`.
+
+**Per-goal pipeline:** recon (grep, not stale graph) → surgical build (reuse>rebuild) → `node --check`
+→ deploy (scp + rebuild core/control-plane/agent as needed; `--env-file ../.env`; rebuild control-plane
+separately) → e2e verify on the 3 orgs BEFORE push → commit (author amarsai3012005; main=prod) →
+changelog + memory → mark `[x]`. Workflow tool BANNED — agents only.
 
 ---
 
-## Queue — HIVEMIND app feature polish (from the 5-agent red-team, 2026-06-19)
+## Phase 1 — Feature-matrix ground truth (TEST, no build)
+- [x] Exercise every feature for all 3 orgs; record PASS/GAP per (feature × type): save, recall, graph,
+  relationships, profile counts, KB upload, connectors, meeting notes, HyperAgents room+turn, Web Intel,
+  TARA, MCP, cognition. Commit the matrix. GATE: matrix file committed; gaps feed Phases 2-5.
 
-### Shipping-blocker bugs (fix first)
-- [!] **Memories.jsx** — ✅ off-token badges + `Invalid Date` guard (24bcee5) + ✅ off-shell page bg removed (2f6446d, AppShell provides it — confirmed). NEEDS RUNTIME SESSION (can't click-test in loop): remove the parent's duplicate listMemories+quickSearch fetch layer (~911-1147; child is self-contained but the 150-line cut needs a page run+click to verify no regression); fix/remove the dead `contradictions` tab link (1262 — needs a real destination).
-- [~] **DigitalEmployees.jsx** — ✅ crash guard (450, 85f4f98) + ✅ renderInline link null/https guard (1561, 24bcee5). REMAINING: cap/stop the 2.5s transcript poll (545-569); flatten dark code-block surface (1575,1588) + blue gradient canvas (820).
-- [~] **Settings.jsx** — ✅ owner role-gate fixed (331, shipped 85f4f98). REMAINING: surface save/revoke errors (162-179 silent `catch{}`); fix dead docs domain `docs.hivemind.dev` → canonical (504,513).
-- [!] **Billing.jsx** — NEEDS USER DECISION: "Graph Queries" meter (540) uses the `searches` limit because no `graphQueries` quota exists in the PLANS data — what's the per-plan graph-query quota (or drop the meter)? Also: annual toggle is cosmetic (−20% label but checkout charges monthly) — wire `billingCycle` into `createBillingCheckout` or remove the toggle? Once decided: also replace alert()+console with inline errors (419-432) + numeric price in PLANS.
-- [~] **WebIntelligence.jsx** — ✅ i18n `[object Object]` fixed (908, 24bcee5). REMAINING: align radii `rounded-xl`→`[10px]` + H1 recipe; surface silent save errors (248-313); a11y label/htmlFor on crawl inputs.
+## Phase 1.5 — FIX GAP-1 (managed per-tenant vector isolation) — URGENT
+- [x] Managed-enterprise vectors write to shared HIVEMIND_PERSONAL, not their org_<id> collection
+  (resolveCollectionForOrg returns the right name but plan-lookup/cache returns personal at write time).
+  Enterprise tenants' vectors are co-mingled = isolation bug. Fix the plan-resolution/cache so the WRITE
+  routes to org_<id>; backfill/migrate any mis-placed vectors. Also clean GAP-2 (21 stale central vectors
+  in org_b30ead1b for the self-host org). GATE: managed save → vector in org_<id>, NOT HIVEMIND_PERSONAL;
+  org_<id> point count grows; HIVEMIND_PERSONAL only holds free-tier vectors.
 
-### Theme hard-rule violations (purple/violet/off-shell)
-- [ ] **WebStudio.jsx** — scope SINGULANCE serif/Google-Fonts + 2nd accent (#1a45c4/violet) to the NEW-TAB report only; in-app `ResearchPreviewModal` must use theme tokens (no external `@import` into the live app, 112-164,989); re-map violet research/crawl accents → #117dff (768-1164); fix `LiveResearchPanel` auto-scroll no-op (757 — ref on non-scroller); whitelist `https?:` in `mdToHtml` link href (1603).
-- [ ] **AgentSwarm.jsx** — remove violet/purple gradient + badges (29-31,691,930 `from-violet-500 to-purple-500`) → sanctioned blue/amber/emerald; alert()/confirm → in-page toast (flash) + one styled confirm for bulk-delete; `font-bold`→`font-semibold` (369,490); emoji→lucide icons; clear poll intervals before reassign (117-124).
-- [ ] **TaraConfig.jsx** — recolor purple→#117dff + flatten glassmorphism skill-card tiles (107-546); delete ~270 lines of dead eslint-disabled components (ConfigEditor/LiveTest/ActiveSessions, 39-504); guard `startedAt` dates (772-853); surface silent load errors (765-768); H1 → `text-[24px] font-semibold`.
-- [ ] **KnowledgeBase.jsx** — normalize radii (`rounded-2xl/xl`→`[10px]`, controls `[6px]`) + soften shadows; H1+section heads to design recipe + drop Space Grotesk on body; map `TYPE_COLORS.general` gray→warm neutrals, drop violet enterprise badge (227,1490,1847); a11y labels on bulk checkboxes + delete btn (1930-2069); remove console.log (2150).
-- [~] **Profile.jsx** — ✅ avatar gradient+shadow → flat solid #117dff (135, 24bcee5). REMAINING: surface fact edit/delete errors + remove console.error (747,759); fix "Edit Profile Facts" collapsing the open editor (1256,1315).
-- [~] **Engine.jsx** — ✅ renamed `t`-shadow map params (365,372 → 24bcee5). REMAINING: drive the "all features active" status bar from real state or label it a static legend (614-630, currently lies); inline error states instead of console.error-only (71-331); confirm step on destructive synthesize-now "Run now" (443).
+## Phase 2 — KB-on-agent (unblock KB for self-host)
+- [x] Agent knowledge_documents + knowledge_segments tables + segment vectors; route doc+segment
+  write/read/recall to the agent via outbox; lift the KB-upload assertKbAllowedForOrg block.
+  GATE: PDF upload to b30ead1b → segments+memories on agent, central=0, recall returns the doc.
 
-### Remaining (genuinely blocked — runtime / product / prop-thread)
-- [!] **Connectors alert→toast** — needs `setToastMessage` threaded into 3 child modals (GmailSyncSettings, oauth-clients, revoke); can't verify modal flow without running. Alerts currently FUNCTION (inform user), just unthemed. Destructive confirms (Gmail flush, OAuth revoke) stay as confirms.
-- [!] **Engine** confirm-on-`synthesize-now` (destructive on real orgs) — needs a styled confirm modal.
-- [!] **MemoryGraph `{false}` panel delete** — attempted; cascades into live temporal-state (setters orphaned, getters still read). Inert dead code, low value, high regression risk → left as-is.
-- Smaller polish left: DigitalEmployees transcript poll cap + dark code-block surface; WebStudio fonts-scope to new-tab report; KnowledgeBase radii normalization (marginal); WebIntelligence radii/H1; AgentSwarm emoji→lucide + poll-interval cleanup.
+## Phase 3 — Structured enrichment + cognition for self-host (compass P5)
+- [x] 3a — enrichMemoryStructured runs centrally for remote; urgency/kind/owner/blocked tags pushed to
+  agent via amrUpdateTags→outbox. VERIFIED on b30ead1b.
+- [x] 3b — cognition-loop / dreaming for remote: pull working set from the agent (/v1/list+/v1/recall),
+  synthesize centrally, push syntheses via store.createMemory→outbox, SKIP drift-compaction on remote
+  (destructive; needs the snapshot rails). Own careful unit — cognition is incident-prone. GATE:
+  synthesize-now on b30ead1b → synthesis lands on agent, central=0, no compaction.
 
-### (superseded) Polish / cleanup / smaller bugs
-- [ ] **Connectors.jsx** — fix Nango-only scope-change dead path (803-820 gate `oauthProvider||nangoProvider` but onChangeScope wired only on oauthProvider → Settings save silently no-ops for Salesforce/Linear); alert()/confirm → themed toast/modal (esp. destructive Gmail flush 1146); env-source hardcoded URLs (360,2376,2910); remove console.* (1096-3760); off-token badges (436-446) → #117dff/amber-600; delete dead exports (StatsRow/CopyButton/CONNECTOR_CATEGORIES).
-- [ ] **MemoryMoss.jsx** — wire `onSelectMemory` (MemoryGraph passes it 1418 but Moss ignores → leaf-node click does nothing); render or remove dead `subtitle`/`hubLeaves` props (224-235).
-- [ ] **ApiKeys.jsx + McpServer.jsx** — drop off-shell `min-h-screen bg-… p-…` double-bg (ApiKeys 332, McpServer 1171); normalize radii to design system; wrap `handleRevoke` in try/catch (ApiKeys 324, floating promise); remove McpServer 200-line `display:none` dead Quick-Setup block (1305-1501).
-- [ ] **Overview.jsx** — robust chat height (1056 drop magic `calc(100vh-104px)`); tone the oversized bold clock to match stat hierarchy (65); remove stray console.warn.
-- [ ] **MemoryGraph.jsx** — remove the permanently-dead `{false && (...)}` temporal panel + its orphaned rAF/state (947-999, 1517-1664) OR re-enable it; remove eslint-disabled unused imports (14-21).
+## Phase 4 — Billing: used/left everywhere + enforce all callsites
+- [ ] getUsageSummary on Overview + Usage (getOrgCounts uniform); echo usage on every action
+  (X-Usage-* headers / usage block) so the API key always knows used/left; enforce remaining callsites
+  (connectors ALL providers, graphQueries block, seats/maxUsers on invite); consolidate+document plans.js.
+  GATE: free org hits each cap → 402/403 with used/left; Usage shows all counters for all 3 types.
 
-## Done (archive — newest first)
-- [x] **TaraConfig** date guards (Invalid-Date) + **Engine** feature badge `active`→`built-in` (honest static legend). `b69d6a2`.
-- [x] **Profile** edit-toggle (was collapsing open editor) + fact update/delete error surfacing; **KnowledgeBase** a11y labels (checkbox + delete btn). `e522931`.
-- [x] **Settings** dead docs domain → live; **WebStudio** LiveResearchPanel auto-scroll no-op fixed. `69b98c1`.
-- [x] **AgentSwarm** result alerts → themed toast (confirms kept on destructive). `9eaa4c4`.
-- [x] **Dead-code deletes:** McpServer 200-line hidden Quick-Setup grid + TaraConfig ~470-line dead components (+orphaned imports). `16c57d9`.
-- [x] **Theme: all purple/violet removed** (AgentSwarm, TaraConfig, WebStudio, KnowledgeBase, Engine) → blue/#117dff single-accent. Da-vinci `d09c667`.
-- [x] **Off-shell double-bg removed** (ApiKeys, McpServer, Memories) + ApiKeys revoke floating-promise guarded. Da-vinci `2f6446d`.
-- [x] **Overview** clock weight (hierarchy) · **MemoryGraph** dead onSelectMemory prop + dead console handler · **KnowledgeBase** dead console handler. Da-vinci `ba21f9e`.
-- [x] **MeetingNotes.jsx** — `MeetingIntelligencePanel` gated to the Summary tab (was rendering on Notes/Transcript too). Da-vinci `24bcee5`, CI build clean.
-- [x] **HyperAgents.jsx** — malformed Tailwind `rounded-none-[24px]`/`-[20px]` → `rounded-none` (sharp, matches the 41 sibling popup classes). Da-vinci `85f4f98`, CI build clean.
-<!-- the agent moves [x] goals here with their commit sha -->
+## Phase 5 — Meetings + TARA for self-host
+- [x] Route meeting + tara rows to the agent so the 501 blocks lift. GATE: record a meeting on
+  b30ead1b → lands on agent, central=0.
+
+## Phase 6 — Uniform-count sweep + cosmetic parity
+- [ ] getOrgCounts on all count surfaces; route self-host recent_titles/tags/Overview band through the
+  agent; remove remaining per-type branches. GATE: Overview+Profile+Usage one code path across 3 types;
+  grep shows no orgIsRemote outside seam helpers.
+
+## Later (situational, not blocking the loop)
+- [ ] Compass P8 backups+restore drill (before any PG=0). P6 migration saga (real central→agent move).
+  P11 managed density decision. P12 .amr swap.
+- [ ] Background-LLM token metering completeness (KB distill raw-Groq fetch + embeddings/vision).

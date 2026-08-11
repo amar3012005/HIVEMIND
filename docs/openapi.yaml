@@ -18,8 +18,10 @@ info:
     url: https://hivemind.davinciai.eu
 
 servers:
+  - url: https://core.singulancelabs.com
+    description: Production hosted API
   - url: https://core.hivemind.davinciai.eu:8050
-    description: Production (EU, Coolify)
+    description: Legacy production hostname
   - url: http://localhost:3000
     description: Local dev
 
@@ -35,6 +37,8 @@ tags:
     description: Document uploads (PDF/DOCX/CSV/XLSX) — chunked + embedded.
   - name: Health
     description: Status + observability.
+  - name: Workflows
+    description: Plan governed multi-step workflows across HIVE-MIND and connected applications.
 
 paths:
   /api/health:
@@ -236,6 +240,78 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/SearchResult' }
 
+  /api/composio/plan:
+    post:
+      tags: [Workflows]
+      summary: Plan a sequential HIVE-MIND and Composio workflow
+      description: |
+        Plans only; it never executes provider actions. The planner sees native
+        HIVE-MIND capabilities plus only the authenticated tenant's ACTIVE
+        Composio connector groups. Returned dependencies form a bounded DAG.
+        Any later write must still enter the pending-write approval pipeline.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request]
+              properties:
+                request: { type: string }
+                language: { type: string, nullable: true }
+                history:
+                  type: array
+                  maxItems: 3
+                  items:
+                    type: object
+                    properties:
+                      role: { type: string, enum: [user, assistant] }
+                      content: { type: string }
+      responses:
+        '200':
+          description: Validated plan with no side effects executed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string, example: hivemind-hosted-planner.v1 }
+                  plan_id: { type: string }
+                  connected_providers:
+                    type: array
+                    items: { type: string }
+                  native_tools:
+                    type: array
+                    items: { type: string }
+                  steps:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index: { type: integer }
+                        operation: { type: string }
+                        authority: { type: string, enum: [read, write] }
+                        output_kind: { type: string, enum: [knowledge, recipient, record, document, message, generic] }
+                        tool_groups:
+                          type: array
+                          minItems: 1
+                          maxItems: 1
+                          items: { type: string }
+                        depends_on:
+                          type: array
+                          items: { type: integer }
+                        instruction: { type: string }
+                        query:
+                          type: string
+                          nullable: true
+                          description: Compact canonical retrieval expression; null for pure action steps.
+                  execution:
+                    type: object
+                    properties:
+                      mode: { type: string, example: sequential_dag }
+                      side_effects_executed: { type: boolean, example: false }
+                      writes_require_approval: { type: boolean, example: true }
+
   /api/graph:
     get:
       tags: [Graph]
@@ -285,8 +361,13 @@ paths:
                 tags: { type: string, description: 'Comma-separated tags' }
                 targetScope:
                   type: string
-                  enum: [personal, organization]
+                  enum: [personal, project, team, organization]
                   default: personal
+                ingestMode:
+                  type: string
+                  enum: [both, evidence]
+                  default: both
+                  description: 'both runs the full memory pipeline; evidence indexes lexical and semantic evidence without memory promotion. Images support both only.'
                 containerTag: { type: string, description: 'Project slug for organization scope' }
       responses:
         '200':

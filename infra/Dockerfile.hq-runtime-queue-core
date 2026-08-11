@@ -1,0 +1,6 @@
+ARG BASE_IMAGE=hivemind/core-api:prod-20260731-hq-runtime-queue-v3
+FROM ${BASE_IMAGE}
+
+COPY core/src/hq-runtime/instruction-loop.js /app/src/hq-runtime/instruction-loop.js
+COPY core/src/hq-runtime/native-engine.js /app/src/hq-runtime/native-engine.js
+COPY core/src/hq-runtime/work-dispatcher.js /app/src/hq-runtime/work-dispatcher.js

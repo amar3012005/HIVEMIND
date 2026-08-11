@@ -1,0 +1,10 @@
+FROM hivemind/employees:prod-20260731-lead-intelligence-v4
+COPY employees-service/src/hivemind_employees/api_hyper_rooms.py /app/src/hivemind_employees/api_hyper_rooms.py
+COPY employees-service/src/hivemind_employees/hivemind_client.py /app/src/hivemind_employees/hivemind_client.py
+COPY employees-service/src/hivemind_employees/agents/agentscope_tools.py /app/src/hivemind_employees/agents/agentscope_tools.py
+COPY employees-service/src/hivemind_employees/hyper/engine.py /app/src/hivemind_employees/hyper/engine.py
+COPY employees-service/src/hivemind_employees/hyper/work_order_contract.py /app/src/hivemind_employees/hyper/work_order_contract.py
+COPY employees-service/src/hivemind_employees/hyper/skills/__init__.py /app/src/hivemind_employees/hyper/skills/__init__.py
+COPY employees-service/src/hivemind_employees/hyper/skills/outreach/prospect-qualification.md /app/src/hivemind_employees/hyper/skills/outreach/prospect-qualification.md
+RUN rm -rf /app/src/hivemind_employees/hyper/domains/hq
+COPY employees-service/src/hivemind_employees/hyper/domains/hq /app/src/hivemind_employees/hyper/domains/hq

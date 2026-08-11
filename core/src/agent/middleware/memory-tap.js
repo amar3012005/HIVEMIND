@@ -14,6 +14,8 @@
  * response (channel:, page:, etc.) extracted by per-provider extractors.
  */
 
+import crypto from 'node:crypto';
+
 const PROVIDER_FROM_TOOL = {
   slack_read_channel: 'slack',
   slack_read_thread: 'slack',
@@ -109,6 +111,9 @@ function buildIngestPayload(toolName, args, raw, ctx) {
 
   const bodyText = rawBodyText(raw) || JSON.stringify(raw || {});
   if (!bodyText || bodyText.length < 20) return null;
+  const sourceDigest = crypto.createHash('sha256')
+    .update(`${provider}\0${toolName}\0${JSON.stringify(args || {})}\0${bodyText}`)
+    .digest('hex').slice(0, 24);
 
   // Derive a more informative title when we can parse the body.
   let title = `${provider}/${toolName} live result`;
@@ -129,7 +134,7 @@ function buildIngestPayload(toolName, args, raw, ctx) {
     source_metadata: {
       source_type: 'mcp-live-tap',
       source_platform: provider,
-      source_id: `${provider}:${toolName}:${Date.now()}`,
+      source_id: `${provider}:${toolName}:${sourceDigest}`,
     },
   };
 }
@@ -141,7 +146,7 @@ export function createMemoryTapMiddleware({ logger = console } = {}) {
     const resp = await next(kwargs);
 
     if (!tool.readOnly || resp.status !== 'ok') return resp;
-    if (!ctx.persistentMemoryEngine?.ingestMemory) return resp;
+    if (!ctx.ingestCanonicalPayload && !ctx.persistentMemoryEngine?.ingestMemory) return resp;
 
     const payload = buildIngestPayload(tool.name, args, resp.meta?.raw, ctx);
     if (!payload) return resp;
@@ -149,7 +154,13 @@ export function createMemoryTapMiddleware({ logger = console } = {}) {
     // Fire-and-forget — don't block the agent on memory write.
     setImmediate(async () => {
       try {
-        await ctx.persistentMemoryEngine.ingestMemory(payload);
+        if (ctx.ingestCanonicalPayload) {
+          await ctx.ingestCanonicalPayload(payload, {
+            sourceType: 'connector', provider: payload.source_metadata?.source_platform || 'mcp_live_tap',
+          });
+        } else {
+          await ctx.persistentMemoryEngine.ingestMemory(payload);
+        }
       } catch (err) {
         logger.warn(`[memory-tap] ingest failed for ${tool.name}: ${err.message}`);
       }

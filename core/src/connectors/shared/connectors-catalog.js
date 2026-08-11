@@ -14,7 +14,7 @@
 //   description   — one-liner shown in UI and API responses
 //   category      — one of the ids in CONNECTOR_CATEGORIES
 //   mode          — array of 'ingestion' | 'live'
-//   authType      — 'oauth2' | 'api_key' | 'connection_string' | 'none'
+//   authType      — 'oauth1' | 'oauth2' | 'api_key' | 'connection_string' | 'none'
 //   status        — 'stable' | 'beta' | 'planned' | 'needs_oauth_setup'
 //   nangoProvider — Nango provider key (omit for non-Nango connectors)
 //   setupHint     — optional string shown to org-admins who need to configure OAuth
@@ -118,6 +118,15 @@ const CONNECTOR_CATALOG = [
     authType: 'oauth2',
     status: 'beta',
   },
+  {
+    id: 'google-search-console',
+    name: 'Google Search Console',
+    description: 'First-party queries, pages, clicks, impressions, CTR, and position for SEO Intelligence.',
+    category: 'data',
+    mode: ['live'],
+    authType: 'oauth2',
+    status: 'stable',
+  },
 
   // ── INGESTION / LIVE — Microsoft 365 ──────────────────────────────────
   {
@@ -209,6 +218,26 @@ const CONNECTOR_CATALOG = [
     authType: 'oauth2',
     status: 'planned',
   },
+  {
+    id: 'x-account',
+    name: 'X',
+    description: 'X identity, media upload and public Post creation.',
+    category: 'marketing',
+    mode: ['live'],
+    authType: 'oauth2',
+    status: 'needs_oauth_setup',
+    setupHint: 'Uses the official X OAuth 2.0 PKCE flow.',
+  },
+  {
+    id: 'x-ads',
+    name: 'X Ads',
+    description: 'Advertiser accounts, paid campaigns, budgets and performance.',
+    category: 'marketing',
+    mode: ['live'],
+    authType: 'oauth1',
+    status: 'needs_oauth_setup',
+    setupHint: 'Uses official X OAuth 1.0a and requires Ads API access.',
+  },
 
   // ── INGESTION — Database ─────────────────────────────────────────────
   {
@@ -292,6 +321,7 @@ const CONNECTOR_CATEGORIES = [
   { id: 'productivity', name: 'Productivity' },
   { id: 'comms', name: 'Communication' },
   { id: 'crm', name: 'CRM & Sales' },
+  { id: 'marketing', name: 'Marketing & Ads' },
   { id: 'project', name: 'Project Management' },
   { id: 'code', name: 'Code & DevOps' },
   { id: 'database', name: 'Databases' },

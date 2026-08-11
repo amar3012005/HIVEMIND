@@ -19,6 +19,20 @@
 
 const BASIC_GROUP = 'basic';
 
+// Server-generated controls used by the deterministic chat orchestrator.
+// Keep this allowlist narrow: arbitrary underscore-prefixed arguments are
+// still rejected and these fields are not exposed in the LLM tool schema.
+const TRUSTED_INTERNAL_ARGUMENTS = new Set([
+  '_explicit_mode',
+  '_structured_intent',
+  '_include_full_memory_content',
+  '_event_range',
+  '_source_id',
+  '_original_content',
+  'semantic_recovery',
+  'allow_semantic_source_recovery',
+]);
+
 export class Toolkit {
   constructor({ logger = console } = {}) {
     this.logger = logger;
@@ -68,6 +82,8 @@ export class Toolkit {
     handler,
     groupName = BASIC_GROUP,
     readOnly = true,
+    concurrencySafe = true,
+    external = false,
     presetKwargs = {},
   }) {
     if (!name || typeof handler !== 'function') {
@@ -76,6 +92,7 @@ export class Toolkit {
     if (!this._groups.has(groupName)) {
       this.createToolGroup({ name: groupName });
     }
+    if (this._tools.has(name)) throw new Error(`duplicate tool name '${name}'`);
     const entry = {
       name,
       description: description || '',
@@ -83,6 +100,8 @@ export class Toolkit {
       handler,
       groupName,
       readOnly,
+      concurrencySafe,
+      external,
       presetKwargs,
     };
     this._tools.set(name, entry);
@@ -116,6 +135,8 @@ export class Toolkit {
         parameters: t.inputSchema || { type: 'object', properties: {} },
         groupName,
         readOnly: isReadOnly,
+        concurrencySafe: t.annotations?.destructiveHint !== true,
+        external: true,
         handler: async (args, _ctx) => {
           return mcpClient.callTool(t.name, args);
         },
@@ -143,16 +164,26 @@ export class Toolkit {
     this._middleware.push(fn);
   }
 
+  markGroupExternal(groupName) {
+    const group = this._groups.get(groupName);
+    if (!group) return;
+    for (const name of group.tools) {
+      const tool = this._tools.get(name);
+      if (tool) tool.external = true;
+    }
+  }
+
   // ── Schemas + execution ───────────────────────────────────────────────
 
   /**
    * JSON schemas of currently active tools — OpenAI/Groq function-call format.
    */
-  getJsonSchemas() {
+  getJsonSchemas({ readOnlyOnly = false } = {}) {
     const out = [];
     for (const t of this._tools.values()) {
       const g = this._groups.get(t.groupName);
       if (!g?.active) continue;
+      if (readOnlyOnly && !t.readOnly) continue;
       out.push({
         type: 'function',
         function: {
@@ -165,8 +196,30 @@ export class Toolkit {
     return out;
   }
 
-  getActiveToolNames() {
-    return this.getJsonSchemas().map(s => s.function.name);
+  getActiveToolNames(options) {
+    return this.getJsonSchemas(options).map(s => s.function.name);
+  }
+
+  /** AgentScope-style capability catalog for the intent parser. */
+  getToolGroupCatalog({ includeInactive = true } = {}) {
+    return Array.from(this._groups.values())
+      .filter((group) => includeInactive || group.active)
+      .map((group) => ({
+        name: group.name,
+        description: group.description,
+        active: group.active,
+        tools: Array.from(group.tools)
+          .map((name) => this._tools.get(name))
+          .filter(Boolean)
+          .map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            readOnly: tool.readOnly,
+            concurrencySafe: tool.concurrencySafe,
+            external: tool.external,
+          })),
+      }))
+      .filter((group) => group.tools.length > 0);
   }
 
   hasTool(name) {
@@ -177,7 +230,7 @@ export class Toolkit {
    * Execute a tool through the middleware chain.
    * Returns a ToolResponse: { content: [{ type: 'text', text }], status, meta }
    */
-  async execute(name, args, ctx = {}) {
+  async execute(name, args, ctx = {}, { trustedInternalArgs = false } = {}) {
     const tool = this._tools.get(name);
     if (!tool) {
       return {
@@ -193,7 +246,22 @@ export class Toolkit {
       };
     }
 
-    const merged = { ...tool.presetKwargs, ...(args || {}) };
+    const supplied = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+    const properties = tool.parameters?.properties || {};
+    const required = tool.parameters?.required || [];
+    const unknown = Object.keys(supplied).filter((key) => {
+      if (key === '_approval_token' && ctx?._approvalFlow === true) return false;
+      if (trustedInternalArgs && TRUSTED_INTERNAL_ARGUMENTS.has(key)) return false;
+      return !(key in properties) && !(key in tool.presetKwargs);
+    });
+    if (unknown.length) {
+      return { content: [{ type: 'text', text: `invalid arguments: unknown field(s) ${unknown.join(', ')}` }], status: 'error', meta: { error: 'invalid_arguments' } };
+    }
+    const merged = { ...supplied, ...tool.presetKwargs };
+    const missing = required.filter((key) => merged[key] === undefined || merged[key] === null || merged[key] === '');
+    if (missing.length) {
+      return { content: [{ type: 'text', text: `invalid arguments: missing field(s) ${missing.join(', ')}` }], status: 'error', meta: { error: 'invalid_arguments' } };
+    }
     const kwargs = { tool_call: { name, input: merged, tool }, args: merged, ctx };
 
     const baseHandler = async (k) => {
@@ -203,7 +271,7 @@ export class Toolkit {
           content: typeof raw === 'string'
             ? [{ type: 'text', text: raw }]
             : Array.isArray(raw?.content) ? raw.content
-            : [{ type: 'text', text: typeof raw === 'object' ? JSON.stringify(raw) : String(raw) }],
+            : [{ type: 'text', text: (typeof raw === 'object' ? JSON.stringify(raw) : String(raw)).slice(0, 16000) }],
           status: raw?.status || 'ok',
           meta: { raw, readOnly: tool.readOnly },
         };

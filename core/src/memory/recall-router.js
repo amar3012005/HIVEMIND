@@ -28,7 +28,14 @@ import { ClusterIndex } from './cluster-index.js';
 // is the always-on, no-network ordering reranker used on delivery (and behind RECALL_TIERED_VIEW).
 import { rerank } from './reranker.js';
 import { ResultReranker } from '../search/result-reranker.js';
+import { buildEvidencePacket } from './recall-packet.js';
+import { isDurableKbPromotionAdmitted } from './durable-content.js';
+import { isMemoryInDateRange } from './temporal-range.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
+import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
+import { scopedMemoryWhere } from './prisma-graph-store.js';
+import { dedupeMemoriesById } from './recall-dedup.js';
+import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -40,14 +47,218 @@ let _routerReranker = null;
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const HOP1_DEFAULT_LIMIT       = 12;
+// Retrieval DEPTH for the evidence lane, decoupled from how many we DELIVER.
+// HOP2_* below are deliver counts. Depth feeds the cross-encoder (RERANK_POOL=150),
+// which then narrows. Measured: small-detail answerability 3/5 -> 5/5 purely from
+// depth 6 -> 150; the reranker chose a segment over a memory 5/5 unprompted.
+const EVIDENCE_DEPTH           = Number(process.env.EVIDENCE_DEPTH || 150);
+// WIDE hand-off from the evidence lane into the single delivery-point cross-encoder.
+// Not user-visible: deliverHybrid narrows to HOP2_DOC_LIMIT after ranking.
+const EVIDENCE_DELIVER         = Number(process.env.EVIDENCE_DELIVER || 40);
+// The wide hand-off is only SAFE when the delivery-point cross-encoder is on to narrow
+// it. With RECALL_HYBRID_DELIVERY_ALWAYS_ON off, 40 unranked evidence rows would reach the answer
+// instead of 8 — a regression. So the widening is inert unless V2 will actually fire.
+const evidenceDeliverFor = () => EVIDENCE_DELIVER;   // deliverHybrid always narrows it
 const HOP2_DOC_LIMIT           = 8;
 const HOP2_UNFILTERED_LIMIT    = 6;
 const HOP3_LIVE_LIMIT          = 5;
 // Deliver-narrow: retrieve stays wide (HOP1 fetches up to 50, RRF/MMR-ranked),
 // but only the top-N ranked memories go to the answer model. 1024 bge-m3 +
 // algorithmic rerank shows a clean relevance cliff after ~5 (junk/redundancy
-// beyond), so default 5. Env-tunable (no redeploy to widen for summarize).
-const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 5);
+// beyond). Progressive consumers reveal five at a time, while recall itself
+// retains the top 15 so a later page never requires another search.
+const RECALL_DELIVER_LIMIT     = Number(process.env.RECALL_DELIVER_LIMIT || 15);
+const MAX_TEMPORAL_RANGE_MS    = 366 * 24 * 60 * 60 * 1000;
+
+function normalizedIso(value) {
+  if (typeof value !== 'string' && !(value instanceof Date)) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function boundedString(value, maxLength) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function entityQueryForms(query) {
+  if (!query) return [];
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
+  const words = [];
+  for (const part of segmenter.segment(String(query))) {
+    const word = part.isWordLike ? part.segment.trim() : '';
+    if (word.length >= 2) words.push(word);
+  }
+  const forms = new Set();
+  for (const word of words) {
+    forms.add(word);
+    forms.add(word.toLocaleLowerCase());
+    if (/^[\p{L}\p{N}]{2,6}$/u.test(word)) forms.add(word.toLocaleUpperCase());
+  }
+  for (let size = Math.min(4, words.length); size >= 2; size -= 1) {
+    for (let start = 0; start + size <= words.length; start += 1) {
+      const slice = words.slice(start, start + size);
+      forms.add(slice.join(' '));
+      // ALSO the space-collapsed form. Users type product names split by a space
+      // ("Solvis pia", "Solvis Max") but the canonical entity is one token
+      // ("SolvisPia", "SolvisMax"). Without this, entity resolution matched only
+      // the generic parent ("SOLVIS") and recall returned the company blurb
+      // instead of the product — the phrasing-sensitive-answer bug. Match is
+      // case-insensitive downstream, so the concatenation resolves regardless of
+      // the user's casing.
+      if (size <= 3) forms.add(slice.join(''));
+    }
+  }
+  return [...forms].slice(0, 48);
+}
+
+export async function resolveCanonicalEntities({ prisma, orgId, query } = {}) {
+  const candidates = entityQueryForms(query);
+  if (!prisma?.entity || !orgId || !candidates.length) return [];
+  const entities = await prisma.entity.findMany({
+    where: {
+      orgId,
+      isActive: true,
+      OR: [
+        ...candidates.map((name) => ({ canonicalName: { equals: name, mode: 'insensitive' } })),
+        { aliases: { hasSome: candidates } },
+      ],
+    },
+    orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }],
+    select: { canonicalName: true },
+    take: 8,
+  });
+  return [...new Set(entities.map((entity) => entity.canonicalName).filter(Boolean))];
+}
+
+async function resolveImplicitSource({ evidence, query, ctx, timeoutMs, requireFilename = false }) {
+  if (!evidence?.resolveSourceFromQuery || !query) return null;
+  const resolved = await withTimeout(
+    evidence.resolveSourceFromQuery({
+      query,
+      userId: ctx.userId,
+      orgId: ctx.orgId,
+      projectId: ctx.projectId || null,
+      deadlineAt: Date.now() + timeoutMs,
+    }),
+    timeoutMs,
+    null,
+  );
+  const source = Array.isArray(resolved) ? resolved[0] : resolved;
+  if (!source) return null;
+  if (requireFilename && source._sourceMatch !== 'filename') return null;
+  const documentId = source.document_id || source.documentId || source.id || null;
+  const title = source.title || source.document_title || source.documentTitle || null;
+  return documentId || title ? { document_id: documentId, title } : null;
+}
+
+export function requireFilenameForImplicitSource(options = {}) {
+  return options.structured_intent === true && options.allow_semantic_source_recovery !== true;
+}
+
+function normalizeTemporalRange(value) {
+  if (!value || typeof value !== 'object') return null;
+  const start = normalizedIso(value.start);
+  const end = normalizedIso(value.end);
+  if (!start && !end) return null;
+  const boundedEnd = end || new Date(new Date(start).getTime() + MAX_TEMPORAL_RANGE_MS).toISOString();
+  const boundedStart = start || new Date(new Date(boundedEnd).getTime() - MAX_TEMPORAL_RANGE_MS).toISOString();
+  if (new Date(boundedStart) > new Date(boundedEnd)) return null;
+  if (new Date(boundedEnd) - new Date(boundedStart) > MAX_TEMPORAL_RANGE_MS) {
+    return {
+      start: new Date(new Date(boundedEnd).getTime() - MAX_TEMPORAL_RANGE_MS).toISOString(),
+      end: boundedEnd,
+      clamped: true,
+    };
+  }
+  return { start: boundedStart, end: boundedEnd, clamped: false };
+}
+
+// Server-owned normalization for the additive recall contract. Legacy modes
+// retain their current behavior; only fact/explain/full opt into the new plan.
+// This keeps HTTP and MCP callers on the same public endpoint while preventing
+// callers from bypassing bounded retrieval with arbitrary plan fields.
+export function resolveRecallPlan(input = {}) {
+  const requested = typeof input.mode === 'string' ? input.mode.toLowerCase() : 'auto';
+  const explicit = requested === 'fact' || requested === 'explain' || requested === 'full';
+  const fullAllowed = requested !== 'full' || input.explicit_mode === true;
+  // Compound-query auto-routing: a multi-part question ("X and Y", multiple
+  // '?', "compare/across/both", several clauses) needs graph/source evidence,
+  // not a single fact pass. Escalate AUTO (non-explicit) compound queries
+  // straight to explain — starting in fact mode then escalating burned most of
+  // the deadline before reaching explain (observed: chat compound answers
+  // dropped a delivered fact + falsely marked a source uncovered).
+  const _q = String(input.query_context || input.query || input.context || '');
+  const _compound = input.structured_intent !== true && _q.length > 40 && (
+    (_q.match(/\?/g) || []).length > 1
+    || /\b(and|plus|as well as|both|compare|across|versus|vs\.?|along with|together with)\b/i.test(_q)
+    || (_q.match(/[.;]/g) || []).length >= 2
+  );
+  const mode = requested === 'full' && !fullAllowed
+    ? 'explain'
+    : explicit ? requested
+      : (_compound && process.env.RECALL_COMPOUND_EXPLAIN !== 'false') ? 'explain'
+        : 'fact';
+  const operation = input.operation === 'timeline' ? 'timeline' : 'recall';
+  const structuredSource = input.source && typeof input.source === 'object' ? input.source : {};
+  const structuredTime = input.time && typeof input.time === 'object' ? input.time : {};
+  // Explicit flat arguments are the established public contract and win over
+  // inferred/structured values during the additive migration.
+  const sourceDocumentId = boundedString(input.source_document_id || structuredSource.document_id, 128);
+  const sourceTitle = boundedString(input.source_title || structuredSource.title, 512);
+  const validAt = normalizedIso(input.valid_at || structuredTime.valid_at);
+  const knownAt = normalizedIso(input.known_at || structuredTime.known_at);
+  const range = normalizeTemporalRange(input.date_range || structuredTime.range);
+  const temporal = knownAt
+    ? 'known_at'
+    : validAt
+      ? 'valid_at'
+      : range
+        ? 'range'
+        : input.temporal === 'known_at'
+          ? 'known_at'
+          : 'current';
+  const budget = mode === 'full' ? 24_000 : mode === 'explain' ? 8_000 : 2_000;
+
+  return {
+    mode,
+    requested_mode: requested,
+    legacy: !explicit,
+    operation,
+    mode_downgraded: requested === 'full' && !fullAllowed ? 'full_requires_explicit_caller' : null,
+    temporal,
+    source: {
+      requested: !!(sourceDocumentId || sourceTitle),
+      document_id: sourceDocumentId,
+      title: sourceTitle,
+    },
+    time: {
+      mode: temporal,
+      valid_at: validAt,
+      known_at: knownAt,
+      range,
+    },
+    max_graph_hops: mode === 'fact' ? 0 : 1,
+    max_memories: operation === 'timeline' ? Math.min(Math.max(Number(input.limit) || 20, 1), 50) : 5,
+    context_budget: budget,
+    // Evidence is a PARALLEL LANE in its own Qdrant collection — not an expensive
+    // serial hop-2, which is what "fact is fast-only" was written for. So `fact` must
+    // include it: a price, a part number, a kW rating IS a fact question, and it is
+    // answered from verbatim segments. Measured on org 1380251c — 0 of 485 memories
+    // held the 5 small facts under test; all 5 were in knowledge_segments. Routing
+    // fact-lookup to the one mode that refuses to read source text is why those
+    // questions returned "nothing directly answers your question" while the answer sat
+    // in a segment. Only an explicit memory-only request opts out.
+    expand_evidence: !explicit ? requested !== 'memory' : true,
+    include_live: explicit && mode === 'fact'
+      ? false
+      : (!explicit ? input.include_live !== false : input.include_live === true),
+    // These are end-to-end retrieval budgets. A full request degrades to the
+    // completed explain-grade packet at the deadline; it never extends chat.
+    latency_budget_ms: mode === 'fact' ? 1_500 : 3_000,
+  };
+}
 
 // Event-time ranking boost: when the query carries a temporal token
 // (today/yesterday/last week/ISO date/month-name), multiplicatively lift
@@ -105,6 +316,72 @@ function applyEventTimeBoost(memories, query) {
   return out;
 }
 
+// ── V5 D5: type-aware recall (flag-gated, default off) ──────────────────────
+// When the multilingual planner signals the question asks for a specific KIND of
+// memory (answer_type -> options.boost_memory_type), we (1) add a type-scoped
+// retrieval LANE so a type-matching memory is guaranteed to be a candidate even
+// when the base lexical/vector/entity lanes miss it (root cause of the residual
+// "what did we decide" gap: entity-hop0 matched 0 entities, so the decision was
+// never generated), and (2) soft-boost matching rows. Language-neutral (the type
+// comes from the planner, not keywords) and tenant-safe (the lane anchors on the
+// caller's already-resolved canonical entities via memoryEntityLink and hydrates
+// through store.getMemories, which applies the same visibility rules).
+const TYPE_AWARE_RECALL = (process.env.V5_TYPE_AWARE_RECALL || 'false').toLowerCase() === 'true';
+const MEMORY_TYPE_BOOST_ALPHA = Number(process.env.MEMORY_TYPE_BOOST_ALPHA || 0.6);
+function applyMemoryTypeBoost(memories, boostType) {
+  if (!boostType || !memories?.length) return memories;
+  const bt = String(boostType).toLowerCase();
+  let boosted = 0;
+  const out = memories.map((m) => {
+    const mt = String(m.memory_type || m.memoryType || '').toLowerCase();
+    if (mt !== bt) return m;
+    boosted++;
+    const base = Number(m._rank_score) || Number(m.score) || 0;
+    return { ...m, _rank_score: base * (1 + MEMORY_TYPE_BOOST_ALPHA), score: (Number(m.score)||0) * (1 + MEMORY_TYPE_BOOST_ALPHA), _memory_type_boosted: true };
+  }).sort((a, b) => (Number(b._rank_score) || Number(b.score) || 0) - (Number(a._rank_score) || Number(a.score) || 0));
+  if (boosted > 0) console.log(`[recall-router] memory-type-boost: type=${bt}, boosted=${boosted}/${memories.length}`);
+  return out;
+}
+
+// Type-scoped candidate lane. Returns hydrated memories of `boostType` linked to
+// any of `entityNames` in this org, bounded. Tenant-safe: memoryEntityLink is
+// org-scoped via the entity ids, and hydration goes through store.getMemories.
+async function fetchTypeScopedCandidates({ prisma, store, orgId, boostType, entityNames }) {
+  try {
+    if (!prisma?.canonicalEntity?.findMany || !prisma?.memoryEntityLink?.findMany || !store?.getMemories) return [];
+    const names = (entityNames || []).map((n) => String(n || '').trim()).filter(Boolean).slice(0, 12);
+    if (!names.length) return [];
+    const norm = names.map((n) => n.toLowerCase());
+    const ents = await prisma.canonicalEntity.findMany({
+      where: { organizationId: orgId, OR: [
+        { canonicalName: { in: names, mode: 'insensitive' } },
+        { normalizedName: { in: norm } },
+      ] },
+      select: { id: true }, take: 24,
+    }).catch(() => []);
+    if (!ents.length) return [];
+    const links = await prisma.memoryEntityLink.findMany({
+      where: { entityId: { in: ents.map((e) => e.id) } },
+      select: { memoryId: true }, take: 60,
+    }).catch(() => []);
+    const ids = [...new Set(links.map((l) => l.memoryId))];
+    if (!ids.length) return [];
+    const memMap = await store.getMemories(ids).catch(() => new Map());
+    const bt = String(boostType).toLowerCase();
+    const out = [];
+    for (const id of ids) {
+      const m = memMap.get ? memMap.get(id) : null;
+      if (!m) continue;
+      const mt = String(m.memory_type || m.memoryType || '').toLowerCase();
+      if (mt !== bt) continue;
+      if (m.org_id && m.org_id !== orgId) continue; // cross-org safety net
+      out.push({ ...m, memory_type: m.memory_type || m.memoryType, score: Number(m.score) || 0.55, _type_scoped_lane: true });
+      if (out.length >= 8) break;
+    }
+    return out;
+  } catch { return []; }
+}
+
 const HOP1_TIMEOUT_MS          = 4000;
 const HOP2_TIMEOUT_MS          = 1500;
 const HOP3_TIMEOUT_MS          = 4000;
@@ -127,10 +404,66 @@ const ANCHOR_BOOST             = 0.30;  // additive boost when memory tagged w/ 
 const DREAM_FIRST_ENABLED      = process.env.RECALL_DREAMS_FIRST !== 'false';
 const DREAM_RANK_MULT          = Number(process.env.RECALL_DREAM_MULT || 1.6);
 const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN || 2);
+const KB_DURABLE_MIN_IMPORTANCE = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
+
+export function serializeRecallMemory(m, { includeFullContent = false } = {}) {
+  return {
+    id: m.id,
+    title: m.title,
+    content: typeof m.content === 'string'
+      ? (includeFullContent ? m.content : m.content.slice(0, 400))
+      : '',
+    memory_type: m.memory_type,
+    tags: m.tags,
+    score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
+    created_at: m.created_at,
+    valid_at: m.valid_at,
+    ...(m.source_metadata?.source_type
+      ? { source_metadata: { source_type: m.source_metadata.source_type } }
+      : {}),
+    ...(m.synthesis_confidence != null ? { synthesis_confidence: m.synthesis_confidence } : {}),
+    ...(m.synthesis_revision != null ? { synthesis_revision: m.synthesis_revision } : {}),
+    ...(m.synthesis_cluster_hash ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
+    ...(Array.isArray(m.synthesis_evidence_ids) && m.synthesis_evidence_ids.length
+      ? { synthesis_evidence_ids: m.synthesis_evidence_ids }
+      : {}),
+    ...(m._cross_cluster_boost != null ? {
+      _cross_cluster_boost: Number(m._cross_cluster_boost.toFixed(3)),
+      _cross_cluster_overlap: m._cross_cluster_overlap || 0,
+    } : {}),
+    ...(typeof m.tier === 'number' ? { tier: m.tier } : {}),
+  };
+}
+
+// Legacy KB promotions can receive a strong retrieval score even when their
+// ingestion importance was below today's durable-memory admission threshold.
+// Keep those rows out of normal memory recall without hiding source evidence,
+// summaries, or syntheses used for explicit source reconstruction.
+export function filterLowSaliencePromotedMemories(memories, minImportance = KB_DURABLE_MIN_IMPORTANCE) {
+  return memories.filter((memory) => isDurableKbPromotionAdmitted(memory, minImportance));
+}
+
+export function mergePromotionImportance(memories, rows) {
+  const byId = new Map((rows || []).map((row) => [row.id, row.importanceScore]));
+  return memories.map((memory) => byId.has(memory.id)
+    ? { ...memory, importance_score: byId.get(memory.id) }
+    : memory);
+}
 
 const WORKSPACE_PLATFORMS = new Set([
   'gmail', 'google_drive', 'google_calendar', 'google_docs', 'google_sheets',
 ]);
+
+// Live data is expensive and may be broader than the source evidence already
+// selected for an answer. It is therefore a bounded expansion only: an
+// explicit live intent, or a retrieved connector/source anchor, plus surface
+// policy. No query-language heuristic decides this across languages.
+export function isLiveExpansionEligible({ includeLive, inspection, liveIntent = false, surfacePolicyAllowsLive = true }) {
+  if (!includeLive || !surfacePolicyAllowsLive) return false;
+  return liveIntent
+    || inspection?.docIds?.length > 0
+    || inspection?.platforms?.some((platform) => WORKSPACE_PLATFORMS.has(platform));
+}
 
 // ── Utility: with-timeout wrapper ───────────────────────────────────────────
 
@@ -142,6 +475,140 @@ function withTimeout(promise, ms, fallback) {
       .then((v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } })
       .catch(() => { if (!done) { done = true; clearTimeout(t); resolve(fallback); } });
   });
+}
+
+// ── RECALL_HYBRID_DELIVERY_ALWAYS_ON — one relevance authority over memories + evidence ──
+// The inventory proved the old tail computed ~20 boosts + RRF + MMR then threw
+// them away (ResultReranker overwrote .score, RRF wrote a dead _rank_score).
+// V2 replaces that churn with a single coherent stage: RRF-fuse the two ranked
+// lists (rank-only → memory & evidence become COMPARABLE, the fix for "only
+// memories reach top-5"), cross-encoder rerank the unified window (the relevance
+// authority, wide 0-1 scale), then apply a SMALL set of SURVIVING amplitude
+// boosts (>1) that actually matter for right-context — recency/event-time
+// (temporal), working-set (chat continuity), synthesis-canonical — minus
+// correctness penalties (superseded/contradicted). Comparable unified scores are
+// written back so the agent's synthesis picks across memory+evidence fairly.
+// Flag-gated (default OFF). Backend-agnostic: operates on candidates, so it
+// works identically for central Qdrant/PG and for `.amr` (dense + agent-PG lexical).
+const V2_RRF_K = 60;
+// The parked A/B ran with a 24 pool while evidence arrived capped at 8 — it never saw
+// depth, which is the variable that moved small-detail answerability 3/5 -> 5/5.
+const V2_POOL  = Number(process.env.RECALL_UNIFIED_POOL || 150);
+export async function deliverHybrid({ query, memories = [], evidence = [], deliverN, evidenceN, budgetMs }) {
+  // THE recall pipeline. Two lanes retrieved in parallel, fused into ONE pool, ranked by
+  // ONE cross-encoder pass, split back out. No RRF, no amplitude boosts, no flag.
+  //
+  // Replaces deliverHybrid, parked after an A/B showed "no rank win". Three measured
+  // reasons it lost: its pool capped at 24 while evidence arrived capped at 8, so it
+  // never saw depth — the variable that moves small-detail answerability 3/5 -> 5/5;
+  // its boosts (pinned x2.0 / synthesis x1.3 / event-time x1.4) read fields present only
+  // on MEMORY rows, so every evidence row scored x1; and those boosts MULTIPLIED the
+  // cross-encoder score, overwriting a real (query,passage) judgement with heuristics.
+  //
+  // Verified: 0 of 485 memories held the 5 small facts under test (prices, part numbers,
+  // a kW rating, a surname); all 5 were in segments; one rerank over memories u segments
+  // answered 5/5, choosing a segment over a memory 5/5 unprompted.
+  //
+  // Ordering is the cross-encoder's alone. The only non-relevance signal kept is
+  // supersession, and it FILTERS rather than reweights — truth, not a guess.
+  const pool = [
+    ...memories.map((m) => ({ _row: m, _kind: 'memory', _title: m.title || '', _content: typeof m.content === 'string' ? m.content : '' })),
+    ...evidence.map((e) => ({ _row: e, _kind: 'evidence', _title: e.document?.title || e.document_title || '', _content: e.content || e.snippet || '' })),
+  ].filter((c) => c._content || c._title);
+  if (pool.length <= 1) return null;
+
+  // A memory and the segment it was DERIVED FROM must not both occupy the delivered set
+  // — that spends the context budget twice on one fact. linked_memory_id is computed
+  // upstream from source_metadata.document_id, so this is a set lookup, not a query.
+  const memIds = new Set(memories.map((m) => m.id).filter(Boolean));
+  const deduped = pool.filter((c) => !(c._kind === 'evidence' && c._row?.linked_memory_id && memIds.has(c._row.linked_memory_id)));
+
+  let ordered = deduped;
+  let usedCrossEncoder = false;
+  // TWO NESTED TIMEOUTS, AND THE OUTER ONE WAS SHORTER THAN THE INNER CALL.
+  // rerank() runs with its own RERANK_TIMEOUT_MS (default 2500) plus one retry, but this
+  // wrapper capped it at `Math.min(Math.max(budgetMs || 0, 1200), 3000)` — a floor of
+  // 1200ms. Measured against the live endpoint: a COLD rerank is ~1207ms (warm ~200ms).
+  // So on any request that arrived with little budget left, the outer timeout pre-empted a
+  // perfectly healthy reranker.
+  //
+  // And it did so INVISIBLY: withTimeout's third argument is a fallback VALUE, so a timeout
+  // RESOLVES TO null rather than throwing — the catch below never ran, the reranker's own
+  // "[reranker] degraded" warn never ran either (its promise was still in flight), and the
+  // only symptom was `DEGRADED: no cross-encoder` with no stated cause. That is what made
+  // recall look non-deterministic: 3 degradations in 40 minutes and a canary flapping
+  // 4/5 -> 5/5 on the one cross-lingual question, with nothing in the log to explain it.
+  //
+  // The floor is now the inner timeout plus margin, so this wrapper can never kill an
+  // attempt the reranker itself would have completed. It stays a real ceiling — a
+  // pathological rerank still degrades — but every degrade is now attributed.
+  const _rrInner = Number(process.env.RERANK_TIMEOUT_MS || 2500);
+  const _rrBudget = Math.max(budgetMs || 0, _rrInner + 500);
+  const _rrStart = Date.now();
+  try {
+    const rr = await withTimeout(
+      rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
+      _rrBudget,
+      null,
+    );
+    if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
+      ordered = rr.map((x) => {
+        const score = Number(x.rerank_score);
+        return { ...x._u, _rerankScore: Number.isFinite(score) ? score : null };
+      }); usedCrossEncoder = true;
+    } else if (rr === null) {
+      console.warn(`[recall-hybrid] cross-encoder TIMED OUT after ${Date.now() - _rrStart}ms `
+        + `(budget=${_rrBudget}ms inner=${_rrInner}ms pool=${deduped.length}) — ranking degrades to `
+        + `interleave. This is the silent path that made recall look non-deterministic.`);
+    } else {
+      console.warn(`[recall-hybrid] cross-encoder returned no usable scores after `
+        + `${Date.now() - _rrStart}ms (rows=${Array.isArray(rr) ? rr.length : 'n/a'}) — see [reranker].`);
+    }
+  } catch (error) {
+    console.warn(`[recall-hybrid] cross-encoder threw after ${Date.now() - _rrStart}ms: ${error.message}`);
+  }
+
+  // FALLBACK MUST NOT COMPARE LANES BY SCORE. Lexical evidence scores are synthetic
+  // (0.55-0.95), vector scores are real cosine (often <0.15), and memory scores come
+  // from an entirely different pipeline — they are incomparable magnitudes. Sorting the
+  // union by `score` therefore lets whichever lane happens to use the larger scale win
+  // outright. That is exactly what buried the German `E3DC Zähler` row behind keyword
+  // hits on the one question that needed semantics. When the cross-encoder is
+  // unavailable, INTERLEAVE the lanes instead so neither can dominate, and say so.
+  if (!usedCrossEncoder) {
+    const byLane = { memory: [], evidence: [] };
+    for (const c of deduped) byLane[c._kind]?.push(c);
+    const woven = [];
+    for (let i = 0; i < Math.max(byLane.memory.length, byLane.evidence.length); i += 1) {
+      if (byLane.evidence[i]) woven.push(byLane.evidence[i]);
+      if (byLane.memory[i]) woven.push(byLane.memory[i]);
+    }
+    ordered = woven;
+    console.warn(`[recall-hybrid] DEGRADED: no cross-encoder — interleaving ${byLane.memory.length} memories / ${byLane.evidence.length} evidence instead of comparing incomparable scores`);
+  }
+
+  const outMem = []; const outEv = []; const rankedCandidates = [];
+  for (const c of ordered) {
+    const x = c._row || {};
+    if (x.is_latest === false || x.supersedes_id) continue;   // superseded: truth filter
+    const rank = rankedCandidates.length + 1;
+    if (c._kind === 'evidence') {
+      outEv.push(x);
+      rankedCandidates.push({ kind: 'evidence', segment_id: x.segmentId || x.segment_id || x.id, rank, score: c._rerankScore ?? null });
+    } else {
+      outMem.push(x);
+      rankedCandidates.push({ kind: 'memory', memory_id: x.id, rank, score: c._rerankScore ?? null });
+    }
+  }
+  console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> mem=${Math.min(outMem.length, deliverN)} ev=${Math.min(outEv.length, evidenceN)}`);
+  return {
+    memories: outMem.slice(0, deliverN),
+    evidence: outEv.slice(0, evidenceN),
+    // Preserve the cross-encoder's one authoritative mixed order. Consumers
+    // may progressively reveal this list without another retrieval/rerank.
+    ranked_candidates: rankedCandidates.slice(0, Math.max(15, deliverN + evidenceN)),
+    ranking_mode: usedCrossEncoder ? 'cross_encoder' : 'lane_interleave_fallback',
+  };
 }
 
 // ── Hop 1 — Memory layer ────────────────────────────────────────────────────
@@ -158,14 +625,15 @@ async function hop1Memory({ store, query, options, ctx }) {
   // the recall to tag=<connector> + ordered by created_at desc instead
   // of pure FTS.
   const ql = String(query || '').toLowerCase();
+  const allowLanguageHeuristics = options.structured_intent !== true;
   const CONNECTOR_KW = ['slack', 'notion', 'gmail', 'github', 'linear', 'jira', 'confluence'];
-  const matchedConnector = CONNECTOR_KW.find(k => ql.includes(k));
-  const isRecentish = /\b(last|latest|recent|today|yesterday|just|now)\b/.test(ql);
+  const matchedConnector = allowLanguageHeuristics ? CONNECTOR_KW.find(k => ql.includes(k)) : null;
+  const isRecentish = allowLanguageHeuristics && /\b(last|latest|recent|today|yesterday|just|now)\b/.test(ql);
   let hasValidAt = !!(options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime()));
   // Inline date detection — pulls "as of May 13", "before March 2025",
   // "on 2026-04-10", "in October" out of the query when caller didn't
   // pass valid_at explicitly. Planner often misses these.
-  if (!hasValidAt && /\b(as of|before|prior to|on|in|by|until)\b/.test(ql)) {
+  if (allowLanguageHeuristics && !hasValidAt && /\b(as of|before|prior to|on|in|by|until)\b/.test(ql)) {
     const MONTH = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11, january: 0, february: 1, march: 2, april: 3, june: 5, july: 6, august: 7, september: 8, october: 9, november: 10, december: 11 };
     const now = new Date();
     const year = now.getUTCFullYear();
@@ -196,16 +664,15 @@ async function hop1Memory({ store, query, options, ctx }) {
   // always carry the word "last").
   const inferredTags = matchedConnector && (isRecentish || hasValidAt) ? [matchedConnector] : null;
 
-  // Bi-temporal `valid_at` filter: snap recall to a past moment so the
-  // agent sees only memories whose document_date <= valid_at AND that
-  // were already known by then (created_at <= valid_at). recallPersisted
-  // honors a date_range param keyed on created_at; we also rely on the
-  // tag-anchored override below to apply document_date filter for the
-  // connector path. Anything else uses created_at as the bi-temporal
-  // baseline.
+  // Bi-temporal controls are independent: valid_at constrains the effective
+  // interval, while known_at constrains when HIVEMIND learned the record.
   const validAtDate = options.valid_at && !Number.isNaN(new Date(options.valid_at).getTime())
     ? new Date(options.valid_at)
     : null;
+  const knownAtDate = options.known_at && !Number.isNaN(new Date(options.known_at).getTime())
+    ? new Date(options.known_at)
+    : null;
+  const snapshotValidAtDate = validAtDate;
   // Fast-path: if we already know we'll use the tag-anchored override,
   // skip the expensive FTS+vector recall — it adds ~1.5s and we'd discard
   // its output anyway. HOP1_TIMEOUT_MS=1500 was eating these calls.
@@ -230,7 +697,17 @@ async function hop1Memory({ store, query, options, ctx }) {
     ...(ctx.projectId ? { project_id: ctx.projectId, project_ids: [ctx.projectId] } : {}),
     ...(explicitDateRange
       ? { date_range: explicitDateRange }
-      : validAtDate ? { date_range: { end: validAtDate.toISOString() } } : {}),
+      : {}),
+    ...(options.valid_at ? { valid_at: options.valid_at } : {}),
+    ...(options.known_at ? { known_at: options.known_at } : {}),
+    include_superseded: options.include_superseded === true,
+    exact_source: !!(options.source_document_id || options.source_title),
+    canonical_entities: options.canonical_entities || [],
+    alternate_lexical_query: options.alternate_lexical_query || null,
+    scope_filter: options.scope_filter || null,
+    structured_intent: options.structured_intent === true,
+    semantic_recovery: options.semantic_recovery === true,
+    cross_rerank: options.semantic_recovery === true ? true : null,
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
@@ -246,46 +723,62 @@ async function hop1Memory({ store, query, options, ctx }) {
   // Also fires as a hard fallback when FTS returned 0 hits.
   const effectiveTags = options.tags || inferredTags;
   let mems = result.memories || [];
+  const missingPromotionImportance = mems.filter((memory) => {
+    const tags = Array.isArray(memory.tags) ? memory.tags : [];
+    return tags.includes('distilled-from-kb')
+      && !Number.isFinite(Number(memory.importance_score ?? memory.importanceScore));
+  });
+  if (missingPromotionImportance.length && store.client?.memory?.findMany) {
+    try {
+      const importanceRows = await store.client.memory.findMany({
+        where: { id: { in: missingPromotionImportance.map((memory) => memory.id) } },
+        select: { id: true, importanceScore: true },
+      });
+      mems = mergePromotionImportance(mems, importanceRows);
+    } catch (error) {
+      console.warn('[recall-router] promotion importance hydration failed:', error.message);
+    }
+  }
   const recencyOverride = isRecentish && inferredTags && store.client?.memory;
   // Time-travel override: when valid_at is set and we have tags (caller-
   // supplied or inferred), also drop into the direct-fetch path so the
   // document_date <= valid_at filter applies AND we order by date.
-  const timeTravelOverride = validAtDate && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
+  const timeTravelOverride = (validAtDate || knownAtDate) && Array.isArray(effectiveTags) && effectiveTags.length > 0 && store.client?.memory;
   const callerTagOverride = callerTags && store.client?.memory;
   if ((recencyOverride || timeTravelOverride || callerTagOverride || (mems.length === 0 && Array.isArray(effectiveTags) && effectiveTags.length > 0)) && store.client?.memory) {
     try {
-      const orFilters = [];
-      if (ctx.orgId) orFilters.push({ orgId: ctx.orgId });
-      if (ctx.userId) orFilters.push({ userId: ctx.userId });
+      const accessWhere = scopedMemoryWhere({
+        user_id: ctx.userId,
+        org_id: ctx.orgId,
+        project: options.project || undefined,
+        access_context: scopedAccessCtx,
+      });
       const tagOnly = await store.client.memory.findMany({
         where: {
+          ...accessWhere,
           deletedAt: null,
           // valid_at queries need superseded versions too — show what was
           // current at that past moment (isLatest at valid_at, not now).
-          ...(validAtDate ? {} : { isLatest: true }),
+          ...(validAtDate || knownAtDate ? {} : { isLatest: true }),
           tags: { hasSome: effectiveTags },
-          ...(orFilters.length === 1 ? orFilters[0] : orFilters.length > 1 ? { OR: orFilters } : {}),
           // Time-travel: filter by EVENT TIME (document_date) only —
           // that's what users mean by "as of May 13" (msgs sent by then),
           // not "memories known by then". Bi-temporal createdAt filter
           // was excluding memories ingested today but sent earlier.
-          ...(validAtDate ? {
-            OR: [
-              { documentDate: { lte: validAtDate } },
-              {
-                AND: [
-                  { documentDate: null },
-                  { createdAt: { lte: validAtDate } },
-                ],
-              },
+          ...(snapshotValidAtDate ? {
+            AND: [
+              { OR: [{ validFrom: null }, { validFrom: { lte: snapshotValidAtDate } }] },
+              { OR: [{ validTo: null }, { validTo: { gt: snapshotValidAtDate } }] },
             ],
           } : {}),
+          ...(knownAtDate ? { createdAt: { lte: knownAtDate } } : {}),
         },
         orderBy: [{ documentDate: 'desc' }, { createdAt: 'desc' }],
         take: Math.min((options.limit || HOP1_DEFAULT_LIMIT) * 4, 50),
         select: {
-          id: true, title: true, content: true, memoryType: true, tags: true,
-          createdAt: true, documentDate: true, importanceScore: true, sourceMetadata: true,
+          id: true, title: true, content: true, memoryType: true, tags: true, isLatest: true,
+          createdAt: true, documentDate: true, validFrom: true, validTo: true,
+          importanceScore: true, sourceMetadata: true,
         },
       });
       // Connector-specific quality filter. A memory tagged "slack" that
@@ -315,8 +808,12 @@ async function hop1Memory({ store, query, options, ctx }) {
         tags: m.tags || [],
         score: Number(m.importanceScore) || 0.5,
         created_at: m.createdAt,
-        valid_at: m.documentDate || m.createdAt,
+        valid_at: m.validFrom || m.documentDate || m.createdAt,
+        valid_from: m.validFrom || null,
+        valid_to: m.validTo || null,
+        is_latest: m.isLatest,
         source_metadata: m.sourceMetadata || null,
+        importance_score: m.importanceScore,
         _searchMethod: 'tag_fallback',
       }));
     } catch (err) {
@@ -335,6 +832,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     created_at: m.created_at,
     valid_at: m.valid_at || m.document_date,
     source_metadata: m.source_metadata || null,
+    importance_score: m.importance_score ?? m.importanceScore,
     // Pass synthesis cluster hash through so cross-cluster boost can fire (Move 3)
     ...(m.synthesis_cluster_hash ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
     ...(m.synthesisClusterHash   ? { synthesisClusterHash:   m.synthesisClusterHash   } : {}),
@@ -395,12 +893,32 @@ export function inspectMemories(memories) {
 // Only used when a memory has `filename:` tag without a resolved document_id
 // (legacy data pre-`aebf344`).
 
-async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) {
-  if (!prisma?.knowledgeDocument || !filenames.length) return [];
+async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId, projectId = null }) {
+  if (!filenames.length) return [];
+  // Remote (self-host): KB docs live on the agent — list them and match filename→title client-side.
+  if (orgIsRemote(orgId)) {
+    try {
+      const out = await amrKbDocs(orgId, { limit: 200, access: { userId, projectId } });
+      const docs = out?.documents || [];
+      const lows = filenames.map((f) => String(f).toLowerCase());
+      return docs
+        .filter((d) => {
+          const t = String(d.title || d.filename || '').toLowerCase();
+          return lows.some((f) => t.includes(f));
+        })
+        .slice(0, 12)
+        .map((d) => d.id || d.document_id)
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+  if (!prisma?.knowledgeDocument) return [];
   try {
     const rows = await prisma.knowledgeDocument.findMany({
       where: {
         orgId,
+        ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
         OR: filenames.map((f) => ({ title: { contains: f, mode: 'insensitive' } })),
       },
       select: { id: true },
@@ -416,7 +934,11 @@ async function resolveDocIdsFromFilenames({ prisma, filenames, userId, orgId }) 
 // hop-2 dig the WHOLE project corpus when hop-1 gave no doc anchors — so a
 // buried term in a project doc that hop-1 never surfaced still reaches evidence.
 async function resolveProjectDocIds({ prisma, projectId, orgId }) {
-  if (!prisma?.knowledgeDocument || !projectId) return [];
+  if (!projectId) return [];
+  // Remote (self-host): agent kb-docs listing doesn't expose the scope-key project tag —
+  // return [] and let the caller's lexical fallback cover it.
+  if (orgIsRemote(orgId)) return [];
+  if (!prisma?.knowledgeDocument) return [];
   try {
     const rows = await prisma.knowledgeDocument.findMany({
       where: { orgId, tags: { has: `scope-key:project:${projectId}` } },
@@ -448,6 +970,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
   if (docIds.length === 0 && inspection.filenames.length > 0) {
     docIds = await resolveDocIdsFromFilenames({
       prisma, filenames: inspection.filenames, userId: ctx.userId, orgId: ctx.orgId,
+      projectId: ctx.projectId || null,
     });
   }
   // Dig wider: no hop-1 anchors but a project is in scope → search the whole
@@ -457,27 +980,36 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
     if (docIds.length) reason = 'project-corpus';
   }
 
-  if (docIds.length > 0) {
-    const items = await evidenceService.retrieveEvidence({
-      query, userId: ctx.userId, orgId: ctx.orgId,
-      documentIds: docIds,
-      limit: HOP2_DOC_LIMIT,
-    });
-    return { items, reason, docIds };
-  }
-
-  // Deepest dig: no doc scope → broad org/user sweep, but ONLY when hop-1 was
-  // sparse. A non-sparse org-wide query that hop-1 already answered keeps the
-  // Case-C skip (no extra latency / noise — preserves current behavior).
-  if (inspection.sparse) {
-    const items = await evidenceService.retrieveEvidence({
-      query, userId: ctx.userId, orgId: ctx.orgId,
-      limit: HOP2_UNFILTERED_LIMIT,
-    });
-    return { items, reason: 'sparse-rescue' };
-  }
-
-  return { items: [], reason: null };
+  // EVIDENCE IS A LANE, NOT A RESCUE.
+  //
+  // This used to be a three-way gate: run evidence only when hop-1 produced document
+  // anchors, else only when hop-1 was `sparse`, else return nothing. Both arms miss a
+  // plain question — no filename and no project means no anchors, and 15 loosely
+  // related memories count as "not sparse" — so the lane was never called and the
+  // verbatim layer could only ever CONFIRM what memories already found, never SUPPLY
+  // what they missed.
+  //
+  // Measured with the [recall-hybrid] counter: ev_in=0 on all five small-detail
+  // questions while the same queries hit 5/5 when the lane was called directly. The
+  // facts (a price, a part number, a kW rating, a surname, a meter model) exist in
+  // segments and in 0 of 485 memories.
+  //
+  // Now unconditional and parallel-safe: evidence lives in its own Qdrant collection,
+  // so this is max() not sum(). Noise is handled where it belongs — the score floor,
+  // and the single cross-encoder in deliverHybrid, which `sparse` was crudely
+  // approximating by refusing to look.
+  const items = await evidenceService.retrieveEvidence({
+    query, userId: ctx.userId, orgId: ctx.orgId,
+    projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
+    scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
+    ...(docIds.length > 0 ? { documentIds: docIds } : {}),
+    depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
+  });
+  return {
+    items,
+    reason: docIds.length > 0 ? reason : (inspection.sparse ? 'sparse' : 'always-on'),
+    ...(docIds.length > 0 ? { docIds } : {}),
+  };
 }
 
 // ── Hop 3 — Live workspace ─────────────────────────────────────────────────
@@ -692,28 +1224,70 @@ export function enforceDreamQuota(ranked, topN, maxDreams = MAX_DREAMS_IN_TOPN) 
 // @returns {Promise<{ evidence, live, trace }>}
 export async function recallEnhance({
   memories, query, ctx, evidenceService, prisma, includeLive = true,
+  includeGraph = false, includeAdjacent = false, deadlineMs = null,
+  liveIntent = false, surfacePolicyAllowsLive = true, liveQuery = hop3Live,
 }) {
   const startedAt = Date.now();
   const inspection = inspectMemories(memories || []);
+  const cap = (normal) => deadlineMs ? Math.min(normal, deadlineMs) : normal;
 
-  const [hop2, hop3] = await Promise.all([
+  const liveEligible = isLiveExpansionEligible({ includeLive, inspection, liveIntent, surfacePolicyAllowsLive });
+  const [hop2, hop3, graph] = await Promise.all([
     withTimeout(
       hop2Evidence({ evidenceService, query, ctx, inspection, prisma }),
-      HOP2_TIMEOUT_MS,
+      cap(HOP2_TIMEOUT_MS),
       { items: [], reason: 'timeout' },
     ),
-    !includeLive
+    !liveEligible
+        ? Promise.resolve({ items: [], reason: 'disabled' })
+        : withTimeout(
+          liveQuery({ prisma, query, ctx, inspection }),
+          cap(HOP3_TIMEOUT_MS),
+          { items: [], reason: 'timeout' },
+        ),
+    !includeGraph
       ? Promise.resolve({ items: [], reason: 'disabled' })
       : withTimeout(
-          hop3Live({ prisma, query, ctx, inspection }),
-          HOP3_TIMEOUT_MS,
+          loadTypedGraphEvidence({
+            prisma,
+            memoryIds: (memories || []).map((m) => m.id).filter(Boolean),
+            userId: ctx.userId,
+            orgId: ctx.orgId,
+            accessContext: ctx.accessContext,
+          }),
+          cap(700),
           { items: [], reason: 'timeout' },
         ),
   ]);
 
+  let evidence = hop2.items;
+  let adjacentReason = 'disabled';
+  if (includeAdjacent && evidence.length && evidenceService?.hydrateAdjacentEvidence) {
+    const elapsed = Date.now() - startedAt;
+    const remaining = deadlineMs ? Math.max(1, deadlineMs - elapsed) : 900;
+    const adjacent = await withTimeout(
+      evidenceService.hydrateAdjacentEvidence({
+        anchors: evidence,
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        perDocument: 3,
+        total: 12,
+      }),
+      Math.min(900, remaining),
+      null,
+    );
+    if (adjacent) {
+      evidence = adjacent;
+      adjacentReason = 'ordered-window';
+    } else {
+      adjacentReason = 'timeout';
+    }
+  }
+
   return {
-    evidence: hop2.items,
+    evidence,
     live:     hop3.items,
+    graph:    graph.items,
     trace: {
       sparse:            inspection.sparse,
       anchors: {
@@ -724,10 +1298,63 @@ export async function recallEnhance({
       },
       evidence_trigger:  hop2.reason,
       live_trigger:      hop3.reason,
+      live_eligible:     liveEligible,
+      graph_trigger:     graph.reason,
+      adjacent_trigger:  adjacentReason,
       latency_ms:        { enhance: Date.now() - startedAt },
     },
   };
 }
+
+export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId, accessContext = {}, time = {} }) {
+  if (!prisma?.relationship || !memoryIds.length || !orgId) return { items: [], reason: null };
+  const knownAt = normalizedIso(time.known_at);
+  const memoryTimeWhere = {
+    ...(knownAt ? { createdAt: { lte: new Date(knownAt) } } : {}),
+  };
+  const rows = await prisma.relationship.findMany({
+    where: {
+      OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }],
+      ...(knownAt ? { createdAt: { lte: new Date(knownAt) } } : {}),
+      fromMemory: { orgId, deletedAt: null, ...memoryTimeWhere },
+      toMemory: { orgId, deletedAt: null, ...memoryTimeWhere },
+    },
+    select: {
+      fromId: true, toId: true, type: true, confidence: true, metadata: true, createdAt: true,
+      fromMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, validFrom: true, validTo: true, memoryProjects: { select: { projectId: true } } } },
+      toMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, validFrom: true, validTo: true, memoryProjects: { select: { projectId: true } } } },
+    },
+    take: 24,
+  });
+  const projectIds = new Set(accessContext?.projectIds || []);
+  const teamIds = new Set(accessContext?.teamIds || []);
+  const visible = (m) => {
+    if (!m) return false;
+    if (m.scope === 'personal') return m.userId === userId;
+    if (m.scope === 'project') {
+      const ids = [m.projectId, ...(m.memoryProjects || []).map((p) => p.projectId)].filter(Boolean);
+      return ids.some((id) => projectIds.has(id));
+    }
+    if (m.scope === 'team') return !!m.primaryTeamId && teamIds.has(m.primaryTeamId);
+    if (m.scope === 'organization') return accessContext?.orgRole !== 'guest';
+    return false;
+  };
+  return {
+    reason: rows.length ? 'typed-one-hop' : null,
+    items: rows.filter((r) => visible(r.fromMemory) && visible(r.toMemory)).map((r) => ({
+      type: r.type,
+      from_id: r.fromId,
+      to_id: r.toId,
+      confidence: r.confidence,
+      created_at: r.createdAt,
+      metadata: r.metadata || {},
+      related: [r.fromMemory, r.toMemory]
+        .filter((m) => !memoryIds.includes(m.id))
+        .map((m) => ({ id: m.id, title: m.title, content: String(m.content || '').slice(0, 400), is_latest: m.isLatest })),
+    })),
+  };
+}
+
 
 // ── Public entry ───────────────────────────────────────────────────────────
 
@@ -753,17 +1380,230 @@ export class RecallRouter {
     if (!query || typeof query !== 'string') {
       return { memories: [], evidence: [], live: [], trace: { error: 'empty query' } };
     }
+    if (ctx.projectId) {
+      const authorizedProjectIds = Array.isArray(ctx.accessContext?.projectIds)
+        ? ctx.accessContext.projectIds
+        : [];
+      if (!authorizedProjectIds.includes(ctx.projectId)) {
+        return {
+          memories: [], evidence: [], live: [],
+          trace: { error: 'project_access_denied', cutoff_reason: 'project_access_denied' },
+        };
+      }
+    }
 
     const traceLatency = {};
     const startedAt = Date.now();
+    let recallPlan = resolveRecallPlan(options);
+    // Chat arrives with a structured planner that is responsible for declaring
+    // a source read. Do not turn an entity-only question such as "Solvis" into
+    // an arbitrary Solvis-named PDF: that makes a broad answer look
+    // source-specific and can hide better product evidence. Legacy /api/recall
+    // callers retain metadata-based filename resolution for compatibility.
+    const allowImplicitSource = !recallPlan.source.requested;
+    const [implicitSource, canonicalEntities] = await Promise.all([
+      allowImplicitSource ? resolveImplicitSource({
+        evidence: this.evidence,
+        query,
+        ctx,
+        timeoutMs: 250,
+        // Structured chat may recover a source only from a literal file
+        // artifact. Metadata-token matches stay available to legacy recall.
+        requireFilename: requireFilenameForImplicitSource(options),
+      }) : null,
+      withTimeout(
+        resolveCanonicalEntities({ prisma: this.prisma, orgId: ctx.orgId, query }),
+        250,
+        [],
+      ),
+    ]);
+    if (implicitSource) {
+      recallPlan = resolveRecallPlan({
+        ...options,
+        source: implicitSource,
+      });
+    }
+    const plannedEntities = Array.isArray(options.named_entities) ? options.named_entities : [];
+    const mergedCanonicalEntities = [...new Set([...plannedEntities, ...canonicalEntities]
+      .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
+    recallPlan = {
+      ...recallPlan,
+      entities: mergedCanonicalEntities,
+      named_entities: mergedCanonicalEntities,
+    };
+    options = {
+      ...options,
+      source_document_id: recallPlan.source.document_id,
+      source_title: recallPlan.source.title,
+      valid_at: recallPlan.time.valid_at,
+      known_at: recallPlan.time.known_at,
+      date_range: recallPlan.time.range,
+      include_superseded: recallPlan.operation === 'timeline' || options.include_superseded === true,
+      canonical_entities: mergedCanonicalEntities,
+    };
+    const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
+    // THE RERANKER GETS A FLOOR, NOT A SLICE OF SOMEONE ELSE'S BUDGET.
+    //
+    // Stages draw on one shared latency_budget_ms (1500ms for mode=fact) greedily, in order,
+    // and the cross-encoder is LAST — so it was routinely starved: measured skips with 17 /
+    // 36 / 47 / 58 / 84ms left, meaning the memory lane delivered ALGORITHMIC order, silently.
+    // This hits .amr/byod HARDER than hybrid, because their evidence lanes are a NETWORK hop
+    // that burns more of the shared budget first. Equal code, unequal accuracy.
+    //
+    // MY FIRST ATTEMPT AT THIS WAS WRONG AND BROKE PRODUCTION: I had every upstream stage
+    // size against `remaining - 450ms`. Recall went to 0/5 on three consecutive canary runs,
+    // because the late RETRIEVAL hops were then handed ~1ms and fetched nothing. Ranking an
+    // empty set perfectly is worthless — retrieval must never fund ranking. Rolled back.
+    //
+    // There is no free option: the reranker can only have time if the request takes longer or
+    // retrieval takes less. Retrieval is strictly more important, so the reranker is allowed a
+    // bounded OVERRUN instead — it sees at least RERANK_RESERVE_MS even when the budget is
+    // spent. Worst case is ~450ms of extra tail latency on requests that already exhausted
+    // their budget; nothing upstream is shortened.
+    const RERANK_RESERVE_MS = Number(process.env.RERANK_RESERVE_MS || 450);
+    let cutoffReason = null;
+    let explicitSourceDocuments = [];
+    let explicitSourceHydration = null;
+    const explicitSourceRequested = recallPlan.source.requested;
+    if (this.evidence?.resolveSourceDocuments && explicitSourceRequested) {
+      explicitSourceDocuments = await withTimeout(
+        this.evidence.resolveSourceDocuments({
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          projectId: ctx.projectId || null,
+          documentId: options.source_document_id || null,
+          title: options.source_title || null,
+        }),
+        Math.min(350, remainingBudget()),
+        [],
+      );
+      if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
+        const fullSource = recallPlan.mode === 'full';
+        // Anchor the source windows on the ENTITY, not the raw NL query. The
+        // user's message ("What does PL Neuheiten 2025_V2.pdf say about
+        // SolvisPia?") is contaminated with the filename and question words:
+        // vector-anchoring on it ranks the document title / boilerplate
+        // (which lexically echo the filename "Preisliste Produktneuheiten")
+        // ABOVE the actual SolvisPia technical passages, so the windows land
+        // on the cover page and the answer wrongly reports the entity absent.
+        // When the planner extracted named entities, search for those; they
+        // are exactly what the user wants located inside the source.
+        const hydrationQuery = mergedCanonicalEntities.length
+          ? mergedCanonicalEntities.join(' ')
+          : query;
+        // Start the hydration query NOW (runs concurrently with hop1/hop2), but
+        // DO NOT wrap it in withTimeout here: withTimeout's clock starts at
+        // creation, and the promise is only awaited far below — after hop1
+        // (up to HOP1_TIMEOUT_MS), the project-scope retry, hop2, RRF and the
+        // cross-cluster boost. Those consumed the whole budget, so a ~50ms
+        // hydration always resolved to {timed_out} and the answer fell back to
+        // hop2's document-lead boilerplate. Keep the raw promise; apply a
+        // fresh-clock timeout at the await.
+        explicitSourceHydration = this.evidence.hydrateSourceDocuments({
+          documents: explicitSourceDocuments,
+          query: hydrationQuery,
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          perDocument: fullSource ? 8 : 3,
+          total: fullSource ? 16 : 8,
+        }).catch((err) => {
+          console.warn('[recall-router] explicit source hydration failed:', err.message);
+          return { hydration_error: true };
+        });
+      }
+    }
+    // A requested source is an authorization boundary, not a ranking hint.
+    // Never replace an unresolved source request with tenant-wide memories.
+    if (explicitSourceRequested && explicitSourceDocuments.length === 0) {
+      return {
+        memories: [], evidence: [], live: [],
+        trace: {
+          recall_plan: recallPlan,
+          hop1_count: 0,
+          sparse: true,
+          top_score: 0,
+          anchors: { filenames: [], doc_hashes: [], doc_ids: [], platforms: [], explicit_source_documents: [] },
+          evidence_trigger: 'source-not-found',
+          live_trigger: 'disabled',
+          tiers_fired: [],
+          cutoff_reason: 'source_not_found',
+          latency_ms: { total: Date.now() - startedAt },
+        },
+      };
+    }
+    // Source ingestion is immediately recallable. For explicit explain/full,
+    // start the tenant-scoped evidence lane alongside memory recall instead of
+    // waiting for asynchronous fact promotion to provide an anchor.
+    const sourceFirstEvidence = recallPlan.expand_evidence
+      ? (explicitSourceRequested && explicitSourceDocuments.length === 0
+        ? Promise.resolve({ items: [], reason: 'source-not-found', docIds: [] })
+        : withTimeout(
+        hop2Evidence({
+          evidenceService: this.evidence,
+          query,
+          ctx,
+          inspection: explicitSourceDocuments.length
+            ? { ...inspectMemories([]), docIds: explicitSourceDocuments.map((document) => document.id) }
+            : inspectMemories([]),
+          prisma: this.prisma,
+        }),
+        Math.min(2_300, remainingBudget()),
+        { items: [], reason: 'timeout' },
+      ))
+      : null;
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
     let memories = await withTimeout(
       hop1Memory({ store: this.store, query, options, ctx }),
-      HOP1_TIMEOUT_MS,
+      Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
       [],
     );
+    let eventRangeCount = 0;
+    if (options.event_range === true && recallPlan.time.range && this.store?.listMemories) {
+      try {
+        const explicitScope = options.scope_filter
+          ? `tier:${String(options.scope_filter).replace(/^tier:/, '')}`
+          : 'personal';
+        const listed = await withTimeout(this.store.listMemories({
+          user_id: ctx.userId,
+          org_id: ctx.orgId,
+          project: ctx.projectId || undefined,
+          is_latest: true,
+          limit: 500,
+          scope: explicitScope,
+          access_context: ctx.accessContext,
+        }), Math.min(900, remainingBudget()), { memories: [] });
+        const boostType = String(options.boost_memory_type || '').toLowerCase();
+        const ranged = (listed?.memories || [])
+          .filter((memory) => isMemoryInDateRange(memory, recallPlan.time.range))
+          .map((memory) => ({
+            ...memory,
+            // A structured event-window match is authoritative relevance, but
+            // remains below a strong topical semantic hit. Type matches receive
+            // a bounded lift for decision/goal/preference queries.
+            score: Math.max(
+              Number(memory.score) || 0,
+              boostType && String(memory.memory_type || '').toLowerCase() === boostType ? 0.70 : 0.45,
+            ),
+            _event_range_match: true,
+          }));
+        eventRangeCount = ranged.length;
+        if (ranged.length) {
+          const byId = new Map(
+            // Put canonical date matches last so they retain the structured
+            // event-range marker and score floor when semantic recall returned
+            // the same memory with a weaker score.
+            [...memories, ...ranged]
+              .filter((memory) => memory?.id)
+              .map((memory) => [memory.id, memory]),
+          );
+          memories = [...byId.values()];
+        }
+      } catch (eventRangeError) {
+        console.warn('[recall-router] event-range lane failed:', eventRangeError.message);
+      }
+    }
     // Project-scope fallback: if user has a project active but recall came
     // back empty, the relevant memories may live outside that project (e.g.
     // personal-scope or org-wide). Retry once without projectId so chat
@@ -774,16 +1614,32 @@ export class RecallRouter {
     let projectFallbackFired = false;
     const _projectFallbackEnabled = process.env.RECALL_PROJECT_FALLBACK !== 'false';
     if (_projectFallbackEnabled && memories.length === 0 && ctx.projectId) {
-      const ctxBroad = { ...ctx, projectId: null };
+      // ISOLATION: the broad retry may escape to personal/org/team knowledge,
+      // but must NEVER surface ANOTHER project's scoped memories — asking about
+      // "Solvis" inside the Singulance project must not answer from the SOLVIS
+      // project. projectIds:[] makes every scope='project' memory fail the
+      // access check in the retrieval scope filter while personal/org/team
+      // memories still pass.
+      const ctxBroad = {
+        ...ctx,
+        projectId: null,
+        accessContext: { ...(ctx.accessContext || {}), projectIds: [] },
+      };
       memories = await withTimeout(
         hop1Memory({ store: this.store, query, options, ctx: ctxBroad }),
-        HOP1_TIMEOUT_MS,
+        Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
         [],
       );
       projectFallbackFired = memories.length > 0;
       if (projectFallbackFired) {
         console.log(`[recall-router] project-scope empty (${ctx.projectId}) → broad recall found ${memories.length} memories`);
       }
+    }
+    if (explicitSourceRequested) {
+      memories = filterMemoriesByDocumentIds(
+        memories,
+        explicitSourceDocuments.map((document) => document.id),
+      );
     }
     traceLatency.memory = Date.now() - t1;
 
@@ -792,18 +1648,25 @@ export class RecallRouter {
     // ── HOP 2 + HOP 3 (parallel, both keyed on inspection) ────────────────
     const t2Start = Date.now();
     const [hop2, hop3] = await Promise.all([
-      withTimeout(
+      !recallPlan.expand_evidence
+        ? Promise.resolve({ items: [], reason: 'disabled' })
+        : sourceFirstEvidence || withTimeout(
         hop2Evidence({
           evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
         }),
-        HOP2_TIMEOUT_MS,
+        Math.min(HOP2_TIMEOUT_MS, remainingBudget()),
         { items: [], reason: 'timeout' },
       ),
-      options.include_live === false
+      !isLiveExpansionEligible({
+        includeLive: recallPlan.include_live,
+        inspection,
+        liveIntent: options.live_intent === true,
+        surfacePolicyAllowsLive: options.surface_policy_allows_live !== false,
+      })
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : withTimeout(
             hop3Live({ prisma: this.prisma, query, ctx, inspection }),
-            HOP3_TIMEOUT_MS,
+            Math.min(HOP3_TIMEOUT_MS, remainingBudget()),
             { items: [], reason: 'timeout' },
           ),
     ]);
@@ -817,10 +1680,14 @@ export class RecallRouter {
     // Fire in try/catch — never block recall on boost failure.
     if (this.clusterIndex && ctx.orgId) {
       try {
-        rankedMemories = await crossClusterEntityBoost(rankedMemories, {
-          clusterIndex:   this.clusterIndex,
-          organizationId: ctx.orgId,
-        });
+        rankedMemories = await withTimeout(
+          crossClusterEntityBoost(rankedMemories, {
+            clusterIndex:   this.clusterIndex,
+            organizationId: ctx.orgId,
+          }),
+          Math.min(350, remainingBudget()),
+          rankedMemories,
+        );
       } catch (boostErr) {
         console.warn('[recall-router] cross-cluster boost failed:', boostErr.message);
       }
@@ -844,11 +1711,37 @@ export class RecallRouter {
     if (!callerWantsAudit) {
       rankedMemories = rankedMemories.filter((m) => !(m.tags || []).includes('internal-audit'));
     }
+    rankedMemories = filterLowSaliencePromotedMemories(rankedMemories);
 
+    // V5 D5 (flag-gated): type-aware recall — merge a type-scoped lane so a
+    // type-matching memory is a candidate even when base lanes missed it, then
+    // soft-boost. Runs BEFORE the floor so merged rows are ranked, not pruned.
+    if (TYPE_AWARE_RECALL && options.boost_memory_type) {
+      try {
+        const extra = await fetchTypeScopedCandidates({
+          prisma: this.prisma, store: this.store,
+          orgId: ctx.orgId, boostType: options.boost_memory_type,
+          entityNames: (recallPlan.entities?.length ? recallPlan.entities : (options.named_entities?.length ? options.named_entities : [])),
+        });
+        if (extra.length) {
+          const seen = new Set(rankedMemories.map((m) => m.id));
+          for (const e of extra) if (!seen.has(e.id)) { rankedMemories.push(e); seen.add(e.id); }
+          console.log(`[recall-router] type-scoped lane: +${extra.filter((e) => !new Set(rankedMemories.slice(0, rankedMemories.length - extra.length).map((m) => m.id)).has(e.id)).length} type=${options.boost_memory_type} candidates`);
+        }
+        rankedMemories = applyMemoryTypeBoost(rankedMemories, options.boost_memory_type);
+      } catch (e) { console.warn('[recall-router] type-aware recall failed:', e.message); }
+    }
     rankedMemories = applyScoreFloor(rankedMemories, 0.40);
-    rankedMemories = applyEventTimeBoost(rankedMemories, query);
+    if (options.structured_intent !== true) rankedMemories = applyEventTimeBoost(rankedMemories, query);
     rankedMemories = applyMMRDiversity(rankedMemories, 0.70);
     rankedMemories = collapseClusterDuplicates(rankedMemories);
+    // Exact-id dedup BEFORE the top-N slice. RRF/lane-fusion + graph expansion
+    // can re-surface the SAME memory under different lane wrappers (id vs
+    // memory.id), and collapseClusterDuplicates only merges near-dupes by
+    // cluster hash — not identical ids. Without this the delivered top-N is
+    // wasted on duplicates (observed: 5 delivered / 3 unique in explain mode).
+    // Keep the first (highest-ranked) occurrence.
+    rankedMemories = dedupeMemoriesById(rankedMemories);
 
     // Fire recall-count update asynchronously — don't block response
     if (this.clusterIndex) {
@@ -869,7 +1762,20 @@ export class RecallRouter {
       const docId = m.source_metadata?.document_id;
       if (docId && !memoryByDocId.has(docId)) memoryByDocId.set(docId, m.id);
     }
-    const evidenceWithLineage = (hop2.items || []).map((e) => ({
+    let selectedEvidence = hop2.items || [];
+    if (explicitSourceHydration) {
+      // Fresh-clock timeout applied HERE, not at creation. The hydration query
+      // has been running concurrently since it was kicked off above; give it a
+      // real slice of the remaining budget now (floored so an explicit source
+      // read — which IS the answer for explain/full — is never starved to a
+      // 0ms wait by earlier hops). Hydration typically completes in ~50ms.
+      const fullSource = recallPlan.mode === 'full';
+      const hydrationBudget = Math.max(600, Math.min(fullSource ? 2_200 : 1_200, remainingBudget()));
+      const hydrated = await withTimeout(explicitSourceHydration, hydrationBudget, { timed_out: true });
+      if (Array.isArray(hydrated) && hydrated.length) selectedEvidence = hydrated;
+      else if (hydrated?.timed_out || Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
+    }
+    const evidenceWithLineage = selectedEvidence.map((e) => ({
       ...e,
       linked_memory_id: memoryByDocId.get(e.documentId) || null,
     }));
@@ -880,10 +1786,21 @@ export class RecallRouter {
 
     // Phase 2 (B2): deliver-N comes from the per-org RetrievalConfig (the
     // self-evolution action space), falling back to RECALL_DELIVER_LIMIT.
-    let deliverN = RECALL_DELIVER_LIMIT;
+    let deliverN = recallPlan.operation === 'timeline'
+      ? Math.min(options.limit || recallPlan.max_memories, 50)
+      : (options.structured_intent === true
+          ? Math.min(Math.max(1, options.limit || 15), 15)
+          : RECALL_DELIVER_LIMIT);
     try {
-      const cfg = await getRetrievalConfig(ctx.orgId);
-      if (cfg?.deliver_limit) deliverN = cfg.deliver_limit;
+      const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, remainingBudget()), null);
+      // Per-org delivery tuning is a default, never an override of an explicit
+      // caller limit. Chat passes structured_intent and reveals its retained
+      // pool progressively; the public recall API can explicitly request the
+      // full 10-15 candidate window.
+      if (recallPlan.operation !== 'timeline'
+          && options.structured_intent !== true
+          && !Number.isFinite(Number(options.limit))
+          && cfg?.deliver_limit) deliverN = cfg.deliver_limit;
     } catch { /* default */ }
 
     // Dreams-first quota: guarantee raw source evidence still appears in the
@@ -908,7 +1825,70 @@ export class RecallRouter {
     // Two-reranker contract: this is the OPT-IN CROSS-ENCODER precision pass (external
     // model, gated RERANK_ENABLED) — no-op (returns first N) when disabled.
     // Stage 4 / P1: optional cross-encoder rerank of the wide ranked pool → deliver top-N.
-    const deliverMemories = await rerank(query, rankedMemories, { topN: deliverN });
+    const rerankBudget = Math.max(remainingBudget(), RERANK_RESERVE_MS);
+    // `> 1` means a 2ms budget still fires a rerank that cannot possibly land, and
+    // withTimeout's fallback is a VALUE — so the cross-encoder silently vanishes from the
+    // memory lane with no log, the same invisible degrade that made deliverHybrid look
+    // non-deterministic. The budget here is a real latency contract, so it is NOT extended
+    // (unlike deliverHybrid's arbitrary 1200ms floor); it is only made visible, and a
+    // budget too small to fit one attempt skips the call instead of wasting it.
+    // Gate on the MEASURED warm latency, not on the timeout ceiling. The first version of
+    // this gate required min(RERANK_TIMEOUT_MS, 1500)ms and therefore skipped calls with
+    // 630ms / 523ms / 350ms left that would have completed comfortably — a warm rerank is
+    // ~270ms against the live endpoint (829ms cold). The withTimeout below is still bounded
+    // by the remaining budget, so attempting with less than the ceiling risks nothing: a
+    // slow call degrades exactly as before, and now says so.
+    const _rrMinMem = Number(process.env.RERANK_MIN_BUDGET_MS || 400);
+    const _canRerank = rerankBudget >= _rrMinMem;
+    if (!_canRerank && rerankBudget > 1) {
+      console.warn(`[recall-router] SKIPPING memory-lane cross-encoder: only ${rerankBudget}ms of budget `
+        + `left (needs >=${_rrMinMem}ms; warm rerank ~270ms) — delivering algorithmic order. The memory `
+        + `lane is NOT cross-encoded for this request. Upstream stages spent the budget: `
+        + `latency_budget_ms=${recallPlan.latency_budget_ms} for mode=${recallPlan.mode || 'n/a'}, and one `
+        + `hop alone is capped at 2300ms, so the final stage can be starved by construction.`);
+    }
+    let deliverMemories = _canRerank
+      ? await withTimeout(
+        rerank(query, rankedMemories, { topN: deliverN }),
+        rerankBudget,
+        rankedMemories.slice(0, deliverN),
+      )
+      : rankedMemories.slice(0, deliverN);
+    deliverMemories = dedupeMemoriesById(deliverMemories).slice(0, deliverN);
+    if (recallPlan.operation === 'timeline') {
+      deliverMemories = [...deliverMemories].sort((left, right) => {
+        const leftTime = new Date(left.valid_from || left.valid_at || left.created_at || 0).getTime();
+        const rightTime = new Date(right.valid_from || right.valid_at || right.created_at || 0).getTime();
+        return leftTime - rightTime;
+      });
+    }
+    if (remainingBudget() <= 1 && recallPlan.mode !== 'fact') cutoffReason ||= 'latency_budget';
+
+    // RECALL_HYBRID_DELIVERY_ALWAYS_ON: replace the delivered memory/evidence order with one
+    // coherent relevance authority (RRF-fuse → cross-encoder → surviving
+    // amplitude) over BOTH sources, so evidence competes fairly and boosts
+    // survive. Default OFF → byte-identical delivery. Falls back to the existing
+    // order on any failure/timeout.
+    let finalEvidence = evidenceWithLineage;
+    let rankedCandidates = [];
+    let hybridRankingMode = 'not_applicable';
+    if (recallPlan.operation !== 'timeline') {
+      const v2 = await deliverHybrid({
+        query,
+        memories: rankedMemories,          // wide pre-slice pool (rerank window)
+        evidence: evidenceWithLineage,
+        deliverN,
+        evidenceN: HOP2_DOC_LIMIT,
+        budgetMs: Math.max(remainingBudget(), RERANK_RESERVE_MS),
+        structuredIntent: options.structured_intent === true,
+      }).catch(() => null);
+      if (v2 && Array.isArray(v2.memories)) {
+        deliverMemories = dedupeMemoriesById(v2.memories).slice(0, deliverN);
+        finalEvidence = v2.evidence || evidenceWithLineage;
+        rankedCandidates = v2.ranked_candidates || [];
+        hybridRankingMode = v2.ranking_mode || 'unknown';
+      }
+    }
 
     // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.
     logTaskOutcome({
@@ -918,35 +1898,10 @@ export class RecallRouter {
     });
 
     return {
-      memories: deliverMemories.map((m) => ({
-        id: m.id,
-        title: m.title,
-        content: typeof m.content === 'string' ? m.content.slice(0, 400) : '',
-        memory_type: m.memory_type,
-        tags: m.tags,
-        score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
-        created_at: m.created_at,
-        valid_at: m.valid_at,
-        // Cognition layer signals — agent uses these to prefer synthesis-
-        // tier rows. Pass through when present; null/undefined harmless.
-        ...(m.source_metadata?.source_type
-          ? { source_metadata: { source_type: m.source_metadata.source_type } }
-          : {}),
-        ...(m.synthesis_confidence != null   ? { synthesis_confidence:   m.synthesis_confidence }   : {}),
-        ...(m.synthesis_revision   != null   ? { synthesis_revision:     m.synthesis_revision }     : {}),
-        ...(m.synthesis_cluster_hash         ? { synthesis_cluster_hash: m.synthesis_cluster_hash } : {}),
-        ...(Array.isArray(m.synthesis_evidence_ids) && m.synthesis_evidence_ids.length
-          ? { synthesis_evidence_ids: m.synthesis_evidence_ids }
-          : {}),
-        // Expose cross-cluster boost metadata when present (Move 3)
-        ...(m._cross_cluster_boost != null ? {
-          _cross_cluster_boost:   Number(m._cross_cluster_boost.toFixed(3)),
-          _cross_cluster_overlap: m._cross_cluster_overlap || 0,
-        } : {}),
-        // Phase B tier surfaced for hydration tap + UI ("hot"/"thin"/"live")
-        ...(typeof m.tier === 'number' ? { tier: m.tier } : {}),
+      memories: deliverMemories.map((memory) => serializeRecallMemory(memory, {
+        includeFullContent: options.include_full_memory_content === true,
       })),
-      evidence: evidenceWithLineage.slice(0, HOP2_DOC_LIMIT).map((e) => ({
+      evidence: finalEvidence.slice(0, HOP2_DOC_LIMIT).map((e) => ({
         segment_id:       e.segmentId,
         document_id:      e.documentId,
         document_title:   e.document?.title || null,
@@ -956,9 +1911,13 @@ export class RecallRouter {
         page:             e.metadata?.startPage || null,
         linked_memory_id: e.linked_memory_id,
       })),
+      ranked_candidates: rankedCandidates,
       live: hop3.items,
       trace: {
+        recall_plan:     recallPlan,
+        hybrid_ranking_mode: hybridRankingMode,
         hop1_count:      memories.length,
+        event_range_count: eventRangeCount,
         sparse:          inspection.sparse,
         top_score:       Number(inspection.topScore.toFixed(3)),
         anchors: {
@@ -966,12 +1925,21 @@ export class RecallRouter {
           doc_hashes: inspection.docHashes,
           doc_ids:    inspection.docIds,
           platforms:  inspection.platforms,
+          explicit_source_documents: explicitSourceDocuments.map((document) => ({
+            id: document.id,
+            title: document.title || null,
+          })),
         },
         evidence_trigger: hop2.reason,
         live_trigger:     hop3.reason,
         tiers_fired:      tiersFired,
+        cutoff_reason:    cutoffReason,
         latency_ms:       { ...traceLatency, total: Date.now() - startedAt },
       },
     };
   }
 }
+
+// V5 Phase 8: buildEvidencePacket moved to recall-packet.js (one module owns the
+// evidence contract). Re-exported here for backward compatibility.
+export { buildEvidencePacket };

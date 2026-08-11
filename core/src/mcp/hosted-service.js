@@ -280,6 +280,10 @@ function formatToolContent(data) {
 }
 
 function formatToolError(name, error) {
+  // Loud server-side log so MCP tool failures are diagnosable from container logs.
+  // Previously a thrown tool error surfaced ONLY to the MCP client as a generic
+  // "operation_failed", leaving nothing in `docker logs hm-core` to root-cause from.
+  try { console.warn(`[mcp] tool ${name} failed: ${error?.message || error}`); } catch { /* noop */ }
   return {
     isError: true,
     content: [{
@@ -465,27 +469,23 @@ export function generateHostedServer(userId, orgId, apiKey) {
 function generateToolsManifest(userId, orgId, options = {}) {
   const scopes = Array.isArray(options.scopes) ? options.scopes : [];
   const scopeSet = new Set(scopes);
-  // Full HIVEMIND-native toolset is exposed to every authenticated MCP client by
-  // default. The previous scope-gating silently hid 23 of 34 tools: the OAuth→
-  // internal scope map (server.js) emits names ('mcp', 'memory:read', 'web:search')
-  // that NEVER matched the gate's expected names ('coding', 'web_search',
-  // 'web_crawl', 'slack:act'), so every OAuth / Claude connection fell through to
-  // only the 10 always-on core tools — regardless of what the user consented to.
-  // These tools read/write HIVEMIND's OWN graph or server-side-keyed services
-  // (same trust level as the always-on memory tools), so they are on by default.
-  // Power users / restricted integrations can opt a group OUT with a negative
-  // scope: '!coding', '!web', '!slack'. '*' or an empty scope list = everything.
-  const hasAll = scopeSet.has('*') || scopes.length === 0;
+  // Web capabilities are explicit allow-list scopes. They spend platform
+  // provider credits and can persist public findings, so an absent or empty
+  // scope set must never be interpreted as blanket access.
+  const hasAll = scopeSet.has('*');
   const hasCoding = hasAll || !scopeSet.has('!coding');
-  const hasWebSearch = hasAll || !scopeSet.has('!web');
-  const hasWebCrawl = hasWebSearch;
-  const hasAnyWeb = hasWebSearch || hasWebCrawl;
+  const hasWebSearch = hasAll || scopeSet.has('web_search');
+  const hasWebResearch = hasAll || scopeSet.has('web_research');
+  const hasWebCrawl = hasAll || scopeSet.has('web_crawl');
+  const hasAnyWeb = hasWebSearch || hasWebResearch || hasWebCrawl;
   // Write gate for the "Default Access" (read-only) OAuth tier. The token's
   // stored scopes are the INTERNAL scopes (server.js createOAuthAccessToken
   // persists internalScopes): Full Access carries 'memory:write', the read-only
   // tier does not. When write is not granted, mutating tools are filtered out of
   // the manifest so a read-only consent is actually enforced, not just cosmetic.
-  const canWrite = hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
+  // Core HIVEMIND memory tools retain their established default-access
+  // behavior. Only provider-spending Web capabilities require explicit scope.
+  const canWrite = scopes.length === 0 || hasAll || scopeSet.has('memory:write') || scopeSet.has('memory.write');
 
   const tools = [
     {
@@ -940,6 +940,22 @@ Use only when the user explicitly asks to rename the assistant. NOT for setting 
       },
     },
     {
+      name: 'hivemind_chat_context',
+      description: `Build the same event-driven, source-grounded context used by /api/chat without generating the final answer. Returns facts, source sections, citations, coverage, and cutoff state for another LLM. A document-backed fact result receives one bounded evidence expansion; full raw-document hydration remains explicit-only.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The user question verbatim.' },
+          mode: { type: 'string', enum: ['fact', 'explain', 'full'], default: 'fact' },
+          project_id: { type: 'string', description: 'Optional accessible project UUID.' },
+          source_document_id: { type: 'string', description: 'Known document UUID; use with full.' },
+          source_title: { type: 'string', description: 'Known source title; use with full.' },
+          include_live: { type: 'boolean', default: false, description: 'Allow eligible live connector evidence.' },
+        },
+        required: ['query'],
+      },
+    },
+    {
       name: 'hivemind_set_voice',
       description: `Define how HIVEMIND speaks — tone, terminology, do/don't rules, signature phrases. Loaded into every Talk-to-HIVE system prompt. Re-calling with the same scope updates the profile.
 Use when the user wants to calibrate HIVEMIND's communication style for themselves (scope="personal") or for the whole org (scope="organization"). NOT for renaming the assistant — use hivemind_set_assistant_name. Organization scope overrides personal scope for shared members; personal scope applies only to the calling user. Content should be in freeform markdown (see parameter description for examples).`,
@@ -1145,6 +1161,7 @@ transaction_time = when the system LEARNED the fact (system clock); valid_time =
           valid_time: { type: 'string', description: 'ISO timestamp — when the fact was true in the world.' },
           memory_query: { type: 'string', description: 'Optional semantic filter on the time-traveled set (e.g. "supplier contract").' },
           file_path: { type: 'string', description: 'Optional file:<path> tag filter (code use).' },
+          limit: { type: 'integer', description: 'Max memories to return (default 20, max 200).' },
           project: { type: 'string' },
           project_id: { type: 'string' },
         }
@@ -1253,39 +1270,19 @@ NOT for a point-in-time snapshot across many memories — use hivemind_at; NOT f
     );
   }
 
-  // ── Web Intelligence tools (scope-gated) ──────────────────
-  if (hasWebSearch) {
-    tools.push({
-      name: 'hivemind_web_search',
-      description: `Search the live web and return structured results (async). Use ONLY for facts that are external to the org and require up-to-date public information: today's news, current prices of public goods, competitor pages, recent events after your knowledge cutoff.
-HARD RULE: NEVER use for facts about the user, their org, their people, their projects, or their decisions — those live in HIVEMIND; use hivemind_recall instead. NOT for crawling a specific URL — use hivemind_web_crawl; NOT for checking job progress — use hivemind_web_job_status. Returns a job_id; poll with hivemind_web_job_status every 3-5s. Save useful findings back to HIVEMIND via hivemind_save_memory with source URL in tags.`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Search query' },
-          domains: { type: 'array', items: { type: 'string' }, description: 'Optional domain allowlist' },
-          limit: { type: 'number', description: 'Max results (default: 10)' }
-        },
-        required: ['query']
-      }
-    });
-  }
-  if (hasWebCrawl) {
-    tools.push({
-      name: 'hivemind_web_crawl',
-      description: `Crawl one or more specific URLs and extract page content (async). Use when you have exact URLs to read — documentation pages, public product pages, linked references.
-NOT for keyword-based web search — use hivemind_web_search; NOT for org/user/project facts — use hivemind_recall. HARD RULE: never crawl internal/private URLs or substitute web crawl for HIVEMIND recall. Returns a job_id; poll with hivemind_web_job_status. depth controls link-following (max 3); page_limit caps total pages (max 50). Save extracted content back to HIVEMIND when it's valuable for future sessions.`,
-      inputSchema: {
-        type: 'object',
-        properties: {
-          urls: { type: 'array', items: { type: 'string' }, description: 'Seed URLs to crawl' },
-          depth: { type: 'number', description: 'Crawl depth (default: 1, max: 3)' },
-          page_limit: { type: 'number', description: 'Max pages (default: 10, max: 50)' }
-        },
-        required: ['urls']
-      }
-    });
-  }
+  // ── Web Intelligence tools (explicit scope-gated) ─────────
+  if (hasWebSearch) tools.push({
+    name: 'hivemind_web_search', description: 'Search the live public web asynchronously. Returns a job_id; poll hivemind_web_job_status.',
+    inputSchema: { type: 'object', properties: { query: { type: 'string' }, domains: { type: 'array', items: { type: 'string' } }, limit: { type: 'number' } }, required: ['query'] },
+  });
+  if (hasWebResearch) tools.push({
+    name: 'hivemind_web_research', description: 'Run bounded, cited public-web research asynchronously. Returns a job_id; poll hivemind_web_job_status.',
+    inputSchema: { type: 'object', properties: { input: { type: 'string' }, model: { type: 'string' }, citation_format: { type: 'string', enum: ['numbered', 'markdown'] } }, required: ['input'] },
+  });
+  if (hasWebCrawl) tools.push({
+    name: 'hivemind_web_crawl', description: 'Crawl public URLs and extract page content asynchronously. Returns a job_id; poll hivemind_web_job_status.',
+    inputSchema: { type: 'object', properties: { urls: { type: 'array', items: { type: 'string' } }, depth: { type: 'number' }, page_limit: { type: 'number' } }, required: ['urls'] },
+  });
   if (hasAnyWeb) {
     tools.push({
       name: 'hivemind_web_job_status',
@@ -1299,6 +1296,8 @@ Use after submitting a web job — call every 3-5 seconds until status is "done"
         required: ['job_id']
       }
     });
+    tools.push({ name: 'hivemind_web_retry_job', description: 'Retry one failed tenant-scoped Web Intelligence job.', inputSchema: { type: 'object', properties: { job_id: { type: 'string' } }, required: ['job_id'] } });
+    tools.push({ name: 'hivemind_web_save_result', description: 'Save a completed Web Intelligence result into HIVEMIND.', inputSchema: { type: 'object', properties: { job_id: { type: 'string' }, result_index: { type: 'number' }, title: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } }, required: ['job_id'] } });
     tools.push({
       name: 'hivemind_web_usage',
       description: `Return current web intelligence quota and usage (searches used, crawl pages consumed, limits remaining). Use before submitting large web jobs to avoid hitting quota mid-task, or when a web job is rejected with a quota error. No parameters required.`,
@@ -2490,30 +2489,42 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         // smart-ingest + entity_co_mention + relationship edges fire
         // before we return. Wall time ~3-8s on the canonical pipeline,
         // acceptable for an interactive save.
-        const saveResp = await apiClient.post('/api/memories?sync=true', {
+        // Canonical front door: MCP save_memory (and chat autosave, which calls
+        // this same tool) routes through POST /api/ingest/source as an ATOMIC
+        // ingest. Provenance is normalized to source:mcp; the engine still owns
+        // supersession (relationship carries {type,target_id}) + entity/edge
+        // creation via the smart router — ingestSource atomic does NOT skip it,
+        // so behaviour matches the old sync /api/memories path. Identity flows
+        // through the X-HM-User-Id/Org-Id headers apiClient already sets, so the
+        // endpoint resolves the correct principal (no body user_id/org_id).
+        const _proj = SCOPE_FIELDS.project_id
+          || (autoAttachedProjectId && !resolvedProjectId ? autoAttachedProjectId : null);
+        const _projIds = SCOPE_FIELDS.project_ids
+          || (autoAttachedProjectId && !resolvedProjectId ? [autoAttachedProjectId] : undefined);
+        const ingestResp = await apiClient.post('/api/ingest/source', {
+          mode: 'atomic',
           title,
           content,
-          memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
-          source_platform: 'mcp',
+          source: { type: 'mcp', source_id: 'mcp' },
           tags: normalizeTags(args.tags),
-          project: normalizeMemoryText(args.project, null) || null,
+          ...(_proj ? { scope: 'project', project_id: _proj } : {}),
+          ...(SCOPE_FIELDS.primary_team_id ? { primary_team_id: SCOPE_FIELDS.primary_team_id } : {}),
           relationship,
           metadata: {
-            source_type: args.source_type || 'text'
+            memory_type: args.source_type === 'decision' ? 'decision' : 'fact',
+            source_type: args.source_type || 'text',
+            project: normalizeMemoryText(args.project, null) || null,
+            ...(_projIds ? { project_ids: _projIds } : {}),
           },
-          user_id: userId,
-          org_id: orgId,
-          smartIngest: true,
-          sync: true,
-          ...SCOPE_FIELDS,
-          // Auto-attach needs the same shape as explicit scoping: project_ids[]
-          // drives resolveScopedIngestPayload; bare project_id alone is ignored
-          // by the scope resolver and the save lands org-wide/personal.
-          ...(autoAttachedProjectId && !resolvedProjectId
-            ? { project_id: autoAttachedProjectId, project_ids: [autoAttachedProjectId], scope: 'project' }
-            : {}),
-          __bypass_membership: isMaster && resolvedProjectId ? true : undefined,
         });
+        const newId = ingestResp.memoryId || (Array.isArray(ingestResp.memoryIds) ? ingestResp.memoryIds[0] : null);
+        const saveResp = {
+          saved: ingestResp.ok === true && !!newId,
+          id: newId,
+          memory_id: newId,
+          operation: ingestResp.operation || 'created',
+          skipped: ingestResp.skipped || false,
+        };
         return formatToolContent({
           ...saveResp,
           scope: resolvedProjectId ? { project_id: resolvedProjectId } : { scope: 'org-wide' },
@@ -2684,6 +2695,46 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
           return formatToolContent({ created: false, error: err.message });
         }
       }
+
+      case 'hivemind_chat_context':
+        {
+          const requestedMode = ['fact', 'explain', 'full'].includes(args.mode) ? args.mode : 'fact';
+          const recallArgs = {
+            query_context: args.query,
+            mode: requestedMode,
+            explicit_mode: true,
+            include_live: args.include_live === true,
+            ...(resolvedProjectId ? { project_id: resolvedProjectId, project_ids: resolvedProjectIds } : {}),
+            ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
+            ...(args.source_title ? { source_title: args.source_title } : {}),
+          };
+          let result = await apiClient.post('/api/recall', recallArgs);
+
+          // Use returned provenance, not query wording, to decide whether the
+          // fact-only packet needs bounded source evidence. Never infer full.
+          const hasDocumentAnchor = (result.memories || []).some((memory) => {
+            const tags = memory?.tags || [];
+            return tags.some((tag) => typeof tag === 'string' && (
+              tag.startsWith('filename:') || tag.startsWith('doc-id:') || tag.startsWith('doc-hash:')
+            )) || !!memory?.source_metadata?.document_id;
+          });
+          if (requestedMode === 'fact' && !(result.evidence || []).length && hasDocumentAnchor) {
+            result = await apiClient.post('/api/recall', { ...recallArgs, mode: 'explain' });
+          }
+
+          return formatToolContent({
+            mode_used: result.mode_used || requestedMode,
+            context: result.evidence_packet || {
+              facts: result.memories || [],
+              sourceSections: result.evidence || [],
+              liveEvidence: result.live || [],
+              citations: [],
+              coverage: {},
+              cutoff_reason: result.cutoff_reason || null,
+            },
+            latency_ms: result.latency_ms || null,
+          });
+        }
 
       case 'hivemind_recall':
         {
@@ -2920,16 +2971,64 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
       }
 
       case 'hivemind_update_memory': {
-        const updRes = await apiClient.put(`/api/memories/${args.memory_id}`, {
-          title: args.title,
-          content: args.content,
-          tags: args.tags,
-          user_id: userId,
-          org_id: orgId
+        // Only send fields the caller actually provided (an undefined field must
+        // not overwrite the stored value with null on the partial-update schema).
+        const patchFields = {};
+        if (args.title !== undefined) patchFields.title = args.title;
+        if (args.content !== undefined) patchFields.content = args.content;
+        if (args.tags !== undefined) patchFields.tags = args.tags;
+
+        const putTo = (id) => apiClient.put(`/api/memories/${id}`, {
+          ...patchFields, user_id: userId, org_id: orgId,
         });
+
+        // A natural-language edit ("change the launch day to next year") frequently
+        // reaches us with a missing or stale memory_id — the model never had it, or
+        // recall handed back an id the caller can SEE but does not OWN (PUT is
+        // owner-scoped, recall is org/shared-scoped). Instead of throwing a bare
+        // operation_failed, resolve the target by recalling the caller's own
+        // memories with the edit text as the query, then update that.
+        const resolveTargetId = async () => {
+          const q = args.match || args.query || args.content || args.title;
+          if (!q) return null;
+          try {
+            const r = await apiClient.post('/api/recall', {
+              query_context: String(q), max_memories: 5, mode: 'quick',
+            });
+            return (r?.memories || []).find((m) => m && m.id)?.id || null;
+          } catch { return null; }
+        };
+
+        let targetId = args.memory_id || null;
+        let resolvedBy = targetId ? 'id' : null;
+        let updRes = null;
+        if (targetId) {
+          try {
+            updRes = await putTo(targetId);
+          } catch (e) {
+            // 403/404 on the supplied id → not found or not owned; fall through to
+            // resolve-by-search. Any other error is genuine → let it surface + log.
+            if (!/failed with 40[34]/.test(e?.message || '')) throw e;
+            targetId = null;
+          }
+        }
+        if (!updRes) {
+          const resolved = await resolveTargetId();
+          if (!resolved) {
+            return formatToolContent({
+              success: false,
+              error: 'Could not determine which memory to update. Pass memory_id, or describe the memory (its subject) so it can be found among your memories.',
+            });
+          }
+          targetId = resolved;
+          resolvedBy = 'search';
+          updRes = await putTo(targetId); // genuine failure here logs + surfaces
+        }
         return formatToolContent({
           success: updRes?.success !== false,
-          memory: updRes?.memory ? polishMemory(updRes.memory) : undefined
+          resolved_by: resolvedBy,
+          memory_id: targetId,
+          memory: updRes?.memory ? polishMemory(updRes.memory) : undefined,
         });
       }
 
@@ -2992,6 +3091,15 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         return formatToolContent(res);
       }
 
+      case 'hivemind_web_research': {
+        const res = await apiClient.post('/api/web/research/jobs', {
+          input: args.input,
+          model: args.model || 'auto',
+          citation_format: args.citation_format || 'numbered',
+        });
+        return formatToolContent(res);
+      }
+
       case 'hivemind_web_crawl': {
         const res = await apiClient.post('/api/web/crawl/jobs', {
           urls: args.urls,
@@ -3008,6 +3116,20 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
 
       case 'hivemind_web_usage': {
         const res = await apiClient.get('/api/web/usage');
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_web_retry_job': {
+        const res = await apiClient.post(`/api/web/jobs/${args.job_id}/retry`, {});
+        return formatToolContent(res);
+      }
+
+      case 'hivemind_web_save_result': {
+        const res = await apiClient.post(`/api/web/jobs/${args.job_id}/save-to-memory`, {
+          resultIndex: args.result_index,
+          title: args.title,
+          tags: args.tags,
+        });
         return formatToolContent(res);
       }
 
@@ -3393,42 +3515,41 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         if (!args.transaction_time && !args.valid_time) {
           throw new Error('hivemind_code_at requires transaction_time and/or valid_time');
         }
-        // Default transaction_time to "now" when only valid_time is given —
-        // and warn callers passing a TX-time earlier than any memory's
-        // creation: empty result is correct, not a bug.
         const txTime = args.transaction_time || null;
         const validTime = args.valid_time || null;
-        const res = await apiClient.post('/api/temporal/as-of', {
-          transaction_time: txTime,
-          valid_time: validTime,
+        const query = args.memory_query || args.file_path || 'workspace memory';
+        const atLimit = Math.max(1, Math.min(200, Number(args.limit) || 20));
+        const res = await apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          // TOP-LEVEL, not nested under `time`. /api/recall reads body.valid_at /
+          // body.transaction_at (routes/recall.js) and NEVER reads body.time, so the
+          // nested form was silently dropped: every hivemind_at call came back
+          // UNFILTERED (measured: 356 memories / 1.7MB for a single-instant query),
+          // which looks like a working tool but is the whole corpus. `known_at` was
+          // also the wrong key — the route's transaction axis is `transaction_at`.
+          ...(txTime ? { transaction_at: txTime } : {}),
+          ...(validTime ? { valid_at: validTime } : {}),
+          ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
+          limit: atLimit,
           project_id: args.project_id || null,
         });
-        let memories = res.memories || [];
-        if (args.file_path) {
-          memories = memories.filter(m => (m.tags || []).includes(`file:${args.file_path}`));
-        }
-        if (args.project) {
-          memories = memories.filter(m => m.project === args.project);
-        }
-        // Enterprise semantic filter (post-filter on title+content tokens)
-        if (args.memory_query && typeof args.memory_query === 'string') {
-          const q = args.memory_query.toLowerCase();
-          const tokens = q.split(/\s+/).filter(t => t.length >= 3);
-          if (tokens.length > 0) {
-            memories = memories.filter(m => {
-              const haystack = `${m.title || ''} ${m.content || ''}`.toLowerCase();
-              return tokens.some(t => haystack.includes(t));
-            });
-          }
-        }
-        const polished = polishMemories(memories);
+        // Cap the response. An as-of query legitimately matches everything whose
+        // validity window covers that instant, which on a real corpus is hundreds
+        // of full memory rows — measured 443 memories / 3.1MB, enough to blow up
+        // the calling agent's context and make the tool unusable in practice. The
+        // documented contract is a default of 20.
+        const polished = polishMemories(res.memories || []).slice(0, atLimit);
         const hint = (polished.length === 0 && txTime)
           ? `No memories exist at transaction_time=${txTime}${args.file_path ? ` for file ${args.file_path}` : ''}. The system may not have learned anything by that time, or the file did not yet exist. Try a later timestamp or omit the filter.`
           : null;
         return formatToolContent({
-          query: res.query || { transaction_time: txTime, valid_time: validTime },
+          query: { text: query, transaction_time: txTime, valid_time: validTime },
           count: polished.length,
           memories: polished,
+          evidence: res.evidence || [],
+          evidence_packet: res.evidence_packet || null,
+          cutoff_reason: res.cutoff_reason || null,
           ...(hint ? { hint } : {})
         });
       }
@@ -3438,34 +3559,56 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         if (!args.time_a || !args.time_b) {
           throw new Error('hivemind_code_diff requires time_a and time_b');
         }
-        const tagsFilter = [];
-        if (args.file_path) tagsFilter.push(`file:${args.file_path}`);
-        if (Array.isArray(args.tags) && args.tags.length) tagsFilter.push(...args.tags);
-
-        const diff = await apiClient.post('/api/temporal/diff', {
-          time_a: args.time_a,
-          time_b: args.time_b,
-          tags_filter: tagsFilter.length ? tagsFilter : undefined
+        const from = new Date(args.time_a);
+        const to = new Date(args.time_b);
+        if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from >= to) {
+          throw new Error('hivemind_diff requires valid time_a/time_b with time_a before time_b');
+        }
+        const tags = [...(Array.isArray(args.tags) ? args.tags : []), ...(args.file_path ? [`file:${args.file_path}`] : [])];
+        const query = args.memory_query || args.file_path || tags.join(' ') || 'workspace changes';
+        const recallAt = (value) => apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          // Top-level (see hivemind_at above): nested `time` is never read, so BOTH
+          // sides of the diff were the same unfiltered set and added/removed was
+          // recall jitter rather than a temporal delta.
+          valid_at: value.toISOString(),
+          ...(tags.length ? { tags } : {}),
         });
-        return formatToolContent({ ...diff, file_path: args.file_path || null });
+        const [a, b] = await Promise.all([recallAt(from), recallAt(to)]);
+        const fromIds = new Set((a.memories || []).map((memory) => memory.id));
+        const toIds = new Set((b.memories || []).map((memory) => memory.id));
+        const added = (b.memories || []).filter((memory) => !fromIds.has(memory.id));
+        const removed = (a.memories || []).filter((memory) => !toIds.has(memory.id));
+        const persisted = (b.memories || []).filter((memory) => fromIds.has(memory.id));
+        const changedIds = new Set([...added, ...removed].map((memory) => memory.id));
+        const edges = [...(a.evidence_packet?.graphEvidence || []), ...(b.evidence_packet?.graphEvidence || [])];
+        const seenEdges = new Set();
+        const changes = edges.filter((edge) => {
+          const type = String(edge.type || '').toLowerCase();
+          const key = `${edge.from_id}|${edge.to_id}|${type}`;
+          if (!['updates', 'contradicts'].includes(type) || seenEdges.has(key)) return false;
+          if (!changedIds.has(edge.from_id) && !changedIds.has(edge.to_id)) return false;
+          seenEdges.add(key);
+          return true;
+        });
+        return formatToolContent({ query, from_date: args.time_a, to_date: args.time_b, added, removed, persisted, changes, from: a, to: b });
       }
 
       case 'hivemind_timeline':
       case 'hivemind_code_timeline': {
-        let memoryId = args.memory_id;
-        if (!memoryId && args.file_path) {
-          // Resolve latest memory tagged file:<path>
-          const list = await apiClient.get('/api/memories', {
-            params: { tags: `file:${args.file_path}`, limit: 1 }
-          });
-          const memories = Array.isArray(list) ? list : (list?.memories || list?.data || []);
-          memoryId = memories[0]?.id || null;
-        }
-        if (!memoryId) {
+        if (!args.memory_id && !args.file_path) {
           throw new Error('hivemind_code_timeline requires memory_id or a resolvable file_path');
         }
-        const res = await apiClient.post('/api/temporal/timeline', { memory_id: memoryId });
-        return formatToolContent(res);
+        const query = args.memory_query || args.file_path || args.memory_id;
+        const res = await apiClient.post('/api/recall', {
+          query_context: query,
+          mode: 'explain',
+          operation: 'timeline',
+          include_superseded: true,
+          ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
+        });
+        return formatToolContent({ query, timeline: res.memories || [], evidence_packet: res.evidence_packet || null, cutoff_reason: res.cutoff_reason || null });
       }
 
       default:

@@ -8,6 +8,28 @@ on:
 
 jobs:
   # ==========================================
+  # Job 0: the .amr/byod agent must not drift
+  # ==========================================
+  # Two hand-maintained implementations of the same 32-endpoint agent API exist:
+  # core/src/vector/mneme/embedded-agent.mjs (amr_embedded — rides every core deploy) and
+  # byod/agent/server.mjs (self-host — built from the published `byod` BRANCH). Nothing
+  # gated the second, so a fix landed for embedded orgs while the self-host agent sat 9 days
+  # stale, missing /v1/kb-lexical entirely (remote evidence recall was silently vector-only)
+  # and missing document-scope enforcement. check-byod-sync.sh existed but nothing ran it on
+  # the deployable ref. It runs here now, so drift fails the build instead of shipping.
+  byod-sync:
+    name: BYOD setup-branch in sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # blob-hash comparison needs real history, not a shallow clone
+
+      - name: byod/ must match the published byod branch
+        run: bash scripts/check-byod-sync.sh
+
+  # ==========================================
   # Job 1: Code Quality & Linting
   # ==========================================
   lint:

@@ -1,0 +1,72 @@
+{
+  "playbook_id": "marketing.strategy-to-growth-brief",
+  "version": 6,
+  "status": "ACTIVE",
+  "name": "Marketing strategy to first-life program",
+  "description": "One Marketing Room execution turns retained company evidence into one complete strategy and its executable first-life portfolio; deterministic materialization follows without another Room turn.",
+  "metadata": {
+    "owner_room_tag": "marketing",
+    "supported_actions": ["formulate_go_to_market_strategy"],
+    "effect_class": "internal",
+    "first_life_program_builder": true,
+    "terminal_states_by_action": {
+      "formulate_go_to_market_strategy": ["strategy_program_ready", "strategy_needs_evidence", "cancelled"]
+    }
+  },
+  "input_contract": {
+    "fields": [
+      {"path": "context.company", "type": "object", "required": true, "description": "Retained company identity and onboarding context."},
+      {"path": "context.baseline", "type": "object", "required": true, "description": "Source-backed baseline and explicit limitations."},
+      {"path": "context.admin_current_status", "type": "object", "required": false, "description": "Optional administrator-confirmed priorities, corrections and blockers."},
+      {"path": "context.lifecycle_catalog", "type": "array", "required": true, "description": "Installed immutable lifecycle descriptors available for portfolio motions."},
+      {"path": "request.instruction", "type": "string", "required": true, "description": "The current operating requirement in the selected locale."}
+    ]
+  },
+  "initial_stage_id": "form_strategy_program",
+  "terminal_states": ["strategy_program_ready", "strategy_needs_evidence", "cancelled"],
+  "stages": [
+    {
+      "id": "form_strategy_program",
+      "objective": "Create one complete, source-backed go-to-market strategy and its first-life operating portfolio in a single Marketing Room run. Use the retained company profile, onboarding information, baseline, administrator status when present, company memory, and current sources. Load the relevant Marketing skills directly and synthesize once; do not run a second planning or validation conversation. Distinguish observed facts from professional recommendations, preserve contradictions and unknowns, and never invent market facts, deadlines, metrics, targets, competitors, or prices. The strategy must define a specific wedge, positioning, discoverable audience segments, offer framing, messaging pillars, named alternatives where evidence supports them, channel rationale, risks, measures with kill criteria, dependencies, and expected outcome. In the same artifact, design two to four evidence-backed Runtime task proposals. Each proposal must state title, bounded objective, reason, expected outcome, success measure, evidence references, dependencies, effect class, priority, and optional suggested targets. Do not select a playbook, Company Room, provider, channel, or supported action; Runtime owns execution selection. Do not include this Marketing strategy lifecycle as a motion, do not pad weak work, and perform no provider action.",
+      "input_refs": ["context.company", "context.baseline", "context.admin_current_status", "context.request", "context.lifecycle_catalog"],
+      "expected_artifacts": ["marketing_strategy_program"],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v2", "phase_kind": "strategy_program", "required_skills": ["strategy-operating-loop", "strategy-kernel", "jtbd-trigger", "positioning-ladder", "beachhead-selection", "grand-slam-offer", "bullseye-channels", "north-star-measures"], "exclude_current_playbook_from_catalog": true, "discussion_mode": "disabled"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "marketing_strategy_program", "value": 1},
+        {"predicate": "is_source_backed", "select": "marketing_strategy_program"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.evidence_summary"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.unknowns"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.confidence"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.niche_wedge"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.positioning"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.audience"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.offer_framing"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.messaging_pillars"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.competitor_plan"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.channel_mix"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.expected_outcome"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.risks"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.measures"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.dependencies"},
+        {"predicate": "all_have_min_items", "select": "marketing_strategy_program", "path": "data.motions", "value": 2}
+      ],
+      "transitions": [{"default": true, "to_stage": "materialize_strategy_program"}],
+      "on_failure": "ESCALATE",
+      "max_attempts": 1
+    },
+    {
+      "id": "materialize_strategy_program",
+      "objective": "Validate and materialize the accepted portfolio as ordered, idempotent proposed Runtime tasks. Invalid motions remain rejected individually; valid motions remain durable.",
+      "input_refs": ["artifacts.marketing_strategy_program", "context.lifecycle_catalog"],
+      "expected_artifacts": ["runtime_task_materialization"],
+      "execution": {"mode": "adapter", "adapter_id": "runtime-task-materializer", "operation": "execute", "config": {"input_key": "marketing_strategy_program", "strategy_key": "marketing_strategy_program", "first_life_policy_version": 8}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "runtime_task_materialization", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "runtime_task_materialization", "path": "data.accepted_todo_ids"},
+        {"predicate": "all_have_nonempty_field", "select": "runtime_task_materialization", "path": "data.portfolio_ref"}
+      ],
+      "transitions": [{"default": true, "to_terminal": "strategy_program_ready"}],
+      "on_failure": "ESCALATE"
+    }
+  ]
+}

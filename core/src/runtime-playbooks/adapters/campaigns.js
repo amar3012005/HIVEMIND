@@ -1,0 +1,277 @@
+import crypto from 'node:crypto';
+import { getCampaignCapabilities } from '../../campaigns/capabilities.js';
+import { dispatchCampaignRoomSafely } from '../../campaigns/dispatcher.js';
+import {
+  approveCampaign, createCampaign, getCampaign, syncCampaignMetrics,
+} from '../../campaigns/service.js';
+
+const ORGANIC = new Set(['x_organic', 'linkedin', 'instagram', 'facebook', 'tiktok', 'youtube', 'pinterest', 'reddit', 'threads', 'bluesky', 'google_business']);
+const PLANNING_FALLBACK = ['x_organic'];
+
+function asObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
+function asArray(value) { return Array.isArray(value) ? value : []; }
+function artifactId(prefix, ...parts) {
+  return `${prefix}-${crypto.createHash('sha256').update(parts.map(String).join('\u0000')).digest('hex').slice(0, 32)}`;
+}
+function value(input, key) { return input?.inputs?.[key]; }
+export function requestedCampaignChannels(request, target) {
+  const candidates = [
+    target?.channels, target?.channel_mix, target?.recommended_channels,
+    request?.channels, request?.channel_mix, request?.recommended_channels,
+  ];
+  const selected = candidates.find(Array.isArray) || [];
+  return [...new Set(selected.map((item) => String(item?.id || item || '').trim().toLowerCase())
+    .map((item) => item === 'x' || item === 'twitter' ? 'x_organic' : item)
+    .filter((item) => ORGANIC.has(item)))];
+}
+export function resolveRuntimeCampaignChannels({ request = {}, target = {}, policy = {}, plannable = [] } = {}) {
+  const requested = requestedCampaignChannels(request, target);
+  const campaignDefaults = asObject(asObject(policy).execution_defaults).campaign;
+  const defaultChannels = requestedCampaignChannels({}, { channels: asObject(campaignDefaults).channels });
+  const allowed = new Set(defaultChannels.length ? defaultChannels : requested.length ? requested : PLANNING_FALLBACK);
+  const available = new Set(plannable);
+  return [...allowed].filter((channel) => available.has(channel)).slice(0, 3);
+}
+
+export function buildRuntimeCampaignInstruction({ baseInstruction, campaignDefaults = {}, target = {} } = {}) {
+  const formatInstruction = campaignDefaults.creative_format === 'single_image_post'
+    ? 'Create standalone single-image posts only. Each scheduled action is one complete post with at most one image. Do not create carousels, multi-slide copy, numbered slide sequences, or threads.'
+    : '';
+  const durationDays = Number(campaignDefaults.duration_days || target.duration_days || 7);
+  const maximumPosts = Number(campaignDefaults.maximum_posts || 0);
+  const horizonInstruction = maximumPosts > 0
+    ? `Create one ${durationDays}-day campaign only, with no more than ${maximumPosts} scheduled posts in total.`
+    : `Create one ${durationDays}-day campaign only.`;
+  return {
+    durationDays,
+    instruction: [String(baseInstruction || '').trim(), horizonInstruction, formatInstruction].filter(Boolean).join('\n\n'),
+  };
+}
+function campaignRef(input) {
+  return asArray(value(input, 'artifacts.campaign_record'))[0]?.data?.campaign_id
+    || asArray(value(input, 'artifacts.campaign_status'))[0]?.data?.campaign_id
+    || asArray(value(input, 'artifacts.campaign_launch_status'))[0]?.data?.campaign_id;
+}
+function capabilityForChannel(channel) {
+  const value = String(channel || '').toLowerCase();
+  if (['x_organic', 'x_ads'].includes(value)) return 'x';
+  if (['linkedin', 'linkedin_ads'].includes(value)) return 'linkedin';
+  if (['instagram'].includes(value)) return 'instagram';
+  if (['facebook', 'meta'].includes(value)) return 'facebook';
+  if (['tiktok', 'tiktok_ads'].includes(value)) return 'tiktok';
+  if (['youtube', 'youtube_ads', 'google_ads'].includes(value)) return 'youtube';
+  if (['pinterest', 'pinterest_ads'].includes(value)) return 'pinterest';
+  return value || null;
+}
+async function syncCapabilityRequests(prisma, context, campaign, unavailable) {
+  const run = await prisma.runtimePlaybookRun.findFirst({ where: { id: context.runId, orgId: context.orgId }, select: { trigger: true } });
+  const todoId = String(run?.trigger?.todo_id || '');
+  if (!todoId) return [];
+  const todo = await prisma.hqTodo.findFirst({ where: { id: todoId, orgId: context.orgId } });
+  if (!todo) return [];
+  const missing = [...new Set(unavailable.filter((row) => !row.connected).map((row) => capabilityForChannel(row.id)).filter(Boolean))];
+  const previous = Array.isArray(todo.context?.runtime_required_capabilities) ? todo.context.runtime_required_capabilities : [];
+  if (!missing.length) {
+    await prisma.$transaction([
+      prisma.hqCapabilityRequest.updateMany({
+        where: { runtimeId: todo.runtimeId, todoId: todo.id, status: 'REQUIRED', capability: { in: previous } },
+        data: { status: 'RESOLVED', resolvedAt: new Date() },
+      }),
+      prisma.hqTodo.update({ where: { id: todo.id }, data: {
+        status: todo.status === 'WAITING_FOR_CONNECTOR' ? 'RUNNING' : todo.status,
+        blockedReason: null,
+        context: { ...(todo.context || {}), runtime_required_capabilities: [] },
+      } }),
+    ]);
+    return [];
+  }
+  await prisma.hqTodo.update({ where: { id: todo.id }, data: {
+    status: 'WAITING_FOR_CONNECTOR',
+    blockedReason: `Missing launch capabilities: ${missing.join(', ')}`,
+    context: { ...(todo.context || {}), runtime_required_capabilities: missing, runtime_capability_run_id: context.runId },
+  } });
+  for (const capability of missing) {
+    const existing = await prisma.hqCapabilityRequest.findFirst({
+      where: { runtimeId: todo.runtimeId, todoId: todo.id, capability, status: 'REQUIRED' },
+    });
+    if (!existing) await prisma.hqCapabilityRequest.create({ data: {
+      runtimeId: todo.runtimeId,
+      orgId: context.orgId,
+      todoId: todo.id,
+      capability,
+      provider: capability,
+      reason: `${campaign.name} is prepared and retained. Connect ${capability} so its approved channel actions can launch without rebuilding the Campaign Contract.`,
+      connectPath: `/hivemind/app/employees/campaigns?connect=${encodeURIComponent(capability)}`,
+    } });
+  }
+  return missing;
+}
+async function owner(prisma, context) {
+  const room = await prisma.hyperRoom.findFirst({ where: { id: context.roomId, orgId: context.orgId }, select: { userId: true } });
+  if (!room?.userId) throw new Error('runtime_campaign_owner_not_found');
+  return room.userId;
+}
+function statusArtifact(context, key, campaign, extra = {}) {
+  return {
+    id: artifactId(key, context.runId, campaign.id, campaign.updatedAt || campaign.status, JSON.stringify(extra)),
+    key, status: 'READY', external_ref: campaign.id,
+    source_refs: [`campaign:${campaign.id}`, ...(campaign.currentPlanVersionId ? [`campaign-plan:${campaign.currentPlanVersionId}`] : [])],
+    data: { campaign_id: campaign.id, correlation_ref: campaign.id, state: campaign.status, plan_version_id: campaign.currentPlanVersionId || null, ...extra },
+  };
+}
+
+export function projectCampaignContractState({ status, assetsReady, repairExhausted, preparationOnly }) {
+  if (status === 'READY_FOR_APPROVAL' && assetsReady) return preparationOnly ? 'reviewed' : 'ready';
+  if (status === 'READY_FOR_APPROVAL') return 'waiting_assets';
+  if (status === 'NEEDS_REPAIR') return repairExhausted ? 'needs_input' : 'needs_repair';
+  if (['NEEDS_INPUT', 'FAILED', 'CANCELLED'].includes(status)) return 'needs_input';
+  return 'preparing';
+}
+
+export function createCampaignRuntimeAdapter({ prisma } = {}) {
+  if (!prisma) throw new Error('runtime_campaign_prisma_required');
+  return {
+    id: 'campaigns',
+    name: 'Campaign operations',
+    description: 'Creates, launches, verifies and observes tenant-scoped Campaign Intelligence executions.',
+    async execute(input, context) {
+      const action = String(input?.config?.action || 'inspect_contract');
+      const userId = await owner(prisma, context);
+      if (action === 'create_campaign') {
+        const request = asObject(value(input, 'context.request'));
+        const target = asObject(value(input, 'context.target'));
+        const policy = asObject(value(input, 'context.policy'));
+        const campaignDefaults = asObject(asObject(policy.execution_defaults).campaign);
+        const baseline = asObject(value(input, 'context.baseline'));
+        const capabilities = await getCampaignCapabilities({ prisma, userId, orgId: context.orgId });
+        const plannable = new Set(capabilities.channels
+          .filter((item) => ORGANIC.has(item.id) && item.planning_ready)
+          .map((item) => item.id));
+        const channels = resolveRuntimeCampaignChannels({ request, target, policy, plannable: [...plannable] });
+        if (!channels.length) throw new Error('runtime_campaign_no_plannable_organic_channel');
+        const baseInstruction = String(request.instruction || request.objective || 'Create a focused awareness campaign').trim();
+        const { durationDays, instruction } = buildRuntimeCampaignInstruction({ baseInstruction, campaignDefaults, target });
+        const destinationUrl = String(
+          baseline?.company?.website || baseline?.website?.url || value(input, 'context.company')?.website || '',
+        ).trim();
+        const result = await createCampaign({ prisma, userId, orgId: context.orgId, body: {
+          name: 'First Growth Sprint awareness campaign',
+          goal: instruction,
+          objective: 'AWARENESS',
+          channels,
+          duration_days: durationDays,
+          intensity: 'FOCUSED',
+          geography: [target.location || baseline?.company?.location].filter(Boolean),
+          // INPUT PREFLIGHT, decided here rather than discovered by rejection. The contract
+          // validator refuses any URL in final_copy that is not in the brief. When the company
+          // has no website on record the allowed set is EMPTY, so every ordinary CTA the Room
+          // writes ("link in bio", "download the white-paper") rejects the whole contract —
+          // observed as five actions failing with 'contains a URL that was not supplied in the
+          // campaign brief', which reads as a Room defect and is really a missing profile
+          // field. Make the consequence explicit and carry it INTO the brief so the Room is
+          // told the policy up front instead of guessing.
+          ...(destinationUrl
+            ? { destination_url: destinationUrl, link_policy: 'single_approved_url' }
+            : { link_policy: 'linkless', link_policy_reason: 'no company website on record — copy must contain no URL' }),
+          success_metrics: ['Impressions', 'Engagements', 'Clicks'],
+          audience: { mode: 'existing_first', discover_if_insufficient: false },
+          brand_constraints: 'Use only claims directly supported by retained evidence. Prefer the exact evidenced wording GDPR-native; do not substitute compliant, certified, guaranteed, only, always, or never unless the cited evidence uses that exact term.',
+          prohibited_claims: 'Unsupported compliance, certification, exclusivity, guarantee, and performance claims.',
+          autonomy_mode: 'APPROVE_PLAN_ONCE',
+          trigger_surface: 'runtime',
+          idempotency_key: `runtime-campaign:${context.runId}`,
+          source_type: 'runtime_playbook', source_id: context.runId,
+          runtime_link: {
+            run_id: context.runId, stage_id: context.stageId,
+            checkpoint_sequence: input?.checkpoint_sequence || null,
+            attempt: input?.attempt || null,
+          },
+        } });
+        if (result.dispatch) dispatchCampaignRoomSafely({ prisma, campaignId: result.campaign.id, dispatch: result.dispatch }).catch(() => {});
+        return { artifacts: [statusArtifact(context, 'campaign_record', result.campaign, { channels, room_id: result.campaign.roomId, created: result.created })] };
+      }
+      const id = campaignRef(input) || value(input, 'event')?.data?.campaign_id;
+      if (!id) throw new Error('runtime_campaign_reference_required');
+      if (action === 'launch') {
+        try {
+          const launched = await approveCampaign({ prisma, orgId: context.orgId, userId, id });
+          const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
+          const externalActionMarkers = (campaign.actions || []).map((campaignAction) => ({
+            id: `campaign-action:${campaignAction.id}:${campaignAction.externalId || 'scheduled'}`,
+            presentation_type: 'social_post',
+            provider: 'campaigns',
+            channel: campaignAction.channel,
+            status: campaignAction.status === 'SUCCEEDED' ? 'published' : 'scheduled',
+            headline: campaignAction.status === 'SUCCEEDED'
+              ? `Congratulations! Your ${campaignAction.channel} post was published.`
+              : `Your ${campaignAction.channel} post is scheduled.`,
+            note: campaignAction.status === 'SUCCEEDED'
+              ? 'The channel adapter confirmed publication.'
+              : 'The campaign launch was accepted and this action entered its governed schedule.',
+            payload: campaignAction.payload || {},
+            assets: campaignAction.assets || [],
+            scheduled_at: campaignAction.scheduledAt || null,
+            external_ref: campaignAction.externalId || null,
+          }));
+          return { artifacts: [statusArtifact(context, 'campaign_launch_status', campaign, {
+            outcome: 'launched', approval_id: launched.approval.id, action_count: launched.launch.action_count,
+            external_action_markers: externalActionMarkers,
+          })] };
+        } catch (error) {
+          const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
+          return { artifacts: [statusArtifact(context, 'campaign_launch_status', campaign, { outcome: 'blocked', reason: String(error?.message || error).slice(0, 1000) })], warnings: [String(error?.message || error)] };
+        }
+      }
+      if (action === 'preflight_launch') {
+        const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
+        const capabilities = await getCampaignCapabilities({ prisma, userId: campaign.ownerUserId, orgId: context.orgId });
+        const byId = new Map(capabilities.channels.map((channel) => [channel.id, channel]));
+        const unavailable = (campaign.requestedChannels || []).map((channel) => byId.get(channel) || {
+          id: channel, connected: false, execution_ready: false, reason: 'connect_account', execution_reason: 'adapter_not_available',
+        }).filter((channel) => !channel.execution_ready);
+        const missing = await syncCapabilityRequests(prisma, context, campaign, unavailable);
+        const unsupported = unavailable.filter((channel) => channel.connected).map((channel) => ({
+          channel: channel.id, reason: channel.execution_reason || channel.reason || 'execution_unavailable',
+        }));
+        return { artifacts: [statusArtifact(context, 'campaign_capability_status', campaign, {
+          all_ready: unavailable.length === 0,
+          waiting_for_connection: missing.length > 0,
+          missing_capabilities: missing,
+          unavailable_channels: unavailable.map((channel) => channel.id),
+          unsupported_channels: unsupported,
+        })] };
+      }
+      if (action === 'observe') {
+        const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
+        return { artifacts: [statusArtifact(context, 'campaign_observation', campaign, { subscription: 'campaign-events' })] };
+      }
+      if (action === 'evaluate') {
+        await syncCampaignMetrics({ prisma, orgId: context.orgId, userId, id }).catch(() => null);
+        const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
+        const snapshots = await prisma.campaignMetricSnapshot.findMany({ where: { campaignId: id }, orderBy: { capturedAt: 'desc' }, take: 20 });
+        return { artifacts: [statusArtifact(context, 'campaign_outcome', campaign, { outcome: 'reviewed', metric_snapshot_count: snapshots.length })] };
+      }
+      const campaign = await getCampaign({ prisma, orgId: context.orgId, userId, id });
+      const actions = campaign.actions || [];
+      const repairPlans = campaign.status === 'NEEDS_REPAIR'
+        ? await prisma.campaignPlanVersion.findMany({
+          where: { campaignId: id, status: 'NEEDS_REPAIR' },
+          orderBy: { version: 'desc' }, take: 3, select: { validation: true },
+        }) : [];
+      const repairAttempts = repairPlans.length;
+      const repairExhausted = repairPlans[0]?.validation?.repair_exhausted === true || repairAttempts >= 3;
+      const request = asObject(value(input, 'context.request'));
+      const preparationOnly = request.external_action_requested !== true;
+      const requiredAssets = actions.filter((item) => item.payload?.creative_brief?.required === true);
+      const assetsReady = requiredAssets.every((item) => item.payload?.asset_id);
+      const contractState = projectCampaignContractState({
+        status: campaign.status, assetsReady, repairExhausted, preparationOnly,
+      });
+      return { artifacts: [statusArtifact(context, 'campaign_status', campaign, {
+        contract_state: contractState, action_count: actions.length, repair_attempt_count: repairAttempts,
+        required_asset_count: requiredAssets.length,
+        ready_asset_count: requiredAssets.filter((item) => item.payload?.asset_id).length,
+      })] };
+    },
+  };
+}

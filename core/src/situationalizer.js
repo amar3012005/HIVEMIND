@@ -12,7 +12,7 @@ const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
  * Groq Situationalizer - Uses Groq API to generate context for memories
  */
 export class GroqSituationalizer {
-  constructor(apiKey, model = 'llama-3.3-70b-versatile') {
+  constructor(apiKey, model = 'cerebras/gpt-oss-120b') {
     this.apiKey = apiKey || process.env.GROQ_API_KEY;
     this.model = model;
     this.cache = new Map();
@@ -168,7 +168,7 @@ export class BatchSituationalizer {
 
 // Default exports for engine integration
 const defaultApiKey = process.env.GROQ_API_KEY || 'your-groq-api-key-here';
-const defaultModel = process.env.GROQ_INFERENCE_MODEL || 'llama-3.3-70b-versatile';
+const defaultModel = process.env.GROQ_INFERENCE_MODEL || 'cerebras/gpt-oss-120b';
 
 export function getSituationalizer() {
   return new GroqSituationalizer(defaultApiKey, defaultModel);

@@ -1,0 +1,7 @@
+[sshd]
+enabled = true
+backend = systemd
+mode = aggressive
+findtime = 10m
+maxretry = 4
+bantime = 1h

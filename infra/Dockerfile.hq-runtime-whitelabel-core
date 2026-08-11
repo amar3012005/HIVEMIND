@@ -1,0 +1,4 @@
+FROM hivemind/core-api:prod-20260731-recall-alias-v1
+USER root
+COPY --chown=nodejs:nodejs core/src/growth/planner.js /app/src/growth/planner.js
+USER nodejs

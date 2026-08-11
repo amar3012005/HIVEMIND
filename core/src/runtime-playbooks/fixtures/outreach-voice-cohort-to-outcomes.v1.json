@@ -1,0 +1,74 @@
+{
+  "playbook_id": "outreach.voice-cohort-to-outcomes",
+  "version": 1,
+  "status": "ACTIVE",
+  "name": "Sequential outreach call cohort",
+  "description": "Prepare an ordered call cohort and complete one analyzed child call at a time under one parent execution.",
+  "initial_stage_id": "prepare_cohort",
+  "terminal_states": ["cohort_completed"],
+  "metadata": {
+    "owner_room_tag": "outreach",
+    "supported_actions": ["place_sequential_voice_calls", "operate_voice_call_cohort"]
+  },
+  "input_contract": {
+    "fields": [
+      {"path": "request.exact_targets", "type": "array", "description": "An ordered set of retained or exact call targets.", "required": true}
+    ]
+  },
+  "stages": [
+    {
+      "id": "prepare_cohort",
+      "objective": "Select and order the grounded call cohort, then prepare one distinct call brief per qualified recipient. Do not dial.",
+      "input_refs": ["context.company", "context.baseline", "context.request", "context.target"],
+      "expected_artifacts": ["call_brief"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "call_brief", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "call_brief", "path": "data.phone"},
+        {"predicate": "unique_by", "select": "call_brief", "path": "data.phone"},
+        {"predicate": "is_source_backed", "select": "call_brief"}
+      ],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v1", "phase_kind": "prepare"}},
+      "transitions": [{"default": true, "to_stage": "evaluate_cohort"}],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "evaluate_cohort",
+      "objective": "Reconcile all child outcomes and determine whether another isolated recipient remains.",
+      "input_refs": ["artifacts.call_brief", "event"],
+      "expected_artifacts": ["child_set_pending", "child_set_complete"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": ["child_set_pending", "child_set_complete"], "value": 1}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "child-playbook", "operation": "execute", "config": {"action": "evaluate", "source_key": "call_brief", "items_path": "data", "item_key_path": "phone", "pending_key": "child_set_pending", "complete_key": "child_set_complete"}},
+      "transitions": [
+        {"when": {"predicate": "has_min_count", "select": "child_set_complete", "value": 1}, "to_terminal": "cohort_completed"},
+        {"default": true, "to_stage": "dispatch_next_call"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "dispatch_next_call",
+      "objective": "Create or reconcile exactly one child call lifecycle for the next ordered recipient.",
+      "input_refs": ["artifacts.call_brief", "artifacts.child_set_pending"],
+      "expected_artifacts": ["child_run"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "child_run", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "child_run", "path": "data.child_run_id"},
+        {"predicate": "all_have_nonempty_field", "select": "child_run", "path": "data.item_key"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "child-playbook", "operation": "execute", "config": {
+        "action": "dispatch_next",
+        "source_key": "call_brief",
+        "items_path": "data",
+        "item_key_path": "phone",
+        "output_key": "child_run",
+        "child_playbook_id": "outreach.voice-call-to-outcome",
+        "child_playbook_version": 2,
+        "child_target_mapping": {"value": "phone", "label": "prospect", "lead_ref": "lead_ref", "verified_email": "verified_email", "personal_notes": "personal_notes"}
+      }},
+      "waits_for_event": {"type": "child.terminal", "correlation_path": "data.item_key", "timeout_after_seconds": 604800},
+      "transitions": [{"default": true, "to_stage": "evaluate_cohort"}],
+      "on_failure": "ESCALATE"
+    }
+  ]
+}

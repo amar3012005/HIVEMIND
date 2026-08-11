@@ -1,0 +1,25 @@
+{
+  "policy_id": "runtime.first-life-policy",
+  "version": 5,
+  "proposal_target": 4,
+  "proposal_minimum": 2,
+  "initial_execution_limit": 1,
+  "preparation_execution_limit": 1,
+  "external_execution_limit": 1,
+  "internal_execution_limit": 1,
+  "initial_status": "PROPOSED",
+  "require_initial_start_decision": true,
+  "optional_admin_checkin": true,
+  "auto_start_internal_bootstrap": true,
+  "auto_prepare_strategy_motions": true,
+  "expansion_triggers": [
+    "user_start",
+    "internal_bootstrap",
+    "strategy_program_ready",
+    "verified_preparation_checkpoint",
+    "verified_result",
+    "verified_monitoring_checkpoint",
+    "user_instruction",
+    "organization_policy"
+  ]
+}

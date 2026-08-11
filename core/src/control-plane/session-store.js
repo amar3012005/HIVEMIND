@@ -1,10 +1,10 @@
 import crypto from 'crypto';
-import Redis from 'ioredis';
 
 const sessions = new Map();
 const states = new Map();
 let redisClientPromise = null;
-let redisConnectionAttempted = false;
+let redisRetryAfter = 0;
+const REDIS_RETRY_BACKOFF_MS = 1000;
 
 function buildRedisConfig(config) {
   if (config.redisUrl) {
@@ -29,8 +29,13 @@ function buildRedisConfig(config) {
   }];
 }
 
-async function getRedisClient(config) {
-  if (redisConnectionAttempted && !redisClientPromise) {
+async function loadRedis() {
+  const mod = await import('ioredis');
+  return mod.default;
+}
+
+export async function getRedisClient(config) {
+  if (!redisClientPromise && Date.now() < redisRetryAfter) {
     return null;
   }
 
@@ -40,8 +45,8 @@ async function getRedisClient(config) {
   }
 
   if (!redisClientPromise) {
-    redisConnectionAttempted = true;
     redisClientPromise = (async () => {
+      const Redis = await loadRedis();
       // ioredis auto-connects on construction. Calling .connect() again
       // throws "Redis is already connecting/connected" → catch below
       // would null the promise and every subsequent getSession() would
@@ -57,12 +62,14 @@ async function getRedisClient(config) {
       client.on('error', () => {});
       await client.connect();
       await client.ping();
+      redisRetryAfter = 0;
       return client;
     })().catch((err) => {
       // Log so silent failures show up in observability instead of just
       // returning null from every subsequent session lookup.
       try { console.warn('[session-store] Redis init failed:', err?.message || err); } catch {}
       redisClientPromise = null;
+      redisRetryAfter = Date.now() + REDIS_RETRY_BACKOFF_MS;
       return null;
     });
   }
@@ -97,7 +104,10 @@ export function verifySessionCookie(secret, cookieValue) {
   }
 
   const expected = signSessionId(secret, sessionId);
-  const matches = crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length) return null;
+  const matches = crypto.timingSafeEqual(sigBuf, expBuf);
   return matches ? sessionId : null;
 }
 

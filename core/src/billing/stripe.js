@@ -80,7 +80,7 @@ export async function ensureCustomer(prisma, org, ownerEmail) {
  * the user is redirected to. The webhook handler is what finalises the
  * subscription state after payment succeeds.
  */
-export async function createCheckoutSession({ customerId, priceId, orgId, userId }) {
+export async function createCheckoutSession({ customerId, priceId, orgId, userId, promotionCodeId = null, promotionId = null, promotionVersionId = null }) {
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const returnSuccess = process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
@@ -93,14 +93,117 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
     line_items: [{ price: priceId, quantity: 1 }],
     success_url: returnSuccess,
     cancel_url: returnCancel,
-    allow_promotion_codes: true,
+    // A managed promotion is server-selected after eligibility has been checked.
+    // Never expose arbitrary Stripe promotion codes when a tenant-bound offer applies.
+    ...(promotionCodeId
+      ? { discounts: [{ promotion_code: promotionCodeId }] }
+      : { allow_promotion_codes: true }),
     billing_address_collection: 'auto',
     automatic_tax: { enabled: true },
     customer_update: { address: 'auto', name: 'auto' },
     subscription_data: {
       metadata: { hivemind_org_id: orgId, hivemind_user_id: userId || '' },
     },
-    metadata: { hivemind_org_id: orgId },
+    metadata: {
+      hivemind_org_id: orgId,
+      ...(promotionId ? { hivemind_promotion_id: promotionId } : {}),
+      ...(promotionVersionId ? { hivemind_promotion_version_id: promotionVersionId } : {}),
+    },
+  });
+}
+
+/**
+ * Creates a platform-managed Stripe coupon and promotion code. The plaintext
+ * code is supplied only at creation time and is never persisted in HIVEMIND.
+ */
+export async function createManagedPromotionCode({ code, name, terms = {} }) {
+  const stripe = await getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+  const kind = String(terms.kind || '').toLowerCase();
+  const couponData = { duration: 'once', name: String(name || 'HIVEMIND promotion').slice(0, 40) };
+  if (kind === 'percentage_discount') {
+    couponData.percent_off = Number(terms.percent_off);
+  } else if (kind === 'fixed_discount') {
+    couponData.amount_off = Number(terms.amount_off_cents);
+    couponData.currency = String(terms.currency || 'EUR').toLowerCase();
+  } else {
+    throw new Error('Stripe promotions require a percentage or fixed discount');
+  }
+  const coupon = await stripe.coupons.create(couponData);
+  const promotionCode = await stripe.promotionCodes.create({
+    coupon: coupon.id,
+    code: String(code).toUpperCase(),
+    active: true,
+    metadata: { hivemind_managed: 'true' },
+  });
+  return { couponId: coupon.id, promotionCodeId: promotionCode.id };
+}
+
+/**
+ * Runway self-serve checkout — a DYNAMIC-price monthly subscription for a scope the
+ * org configured (no fixed Stripe price id). `unit_amount` is the server-computed
+ * monthly total; a self-hosted setup fee rides the first invoice via add_invoice_items.
+ * The subscription carries metadata.kind='runway' + checkout_id so (a) the webhook can
+ * activate the stored custom entitlement and (b) syncPersonalStripeSubscription's
+ * price→plan map (which returns null for this unmapped dynamic price) never clobbers it.
+ */
+export async function createRunwayCheckoutSession({ customerId, orgId, userId, quote, checkoutId }) {
+  const stripe = await getStripe();
+  if (!stripe) throw new Error('Stripe not configured');
+  const returnSuccess = process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
+    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=success';
+  const returnCancel = process.env.STRIPE_PUBLIC_CHECKOUT_CANCEL
+    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=cancelled';
+  const currency = String(quote?.currency || 'eur').toLowerCase();
+  const cfg = quote?.config || {};
+  const label = `HIVEMIND Runway — ${quote?.mode || 'managed'} · ${cfg.seats} seats · ${cfg.tokens}M tokens`
+    + (quote?.mode === 'managed' ? ` · ${cfg.dataGb}GB` : '');
+  // Optional Stripe tax code (e.g. txcd_10103001 = SaaS, business use). When set,
+  // automatic tax is enabled with this code on the ad-hoc line; when unset, tax is
+  // skipped so the ad-hoc-price checkout always opens (see product_data below).
+  const runwayTaxCode = process.env.RUNWAY_STRIPE_TAX_CODE || null;
+  const subscription_data = {
+    metadata: { hivemind_org_id: orgId, hivemind_user_id: userId || '', kind: 'runway', checkout_id: checkoutId || '' },
+  };
+  // Recurring monthly line. Ad-hoc product: Stripe automatic_tax needs a per-line
+  // tax_code for ad-hoc products (unlike the fixed Pro/Scale prices, whose Products
+  // carry a tax code in the dashboard). Only attach a tax_code + enable automatic_tax
+  // when RUNWAY_STRIPE_TAX_CODE is set — otherwise automatic tax throws "You must
+  // specify a tax code…" and the checkout never opens. Default: no automatic tax.
+  const line_items = [{
+    quantity: 1,
+    price_data: {
+      currency,
+      recurring: { interval: 'month' },
+      unit_amount: Math.round(Number(quote.monthlyTotal) * 100),
+      product_data: { name: label, ...(runwayTaxCode ? { tax_code: runwayTaxCode } : {}) },
+    },
+  }];
+  // Self-hosted one-time setup fee: a ONE-TIME line item (no `recurring`). In
+  // subscription mode Stripe bills one-time line items on the first invoice.
+  // (subscription_data.add_invoice_items is NOT accepted by Checkout Sessions.)
+  if (Number(quote?.setupOneTime) > 0) {
+    line_items.push({
+      quantity: 1,
+      price_data: {
+        currency,
+        unit_amount: Math.round(Number(quote.setupOneTime) * 100),
+        product_data: { name: 'One-time deployment & security setup', ...(runwayTaxCode ? { tax_code: runwayTaxCode } : {}) },
+      },
+    });
+  }
+  return stripe.checkout.sessions.create({
+    mode: 'subscription',
+    customer: customerId,
+    line_items,
+    success_url: returnSuccess,
+    cancel_url: returnCancel,
+    billing_address_collection: 'auto',
+    ...(runwayTaxCode
+      ? { automatic_tax: { enabled: true }, customer_update: { address: 'auto', name: 'auto' } }
+      : {}),
+    subscription_data,
+    metadata: { hivemind_org_id: orgId, kind: 'runway', checkout_id: checkoutId || '' },
   });
 }
 
@@ -163,4 +266,20 @@ export async function constructEvent({ rawBody, signature }) {
 export async function findOrgByCustomerId(prisma, customerId) {
   if (!prisma || !customerId) return null;
   return prisma.organization.findUnique({ where: { stripeCustomerId: customerId } });
+}
+
+export function getSubscriptionIdFromStripeObject(object) {
+  const subscription = object?.subscription
+    || object?.parent?.subscription_details?.subscription
+    || object?.subscription_details?.subscription;
+  if (typeof subscription === 'string') return subscription;
+  return subscription?.id || null;
+}
+
+export function getSubscriptionPriceId(subscription) {
+  return subscription?.items?.data?.[0]?.price?.id || null;
+}
+
+export function isEntitledSubscriptionStatus(status) {
+  return status === 'active' || status === 'trialing';
 }

@@ -45,6 +45,14 @@ describe('MCP tools visibility gating', () => {
     expect(names).toContain('hivemind_web_usage');
   });
 
+  it('exposes research only to the explicit web_research scope', () => {
+    const names = toolNames(handleToolsList('u1', 'o1', { scopes: ['web_research'] }));
+    expect(names).toContain('hivemind_web_research');
+    expect(names).not.toContain('hivemind_web_search');
+    expect(names).not.toContain('hivemind_web_crawl');
+    expect(names).toContain('hivemind_web_job_status');
+  });
+
   it('excludes ALL web tools when no web scopes present', () => {
     const result = handleToolsList('u1', 'o1', { scopes: ['memory:read', 'memory:write', 'mcp'] });
     const names = toolNames(result);

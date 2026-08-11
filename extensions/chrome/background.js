@@ -922,16 +922,13 @@ async function handleChatStream(message, sender) {
     }
   }
 
-  // Language enforcement — same belt-and-braces as the dashboard. Pulls
-  // user's chosen reply language from chrome.storage.local (set by the
-  // side-panel language pill). Prepends a strict directive to the wire
-  // message when non-EN so the LLM can't drift back to English mid-stream.
+  // Keep the recall query clean; the backend enforces reply language from
+  // the separate `language` field.
   const { lang: storedLang } = await chrome.storage.local.get(['lang']);
   const lang2 = (storedLang || 'en').slice(0, 2).toLowerCase();
-  const wireMessage = wrapWithLanguageDirective(fullMessage, lang2);
 
   const chatBody = await withScope({
-    message: wireMessage,
+    message: fullMessage,
     history,
     stream: true,
     browser_origin: Boolean(context),
@@ -1100,27 +1097,6 @@ async function withScope(payload = {}) {
     };
   }
   return payload;
-}
-
-// ── Language enforcement ──────────────────────────────────────────────────
-// Mirrors the dashboard's Talk-to-HIVE wrapper. When the reply language is
-// anything other than English, prepend a strict directive so the LLM can't
-// silently drift back to English mid-stream. UI history stays clean; only
-// the wire message carries the wrapper.
-const LANG_FULL = {
-  en: 'English', de: 'German', es: 'Spanish', fr: 'French', it: 'Italian',
-  pt: 'Portuguese', nl: 'Dutch', pl: 'Polish', cs: 'Czech', sv: 'Swedish',
-  no: 'Norwegian', fi: 'Finnish', el: 'Greek', hu: 'Hungarian', ro: 'Romanian',
-  sl: 'Slovenian', ar: 'Arabic', he: 'Hebrew', tr: 'Turkish', ru: 'Russian',
-  uk: 'Ukrainian', hi: 'Hindi', bn: 'Bengali', ta: 'Tamil', te: 'Telugu',
-  ja: 'Japanese', ko: 'Korean', zh: 'Chinese', vi: 'Vietnamese', th: 'Thai',
-  id: 'Indonesian', ms: 'Malay', sk: 'Slovak',
-};
-function wrapWithLanguageDirective(message, lang2) {
-  const code = (lang2 || 'en').slice(0, 2).toLowerCase();
-  if (code === 'en') return message;
-  const langName = LANG_FULL[code] || 'English';
-  return `[STRICT LANGUAGE: Respond ONLY in ${langName}. Even one English word fails the test.]\n\n${message}`;
 }
 
 async function saveToHivemind(config, memory) {
@@ -1961,9 +1937,8 @@ async function handleChatMessage(message, tabId) {
   try {
     const { lang: storedLang } = await chrome.storage.local.get(['lang']);
     const lang2 = (storedLang || 'en').slice(0, 2).toLowerCase();
-    const wireMessage = wrapWithLanguageDirective(fullMessage, lang2);
     const chatBody = await withScope({
-      message: wireMessage,
+      message: fullMessage,
       model: 'llama-3.3-70b-versatile',
       browser_origin: Boolean(context),
       history: history || [],

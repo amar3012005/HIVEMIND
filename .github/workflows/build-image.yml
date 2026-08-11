@@ -3,11 +3,26 @@
 # main produces ghcr.io/<repo>/hivemind-core:<sha> (+ :latest) ONLY if the unit
 # tests + syntax check pass — so a broken commit never becomes a deployable tag.
 # Rollback = redeploy a previous :<sha> tag (see docs/DEPLOY_RUNBOOK.md).
+#
+# `singulance-main` ADDED 2026-08-05. It is the ONLY deployable ref (CLAUDE.md) and it was
+# MISSING from this list — so every release-worthy commit produced no image and the whole
+# registry path silently no-opped. The box therefore had to build from a working tree,
+# which is exactly what this workflow exists to prevent: on 2026-08-04 a stale
+# `COPY core/src ./src` layer shipped an image with 53 files in src/memory instead of 61
+# (canonical-entity-persister.js absent entirely), and the marker-grep PASSED because
+# grepping a missing file returns nothing. CI building from a clean checkout removes that
+# failure mode by construction.
+#
+# NOTE: this workflow cannot run at all until the GitHub Actions billing lock on the
+# account is cleared. Jobs currently report `failure` with "The job was not started
+# because your account is locked due to a billing issue" — indistinguishable from a real
+# test failure unless you open the job. Until then, box-side builds remain the fallback
+# and MUST use --no-cache when a change adds a file, plus a file-count check.
 name: build-core-image
 
 on:
   push:
-    branches: [main]
+    branches: [singulance-main, main, feat/mneme-foundation]
     paths:
       - 'core/**'
       - 'extensions/**'

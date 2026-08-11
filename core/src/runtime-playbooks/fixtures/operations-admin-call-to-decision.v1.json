@@ -1,0 +1,119 @@
+{
+  "playbook_id": "operations.admin-call-to-decision",
+  "version": 1,
+  "status": "ACTIVE",
+  "name": "Administrator call to recorded decision",
+  "description": "Resolve an administrator contact, obtain exact manual authority, place one governed call, and retain the resulting decision without mutating lead records.",
+  "initial_stage_id": "resolve_admin_phone",
+  "terminal_states": ["admin_decision_recorded", "admin_call_failed"],
+  "metadata": {
+    "owner_room_tag": "general",
+    "supported_actions": ["call_organization_administrator", "collect_administrator_decision"]
+  },
+  "input_contract": {
+    "fields": [
+      {"path": "request.instruction", "type": "string", "description": "The administrator call objective.", "required": true}
+    ]
+  },
+  "stages": [
+    {
+      "id": "resolve_admin_phone",
+      "objective": "Resolve the verified administrator phone already supplied by the organization or exact request.",
+      "input_refs": ["context.request", "context.supplied_inputs", "context.company"],
+      "expected_artifacts": ["input_available", "input_missing"],
+      "completion_checks": [{"predicate": "has_min_count", "select": ["input_available", "input_missing"], "value": 1}],
+      "execution": {"mode": "adapter", "adapter_id": "runtime-input", "operation": "execute", "config": {"action": "resolve", "input_key": "admin_phone", "value_type": "phone", "candidate_paths": ["context.supplied_inputs.admin_phone", "context.request.exact_targets.0.value", "context.company.admin_phone", "context.company.phone"], "available_key": "input_available", "missing_key": "input_missing"}},
+      "transitions": [
+        {"when": {"predicate": "has_min_count", "select": "input_missing", "value": 1}, "to_stage": "request_admin_phone"},
+        {"default": true, "to_stage": "prepare_admin_call"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "request_admin_phone",
+      "objective": "Request the verified administrator phone and preserve this execution while waiting.",
+      "input_refs": ["artifacts.input_missing"],
+      "expected_artifacts": ["input_request"],
+      "completion_checks": [{"predicate": "has_min_count", "select": "input_request", "value": 1}],
+      "execution": {"mode": "adapter", "adapter_id": "runtime-input", "operation": "execute", "config": {"input_key": "admin_phone", "output_key": "input_request", "label": "Administrator phone", "description": "Provide the verified organization administrator phone in international format.", "value_type": "phone"}},
+      "waits_for_event": {"type": "input.provided", "correlation_path": "data.input_key", "timeout_after_seconds": 2592000},
+      "transitions": [{"default": true, "to_stage": "prepare_admin_call"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "prepare_admin_call",
+      "objective": "Prepare one grounded administrator call brief from the exact operating objective and verified organization context. Do not dial and do not create lead records.",
+      "input_refs": ["context.company", "context.request", "context.supplied_inputs", "artifacts.input_available", "event"],
+      "expected_artifacts": ["call_brief"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "call_brief", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "call_brief", "path": "data.phone"},
+        {"predicate": "is_source_backed", "select": "call_brief"}
+      ],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v1", "phase_kind": "prepare"}},
+      "transitions": [{"default": true, "to_stage": "prepare_admin_contract"}],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "prepare_admin_contract",
+      "objective": "Persist the immutable administrator call contract without dialing.",
+      "input_refs": ["artifacts.call_brief"],
+      "expected_artifacts": ["call_contract"],
+      "completion_checks": [{"predicate": "references_cover_all", "select": "call_contract", "path": "data.input_ref", "target_select": "call_brief"}],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "execute", "config": {"action": "prepare", "input_key": "call_brief", "output_key": "call_contract"}},
+      "transitions": [{"default": true, "to_stage": "place_admin_call"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "place_admin_call",
+      "objective": "Place the exact manually approved administrator call.",
+      "input_refs": ["artifacts.call_contract"],
+      "expected_artifacts": ["call_receipt", "call_rejection", "call_uncertain"],
+      "completion_checks": [{"predicate": "references_cover_all", "select": ["call_receipt", "call_rejection", "call_uncertain"], "path": "data.input_ref", "target_select": "call_contract"}],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "execute", "config": {"action": "deliver", "input_key": "call_contract", "output_key": "call_receipt", "rejection_key": "call_rejection", "uncertain_key": "call_uncertain"}},
+      "authority_gate": "admin_call", "authority_policy_key": "admin_calls", "authority_policy_mode": "manual_only", "authority_binding": "stage_inputs",
+      "transitions": [
+        {"when": {"predicate": "has_min_count", "select": "call_receipt", "value": 1}, "to_stage": "observe_admin_call"},
+        {"default": true, "to_terminal": "admin_call_failed"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "observe_admin_call",
+      "objective": "Wait for the canonical administrator call result.",
+      "input_refs": ["artifacts.call_receipt"],
+      "expected_artifacts": ["call_subscription"],
+      "completion_checks": [{"predicate": "all_have_nonempty_field", "select": "call_subscription", "path": "data.correlation_ref"}],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "monitor", "config": {"input_key": "call_receipt", "output_key": "call_subscription"}},
+      "waits_for_event": {"types": ["call.completed", "call.failed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 7200},
+      "transitions": [{"default": true, "to_stage": "analyze_admin_call"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "analyze_admin_call",
+      "objective": "Read the exact transcript and insight, extract decisions and action items, and identify any spoken operating instruction that still requires explicit confirmation.",
+      "input_refs": ["artifacts.call_brief", "artifacts.call_receipt", "event"],
+      "expected_artifacts": ["call_analysis"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "call_analysis", "value": 1},
+        {"predicate": "is_source_backed", "select": "call_analysis"}
+      ],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v1", "phase_kind": "review"}},
+      "transitions": [
+        {"when": {"predicate": "field_equals", "select": "call_analysis", "path": "data.terminal_state", "value": "call_failed", "mode": "any"}, "to_terminal": "admin_call_failed"},
+        {"default": true, "to_stage": "record_admin_decision"}
+      ],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "record_admin_decision",
+      "objective": "Append the evidence-backed administrator decision to the Runtime journal without changing leads or enqueuing spoken instructions.",
+      "input_refs": ["artifacts.call_analysis"],
+      "expected_artifacts": ["journal_record"],
+      "completion_checks": [{"predicate": "references_cover_all", "select": "journal_record", "path": "data.input_ref", "target_select": "call_analysis"}],
+      "execution": {"mode": "adapter", "adapter_id": "runtime-journal", "operation": "execute", "config": {"input_key": "call_analysis", "output_key": "journal_record", "event_type": "admin_call_decision"}},
+      "transitions": [{"default": true, "to_terminal": "admin_decision_recorded"}],
+      "on_failure": "ESCALATE"
+    }
+  ]
+}

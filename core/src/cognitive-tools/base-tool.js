@@ -114,9 +114,17 @@ export class CognitiveTool {
         if (now - new Date(map[k]).getTime() > 7 * 24 * 60 * 60 * 1000) delete map[k];
       }
       map[`${orgId}:${hash}`] = new Date().toISOString();
-      await this.prisma.governanceAgentState.update({
+      // UPSERT, not update. agentName is the @id, and update() throws
+      // "Record to update not found" whenever the row does not exist yet — which
+      // is every org that has never had a turing run. Observed nine times per
+      // governance cycle across three orgs, caught by the surrounding catch and
+      // logged as prisma:error noise that buried real failures.
+      // Every other column has a schema default, so create needs only the id.
+      const nextConfig = { ...(row?.config || {}), cooldown_map: map };
+      await this.prisma.governanceAgentState.upsert({
         where: { agentName: 'turing' },
-        data: { config: { ...(row?.config || {}), cooldown_map: map } },
+        update: { config: nextConfig },
+        create: { agentName: 'turing', config: nextConfig },
       });
     } catch (err) {
       this.logger?.warn?.(`[cognitive-tool] cooldown record failed: ${err.message}`);

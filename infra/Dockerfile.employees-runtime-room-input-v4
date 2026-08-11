@@ -1,0 +1,3 @@
+FROM hivemind/employees:prod-20260802-runtime-room-input-v3
+
+COPY employees-service/src/hivemind_employees/hyper/engine.py /app/src/hivemind_employees/hyper/engine.py

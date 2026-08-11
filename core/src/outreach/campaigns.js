@@ -1,0 +1,1182 @@
+// Outreach campaign runner — durable batch email/call campaigns over the Places
+// prospects of a sealed HyperAgents turn.
+//
+// Hybrid control model:
+//   - Created atomically when the user clicks "Send outreach emails"/"Start
+//     outreach calls" (snapshot of eligible prospects → outreach_targets rows).
+//   - The FE drives paced email batches. Core owns TARA call sequences so the
+//     next prospect cannot dial before the prior call's learning is durable.
+//   - A drain interval takes over campaigns whose lastTickAt goes stale (tab
+//     died) and finishes the remaining targets server-side, honoring the same
+//     pacing rules. Idempotency is ledger-first: a target is only ever sent once.
+//
+// The single-shot send paths are REUSED, not forked: email goes through the same
+// core google-exec gmail_send bridge as /send-email; calls go through the same
+// tara-deepgram /calls/outbound as /call. OutboundAction stays the sent-truth
+// ledger (reply-match + outcomes strip pick campaign sends up for free).
+//
+// Spec: docs/superpowers/specs/2026-07-16-outreach-campaign-runner-design.md
+
+import { outreachKillSwitchActive, outreachDailyCap, outreachAutonomyEnabled, assertAutonomousSendAllowed, outreachAutoProposeEnabled } from './outreach-contract.js';
+import { buildOutreachContract, resolveDelivery } from './contract.js';
+import { createTaraOutboundCallService } from '../tara/outbound-call-service.js';
+
+// ── Provider capability probe ───────────────────────────────────────────────
+// Telephony is NOT guaranteed: an adapter can ship realtime voice with no PSTN
+// bridge (tara-grok does exactly that — it has no /calls/outbound, so dialing it
+// 404s and the campaign target hard-fails). Ask the adapter what it supports,
+// cache it, and let the caller fall back to a browser-run call.
+const CAPABILITY_TTL_MS = 5 * 60 * 1000;
+const _capabilityCache = new Map(); // baseUrl → { value, expiresAt }
+
+async function providerCapabilities(baseUrl) {
+  const hit = _capabilityCache.get(baseUrl);
+  if (hit && hit.expiresAt > Date.now()) return hit.value;
+  let value = null;
+  try {
+    const res = await fetch(`${baseUrl}/capabilities`, { signal: AbortSignal.timeout(4000) });
+    if (res.ok) {
+      const data = await res.json();
+      value = { telephony: !!data?.telephony, browser: data?.browser !== false };
+    }
+  } catch { /* adapter down or older build — fall through to the probe below */ }
+  if (!value) {
+    // Older adapters have no /capabilities. Probe the dial route itself: a
+    // POST-only route answers 405 to GET (exists); a missing one answers 404.
+    try {
+      const res = await fetch(`${baseUrl}/calls/outbound`, { method: 'GET', signal: AbortSignal.timeout(4000) });
+      value = { telephony: res.status !== 404, browser: true };
+    } catch {
+      value = { telephony: false, browser: true };
+    }
+  }
+  _capabilityCache.set(baseUrl, { value, expiresAt: Date.now() + CAPABILITY_TTL_MS });
+  return value;
+}
+
+const EMAIL_RE = /^[\w.+-]+@[\w.-]+\.\w+$/;
+const E164_RE = /^\+[1-9]\d{6,14}$/;
+const MAX_TARGETS = 50;
+const EMAIL_PACE_MS = 8000; // min gap between email sends per campaign (Gmail heuristics)
+const DRAIN_STALE_MS = 5 * 60 * 1000; // FE silent this long → drain takes over
+const SENDING_STUCK_MS = 10 * 60 * 1000; // 'sending' older than this → ledger-check
+const DRAIN_EVERY_MS = 2 * 60 * 1000;
+
+function targetInputContext(prospect = {}) {
+  return {
+    source_url: prospect.source_url || prospect.sourceUrl || null,
+    place_id: prospect.place_id || prospect.placeId || null,
+    fit_rationale: prospect.fit_reason || prospect.fit_rationale || null,
+    outreach_angle: prospect.outreach_angle || null,
+    notes: prospect.notes || prospect.personal_notes || null,
+    special_instruction: prospect.special_instruction || null,
+  };
+}
+
+/**
+ * Wire the outreach routes + drain loop. `deps` supplies the control-plane's own
+ * primitives so this module never duplicates auth/ledger/config logic:
+ *   { prisma, CONFIG, getInternalApiKey, jsonResponse, parseBody,
+ *     requireSession, recordOutboundAction, sidecarBaseUrl, taraProviderFor }
+ */
+export function createOutreachModule(deps) {
+  const {
+    prisma, CONFIG, getInternalApiKey, jsonResponse, parseBody,
+    requireSession, recordOutboundAction, sidecarBaseUrl, taraProviderFor,
+    onRuntimeCallResult = null,
+  } = deps;
+  const outboundCalls = createTaraOutboundCallService({ prisma });
+
+  // ── snapshot: latest prospects event per query from the sealed turn ────────
+  function prospectsFromTurn(lines) {
+    const byQuery = {};
+    for (const l of (Array.isArray(lines) ? lines : [])) {
+      if (l && l.t === 'prospects' && Array.isArray(l.prospects)) byQuery[l.query || '_'] = l;
+    }
+    return Object.values(byQuery).flatMap((ev) => ev.prospects || []);
+  }
+
+  async function connectedGmail(userId) {
+    try {
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT platform_user_id FROM "hivemind"."platform_integrations"
+          WHERE user_id = $1::uuid AND platform_type = 'gmail' AND platform_user_id IS NOT NULL
+          ORDER BY updated_at DESC NULLS LAST LIMIT 1`, userId,
+      );
+      const v = rows?.[0]?.platform_user_id;
+      return v && String(v).includes('@') ? String(v).trim() : null;
+    } catch { return null; }
+  }
+
+  async function senderIdentity(campaign) {
+    const [user, organization] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: campaign.userId },
+        select: { displayName: true, email: true },
+      }).catch(() => null),
+      prisma.organization.findUnique({
+        where: { id: campaign.orgId },
+        select: { name: true },
+      }).catch(() => null),
+    ]);
+    const senderEmail = campaign.senderEmail || user?.email || '';
+    return {
+      email: String(senderEmail || '').trim(),
+      name: String(user?.displayName || senderEmail || '').trim(),
+      company: String(organization?.name || '').trim(),
+    };
+  }
+
+  async function loadCampaign(id, orgId, withTargets = true) {
+    return prisma.outreachCampaign.findFirst({
+      where: { id, orgId },
+      include: withTargets ? { targets: { orderBy: { position: 'asc' } } } : undefined,
+    });
+  }
+
+  const tick = (id) => prisma.outreachCampaign.update({
+    where: { id }, data: { lastTickAt: new Date() },
+  }).catch(() => {});
+
+  async function outboundCallPolicy(orgId) {
+    const runtime = await prisma.hqRuntime.findUnique({
+      where: { orgId }, select: { authorityPolicy: true },
+    }).catch(() => null);
+    const value = String(runtime?.authorityPolicy?.outbound_calls || '').toLowerCase();
+    return ['manual', 'auto'].includes(value) ? value : 'unconfigured';
+  }
+
+  async function persistOutboundCallPolicy(orgId, preference) {
+    if (!['manual', 'auto'].includes(preference)) return;
+    const runtime = await prisma.hqRuntime.findUnique({ where: { orgId } }).catch(() => null);
+    if (!runtime || runtime.authorityPolicy?.outbound_calls === preference) return;
+    await prisma.hqRuntime.update({
+      where: { id: runtime.id },
+      data: {
+        authorityPolicy: { ...(runtime.authorityPolicy || {}), outbound_calls: preference },
+        version: { increment: 1 },
+      },
+    });
+  }
+
+  // Resolve a concrete Cartesia voice_id from the contract's language + tone. Fetches
+  // TARA's live voice catalog (GET /voices?language=), cached 1h. Prefers a feminine voice
+  // (TARA's persona) for warm/friendly tones, else the first for that language. Returns null
+  // on any failure → TARA resolves a language-appropriate default itself (never blocks a call).
+  const _voiceCache = { at: 0, byLang: {} };
+  async function resolveVoiceId(orgId, language, voiceStyle) {
+    try {
+      const lang = String(language || 'en').slice(0, 8);
+      if (Date.now() - _voiceCache.at > 3600000) { _voiceCache.byLang = {}; _voiceCache.at = Date.now(); }
+      if (!_voiceCache.byLang[lang]) {
+        const provider = await taraProviderFor(orgId);
+        const r = await fetch(`${provider.baseUrl}/voices?language=${encodeURIComponent(lang)}`,
+          { signal: AbortSignal.timeout(6000) }).catch(() => null);
+        const j = r && r.ok ? await r.json().catch(() => null) : null;
+        _voiceCache.byLang[lang] = Array.isArray(j) ? j : (Array.isArray(j?.voices) ? j.voices : []);
+      }
+      const voices = _voiceCache.byLang[lang] || [];
+      if (!voices.length) return null;
+      const style = String(voiceStyle || '').toLowerCase();
+      const wantFem = !/formal|crisp|authorit|deep/.test(style); // default to TARA's feminine persona
+      const pick = voices.find((v) => wantFem && String(v.gender || '').toLowerCase().startsWith('fem'))
+        || voices[0];
+      return pick?.id || null;
+    } catch { return null; }
+  }
+
+  // ── per-target generation (proxies to the employees sidecar LLM) ───────────
+  async function generateTarget(campaign, target) {
+    await prisma.outreachTarget.update({ where: { id: target.id }, data: { state: 'generating' } });
+    try {
+      const sender = await senderIdentity(campaign);
+      const r = await fetch(`${sidecarBaseUrl}/outreach/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: campaign.channel,
+          turn_id: campaign.turnId,
+          sender_email: sender.email,
+          sender_name: sender.name,
+          sender_company: sender.company,
+          user_id: campaign.userId, org_id: campaign.orgId,
+          prospect: {
+            lead_id: target.leadId || undefined,
+            company: target.company, email: target.email, phone: target.phone,
+            website: target.website, address: target.address,
+            source_url: target.inputContext?.source_url || undefined,
+            fit_reason: target.inputContext?.fit_rationale || undefined,
+            outreach_angle: target.inputContext?.outreach_angle || undefined,
+            notes: [target.inputContext?.notes, target.inputContext?.special_instruction]
+              .filter(Boolean).join('\n') || undefined,
+          },
+        }),
+        signal: AbortSignal.timeout(90000),
+      });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j || j.error) throw new Error(j?.error || `generate failed (${r.status})`);
+      const payload = campaign.channel === 'email'
+        ? { subject: String(j.subject || '').slice(0, 500), body: String(j.body || '') }
+        : {
+            goal: String(j.goal || '').slice(0, 300), opener: String(j.opener || '').slice(0, 400),
+            // Prospect brief (firm + why-fit + prior-call learnings) — rides the
+            // dial as TARA's [PROSPECT CONTEXT] so the strategist isn't blind.
+            ...(j.context ? { context: String(j.context).slice(0, 800) } : {}),
+            // Auto-selected call contract (P: TARA-from-contract): language + conversation
+            // strategy + voice tone — chosen by the contract generator, resolved to a concrete
+            // Cartesia voice at dial time. Drives voice/language/strategy automatically.
+            language: String(j.language || 'en').slice(0, 8),
+            ...(j.strategy ? { strategy: String(j.strategy).slice(0, 200) } : {}),
+            ...(j.voice_style ? { voice_style: String(j.voice_style).slice(0, 40) } : {}),
+          };
+      if (campaign.channel === 'email' && (!payload.subject || !payload.body)) throw new Error('empty email payload');
+      if (campaign.channel === 'call' && !payload.goal) throw new Error('empty call goal');
+      return prisma.outreachTarget.update({
+        where: { id: target.id }, data: { state: 'ready', payload },
+      });
+    } catch (err) {
+      await prisma.outreachTarget.update({
+        where: { id: target.id },
+        data: { state: 'failed', resultRef: { error: `generate: ${String(err.message).slice(0, 300)}` } },
+      });
+      throw err;
+    }
+  }
+
+  // ── execute lanes (shared by the FE route and the drain worker) ────────────
+  async function executeEmail(campaign, target) {
+    // Idempotency: the ledger is send-truth — never resend a target that has one.
+    if (target.resultRef?.outboundActionId) return target;
+    const payload = target.payload || {};
+    if (!target.email || !EMAIL_RE.test(target.email)) throw new Error('target has no valid email');
+    if (!payload.subject || !payload.body) throw new Error('target payload not generated');
+    // Cross-campaign dedup — HARD guard: this org already emailed this address
+    // (any prior campaign, any prior turn). Never contact the same client twice.
+    const already = await prisma.$queryRawUnsafe(
+      `SELECT id, sent_at FROM "hivemind"."outbound_actions"
+        WHERE org_id = $1::uuid AND channel = 'email' AND status = 'sent'
+          AND lower(recipient) = lower($2) LIMIT 1`,
+      campaign.orgId, target.email,
+    ).catch(() => []);
+    if (already?.length) {
+      const when = already[0].sent_at ? new Date(already[0].sent_at).toISOString().slice(0, 10) : 'earlier';
+      return prisma.outreachTarget.update({
+        where: { id: target.id },
+        data: {
+          state: 'skipped',
+          resultRef: { skipped: `already emailed ${target.email} (${when}) — not re-sent`, dedupOf: already[0].id },
+        },
+      });
+    }
+    // Pace: min gap since this campaign's last successful email send.
+    const last = await prisma.outreachTarget.findFirst({
+      where: { campaignId: campaign.id, state: 'sent' }, orderBy: { updatedAt: 'desc' },
+    });
+    if (last && Date.now() - new Date(last.updatedAt).getTime() < EMAIL_PACE_MS) {
+      const wait = EMAIL_PACE_MS - (Date.now() - new Date(last.updatedAt).getTime());
+      const err = new Error(`pacing: retry in ${Math.ceil(wait / 1000)}s`);
+      err.retryable = true; err.status = 429;
+      throw err;
+    }
+    await prisma.outreachTarget.update({ where: { id: target.id }, data: { state: 'sending' } });
+    const r = await fetch(`${CONFIG.coreApiBaseUrl}/api/connectors/google/exec`, {
+      method: 'POST',
+      headers: {
+        'X-API-Key': getInternalApiKey(),
+        'X-HM-User-Id': campaign.userId, 'X-HM-Org-Id': campaign.orgId,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        tool: 'gmail_send',
+        arguments: { to: target.email, subject: payload.subject, body: payload.body, markdown: true },
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+    const tx = await r.text();
+    let result; try { result = JSON.parse(tx); } catch { result = { raw: tx }; }
+    if (!r.ok) {
+      const authDead = r.status === 401 || /invalid_grant|invalid credentials|401/i.test(tx);
+      await prisma.outreachTarget.update({
+        where: { id: target.id },
+        data: { state: 'failed', resultRef: { error: `gmail send failed (${r.status})${authDead ? ' — reconnect Gmail' : ''}` } },
+      });
+      if (authDead) {
+        // Token dead — pause the whole campaign instead of burning every target.
+        await prisma.outreachCampaign.update({ where: { id: campaign.id }, data: { status: 'paused' } });
+        const err = new Error('gmail-reauth'); err.status = 401; throw err;
+      }
+      throw new Error(`gmail send failed (${r.status})`);
+    }
+    const action = await recordOutboundAction({
+      orgId: campaign.orgId, userId: campaign.userId, roomId: campaign.roomId,
+      channel: 'email', recipient: target.email, subject: payload.subject,
+      messageId: result?.id || null, threadId: result?.threadId || null,
+      meta: { via: 'outreach-campaign', campaign_id: campaign.id, target_id: target.id },
+    }).catch(() => null);
+    return prisma.outreachTarget.update({
+      where: { id: target.id },
+      data: {
+        state: 'sent',
+        resultRef: { outboundActionId: action?.id || true, messageId: result?.id || null, threadId: result?.threadId || null },
+      },
+    });
+  }
+
+  // Resolve a pinned skill id to its prompt text. Core owns the skills store and
+  // this module runs in the control-plane, so fetch over the internal API rather
+  // than duplicating the store. Cached per (org, skill) — a campaign dials the
+  // same skill for every target. Best-effort: a miss degrades to the base prompt
+  // rather than failing the call.
+  const _skillPromptCache = new Map(); // `${orgId}:${skillId}` → { value, expiresAt }
+  const SKILL_PROMPT_TTL_MS = 5 * 60 * 1000;
+  async function resolveSkillPrompt(campaign, skillId) {
+    if (!skillId) return null;
+    const key = `${campaign.orgId}:${skillId}`;
+    const hit = _skillPromptCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) return hit.value;
+    let value = null;
+    try {
+      const res = await fetch(`${CONFIG.coreApiBaseUrl}/api/tara/skills`, {
+        headers: {
+          'X-API-Key': getInternalApiKey(),
+          'x-hm-user-id': campaign.userId,
+          'x-hm-org-id': campaign.orgId,
+        },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const items = Array.isArray(data?.skills) ? data.skills : (Array.isArray(data) ? data : []);
+        const skill = items.find((s) => s?.id === skillId);
+        if (skill) {
+          value = [skill.primary_prompt, skill.secondary_prompt].filter(Boolean).join('\n\n') || null;
+        }
+      }
+    } catch (error) {
+      console.warn('[outreach] skill prompt resolve failed:', error.message);
+    }
+    _skillPromptCache.set(key, { value, expiresAt: Date.now() + SKILL_PROMPT_TTL_MS });
+    return value;
+  }
+
+  async function executeCall(campaign, target) {
+    if (target.resultRef?.taraCallLegId) return target; // already dialed
+    const payload = target.payload || {};
+    if (!target.phone || !E164_RE.test(String(target.phone).replace(/[\s()/-]/g, ''))) {
+      throw new Error('target has no valid E.164 phone');
+    }
+    if (!payload.goal) throw new Error('target call goal not generated');
+    // TARA is one voice — strictly serial per campaign.
+    const inFlight = await prisma.outreachTarget.findFirst({
+      where: { campaignId: campaign.id, state: { in: ['dialing', 'in_call', 'analyzing'] }, NOT: { id: target.id } },
+    });
+    if (inFlight) { const err = new Error('another call in this campaign is in flight'); err.status = 409; throw err; }
+    await prisma.outreachTarget.update({ where: { id: target.id }, data: { state: 'dialing' } });
+    const to = String(target.phone).replace(/[\s()/-]/g, '');
+    // Directive folds goal + opener + the auto-selected conversation strategy so TARA's
+    // strategist plans with intent.
+    const directive = [
+      payload.goal,
+      payload.opener ? `Open with: ${payload.opener}` : null,
+      payload.strategy ? `Strategy: ${payload.strategy}` : null,
+    ].filter(Boolean).join('. ');
+    // Auto-select voice from the contract (language + tone). Best-effort; null → TARA default.
+    const language = String(payload.language || 'en').slice(0, 8);
+    const voiceId = await resolveVoiceId(campaign.orgId, language, payload.voice_style);
+    // Same goal + SKILL plan for every outbound call, whichever provider runs it.
+    const skillId = campaign.voiceConfigSnapshot?.skill_id || null;
+    const skillPrompt = await resolveSkillPrompt(campaign, skillId);
+    // The org placing the call — TARA introduces herself as working for THIS,
+    // not for the prospect she is dialing.
+    const callerCompany = (await prisma.organization
+      .findUnique({ where: { id: campaign.orgId }, select: { name: true } })
+      .catch(() => null))?.name || null;
+    // Provider follows the org's CURRENT selection at dial time, not the value
+    // snapshotted when the campaign was created. Flipping the Deepgram/Grok
+    // toggle must take effect on the next call — otherwise a campaign created
+    // last week keeps dialing on the old engine and the toggle looks broken.
+    // The snapshot stays as the fallback if the live lookup fails, so a
+    // transient error can never leave a campaign unable to dial.
+    const runtimePinnedProvider = campaign.voiceConfigSnapshot?.runtime_playbook_run_id
+      ? campaign.voiceConfigSnapshot?.selected_provider : null;
+    let provider = runtimePinnedProvider || await taraProviderFor(campaign.orgId).catch(() => null);
+    if (!provider && campaign.voiceProvider) {
+      provider = {
+        provider: campaign.voiceProvider,
+        revision: campaign.voiceConfigSnapshot?.revision || 1,
+        config: campaign.voiceConfigSnapshot || {},
+        baseUrl: campaign.voiceProvider === 'grok' ? CONFIG.taraGrokBaseUrl : CONFIG.taraDeepgramBaseUrl,
+      };
+    }
+    if (!provider) throw new Error('no TARA voice provider available for this org');
+
+    // ── Telephony present? If not, hand the contract to the user's browser ──
+    // Previously this dialed unconditionally: against a provider with no PSTN
+    // bridge the POST 404s and the target dies as 'failed'. Instead park it as
+    // 'browser' carrying the SAME universal contract, so the user can run the
+    // call from their own voice session with the identical goal/voice/language.
+    const capabilities = await providerCapabilities(provider.baseUrl);
+    const delivery = resolveDelivery({ channel: 'call', capabilities });
+    if (delivery.mode === 'browser') {
+      const contract = buildOutreachContract({
+        campaign, target, delivery, voiceId,
+        skillId: campaign.voiceConfigSnapshot?.skill_id || null,
+      });
+      const updated = await prisma.outreachTarget.update({
+        where: { id: target.id },
+        data: {
+          state: 'browser',
+          payload: { ...payload, contract },
+          resultRef: {
+            ...(target.resultRef || {}),
+            delivery: 'browser',
+            provider: provider.provider,
+            reason: delivery.reason,
+          },
+        },
+      });
+      console.log(JSON.stringify({
+        svc: 'outreach', level: 'info', event: 'call_handoff_browser',
+        campaign_id: campaign.id, target_id: target.id, provider: provider.provider,
+      }));
+      return updated;
+    }
+
+    const orgBrief = await (async () => {
+      try {
+        const { buildOrgBrief } = await import('../tara/org-brief.js');
+        return await buildOrgBrief(prisma, campaign.orgId, { userId: campaign.userId });
+      } catch { return ''; }
+    })();
+    let receipt;
+    try {
+      receipt = await outboundCalls.execute({
+        executionRef: campaign.voiceConfigSnapshot?.runtime_playbook_run_id || campaign.id,
+        source: 'outreach-campaign',
+        orgId: campaign.orgId,
+        userId: campaign.userId,
+        roomId: campaign.roomId,
+        campaignId: campaign.unifiedCampaignId || null,
+        outreachCampaignId: campaign.id,
+        outreachTargetId: target.id,
+        leadId: target.leadId || null,
+        runtimePlaybookRunId: campaign.voiceConfigSnapshot?.runtime_playbook_run_id || null,
+        runtimeStageId: campaign.voiceConfigSnapshot?.runtime_playbook_stage_id || null,
+        authorityRef: campaign.voiceConfigSnapshot?.authority_ref || null,
+        campaignName: `Outreach calls: ${campaign.id}`,
+        recipientName: target.company,
+        recipientCompany: target.company,
+        to,
+        goal: payload.goal,
+        provider,
+        providerCandidates: campaign.voiceConfigSnapshot?.provider_candidates || [provider.provider],
+        configSnapshot: { revision: provider.revision || 1, skill_id: skillId || null },
+        auditContext: { target_id: target.id, lead_id: target.leadId || null },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(process.env.TARA_DG_API_KEY ? { 'X-TARA-Key': process.env.TARA_DG_API_KEY } : {}),
+        },
+        providerPayload: {
+          user_id: campaign.userId, org_id: campaign.orgId,
+        goal: String(directive).slice(0, 600),
+        // The SAME goal + skill plan for every outbound call, whichever provider
+        // executes it. The snapshot pinned the skill; its prompt is resolved above
+        // so a phone call runs the chosen persona, not the bare base prompt.
+        skill_id: skillId || undefined,
+        skill_prompt: skillPrompt || undefined,
+        // `company` is WHO TARA WORKS FOR — it lands in "you are a phone agent
+        // for {company}". Passing the PROSPECT here made TARA announce herself as
+        // "calling on behalf of <the firm she was cold-calling>". The prospect's
+        // identity belongs in contact_name/context, never here.
+        company: callerCompany || undefined,
+        // Compact org brief so the opener knows WHAT this company does, not just
+        // its name. Built in core (cached, off the call's critical path) and sent
+        // to whichever adapter dials — both consume the same field.
+        org_brief: orgBrief || undefined,
+        // Auto-selected call contract: language + concrete Cartesia voice (TARA resolves a
+        // language default when voice_id is null).
+        language,
+        voice_id: voiceId || undefined,
+        // Full prospect metadata contract — TARA plans + speaks around WHO it's
+        // calling (firm brief + why-fit + prior-call learnings from generate).
+        context: payload.context ? String(payload.context).slice(0, 800) : undefined,
+        contact_name: target.company ? String(target.company).slice(0, 120) : undefined,
+        provider: provider.provider,
+          config_revision: provider.revision,
+        },
+      });
+    } catch (error) {
+      const uncertain = error?.classification === 'uncertain_transport' || error?.reconciliationRequired === true;
+      await prisma.outreachTarget.update({
+        where: { id: target.id },
+        data: {
+          state: uncertain ? 'dialing' : 'failed',
+          resultRef: {
+            ...(target.resultRef || {}),
+            taraCallAttemptId: error?.attemptId || null,
+            outcome: uncertain ? 'uncertain' : 'rejected',
+            error: String(error?.message || error).slice(0, 300),
+          },
+        },
+      });
+      throw error;
+    }
+    // A provider dial receipt proves only that the call started. The target stays
+    // active until /api/tara/calls/end has produced (or conclusively cannot
+    // produce) its post-call insight and the campaign reconciler records it.
+    return prisma.outreachTarget.update({
+      where: { id: target.id },
+      // `provider` is required by live-listen: the audio tap lives on whichever
+      // ADAPTER ran the call (/voice2 for deepgram, /voice-grok for grok), so a
+      // listener that assumes deepgram hears silence on a Grok call.
+      data: {
+        state: 'in_call',
+        resultRef: {
+          outboundActionId: receipt.outboundAction?.id || receipt.attempt?.outboundActionId || null,
+          taraCallAttemptId: receipt.attempt?.id || null,
+          taraCallLegId: receipt.callLegId,
+          requestedSessionId: receipt.requestedSessionId,
+          sessionId: receipt.canonicalSessionId,
+          provider: receipt.provider,
+          dialedAt: new Date().toISOString(),
+        },
+      },
+    });
+  }
+
+  // P6 Outreach Contract — the send choke point for BOTH the FE lane and the autonomous
+  // drain worker. Honors the kill switch (instant all-outreach stop) and a per-org daily cap.
+  // Skip-not-throw (mirrors the dedup path): a blocked target is marked 'skipped' with a reason
+  // so the campaign advances cleanly. Defaults (kill off, cap 0) are behavior-neutral.
+  async function executeTarget(c, t) {
+    if (outreachKillSwitchActive()) {
+      return prisma.outreachTarget.update({
+        where: { id: t.id },
+        data: { state: 'skipped', resultRef: { skipped: 'outreach kill switch engaged — not sent', blockedBy: 'kill_switch' } },
+      }).catch(() => t);
+    }
+    const cap = outreachDailyCap();
+    if (cap) {
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT count(*)::int AS n FROM "hivemind"."outbound_actions"
+          WHERE org_id = $1::uuid AND status = 'sent' AND sent_at >= now() - interval '1 day'`,
+        c.orgId,
+      ).catch(() => [{ n: 0 }]);
+      const sentToday = rows?.[0]?.n || 0;
+      if (sentToday >= cap) {
+        return prisma.outreachTarget.update({
+          where: { id: t.id },
+          data: { state: 'skipped', resultRef: { skipped: `daily outreach cap reached (${cap})`, blockedBy: 'daily_cap' } },
+        }).catch(() => t);
+      }
+    }
+    return c.channel === 'email' ? executeEmail(c, t) : executeCall(c, t);
+  }
+
+  const callCampaignLocks = new Map();
+
+  async function withCallCampaignLock(campaignId, task) {
+    if (callCampaignLocks.has(campaignId)) return callCampaignLocks.get(campaignId);
+    const pending = Promise.resolve().then(task).finally(() => callCampaignLocks.delete(campaignId));
+    callCampaignLocks.set(campaignId, pending);
+    return pending;
+  }
+
+  async function advanceCallCampaign(campaignId, orgId) {
+    return withCallCampaignLock(campaignId, async () => {
+      let campaign = await loadCampaign(campaignId, orgId);
+      if (!campaign || campaign.channel !== 'call' || campaign.status !== 'running') return campaign;
+      if (campaign.targets.some((target) => ['dialing', 'in_call', 'analyzing'].includes(target.state))) return campaign;
+
+      // Skip generation failures without losing the rest of the cohort, but place
+      // at most one call. A later call is prepared only after the active call has
+      // produced its terminal analysis.
+      for (const candidate of campaign.targets) {
+        if (!['selected', 'ready'].includes(candidate.state)) continue;
+        let target = candidate;
+        try {
+          if (target.state === 'selected') target = await generateTarget(campaign, target);
+          if (target.state === 'ready') {
+            await executeTarget(campaign, target);
+            return loadCampaign(campaignId, orgId);
+          }
+        } catch (error) {
+          console.warn('[outreach-call] target advance failed:', target.id, error.message);
+        }
+        campaign = await loadCampaign(campaignId, orgId);
+      }
+      await finalizeIfDone(campaignId, orgId);
+      return loadCampaign(campaignId, orgId);
+    });
+  }
+
+  async function reconcileCall({ orgId, sessionId, campaignId = null, targetId = null }) {
+    const where = targetId
+      ? { id: targetId, ...(campaignId ? { campaignId } : {}) }
+      : { OR: [
+          { resultRef: { path: ['sessionId'], equals: sessionId } },
+          { resultRef: { path: ['requestedSessionId'], equals: sessionId } },
+        ] };
+    const target = await prisma.outreachTarget.findFirst({ where });
+    if (!target) return { status: 'not_found' };
+    const campaign = await loadCampaign(target.campaignId, orgId, false);
+    if (!campaign || campaign.channel !== 'call') return { status: 'not_found' };
+    let expectedSession = String(target.resultRef?.sessionId || '');
+    const requestedSession = String(target.resultRef?.requestedSessionId || '');
+    if (!expectedSession) return { status: 'correlation_mismatch' };
+    if (sessionId && ![expectedSession, requestedSession].filter(Boolean).includes(String(sessionId))) return { status: 'correlation_mismatch' };
+    const attempt = target.resultRef?.taraCallAttemptId
+      ? await prisma.taraCallAttempt.findFirst({ where: { id: target.resultRef.taraCallAttemptId, orgId } }).catch(() => null)
+      : await prisma.taraCallAttempt.findFirst({ where: {
+          orgId, OR: [{ sessionId: expectedSession }, { requestedSessionId: requestedSession || expectedSession }],
+        }, orderBy: { createdAt: 'desc' } }).catch(() => null);
+    if (attempt?.sessionId && attempt.sessionId !== expectedSession) {
+      expectedSession = attempt.sessionId;
+      await prisma.outreachTarget.update({ where: { id: target.id }, data: {
+        resultRef: { ...(target.resultRef || {}), requestedSessionId: requestedSession || target.resultRef?.sessionId || null, sessionId: expectedSession },
+      } });
+    }
+    const call = await prisma.taraCall.findUnique({
+      where: { orgId_sessionId: { orgId, sessionId: expectedSession } },
+    }).catch(() => null);
+    if (!call || !['completed', 'failed'].includes(call.status)) return { status: 'in_call', target };
+
+    await prisma.outreachTarget.updateMany({
+      where: { id: target.id, state: { in: ['dialing', 'in_call'] } },
+      data: { state: 'analyzing' },
+    });
+    const insight = await prisma.taraInsight.findUnique({ where: { callId: call.id } }).catch(() => null);
+    // A completed call with spoken turns waits briefly for its asynchronously
+    // generated insight. A zero-turn or failed call is already conclusive.
+    const insightDeadlinePassed = call.endedAt
+      && Date.now() - new Date(call.endedAt).getTime() > 5 * 60 * 1000;
+    if (!insight && call.status === 'completed' && Number(call.turnCount || 0) > 0 && !insightDeadlinePassed) {
+      return { status: 'analyzing', target: await prisma.outreachTarget.findUnique({ where: { id: target.id } }) };
+    }
+    const data = insight?.data && typeof insight.data === 'object' ? insight.data : {};
+    const callOutcome = call.status === 'failed'
+      ? 'failed'
+      : String(data.goal_outcome || (call.turnCount > 0 ? 'completed' : 'no_answer')).slice(0, 80);
+    const resultRef = {
+      ...(target.resultRef || {}),
+      callId: call.id,
+      callStatus: call.status,
+      callOutcome,
+      durationMs: call.durationMs || 0,
+      turnCount: call.turnCount || 0,
+      insightId: insight?.id || null,
+      summary: insight?.summary || null,
+      sentiment: data.sentiment || null,
+      leadFound: data.lead_found === true,
+      taraLearnings: Array.isArray(data.tara_learnings) ? data.tara_learnings.slice(0, 12) : [],
+      nextStep: Array.isArray(data.leads) ? data.leads.find((lead) => lead?.next_step)?.next_step || null : null,
+      analyzedAt: target.resultRef?.analyzedAt || new Date().toISOString(),
+    };
+    const updated = await prisma.outreachTarget.update({
+      where: { id: target.id }, data: { state: 'analyzed', resultRef },
+    });
+    const runtimeRunId = String(campaign.voiceConfigSnapshot?.runtime_playbook_run_id || '');
+    if (runtimeRunId && typeof onRuntimeCallResult === 'function') {
+      await onRuntimeCallResult({
+        orgId,
+        runId: runtimeRunId,
+        target: updated,
+        result: { session_id: expectedSession, call, insight },
+      }).catch((error) => console.warn('[outreach-call] runtime result wake failed:', updated.id, error.message));
+    }
+    // Runtime playbooks own the transition after Room analysis. Human-started
+    // campaigns retain the existing serial continuation behavior.
+    if (!runtimeRunId) await advanceCallCampaign(campaign.id, orgId);
+    return { status: 'analyzed', target: updated, campaign: await loadCampaign(campaign.id, orgId) };
+  }
+
+  async function reconcileActiveCalls() {
+    const active = await prisma.outreachTarget.findMany({
+      where: { state: { in: ['dialing', 'in_call', 'analyzing'] }, campaign: { channel: 'call', status: 'running' } },
+      select: { id: true, campaignId: true, resultRef: true, campaign: { select: { orgId: true } } },
+      take: 25,
+    });
+    for (const target of active) {
+      const sessionId = target.resultRef?.sessionId;
+      if (!sessionId) continue;
+      await reconcileCall({
+        orgId: target.campaign.orgId, sessionId, campaignId: target.campaignId, targetId: target.id,
+      }).catch((error) => console.warn('[outreach-call] reconcile failed:', target.id, error.message));
+    }
+  }
+
+  // ── drain worker: finish campaigns whose FE went away ──────────────────────
+  async function drainOnce() {
+    // P6 — autonomous execution switch. When off, the FE must drive every send (no
+    // background autonomy). Default on. Kill switch also short-circuits all sending.
+    if (!outreachAutonomyEnabled() || outreachKillSwitchActive()) return;
+    await reconcileActiveCalls();
+    const stale = new Date(Date.now() - DRAIN_STALE_MS);
+    const campaigns = await prisma.outreachCampaign.findMany({
+      where: { status: 'running', lastTickAt: { lt: stale } },
+      include: { targets: { orderBy: { position: 'asc' } } },
+      take: 5,
+    });
+    for (const c of campaigns) {
+      // First-contact-HITL invariant: only auto-advance a human-authorized running
+      // campaign — never cold-originate. (Redundant with the query filter, but the
+      // contract is the single place the invariant is asserted + auditable.)
+      const gate = assertAutonomousSendAllowed({ campaign: c });
+      if (!gate.allowed) continue;
+      try {
+        if (c.channel === 'call') {
+          await advanceCallCampaign(c.id, c.orgId);
+          continue;
+        }
+        // Un-stick: 'sending' older than SENDING_STUCK_MS → the ledger decides.
+        for (const t of c.targets.filter((x) => x.state === 'sending'
+            && Date.now() - new Date(x.updatedAt).getTime() > SENDING_STUCK_MS)) {
+          const sent = await prisma.$queryRawUnsafe(
+            `SELECT id FROM "hivemind"."outbound_actions"
+              WHERE org_id = $1::uuid AND meta->>'target_id' = $2 LIMIT 1`, c.orgId, t.id,
+          ).catch(() => []);
+          await prisma.outreachTarget.update({
+            where: { id: t.id },
+            data: sent?.length
+              ? { state: 'sent', resultRef: { outboundActionId: sent[0].id, recoveredByDrain: true } }
+              : { state: 'selected', resultRef: null }, // never actually left — safe to redo
+          });
+        }
+        const fresh = await loadCampaign(c.id, c.orgId);
+        const pending = fresh.targets.filter((t) => ['selected', 'ready'].includes(t.state));
+        for (const t of pending) {
+          if ((await prisma.outreachCampaign.findFirst({ where: { id: c.id }, select: { status: true } }))?.status !== 'running') break;
+          try {
+            let target = t;
+            if (target.state === 'selected') target = await generateTarget(fresh, target);
+            if (c.channel === 'email') {
+              const gap = Date.now() % EMAIL_PACE_MS; // simple pacing between drain sends
+              await new Promise((ok) => { setTimeout(ok, EMAIL_PACE_MS - gap + 250); });
+            }
+            await executeTarget(fresh, await prisma.outreachTarget.findFirst({ where: { id: target.id } }));
+          } catch (err) {
+            if (err.status === 401) break; // campaign was auto-paused (gmail reauth)
+            console.warn('[outreach-drain] target failed:', t.id, err.message);
+          }
+        }
+        await finalizeIfDone(c.id, c.orgId);
+      } catch (err) { console.warn('[outreach-drain] campaign error:', c.id, err.message); }
+    }
+  }
+
+  async function finalizeIfDone(id, orgId) {
+    const c = await loadCampaign(id, orgId);
+    if (!c || c.status !== 'running') return;
+    const open = c.targets.some((t) => [
+      'selected', 'ready', 'generating', 'sending', 'dialing', 'in_call', 'analyzing',
+    ].includes(t.state));
+    if (!open) {
+      await prisma.outreachCampaign.update({
+        where: { id }, data: { status: 'done', finishedAt: new Date() },
+      });
+    }
+  }
+
+  function startDrain() {
+    const h = setInterval(() => { drainOnce().catch((e) => console.warn('[outreach-drain]', e.message)); }, DRAIN_EVERY_MS);
+    h.unref?.();
+    return h;
+  }
+
+  // ── HTTP handler — returns true when the request was handled ───────────────
+  async function handle(req, res, pathname) {
+    const taraCallReadMatch = pathname.match(/^\/internal\/hyper\/tara\/calls\/([^/]+)$/);
+    if (taraCallReadMatch && req.method === 'GET') {
+      const key = String(req.headers['x-api-key'] || '').trim();
+      if (!key || key !== getInternalApiKey()) return jsonResponse(res, { error: 'unauthorized' }, 401), true;
+      const orgId = String(req.headers['x-hm-org-id'] || '').trim();
+      const reference = decodeURIComponent(taraCallReadMatch[1]).replace(/^tara-call:/, '');
+      if (!/^[0-9a-f-]{36}$/i.test(orgId) || !reference) {
+        return jsonResponse(res, { error: 'tenant and call reference are required' }, 400), true;
+      }
+      const call = await prisma.taraCall.findFirst({
+        where: { orgId, OR: [...(/^[0-9a-f-]{36}$/i.test(reference) ? [{ id: reference }] : []), { sessionId: reference }] },
+      });
+      if (!call) return jsonResponse(res, { found: false }, 404), true;
+      const [turns, insight] = await Promise.all([
+        prisma.taraTurn.findMany({ where: { orgId, callId: call.id }, orderBy: { seq: 'asc' } }),
+        prisma.taraInsight.findFirst({ where: { orgId, callId: call.id } }),
+      ]);
+      return jsonResponse(res, {
+        found: true,
+        call: {
+          id: call.id, session_id: call.sessionId, provider: call.provider, status: call.status,
+          goal: call.goal, language: call.language, turn_count: call.turnCount,
+          duration_ms: call.durationMs, started_at: call.startedAt, ended_at: call.endedAt,
+        },
+        transcript_ref: `tara-call:${call.id}`,
+        turns: turns.map((turn) => ({ seq: turn.seq, user_text: turn.userText, agent_text: turn.agentText, created_at: turn.createdAt })),
+        insight: insight ? { id: insight.id, summary: insight.summary, data: insight.data, created_at: insight.createdAt } : null,
+      }), true;
+    }
+
+    if (pathname === '/internal/hyper/outreach/calls/reconcile' && req.method === 'POST') {
+      const key = String(req.headers['x-api-key'] || '').trim();
+      if (!key || key !== getInternalApiKey()) return jsonResponse(res, { error: 'unauthorized' }, 401), true;
+      const body = await parseBody(req).catch(() => ({}));
+      const orgId = String(body.org_id || '').trim();
+      const sessionId = String(body.session_id || '').trim();
+      if (!/^[0-9a-f-]{36}$/.test(orgId) || !sessionId) {
+        return jsonResponse(res, { error: 'org_id and session_id are required' }, 400), true;
+      }
+      const result = await reconcileCall({ orgId, sessionId });
+      return jsonResponse(res, result, result.status === 'not_found' ? 404 : 200), true;
+    }
+
+    if (pathname === '/internal/hyper/outreach/runtime-call/start' && req.method === 'POST') {
+      const key = String(req.headers['x-api-key'] || '').trim();
+      if (!key || key !== getInternalApiKey()) return jsonResponse(res, { error: 'unauthorized' }, 401), true;
+      const body = await parseBody(req).catch(() => ({}));
+      const campaignId = String(body.campaign_id || '').trim();
+      const runId = String(body.run_id || '').trim();
+      const orgId = String(body.org_id || '').trim();
+      if (![campaignId, runId, orgId].every((value) => /^[0-9a-f-]{36}$/i.test(value))) {
+        return jsonResponse(res, { error: 'campaign_id, run_id and org_id are required' }, 400), true;
+      }
+      const campaign = await loadCampaign(campaignId, orgId, false);
+      if (!campaign || campaign.channel !== 'call') return jsonResponse(res, { error: 'runtime call campaign not found' }, 404), true;
+      if (String(campaign.voiceConfigSnapshot?.runtime_playbook_run_id || '') !== runId) {
+        return jsonResponse(res, { error: 'runtime call ownership mismatch' }, 409), true;
+      }
+      if (!['queued', 'running'].includes(campaign.status)) {
+        return jsonResponse(res, { error: `cannot start a ${campaign.status} runtime call` }, 409), true;
+      }
+      if (campaign.status === 'queued') {
+        await prisma.outreachCampaign.update({
+          where: { id: campaign.id },
+          data: { status: 'running', startedAt: campaign.startedAt || new Date(), lastTickAt: new Date() },
+        });
+      }
+      const advanced = await advanceCallCampaign(campaign.id, orgId);
+      const target = advanced?.targets?.find((row) => ['dialing', 'in_call', 'browser'].includes(row.state))
+        || advanced?.targets?.find((row) => row.resultRef?.sessionId)
+        || null;
+      if (!target) return jsonResponse(res, { error: 'TARA did not return a call receipt' }, 502), true;
+      if (target.state === 'browser') {
+        return jsonResponse(res, { error: 'The selected TARA provider has no outbound telephony capability.' }, 409), true;
+      }
+      return jsonResponse(res, { campaign: advanced, target }, 200), true;
+    }
+
+    // POST /internal/hyper/outreach/propose { room_id, turn_id, channel } — P6 human-approved
+    // auto-generation. The OS assembles a QUEUED (proposed) campaign from a turn's eligible
+    // prospects; it is NEVER auto-started — a human must Start it (first-contact HITL), and the
+    // drain only ever sends 'running'. Internal-auth + flag-gated (HYPER_OUTREACH_AUTO_PROPOSE).
+    if (pathname === '/internal/hyper/outreach/propose' && req.method === 'POST') {
+      if (!outreachAutoProposeEnabled()) {
+        return jsonResponse(res, { error: 'outreach auto-propose is disabled', code: 'autopropose_disabled' }, 403), true;
+      }
+      const key = String(req.headers['x-api-key'] || '').trim();
+      if (!key || key !== getInternalApiKey()) return jsonResponse(res, { error: 'unauthorized' }, 401), true;
+      const body = await parseBody(req).catch(() => ({}));
+      const channel = String(body.channel || '').trim();
+      const roomId = String(body.room_id || '').trim();
+      const turnId = String(body.turn_id || '').trim();
+      if (!['email', 'call'].includes(channel) || !/^[0-9a-f-]{36}$/.test(roomId) || !/^[0-9a-f-]{36}$/.test(turnId)) {
+        return jsonResponse(res, { error: 'room_id, turn_id and channel(email|call) are required' }, 400), true;
+      }
+      const room = await prisma.hyperRoom.findFirst({ where: { id: roomId, archivedAt: null } });
+      if (!room) return jsonResponse(res, { error: 'room not found' }, 404), true;
+      const turn = await prisma.hyperTurn.findFirst({ where: { id: turnId, roomId: room.id } });
+      if (!turn) return jsonResponse(res, { error: 'turn not found' }, 404), true;
+      // Prospects: an EXPLICIT prospect (an agent's propose_call decision — "call THIS firm")
+      // takes precedence; otherwise derive the stack from the turn's discovered prospects.
+      const explicit = Array.isArray(body.prospects) ? body.prospects
+        : (body.prospect && typeof body.prospect === 'object' ? [body.prospect] : null);
+      const all = explicit || prospectsFromTurn(turn.lines);
+      const eligible = all.filter((p) => (channel === 'email'
+        ? p.email && EMAIL_RE.test(p.email)
+        : p.phone && E164_RE.test(String(p.phone).replace(/[\s()/-]/g, '')))).slice(0, MAX_TARGETS);
+      if (!eligible.length) return jsonResponse(res, { error: `no ${channel}-eligible prospect(s)` }, 400), true;
+      const senderEmail = channel === 'email' ? await connectedGmail(room.userId) : null;
+      const voice = channel === 'call' ? await taraProviderFor(room.orgId) : null;
+      const callPolicy = channel === 'call' ? await outboundCallPolicy(room.orgId) : 'unconfigured';
+      const campaign = await prisma.outreachCampaign.create({
+        data: {
+          roomId: room.id, turnId, userId: room.userId, orgId: room.orgId,
+          channel, senderEmail,
+          ...(voice ? { voiceProvider: voice.provider, voiceConfigSnapshot: { revision: voice.revision, ...voice.config } } : {}),
+          status: callPolicy === 'auto' ? 'running' : 'queued',
+          lastTickAt: callPolicy === 'auto' ? new Date() : null,
+          ...(callPolicy === 'auto' ? { startedAt: new Date() } : {}),
+          targets: {
+            create: eligible.map((p, i) => ({
+              position: i,
+              company: String(p.company || '').slice(0, 300),
+              email: p.email ? String(p.email).slice(0, 320) : null,
+              phone: p.phone ? String(p.phone).slice(0, 40) : null,
+              website: p.website ? String(p.website).slice(0, 500) : null,
+              address: p.address ? String(p.address).slice(0, 500) : null,
+              leadId: p.lead_id && /^[0-9a-f-]{36}$/.test(String(p.lead_id)) ? String(p.lead_id) : null,
+              inputContext: targetInputContext(p),
+            })),
+          },
+        },
+        include: { targets: { orderBy: { position: 'asc' } } },
+      });
+      // Generate the first target's CONTRACT up front (goal + strategy + auto voice/language)
+      // so the approval popup shows the real plan the moment the OS decides. Best-effort —
+      // the campaign stands even if generation is slow/failed (targets generate on Start too).
+      let contract = null;
+      try {
+        const t0 = campaign.targets[0];
+        if (t0) {
+          const gen = await generateTarget(campaign, t0);
+          const pl = gen?.payload || {};
+          const voiceId = channel === 'call' ? await resolveVoiceId(room.orgId, pl.language, pl.voice_style) : null;
+          const capabilities = voice ? await providerCapabilities(voice.baseUrl) : { telephony: false, browser: true };
+          const delivery = resolveDelivery({ channel, capabilities });
+          const universal = buildOutreachContract({
+            campaign, target: gen, delivery, voiceId,
+            skillId: campaign.voiceConfigSnapshot?.skill_id || null,
+          });
+          contract = {
+            ...universal,
+            prospect: t0.company || t0.email || t0.phone || null,
+            goal: universal.objective.goal || null,
+            strategy: universal.objective.strategy || null,
+            language: universal.persona.language || 'en',
+            voice_style: universal.persona.voice_style || null,
+            voice_id: universal.persona.voice_id || null,
+            targets: campaign.targets.length,
+          };
+        }
+      } catch (e) { console.warn('[outreach-propose] contract gen failed (non-fatal):', e.message); }
+      // Live popup hint: if the caller passed the room's callback_url, push a `call_contract`
+      // event so the FE can surface the approval popup immediately (card fallback = the queued
+      // campaign in the list). Approve = Start the campaign; Reject = stop/cancel.
+      const cbUrl = String(body.callback_url || '').trim();
+      if (cbUrl && contract && callPolicy !== 'auto') {
+        fetch(cbUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': getInternalApiKey() },
+          body: JSON.stringify({
+            turn_id: turnId,
+            event: {
+              t: 'call_contract',
+              campaign_id: campaign.id,
+              contract,
+              authority_preference: callPolicy,
+            },
+          }),
+          signal: AbortSignal.timeout(8000),
+        }).catch(() => {});
+      }
+      if (channel === 'call' && callPolicy === 'auto') {
+        setTimeout(() => {
+          advanceCallCampaign(campaign.id, room.orgId)
+            .catch((error) => console.warn('[outreach-call] automatic start failed:', campaign.id, error.message));
+        }, 0);
+      }
+      return jsonResponse(res, {
+        campaign, proposed: callPolicy !== 'auto', contract, authority_preference: callPolicy,
+        note: callPolicy === 'auto'
+          ? 'The organization has authorized verified outbound calls. The sequence started automatically.'
+          : 'Proposed (queued). Requires authority before TARA dials.',
+      }, 200), true;
+    }
+
+    // POST /v1/hyper-rooms/:roomId/outreach-campaigns — create (snapshot)
+    let m = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/outreach-campaigns$/);
+    if (m && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const body = await parseBody(req).catch(() => ({}));
+      const channel = String(body.channel || '').trim();
+      const turnId = String(body.turn_id || '').trim();
+      if (!['email', 'call'].includes(channel) || !/^[0-9a-f-]{36}$/.test(turnId)) {
+        return jsonResponse(res, { error: 'channel (email|call) and turn_id are required' }, 400), true;
+      }
+      const room = await prisma.hyperRoom.findFirst({ where: { id: m[1], orgId: current.session.orgId, archivedAt: null } });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404), true;
+      const turn = await prisma.hyperTurn.findFirst({ where: { id: turnId, roomId: room.id } });
+      if (!turn) return jsonResponse(res, { error: 'Turn not found' }, 404), true;
+      const all = prospectsFromTurn(turn.lines);
+      const eligible = all.filter((p) => (channel === 'email'
+        ? p.email && EMAIL_RE.test(p.email)
+        : p.phone && E164_RE.test(String(p.phone).replace(/[\s()/-]/g, '')))).slice(0, MAX_TARGETS);
+      if (!eligible.length) return jsonResponse(res, { error: `no ${channel}-eligible prospects on this turn` }, 400), true;
+      const senderEmail = channel === 'email' ? await connectedGmail(room.userId) : null;
+      if (channel === 'email' && !senderEmail) {
+        return jsonResponse(res, { error: 'no connected Gmail — connect Gmail to send outreach' }, 400), true;
+      }
+      const voice = channel === 'call' ? await taraProviderFor(room.orgId) : null;
+      const campaign = await prisma.outreachCampaign.create({
+        data: {
+          roomId: room.id, turnId, userId: room.userId, orgId: room.orgId,
+          channel, senderEmail, lastTickAt: new Date(),
+          ...(voice ? { voiceProvider: voice.provider, voiceConfigSnapshot: { revision: voice.revision, ...voice.config } } : {}),
+          targets: {
+            create: eligible.map((p, i) => ({
+              position: i,
+              company: String(p.company || '').slice(0, 300),
+              email: p.email ? String(p.email).slice(0, 320) : null,
+              phone: p.phone ? String(p.phone).slice(0, 40) : null,
+              website: p.website ? String(p.website).slice(0, 500) : null,
+              address: p.address ? String(p.address).slice(0, 500) : null,
+              leadId: p.lead_id && /^[0-9a-f-]{36}$/.test(String(p.lead_id)) ? String(p.lead_id) : null,
+              inputContext: targetInputContext(p),
+            })),
+          },
+        },
+        include: { targets: { orderBy: { position: 'asc' } } },
+      });
+      // Pre-mark any target we've ALREADY emailed (any prior campaign) as skipped
+      // so the panel shows "already emailed" up front and the run won't re-send.
+      if (channel === 'email') {
+        const emails = campaign.targets.map((t) => t.email).filter(Boolean);
+        if (emails.length) {
+          const prior = await prisma.$queryRawUnsafe(
+            `SELECT DISTINCT lower(recipient) AS r FROM "hivemind"."outbound_actions"
+              WHERE org_id = $1::uuid AND channel = 'email' AND status = 'sent'
+                AND lower(recipient) = ANY($2::text[])`,
+            room.orgId, emails.map((e) => e.toLowerCase()),
+          ).catch(() => []);
+          const seen = new Set((prior || []).map((x) => x.r));
+          const dupes = campaign.targets.filter((t) => t.email && seen.has(t.email.toLowerCase()));
+          if (dupes.length) {
+            await prisma.outreachTarget.updateMany({
+              where: { id: { in: dupes.map((t) => t.id) } },
+              data: { state: 'skipped', resultRef: { skipped: 'already emailed — not re-sent' } },
+            });
+            const reloaded = await loadCampaign(campaign.id, room.orgId);
+            return jsonResponse(res, { campaign: reloaded }, 200), true;
+          }
+        }
+      }
+      return jsonResponse(res, { campaign }, 200), true;
+    }
+
+    // GET /v1/outreach-campaigns/:id
+    m = pathname.match(/^\/v1\/outreach-campaigns\/([0-9a-f-]{36})$/);
+    if (m && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const c = await loadCampaign(m[1], current.session.orgId);
+      if (!c) return jsonResponse(res, { error: 'Campaign not found' }, 404), true;
+      return jsonResponse(res, { campaign: c }, 200), true;
+    }
+
+    // POST /v1/outreach-campaigns/:id/start | /stop
+    m = pathname.match(/^\/v1\/outreach-campaigns\/([0-9a-f-]{36})\/(start|stop)$/);
+    if (m && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const c = await loadCampaign(m[1], current.session.orgId, false);
+      if (!c) return jsonResponse(res, { error: 'Campaign not found' }, 404), true;
+      const body = await parseBody(req).catch(() => ({}));
+      const preference = String(body.preference || '').trim().toLowerCase();
+      if (preference && !['manual', 'auto'].includes(preference)) {
+        return jsonResponse(res, { error: 'preference must be manual or auto' }, 400), true;
+      }
+      const want = m[2] === 'start' ? 'running' : 'paused';
+      const legal = m[2] === 'start' ? ['queued', 'paused'] : ['running', 'queued'];
+      if (!legal.includes(c.status)) return jsonResponse(res, { error: `cannot ${m[2]} a ${c.status} campaign` }, 409), true;
+      const updated = await prisma.outreachCampaign.update({
+        where: { id: c.id },
+        data: { status: want, lastTickAt: new Date(), ...(m[2] === 'start' && !c.startedAt ? { startedAt: new Date() } : {}) },
+      });
+      if (m[2] === 'start' && c.channel === 'call') {
+        if (preference) await persistOutboundCallPolicy(c.orgId, preference);
+        setTimeout(() => {
+          advanceCallCampaign(c.id, c.orgId)
+            .catch((error) => console.warn('[outreach-call] start failed:', c.id, error.message));
+        }, 0);
+      }
+      return jsonResponse(res, {
+        campaign: updated,
+        authority_preference: preference || (c.channel === 'call' ? await outboundCallPolicy(c.orgId) : null),
+      }, 200), true;
+    }
+
+    // PATCH /v1/outreach-campaigns/:id/targets/:tid — deselect/reselect + payload edit
+    m = pathname.match(/^\/v1\/outreach-campaigns\/([0-9a-f-]{36})\/targets\/([0-9a-f-]{36})$/);
+    if (m && req.method === 'PATCH') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const c = await loadCampaign(m[1], current.session.orgId, false);
+      if (!c) return jsonResponse(res, { error: 'Campaign not found' }, 404), true;
+      const t = await prisma.outreachTarget.findFirst({ where: { id: m[2], campaignId: c.id } });
+      if (!t) return jsonResponse(res, { error: 'Target not found' }, 404), true;
+      if (['sending', 'sent', 'dialing', 'in_call', 'analyzing', 'analyzed'].includes(t.state)) {
+        return jsonResponse(res, { error: `target is ${t.state} — immutable` }, 409), true;
+      }
+      const body = await parseBody(req).catch(() => ({}));
+      const data = {};
+      if (typeof body.selected === 'boolean') {
+        data.state = body.selected ? 'selected' : 'deselected';
+        if (body.selected && t.payload) data.state = 'ready'; // keep an edited payload
+      }
+      if (body.payload && typeof body.payload === 'object') {
+        data.payload = c.channel === 'email'
+          ? { subject: String(body.payload.subject || t.payload?.subject || '').slice(0, 500), body: String(body.payload.body || t.payload?.body || '') }
+          : { goal: String(body.payload.goal || t.payload?.goal || '').slice(0, 300), opener: String(body.payload.opener || t.payload?.opener || '').slice(0, 400),
+              // Inline edits never drop the generated prospect brief.
+              ...(t.payload?.context ? { context: t.payload.context } : {}) };
+        if (!data.state && t.state !== 'deselected') data.state = 'ready';
+      }
+      if (!Object.keys(data).length) return jsonResponse(res, { error: 'nothing to update' }, 400), true;
+      const updated = await prisma.outreachTarget.update({ where: { id: t.id }, data });
+      tick(c.id);
+      return jsonResponse(res, { target: updated }, 200), true;
+    }
+
+    // POST /v1/outreach-campaigns/:id/targets/:tid/generate | /execute
+    m = pathname.match(/^\/v1\/outreach-campaigns\/([0-9a-f-]{36})\/targets\/([0-9a-f-]{36})\/(generate|execute)$/);
+    if (m && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const c = await loadCampaign(m[1], current.session.orgId, false);
+      if (!c) return jsonResponse(res, { error: 'Campaign not found' }, 404), true;
+      const t = await prisma.outreachTarget.findFirst({ where: { id: m[2], campaignId: c.id } });
+      if (!t) return jsonResponse(res, { error: 'Target not found' }, 404), true;
+      tick(c.id);
+      try {
+        if (m[3] === 'generate') {
+          if (!['selected', 'failed', 'ready'].includes(t.state)) {
+            return jsonResponse(res, { error: `cannot generate for a ${t.state} target` }, 409), true;
+          }
+          const updated = await generateTarget(c, t);
+          return jsonResponse(res, { target: updated }, 200), true;
+        }
+        if (c.status !== 'running') return jsonResponse(res, { error: 'campaign is not running — press Start' }, 409), true;
+        if (t.state !== 'ready') return jsonResponse(res, { error: `cannot execute a ${t.state} target` }, 409), true;
+        const updated = await executeTarget(c, t);
+        await finalizeIfDone(c.id, c.orgId);
+        return jsonResponse(res, { target: updated }, 200), true;
+      } catch (err) {
+        return jsonResponse(res, { error: err.message, retryable: !!err.retryable }, err.status || 500), true;
+      }
+    }
+
+    m = pathname.match(/^\/v1\/outreach-campaigns\/([0-9a-f-]{36})\/targets\/([0-9a-f-]{36})\/reconcile$/);
+    if (m && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return true;
+      const c = await loadCampaign(m[1], current.session.orgId, false);
+      if (!c) return jsonResponse(res, { error: 'Campaign not found' }, 404), true;
+      const target = await prisma.outreachTarget.findFirst({ where: { id: m[2], campaignId: c.id } });
+      if (!target) return jsonResponse(res, { error: 'Target not found' }, 404), true;
+      const sessionId = String(target.resultRef?.sessionId || '');
+      if (!sessionId) return jsonResponse(res, { error: 'Target has no TARA session' }, 409), true;
+      return jsonResponse(res, await reconcileCall({
+        orgId: c.orgId, sessionId, campaignId: c.id, targetId: target.id,
+      }), 200), true;
+    }
+
+    return false;
+  }
+
+  return {
+    handle, startDrain,
+    _internal: {
+      prospectsFromTurn, executeTarget, generateTarget, drainOnce, finalizeIfDone,
+      reconcileCall, advanceCallCampaign,
+    },
+  };
+}

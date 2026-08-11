@@ -17,6 +17,11 @@ import { registerGmailTools } from './connector-toolkits/gmail-tools.js';
 import { registerGdocsTools } from './connector-toolkits/gdocs-tools.js';
 import { registerGeminiTools } from './connector-toolkits/gemini-tools.js';
 import { registerSlackTools } from './connector-toolkits/slack-tools.js';
+import { getHivemindToolCatalog, registerHivemindTools } from './connector-toolkits/hivemind-tools.js';
+import { getCampaignToolCatalog, registerCampaignTools } from './connector-toolkits/campaign-tools.js';
+import { getGrowthBaselineToolCatalog, registerGrowthBaselineTools } from './connector-toolkits/growth-baseline-tools.js';
+import { getGrowthPlanToolCatalog, registerGrowthPlanTools } from './connector-toolkits/growth-plan-tools.js';
+import { campaignsV2Enabled } from '../campaigns/state.js';
 
 // MCP-backed groups (run via persistent client pool).
 // 'slack' moved OUT of this list: Slack OAuth is native (PlatformIntegration
@@ -34,6 +39,45 @@ const NANGO_REST_GROUPS = [
   { provider: 'google-gemini', groupName: 'google-gemini', register: (tk, deps) => registerGeminiTools(tk, deps) },
 ];
 
+const CONNECTOR_CAPABILITIES = {
+  gmail: { description: 'Gmail search, thread reading, sending, labels, and reply watching.', tools: ['gmail_search_threads', 'gmail_read_thread', 'gmail_send_email', 'gmail_label_thread', 'gmail_watch_mailbox'] },
+  'google-docs': { description: 'Google Docs search, reading and document creation.', tools: ['gdocs_search', 'gdocs_read', 'gdocs_create'] },
+  'google-gemini': { description: 'Google Gemini connected application capabilities.', tools: ['gemini_generate'] },
+  slack: { description: 'Slack search, channels, history, threads and posting.', tools: ['slack_search_messages', 'slack_list_channels', 'slack_channel_history', 'slack_read_thread', 'slack_post_message'] },
+  notion: { description: 'Notion workspace read and write tools through MCP.', tools: ['notion MCP tools'] },
+  github: { description: 'GitHub repository read and write tools through MCP.', tools: ['GitHub MCP tools'] },
+  linear: { description: 'Linear issue and project tools through MCP.', tools: ['Linear MCP tools'] },
+};
+const CONNECTOR_WRITE_TOOLS = new Set(['gmail_send_email', 'gmail_label_thread', 'gdocs_create', 'slack_post_message']);
+
+const capabilityCache = new Map();
+export async function getCapabilityCatalogForUser({ prisma, userId, orgId }) {
+  const key = `${userId}:${orgId}`;
+  const cached = capabilityCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.catalog;
+  const enabled = new Set();
+  if (prisma?.nangoConnection) {
+    const rows = await prisma.nangoConnection.findMany({
+      where: { userId, orgId, status: 'active' }, select: { providerKey: true },
+    }).catch(() => []);
+    for (const row of rows) enabled.add(row.providerKey);
+  }
+  if (prisma?.platformIntegration) {
+    const slack = await prisma.platformIntegration.findUnique({
+      where: { userId_platformType: { userId, platformType: 'slack' } }, select: { isActive: true },
+    }).catch(() => null);
+    if (slack?.isActive) enabled.add('slack');
+  }
+  const connectorCatalog = [...enabled].map((name) => CONNECTOR_CAPABILITIES[name] ? ({
+    name, description: CONNECTOR_CAPABILITIES[name].description,
+    tools: CONNECTOR_CAPABILITIES[name].tools.map((tool) => ({ name: tool, description: `Server-owned ${name} capability`, readOnly: !CONNECTOR_WRITE_TOOLS.has(tool) })),
+  }) : null).filter(Boolean);
+  const nativeCatalog = [...(campaignsV2Enabled(orgId) ? [getCampaignToolCatalog()] : []), getGrowthBaselineToolCatalog(), getGrowthPlanToolCatalog()];
+  const catalog = [...getHivemindToolCatalog(), ...nativeCatalog, ...connectorCatalog];
+  capabilityCache.set(key, { expiresAt: Date.now() + 30_000, catalog });
+  return catalog;
+}
+
 /** Singleton pool — one per process. */
 let _pool = null;
 function getPool(prisma) {
@@ -48,8 +92,16 @@ function getPool(prisma) {
  *                  for the existing HIVEMIND-internal tools.
  * @returns {Promise<Toolkit>}
  */
-export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools = [], persistentMemoryEngine = null }) {
+export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools = [], persistentMemoryEngine = null, selectedGroups = [] }) {
   const tk = new Toolkit();
+  const selected = new Set(selectedGroups);
+
+  // Native HIVEMIND tools use the same AgentScope-style group contract as
+  // connectors. Groups remain inactive until selected for this turn.
+  registerHivemindTools(tk, { selectedGroups });
+  if (campaignsV2Enabled(orgId)) registerCampaignTools(tk, { prisma, userId, orgId, selectedGroups });
+  registerGrowthBaselineTools(tk, { prisma, orgId, userId, selectedGroups });
+  registerGrowthPlanTools(tk, { prisma, orgId, userId, selectedGroups });
 
   // 1. Register HIVEMIND-internal tools into 'basic' group (always active).
   for (const t of hivemindTools) {
@@ -84,14 +136,37 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
   if (prisma?.nangoConnection) {
     try {
       const connections = await prisma.nangoConnection.findMany({
-        where: { userId, status: 'active' },
+        where: { userId, orgId, status: 'active' },
         select: { providerKey: true },
       });
       const activeProviders = new Set(connections.map(c => c.providerKey));
       const pool = getPool(prisma);
 
+      // Connector Runtime V1 (plan Phase 8 Chat cutover) — flag-gated, default
+      // OFF → the legacy registration below runs UNCHANGED. When on, connectors
+      // the runtime knows are registered in-process via the runtime adapter;
+      // the rest fall through to the legacy path (per-connector, no drops).
+      const _runtimeHandled = new Set();
+      if (process.env.CONNECTOR_RUNTIME_CHAT === 'true' && globalThis.__hivemindConnectorRuntime) {
+        try {
+          const { registerRuntimeConnectorGroups } = await import('./runtime-toolkit-adapter.js');
+          const handled = registerRuntimeConnectorGroups({
+            tk, runtime: globalThis.__hivemindConnectorRuntime, prisma,
+            userId, orgId, projectId: (typeof projectId !== 'undefined' ? projectId : null),
+            selected, activeProviders,
+          });
+          for (const id of handled) _runtimeHandled.add(id);
+        } catch (err) {
+          console.warn(`[toolkit] runtime connector registration failed: ${err.message}`);
+        }
+      }
+      // legacy provider key → runtime connector id (to skip handled ones)
+      const _RT_MAP = { gmail: 'gmail', 'google-docs': 'google_docs', 'google-sheets': 'google_sheets', slack: 'slack' };
+
       // (a) MCP groups.
       for (const provider of MCP_CONNECTOR_GROUPS) {
+        if (_runtimeHandled.has(_RT_MAP[provider] || provider)) continue;
+        if (!selected.has(provider)) continue;
         if (!activeProviders.has(provider)) continue;
         tk.createToolGroup({
           name: provider,
@@ -100,7 +175,7 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
           notes: `${provider}: live read/write through provider MCP. Activate via reset_equipped_tools when query intent matches ${provider}. Write tools (post/send/schedule) go through draft-approval — user must Approve before send.`,
         });
         try {
-          const client = await pool.resolve(userId, provider);
+          const client = await pool.resolve(userId, orgId, provider);
           await tk.registerMcpClient(client, { groupName: provider });
         } catch (err) {
           // MCP server unreachable or app not enabled — keep group empty.
@@ -110,9 +185,12 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
 
       // (b) Nango-REST groups (gmail / google-docs / google-gemini).
       for (const cfg of NANGO_REST_GROUPS) {
+        if (_runtimeHandled.has(_RT_MAP[cfg.provider] || cfg.provider)) continue;
+        if (!selected.has(cfg.groupName)) continue;
         if (!activeProviders.has(cfg.provider)) continue;
         try {
           cfg.register(tk, { persistentMemoryEngine });
+          tk.markGroupExternal(cfg.groupName);
         } catch (err) {
           console.warn(`[toolkit] rest register ${cfg.groupName} failed: ${err.message}`);
         }
@@ -127,7 +205,7 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
   //    (platformIntegration) or a legacy Nango connection. Token resolution
   //    happens lazily per tool call inside SlackBridge/ConnectorStore, so
   //    registration is just two cheap indexed lookups.
-  if (prisma?.platformIntegration) {
+  if (selected.has('slack') && prisma?.platformIntegration) {
     try {
       const [nativeRow, nangoRow] = await Promise.all([
         prisma.platformIntegration.findUnique({
@@ -135,13 +213,14 @@ export async function buildToolkitForUser({ prisma, userId, orgId, hivemindTools
           select: { isActive: true },
         }).catch(() => null),
         prisma.nangoConnection?.findFirst({
-          where: { userId, providerKey: 'slack', status: 'active' },
+          where: { userId, orgId, providerKey: 'slack', status: 'active' },
           select: { id: true },
         }).catch(() => null),
       ]);
       if (nativeRow?.isActive || nangoRow) {
         const { ConnectorStore } = await import('../connectors/framework/connector-store.js');
         registerSlackTools(tk, { connectorStore: new ConnectorStore(prisma), userId });
+        tk.markGroupExternal('slack');
       }
     } catch (err) {
       console.warn(`[toolkit] slack native register failed: ${err.message}`);

@@ -1,11 +1,16 @@
 import { computeTokenSimilarity, tokenCountMap, cosineFromCounts } from './conflict-detector.js';
 import { normalizeEntity } from './entity-normalize.js';
+import { resolveEntityRecallCandidates } from './entity-hop0.js';
 import { getQdrantClient } from '../vector/qdrant-client.js';
+import { runWithOrg, currentOrg, currentApiKey } from '../db/prisma.js';
 import { getRetrievalConfig } from './retrieval-config.js';
 import { expandTemporalQuery } from '../search/time-aware-expander.js';
 import { ResultReranker } from '../search/result-reranker.js';
+import { applyExactSourceSummaryPenalty, sortWithImportanceTiebreaker } from './recall-ranking-policy.js';
+import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { rerank as crossEncoderRerank } from './reranker.js';
 import { meterTokens } from '../billing/usage-tracker.js';
+import { isMemoryInDateRange } from './temporal-range.js';
 
 // PHASE-B: single canonical ALGORITHMIC reranker, shared with three-tier-retrieval.js.
 // Lazily constructed inside the RECALL_TIERED_VIEW=true branch so the dark-by-default
@@ -304,8 +309,8 @@ function collapseNearDuplicates(scored, options = {}) {
   return unique;
 }
 
-function applyRecallRelevanceFloor(scored, options = {}) {
-  const { temporalComparison = false } = options;
+export function applyRecallRelevanceFloor(scored, options = {}) {
+  const { temporalComparison = false, semanticRecovery = false } = options;
   if (scored.length === 0) return [];
 
   // Hard absolute minimum — never return results below these thresholds
@@ -319,7 +324,13 @@ function applyRecallRelevanceFloor(scored, options = {}) {
   );
 
   // If nothing passes hard minimum, return empty — the LLM should say "I don't know"
-  if (viable.length === 0) return [];
+  if (viable.length === 0) {
+    // One bounded recovery attempt may keep a small semantic rerank pool even
+    // when legacy weighted scores miss their hard floor. The caller forces the
+    // multilingual cross-encoder on this pool; no keyword/type heuristic is
+    // re-enabled, and ordinary recall retains the fail-closed empty result.
+    return semanticRecovery ? scored.slice(0, 24) : [];
+  }
 
   // Second pass: relative floor based on top score (quality gradient)
   const topScore = viable[0].score;
@@ -479,35 +490,24 @@ function policyBoost(memory, {
   return score;
 }
 
-function parseDateRangeBoundary(value) {
-  if (!value) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
+function isMemoryInTemporalSnapshot(memory, { validAt = null, knownAt = null } = {}) {
+  if (!validAt && !knownAt) return true;
+  const created = memory?.created_at || memory?.createdAt || null;
+  const validFrom = memory?.valid_from || memory?.validFrom
+    || memory?.document_date || memory?.documentDate || created;
+  const validTo = memory?.valid_to || memory?.validTo || null;
+  const createdMs = created ? new Date(created).getTime() : Number.NaN;
+  const fromMs = validFrom ? new Date(validFrom).getTime() : Number.NaN;
+  const toMs = validTo ? new Date(validTo).getTime() : Number.NaN;
+  const validMs = validAt ? new Date(validAt).getTime() : null;
+  const knownMs = knownAt ? new Date(knownAt).getTime() : null;
 
-function isMemoryInDateRange(memory, dateRange) {
-  if (!dateRange) return true;
-
-  const start = parseDateRangeBoundary(dateRange.start);
-  const end = parseDateRangeBoundary(dateRange.end);
-  const candidateDates = [
-    memory.document_date,
-    memory.created_at,
-    memory.metadata?.record_time,
-    memory.metadata?.event_time,
-    memory.metadata?.valid_from,
-    memory.metadata?.valid_to
-  ]
-    .map(parseDateRangeBoundary)
-    .filter(Boolean);
-
-  if (candidateDates.length === 0) return false;
-
-  return candidateDates.some(date => {
-    if (start && date < start) return false;
-    if (end && date > end) return false;
-    return true;
-  });
+  if (knownMs != null && (!Number.isFinite(createdMs) || createdMs > knownMs)) return false;
+  if (validMs != null) {
+    if (Number.isFinite(fromMs) && fromMs > validMs) return false;
+    if (Number.isFinite(toMs) && toMs <= validMs) return false;
+  }
+  return true;
 }
 
 // Retrieve-wide → deliver-narrow. The candidate pool must stay WIDE regardless
@@ -517,7 +517,37 @@ function isMemoryInDateRange(memory, dateRange) {
 // pool for every small-deliver caller (Tara max=6-8, chat max=8) and was the
 // real cause of "exact fact missed at k=8 but rank-1 at k=50". Floor is env-
 // tunable; default 150 captures the cross-lingual / long-tail matches.
-const RECALL_POOL_FLOOR = Math.max(Number(process.env.RECALL_CANDIDATE_POOL || 150), 50);
+const RECALL_POOL_CEILING = 150;
+const RECALL_POOL_FLOOR = Math.min(
+  RECALL_POOL_CEILING,
+  Math.max(Number(process.env.RECALL_CANDIDATE_POOL || RECALL_POOL_CEILING), 50),
+);
+
+function boundedCandidatePool(maxMemories, multiplier = 4) {
+  return Math.min(
+    RECALL_POOL_CEILING,
+    Math.max(Number(maxMemories || 0) * multiplier, RECALL_POOL_FLOOR),
+  );
+}
+
+export function boundedLaneFusion(lanes, ceiling = RECALL_POOL_CEILING) {
+  const active = lanes.filter((lane) => Array.isArray(lane) && lane.length > 0);
+  const fused = [];
+  const seen = new Set();
+  for (let index = 0; fused.length < ceiling && active.some((lane) => index < lane.length); index += 1) {
+    for (const lane of active) {
+      const candidate = lane[index];
+      if (!candidate) continue;
+      const memory = candidate.memory || candidate;
+      const id = memory?.id || memory?.memory_id;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      fused.push(candidate);
+      if (fused.length >= ceiling) break;
+    }
+  }
+  return fused;
+}
 
 // ── Cross-lingual / sparse-recall query expansion ─────────────────────────
 // When the primary vector recall is THIN (few candidates clear the score
@@ -555,7 +585,7 @@ async function _groqQueryLLM(systemPrompt, userText, orgId, timeoutMs = 2500) {
     clearTimeout(timer);
     if (!r.ok) return {};
     const j = await r.json();
-    if (orgId && j.usage?.total_tokens) meterTokens(orgId, j.usage.total_tokens); // same usage-tracker pipeline
+    if (orgId && j.usage?.total_tokens) meterTokens(orgId, j.usage.total_tokens, currentApiKey(), j.model, 'recall-expansion'); // same usage-tracker pipeline, now per-key attributed
     return JSON.parse(j.choices?.[0]?.message?.content || '{}');
   } catch (e) { return {}; }
 }
@@ -603,6 +633,31 @@ async function extractQueryEntitiesLLM(query, orgId) {
   return tags;
 }
 
+// Scope-filter matcher — the chat scope selector (personal / all-org / project)
+// must ACTUALLY restrict the delivered set. The naive `m.scope === scope_filter`
+// check fails because several lanes (FTS / lexical / Qdrant-payload) deliver rows
+// with NO hydrated `scope`, and `m.scope && …` then keeps every scope-less row —
+// so a project fact leaked into a `personal` recall. Infer the tier the SAME way
+// the access-context filter does (~L790): a project link ⇒ 'project'; otherwise
+// 'organization'. NEVER infer 'personal' — the personal tier requires a proven
+// scope row, so the `personal` lens admits ONLY provably-personal memories (a
+// scope-less row can't claim it). 'organization'/none is passed as null upstream
+// → this is never called for the org-wide lens (everything the access context
+// already allows is delivered).
+function matchesScopeFilter(m, scope_filter) {
+  if (!scope_filter) return true;
+  if (!m) return false;
+  // Accept BOTH shapes: a flat memory (per-lane checks pass one) AND a ranked
+  // wrapper item `{ memory, score, … }` (the post-merge choke point passes one —
+  // the flatten to `{...item.memory}` happens later). Reading scope off the
+  // wrapper saw undefined and inferred 'organization', silently dropping the
+  // whole pool for a project/personal lens.
+  const mem = (m.memory && typeof m.memory === 'object') ? m.memory : m;
+  const eff = mem.scope
+    || ((mem.project_id || (Array.isArray(mem.project_ids) && mem.project_ids.length)) ? 'project' : 'organization');
+  return eff === scope_filter;
+}
+
 async function vectorCandidatesForRecall(store, {
   query_context,
   user_id,
@@ -612,9 +667,11 @@ async function vectorCandidatesForRecall(store, {
   tags = [],
   max_memories,
   dateRange = null,
+  validAt = null,
+  knownAt = null,
   scoreThreshold = 0.25,
   hnswEf = undefined, // PHASE-F: per-org HNSW ef_search; undefined → searchMemories falls back to EF_SEARCH_DEFAULT
-  candidatePoolSize = Math.max(max_memories * 4, RECALL_POOL_FLOOR),
+  candidatePoolSize = boundedCandidatePool(max_memories),
   is_latest = true,
   access_context = null,
   scope_filter = null,
@@ -645,6 +702,8 @@ async function vectorCandidatesForRecall(store, {
     // `project_id` (see below). Narrowing-only — it cannot widen access.
     tags,
     is_latest,
+    valid_at: validAt,
+    known_at: knownAt,
     limit: candidatePoolSize,
     score_threshold: scoreThreshold,
     hnsw_ef: hnswEf, // PHASE-F: inert when undefined (searchMemories → EF_SEARCH_DEFAULT)
@@ -662,7 +721,9 @@ async function vectorCandidatesForRecall(store, {
   // returned null, silently collapsing the vector lane from ~150 hits to ~1. The
   // batch is a single query (no contention) and also populates project_ids.
   const _vecIds = (results || []).map(r => r.payload?.memory_id || r.id).filter(Boolean);
-  const _vecMemById = store.getMemories ? await store.getMemories(_vecIds) : new Map();
+  const _vecMemById = store.getMemories
+    ? await store.getMemories(_vecIds, { valid_at: validAt, known_at: knownAt })
+    : new Map();
   const hydrated = (results || []).map(result => {
     const sourcePlatform = result.payload?.source_platform || result.payload?.source || null;
     if (source_platforms.length > 0 && !source_platforms.includes(sourcePlatform)) {
@@ -672,7 +733,9 @@ async function vectorCandidatesForRecall(store, {
     const memoryId = result.payload?.memory_id || result.id;
     const memory = _vecMemById.get(memoryId);
     if (!memory) return null;
+    if (typeof is_latest === 'boolean' && (memory.is_latest !== false) !== is_latest) return null;
     if (!isMemoryInDateRange(memory, dateRange)) return null;
+    if (!isMemoryInTemporalSnapshot(memory, { validAt, knownAt })) return null;
     // V2 scope filtering: enforce after hydrate (vector index doesn't carry scope)
     if (access_context) {
       const m = memory;
@@ -689,12 +752,28 @@ async function vectorCandidatesForRecall(store, {
       // when enabled or when the flag is unknown.
       const dropCrossProject = isGuest || access_context.crossProject === false;
       if (dropCrossProject && Array.isArray(m.tags) && m.tags.includes('scope:cross-project')) return null;
+      // Older vector payloads carry no `scope` field at all — requiring an
+      // exact scope match dropped EVERY such memory whenever an access context
+      // was active (a project-scoped /chat recall returned 0 hits against 61
+      // stored project memories). Infer conservatively from the payload:
+      // a project link ⇒ project semantics; else org-tier (still org_id +
+      // non-guest gated below). Never inferred to 'personal' — a scoped row
+      // is required to claim the personal tier.
+      const mScope = m.scope
+        || ((m.project_id || (Array.isArray(m.project_ids) && m.project_ids.length)) ? 'project' : 'organization');
       const ok =
-        (m.scope === 'personal' && m.user_id === user_id) ||
-        (m.scope === 'organization' && m.org_id === org_id && !isGuest) ||
-        (m.scope === 'team' && (access_context.teamIds || []).includes(m.primary_team_id)) ||
-        (m.scope === 'project' && Array.isArray(m.project_ids) &&
-           m.project_ids.some(pid => (access_context.projectIds || []).includes(pid)));
+        (mScope === 'personal' && m.user_id === user_id) ||
+        (mScope === 'organization' && m.org_id === org_id && !isGuest) ||
+        (mScope === 'team' && (access_context.teamIds || []).includes(m.primary_team_id)) ||
+        // Project memories may carry a project_ids ARRAY (memory_projects link)
+        // or only the single project_id column — accept either. Requiring the
+        // array silently dropped every single-project memory whenever an access
+        // context was active (scoped /chat recall → 0 hits on 61 memories).
+        (mScope === 'project' && (
+          (Array.isArray(m.project_ids)
+            && m.project_ids.some(pid => (access_context.projectIds || []).includes(pid)))
+          || (m.project_id && (access_context.projectIds || []).includes(m.project_id))
+        ));
       if (!ok) return null;
     }
     // Project-scope narrowing (replaces the broken Qdrant `project` pre-filter):
@@ -705,7 +784,7 @@ async function vectorCandidatesForRecall(store, {
       const pids = Array.isArray(memory.project_ids) ? memory.project_ids : [];
       if (pid !== project && !pids.includes(project)) return null;
     }
-    if (scope_filter && memory.scope && memory.scope !== scope_filter) return null;
+    if (!matchesScopeFilter(memory, scope_filter)) return null;
 
     return {
       memory,
@@ -785,7 +864,13 @@ function traversal(startId, relationships, depth = 2, types = ['Derives', 'Exten
   return nodes;
 }
 
-export async function queryPersistedMemories(store, { pattern, user_id, org_id, project, ...params }) {
+export async function queryPersistedMemories(store, opts) {
+  // Residency: run in the org's context so hydrate/listMemories hit the org's store (customer PG for
+  // a self-host org). Re-entrancy guard; undefined org → central (managed), unchanged.
+  if (opts?.org_id && currentOrg() !== opts.org_id) return runWithOrg(opts.org_id, () => queryPersistedMemories(store, opts));
+  return _queryPersistedMemoriesImpl(store, opts);
+}
+async function _queryPersistedMemoriesImpl(store, { pattern, user_id, org_id, project, ...params }) {
   const { memories } = await store.listMemories({
     user_id,
     org_id,
@@ -1195,7 +1280,13 @@ export function buildRecallSpine(flatMemories, synthesized) {
   }
 }
 
-export async function recallPersistedMemories(store, {
+export async function recallPersistedMemories(store, opts) {
+  // Residency: run the whole recall (incl. PG hydrate) in the org's context → customer PG for a
+  // self-host org. Re-entrancy guard; undefined org → central (managed), unchanged.
+  if (opts?.org_id && currentOrg() !== opts.org_id) return runWithOrg(opts.org_id, () => recallPersistedMemories(store, opts));
+  return _recallPersistedMemoriesImpl(store, opts);
+}
+async function _recallPersistedMemoriesImpl(store, {
   query_context,
   user_id,
   org_id,
@@ -1209,6 +1300,8 @@ export async function recallPersistedMemories(store, {
   weights = { similarity: 0.45, recency: 0.15, importance: 0.1, vector: 0.2, graph: 0.05, policy: 0.05 },
   graph_expansion_depth = 2,
   date_range = null,
+  valid_at = null,
+  known_at = null,
   is_latest,           // boolean — undefined = default (true), false = include superseded
   include_expired,     // boolean — include expired memories
   sort,                // 'score' | 'date_asc' | 'date_desc'
@@ -1216,6 +1309,7 @@ export async function recallPersistedMemories(store, {
   include_superseded,  // boolean — include older update-chain versions via traverseUpdateChain
   raw_query = null,     // original user phrasing (pre-rewrite) for time-travel intent detection
   access_context = null, // { projectIds, teamIds } for V2 multi-tier scope filter
+  structured_intent = false, // progressive router provides an LLM plan → skip English-keyword heuristics (e.g. detectMemoryTypeBoost); the planner-driven, language-neutral type boost is authoritative.
   scope_filter = null,   // optional MemoryScope filter: 'personal'|'project'|'team'|'organization'
                          // limits to memories whose scope === this value (in addition to access_context)
   entity_filter_mode = null, // per-call override of ENTITY_FILTER_MODE env (off|should|must)
@@ -1229,6 +1323,10 @@ export async function recallPersistedMemories(store, {
   query_expansion = null,    // per-call override of RECALL_QUERY_EXPANSION — cross-lingual / sparse
                              // rescue: when the primary recall is THIN, translate/rephrase the query
                              // and merge extra candidates. null = env default.
+  exact_source = false,
+  canonical_entities = [],
+  alternate_lexical_query = null,
+  semantic_recovery = false,
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1267,9 +1365,7 @@ export async function recallPersistedMemories(store, {
   const _RLAP = process.env.RECALL_LAP === 'true';
   const _t0 = _RLAP ? Date.now() : 0;
   const _lap = {};
-  const candidatePoolSize = temporalComparison
-    ? Math.max(max_memories * 8, RECALL_POOL_FLOOR)
-    : Math.max(max_memories * 4, RECALL_POOL_FLOOR);
+  const candidatePoolSize = boundedCandidatePool(max_memories, temporalComparison ? 8 : 4);
   // Phase 2 (B2): non-temporal score threshold comes from the per-org
   // RetrievalConfig (the self-evolution loop's primary Recall@K knob), falling
   // back to 0.20. Temporal queries keep the looser 0.15 floor for recall.
@@ -1297,7 +1393,9 @@ export async function recallPersistedMemories(store, {
     : weights;
 
   // is_latest: undefined = default true, false = include superseded versions
-  const effectiveIsLatest = is_latest !== undefined ? is_latest : true;
+  const temporalSnapshot = !!(valid_at || known_at);
+  const snapshotValidAt = valid_at || null;
+  const effectiveIsLatest = temporalSnapshot ? undefined : (is_latest !== undefined ? is_latest : true);
 
   // Load WorkingSet for this user (rolling spotlight on active context).
   // Used downstream to boost memories whose entity/thread/project tags
@@ -1331,9 +1429,14 @@ export async function recallPersistedMemories(store, {
   const ENTITY_FILTER_MODE = (entity_filter_mode || process.env.ENTITY_FILTER_MODE || 'should').toLowerCase();
   const _entityTagsPromise = ENTITY_FILTER_MODE !== 'off'
     ? (async () => {
+        const _canonical = (Array.isArray(canonical_entities) ? canonical_entities : [])
+          .flatMap((entity) => {
+            const normalized = normalizeEntity(entity);
+            return normalized ? [`entity:${normalized}`, `entity:${normalized.toLowerCase()}`] : [];
+          });
         const _regex = normalizeQueryEntityTokens(query_context);
         const _llm = await extractQueryEntitiesLLM(query_context, org_id);
-        return _llm.length ? [...new Set([..._regex, ..._llm])] : _regex;
+        return [...new Set([..._canonical, ..._regex, ..._llm])];
       })()
     : Promise.resolve([]);
   // 'must' (hard filter) needs the tags before the main fetch; 'should' (global
@@ -1376,6 +1479,8 @@ export async function recallPersistedMemories(store, {
     tags: _effectiveTags,
     max_memories,
     dateRange: effectiveDateRange,
+    validAt: snapshotValidAt,
+    knownAt: known_at,
     scoreThreshold: vectorScoreThreshold,
     hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined, // PHASE-F: per-org ef_search when wired; undefined otherwise (dark-safe)
     candidatePoolSize,
@@ -1407,7 +1512,8 @@ export async function recallPersistedMemories(store, {
     ? vectorCandidatesForRecall(store, {
         query_context, user_id, org_id, project, source_platforms,
         tags: _temporalFilterTags, max_memories,
-        dateRange: null, scoreThreshold: vectorScoreThreshold,
+        dateRange: null, validAt: snapshotValidAt, knownAt: known_at,
+        scoreThreshold: vectorScoreThreshold,
         hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
         candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
       })
@@ -1425,7 +1531,8 @@ export async function recallPersistedMemories(store, {
         return vectorCandidatesForRecall(store, {
           query_context, user_id, org_id, project, source_platforms,
           tags: entityTags, max_memories,
-          dateRange: effectiveDateRange, scoreThreshold: vectorScoreThreshold,
+          dateRange: effectiveDateRange, validAt: snapshotValidAt, knownAt: known_at,
+          scoreThreshold: vectorScoreThreshold,
           hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
           candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
         })
@@ -1433,6 +1540,31 @@ export async function recallPersistedMemories(store, {
       }).catch(() => [])
     : Promise.resolve([]);
   _entityCandidatesPromise.catch(() => {});
+
+  // ── Hop-0 canonical-entity lane (gated: RECALL_ENTITY_HOP0, default on) ──
+  // Bounded DETERMINISTIC registry lookup (indexed entity tables, no LLM)
+  // that surfaces entity-linked memories as ADDITIVE candidates. Overlaps the
+  // other lanes; ~125ms deadline; fails open to [] so it can never delay or
+  // narrow ordinary recall. See entity-hop0.js for caps + matching rules.
+  const _ENTITY_HOP0_EMPTY = { candidates: [], matchedEntities: [], matchedQueryEntityCount: 0, latencyMs: 0, cutoff: false };
+  const _entityHop0Promise = (process.env.RECALL_ENTITY_HOP0 !== 'false')
+    ? resolveEntityRecallCandidates({
+        store,
+        query: query_context,
+        org_id,
+        user_id,
+        access_context,
+        scope_filter,
+        dateRange: effectiveDateRange,
+        validAt: snapshotValidAt,
+        knownAt: known_at,
+        is_latest: effectiveIsLatest,
+        excludeMemory: (m) => isTaraActivity(m) || isRecallNoise(m),
+        isMemoryInDateRange,
+        isMemoryInTemporalSnapshot,
+      }).catch(() => _ENTITY_HOP0_EMPTY)
+    : Promise.resolve(_ENTITY_HOP0_EMPTY);
+  _entityHop0Promise.catch(() => {});
 
   // Observation-prefix (Mastra-style stable context) depends ONLY on
   // (user, org, project) — NOT on the recall results — yet was assembled at the
@@ -1460,18 +1592,19 @@ export async function recallPersistedMemories(store, {
   })();
   _userProfilePromise.catch(() => {});
 
-  const lexicalCandidates = await store.searchMemories({
-    query: query_context,
-    user_id,
-    org_id,
-    project,
-    tags: _effectiveTags,
-    is_latest: effectiveIsLatest,
-    n_results: candidatePoolSize,
-    created_after: effectiveDateRange?.start,
-    created_before: effectiveDateRange?.end,
-    access_context,
-  });
+  const lexicalArgs = {
+    user_id, org_id, project, tags: _effectiveTags, is_latest: effectiveIsLatest,
+    n_results: candidatePoolSize, created_after: effectiveDateRange?.start,
+    created_before: effectiveDateRange?.end, valid_at, known_at, access_context,
+  };
+  const lexicalQueries = [...new Set([query_context, alternate_lexical_query]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => value.trim()))].slice(0, 2);
+  const lexicalLanes = await Promise.all(lexicalQueries.map((query) =>
+    store.searchMemories({ ...lexicalArgs, query })));
+  const lexicalCandidates = [...new Map(
+    lexicalLanes.flat().filter((memory) => memory?.id).map((memory) => [memory.id, memory]),
+  ).values()];
 
   const filteredLexical = lexicalCandidates.filter(memory => {
     const memTags = memory.tags || [];
@@ -1483,7 +1616,8 @@ export async function recallPersistedMemories(store, {
     // Exclude benchmark data from production recall when no specific project is set
     if (!project && memTags.includes('longmemeval')) return false;
     if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
-    if (scope_filter && memory.scope && memory.scope !== scope_filter) return false;
+    if (!isMemoryInTemporalSnapshot(memory, { validAt: snapshotValidAt, knownAt: known_at })) return false;
+    if (!matchesScopeFilter(memory, scope_filter)) return false;
     // Exclude canonical-summary rows from default recall — BUT ONLY the
     // generic chat / conversation compactions. Knowledge-base, document,
     // entity-scoped, and entity-tagged compactions are the substantive
@@ -1529,6 +1663,7 @@ export async function recallPersistedMemories(store, {
       const _fetched = await Promise.all(_variants.map((v) => vectorCandidatesForRecall(store, {
         query_context: v, user_id, org_id, project, source_platforms,
         tags: _effectiveTags, max_memories, dateRange: effectiveDateRange,
+        validAt: snapshotValidAt, knownAt: known_at,
         scoreThreshold: Math.min(vectorScoreThreshold ?? 0.25, 0.12), // relax for cross-lingual low-cosine
         hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
         candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
@@ -1553,11 +1688,13 @@ export async function recallPersistedMemories(store, {
   //   • temporal pass: COMPLEMENTARY to effectiveDateRange — it any-matches the
   //     ingest ts:/time: EVENT-time tags (dateRange:null), surfacing memories a
   //     record-time window misses. _temporal_filtered tag set inside the promise.
-  const [entityFilteredCandidates, temporalFilteredCandidates, relationships] = await Promise.all([
+  const [entityFilteredCandidates, temporalFilteredCandidates, relationships, _entityHop0] = await Promise.all([
     _entityCandidatesPromise,
     _temporalCandidatesPromise,
     _relationshipsPromise,
+    _entityHop0Promise,
   ]);
+  const entityHop0Candidates = Array.isArray(_entityHop0?.candidates) ? _entityHop0.candidates : [];
   // Keep _entityFilterTags populated for any downstream reference. The extraction
   // promise is already settled (the entity pass above awaited it); this is a
   // no-op await that just surfaces the resolved tags. 'must' mode set it earlier.
@@ -1571,8 +1708,16 @@ export async function recallPersistedMemories(store, {
   if (_RLAP) _lap.fetch = Date.now() - _t0;
 
   // Graph Expansion: Discover related memories through graph traversal
+  const initialCandidates = boundedLaneFusion([
+    filteredLexical.map((memory) => ({ memory, score: 0 })),
+    vectorCandidates,
+    crosslingualCandidates,
+    entityFilteredCandidates,
+    temporalFilteredCandidates,
+    entityHop0Candidates,
+  ]);
   const expandedCandidates = await expandCandidatesViaGraph(store, {
-    initialCandidates: [...filteredLexical.map(m => ({ memory: m, score: 0 })), ...vectorCandidates, ...crosslingualCandidates, ...entityFilteredCandidates, ...temporalFilteredCandidates],
+    initialCandidates,
     relationships,
     relationshipCounts,
     query_context,
@@ -1623,10 +1768,10 @@ export async function recallPersistedMemories(store, {
         (_effectiveWeights.policy ?? 0.05) * policyScore +
         temporalBoost + _eventTimeBoost(memory);
     // Superseded memory penalty
-    if (memory.is_latest === false) score *= 0.55;
+    if (!temporalSnapshot && memory.is_latest === false) score *= 0.55;
     // Stale-superseded penalty: superseded AND >30 days old gets extra
     // downweight. Catches old revisions that linger after drift compaction.
-    if (memory.is_latest === false && daysAgo > 30) score *= 0.70;
+    if (!temporalSnapshot && memory.is_latest === false && daysAgo > 30) score *= 0.70;
     // Contradiction penalty (WS2 temporal): a freshly-stated contradiction hard-
     // demotes its target (poisoned-preference fix — the just-corrected fact sinks);
     // an old one softens. The later-stated "winner" gets a recency boost so it
@@ -1700,9 +1845,9 @@ export async function recallPersistedMemories(store, {
         (_effectiveWeights.policy ?? 0.05) * policyScore +
         temporalBoost + _eventTimeBoost(candidate.memory);
     // Superseded memory penalty
-    if (candidate.memory?.is_latest === false) score *= 0.55;
+    if (!temporalSnapshot && candidate.memory?.is_latest === false) score *= 0.55;
     // Stale-superseded penalty (>30d) + contradiction penalty (WS2 temporal).
-    if (candidate.memory?.is_latest === false && daysAgo > 30) score *= 0.70;
+    if (!temporalSnapshot && candidate.memory?.is_latest === false && daysAgo > 30) score *= 0.70;
     if (candidate.memory?.id) {
       score *= contradictionPenalty(contradictedIds.get(candidate.memory.id), _nowMs);
       score *= correctionWinnerBoost(correctionWinners.get(candidate.memory.id), _nowMs);
@@ -1749,7 +1894,7 @@ export async function recallPersistedMemories(store, {
         (_effectiveWeights.vector ?? 0.2) * (candidate.vectorScore || 0) +
         (_effectiveWeights.graph ?? 0.05) * graphScore +
         (_effectiveWeights.policy ?? 0.05) * policyScore + _eventTimeBoost(candidate.memory);
-    if (candidate.memory?.is_latest === false) score *= 0.55;
+    if (!temporalSnapshot && candidate.memory?.is_latest === false) score *= 0.55;
     if (candidate.memory?.id) {
       score *= contradictionPenalty(contradictedIds.get(candidate.memory.id), _nowMs);
       score *= correctionWinnerBoost(correctionWinners.get(candidate.memory.id), _nowMs);
@@ -1757,10 +1902,81 @@ export async function recallPersistedMemories(store, {
     return { ...candidate, keywordScore: candidate.similarityScore || 0, graphScore, policyScore, recencyScore, score };
   }).filter(c => c.memory?.id);
 
-  const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal).sort((a, b) => b.score - a.score);
+  // Score the Hop-0 entity-lane candidates and merge them DIRECTLY (same
+  // pattern as scoredTemporal). They carry no vector similarity — their claim
+  // to relevance is the deterministic entity match, applied as a BOUNDED boost
+  // (≤0.45) plus a small multi-entity coverage bonus (≤0.15). Semantic and
+  // lexical relevance still decide the final order: an entity match lifts a
+  // candidate into contention, it cannot override an on-topic result. All
+  // penalties (superseded/contradiction/attribution) apply identically.
+  const _hop0CoverageBoost = Math.min(0.15, (_entityHop0?.matchedQueryEntityCount || 0) * 0.05);
+  const scoredEntityHop0 = entityHop0Candidates.map(candidate => {
+    const now = Date.now();
+    const created = new Date(candidate.memory?.created_at).getTime();
+    const daysAgo = Number.isFinite(created) ? (now - created) / (1000 * 60 * 60 * 24) : 365;
+    const recencyScore = Math.exp(-daysAgo / 30);
+    const graphScore = Math.min((relationshipCounts.get(candidate.memory?.id) || 0) * 0.03, 0.12);
+    const policyScore = policyBoost(candidate.memory, { preferred_project, preferred_source_platforms, preferred_tags });
+    const entityBoost = Math.min(0.45, (candidate._entity_match_score || 0) * 0.45);
+    let score = (_effectiveWeights.recency ?? 0.15) * recencyScore +
+        (_effectiveWeights.importance ?? 0.1) * 1 +
+        (_effectiveWeights.graph ?? 0.05) * graphScore +
+        (_effectiveWeights.policy ?? 0.05) * policyScore +
+        entityBoost + _hop0CoverageBoost + _eventTimeBoost(candidate.memory);
+    if (!temporalSnapshot && candidate.memory?.is_latest === false) score *= 0.55;
+    if (candidate.memory?.id) {
+      score *= contradictionPenalty(contradictedIds.get(candidate.memory.id), _nowMs);
+      score *= correctionWinnerBoost(correctionWinners.get(candidate.memory.id), _nowMs);
+    }
+    // The deterministic entity match IS this candidate's lexical-relevance
+    // evidence. Carry it (scaled) as keyword/similarity signal so
+    // applyRecallRelevanceFloor's HARD_MIN_SIMILARITY (0.10) doesn't silently
+    // drop Hop-0-only candidates: exact match (0.5) clears every floor; a weak
+    // partial (0.15) clears only the hard floor and yields to strong semantic
+    // hits — entity matching boosts relevance, it does not override it.
+    const _lexEvidence = Math.max(0, Math.min(0.5, (candidate._entity_match_score || 0) * 0.5));
+    return { ...candidate, keywordScore: _lexEvidence, similarityScore: _lexEvidence, graphScore, policyScore, recencyScore, score };
+  }).filter(c => c.memory?.id);
 
-  // Apply memory_type boosting based on query intent (from code-review-graph's kind boosting)
-  const typeBoosts = detectMemoryTypeBoost(query_context);
+  const ranked = mergeCandidateLists(scoredLexical, enrichedVector, expandedCandidates, scoredTemporal, scoredEntityHop0)
+    // Deterministic ordering: score desc, then a STABLE id tie-break so equal
+    // scores never reorder run-to-run (the "sometimes works, sometimes not"
+    // non-determinism). Same input → same candidate order → same rerank window.
+    .sort((a, b) => (b.score - a.score) || String(a.memory?.id || a.id || '').localeCompare(String(b.memory?.id || b.id || '')));
+
+  // Rarity-weighted distinctive-token boost (hybrid lexical recall, flag-gated).
+  // ts_rank + vector similarity both reward the COMMON brand token (e.g. every
+  // "solvis" memory), drowning the RARE decisive token ("pia", "tim") that
+  // actually answers an entity-specific query — so "launch date of solvis pia"
+  // buried the PIA event under generic brand facts. This boosts candidates that
+  // carry the query's rare tokens, using in-set inverse doc-frequency (no extra
+  // DB query) + substring match (catches concatenated names like SolvisTim).
+  // Default OFF → no change.
+  if (process.env.HYBRID_LEXICAL_RECALL === 'true' && ranked.length > 1) {
+    const qToks = [...new Set(String(query_context || '').toLowerCase().split(/\s+/)
+      .map((w) => w.replace(/[^a-z0-9]/g, '')).filter((w) => w.length >= 3))];
+    if (qToks.length) {
+      const N = ranked.length;
+      const texts = ranked.map((c) => `${c.memory?.title || ''} ${c.memory?.content || ''}`.toLowerCase());
+      const df = {};
+      for (const t of qToks) df[t] = texts.filter((x) => x.includes(t)).length;
+      const weight = (t) => (df[t] > 0 ? Math.max(0, 1 - df[t] / N) : 0); // in every candidate → 0; rare → ~1
+      const ALPHA = Number(process.env.HYBRID_RARE_ALPHA || 0.6);
+      for (let i = 0; i < ranked.length; i += 1) {
+        let boost = 0;
+        for (const t of qToks) if (texts[i].includes(t)) boost += weight(t);
+        if (boost > 0) ranked[i].score = (Number(ranked[i].score) || 0) * (1 + ALPHA * boost);
+      }
+      ranked.sort((a, b) => b.score - a.score);
+    }
+  }
+
+  // Apply memory_type boosting based on query intent (from code-review-graph's kind boosting).
+  // GATED: only in the legacy non-structured path. Under the progressive router
+  // (structured_intent=true) this English-keyword detector is skipped — it double-boosted
+  // against the planner-driven, language-neutral boost_memory_type (≈×2.56, English-only)
+  // and produced different rankings per language. The planner signal is authoritative there.
+  const typeBoosts = structured_intent ? {} : detectMemoryTypeBoost(query_context);
   if (Object.keys(typeBoosts).length > 0) {
     for (const item of ranked) {
       const memType = item.memory?.memory_type || '';
@@ -1771,7 +1987,17 @@ export async function recallPersistedMemories(store, {
     ranked.sort((a, b) => b.score - a.score);
   }
 
-  const filtered = applyRecallRelevanceFloor(ranked, { temporalComparison });
+  let filtered = applyRecallRelevanceFloor(ranked, { temporalComparison, semanticRecovery: semantic_recovery });
+
+  // SCOPE ENFORCEMENT (universal, post-merge): the chat scope selector (personal/project/team)
+  // must actually restrict the delivered set. The per-lane checks (786/1618) run before some
+  // candidates carry .scope and are bypassed by the merge/rerank path, so enforce it once here
+  // on the fully-merged, scope-hydrated pool. Mirrors the per-lane rule (drop only a present,
+  // mismatched scope; keep scope-less rows). 'organization'/none is passed as null → no filter
+  // (everything the access_context already allows in the org).
+  if (scope_filter) {
+    filtered = filtered.filter((m) => matchesScopeFilter(m, scope_filter));
+  }
 
   // Filter out meta-facts from LLM extraction that describe the extraction process, not actual user facts
   const META_FACT_RE = /\b(the user (did not|provided|shared|mentioned|gave|is discussing|discussed|started a new topic|gave a|uploaded))\b/i;
@@ -1780,6 +2006,13 @@ export async function recallPersistedMemories(store, {
   const cleanFiltered = filtered.filter(item => {
     const content = item.content || item.memory?.content || '';
     const title = item.title || item.memory?.title || '';
+    // Exclude raw `promoted-from-segment` chunks — raw document sections promoted
+    // verbatim. They belong to the evidence layer, not memory. They leak into this
+    // HYBRID recall via the LEXICAL/FTS candidate path (which bypasses the Qdrant
+    // layer/tag filter) as multi-hundred-char raw dumps. Memory recall = distilled
+    // facts only. Source-agnostic chokepoint (covers lexical + vector + graph).
+    const _tags = item.tags || item.memory?.tags || [];
+    if (Array.isArray(_tags) && _tags.includes('promoted-from-segment')) return false;
     if (META_FACT_RE.test(content)) return false;
     // Filter facts that are just file/document references with no real content
     if (content.length < 40 && /\.(pdf|doc|txt|csv|xls)/i.test(content)) return false;
@@ -1836,14 +2069,6 @@ export async function recallPersistedMemories(store, {
     else if (role === 'bridge') mult *= 1.05;
     if (hubScore > 0) mult *= (1 + 0.10 * Math.min(1, hubScore));
     mult *= (0.85 + 0.15 * Math.max(0.1, Math.min(1.0, strength)));
-    // P2 salience: importance_score is the content-derived priority signal set
-    // at ingest (decision/lesson > fact > observation, ± user/LLM priority).
-    // Centered on 0.5 so legacy rows (default 0.5) stay neutral (×1.0); a 0.85
-    // decision lifts ×1.14, a 0.1 throwaway drops ×0.84. Until now this column
-    // was written but never consumed in ranking — this is the wire-up.
-    const importance = Number.isFinite(mem.importance_score) ? mem.importance_score
-      : (Number.isFinite(mem.importanceScore) ? mem.importanceScore : 0.5);
-    mult *= (0.80 + 0.40 * Math.max(0.1, Math.min(1.0, importance)));
     return { ...item, score: (item.score || 0) * mult };
   };
 
@@ -1962,7 +2187,8 @@ export async function recallPersistedMemories(store, {
     let result = items.map(item => {
       const tags = item.memory?.tags || item.tags || [];
       const isFactMemory = Array.isArray(tags) && tags.includes('extracted-fact');
-      const boosted = isFactMemory ? { ...item, score: (item.score || 0) * 1.15 } : item;
+      let boosted = isFactMemory ? { ...item, score: (item.score || 0) * 1.15 } : item;
+      boosted = applyExactSourceSummaryPenalty(boosted, exact_source);
       return applyWorkingSetBoost(applyEntityMatchBoost(applyClusterBoost(boosted)));
     });
 
@@ -1979,7 +2205,7 @@ export async function recallPersistedMemories(store, {
       });
     }
 
-    return result.sort((a, b) => (b.score || 0) - (a.score || 0));
+    return sortWithImportanceTiebreaker(result);
   };
 
   // Phase 1 cognition rework: query-aware synthesis gate.
@@ -2107,11 +2333,41 @@ export async function recallPersistedMemories(store, {
     const existingIds = new Set(boostedItems.map(item => (item.memory || item).id));
     for (const mem of withSuperseded) {
       if (!existingIds.has(mem.id || mem.memory_id)) {
-        finalItems = [...finalItems, { memory: mem, score: mem.score || 0 }];
+        const score = Number(mem.score) || 0;
+        finalItems = [...finalItems, {
+          memory: mem,
+          score: temporalSnapshot ? score : score * 0.55,
+          ...(!temporalSnapshot ? { _superseded_penalty: true } : {}),
+        }];
       }
     }
     // (Time-travel version timeline is built later from the DELIVERED memories —
     // after rerank/head-slot/slice — since the reranker reorders the set.)
+  }
+
+  const missingPromotionImportance = finalItems.filter((item) => {
+    const memory = item.memory || item;
+    const memoryTags = Array.isArray(memory.tags) ? memory.tags : [];
+    return memoryTags.includes('distilled-from-kb')
+      && !Number.isFinite(Number(memory.importance_score ?? memory.importanceScore));
+  });
+  const prismaMemory = store.client?.memory || store.prisma?.memory;
+  if (missingPromotionImportance.length && prismaMemory?.findMany) {
+    try {
+      const rows = await prismaMemory.findMany({
+        where: { id: { in: missingPromotionImportance.map((item) => (item.memory || item).id) } },
+        select: { id: true, importanceScore: true },
+      });
+      const importanceById = new Map(rows.map((row) => [row.id, row.importanceScore]));
+      finalItems = finalItems.map((item) => {
+        const memory = item.memory || item;
+        if (!importanceById.has(memory.id)) return item;
+        const hydrated = { ...memory, importance_score: importanceById.get(memory.id) };
+        return item.memory ? { ...item, memory: hydrated } : hydrated;
+      });
+    } catch (error) {
+      console.warn('[persisted-retrieval] promotion importance hydration failed:', error.message);
+    }
   }
 
   // Caller-opts-in audit pass-through (e.g. /v1/governance UI). Else drop.
@@ -2131,6 +2387,7 @@ export async function recallPersistedMemories(store, {
       // Drop hyper-room decisions from default recall — caller opts in.
       if (!callerWantsRoomDecisions
           && (tags.includes('room-decision') || tags.includes('hyper-rooms'))) return false;
+      if (!isDurableKbPromotionAdmitted(item.memory || item, Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65))) return false;
       return true;
     })
     .sort((a, b) => {
@@ -2145,7 +2402,8 @@ export async function recallPersistedMemories(store, {
         const dateB = new Date(b.memory?.document_date || b.document_date || b.memory?.created_at || b.created_at || 0);
         return dateB - dateA;
       }
-      return b.score - a.score; // default: score descending
+      // Deterministic: score desc + stable id tie-break (see merge-sort note above).
+      return (b.score - a.score) || String(a.memory?.id || a.id || '').localeCompare(String(b.memory?.id || b.id || ''));
     })
     // RERANK WINDOW — keep a wide window (not just the delivered top-N) so the
     // rerankers below can surface a relevant row buried by score (e.g. a cross-
@@ -2153,6 +2411,10 @@ export async function recallPersistedMemories(store, {
     // AFTER reranking. This was the structural bug: old code sliced to
     // max_memories here, so rerankers only reordered the already-cut top-N.
     .slice(0, Math.min(finalItems.length, Math.max(max_memories * 6, 50)));
+
+  if (sort !== 'date_asc' && sort !== 'date_desc') {
+    top = sortWithImportanceTiebreaker(top);
+  }
 
   // PHASE-B: tiered-view delivery reranking via the canonical algorithmic
   // ResultReranker (shared with three-tier-retrieval.js). Dark by default —
@@ -2190,6 +2452,7 @@ export async function recallPersistedMemories(store, {
   // so the Cohere reranker never fired on chat/recall/MCP despite the flag).
   // A per-call cross_rerank still overrides (true/false).
   const _crossRerank = cross_rerank != null ? !!cross_rerank : (process.env.RERANK_ENABLED === 'true');
+  let _crossReranked = false;
   if (_crossRerank && top.length > 1) {
     try {
       const crq = typeof query_context === 'string'
@@ -2200,8 +2463,22 @@ export async function recallPersistedMemories(store, {
         top.map((item) => ({ ...item, title: item.memory?.title ?? item.title, content: item.memory?.content ?? item.content })),
         { topN: top.length },
       );
-      if (Array.isArray(reranked) && reranked.length) top = reranked;
+      // The reranker returns the prior order on failure/disabled; only treat it
+      // as authoritative when it actually scored rows (rerank_score present).
+      if (Array.isArray(reranked) && reranked.length && reranked.some((r) => r.rerank_score != null)) {
+        top = reranked;
+        _crossReranked = true;
+      }
     } catch (e) { /* graceful degrade — keep current order */ }
+  }
+
+  // NULLIFICATION BUG (fixed): this tiebreaker's first step is a FULL re-sort by
+  // the old `.score`, which silently discarded the cross-encoder's ordering on
+  // every call — the Cohere rerank ran, paid its latency, and had zero effect.
+  // The cross-encoder order IS the final relevance order when it returns; the
+  // importance tiebreaker applies only when the cross-encoder didn't run.
+  if (!_crossReranked && sort !== 'date_asc' && sort !== 'date_desc') {
+    top = sortWithImportanceTiebreaker(top);
   }
 
   // Deliver-narrow: slice the reranked WINDOW down to the requested count now
@@ -2218,7 +2495,7 @@ export async function recallPersistedMemories(store, {
   const isDateSpecificQuery = sort === 'date_asc' || sort === 'date_desc'
     || DATE_SPECIFIC_RE.test(query_context || '');
 
-  if (!isDateSpecificQuery && top.length > 1) {
+  if (!exact_source && !isDateSpecificQuery && top.length > 1) {
     const synthIdx = top.findIndex(item => {
       const mem = item.memory || item;
       let srcType = mem.source_metadata?.source_type || mem.sourceMetadata?.sourceType || null;
@@ -2462,6 +2739,9 @@ export async function recallPersistedMemories(store, {
         vector: Array.isArray(vectorCandidates) ? vectorCandidates.length : 0,
         crosslingual: Array.isArray(crosslingualCandidates) ? crosslingualCandidates.length : 0,
         entity: Array.isArray(entityFilteredCandidates) ? entityFilteredCandidates.length : 0,
+        entity_hop0: entityHop0Candidates.length,
+        entity_hop0_matched: Array.isArray(_entityHop0?.matchedEntities) ? _entityHop0.matchedEntities.length : 0,
+        entity_hop0_ms: _entityHop0?.latencyMs || 0,
         temporal: Array.isArray(temporalFilteredCandidates) ? temporalFilteredCandidates.length : 0,
         graph_expanded: Array.isArray(expandedCandidates) ? expandedCandidates.length : 0,
       },

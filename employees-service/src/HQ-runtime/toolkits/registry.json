@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "scope": "hq_only",
+  "toolkits": [
+    {"id":"growth_baseline","authority":"read_or_internal","description":"Read retained company evidence or collect a targeted refresh."},
+    {"id":"growth_plan","authority":"internal","description":"Create or operate one evidence-backed Growth Stage and Work Order."},
+    {"id":"company_memory","authority":"read","description":"Retrieve selected company facts, policies, and prior decisions."},
+    {"id":"growth_journal","authority":"internal","description":"Read and append compact operating checkpoints."},
+    {"id":"work_orders","authority":"internal","description":"Delegate bounded specialist work and inspect result packets."},
+    {"id":"campaigns","authority":"governed_write","description":"Create, schedule, inspect, pause, or operate campaign actions."},
+    {"id":"zernio","authority":"governed_write","description":"Inspect connected social state and execute approved channel actions."},
+    {"id":"seo","authority":"read_or_internal","description":"Inspect website evidence and delegate prioritized SEO work."},
+    {"id":"leads","authority":"read_or_internal","description":"Read organization leads and persist newly verified prospects."},
+    {"id":"outreach","authority":"governed_write","description":"Prepare or execute approved outreach actions."},
+    {"id":"scheduling","authority":"internal","description":"Create durable HQ checkpoints and event-driven wakes."},
+    {"id":"governance","authority":"control","description":"Evaluate policy, approval, claim, spending, and external-write constraints."}
+  ]
+}

@@ -23,7 +23,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .agents.agentscope_factory import build_react_agent
 from .bootstrap_client import fetch_bootstrap
@@ -40,6 +40,10 @@ router = APIRouter(prefix="/v1/team-tasks", tags=["team-tasks"])
 
 # ── Request / response models ────────────────────────────────────
 class CreateTeamTaskRequest(BaseModel):
+    # P1 seam contract: forward-tolerant — silently ignore unknown fields from a newer
+    # caller (version skew never 400s), and accept an optional negotiated schema_version.
+    model_config = ConfigDict(extra="ignore")
+    schema_version: Optional[str] = None
     brief: str = Field(..., min_length=1, description="Task brief / question for the team")
     org_id: str = Field(..., description="UUID of the owning organization")
     team_id: Optional[str] = Field(None, description="Optional UUID of the team scope")

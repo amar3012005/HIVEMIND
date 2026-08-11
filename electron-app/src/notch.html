@@ -1,0 +1,286 @@
+<meta charset="utf-8" />
+<title>SINGULANCE Notch</title>
+<style>
+  /* The window itself is transparent; everything visual is drawn here so the
+     collapsed state can blend into the physical notch (pure black) and the
+     expanded state can float as glass under it. */
+  :root {
+    --accent: #117dff;
+    --glass: rgba(17, 17, 20, 0.72);
+    --hair: rgba(255, 255, 255, 0.09);
+    --text: #f4f4f5;
+    --muted: #8b8b93;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-user-select: none; }
+  html, body {
+    width: 100%; height: 100%; background: transparent; overflow: hidden;
+    font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    color: var(--text); cursor: default;
+  }
+  body { display: flex; justify-content: center; align-items: flex-start; }
+
+  /* ── Collapsed: a pill that reads as part of the notch ───────────────── */
+  #pill {
+    width: 210px; height: 34px; background: #000;
+    border-radius: 0 0 17px 17px;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    transition: opacity 160ms var(--ease);
+  }
+  #pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  #pill .word { font-size: 10px; letter-spacing: 0.16em; font-weight: 600; color: #d4d4d8; text-transform: uppercase; }
+  body.open #pill { display: none; }
+
+  /* ── Expanded: glass panel hanging off the top edge ──────────────────── */
+  #panel {
+    display: none; width: 720px; height: 470px;
+    background: var(--glass);
+    -webkit-backdrop-filter: blur(28px) saturate(160%);
+    backdrop-filter: blur(28px) saturate(160%);
+    border: 1px solid var(--hair); border-top: none;
+    border-radius: 0 0 26px 26px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+    padding: 14px 18px 18px;
+    flex-direction: column; gap: 12px;
+    animation: drop 220ms var(--ease);
+  }
+  body.open #panel { display: flex; }
+  @keyframes drop { from { transform: translateY(-14px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+  header { display: flex; align-items: center; gap: 10px; padding: 2px 2px 0; }
+  header .mark { font-size: 12px; font-weight: 700; letter-spacing: 0.14em; }
+  header .sub { font-size: 11px; color: var(--muted); }
+  header .spacer { flex: 1; }
+  #status { font-size: 11px; color: var(--muted); transition: color 160ms; max-width: 300px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status.ok { color: #4ade80; } #status.err { color: #f87171; } #status.busy { color: var(--accent); }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; flex: 1; min-height: 0; }
+
+  .card {
+    background: rgba(255, 255, 255, 0.045); border: 1px solid var(--hair);
+    border-radius: 16px; padding: 13px 14px; display: flex; flex-direction: column; gap: 9px;
+    transition: border-color 160ms var(--ease), background 160ms var(--ease), transform 160ms var(--ease);
+  }
+  .card:hover { border-color: rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.06); }
+  .card h3 { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #d4d4d8; display: flex; align-items: center; gap: 7px; }
+  .card h3 svg { opacity: 0.85; }
+  .card p { font-size: 11px; color: var(--muted); line-height: 1.45; }
+
+  /* Capture spans the full width — it is the thing used most. */
+  .card.capture { grid-column: 1 / -1; }
+  textarea {
+    flex: 1; min-height: 84px; resize: none; background: rgba(0, 0, 0, 0.28);
+    border: 1px solid var(--hair); border-radius: 11px; padding: 10px 12px;
+    color: var(--text); font: inherit; font-size: 13px; line-height: 1.5;
+    -webkit-user-select: text; outline: none; transition: border-color 160ms;
+  }
+  textarea:focus { border-color: rgba(17, 125, 255, 0.55); }
+  textarea::placeholder { color: #6b6b73; }
+
+  .actions { display: flex; align-items: center; gap: 8px; }
+  button {
+    font: inherit; font-size: 12px; font-weight: 600; border-radius: 9px; padding: 7px 13px;
+    border: 1px solid var(--hair); background: rgba(255, 255, 255, 0.06); color: var(--text);
+    cursor: pointer; transition: background 140ms, border-color 140ms, transform 100ms;
+  }
+  button:hover { background: rgba(255, 255, 255, 0.11); border-color: rgba(255, 255, 255, 0.2); }
+  button:active { transform: scale(0.97); }
+  button.primary { background: var(--accent); border-color: transparent; color: #fff; }
+  button.primary:hover { background: #2f8dff; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .hint { font-size: 10px; color: #6b6b73; margin-left: auto; }
+
+  /* Drop target — the whole panel accepts files, this card is the affordance. */
+  .drop { flex: 1; border: 1.5px dashed rgba(255, 255, 255, 0.16); border-radius: 12px;
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          gap: 5px; color: var(--muted); font-size: 11px; text-align: center; padding: 8px;
+          transition: border-color 160ms, background 160ms, color 160ms; }
+  body.dragging .drop { border-color: var(--accent); background: rgba(17, 125, 255, 0.12); color: #cfe3ff; }
+  body.dragging .card.kb { border-color: rgba(17, 125, 255, 0.5); }
+
+  ul#jobs { list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 62px; overflow-y: auto; }
+  ul#jobs li { font-size: 10.5px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  ul#jobs li .s { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; }
+  ul#jobs li.done .s { background: #4ade80; } ul#jobs li.fail .s { background: #f87171; }
+  ul#jobs li span.n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+
+<div id="pill"><span class="dot"></span><span class="word">SINGULANCE</span></div>
+
+<div id="panel">
+  <header>
+    <span class="mark">SINGULANCE</span>
+    <span class="sub">· quick actions</span>
+    <span class="spacer"></span>
+    <span id="status">Hover to open · click to pin</span>
+  </header>
+
+  <div class="row">
+    <div class="card capture">
+      <h3>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        Capture a thought
+      </h3>
+      <textarea id="note" placeholder="Type anything — it becomes a durable memory, searchable everywhere."></textarea>
+      <div class="actions">
+        <button class="primary" id="save">Save to memory</button>
+        <button id="openMem">Open memories</button>
+        <span class="hint">⌘↵ to save</span>
+      </div>
+    </div>
+
+    <div class="card kb">
+      <h3>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5-5 5 5"/><path d="M12 5v12"/></svg>
+        Knowledge base
+      </h3>
+      <div class="drop" id="drop">
+        <strong style="font-size:11.5px;color:#d4d4d8">Drop files anywhere</strong>
+        <span>PDF, docs, images, audio — parsed, chunked and indexed</span>
+      </div>
+      <div class="actions"><button id="pick">Choose files…</button></div>
+      <ul id="jobs"></ul>
+    </div>
+
+    <div class="card">
+      <h3>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v4"/></svg>
+        AI meeting notes
+      </h3>
+      <p>Record a meeting and get sectioned notes, decisions and action items — grounded in what HIVEMIND already knows.</p>
+      <div class="actions">
+        <button class="primary" id="meet">Start a meeting</button>
+        <button id="meetAll">All meetings</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const body = document.body;
+  let pinned = false;
+  let hoverIn = false;
+
+  const setStatus = (msg, cls = '') => { const s = $('status'); s.textContent = msg; s.className = cls; };
+
+  // Hover opens, click pins. The main process owns the actual window resize;
+  // this only reports intent so the two never disagree about the size.
+  const open = (v) => {
+    if (v === false && pinned) return;
+    body.classList.toggle('open', v);
+    window.notch.setExpanded(v);
+  };
+  document.addEventListener('mouseenter', () => { hoverIn = true; open(true); }, true);
+  window.addEventListener('mouseover', () => { if (!hoverIn) { hoverIn = true; open(true); } });
+  window.addEventListener('mouseout', (e) => {
+    if (e.relatedTarget) return;       // still inside the panel
+    hoverIn = false;
+    if (!pinned) open(false);
+  });
+  $('pill').addEventListener('click', () => { pinned = true; open(true); setStatus('Pinned — click outside to release'); });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { pinned = false; open(false); }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') save();
+  });
+
+  // ── Capture ──────────────────────────────────────────────────────────────
+  async function save() {
+    const text = $('note').value.trim();
+    if (!text) { setStatus('Nothing to save', 'err'); return; }
+    $('save').disabled = true;
+    setStatus('Saving…', 'busy');
+    try {
+      await window.notch.capture(text);
+      $('note').value = '';
+      setStatus('Saved to memory', 'ok');
+    } catch (err) {
+      setStatus(String(err.message || err).slice(0, 90), 'err');
+    } finally {
+      $('save').disabled = false;
+    }
+  }
+  $('save').addEventListener('click', save);
+  $('openMem').addEventListener('click', () => window.notch.open('/hivemind/app/memories'));
+  $('meet').addEventListener('click', () => window.notch.open('/hivemind/app/meetings?record=1'));
+  $('meetAll').addEventListener('click', () => window.notch.open('/hivemind/app/meetings'));
+
+  // ── Knowledge base uploads ───────────────────────────────────────────────
+  const jobs = $('jobs');
+  function addJob(name) {
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="s"></span><span class="n"></span>';
+    li.querySelector('.n').textContent = name + ' · uploading';
+    jobs.prepend(li);
+    while (jobs.children.length > 6) jobs.lastChild.remove();
+    return li;
+  }
+  // Poll a real job rather than showing a spinner that lies about progress.
+  function track(li, name, jobId) {
+    if (!jobId) { li.classList.add('done'); li.querySelector('.n').textContent = name + ' · queued'; return; }
+    const started = Date.now();
+    const tick = async () => {
+      if (Date.now() - started > 10 * 60_000) return;
+      try {
+        const st = await window.notch.jobStatus(jobId);
+        const s = String((st && (st.status || st.state)) || '').toLowerCase();
+        if (['ready', 'done', 'completed', 'indexed'].includes(s)) {
+          li.classList.add('done'); li.querySelector('.n').textContent = name + ' · in knowledge base'; return;
+        }
+        if (['failed', 'dead', 'error'].includes(s)) {
+          li.classList.add('fail'); li.querySelector('.n').textContent = name + ' · failed'; return;
+        }
+        li.querySelector('.n').textContent = name + ' · ' + (s || 'processing');
+      } catch (_) { /* transient — keep polling */ }
+      setTimeout(tick, 2500);
+    };
+    setTimeout(tick, 2000);
+  }
+
+  async function send(paths) {
+    if (!paths.length) return;
+    setStatus(`Uploading ${paths.length} file${paths.length === 1 ? '' : 's'}…`, 'busy');
+    const lis = paths.map((p) => addJob(p.split('/').pop()));
+    try {
+      const res = await window.notch.upload(paths, 'personal');
+      (res.results || []).forEach((r, i) => {
+        const li = lis[i];
+        if (!li) return;
+        if (r.ok) track(li, r.name, r.jobId);
+        else { li.classList.add('fail'); li.querySelector('.n').textContent = r.name + ' · ' + (r.error || 'failed'); }
+      });
+      setStatus(res.ok ? 'Upload started' : 'Upload failed', res.ok ? 'ok' : 'err');
+    } catch (err) {
+      lis.forEach((li) => li.classList.add('fail'));
+      setStatus(String(err.message || err).slice(0, 90), 'err');
+    }
+  }
+
+  $('pick').addEventListener('click', async () => {
+    pinned = true;                     // the OS dialog steals focus; stay open
+    setStatus('Choosing files…', 'busy');
+    try {
+      const res = await window.notch.upload([], 'personal');
+      if (res.cancelled) { setStatus('Cancelled'); return; }
+      (res.results || []).forEach((r) => {
+        const li = addJob(r.name);
+        if (r.ok) track(li, r.name, r.jobId);
+        else { li.classList.add('fail'); li.querySelector('.n').textContent = r.name + ' · ' + (r.error || 'failed'); }
+      });
+      setStatus(res.ok ? 'Upload started' : 'Upload failed', res.ok ? 'ok' : 'err');
+    } catch (err) { setStatus(String(err.message || err).slice(0, 90), 'err'); }
+  });
+
+  ['dragenter', 'dragover'].forEach((ev) => window.addEventListener(ev, (e) => {
+    e.preventDefault(); pinned = true; open(true); body.classList.add('dragging');
+  }));
+  ['dragleave', 'drop'].forEach((ev) => window.addEventListener(ev, (e) => {
+    e.preventDefault(); if (ev === 'dragleave' && e.relatedTarget) return; body.classList.remove('dragging');
+  }));
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const paths = [...(e.dataTransfer?.files || [])].map((f) => window.notch.pathForFile(f)).filter(Boolean);
+    if (paths.length) send(paths); else setStatus('Could not read that file', 'err');
+  });
+</script>

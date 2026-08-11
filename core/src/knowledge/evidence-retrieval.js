@@ -9,11 +9,171 @@
  */
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
+import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
+
+export function fuseRemoteEvidenceHits(vectorHits = [], lexicalHits = [], { rankConstant = 60 } = {}) {
+  const byId = new Map();
+  const add = (hit, lane, rank) => {
+    const id = hit?.segment_id || hit?.segmentId || hit?.id;
+    if (!id) return;
+    const current = byId.get(id) || { ...hit, segment_id: id, _rrf: 0 };
+    current._rrf += 1 / (rankConstant + rank);
+    if (lane === 'semantic') {
+      current._semantic = true;
+      current.semantic_score = Number(hit.score) || 0;
+    } else {
+      current._lexical = true;
+      current.lexical_score = Number(hit.score) || 0;
+    }
+    byId.set(id, current);
+  };
+  vectorHits.forEach((hit, index) => add(hit, 'semantic', index + 1));
+  lexicalHits.forEach((hit, index) => add(hit, 'lexical', index + 1));
+  const maxFusion = 2 / (rankConstant + 1);
+  return [...byId.values()].map(({ _rrf, ...hit }) => ({
+    ...hit,
+    score: Number((_rrf / maxFusion).toFixed(6)),
+    fusion_score: Number((_rrf / maxFusion).toFixed(6)),
+  })).sort((left, right) => right.score - left.score);
+}
+
+/**
+ * Which SCOPE TIER does a document belong to, for display?
+ *
+ * `_accessibleDocumentWhere` below decides who MAY see a document. This answers the
+ * separate question the chat needs: which tier did this answer come FROM, so the UI can
+ * render "(memory found in <scope>)". Chat used to report scopes for the memory lane
+ * only, so an answer built purely from uploaded documents — exactly what a KB question
+ * hits — showed no provenance chip at all, even though the document carries the tag.
+ *
+ * Reuses the tag forms `_accessibleDocumentWhere` already matches, including the
+ * `scope-key:org:<uuid>` / legacy `scope-key:organization` pair. The upload writer emits
+ * exactly ONE scopeKey per document (scopeType is single-valued in
+ * upload-authorization.js), so this checks narrow→wide and takes the first match rather
+ * than trying to merge tiers.
+ *
+ * Untagged ⇒ 'personal'. That is not a guess: untagged documents are owner-only in
+ * `_accessibleDocumentWhere`'s bare `{ userId }` arm, so personal is what they ARE.
+ */
+export function documentScopeFromTags(tags, { orgId } = {}) {
+  const t = Array.isArray(tags) ? tags : [];
+  if (!t.length) return { scope: 'personal', projectId: null };
+  const find = (prefix) => t.find((x) => typeof x === 'string' && x.startsWith(prefix));
+  if (find('scope-key:personal:')) return { scope: 'personal', projectId: null };
+  const proj = find('scope-key:project:');
+  if (proj) return { scope: 'project', projectId: proj.slice('scope-key:project:'.length) || null };
+  if (find('scope-key:team:')) return { scope: 'team', projectId: null };
+  if (t.includes(`scope-key:org:${orgId}`) || t.includes('scope-key:organization')) {
+    return { scope: 'organization', projectId: null };
+  }
+  // Carries tags, but none of them a scope-key — same owner-only reality as untagged.
+  return { scope: 'personal', projectId: null };
+}
 
 export class EvidenceRetrievalService {
   constructor({ db, qdrantClient }) {
     this.db = db;
     this.qdrantClient = qdrantClient;
+  }
+
+  /**
+   * Order a DEPTH-sized pool and hand back a WIDE slice for the delivery-point
+   * cross-encoder to arbitrate. Local only — no network.
+   *
+   * The cross-encoder deliberately does NOT run here. Measured: calling it per-lane
+   * cost +902ms on a warm query (77ms -> 979ms) because `rerank` is a remote call
+   * that does not cache — and the router already reranks, so a lane-level pass makes
+   * TWO remote calls per query. ONE pass at the delivery point over memories ∪
+   * segments (deliverUnifiedV2) gets the same accuracy for one call, and is the only
+   * place the two lanes can actually be compared against each other.
+   *
+   * `deliver` is therefore a WIDE hand-off (~40), not the user-visible count; the
+   * delivery point narrows to HOP2_DOC_LIMIT after ranking.
+   */
+  /**
+   * Which DOCUMENTS may this caller see? Segments carry no scope of their own —
+   * knowledge_segments has only document_id/user_id/org_id — so scope is enforced by
+   * joining to the document, where it lives in `tags` as `scope-key:*` (written as
+   * scopeKey by knowledge/upload-authorization.js).
+   *
+   * Replaces a blanket `userId` filter that made a COLLEAGUE'S ORG-SHARED UPLOAD
+   * INVISIBLE: an org knowledge base that only ever returned your own documents.
+   * Retrieval is now org-wide in Qdrant and authoritatively scoped here, in Postgres,
+   * before anything is returned.
+   *
+   * Untagged documents (verified: 21 of 100 carry no scope-key) fall to OWNER-ONLY via
+   * the bare `{ userId }` arm — identical to the previous behaviour, so nothing that
+   * used to be visible disappears, and an unknown scope is never published.
+   *
+   * Mirrors the accessibleDocument shape in agent/tool-registry.js rather than adding a
+   * second scope implementation.
+   */
+  _accessibleDocumentWhere({ userId, orgId, projectId = null, accessContext = null, scopeFilter = null }) {
+    const base = { orgId, archivedAt: null };
+    const projectTags = (accessContext?.projectIds || []).map((id) => `scope-key:project:${id}`);
+    const teamTags = (accessContext?.teamIds || []).map((id) => `scope-key:team:${id}`);
+    // THE UPLOAD WRITER EMITS `scope-key:org:<orgId>`, NOT `scope-key:organization`.
+    // Verified on a real upload with targetScope=organization, whose tags are
+    // {..., scope-key:org:1380251c-f707-4aee-98a4-dd93b63b4a00, ...}. Matching only the
+    // bare literal meant every org-shared document fell through to the owner-only branch:
+    // a colleague could not see it at all, so org-wide sharing did not work — and under a
+    // `personal` lens the NOT-guard below missed the real tag, so the owner saw their own
+    // org document labelled personal. Both forms are accepted here, which is exactly what
+    // appendDocumentAccess on the .amr agent already does (`scope-key:org:${ORG}` OR the
+    // legacy `scope-key:organization`), so central and remote now answer identically.
+    const orgTags = [`scope-key:org:${orgId}`, 'scope-key:organization'];
+
+    // An EXPLICIT lens NARROWS — it never widens. Mirrors matchesScopeFilter on the
+    // memory side (persisted-retrieval.js), which does an exact scope equality check,
+    // so both lanes answer the same question for the same request. Without this an
+    // ?scope=personal question kept org documents in the evidence half of the answer.
+    if (scopeFilter === 'organization') return { ...base, tags: { hasSome: orgTags } };
+    if (scopeFilter === 'project') {
+      const tags = projectId ? [`scope-key:project:${projectId}`] : projectTags;
+      // No project in scope + a project lens = nothing is in scope. Fail closed rather
+      // than silently falling back to everything the caller can see.
+      return { ...base, tags: { hasSome: tags.length ? tags : ['scope-key:project:__none__'] } };
+    }
+    if (scopeFilter === 'team') {
+      return { ...base, tags: { hasSome: teamTags.length ? teamTags : ['scope-key:team:__none__'] } };
+    }
+    if (scopeFilter === 'personal') {
+      // Owned by the caller, or explicitly tagged personal to them. Untagged documents
+      // are owner-only elsewhere, so they belong here and nowhere else.
+      //
+      // The owner branch must exclude every NON-personal scope, not just the org one.
+      // Excluding orgTags alone let the caller's OWN project documents through: a
+      // project document carries `scope-key:project:<id>` and no org tag, so
+      // `NOT hasSome(orgTags)` was true and `userId` matched the uploader. Measured
+      // live against /api/evidence/search with scope=personal: 8 results, 4 of them
+      // project-scoped — the lens returned exactly what it exists to exclude.
+      // projectTags/teamTags come from the caller's own accessContext, which is the
+      // only set that could leak into their view in the first place.
+      const nonPersonalTags = [...orgTags, ...projectTags, ...teamTags];
+      return { ...base, OR: [
+        { tags: { has: `scope-key:personal:${userId}` } },
+        { AND: [{ userId }, { NOT: { tags: { hasSome: nonPersonalTags } } }] },
+      ] };
+    }
+    if (scopeFilter) console.warn(`[EvidenceRetrieval] unknown scopeFilter '${scopeFilter}' — using full accessible set`);
+
+    if (projectId) return { ...base, tags: { has: `scope-key:project:${projectId}` } };
+    return {
+      ...base,
+      OR: [
+        { userId },                                              // own uploads + untagged
+        { tags: { hasSome: orgTags } },
+        { tags: { has: `scope-key:personal:${userId}` } },
+        ...(projectTags.length ? [{ tags: { hasSome: projectTags } }] : []),
+        ...(teamTags.length ? [{ tags: { hasSome: teamTags } }] : []),
+      ],
+    };
+  }
+
+  _orderAndSlice(candidates, deliver) {
+    return candidates
+      .sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0))
+      .slice(0, deliver);
   }
 
   /**
@@ -28,6 +188,20 @@ export class EvidenceRetrievalService {
    */
   async retrieveEvidence({
     query, userId, orgId, limit = 10,
+    // DEPTH vs DELIVER. One `limit` used to do BOTH jobs — it sized the Qdrant
+    // over-fetch AND the returned slice — so production's limit:6 handed the
+    // cross-encoder 12 candidates while RERANK_POOL=150 sat unused. Measured on
+    // org 1380251c: pool recall 1->6, 2->11, 0->8 going from depth 5 to 300, and
+    // small-detail answerability 3/5 -> 5/5. `limit` remains an alias for both so
+    // no existing caller changes behaviour.
+    depth = null,
+    deliver = null,
+    projectId = null,         // scope: pin to one project when the caller has one
+    accessContext = null,     // scope: { projectIds, teamIds, orgRole } from the session
+    scopeFilter = null,       // scope: an EXPLICIT lens the caller asked for
+                              // (personal|project|team|organization). Memories enforce
+                              // this via matchesScopeFilter; evidence must too, or a
+                              // personal-scoped question answers from org documents.
     documentId = null,        // legacy single-doc filter (kept for backwards compat)
     documentIds = null,       // NEW: multi-doc filter — used by RecallRouter for tag-anchored evidence
     scoreThreshold = null,    // override default 0.5; lower for doc-filtered search where we want most chunks
@@ -37,6 +211,8 @@ export class EvidenceRetrievalService {
     const collectionName = PER_TENANT
       ? await resolveCollectionForOrg(orgId)
       : (process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence');
+    const _depth = Math.max(1, Number(depth ?? limit) || 10);
+    const _deliver = Math.max(1, Number(deliver ?? limit) || 10);
     const docIdSet = Array.isArray(documentIds) && documentIds.length
       ? [...new Set(documentIds.filter(Boolean))]
       : (documentId ? [documentId] : null);
@@ -45,9 +221,76 @@ export class EvidenceRetrievalService {
     // segments (Qdrant cosine on filename-style queries can score below 0.5).
     const effectiveThreshold = scoreThreshold != null
       ? scoreThreshold
-      : (docIdSet ? 0.2 : 0.5);
+      : (docIdSet ? 0.2 : Number(process.env.EVIDENCE_SCORE_FLOOR ?? 0.05));
 
     try {
+      // Remote (self-host) orgs: KB evidence lives on the agent — no central Qdrant or DB access.
+      if (orgIsRemote(orgId)) {
+        const access = { userId, projectId, accessContext, scopeFilter };
+        // Documents scope only -- access travels as its own explicit option to both calls
+        // below (both bridges now accept it that way), not nested inside this object. It
+        // used to be bundled into `filter` for both lanes; that happened to match how
+        // kb-lexical's server route read it, but kb-recall's took access as a named opt, so
+        // the two calls were relying on two different, undocumented shapes of the same object.
+        const filter = {
+          documentId: docIdSet && docIdSet.length === 1 ? docIdSet[0] : undefined,
+          documentIds: docIdSet && docIdSet.length > 1 ? docIdSet : undefined,
+        };
+        // Exact terms and embeddings are complementary. Start the lexical lane
+        // immediately so a part number still returns when embedding is unavailable.
+        const lexicalPromise = amrKbLexicalRemote(orgId, query, { filter, limit: _depth, access });
+        const queryVector = await this.qdrantClient.generateEmbedding(query);
+        const vectorPromise = queryVector
+          ? amrKbRecall(orgId, queryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold, access })
+          : Promise.resolve([]);
+        const [vectorHits, lexicalHits] = await Promise.all([vectorPromise, lexicalPromise]);
+        // null (not []) means the lane FAILED rather than matched nothing — see
+        // remote-backend.js. Say which lane is missing, because a half-working remote agent
+        // returns plausible answers with a whole retrieval mode silently absent, and that is
+        // indistinguishable from a small corpus unless we log it here.
+        if (vectorHits === null || lexicalHits === null) {
+          console.warn(`[EvidenceRetrieval] REMOTE LANE DOWN org=${orgId}: `
+            + `${vectorHits === null ? 'vector ' : ''}${lexicalHits === null ? 'lexical ' : ''}`
+            + `unavailable — this answer is built from the remaining lane only, so recall is `
+            + `degraded, NOT empty. Check the .amr agent build (is it in sync with byod/?).`);
+        }
+        const hits = fuseRemoteEvidenceHits(vectorHits || [], lexicalHits || []);
+        if (!hits.length) return [];
+        const hydrated = await amrKbHydrate(orgId, hits.map((h) => h.segment_id), access);
+        // Build a score lookup from the merged vector and lexical hits.
+        const hydrateMap = new Map((hydrated || []).map((s) => [s.id, s]));
+        const remoteResults = hits
+          .map((h) => {
+            const s = hydrateMap.get(h.segment_id);
+            if (!s) return null;
+            // Filter by docIdSet when multiple docs requested (agent-side only filtered single-doc).
+            if (docIdSet && docIdSet.length > 1 && !docIdSet.includes(s.document_id)) return null;
+            return {
+              type: 'evidence_segment',
+              segmentId: s.id,
+              documentId: s.document_id,
+              content: s.content,
+              snippet: this._extractSnippet(s.content, query),
+              score: h.score,
+              fusion_score: h.fusion_score,
+              semantic_score: h.semantic_score ?? null,
+              lexical_score: h.lexical_score ?? null,
+              ...(h._semantic ? { _semantic: true } : {}),
+              ...(h._lexical ? { _lexical: true } : {}),
+              document: { id: s.document_id, title: s.title || h.title || null },
+              metadata: {
+                segmentType: s.segment_type,
+                segmentIndex: s.segment_index,
+                wordCount: s.word_count ?? h.word_count ?? null,
+                startPage: s.start_page ?? h.start_page ?? null,
+                endPage: s.end_page ?? h.end_page ?? null,
+              },
+            };
+          })
+          .filter(Boolean);
+        return this._orderAndSlice(remoteResults, _deliver);
+      }
+
       // Step 1: Vector search in evidence collection.
       // Multi-doc filter uses Qdrant's `match.any` array, single uses
       // `match.value`. Falls back to no doc filter when docIdSet null.
@@ -62,12 +305,14 @@ export class EvidenceRetrievalService {
         query,
         filter: {
           must: [
-            { key: 'user_id', match: { value: userId } },
+            // NO user_id here. Scope is enforced authoritatively in the Postgres
+            // hydrate below (_accessibleDocumentWhere) — a payload-level user filter
+            // could only ever express "mine", which hid org-shared documents.
             { key: 'org_id', match: { value: orgId } },
             ...docFilter,
           ]
         },
-        limit: limit * 2, // Over-fetch for reranking
+        limit: _depth, // retrieval DEPTH — the cross-encoder narrows to `deliver`
         // searchMemories destructures `score_threshold` (snake) — passing
         // camelCase silently dropped the computed threshold (fell back to 0.15).
         score_threshold: effectiveThreshold,
@@ -81,8 +326,10 @@ export class EvidenceRetrievalService {
       const segments = await this.db.knowledgeSegment.findMany({
         where: {
           id: { in: segmentIds },
-          userId,
-          orgId
+          orgId,
+          document: docIdSet
+            ? { archivedAt: null }
+            : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
         },
         include: {
           document: {
@@ -92,7 +339,10 @@ export class EvidenceRetrievalService {
               documentType: true,
               sourcePlatform: true,
               sourceUrl: true,
-              documentDate: true
+              documentDate: true,
+              // Scope lives ONLY in tags (segments have no scope column), so without
+              // this the delivered evidence could not say which tier answered.
+              tags: true
             }
           }
         }
@@ -101,7 +351,12 @@ export class EvidenceRetrievalService {
       // Step 3: Merge with vector scores and format
       const segmentMap = new Map(segments.map(s => [s.id, s]));
       
-      const fmt = (segment, score, lexical = false) => ({
+      const fmt = (segment, score, lexical = false) => {
+        // Derive the tier BEFORE dropping tags: the chip needs the scope, the client does
+        // not need the raw tag list (it would grow every citation payload for no gain).
+        const { tags: _docTags, ...documentPublic } = segment.document || {};
+        const { scope: _scope, projectId: _scopeProjectId } = documentScopeFromTags(_docTags, { orgId });
+        return {
         type: 'evidence_segment',
         segmentId: segment.id,
         documentId: segment.documentId,
@@ -109,15 +364,29 @@ export class EvidenceRetrievalService {
         snippet: this._extractSnippet(segment.content, query),
         score,
         ...(lexical ? { _lexical: true } : {}),
-        document: segment.document,
+        document: documentPublic,
+        // Which tier this evidence came from, so chat can report provenance for
+        // upload-answered turns the same way it already does for memories.
+        scope: _scope,
+        project_id: _scopeProjectId,
         metadata: {
           segmentType: segment.segmentType,
           segmentIndex: segment.segmentIndex,
           wordCount: segment.wordCount,
           startPage: segment.startPage,
           endPage: segment.endPage,
+          // heading + heading_path were WRITTEN to knowledge_segments and then dropped
+          // HERE — this formatter built a fresh object and never forwarded the segment's
+          // own metadata. So the metadata-aware segmentation paid off for pages and
+          // segment_type (both forwarded above) and ZERO for headings: a citation could
+          // say "page 3" but never "1. Gesellschaftliche Gründe > Lebensqualität".
+          // 674 of 3137 segments carry a heading_path today and none of it reached recall.
+          heading: segment.metadata?.heading ?? null,
+          heading_path: segment.metadata?.heading_path ?? null,
+          depth: segment.depth ?? null,
         },
-      });
+        };
+      };
 
       const results = vectorResults
         .map(vr => {
@@ -140,12 +409,29 @@ export class EvidenceRetrievalService {
       // its slots with OTHER segments — the count is fine, the right segment is
       // just missing. Lexical hits merge in, get re-ranked, and slice keeps top-N.
       {
-        const lexTokens = [...new Set(
+        const allQueryTokens = [...new Set(
           String(query || '')
             .split(/[^\p{L}\p{N}§°]+/u)
             .map(t => t.trim())
-            .filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^[A-ZÄÖÜ]/.test(t)))
-        )].slice(0, 8);
+            .filter(t => t.length >= 3)
+        )];
+        // A hard document filter makes a bounded lexical pass safe and cheap.
+        // Use every query token there so lowercase details work in any language;
+        // retain the narrower legacy lane for an unscoped corpus search.
+        const _baseTokens = (docIdSet
+          ? allQueryTokens
+          : allQueryTokens.filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^\p{Lu}/u.test(t))));
+        // Hybrid lexical (flag-gated, parallel with vector): add collapsed
+        // adjacent-token forms so concatenated product names ("solvis tim" →
+        // "solvistim") match as a WHOLE substring in evidence too — the same
+        // wide-retrieve lane the memory path uses. Coverage scoring below is the
+        // narrow score. Default off → token set unchanged.
+        const _collapsed = [];
+        if (process.env.HYBRID_LEXICAL_RECALL === 'true') {
+          const t = allQueryTokens.map(x => x.toLowerCase());
+          for (let i = 0; i + 1 < t.length; i += 1) { const j = t[i] + t[i + 1]; if (j.length >= 6) _collapsed.push(j); }
+        }
+        const lexTokens = [...new Set([..._baseTokens, ..._collapsed])].slice(0, 16);
         if (lexTokens.length) {
           try {
             // Scope the lexical pass to the SAME docs as the vector pass when a
@@ -155,25 +441,49 @@ export class EvidenceRetrievalService {
             // always; by docIdSet when the caller scoped to specific docs.
             const lexSegments = await this.db.knowledgeSegment.findMany({
               where: {
-                userId,
                 orgId,
+                // same authoritative scope gate as the vector hydrate — one helper,
+                // not a second implementation that can drift from it
+                document: docIdSet
+                  ? { archivedAt: null }
+                  : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
                 ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
                 OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
               },
               include: {
-                document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true } },
+                document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true } },
               },
-              take: limit * 2,
+              take: Math.min(docIdSet ? _depth * 2 : _depth, 200),
             });
             for (const segment of lexSegments) {
-              if (haveIds.has(segment.id)) continue;
               // Score by DISTINCT query-token overlap: a segment containing more
               // of the query's distinctive tokens (e.g. both "1KOMMA5" AND "Enpal")
               // is a stronger literal match → must outrank doc-scoped vector hits
               // and survive the top-N slice. 1 token ≈ 0.6, scaling up to ~0.9.
               const lc = String(segment.content || '').toLowerCase();
-              const matches = lexTokens.filter((t) => lc.includes(t.toLowerCase())).length;
-              results.push(fmt(segment, Math.min(0.9, 0.55 + 0.13 * matches), true));
+              const matched = lexTokens.filter((t) => lc.includes(t.toLowerCase()));
+              const coverage = matched.length / Math.max(1, lexTokens.length);
+              const orderedPairs = lexTokens.slice(0, -1).filter((token, index) =>
+                lc.includes(`${token.toLowerCase()} ${lexTokens[index + 1].toLowerCase()}`)).length;
+              const score = Math.min(0.95, 0.55 + (0.3 * coverage) + (0.08 * orderedPairs));
+              // LEXICAL EVIDENCE IS ADDITIVE — NOT A DUPLICATE TO DISCARD.
+              // This used to `continue` when the vector pass had already returned the
+              // segment, which made retrieval NON-MONOTONIC IN DEPTH: lexical scores are
+              // synthetic (0.55-0.95) while cosine is real and often <0.15, so a DEEPER
+              // vector pass pulled the segment into haveIds, suppressed its boost, and
+              // dropped it below the final slice. Measured on query "SPiNE": _lexical rows
+              // 9 -> 8 -> 1 and true hits 24 -> 24 -> 17 as depth went 60 -> 150 -> 300.
+              // Increasing depth was silently deleting the only signal that finds exact
+              // part numbers. Merge the stronger signal instead.
+              const already = haveIds.has(segment.id)
+                ? results.find((r) => r.segmentId === segment.id)
+                : null;
+              if (already) {
+                if (score > (Number(already.score) || 0)) already.score = score;
+                already._lexical = true;
+                continue;
+              }
+              results.push(fmt(segment, score, true));
               haveIds.add(segment.id);
             }
           } catch (lexErr) {
@@ -182,7 +492,7 @@ export class EvidenceRetrievalService {
         }
       }
 
-      return results.sort((a, b) => b.score - a.score).slice(0, limit);
+      return this._orderAndSlice(results, _deliver);
     } catch (error) {
       console.error('[EvidenceRetrieval] Retrieval failed:', error);
       return [];
@@ -199,10 +509,22 @@ export class EvidenceRetrievalService {
    * @param {number} params.evidenceLimit
    * @returns {Promise<{memories: Array, evidence: Array}>}
    */
-  async retrieveHybrid({ query, userId, orgId, memoryLimit = 5, evidenceLimit = 5 }) {
+  async retrieveHybrid({
+    query, userId, orgId, memoryLimit = 5, evidenceLimit = 5,
+    // Scope lens, forwarded to the evidence branch. Without these the hybrid
+    // endpoint returned org-wide evidence under a personal/project lens — the
+    // exact case retrieveEvidence's own scope handling exists to prevent.
+    // The memory branch below is already user_id-filtered in its Qdrant filter,
+    // which is narrower than a scope lens; it is left alone here deliberately
+    // rather than half-converting a function its own comment calls a placeholder.
+    projectId = null, accessContext = null, scopeFilter = null,
+  }) {
     const [memories, evidence] = await Promise.all([
       this._retrieveCanonicalMemories({ query, userId, orgId, limit: memoryLimit }),
-      this.retrieveEvidence({ query, userId, orgId, limit: evidenceLimit })
+      this.retrieveEvidence({
+        query, userId, orgId, limit: evidenceLimit,
+        projectId, accessContext, scopeFilter,
+      })
     ]);
 
     return {
@@ -212,12 +534,216 @@ export class EvidenceRetrievalService {
     };
   }
 
+  /** Resolve an explicitly requested source without trusting a model-supplied id. */
+  async resolveSourceDocuments({ userId, orgId, projectId = null, documentId = null, title = null, limit = 3 }) {
+    if (orgIsRemote(orgId)) return [];
+    if (!this.db?.knowledgeDocument || (!documentId && !title)) return [];
+
+    return this.db.knowledgeDocument.findMany({
+      where: {
+        ...(!projectId ? { userId } : {}),
+        orgId,
+        archivedAt: null,
+        ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
+        ...(documentId ? { id: documentId } : {}),
+        ...(!documentId && title ? {
+          OR: [
+            { title: { contains: title, mode: 'insensitive' } },
+            { sourceId: { contains: title, mode: 'insensitive' } },
+          ],
+        } : {}),
+      },
+      select: {
+        id: true,
+        title: true,
+        documentType: true,
+        sourcePlatform: true,
+        sourceUrl: true,
+        documentDate: true,
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: Math.max(1, Math.min(limit, 10)),
+    });
+  }
+
+  /**
+   * Resolve a document mentioned in natural-language input before retrieval.
+   * This is metadata-only: source eligibility never depends on vector scores or
+   * an LLM extracting an English filename.
+   */
+  async resolveSourceFromQuery({ userId, orgId, projectId = null, query, limit = 1 }) {
+    const filenameMatch = String(query || '').normalize('NFKC').match(
+      /([^\n"'()[\]{}]{1,220}\.(?:pdf|docx?|xlsx?|pptx?|txt|md|html?|csv|json|png|jpe?g|webp))/i,
+    );
+    const filename = filenameMatch
+      ? filenameMatch[1].trim().replace(/^(?:what\s+(?:exactly\s+)?does|what\s+is\s+in|tell\s+me\s+what|send|share|email|open|read)\s+/i, '')
+      : null;
+    const sourceMatch = filename ? 'filename' : 'metadata_tokens';
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
+    const tokens = [...new Set(
+      [...segmenter.segment(filename || String(query || '').normalize('NFKC'))]
+        .filter((part) => part.isWordLike && part.segment.length >= 3)
+        .map((part) => part.segment.toLocaleLowerCase()),
+    )].slice(0, 12);
+    if (!tokens.length) return [];
+
+    const score = (document) => {
+      const haystack = [document.title, document.sourceId, document.filename]
+        .filter(Boolean).join(' ').normalize('NFKC').toLocaleLowerCase();
+      const hits = tokens.filter((token) => haystack.includes(token)).length;
+      return hits / tokens.length;
+    };
+
+    if (orgIsRemote(orgId)) {
+      // The remote KB listing does not yet expose enforceable project tags.
+      // A requested project must therefore fail closed rather than match an
+      // org-wide same-name file.
+      if (projectId) return [];
+      const listed = await amrKbDocs(orgId, { limit: 200, offset: 0, access: { userId, projectId } });
+      return (listed?.documents || [])
+        .filter((document) => !document.userId || document.userId === userId)
+        .map((document) => ({ ...document, _sourceScore: score(document), _sourceMatch: sourceMatch }))
+        .filter((document) => document._sourceScore >= 0.34)
+        .sort((a, b) => b._sourceScore - a._sourceScore || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+        .slice(0, Math.max(1, Math.min(limit, 3)));
+    }
+
+    if (!this.db?.knowledgeDocument) return [];
+    const documents = await this.db.knowledgeDocument.findMany({
+      where: {
+        ...(!projectId ? { userId } : {}),
+        orgId,
+        archivedAt: null,
+        ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
+        OR: tokens.flatMap((token) => [
+          { title: { contains: token, mode: 'insensitive' } },
+          { sourceId: { contains: token, mode: 'insensitive' } },
+        ]),
+      },
+      select: {
+        id: true, title: true, sourceId: true, documentType: true,
+        sourcePlatform: true, sourceUrl: true, documentDate: true, updatedAt: true,
+      },
+      take: 30,
+    });
+    return documents
+      .map((document) => ({ ...document, _sourceScore: score(document), _sourceMatch: sourceMatch }))
+      .filter((document) => document._sourceScore >= 0.34)
+      .sort((a, b) => b._sourceScore - a._sourceScore
+        || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+      .slice(0, Math.max(1, Math.min(limit, 3)));
+  }
+
+  /**
+   * Hydrate ordered raw sections for a named source. This reads the canonical
+   * document store; evidence vectors are used only to select relevant anchors.
+   */
+  async hydrateSourceDocuments({ documents, query, userId, orgId, perDocument = 8, total = 16 }) {
+    if (orgIsRemote(orgId) || !this.db?.knowledgeSegment || !documents?.length) return [];
+    const documentIds = documents.map((document) => document.id).filter(Boolean);
+    const anchors = await Promise.race([
+      this.retrieveEvidence({
+        query,
+        userId,
+        orgId,
+        documentIds,
+        limit: Math.min(total, Math.max(documentIds.length * 3, 6)),
+        scoreThreshold: 0.1,
+      }),
+      new Promise((resolve) => setTimeout(() => resolve([]), 450)),
+    ]);
+    // Group anchors per document, keeping BOTH the segment index and the
+    // anchor score. A single query can match relevant passages scattered
+    // across a document (e.g. a product named at segment 3 AND segment 47);
+    // ranking anchors by score lets each real hit seed its own window instead
+    // of collapsing to one contiguous run from the earliest index — which was
+    // dropping later passages and letting a lexically-dense but off-topic
+    // section (a different product) stand in for the queried one.
+    const anchorsByDoc = new Map();
+    for (const anchor of anchors) {
+      if (!Number.isInteger(anchor?.metadata?.segmentIndex)) continue;
+      const list = anchorsByDoc.get(anchor.documentId) || [];
+      list.push({ index: anchor.metadata.segmentIndex, score: anchor.score ?? 0 });
+      anchorsByDoc.set(anchor.documentId, list);
+    }
+
+    // Build a set of segment indexes to fetch for one document: a ±radius
+    // window around each of the top-scoring anchors, merged where they
+    // overlap, capped at `budget` segments. Falls back to a lead window
+    // (0..budget) when the query produced no positional anchors.
+    const windowIndexes = (docAnchors, budget, radius = 1) => {
+      if (!docAnchors.length) {
+        return Array.from({ length: budget }, (_, i) => i);
+      }
+      const ranked = [...docAnchors].sort((a, b) => b.score - a.score);
+      const wanted = new Set();
+      for (const { index } of ranked) {
+        for (let i = Math.max(0, index - radius); i <= index + radius; i += 1) {
+          wanted.add(i);
+          if (wanted.size >= budget) break;
+        }
+        if (wanted.size >= budget) break;
+      }
+      return [...wanted].sort((a, b) => a - b);
+    };
+
+    const rows = [];
+    const scoreById = new Map(anchors.map((anchor) => [anchor.segmentId, anchor.score]));
+    for (const document of documents) {
+      const budget = Math.max(1, Math.min(perDocument, total - rows.length));
+      const indexes = windowIndexes(anchorsByDoc.get(document.id) || [], budget);
+      const segments = await this.db.knowledgeSegment.findMany({
+        where: {
+          userId,
+          orgId,
+          documentId: document.id,
+          document: { archivedAt: null },
+          segmentIndex: { in: indexes },
+        },
+        orderBy: { segmentIndex: 'asc' },
+        take: budget,
+      });
+      for (const segment of segments) {
+        rows.push({
+          type: 'evidence_segment',
+          segmentId: segment.id,
+          documentId: segment.documentId,
+          content: segment.content,
+          snippet: this._extractSnippet(segment.content, query, 520),
+          score: scoreById.get(segment.id) ?? null,
+          document,
+          metadata: {
+            segmentType: segment.segmentType,
+            segmentIndex: segment.segmentIndex,
+            wordCount: segment.wordCount,
+            startPage: segment.startPage,
+            endPage: segment.endPage,
+          },
+        });
+        if (rows.length >= total) return rows;
+      }
+    }
+    return rows;
+  }
+
   /**
    * Get evidence for a specific memory (citations/grounding)
    * @param {string} memoryId
    * @returns {Promise<Array>} linked evidence segments
    */
-  async getMemoryEvidence(memoryId) {
+  async getMemoryEvidence(memoryId, orgId = null) {
+    // ROUTED. memory_evidence_links is a CENTRAL table; for an .amr/byod org the memory and its
+    // provenance live on the agent, so a central query returned [] and the FE's Evidence tab was
+    // permanently empty for those tenants. The agent returns the same shape.
+    if (orgId && orgIsRemote(orgId)) {
+      const remote = await amrMemoryEvidence(orgId, memoryId);
+      if (remote === null) {
+        console.warn(`[EvidenceRetrieval] memory-evidence lane DOWN for remote org ${orgId} — `
+          + `returning empty, which is NOT the same as "no evidence exists".`);
+        return [];
+      }
+      return remote;
+    }
     const links = await this.db.memoryEvidenceLink.findMany({
       where: { memoryId },
       include: {
@@ -258,6 +784,71 @@ export class EvidenceRetrievalService {
       excerpt: link.excerpt,
       segment: link.segment || null,
       document: link.document || link.segment?.document || null
+    }));
+  }
+
+  /**
+   * Hydrate a bounded, ordered window around matched source segments.
+   * This is used only by explicit full recall; matched evidence remains the
+   * fallback when a remote store cannot enumerate document order.
+   */
+  async hydrateAdjacentEvidence({ anchors, userId, orgId, perDocument = 3, total = 12 }) {
+    const matched = (anchors || []).filter((item) =>
+      item?.documentId && Number.isInteger(item?.metadata?.segmentIndex));
+    if (!matched.length || orgIsRemote(orgId)) return matched.slice(0, total);
+
+    const windows = new Map();
+    for (const item of matched) {
+      if (windows.has(item.documentId)) continue;
+      const index = item.metadata.segmentIndex;
+      const before = Math.floor((perDocument - 1) / 2);
+      windows.set(item.documentId, {
+        gte: Math.max(0, index - before),
+        lte: index + (perDocument - before - 1),
+      });
+    }
+
+    const segments = await this.db.knowledgeSegment.findMany({
+      where: {
+        userId,
+        orgId,
+        OR: [...windows].map(([documentId, range]) => ({
+          documentId,
+          segmentIndex: range,
+        })),
+      },
+      include: {
+        document: {
+          select: {
+            id: true,
+            title: true,
+            documentType: true,
+            sourcePlatform: true,
+            sourceUrl: true,
+            documentDate: true,
+          },
+        },
+      },
+      orderBy: [{ documentId: 'asc' }, { segmentIndex: 'asc' }],
+      take: total,
+    });
+
+    const scoreByDocument = new Map(matched.map((item) => [item.documentId, item.score ?? null]));
+    return segments.map((segment) => ({
+      type: 'evidence_segment',
+      segmentId: segment.id,
+      documentId: segment.documentId,
+      content: segment.content,
+      snippet: segment.content,
+      score: scoreByDocument.get(segment.documentId),
+      document: segment.document,
+      metadata: {
+        segmentType: segment.segmentType,
+        segmentIndex: segment.segmentIndex,
+        wordCount: segment.wordCount,
+        startPage: segment.startPage,
+        endPage: segment.endPage,
+      },
     }));
   }
 
@@ -403,11 +994,22 @@ export class EvidenceRetrievalService {
     if (index === -1) {
       const tokens = [...new Set(
         String(query || '').split(/[^\p{L}\p{N}§°]+/u).map(t => t.trim()).filter(t => t.length >= 3)
-      )].sort((a, b) => b.length - a.length);
-      for (const t of tokens) {
-        const i = contentLower.indexOf(t.toLowerCase());
-        if (i !== -1) { index = i; break; }
+      )];
+      let best = null;
+      for (const token of tokens) {
+        const needle = token.toLowerCase();
+        let position = contentLower.indexOf(needle);
+        while (position !== -1) {
+          const start = Math.max(0, position - Math.floor(contextLength / 2));
+          const window = contentLower.slice(start, Math.min(content.length, start + contextLength));
+          const covered = tokens.reduce((count, item) => count + Number(window.includes(item.toLowerCase())), 0);
+          const candidate = { position, covered, tokenLength: token.length };
+          if (!best || candidate.covered > best.covered
+            || (candidate.covered === best.covered && candidate.tokenLength > best.tokenLength)) best = candidate;
+          position = contentLower.indexOf(needle, position + needle.length);
+        }
       }
+      index = best?.position ?? -1;
     }
 
     if (index === -1) {

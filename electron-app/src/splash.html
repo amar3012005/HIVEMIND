@@ -3,149 +3,111 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HIVEMIND</title>
+  <title>SINGULANCE</title>
   <style>
+    :root { --ink: #0a0a0a; --paper: #ffffff; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
+    html, body { height: 100%; overflow: hidden; }
     body {
+      background: var(--paper);
+      color: var(--ink);
       font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
-      background: #ffffff;
-      color: #0a0a0a;
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      user-select: none;
-      -webkit-app-region: drag;
-      overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+      user-select: none; -webkit-app-region: drag; cursor: default;
     }
 
-    .wordmark {
-      font-family: 'Georgia', 'Times New Roman', serif;
-      font-size: clamp(72px, 12vw, 120px);
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      color: #117dff;
-      line-height: 1;
-      text-transform: uppercase;
-      opacity: 0;
-      transform: translateY(16px);
-      animation: fadeUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.1s forwards;
+    /* film grain + faint vignette — cinematic B&W */
+    body::after {
+      content: ''; position: fixed; inset: 0; pointer-events: none; opacity: .04;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
     }
-
-    .subtitle {
-      margin-top: 24px;
-      font-size: 16px;
-      color: #888;
-      font-weight: 400;
-      letter-spacing: 0.01em;
-      max-width: 420px;
-      text-align: center;
-      line-height: 1.5;
-      opacity: 0;
-      animation: fadeUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.3s forwards;
-    }
-
-    .cta {
-      margin-top: 48px;
-      -webkit-app-region: no-drag;
-      opacity: 0;
-      animation: fadeUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.5s forwards;
-    }
-
-    .cta button {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      padding: 16px 40px;
-      background: #117dff;
-      color: #fff;
-      font-size: 17px;
-      font-weight: 600;
-      letter-spacing: 0.01em;
-      border: none;
-      border-radius: 12px;
-      cursor: pointer;
-      transition: background 0.15s, transform 0.12s, box-shadow 0.15s;
-      box-shadow: 0 4px 20px rgba(17, 125, 255, 0.25);
-    }
-
-    .cta button:hover {
-      background: #0066e0;
-      transform: translateY(-1px);
-      box-shadow: 0 6px 28px rgba(17, 125, 255, 0.35);
-    }
-
-    .cta button:active {
-      transform: translateY(0);
-      box-shadow: 0 2px 10px rgba(17, 125, 255, 0.2);
-    }
-
-    .cta button .arrow {
-      font-size: 20px;
-      line-height: 1;
-    }
-
-    /* Loading state */
-    .cta button.loading {
-      background: #0066e0;
-      cursor: not-allowed;
-      pointer-events: none;
-    }
-
-    .spinner {
-      width: 18px;
-      height: 18px;
-      border: 2.5px solid rgba(255,255,255,0.3);
-      border-top-color: #fff;
-      border-radius: 50%;
-      animation: spin 0.7s linear infinite;
-      display: none;
-    }
-
-    .cta button.loading .spinner { display: block; }
-    .cta button.loading .arrow { display: none; }
-    .cta button.loading .label { opacity: 0.7; }
-
-    @keyframes fadeUp {
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
-    /* Subtle background texture */
     body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background:
-        radial-gradient(ellipse 80% 60% at 50% 100%, rgba(17,125,255,0.04) 0%, transparent 70%);
-      pointer-events: none;
+      content: ''; position: fixed; inset: 0; pointer-events: none;
+      background: radial-gradient(ellipse 70% 70% at 50% 50%, transparent 55%, rgba(0,0,0,0.05) 100%);
     }
+
+    .stage { position: relative; text-align: center; width: 100%; max-width: 640px; padding: 0 40px; }
+
+    /* ── Signature reveal: wordmark wiped in left→right ── */
+    .mark { position: relative; display: inline-block; }
+    .mark img {
+      display: block; width: min(440px, 74vw); height: auto;
+      clip-path: inset(0 100% 0 0);
+      animation: wipe 1.15s cubic-bezier(0.7, 0, 0.2, 1) 0.35s forwards;
+      filter: contrast(1.05);
+    }
+    /* ink pen dot riding the reveal edge */
+    .pen {
+      position: absolute; top: 50%; left: 0; width: 6px; height: 6px; border-radius: 50%;
+      background: var(--ink); transform: translate(-50%, -50%) scale(0); opacity: 0;
+      animation: pen 1.15s cubic-bezier(0.7, 0, 0.2, 1) 0.35s forwards;
+    }
+    /* hairline underline sweeps after the word is drawn */
+    .rule {
+      height: 1.5px; background: var(--ink); width: 0; margin: 20px auto 0;
+      animation: rule 0.7s cubic-bezier(0.22, 1, 0.36, 1) 1.5s forwards;
+    }
+
+    .greet {
+      margin-top: 30px; font-size: 15px; font-weight: 500; letter-spacing: 0.02em;
+      color: #0a0a0a; opacity: 0; transform: translateY(8px);
+      animation: rise 0.7s cubic-bezier(0.22,1,0.36,1) 1.9s forwards;
+    }
+    .tag {
+      margin-top: 8px; font-size: 12px; font-weight: 400; letter-spacing: 0.08em;
+      text-transform: uppercase; color: #a3a3a3;
+      opacity: 0; transform: translateY(8px);
+      animation: rise 0.7s cubic-bezier(0.22,1,0.36,1) 2.1s forwards;
+    }
+
+    /* thin loading meter at very bottom */
+    .meter { position: fixed; left: 0; bottom: 0; height: 2px; width: 0; background: var(--ink);
+      animation: meter 3.2s cubic-bezier(0.4,0,0.2,1) 0.35s forwards; opacity: .85; }
+
+    .skip { position: fixed; bottom: 20px; right: 24px; font-size: 10px; letter-spacing: .18em;
+      text-transform: uppercase; color: #c8c4be; -webkit-app-region: no-drag; }
+
+    @keyframes wipe  { to { clip-path: inset(0 0 0 0); } }
+    @keyframes pen   { 0% { opacity: 0; transform: translate(-50%,-50%) scale(0);} 8% { opacity:1; transform: translate(-50%,-50%) scale(1);} 92% { left: 100%; opacity: 1;} 100% { left: 100%; opacity: 0; transform: translate(-50%,-50%) scale(0);} }
+    @keyframes rule  { to { width: min(440px, 74vw); } }
+    @keyframes rise  { to { opacity: 1; transform: translateY(0); } }
+    @keyframes meter { to { width: 100%; } }
+
+    .stage.leaving { animation: leave .45s ease forwards; }
+    @keyframes leave { to { opacity: 0; transform: scale(1.015); } }
   </style>
 </head>
 <body>
-  <div class="wordmark">HIVEMIND</div>
-  <p class="subtitle">The agent that remembers everything. We'll get things ready — takes a few seconds.</p>
-  <div class="cta">
-    <button id="btn" onclick="launch()">
-      <span class="label">Open HIVEMIND</span>
-      <span class="arrow">→</span>
-      <div class="spinner"></div>
-    </button>
+  <div class="stage" id="stage">
+    <div class="mark">
+      <img src="../assets/wordmark.png" alt="SINGULANCE" />
+      <span class="pen"></span>
+    </div>
+    <div class="rule"></div>
+    <div class="greet" id="greet">Welcome</div>
+    <div class="tag">The agent that remembers everything</div>
   </div>
+  <div class="meter"></div>
+  <div class="skip">press any key to enter</div>
 
   <script>
-    function launch() {
-      const btn = document.getElementById('btn');
-      btn.classList.add('loading');
-      btn.querySelector('.label').textContent = 'Opening…';
-      // Tell main process to open the main window
-      window.__electron?.launch();
+    (function () {
+      const h = new Date().getHours();
+      const g = h < 5 ? 'Still up' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+      document.getElementById('greet').textContent = g;
+    })();
+
+    let handed = false;
+    function proceed() {
+      if (handed) return; handed = true;
+      document.getElementById('stage').classList.add('leaving');
+      setTimeout(() => { window.__electron && window.__electron.launch(); }, 260);
     }
+    const AUTO = setTimeout(proceed, 3550);
+    function skip() { clearTimeout(AUTO); proceed(); }
+    window.addEventListener('keydown', skip);
+    window.addEventListener('click', skip);
   </script>
 </body>
 </html>

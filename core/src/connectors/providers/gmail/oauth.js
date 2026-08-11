@@ -8,7 +8,12 @@
 // Adding a service here = one more checkbox in the consent screen,
 // nothing else changes server-side.
 const SCOPE_MAP = {
-  gmail:    ['https://www.googleapis.com/auth/gmail.readonly'],
+  // readonly = ingest/sync; compose+send power the HITL outbound loop (drafts
+  // created by agents, sends fired only on user approval). Users who connected
+  // before these scopes existed must RECONNECT Gmail to grant them.
+  gmail:    ['https://www.googleapis.com/auth/gmail.readonly',
+             'https://www.googleapis.com/auth/gmail.compose',
+             'https://www.googleapis.com/auth/gmail.send'],
   drive:    ['https://www.googleapis.com/auth/drive.readonly'],
   calendar: ['https://www.googleapis.com/auth/calendar.readonly'],
   docs:     ['https://www.googleapis.com/auth/documents.readonly'],
@@ -18,6 +23,7 @@ const SCOPE_MAP = {
   chat:     ['https://www.googleapis.com/auth/chat.messages.readonly'],
   tasks:    ['https://www.googleapis.com/auth/tasks.readonly'],
   forms:    ['https://www.googleapis.com/auth/forms.body.readonly'],
+  'search-console': ['https://www.googleapis.com/auth/webmasters.readonly'],
 };
 
 const BASE_SCOPES = [
@@ -49,6 +55,7 @@ export function getOAuthConfig(options = {}) {
 }
 
 export const AVAILABLE_SERVICES = Object.keys(SCOPE_MAP);
+export const DEFAULT_SERVICES = AVAILABLE_SERVICES.filter((service) => service !== 'search-console');
 export { SCOPE_MAP };
 
 /**

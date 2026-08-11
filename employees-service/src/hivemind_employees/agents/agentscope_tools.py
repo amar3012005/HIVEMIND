@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -77,6 +78,141 @@ _OUTPUT_UNLOCKED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
 _TURN_ARTIFACTS: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
     "hyper_turn_artifacts", default=None
 )
+# P0 provenance: armed per turn by the orchestrator so every fact an agent saves to
+# the company brain carries WHERE it came from (turn/room/org) — the audit trail that
+# makes the closed-loop OS traceable. Default None → provenance fields are simply omitted.
+_TURN_PROVENANCE: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "hyper_turn_provenance", default=None
+)
+_PLACES_SEARCH_COUNT: "contextvars.ContextVar[int]" = contextvars.ContextVar(
+    "hq_places_search_count", default=0
+)
+_PLACES_SEARCH_TOTAL: "contextvars.ContextVar[int]" = contextvars.ContextVar(
+    "hq_places_search_total", default=0
+)
+
+
+def get_places_search_count() -> int:
+    return int(_PLACES_SEARCH_COUNT.get() or 0)
+
+
+def get_places_search_total() -> int:
+    return int(_PLACES_SEARCH_TOTAL.get() or 0)
+
+
+def set_turn_provenance(turn_id: Optional[str] = None, room_id: Optional[str] = None,
+                        org_id: Optional[str] = None, callback_url: Optional[str] = None) -> None:
+    """Arm per-turn provenance so save_memory can stamp a fact's origin AND so propose_call
+    can reach the control-plane (via callback_url's host) to propose a TARA call. Safe with
+    partial info (a missing turn just yields null fields)."""
+    _TURN_PROVENANCE.set({"turn_id": turn_id, "room_id": room_id, "org_id": org_id,
+                          "callback_url": callback_url})
+
+
+# P0 actionable-gate: only durable, actionable facts should enter the company brain.
+# HYPER_PROVENANCE_GATE ∈ {off, log, enforce}. Default 'log' (SHADOW — records what it
+# WOULD reject without blocking, so the gate can be tuned on real traffic before it is
+# flipped to 'enforce'). This keeps the live room flow un-spoiled until a human enables it.
+_ACTIONABLE_MIN_CHARS = int(os.environ.get("HYPER_MIN_FACT_CHARS", "15") or 15)
+
+
+def _actionable_verdict(title: str, content: str):
+    """Is this fact worth persisting? Conservative heuristic — rejects empty/near-empty
+    content and bare clarifying questions (the chatter the gate exists to keep out).
+    Returns (ok: bool, reason: str). Intentionally lenient: better to keep a marginal
+    fact than to drop a real one; 'enforce' is opt-in."""
+    c = (content or "").strip()
+    if len(c) < _ACTIONABLE_MIN_CHARS:
+        return False, f"content too short (<{_ACTIONABLE_MIN_CHARS} chars)"
+    if c.endswith("?") and len(c) < 80 and "." not in c:
+        return False, "reads as a question, not a durable fact"
+    return True, "ok"
+
+
+def _prospect_slug(v: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(v or "").lower()).strip("-")[:60]
+
+
+def _save_prospect_memory(api_key, user_id, org_id, project_id, *, company, note,
+                          phone="", email="", website="", address="", fit_reason="",
+                          distinctive_signal="", outreach_angle="", source="agent") -> dict:
+    """Persist a prospect/lead as an org-scoped memory (tag 'prospect') carrying a PERSONAL NOTE.
+    The whole company's rooms see it via list_prospects → reuse over re-discovery. The memory's
+    createdAt records WHEN the lead was added. Returns the created memory or an {error} dict."""
+    # DISABLED BY DEFAULT — prospects are CRM records, not memories.
+    #
+    # This wrote one memory per lead ("PROSPECT: <co> PHONE: … EMAIL: … WEBSITE: …")
+    # with every intelligence step switched off in the body below: smartIngest
+    # False, skipProcessing, skip_relationship_classification,
+    # skip_contradiction_detection, defer_entity_linking. They were never processed
+    # as memories at all — they used the memory table as a lead store.
+    #
+    # Measured: 119 written into one org in a single day, 0% anchored to evidence,
+    # the largest unanchored source in the corpus. They pollute semantic recall — a
+    # question about company strategy competes against a lead's phone number — and
+    # being unanchored they cannot be cited, verified, or re-extracted.
+    #
+    # Override with HYPER_PROSPECTS_TO_MEMORY=true. The durable fix is a real leads
+    # table with list_prospects reading from it.
+    if str(os.getenv("HYPER_PROSPECTS_TO_MEMORY", "false")).lower() != "true":
+        return {"skipped": "prospect_memory_writes_disabled",
+                "reason": "prospects are CRM records, not memories; "
+                          "set HYPER_PROSPECTS_TO_MEMORY=true to override",
+                "company": str(company or "").strip()[:120]}
+    company = str(company or "").strip()
+    note = str(note or "").strip()
+    if not company or not note:
+        return {"error": "company and note are required"}
+    phone = str(phone or "").strip()
+    email = str(email or "").strip()
+    website = str(website or "").strip()
+    lines = [f"PROSPECT: {company}"]
+    if phone:
+        lines.append(f"PHONE: {phone}")
+    if email:
+        lines.append(f"EMAIL: {email}")
+    if website:
+        lines.append(f"WEBSITE: {website}")
+    if address:
+        lines.append(f"ADDRESS: {address}")
+    if fit_reason:
+        lines.append(f"FIT_REASON: {fit_reason}")
+    if distinctive_signal:
+        lines.append(f"DISTINCTIVE_SIGNAL: {distinctive_signal}")
+    if outreach_angle:
+        lines.append(f"OUTREACH_ANGLE: {outreach_angle}")
+    lines.append(f"NOTE: {note}")
+    tags = ["prospect", "lead", f"company:{_prospect_slug(company)}"]
+    if phone:
+        tags.append("has-phone")
+    if email:
+        tags.append("has-email")
+    body = {
+        "title": f"Prospect: {company}"[:120], "content": "\n".join(lines), "tags": tags,
+        "sync": True, "smartIngest": False, "skipProcessing": True,
+        "skipPredictCalibrate": True, "skipAdvisoryLock": True,
+        "skip_relationship_classification": True, "skip_contradiction_detection": True,
+        "defer_entity_linking": True,
+        "memory_type": "fact", "source_platform": "hyperagents-prospect",
+        "source_metadata": {"source_type": "prospect", "source_platform": "hyperagents-prospect",
+                            "prospect_source": source, "company": company,
+                            "phone": phone or None, "email": email or None, "website": website or None,
+                            "address": address or None, "fit_reason": fit_reason or None,
+                            "distinctive_signal": distinctive_signal or None,
+                            "outreach_angle": outreach_angle or None},
+    }
+    if project_id:
+        body["project_id"] = project_id
+    try:
+        with _client(api_key, user_id, org_id) as c:
+            r = c.post("/api/memories", json=body)
+            r.raise_for_status()
+            return r.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[save_prospect] failed: %s", exc)
+        return {"error": str(exc)[:160]}
+
+
 # Outward sends that ALWAYS need HITL approval even after consensus (they leave
 # the org). Internal artifacts (docs/sheets) run without HITL once consensus is
 # reached. gmail_send + MCP non-read calls are outward.
@@ -96,9 +232,13 @@ def _looks_like_read(name: str) -> bool:
 
 
 def begin_turn_write_gate(policy: str) -> None:
-    """Arm the write/consensus gates for the current turn. policy ∈ {"ask","auto"}.
+    """Arm the write/consensus gates for the current turn.
+
+    ``deny`` blocks every write, ``ask`` queues writes, ``auto`` preserves the
+    ordinary Room policy (outbound sends still ask), and ``authorized`` means an
+    exact upstream authority checkpoint already approved this turn.
     Output stays LOCKED until the orchestrator reaches consensus (synthesis)."""
-    _WRITE_POLICY.set(policy if policy in ("ask", "auto") else "auto")
+    _WRITE_POLICY.set(policy if policy in ("deny", "ask", "auto", "authorized") else "ask")
     _PENDING_WRITES.set([])
     _OUTPUT_UNLOCKED.set(False)
     _TURN_ARTIFACTS.set([])
@@ -131,13 +271,16 @@ def drain_artifacts() -> List[Dict[str, Any]]:
     return list(arts) if isinstance(arts, list) else []
 
 
-def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "") -> str:
+def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "",
+                         body_md: str = "") -> str:
     """Orchestrator-side: record a produced draft as an artifact AND queue its
     send for the user's approval. Used as a deterministic fallback when the
     agents composed an email but did not fire gmail_send themselves — so an
-    email turn ALWAYS yields a draft + approval card. Returns the approval_id."""
+    email turn ALWAYS yields a draft + approval card. Returns the approval_id.
+    body_md (the draft's markdown) rides the artifact + approval events so the
+    FE can PREVIEW / edit / one-click-send in-app without opening Gmail."""
     _record_artifact("gmail", url or "https://mail.google.com/mail/u/0/#drafts",
-                     title=subject or "Draft", label="Review draft")
+                     title=subject or "Draft", label="Review draft", body_md=body_md)
     approval_id = uuid.uuid4().hex[:12]
     rec = {
         "approval_id": approval_id,
@@ -145,6 +288,7 @@ def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "") ->
         "summary": f"Send email to {to} — “{subject}”",
         "bridge": "google",
         "descriptor": {"tool": "gmail_send_draft", "arguments": {"draftId": draft_id}},
+        "to": to, "subject": subject, "body_md": str(body_md or "")[:20000],
     }
     pend = _PENDING_WRITES.get()
     if isinstance(pend, list):
@@ -166,20 +310,24 @@ def _consensus_gate(label: str) -> Optional[ToolResponse]:
     )
 
 
-def _record_artifact(connector: str, url: str, title: str = "", label: str = "") -> None:
+def _record_artifact(connector: str, url: str, title: str = "", label: str = "",
+                     body_md: str = "") -> None:
     """Record a produced artifact (doc/sheet) so the orchestrator can emit a
     `connector_logo` 'view in new tab' event to the FE. After the FIRST artifact
     lands, RE-LOCK output so the turn produces ONE high-quality deliverable
-    rather than a pile of near-duplicate drafts from racing agents/retries."""
+    rather than a pile of near-duplicate drafts from racing agents/retries.
+    body_md: the artifact's textual content (bounded) → in-app FE preview."""
     arts = _TURN_ARTIFACTS.get()
     if isinstance(arts, list) and url:
-        arts.append({"connector": connector, "url": url, "title": title, "label": label})
+        arts.append({"connector": connector, "url": url, "title": title, "label": label,
+                     "body_md": str(body_md or "")[:20000]})
         _OUTPUT_UNLOCKED.set(False)
 
 
-def record_artifact(connector: str, url: str, title: str = "", label: str = "") -> None:
+def record_artifact(connector: str, url: str, title: str = "", label: str = "",
+                    body_md: str = "") -> None:
     """Public: orchestrator records a produced doc/sheet artifact (→ connector_logo)."""
-    _record_artifact(connector, url, title=title, label=label)
+    _record_artifact(connector, url, title=title, label=label, body_md=body_md)
 
 
 def _artifact_url(payload: object) -> str:
@@ -193,12 +341,28 @@ def _artifact_url(payload: object) -> str:
 def _gate_write(
     label: str, summary: str, bridge: str, descriptor: dict, force: bool = False
 ) -> Optional[ToolResponse]:
-    """When policy is "ask" (or force=True), queue the write for approval and
+    """Apply the active turn's write authority before connector execution.
+
+    ``deny`` fails closed without queueing. ``ask`` (or force=True under an
+    ordinary Room policy) queues the write for approval. ``authorized`` is used
+    only for a checkpoint already approved by HQ and permits that exact turn's
+    write without another generic approval prompt.
+
     return a "pending" ToolResponse WITHOUT executing. Returns None when the
     write may run now. `force` is for outward SENDS (gmail send/reply, trash),
     which ALWAYS require the user's approval regardless of policy. `descriptor`
     carries everything the approve endpoint needs to replay the bridge call."""
-    if not force and _WRITE_POLICY.get() != "ask":
+    policy = _WRITE_POLICY.get()
+    if policy == "deny":
+        return _tool_response_text(
+            f"⛔ WRITE DENIED — '{label}' was NOT executed. This turn has read-only "
+            "authority. Continue with evidence gathering and report the blocked write "
+            "as an exact gap; do not retry it.",
+            metadata={"status": "write_denied", "label": label},
+        )
+    if policy == "authorized":
+        return None
+    if not force and policy != "ask":
         return None
     approval_id = uuid.uuid4().hex[:12]
     rec = {
@@ -583,6 +747,33 @@ def _register_connector_tools(
     connector when its task actually needs it. All calls POST the core bridge,
     which resolves the room owner's Nango token server-side.
     """
+    # ── Connector Runtime V1 cutover (plan Phase 6) ──────────────────────
+    # When CONNECTOR_RUNTIME_HYPER=true, register connectors through the Core
+    # canonical runtime via the stateless MCP gateway (one capability token,
+    # native AgentScope HttpStatelessClient — NO per-provider Python). Flag-off
+    # (default) → the legacy per-provider path below runs unchanged. On any
+    # runtime failure we fall through to the legacy path so a room never loses
+    # its connectors.
+    if os.getenv("CONNECTOR_RUNTIME_HYPER", "").lower() in ("1", "true", "yes", "on"):
+        try:
+            from ..connectors.mcp_projection import register_runtime_connectors
+            handled = register_runtime_connectors(
+                tk, api_key=api_key, user_id=user_id, org_id=org_id,
+                connectors=connectors, read_only=read_only,
+            )
+            if handled:
+                # Runtime handled ONLY the connectors it knows (gmail/gdocs/…).
+                # Any remaining connectors (e.g. notion/github/linear not yet in
+                # the runtime registry) MUST still be registered by the legacy
+                # path — never drop a room's connector. Narrow the list and fall
+                # through; return only if the runtime covered everything.
+                remaining = [c for c in connectors if c not in set(handled)]
+                if not remaining:
+                    return
+                connectors = remaining
+        except Exception:
+            pass  # any error → full legacy path (connectors unchanged)
+
     def _register_google(kind: str, read_only: bool = False):
         def _google(tool_name: str, arguments: Optional[dict] = None) -> ToolResponse:
             return _tool_response(_google_json(tool_name, arguments))
@@ -968,6 +1159,52 @@ def _register_connector_tools(
         tk.register_tool_function(cll, group_name=safe)
 
 
+def register_experience_tool(tk: Toolkit, org_id: Optional[str], slug: Optional[str]) -> None:
+    """Register `recall_experience` — the LAZY, read-only accessor for an agent's
+    GLOBAL learned playbook (operating lessons distilled across ALL rooms, stored on
+    digital_employees.evo_playbook). Surfaced as a TOOL — not injected wholesale every
+    turn — so it stays token-lean and scales as the playbook grows, loaded only when
+    the agent decides it's relevant. The agent reads its OWN lessons on demand; this
+    path NEVER writes (a private chat is not journalised — only a sealed room turn's
+    post-verify reflection appends). Org-scoped by (org_id, slug); no-op if either is
+    missing. Uniform across personal/managed/self-host: reads the deployment-local
+    digital_employees row, the same relational anchor every org type uses."""
+    if not org_id or not slug:
+        return
+
+    async def recall_experience(topic: str = "") -> ToolResponse:
+        """Recall YOUR own learned operating lessons from past work across every room
+        (your global playbook). Call this when a task resembles one you have handled
+        before and you want to apply what you learned. `topic` narrows to the most
+        relevant lessons by keyword; empty returns your most recent. These are lessons
+        to APPLY, not facts to cite to the user."""
+        try:
+            from ..db import get_employee_playbook
+            lessons = await get_employee_playbook(str(org_id), str(slug))
+        except Exception as exc:  # noqa: BLE001 — experience is optional, never fatal
+            return _tool_response_text(f"(could not load your experience: {str(exc)[:120]})")
+        lessons = [str(l).strip() for l in (lessons or []) if str(l).strip()]
+        if not lessons:
+            return _tool_response_text("You have no learned lessons yet.")
+        t = (topic or "").lower().strip()
+        if t:
+            toks = [w for w in re.split(r"\W+", t) if len(w) > 2]
+            hits = [l for l in lessons if any(w in l.lower() for w in toks)]
+            chosen = (hits or lessons[-8:])[:8]
+        else:
+            chosen = lessons[-8:]
+        body = "\n".join(f"- {l}" for l in chosen)
+        return _tool_response_text(
+            "YOUR LEARNED LESSONS (apply these, do not cite as facts):\n" + body,
+            metadata={"count": len(lessons), "returned": len(chosen)},
+        )
+
+    try:
+        tk.register_tool_function(recall_experience)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("register_experience_tool failed: %s", exc)
+
+
 def build_hivemind_toolkit(
     api_key: str,
     enabled_tool_names: List[str],
@@ -1034,6 +1271,160 @@ def build_hivemind_toolkit(
     # tool-call 400 that breaks planning. Room agents get it via DEFAULT_HYPER_TOOLS.
     if "org_directory" in enabled_tool_names:
         tk.register_tool_function(org_directory)
+
+    # propose_call — the agent's decision to place a TARA outbound CALL. ALWAYS available:
+    # it is safe by construction (only QUEUES a call contract for the user's popup approval;
+    # flag-gated on the control side + first-contact HITL — it NEVER dials on its own).
+    def propose_call(company: str, phone: str, why: str = "", lead_id: str = "",
+                     personal_notes: str = "") -> ToolResponse:
+        """Propose an outbound phone CALL to a prospect when a live voice call is the right next
+        move (a warm lead, a meeting opportunity, a time-sensitive follow-up) — NOT for routine
+        info. This does NOT dial: it queues a call CONTRACT (goal + conversation strategy +
+        auto-selected voice & language) that POPS UP for the user's one-click approval; TARA calls
+        only after they approve. Args: company (who to call), phone (E.164, e.g. '+49151234567'),
+        why (the exact outcome or special instruction for this call), lead_id (the durable
+        Your Leads identifier when available), personal_notes (verified lead-specific context)."""
+        prov = _TURN_PROVENANCE.get() or {}
+        cb = str(prov.get("callback_url") or "")
+        room_id = prov.get("room_id")
+        turn_id = prov.get("turn_id")
+        if not (cb and room_id and turn_id):
+            return _tool_response_text("Cannot propose a call outside a live room turn.")
+        ph = str(phone or "").strip().replace(" ", "")
+        if not ph.startswith("+") or len(ph) < 8:
+            return _tool_response_text("A valid E.164 phone (e.g. +49151234567) is required to propose a call.")
+        # control-plane base = the callback host (…/internal/hyper/turn-event → base)
+        base = cb.split("/internal/")[0] if "/internal/" in cb else cb.rstrip("/")
+        mk = os.environ.get("HIVEMIND_MASTER_API_KEY", "")
+        try:
+            with httpx.Client(timeout=httpx.Timeout(90.0, connect=5.0)) as c:
+                r = c.post(
+                    f"{base}/internal/hyper/outreach/propose",
+                    headers={"X-API-Key": mk, "Content-Type": "application/json"},
+                    json={"room_id": room_id, "turn_id": turn_id, "channel": "call",
+                          "callback_url": cb, "prospect": {
+                              "company": company or ph, "phone": ph,
+                              "lead_id": lead_id or None,
+                              "notes": personal_notes or None,
+                              "special_instruction": why or None,
+                          }},
+                )
+            if r.status_code == 403:
+                return _tool_response_text("Call proposals are disabled for this deployment.")
+            r.raise_for_status()
+            ct = (r.json() or {}).get("contract") or {}
+            return _tool_response_text(
+                f"Queued a call to {company} for the user's approval — a popup will ask them to "
+                f"approve before TARA dials. Goal: {ct.get('goal') or 'set'}; "
+                f"language: {ct.get('language') or 'en'}; voice: {ct.get('voice_style') or 'auto'}.")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[propose_call] failed: %s", exc)
+            return _tool_response_text(f"Could not queue the call proposal ({str(exc)[:120]}).")
+    tk.register_tool_function(propose_call)
+
+    # ── Shared LEAD BOOK — the company's persistent prospects/leads (org-scoped memories,
+    # tagged 'prospect'). Every room sees the same book, so agents REUSE leads instead of
+    # re-discovering/re-generating (expensive Places calls). Each lead carries a PERSONAL NOTE
+    # captured when it was added (the memory's createdAt records WHEN). ALWAYS registered.
+    def places_search(query: str, limit: int = 20) -> ToolResponse:
+        """Discover real local businesses for a location-grounded outreach assignment.
+        Use only after checking list_prospects. Query format must be '<category> in <city>'.
+        Results come from Google Places and are saved into the shared lead book."""
+        clean = re.sub(r"\s+", " ", str(query or "").strip())[:180]
+        key = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("HYPER_PLACES_KEY") or ""
+        if not key:
+            return _tool_response({"status": "blocked", "reason": "google_maps_unavailable"})
+        if len(clean.split()) < 2:
+            return _tool_response({"status": "blocked", "reason": "query_requires_category_and_location"})
+        _PLACES_SEARCH_COUNT.set(get_places_search_count() + 1)
+        try:
+            with httpx.Client(timeout=httpx.Timeout(30.0, connect=5.0)) as c:
+                response = c.post(
+                    "https://places.googleapis.com/v1/places:searchText",
+                    headers={
+                        "Content-Type": "application/json", "X-Goog-Api-Key": key,
+                        "X-Goog-FieldMask": "places.displayName,places.internationalPhoneNumber,places.websiteUri,places.formattedAddress",
+                    },
+                    json={"textQuery": clean, "maxResultCount": min(max(int(limit or 20), 1), 20)},
+                )
+                response.raise_for_status()
+                places = (response.json() or {}).get("places") or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[places_search] failed: %s", exc)
+            return _tool_response({"status": "blocked", "reason": str(exc)[:180]})
+        rows = []
+        for place in places:
+            name = str((place.get("displayName") or {}).get("text") or "").strip()
+            if not name:
+                continue
+            row = {"company": name, "phone": str(place.get("internationalPhoneNumber") or ""),
+                   "website": str(place.get("websiteUri") or ""), "address": str(place.get("formattedAddress") or "")}
+            rows.append(row)
+        # Core writes a prospect synchronously. Persist a full Places page in
+        # parallel so one valid discovery step cannot monopolize HQ for minutes.
+        def persist(row: Dict[str, str]) -> dict:
+            contactability = "direct phone or website is available" if row.get("phone") or row.get("website") else "contact route still needs verification"
+            fit_reason = f"{row['company']} matches the requested '{clean}' segment; {contactability}."
+            outreach_angle = f"Open with the relevance of {row['company']} to the requested market, then validate its current need before proposing a solution."
+            return _save_prospect_memory(
+                api_key, user_id, org_id, project_id, company=row["company"],
+                note=f"Discovered via Google Places for '{clean}'. {fit_reason}",
+                phone=row["phone"], website=row["website"], address=row["address"],
+                fit_reason=fit_reason,
+                distinctive_signal=f"Verified listing at {row['address'] or 'the requested location'} with {'a direct contact route' if row.get('phone') or row.get('website') else 'contact enrichment pending'}.",
+                outreach_angle=outreach_angle, source="google-places",
+            )
+        if rows:
+            with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
+                list(pool.map(persist, rows))
+        _PLACES_SEARCH_TOTAL.set(get_places_search_total() + len(rows))
+        return _tool_response({"status": "completed", "query": clean, "found": len(rows), "prospects": rows, "source": "Google Places"})
+    tk.register_tool_function(places_search)
+
+    def list_prospects(query: str = "", limit: int = 30) -> ToolResponse:
+        """See the company's EXISTING prospects/leads (with the note captured when each was added)
+        BEFORE you discover or generate new ones — reuse what's already there, don't re-search.
+        Call this ONLY when you actually need leads (it's not free). Optional `query` narrows by
+        company or keyword. Returns company + contact (phone/email/website) + the note + when-added."""
+        params = {"tags": "prospect", "is_latest": "true", "limit": min(max(int(limit or 30), 1), 60)}
+        try:
+            with _client(api_key, user_id, org_id) as c:
+                r = c.get("/api/memories", params=params)
+                r.raise_for_status()
+                data = r.json()
+        except Exception as exc:  # noqa: BLE001
+            return _tool_response_text(f"Could not read the lead book ({str(exc)[:120]}).")
+        rows = data.get("memories") or data.get("results") or (data if isinstance(data, list) else [])
+        q = str(query or "").strip().lower()
+        out = []
+        for m in (rows if isinstance(rows, list) else []):
+            if not isinstance(m, dict):
+                continue
+            title = str(m.get("title") or "")
+            content = str(m.get("content") or m.get("summary") or "")
+            if q and q not in (title + " " + content).lower():
+                continue
+            out.append({"company": title.replace("Prospect:", "").strip() or None,
+                        "note": content[:400], "added": m.get("created_at") or m.get("createdAt"),
+                        "tags": [t for t in (m.get("tags") or []) if isinstance(t, str)][:8]})
+        return _tool_response({"count": len(out), "prospects": out[:params["limit"]],
+                               "hint": "Reuse these before discovering new leads."})
+    tk.register_tool_function(list_prospects)
+
+    def save_prospect(company: str, note: str, phone: str = "", email: str = "", website: str = "",
+                      address: str = "", fit_reason: str = "", distinctive_signal: str = "",
+                      outreach_angle: str = "") -> ToolResponse:
+        """Add a prospect/lead to the company's shared lead book with a PERSONAL NOTE about why
+        they matter right now — the reason/angle/signal, captured at THIS moment. Use when you
+        identify a lead worth tracking so the whole company can reuse it later without re-searching.
+        Args: company (required), note (why this lead matters — required), phone (E.164), email, website."""
+        res = _save_prospect_memory(api_key, user_id, org_id, project_id,
+                                    company=company, note=note, phone=phone, email=email,
+                                    website=website, address=address, fit_reason=fit_reason,
+                                    distinctive_signal=distinctive_signal,
+                                    outreach_angle=outreach_angle, source="agent")
+        return _tool_response(res) if isinstance(res, dict) else _tool_response_text(str(res))
+    tk.register_tool_function(save_prospect)
 
     if "hivemind_slack_post" in enabled_tool_names:
         def slack_post(channel: str, text: str, thread_ts: Optional[str] = None) -> ToolResponse:
@@ -1111,13 +1502,13 @@ def build_hivemind_toolkit(
                 max_memories: Max memories to return (default 5).
             """
             with _client(api_key, user_id, org_id) as c:
-                body = {"query_context": query, "max_memories": max_memories}
+                body = {"query_context": query, "max_memories": max_memories, "mode": "explain"}
                 # Room scope: when the room belongs to a project HIVEMIND, every
                 # agent recall is scoped to that project so the room stays on-topic.
-                # core /api/recall reads `project`/`preferred_project` (NOT
-                # `project_id`) — same keys recall_emulated sends — so the agents
-                # hit the exact project-scoped recall path the grounding pass uses.
+                # project_id is the hard tenant-validated scope. The legacy
+                # project/preferred_project fields remain ranking hints only.
                 if project_id:
+                    body["project_id"] = project_id
                     body["project"] = project_id
                     body["preferred_project"] = project_id
                 r = c.post("/api/recall", json=body)
@@ -1135,11 +1526,33 @@ def build_hivemind_toolkit(
                 tags: Comma-separated tags (e.g. "decision,pricing,q1").
             """
             tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
+            # P0 actionable-gate (shadow by default). Junk facts never help the brain.
+            gate_mode = os.environ.get("HYPER_PROVENANCE_GATE", "log").lower()
+            ok, reason = _actionable_verdict(title, content)
+            if not ok and gate_mode == "enforce":
+                log.info("[provenance-gate] rejected save (%s): %s", reason, (title or "")[:60])
+                return _tool_response_text(
+                    f"Not saved — the actionable gate rejected this ({reason}). "
+                    "Save a concrete, durable fact (a decision, number, name, or commitment), not a question or filler."
+                )
+            if not ok and gate_mode == "log":
+                log.warning("[provenance-gate] SHADOW would-reject (%s): %s", reason, (title or "")[:60])
+            prov = _TURN_PROVENANCE.get() or {}
             with _client(api_key, user_id, org_id) as c:
                 body = {"title": title, "content": content, "tags": tag_list, "sync": True}
                 # Room scope: project-scoped rooms save into the project HIVEMIND.
                 if project_id:
                     body["project_id"] = project_id
+                # P0 provenance: stamp origin so the company brain is auditable (stored via
+                # the existing source_platform column + source_metadata JSON — no schema change).
+                body["source_platform"] = "hyperagents"
+                _sm = {"source_type": "hyperagents_room", "source_platform": "hyperagents",
+                       "produced_by": "hyperagents-agent", "actionable": bool(ok)}
+                if prov.get("turn_id"):
+                    _sm["source_session_id"] = str(prov["turn_id"])
+                if prov.get("room_id"):
+                    _sm["room_id"] = str(prov["room_id"])
+                body["source_metadata"] = _sm
                 r = c.post("/api/memories", json=body)
                 r.raise_for_status()
                 return _tool_response(r.json())
@@ -1305,6 +1718,34 @@ def build_hivemind_toolkit(
                         return _tool_response(payload)
                 return _tool_response({"status": "timeout", "job_id": job_id})
         tk.register_tool_function(web_research)
+
+    if "hivemind_seo_audit" in enabled_tool_names:
+        def seo_audit(url: str, page_limit: int = 25) -> ToolResponse:
+            """Audit a public website with deterministic SEO rules.
+
+            Use in SEO Rooms when the task names a website URL. Returns crawl
+            coverage, page/template findings, evidence, severity and limitations.
+            It does not infer rankings, traffic, Search Console state or CWV.
+            """
+            import time
+            with _client(api_key, user_id, org_id) as c:
+                r = c.post("/api/web/seo-audit/jobs", json={
+                    "url": url, "page_limit": min(max(page_limit, 1), 50), "depth": 2,
+                })
+                r.raise_for_status()
+                job_id = r.json().get("job_id")
+                if not job_id:
+                    return _tool_response({"error": "no job_id"})
+                for _ in range(90):
+                    time.sleep(2)
+                    result = c.get(f"/api/web/jobs/{job_id}")
+                    if result.status_code != 200:
+                        continue
+                    payload = result.json()
+                    if payload.get("status") in {"succeeded", "failed"}:
+                        return _tool_response(payload)
+                return _tool_response({"status": "timeout", "job_id": job_id})
+        tk.register_tool_function(seo_audit)
 
     log.info("Built AgentScope toolkit (tools=%s)", enabled_tool_names)
     return tk

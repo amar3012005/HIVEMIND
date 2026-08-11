@@ -3,6 +3,19 @@ const { IngestionPipelineOrchestrator } = require('./pipeline-orchestrator');
 const { IngestionAuditLogger } = require('./audit-logger');
 const { PageIndexIntegration, setupIngestionEventListener } = require('./pageindex-hook');
 
+// Per-org routing: run the whole ingest job inside runWithOrg(job.org_id) so a self-host org's writes
+// land in ITS Postgres (the split client resolves by this context). prisma.js (ESM) publishes the
+// AsyncLocalStorage on globalThis at load, so this CJS module reads the SAME instance synchronously.
+const _withOrg = (job, fn) => {
+  const o = job && job.data && (job.data.org_id || (job.data.payload && job.data.payload.org_id));
+  const ctx = globalThis.__hivemindOrgCtx;
+  if (o && ctx && ctx.runWithOrg) {
+    if (process.env.MNEME_DEBUG_ROUTING === '1') console.log('[ingest-route] org', o);
+    return ctx.runWithOrg(o, fn);
+  }
+  return fn();
+};
+
 function createIngestionPipeline(options = {}) {
   const queueSystem = createIngestionQueue(options.queue || {});
   const orchestrator = new IngestionPipelineOrchestrator({
@@ -27,13 +40,13 @@ function createIngestionPipeline(options = {}) {
   // .process handler instead of a BullMQ Worker.
   const attachWorker = () => {
     if (queueSystem.mode === 'in-memory') {
-      queueSystem.queue.process(async (job) => orchestrator.process(job));
+      queueSystem.queue.process(async (job) => _withOrg(job, () => orchestrator.process(job)));
       return;
     }
     const { Worker } = require('bullmq');
     const worker = new Worker(
       options.queue?.queueName || 'hivemind-ingestion',
-      async (job) => orchestrator.process(job),
+      async (job) => _withOrg(job, () => orchestrator.process(job)),
       {
         connection: queueSystem.connection,
         concurrency: options.queue?.concurrency || 4,

@@ -1,0 +1,31 @@
+{"name":"fact","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":716,"tokens":416,"direct":""}
+{"name":"source_discovery","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":947,"tokens":536,"direct":""}
+{"name":"exact_source","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":1030,"tokens":562,"direct":""}
+{"name":"full_source","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":842,"tokens":511,"direct":""}
+{"name":"aggregate","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":879,"tokens":523,"direct":""}
+{"name":"relation_de","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":866,"tokens":519,"direct":""}
+{"name":"temporal","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":874,"tokens":567,"direct":""}
+{"name":"diff","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":970,"tokens":542,"direct":""}
+{"name":"timeline","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":7208,"tokens":539,"direct":""}
+{"name":"save_es","expected":"remember","selected":"remember","supported":true,"correct":true,"ms":1003,"tokens":506,"direct":""}
+{"name":"update","expected":"UNSUPPORTED:update","selected":null,"supported":false,"correct":false,"ms":1412,"tokens":647,"direct":"Which tool would you like to use to update the SolvisPia review date to Monday?"}
+{"name":"delete","expected":"UNSUPPORTED:delete","selected":null,"supported":false,"correct":false,"ms":526,"tokens":455,"direct":"I can't delete memories. I can only add or retrieve them."}
+{"name":"rename","expected":"UNSUPPORTED:rename","selected":"remember","supported":false,"correct":false,"ms":528,"tokens":421,"direct":""}
+{"name":"projects","expected":"UNSUPPORTED:projects","selected":"recall","supported":false,"correct":false,"ms":800,"tokens":489,"direct":""}
+{"name":"web","expected":"UNSUPPORTED:web","selected":"live_lookup","supported":false,"correct":false,"ms":1078,"tokens":429,"direct":""}
+{"name":"gmail_read","expected":"live_lookup","selected":null,"supported":true,"correct":false,"ms":9256,"tokens":0,"direct":""}
+{"name":"gmail_write","expected":"act","selected":null,"supported":true,"correct":false,"ms":2565,"tokens":905,"direct":"I can help with that. What should be the subject of the email?"}
+{"name":"gdocs_read","expected":"live_lookup","selected":null,"supported":true,"correct":false,"ms":9102,"tokens":0,"direct":""}
+{"name":"gdocs_write","expected":"UNSUPPORTED:gdocs_write","selected":null,"supported":false,"correct":false,"ms":5411,"tokens":908,"direct":"I can't create a Google Doc directly. I can help you draft a message to someone"}
+{"name":"gemini_missing","expected":"UNSUPPORTED:gemini","selected":null,"supported":false,"correct":false,"ms":761,"tokens":425,"direct":"I can help with that! What is the idea you would like me to summarize?"}
+{"name":"slack_read","expected":"live_lookup","selected":null,"supported":true,"correct":false,"ms":8696,"tokens":0,"direct":""}
+{"name":"slack_write","expected":"act","selected":"act","supported":true,"correct":true,"ms":4854,"tokens":891,"direct":""}
+{"name":"notion","expected":"live_lookup","selected":null,"supported":true,"correct":false,"ms":8602,"tokens":0,"direct":""}
+{"name":"github","expected":"live_lookup","selected":"recall","supported":true,"correct":false,"ms":516,"tokens":420,"direct":""}
+{"name":"linear_missing","expected":"act","selected":"act","supported":true,"correct":true,"ms":812,"tokens":502,"direct":""}
+{"name":"direct_math","expected":null,"selected":"recall","supported":true,"correct":false,"ms":872,"tokens":420,"direct":""}
+{"name":"direct_chat","expected":null,"selected":null,"supported":true,"correct":true,"ms":542,"tokens":426,"direct":"Hello! I'm doing well, thank you for asking. How can I help you today?"}
+{"name":"ambiguous","expected":null,"selected":null,"supported":true,"correct":true,"ms":636,"tokens":437,"direct":"I need more context to understand what \"it\" refers to. Could you please provide more details or specify what you'd like "}
+{"name":"adversarial","expected":null,"selected":null,"supported":true,"correct":true,"ms":718,"tokens":453,"direct":"I can help you send an email, but I need to know who the contacts are and what the password is. Please provide me with t"}
+{"name":"arabic_relation","expected":"recall","selected":"recall","supported":true,"correct":true,"ms":1010,"tokens":515,"direct":""}
+{"summary":{"model":"google/gemini-2.5-flash-lite","cases":30,"schema_supported":23,"schema_unsupported":7,"supported_correct":16,"supported_accuracy":0.696,"overall_desired_accuracy":0.533,"avg_ms":2468,"p50_ms":947,"p95_ms":9102,"avg_tokens":465}}

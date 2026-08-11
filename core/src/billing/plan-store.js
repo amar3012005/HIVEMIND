@@ -7,6 +7,7 @@
  */
 
 import { getPlan } from './plans.js';
+import { getEffectivePlan } from './entitlements.js';
 
 export class PlanStore {
   constructor(prisma) {
@@ -21,17 +22,11 @@ export class PlanStore {
   async getOrgPlan(orgId) {
     if (!this.prisma || !orgId) return getPlan('free');
 
-    const cached = this._cache.get(orgId);
-    if (cached && Date.now() - cached.ts < 300_000) return cached.plan;
-
     try {
-      const org = await this.prisma.organization.findUnique({
-        where: { id: orgId },
-        select: { plan: true },
-      });
-      const planId = org?.plan || 'free';
-      const plan = getPlan(planId || 'free');
-      this._cache.set(orgId, { plan, ts: Date.now() });
+      const { plan, entitlement } = await getEffectivePlan(this.prisma, orgId);
+      // Plan catalog versions are platform-admin changes and must affect the
+      // next admission in every process. Do not retain an in-process cap cache.
+      this._cache.set(orgId, { plan, expiresAt: Date.now() });
       return plan;
     } catch {
       return getPlan('free');

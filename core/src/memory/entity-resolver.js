@@ -25,6 +25,8 @@ import { v4 as uuidv4 } from 'uuid';
 const AUTO_LINK_FLOOR = 0.95;
 const REVIEW_FLOOR = 0.70;
 
+import { entityMatchVariants } from './entity-normalize.js';
+
 function normalizeName(name) {
   if (!name) return '';
   return String(name)
@@ -134,7 +136,22 @@ export class EntityResolver {
           take: 5,
         });
         if (candidates.length === 1) {
-          return { entity: candidates[0], confidence: 0.93, reason: 'name_alias_exact' };
+          // 0.96, ABOVE AUTO_LINK_FLOOR (0.95). This was 0.93 — below the floor — so an
+          // EXACT match auto-linked nothing and every hit went to the review queue instead.
+          // Effect in production: the first document to mention an entity took the CREATE
+          // path and linked fine; every later document mentioning the SAME entity resolved
+          // here, scored 0.93, and silently linked nothing. Entity linking therefore decayed
+          // to zero as an org's entity set saturated — measured on ten ingests of one file:
+          // 31, 35, 28, 19, 12, 12, 0, 1 links, with "+0 entities, 0 links, 1 queued for
+          // review" in the log. The graph quietly stopped growing on exactly the documents
+          // that reinforce known entities, which are the ones that matter most.
+          //
+          // This branch is not a guess: the query is scoped by organizationId AND entityKind,
+          // matches canonicalName case-insensitively or an exact alias, and requires EXACTLY
+          // ONE candidate. That is identity. Raising this score (rather than lowering the
+          // floor) keeps the floor meaningful — the 0.90 domain+name_fuzzy and 0.80/0.72
+          // jaccard branches below ARE guesses and must still go to review.
+          return { entity: candidates[0], confidence: 0.96, reason: 'name_alias_exact' };
         }
         // Fuzzy across all same-kind entities (cap 100, prefer recent)
         const fuzzyPool = await this.prisma.canonicalEntity.findMany({
@@ -186,10 +203,37 @@ export class EntityResolver {
       }
 
       // Create new canonical entity.
+      const _canonName = cand.name || cand.email || 'Unknown';
+      // V5 dedup guard: reuse an existing entity with the SAME normalized name in
+      // this org REGARDLESS of entityKind, before minting a new row. _bestMatch
+      // scopes by kind, so the same real-world entity classified under different
+      // kinds by different ingestion paths (e.g. "SolvisMax" as product vs
+      // "solvismax" as company) would otherwise create case/kind variants. The
+      // normalized name is a unicode-aware lowercase key (language-neutral), and
+      // Postgres is immediately consistent so near-simultaneous saves can't race a
+      // duplicate. Only reuse a specific (non-empty) normalized key.
+      const _normKey = normalizeName(_canonName);
+      if (_normKey && _normKey.length >= 2) {
+        const existing = await this.prisma.canonicalEntity.findFirst({
+          // in: variants — plural + diacritic folds of the key, so 'Wärmepumpen'
+          // reuses 'Wärmepumpe' instead of minting a sibling canonical.
+          where: { organizationId, normalizedName: { in: entityMatchVariants(_normKey) } },
+          orderBy: { createdAt: 'asc' }, // oldest wins — the canonical original
+        }).catch(() => null);
+        if (existing) {
+          await this._link({ memoryId, entityId: existing.id, role, confidence: 0.9 });
+          await this._enrichEntity(existing.id, { name: cand.name, email: cand.email, domain, externalRefs });
+          results.push({ entityId: existing.id, role, confidence: 0.9, action: 'linked', reason: 'normalized_name_reuse' });
+          continue;
+        }
+      }
       const created = await this.prisma.canonicalEntity.create({
         data: {
           organizationId,
-          canonicalName: cand.name || cand.email || 'Unknown',
+          canonicalName: _canonName,
+          // normalized_name is NOT NULL in the DB; without it every create threw
+          // P2011 and canonical_entities could never populate. Stable identity key.
+          normalizedName: normalizeName(_canonName) || String(_canonName).toLowerCase(),
           entityKind: kind,
           aliases: cand.name ? [cand.name] : [],
           primaryEmail: cand.email ? String(cand.email).toLowerCase() : null,

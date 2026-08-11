@@ -16,11 +16,30 @@ const PREFERENCE_PATTERNS = [
   { key: null, patterns: [/i (?:prefer|like|love|enjoy|always use|favor) ([\w\s]{3,40}?)(?:\.|,|\s+and|\s+but|\s+for|$)/i, /my (?:favorite|preferred|go-to) (\w+) is ([\w\s]{3,30}?)(?:\.|,|$)/i] },
 ];
 
+// Process-wide singleton so every caller (server.js /api/profiles, the chat
+// get_user_profile tool, onboarding company-fact writes) SHARES one 60s cache.
+// Constructing throwaway instances means a write on one never invalidates
+// another's cache → up-to-60s stale reads. Callers outside server.js's own
+// singleton should use this accessor. Keyed by nothing — the prisma client is
+// the same process-wide singleton (getPrismaClient).
+let _sharedProfileStore = null;
+export function getSharedProfileStore(prisma) {
+  if (!_sharedProfileStore && prisma) _sharedProfileStore = new ProfileStore(prisma);
+  return _sharedProfileStore;
+}
+
 export class ProfileStore {
   constructor(prisma) {
     this.prisma = prisma;
     this._cache = new Map(); // userId -> { facts, ts }
     this._cacheTTL = 60_000; // 1 minute
+  }
+
+  invalidateOrg(orgId) {
+    const marker = `:${orgId || ''}:`;
+    for (const key of this._cache.keys()) {
+      if (key.includes(marker)) this._cache.delete(key);
+    }
   }
 
   /**

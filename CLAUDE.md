@@ -1,5 +1,35 @@
 ## MCP Tools: code-review-graph
 
+## Mandatory Deployment Governor
+
+Every production action must first load [`DEPLOY_GOVERNOR.md`](DEPLOY_GOVERNOR.md)
+and `.claude/agents/singulance-deploy-governor.md`. Deploy only pushed
+`singulance-main` to the SSH alias `singulance` through the foreground
+cache-preserving quick-deploy path. Never use the legacy raw-IP/Coolify/Vercel
+instructions.
+
+## Mandatory Production Release Rule
+
+Before feature work, read and follow
+[`docs/BRANCH_PROTOCOL.md`](docs/BRANCH_PROTOCOL.md). Work on a session branch
+or isolated worktree, rebase onto `origin/singulance-main`, and merge only a
+complete tested state into `singulance-main`. Do not commit feature work
+directly to `singulance-main`, and never point the parent repo at an unpushed
+`frontend/Da-vinci` commit.
+
+Before any production edit, build, migration, restart, or deployment, read and follow
+[`docs/PRODUCTION_RELEASE_PROTOCOL.md`](docs/PRODUCTION_RELEASE_PROTOCOL.md). Compare the intended
+commits with [`docs/PRODUCTION_RELEASE.md`](docs/PRODUCTION_RELEASE.md). Stop rather than deploy from
+a dirty checkout, stale frontend gitlink, mutable image tag, unpushed commit, or conflicting session.
+SINGULANCE production is only `ssh singulance`; never use `myserver` for this release path.
+
+## Mandatory Engineering Journal
+
+Read and maintain [`docs/ENGINEERING_JOURNAL.md`](docs/ENGINEERING_JOURNAL.md).
+Git is the source of truth: journal entries must cite pushed SHAs and must
+separate `Committed` from `Accepted release`. Append entries only; never
+rewrite history or describe an uncommitted change as complete.
+
 **IMPORTANT: Project has knowledge graph. ALWAYS use
 code-review-graph MCP tools BEFORE Grep/Glob/Read for codebase exploration.** Graph faster, cheaper (fewer tokens), gives
 structural context (callers, dependents, test coverage) file

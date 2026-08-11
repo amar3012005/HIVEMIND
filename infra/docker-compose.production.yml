@@ -79,28 +79,28 @@ x-logging: &default-logging
     labels: "hivemind.component,environment"
 
 # Common health checks
-x-healthcheck: &pg-healthcheck
+x-pg-healthcheck: &pg-healthcheck
   test: ["CMD-SHELL", "pg_isready -U hivemind -d hivemind -h 127.0.0.1"]
   interval: 10s
   timeout: 5s
   retries: 5
   start_period: 30s
 
-x-healthcheck: &redis-healthcheck
+x-redis-healthcheck: &redis-healthcheck
   test: ["CMD", "redis-cli", "-a", "$${REDIS_PASSWORD}", "ping"]
   interval: 10s
   timeout: 5s
   retries: 5
   start_period: 10s
 
-x-healthcheck: &qdrant-healthcheck
+x-qdrant-healthcheck: &qdrant-healthcheck
   test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
   interval: 10s
   timeout: 5s
   retries: 5
   start_period: 20s
 
-x-healthcheck: &api-healthcheck
+x-api-healthcheck: &api-healthcheck
   test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
   interval: 30s
   timeout: 10s
@@ -182,6 +182,8 @@ services:
       - ../core/src:/app/src:ro
     environment:
       - NODE_ENV=production
+      - HIVEMIND_RUNTIME_ROLE=app
+      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
       - DATABASE_URL=postgresql://hivemind:${POSTGRES_PASSWORD}@postgres:5432/hivemind?schema=public
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - QDRANT_URL=http://qdrant:6333
@@ -220,6 +222,111 @@ services:
         reservations:
           cpus: '0.5'
           memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  api-maintenance:
+    image: hivemind/core:${VERSION:-latest}
+    container_name: hivemind-api-maintenance
+    restart: unless-stopped
+    <<: *default-security-context
+    build:
+      context: ../core
+      dockerfile: ../Dockerfile.production
+      args:
+        - NODE_ENV=production
+    command: ["node", "src/workers/memory-maintenance-worker.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ../logs:/app/logs:rw
+      - ../core/src:/app/src:ro
+    environment:
+      - NODE_ENV=production
+      - HIVEMIND_RUNTIME_ROLE=maintenance
+      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
+      - DATABASE_URL=postgresql://hivemind:${POSTGRES_PASSWORD}@postgres:5432/hivemind?schema=public
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - ZITADEL_ISSUER_URL=https://${ZITADEL_DOMAIN:-auth.hivemind.io}
+      - ZITADEL_CLIENT_ID=${ZITADEL_CLIENT_ID}
+      - ZITADEL_CLIENT_SECRET=${ZITADEL_CLIENT_SECRET}
+      - HSM_MASTER_KEY=${HSM_MASTER_KEY}
+      - LOG_LEVEL=info
+      - LOG_FORMAT=json
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.11
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  api-sidecar:
+    image: hivemind/core:${VERSION:-latest}
+    container_name: hivemind-api-sidecar
+    restart: unless-stopped
+    <<: *default-security-context
+    build:
+      context: ../core
+      dockerfile: ../Dockerfile.production
+      args:
+        - NODE_ENV=production
+    command: ["node", "src/workers/app-sidecar-worker.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ../logs:/app/logs:rw
+      - ../core/src:/app/src:ro
+    environment:
+      - NODE_ENV=production
+      - HIVEMIND_RUNTIME_ROLE=sidecar
+      - HIVEMIND_REQUIRE_QUEUED_KB_UPLOADS=true
+      - DATABASE_URL=postgresql://hivemind:${POSTGRES_PASSWORD}@postgres:5432/hivemind?schema=public
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - ZITADEL_ISSUER_URL=https://${ZITADEL_DOMAIN:-auth.hivemind.io}
+      - ZITADEL_CLIENT_ID=${ZITADEL_CLIENT_ID}
+      - ZITADEL_CLIENT_SECRET=${ZITADEL_CLIENT_SECRET}
+      - HSM_MASTER_KEY=${HSM_MASTER_KEY}
+      - LOG_LEVEL=info
+      - LOG_FORMAT=json
+      - DR_PORT=8055
+    networks:
+      hivemind-network:
+        ipv4_address: 172.28.0.12
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
       restart_policy:
         condition: on-failure
         delay: 5s

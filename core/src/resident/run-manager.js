@@ -11,6 +11,7 @@ import { includePersonalForOrg, cognitionEnabledForOrg } from './cognition-pilot
 import { FeynmanAgent } from './feynman.js';
 import { TuringAgent } from './turing.js';
 import { isPoolEnabled, ensurePoolRow, resetAndReadPool, spendPool } from './budget-pool.js';
+import { runWithOrg, currentOrg } from '../db/prisma.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -806,6 +807,9 @@ export class ResidentRunManager {
       err.code = 'MISSING_ORG_ID';
       throw err;
     }
+    if (currentOrg() !== orgId) {
+      return runWithOrg(orgId, () => this.runFullCycle({ orgId, userId, scope, project, region, trigger, enabledCognitiveTools, tierName, tierTokenEstimate }));
+    }
     if (!this.prisma) {
       this.logger?.warn?.('[gov-cycle] no prisma client — skipping persistence');
     }
@@ -978,9 +982,14 @@ export class ResidentRunManager {
             || fFinal?.result?.observations?.[fFinal.result.observations.length - 1]?.content?.memory_id
             || null;
           if (lastScannedId) {
-            await this.prisma.governanceAgentState.update({
+            // Upsert for the same reason as the cycle-token writer below:
+            // agentName is the @id, so update() throws on an agent that has never
+            // run here, and the .catch() hides the rejection while Prisma still
+            // logs prisma:error.
+            await this.prisma.governanceAgentState.upsert({
               where: { agentName: 'faraday' },
-              data: { cursorMemoryId: lastScannedId },
+              update: { cursorMemoryId: lastScannedId },
+              create: { agentName: 'faraday', cursorMemoryId: lastScannedId },
             }).catch(() => null);
           }
         } catch {}
@@ -1286,12 +1295,24 @@ export class ResidentRunManager {
     for (const agentName of ['faraday', 'feynman', 'turing']) {
       const tokensSpent = Number(tokenUsageByAgent[agentName] ?? FALLBACK_TOKENS_PER_RUN) | 0;
       totalCycleTokens += tokensSpent;
-      await this.prisma.governanceAgentState.update({
+      // UPSERT: agentName is the @id, so update() throws "Record to update not
+      // found" for any agent that has never run in this deployment. The .catch()
+      // swallowed the rejection but Prisma still emitted prisma:error, and this
+      // loop runs three agents per org — the observed nine errors per governance
+      // cycle across three orgs came from exactly here, burying real failures.
+      // `increment` is meaningless on create, so the create seeds the literal.
+      await this.prisma.governanceAgentState.upsert({
         where: { agentName },
-        data: {
+        update: {
           lastRunAt: now,
           lastCompletedAt: status === 'completed' ? now : undefined,
           tokensSpentToday: { increment: tokensSpent },
+        },
+        create: {
+          agentName,
+          lastRunAt: now,
+          lastCompletedAt: status === 'completed' ? now : null,
+          tokensSpentToday: tokensSpent,
         },
       }).catch(() => null);
 

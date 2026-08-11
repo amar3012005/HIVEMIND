@@ -1,0 +1,17 @@
+# Overlay on whatever core image is currently live, carrying ONLY the KB ingest
+# fixes from this session. Built as an overlay rather than a full tree build so a
+# concurrent session's image work is preserved rather than reverted — the compose
+# tag moved under us mid-session more than once.
+#
+# Carries: parse-tier routing (smart-by-format), Docling poll 404 fast-fail,
+# chunker timeout, parse-survives-chunker-failure, segmentation granularity +
+# overlap, source-text retention, zero-memory failure gate.
+FROM hivemind/core-api:prod-20260731-hq-email-loop-v1
+
+COPY core/src/server.js /app/src/server.js
+COPY core/src/knowledge/document-first-ingestion.js /app/src/knowledge/document-first-ingestion.js
+COPY core/src/knowledge/enterprise/docling-adapter.js /app/src/knowledge/enterprise/docling-adapter.js
+COPY core/src/routes/recall.js /app/src/routes/recall.js
+COPY core/src/routes/knowledge.js /app/src/routes/knowledge.js
+COPY core/src/knowledge/enterprise/fast-pdf-parser.js /app/src/knowledge/enterprise/fast-pdf-parser.js
+COPY core/src/memory/graph-engine.js /app/src/memory/graph-engine.js

@@ -15,6 +15,8 @@
  */
 
 import { getHydrateConfig, getManifest } from '../connectors/framework/connector-manifest.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
+import { remoteHydrate } from '../vector/mneme/remote-backend.js';
 
 /**
  * @param {{ prisma, qdrantClient, connectorStore, toolkitFactory }} deps
@@ -23,6 +25,14 @@ import { getHydrateConfig, getManifest } from '../connectors/framework/connector
 export async function hydrateMemory(deps, { memoryId, userId, orgId }) {
   const { prisma, qdrantClient } = deps || {};
   if (!prisma || !memoryId || !userId) return { ok: false, reason: 'missing-deps' };
+
+  // Remote (self-host): the memory row lives on the agent and is stored full-content —
+  // tier stubs are a central-only concept, so if the row exists it is already "hot".
+  if (orgId && orgIsRemote(orgId)) {
+    const rows = await remoteHydrate(orgId, [memoryId]).catch(() => []);
+    if (!rows.length) return { ok: false, reason: 'memory-not-found' };
+    return { ok: true, reason: 'already-tier-2' };
+  }
 
   let memory;
   try {

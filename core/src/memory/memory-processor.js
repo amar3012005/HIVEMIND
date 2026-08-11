@@ -9,6 +9,8 @@
  * Replaces separate ConflictResolver + Observer calls.
  */
 
+import { memoryChatFetch } from '../llm/groq-fallback.js';
+
 export class MemoryProcessor {
   constructor(options = {}) {
     this.groqApiKey = options.groqApiKey || process.env.GROQ_API_KEY;
@@ -38,7 +40,7 @@ export class MemoryProcessor {
     const maxTokens = Math.max(300, Math.min(inputTokens + 500, 4000));
 
     try {
-      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      const resp = await memoryChatFetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${this.groqApiKey}`,
@@ -65,6 +67,21 @@ FACT_SENTENCES:
 
 Rules:
 - RELATIONSHIP: ADD/UPDATE/EXTEND/DERIVE/NOOP
+  ADD     = a new fact. Use this by DEFAULT, including when the new fact is
+            INCOMPATIBLE with an existing one.
+  UPDATE  = the SAME fact with a new value, and the user signalled a change
+            ("now", "moved to", "actually", "no longer").
+  EXTEND  = adds detail to an existing fact that stays TRUE. Sharing a topic,
+            a date or a person is NOT enough.
+  DERIVE  = a conclusion drawn from other memories.
+  NOOP    = an exact duplicate that adds nothing.
+  There is deliberately NO "contradicts" option here: incompatibility is decided
+  downstream by the contradiction detector, which can only run when you return
+  ADD. Returning EXTEND for an incompatible fact SILENCES that check.
+  So: two commitments in the same time window that cannot both hold — a trip to
+  Dubai and a trip to Hannover on the same day, two meetings at one hour, one
+  person in two places — are ADD, never EXTEND. They do not extend each other;
+  they compete, and something downstream needs to notice.
 - PRIORITY: HIGH/MEDIUM/LOW
 - OBSERVATION: One sentence summary with 🔴/🟡/🟢. Write TRIVIAL if nothing noteworthy.
 - ENTITIES: Names of people, companies, products, places, technologies. Write NONE if empty.
@@ -109,6 +126,14 @@ CRITICAL RULES:
 
   _parseOutput(output, similarMemories, originalContent) {
     const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
+    // What the model was SHOWN and what it ANSWERED. Without this the three
+    // possible causes of a wrong edge — candidate never offered, model judged
+    // badly, parse defaulted — are indistinguishable from the outside.
+    if (String(process.env.MEMORY_PROCESSOR_DEBUG || '').toLowerCase() === 'true') {
+      const _raw = lines.find(l => /^(?:RELATIONSHIP[:\s]+)?(ADD|UPDATE|EXTEND|DERIVE|NOOP)[:\s]/i.test(l)) || '(none)';
+      console.log(`[memory-processor] rel_raw=${JSON.stringify(_raw)} candidates=${similarMemories.length} `
+        + `ids=${similarMemories.slice(0, 5).map(m => String(m.id).slice(0, 8)).join(',')}`);
+    }
 
     // Parse RELATIONSHIP
     let relationship = { action: 'ADD', targetId: null, sourceIds: [], reason: 'default' };
@@ -123,7 +148,25 @@ CRITICAL RULES:
         // Try to match the ID against similar memories
         if (relationship.action === 'UPDATE' || relationship.action === 'EXTEND') {
           const target = similarMemories.find(m => idOrReason.includes(m.id));
-          relationship.targetId = target?.id || similarMemories[0]?.id || null;
+          // NEVER INVENT A TARGET. This used to fall back to `similarMemories[0]`,
+          // so a model that answered "EXTEND" without naming an id had the edge
+          // attached to whichever candidate happened to sort first — usually just
+          // the most recent one. Observed as a chain of Extends between unrelated
+          // same-day memories (Tokyo -> Dubai -> Hannover): none of those were a
+          // judgement about those pairs, they were the first element of a list.
+          //
+          // It also suppressed contradiction detection, which only runs when the
+          // action is ADD and no edge is set. So an unsourced EXTEND both fabricated
+          // a relationship AND silenced the check that would have caught the real
+          // conflict. An unattributable EXTEND/UPDATE is not evidence of anything:
+          // fall back to ADD and let the detector look.
+          if (target?.id) {
+            relationship.targetId = target.id;
+          } else {
+            relationship.action = 'ADD';
+            relationship.targetId = null;
+            relationship.reason = `${relationship.reason || ''} [downgraded: no target id named]`.trim();
+          }
         } else if (relationship.action === 'DERIVE') {
           const idMatches = [...new Set([
             ...similarMemories

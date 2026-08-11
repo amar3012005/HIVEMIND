@@ -13,6 +13,8 @@
  */
 
 import { chatCompletion, getDefaultModel } from './enterprise/litellm-client.js';
+import { memoryLLMRoute } from '../llm/groq-fallback.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
 
 const EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s)]+/g;
@@ -21,17 +23,27 @@ const HASHTAG_RE = /(?:^|\s)#([A-Z0-9_-]{2,40})/gi;
 
 const ENTITY_TYPES = ['person', 'organization', 'project', 'topic', 'location', 'product', 'event'];
 
-const SYSTEM_PROMPT = `You extract named entities from text.
+const SYSTEM_PROMPT = `You extract EVERY distinct named entity from the text. Be THOROUGH, not minimal — this feeds a knowledge graph, and a missed entity is lost forever. Never stop at the obvious organization; capture every specific named thing.
 
 Return ONLY a JSON object: { "entities": [...] }
 Each entity: { "name": string, "type": one_of(${ENTITY_TYPES.map(t => `"${t}"`).join(',')}), "aliases": string[]?, "confidence": number_0_to_1 }
 
+Extract ALL of these whenever named or specifically identified:
+- person — named individuals.
+- organization — companies, institutions, teams, brands, vendors, clients, partners.
+- product — products, product LINES, MODELS, devices, COMPONENTS, apps, services, features, and article/model/SKU numbers. List EACH distinct product/component as its OWN entity, not just the parent brand (e.g. "Solvis Indoor Unit", "Solvis Storage Tank", "Solvis Outdoor Unit", "SolvisBen HB", "article 33989" — all separate products).
+- project — named projects, initiatives, campaigns.
+- location — places, cities, countries, regions, sites, addresses, facilities.
+- topic — significant technologies, standards, materials, methods, or concepts central to the text (e.g. "R290 refrigerant", "heat pump", "GWP").
+- event — meetings, launches, milestones, or notable dated occurrences.
+
 Rules:
+- COMPREHENSIVE over conservative: when in doubt about a clearly-named specific thing, include it.
 - Canonical name = most common written form. Strip titles ("Mr.", "Dr.") for people.
-- Skip generic words ("user", "the team", "company").
-- Combine same-entity variants under one canonical with aliases.
-- Maximum 25 entities per call.
-- Empty list ok if no clear entities.`;
+- Combine same-entity spelling/casing variants under ONE canonical with aliases (don't drop them).
+- Skip ONLY truly generic words with no specific name ("user", "the team", "the company", "the system", "lorem ipsum" placeholder text).
+- Up to 40 entities per call.
+- Empty list only if there are genuinely no named entities.`;
 
 export class EntityExtractor {
   constructor({ prisma, logger = console, model = null }) {
@@ -39,9 +51,14 @@ export class EntityExtractor {
     this.logger = logger;
     // Entity extraction prefers a fast non-reasoning model (llama 3.3 70B is
     // ~5x faster than gpt-oss-20b and emits JSON cleanly).
+    // Use the LiteLLM client's own default model (getDefaultModel — the same
+    // client chatCompletion() calls). The old `cerebras/gpt-oss-120b` fallback
+    // was NOT a valid model id at the gateway (api.blaiq.ai) → every LLM
+    // extraction 400'd → 0 entities (only the heuristic's lone org survived).
     this.model = model
       || process.env.ENTITY_EXTRACTION_MODEL
-      || (process.env.GROQ_API_KEY ? 'llama-3.3-70b-versatile' : getDefaultModel());
+      || memoryLLMRoute()?.model
+      || getDefaultModel();
   }
 
   /**
@@ -51,6 +68,14 @@ export class EntityExtractor {
   async extractFromSegment({ segment, userId, orgId, documentId }) {
     if (!segment?.content || segment.content.trim().length < 20) {
       return { entities: [], mentions: [], skipped: true, reason: 'too_short' };
+    }
+    // RESIDENCY: the central entity / entityMention tables are FK'd to central segment/memory rows the
+    // agent doesn't have — for a remote (self-host) org these upserts throw ("Invalid prisma.entityMention
+    // .create invocation"). The memory entity graph for self-host is built on the AGENT by the co-mention
+    // linker (entity:* tags via amrUpdateTags + edges via amrAddEdge). Skip the central segment-entity
+    // persistence for remote.
+    if (orgIsRemote(orgId)) {
+      return { entities: [], mentions: [], skipped: true, reason: 'remote-agent' };
     }
 
     // 1. Regex pre-pass — cheap candidates
@@ -152,7 +177,10 @@ export class EntityExtractor {
   }
 
   async _llmExtract(text) {
-    const input = String(text).slice(0, 4000);
+    // 8000 chars (~2k tokens): long atomic memories (e.g. a full image visual-
+    // evidence description) exceed 4000 and would lose entities named later in
+    // the text. Wider window → richer, complete extraction.
+    const input = String(text).slice(0, 8000);
     let raw = null;
     // Retry once on transient failure
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -161,7 +189,17 @@ export class EntityExtractor {
           model: this.model,
           json_mode: true,
           temperature: 0.1,
-          max_tokens: 800,
+          // 800 was self-defeating. The system prompt demands "extract EVERY
+          // distinct named entity, be THOROUGH not minimal" — and the cap then
+          // truncated the JSON mid-array, so JSON.parse failed and the whole
+          // extraction returned []. The MORE entities the model found, the more
+          // certain it produced NOTHING.
+          // Measured on a real 7.2 KB image description naming E3/DC, SOLVIS,
+          // clever-PV, SPINE, HEIDELBERG plus photovoltaics/HEMS/battery storage:
+          //   completion=836 finish=error  (attempt 1)
+          //   completion=800 finish=error  (attempt 2)  -> 0 candidates
+          // ~25 entities of ~40 JSON tokens each needs well over 1k.
+          max_tokens: Number(process.env.ENTITY_EXTRACT_MAX_TOKENS || 4000),
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: input },
@@ -184,6 +222,25 @@ export class EntityExtractor {
       const m = typeof raw === 'string' ? raw.match(/\{[\s\S]*\}/) : null;
       if (m) {
         try { parsed = JSON.parse(m[0]); } catch { parsed = null; }
+      }
+      // SECOND salvage — recover a TRUNCATED array. The block match above needs a
+      // closing brace, so a response cut off mid-array matched nothing and every
+      // entity the model DID emit was thrown away. All-or-nothing on a truncated
+      // response is the worst possible failure here: entity extraction feeds the
+      // graph, and a dropped entity is a relationship that can never form.
+      // Rebuild by taking whole `{...}` objects up to the truncation point.
+      if (!parsed && typeof raw === 'string') {
+        const objs = raw.match(/\{\s*"name"[\s\S]*?\}/g) || [];
+        if (objs.length) {
+          const salvaged = [];
+          for (const o of objs) {
+            try { salvaged.push(JSON.parse(o)); } catch { /* skip the partial tail */ }
+          }
+          if (salvaged.length) {
+            this.logger?.warn?.(`[entity-extractor] response truncated — salvaged ${salvaged.length} entities`);
+            parsed = { entities: salvaged };
+          }
+        }
       }
       if (!parsed) return [];
     }

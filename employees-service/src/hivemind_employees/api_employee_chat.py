@@ -18,7 +18,7 @@ from typing import Dict, Optional
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import asyncio
 
@@ -33,6 +33,10 @@ router = APIRouter(prefix="/v1/employees", tags=["employee-chat"])
 
 
 class ChatRequest(BaseModel):
+    # P1 seam contract: forward-tolerant — silently ignore unknown fields from a newer
+    # caller (version skew never 400s), and accept an optional negotiated schema_version.
+    model_config = ConfigDict(extra="ignore")
+    schema_version: Optional[str] = None
     text: str = Field(..., min_length=1, description="User message")
     conversation_id: Optional[str] = Field(
         None,
@@ -97,7 +101,11 @@ async def _get_or_build_agent(emp: Dict, conv_key: str) -> ReActAgent:
         }
     if not api_key:
         raise HTTPException(412, "employee has no bootstrap api_key")
-    agent = build_react_agent(merged_emp, api_key)
+    # Pass org_id so recall + connector toolkits are tenant-scoped. merged_emp carries the agent's
+    # own connector grants (→ Gmail/Docs/Sheets/MCP tools) and its GLOBAL learned playbook (→ injected
+    # into the persona) from the chat-profile, so private chat knows the org + what it learned and can
+    # call toolkits — the same reach it has inside a room.
+    agent = build_react_agent(merged_emp, api_key, org_id=merged_emp.get("org_id"))
     _CHAT_AGENTS[conv_key] = agent
     return agent
 

@@ -1,0 +1,8 @@
+{
+  "slug": "campaign",
+  "version": 1,
+  "display_name": "Campaign Intelligence",
+  "description": "Source-grounded campaign strategy, creative systems, channel execution plans, launch safety, and measurable learning loops.",
+  "lead_shape": "maker",
+  "default_skill": "campaign-operating-system"
+}

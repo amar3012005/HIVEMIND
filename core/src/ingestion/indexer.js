@@ -152,12 +152,46 @@ function contentHashPointId(content, scopeKey) {
   return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20, 32)].join('-');
 }
 
-function createDefaultVectorStore() {
-  if (process.env.QDRANT_URL) {
-    return new QdrantVectorStore();
+/**
+ * MnemeRouterVectorStore — routes a configured set of orgs to the local .amr
+ * engine (mneme) while every other org keeps using the fallback (Qdrant).
+ * Off unless BOTH MNEME_ORGS (csv of org tokens, e.g. "sai") and MNEME_MODULE
+ * (path to the mneme-node package) are set — so production is untouched by default.
+ * The mneme MnemeVectorStore matches this exact upsert/search interface.
+ */
+class MnemeRouterVectorStore {
+  constructor(fallback) {
+    this.fallback = fallback;
+    this.orgs = (process.env.MNEME_ORGS || '').split(',').map((s) => s.trim()).filter(Boolean);
+    this._mneme = null;
   }
+  _isMneme(collectionName) {
+    return this.orgs.some((o) => String(collectionName).includes(o));
+  }
+  _store() {
+    if (!this._mneme) {
+      const { MnemeVectorStore } = require(process.env.MNEME_MODULE);
+      this._mneme = new MnemeVectorStore({
+        dataRoot: process.env.MNEME_DATA_ROOT,
+        dim: Number(process.env.MNEME_DIM || 1024),
+      });
+    }
+    return this._mneme;
+  }
+  async upsert(collectionName, points) {
+    return (this._isMneme(collectionName) ? this._store() : this.fallback).upsert(collectionName, points);
+  }
+  async search(collectionName, vector, topK = 5) {
+    return (this._isMneme(collectionName) ? this._store() : this.fallback).search(collectionName, vector, topK);
+  }
+}
 
-  return new InMemoryVectorStore();
+function createDefaultVectorStore() {
+  const base = process.env.QDRANT_URL ? new QdrantVectorStore() : new InMemoryVectorStore();
+  if (process.env.MNEME_ORGS && process.env.MNEME_MODULE) {
+    return new MnemeRouterVectorStore(base);
+  }
+  return base;
 }
 
 async function indexEmbeddedChunks(chunks, context = {}, deps = {}) {
@@ -238,5 +272,6 @@ module.exports = {
   indexEmbeddedChunks,
   InMemoryVectorStore,
   QdrantVectorStore,
+  MnemeRouterVectorStore,
   buildCollectionName,
 };

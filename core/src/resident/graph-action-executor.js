@@ -147,9 +147,11 @@ export class GraphActionExecutor {
     const tool = registry.get(toolName);
     if (!tool) return { status: 'failed', error: `unknown_tool: ${toolName}` };
 
-    // Resolve a representative member for orgId/userId fallback.
-    const sample = memoryIds?.length
-      ? await prisma.memory.findFirst({ where: { id: { in: memoryIds.slice(0, 1) } }, select: { orgId: true, userId: true } })
+    // Resolve a representative member for orgId/userId fallback. Only hit central Postgres
+    // when the payload doesn't already carry org_id — remote (self-host) orgs have no central
+    // row, so the lookup returning null must not fail the action when content.org_id exists.
+    const sample = memoryIds?.length && !content?.org_id
+      ? await prisma.memory.findFirst({ where: { id: { in: memoryIds.slice(0, 1) } }, select: { orgId: true, userId: true } }).catch(() => null)
       : null;
     const orgId = content?.org_id || sample?.orgId;
     const userId = content?.user_id || sample?.userId;

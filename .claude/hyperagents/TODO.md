@@ -1,45 +1,51 @@
-# HyperAgents — Active TODO
+# HyperAgents / Singulance-OS — Active TODO
 
-The `hyperagents-builder` skill writes the recon+plan phases here BEFORE coding,
-then executes them one-by-one, checking each off. One feature at a time.
-When all phases ship → move a summary line to [JOURNAL.md](./JOURNAL.md) and clear this.
-
-- `[ ]` pending · `[~]` in progress · `[x]` done · `[!]` blocked (note why)
+The `hyperagents-builder` skill writes recon+plan phases here BEFORE coding, then
+executes one-by-one, checking each off. `[ ]` pending · `[~]` in progress · `[x]`
+done · `[!]` blocked. When a phase ships → JOURNAL entry + check it here.
 
 ---
 
-## Current feature: Agentic orchestrator (AgentScope PlanNotebook + MsgHub) — started 2026-06-19
-**Goal:** Replace the deterministic phase machine with an autonomous agent-driven loop that works for ANY task: lead decomposes → each owner gets a SubTask → each runs its own ReAct loop (personified recall + connectors) → MsgHub broadcasts → synthesize → structured verify. No `if intended_output==…`, no `_resolve_recipients`/`_produce_output` branches.
-**Recon-redteam verdict:** AgentScope 1.0.19 natively supports it (API verified): `PlanNotebook`(create_plan/finish_subtask + plan-change hook), `MsgHub`(auto-broadcast), `ReActAgent(plan_notebook=, structured_model=)`, `Toolkit` groups. Build behind a flag (safe/reversible); risk = gpt-oss harmony tool-name leak (retry) + token/429 (cap) + FE event parity.
-**Feature-recon:** Extends `build_react_agent` (add optional `plan_notebook`) + new `_orchestrate_agentic`; reuses existing grounding gate, `_verify_and_emit`, approval queue, event types. Does NOT touch the live deterministic path until parity.
+## PROGRAM: Singulance-OS "AI Company" closed loop
+Full design in the owner's plan (onboard → verified presence → round-table →
+frontier report → outreach contract → TARA acts → learnings ingested; gated by
+provenance+actionable-gate and a Governor). Owner-chosen order below.
 
-### Phases
-- [x] P1 — DONE (77004cd8): `_orchestrate_agentic` via STRUCTURED flat plan (gpt-oss can't do nested create_plan) → owners execute with tools in MsgHub → synthesis → grounding gate/verify/produce/seal. Smoke: subtasks=4, complete, grounded to real Münzer. Flag OFF.
-- [ ] P2 — Agent-driven PRODUCE: synthesizer/owner calls `docs_create`/`gmail_create_draft` itself (approval card still surfaces); drop the deterministic producer for this path.
-- [ ] P3 — Robustness: harmony/429 retry per owner, cost cap, max rounds, reuse the hard grounding gate + structured verify, idempotent seal.
-- [ ] P4 — FE: render live SubTask states from the plan event; turn the flag ON after parity with the deterministic path.
-- [ ] Verify — e2e on JEE/Solvis room for several task shapes (doc, email, answer, doc+email); CEO grounds to real Münzer, doc+email produces the doc + drafts when recipient known.
-- [ ] Ship — per phase: commit (author amarsai3012005) + push + JOURNAL.
-- [ ] Retrospective — scorecard → JOURNAL; delegate to hivemind-skill-evolver.
+### In-flight (owner priority 2026-07-23)
+- [~] **F0 — employees-service LLM canonicalization** (close the Brain/OS gap FIRST).
+  Cerebras→OpenRouter / gpt-oss-120b, NO groq/llama, in the Python sidecar.
+  Files: `hyper/engine.py` (model defaults + `_route_direct_openrouter`/`GROQ_URL`
+  path + `_GROQ_DEAD`), env (`HYPER_WEB_MODEL`, `MIND_READER_MODEL`,
+  `COGNITION_WRITER_MODEL`, `GROQ_INFERENCE_MODEL`, `HIVEMIND_LLM_MODEL`).
+  done-when: no text call routes to api.groq.com / a llama model; a room turn +
+  round-table run green on gpt-oss via Cerebras→OpenRouter; deployed hm-employees.
+  NOTE: `groq/compound*` web-search has no gpt-oss twin — decide (keep isolated as
+  a non-text tool, or replace the web lane) rather than blanket-swap.
+- [ ] **P3 — eval baseline (moved UP, before P4/P7)** — can't prove a quality win
+  without a baseline. `employees-service/evals/hyper_report_eval.py`: N frozen
+  `(company_url, task)` → run pipeline → rubric score (grounded? specific?
+  actionable? zero hallucinated facts). Baseline now; regression-gate later phases.
 
-> _(template for future features below)_
+### Then the plan (owner's visual-first order, with the two guards above landed first)
+- [x] **P7 — MsgHub round-table debate** (SHIPPED 014457f1f) — — round-2 argues verbatim round-1 peer msgs (`_debate`, engine.py).
+- [ ] **P5 — parallel verified presence scan at genesis** — address+socials, ≥2-source `verified` (control-plane onboarding). WRITE to the P0 schema (define P0 fields first).
+- [ ] **P4 — `HYPER_SYNTH_MODEL` frontier final report** — one frontier call for the sealed report (engine.py synth seam). Gate cost via Governor. Re-run P3.
+- [ ] **P1 — typed contracts at the 4 seams** — CompanyProfile/RoundtableReport/OutreachContract/OutcomeReport v1 (JS + pydantic), version-tolerant (accept vN & vN-1).
+- [ ] **P0 — provenance + actionable-gate** — `{verification,confidence,actionable}`; `actionable && !verified` → ingest reject. **Define the fields+rule BEFORE P5; enforce hard gate BEFORE P6.**
+- [ ] **P2 — Governor primitive** — per-org token + outbound caps + kill switch; checked by every autonomous action. Pull the kill switch EARLY.
+- [ ] **P6 — Outreach Contract v1 (TARA autonomy)** — LAST, GATED on P0. Report emits contract; TARA picks skill + sets goal; outcome writes back verified learning.
 
-> When a new feature starts, replace this block with:
->
-> ## Current feature: <name> — started YYYY-MM-DD
-> **Goal:** <one line>
-> **Recon-redteam verdict:** <reuse / build / risks flagged>
-> **Feature-recon:** <existing code found — extend X / nothing, net-new>
->
-> ### Phases
-> - [ ] P1 — <phase> · files: <...> · done-when: <verifiable>
-> - [ ] P2 — ...
-> - [ ] Verify — e2e on box (command + expected)
-> - [ ] Ship — commit (author amarsai3012005) + push + JOURNAL entry
-> - [ ] Retrospective — score the run (scorecard → JOURNAL), delegate to `hivemind-skill-evolver`, propose (don't auto-apply) any harness improvement
+### Adjustments I recommend (from the high-level review — owner to confirm)
+- Verification = ≥2 *independent* sources needs real design (source-class independence,
+  normalization, human-approval rung on first autonomous dials) — it's the moat AND the liability.
+- P3 baseline before P4/P7 (done above). Contracts version-tolerant so JS/Python deploy independently.
 
-## Backlog (known next increments)
-- [ ] MCP-connector search in GATHER (Notion/Slack/GitHub) — only when a room enables an MCP connector.
-- [ ] Verifier strictness on LLM-authored `done_criterion` (it sometimes demands sections the user didn't ask for → met=false partial). Consider grounding done_criterion to the user's actual ask.
-- [ ] Extend the GROUNDING GATE (save+seal block) to the swarm + deep_sim paths — it's currently in the debate path + the goalkeeper (all templates loop on grounded_ok, but swarm's own save isn't gated). Debate covers the transcript cases; swarm save-gate is the residual.
-- [x] ~~Per-owner EXECUTE tool use~~ — DONE (30d03725): owners now run real tools (recall+connectors) in a bounded ReAct loop.
+## Superseded / historical
+- **Agentic orchestrator (AgentScope PlanNotebook + MsgHub), started 2026-06-19,
+  parked at P2, flag OFF (`HYPER_AGENTIC_ORCHESTRATOR`).** Not part of this program;
+  left as-is (flag off). Revisit only if the round-table path needs its subtask model.
+
+## Backlog
+- [ ] MCP-connector search in GATHER (Notion/Slack/GitHub) when a room enables an MCP connector.
+- [ ] Verifier strictness on LLM-authored `done_criterion` (sometimes demands unrequested sections).
+- [ ] Extend GROUNDING GATE to swarm + deep_sim save paths.

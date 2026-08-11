@@ -1,0 +1,181 @@
+import crypto from 'node:crypto';
+import { authorizeKnowledgeScope } from './upload-authorization.js';
+import { safeUploadFilename, uploadError, validateKnowledgeFile } from './upload-contract.js';
+import { countPages } from './page-count.js';
+
+export class KnowledgeUploadService {
+  constructor({ prisma, queue, jobStore, planEnforcer, storageReady }) {
+    this.prisma = prisma;
+    this.queue = queue;
+    this.jobStore = jobStore;
+    this.planEnforcer = planEnforcer;
+    this.storageReady = storageReady;
+  }
+
+  async admit({ userId, orgId, file, targetScope, projectIds, primaryTeamId, metadata }) {
+    const filename = safeUploadFilename(file.filename);
+    const validation = validateKnowledgeFile({
+      filename, contentType: file.contentType, bytes: file.data?.length, buffer: file.data,
+    });
+    if (!validation.ok) return { ok: false, ...uploadError(validation.code, { limits: validation.limits }) };
+    const ingestMode = metadata?.ingest_mode === 'evidence' ? 'evidence' : 'both';
+    if (validation.kind === 'image' && ingestMode === 'evidence') {
+      return { ok: false, status: 400, body: {
+        error: 'evidence_mode_unsupported_for_image',
+        message: 'Images use the vision-to-memory pipeline and currently support ingestMode=both only.',
+      } };
+    }
+
+    const scope = await authorizeKnowledgeScope({
+      prisma: this.prisma, userId, orgId, targetScope, projectIds, primaryTeamId,
+    });
+    if (!scope.ok) return { ok: false, status: scope.status, body: { error: scope.code } };
+
+    const org = await this.prisma.organization.findFirst({
+      where: { id: orgId }, select: { memoryStorageMode: true },
+    });
+    if (!org) return { ok: false, status: 404, body: { error: 'scope_not_found' } };
+    const storageMode = org.memoryStorageMode || 'hybrid';
+    if (!this.storageReady(orgId, storageMode)) {
+      return { ok: false, status: 503, body: {
+        error: 'storage_unavailable', message: 'The selected memory storage is unavailable. No central fallback was used.',
+      } };
+    }
+    if (!await this.queue?.isAvailable()) {
+      return { ok: false, status: 503, body: { error: 'queue_unavailable', message: 'Durable ingestion is temporarily unavailable.' } };
+    }
+
+    if (this.planEnforcer) {
+      const estimatedPages = await this._estimatePages(file, validation);
+      const limit = await this.planEnforcer.checkLimit(orgId, 'kbPages', estimatedPages);
+      if (!limit.allowed) return { ok: false, status: limit.status || 402, body: {
+        error: 'quota_reached', metric: 'kbPages', estimated_pages: estimatedPages,
+      } };
+    }
+
+    const checksum = crypto.createHash('sha256').update(file.data).digest('hex');
+    let job = await this.jobStore.findDuplicate({ orgId, scopeKey: scope.scopeKey, checksum });
+    // A file already ingested successfully is NOT a failure — it is the best
+    // possible outcome. The FE branches on `duplicate` (KnowledgeBase.jsx checks
+    // `err.response.status === 409 && err.response.data.duplicate`) to render
+    // "already in this scope" with an Upload-anyway action. This body never set
+    // that flag, so every previously-ingested file rendered as a red **Failed**
+    // row. Observed on a real batch: B&B_Solvis_Kick-Off.docx, Brandind Skizze
+    // (1).pdf, BundB-Solvis-Budget.pdf and Dachmarke (1).pdf all showed "Failed"
+    // while holding 10, 2, 18 and 7 memories respectively.
+    // `message` is included because the FE prefers it over the raw error code.
+    // A ready job row OUTLIVES its document. Deleting a document removes the
+    // document, its segments and its memories, but not the ingest job — so this
+    // reported "already in your knowledge base" for a file the user had just
+    // deleted, and there was no way to ingest it again. Verified: deleting
+    // BundB-Solvis-Budget.pdf removed all 31 memories, and the very next upload of
+    // the same bytes came back duplicate_document.
+    //
+    // Confirm the document still exists before claiming the file is present. Same
+    // check the /upload/precheck route already makes; the two must agree or the
+    // pre-flight says "go" and the upload then refuses.
+    let _readyDocLives = false;
+    if (job?.status === 'ready') {
+      if (!job.documentId) {
+        _readyDocLives = false; // ready with no document to point at — nothing to reuse
+      } else if (this.prisma?.knowledgeDocument) {
+        try {
+          _readyDocLives = !!(await this.prisma.knowledgeDocument.findFirst({
+            where: { id: job.documentId, orgId }, select: { id: true },
+          }));
+        } catch { _readyDocLives = true; } // lookup failed — keep the old, safer behaviour
+      } else {
+        _readyDocLives = true;
+      }
+    }
+    if (job?.status === 'ready' && _readyDocLives) return { ok: false, status: 409, body: {
+      error: 'duplicate_document',
+      duplicate: true,
+      message: 'Already in your knowledge base — this exact file was ingested before.',
+      existing_title: job.filename || null,
+      status: 'existing', job_id: job.id,
+      existing_document_id: job.documentId, actions: ['view_existing', 'reprocess'],
+    } };
+    // Ready job whose document is gone: treat it as re-ingestable. Falling through
+    // reuses the existing row via the processingVersion bump below, so the retry
+    // path and this path stay one state machine.
+    const _reingestDeleted = job?.status === 'ready' && !_readyDocLives;
+    if (_reingestDeleted) {
+      console.log(`[upload] re-ingesting ${file.filename}: ready job ${job.id} points at a deleted document`);
+    }
+    if (job && job.userId !== userId) {
+      return { ok: false, status: 409, body: { error: 'upload_already_processing', status: 'processing' } };
+    }
+    // `_reingestDeleted` must bypass this guard too: 'ready' is not terminal, so
+    // without it a ready-but-deleted job returns existing:true here and the
+    // re-ingest never happens — the branch above would be dead code.
+    if (job && !_reingestDeleted && !['failed', 'dead', 'cancelled'].includes(job.status)) {
+      return { ok: true, existing: true, job };
+    }
+
+    const processingVersion = job ? job.processingVersion + 1 : 1;
+    // A ready-but-deleted job is reset exactly like a failed one, so both paths
+    // share one state machine (see /api/knowledge/jobs/retry).
+    if (job) {
+      await this.jobStore.updateOwned(job.id, orgId, {
+        status: 'queued', stage: 'queued', progress: 0, processingVersion,
+        attempt: 0, errorCode: null, errorMessage: null, completedAt: null,
+      });
+      job = await this.jobStore.findOwned(job.id, { orgId, userId });
+    } else {
+      job = await this.jobStore.create({
+        orgId, userId, scopeType: scope.scopeType, scopeId: scope.scopeId,
+        scopeKey: scope.scopeKey, storageMode, filename,
+        contentType: file.contentType || 'application/octet-stream', mediaKind: validation.kind,
+        checksum, ingestMode, status: 'queued', stage: 'queued', progress: 0, processingVersion,
+        metadata: { ...metadata, project_ids: projectIds, primary_team_id: primaryTeamId },
+      });
+    }
+
+    const filePath = this.queue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
+    const queued = await this.queue.enqueue({
+      userId, orgId, filename, contentType: file.contentType, checksum, filePath,
+      trackerJobId: job.id, processingVersion,
+      metadata: {
+        ...metadata, media_kind: validation.kind, scope_type: scope.scopeType,
+        scope_id: scope.scopeId, project_ids: projectIds, primary_team_id: primaryTeamId,
+      },
+    });
+    if (queued.backpressure) {
+      await this.jobStore.fail(job.id, orgId, Object.assign(new Error('Ingestion queue is saturated.'), { code: 'QUEUE_SATURATED' }));
+      return { ok: false, status: 429, body: { error: 'queue_saturated', retry_after: 30 } };
+    }
+    await this.jobStore.updateOwned(job.id, orgId, { queueJobId: queued.queue_job_id });
+    return { ok: true, job: await this.jobStore.findOwned(job.id, { orgId, userId }) };
+  }
+
+  /**
+   * Estimate how many plan "pages" an upload consumes, per media kind — never
+   * by raw bytes. The old value `Math.ceil(file.data.length / 50_000)` is a
+   * byte heuristic with no basis in the plan's unit: a 3 MB image was billed
+   * as ~62 pages (and 402'd a Free org that was well within a 1-page image's
+   * allowance), while a 500 KB markdown file billed as 10. The durable
+   * counter (settled after ingest) uses the REAL parsed page count; this
+   * pre-admit estimate only needs to be accurate enough to not false-block.
+   *
+   * - image            → 1  (an image is one thing = one page, by definition)
+   * - pdf              → real page count (cheap header/count read, same lib the
+   *                      parser uses); fall back to 1 if it cannot be read
+   * - other documents  → 1  at admit (office/text pages aren't knowable before
+   *                      parsing; the durable counter settles the real value)
+   */
+  async _estimatePages(file, validation) {
+    const kind = validation?.kind;
+    if (kind === 'image' || String(file?.contentType || '').toLowerCase().startsWith('image/')) {
+      return 1;
+    }
+    // ONE counter for admit and settle. This used to inline a PDF-only count and
+    // return 1 for everything else, so the kbPages limit was unenforceable for
+    // every PPTX/DOCX/XLSX — a 15-slide deck was admitted as "1 page" and later
+    // billed 5 (the count of distinct SEGMENTED pages). countPages reads the real
+    // unit out of the container; null means genuinely unknowable (see that file),
+    // and 1 remains the honest floor for the admit check.
+    const real = await countPages(file?.data, file?.filename);
+    return Number.isFinite(real) && real > 0 ? real : 1;
+  }
+}

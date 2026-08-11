@@ -119,6 +119,21 @@ const MEMORIES_PAYLOAD_INDEXES = [
     description: 'When the interaction occurred (dual-layer timestamp)'
   },
   {
+    field_name: 'created_at',
+    field_schema: 'datetime',
+    description: 'Transaction-time eligibility for known_at recall'
+  },
+  {
+    field_name: 'valid_from',
+    field_schema: 'datetime',
+    description: 'Valid-time window start'
+  },
+  {
+    field_name: 'valid_to',
+    field_schema: 'datetime',
+    description: 'Valid-time window end'
+  },
+  {
     field_name: 'importance_score',
     field_schema: 'float',
     description: 'User/model assigned importance (0-1)'
@@ -203,6 +218,7 @@ const SESSIONS_PAYLOAD_INDEXES = [
 export class QdrantCollections {
   #client;
   #config;
+  #payloadIndexChecks = new Map();
 
   constructor(config) {
     this.#config = {
@@ -263,6 +279,7 @@ export class QdrantCollections {
 
     if (await this.collectionExists(collectionName)) {
       logger.info(`Collection ${collectionName} already exists`);
+      await this.createPayloadIndexes(collectionName, MEMORIES_PAYLOAD_INDEXES);
       return;
     }
 
@@ -412,28 +429,37 @@ export class QdrantCollections {
     collectionName,
     indexes
   ) {
-    for (const index of indexes) {
-      try {
+    const signature = `${collectionName}:${indexes.map(({ field_name, field_schema }) => `${field_name}:${field_schema}`).join('|')}`;
+    const cached = this.#payloadIndexChecks.get(signature);
+    if (cached) return cached;
+
+    const ensure = (async () => {
+      // Qdrant treats createPayloadIndex as a write even when the index already
+      // exists. Read the schema once and create only missing indexes so opening
+      // a Room never repeats a wait:true write for every tenant field.
+      const collection = await this.#client.getCollection(collectionName);
+      const payloadSchema = collection?.payload_schema || collection?.result?.payload_schema || {};
+      for (const index of indexes) {
+        if (payloadSchema[index.field_name]) continue;
         await this.#client.createPayloadIndex(collectionName, {
           field_name: index.field_name,
           field_schema: index.field_schema,
           wait: true
         });
-        logger.debug(`Payload index created: ${collectionName}.${index.field_name}`, {
+        logger.info(`Payload index created: ${collectionName}.${index.field_name}`, {
           schema: index.field_schema,
           isTenantFilter: index.is_tenant_filter
         });
-      } catch (error) {
-        // Check if index already exists
-        const collections = await this.#client.getCollections();
-        const collection = collections.collections.find(c => c.name === collectionName);
-        if (collection && collection.payload_schema?.[index.field_name]) {
-          logger.debug(`Payload index ${index.field_name} already exists`);
-        } else {
-          logger.error(`Failed to create payload index ${index.field_name}`, { error });
-          throw error;
-        }
       }
+    })();
+
+    this.#payloadIndexChecks.set(signature, ensure);
+    try {
+      return await ensure;
+    } catch (error) {
+      this.#payloadIndexChecks.delete(signature);
+      logger.error(`Failed to ensure payload indexes for ${collectionName}`, { error });
+      throw error;
     }
   }
 

@@ -1,0 +1,175 @@
+{
+  "playbook_id": "outreach.voice-call-to-outcome",
+  "version": 2,
+  "status": "ACTIVE",
+  "name": "Outreach voice call to governed outcome",
+  "description": "Prepare, authorize, place, observe, analyze, and complete the evidence-backed next action for one outbound TARA call.",
+  "initial_stage_id": "prepare_call_brief",
+  "terminal_states": ["call_completed", "call_failed", "summary_sent", "summary_not_deliverable"],
+  "metadata": {
+    "owner_room_tag": "outreach",
+    "supported_actions": ["place_voice_call", "place_voice_call_and_complete_follow_up"],
+    "purpose": "Use for one exact verified recipient. The Outreach Room owns strategy and analysis; adapters own governed provider effects."
+  },
+  "input_contract": {
+    "fields": [
+      {"path": "request.exact_targets", "type": "array", "description": "One exact recipient with a verified phone number and any retained lead references.", "required": true}
+    ]
+  },
+  "stages": [
+    {
+      "id": "prepare_call_brief",
+      "objective": "Prepare one grounded TARA call brief from the controlling instruction, company context, retained lead evidence, personal notes, and prior safe outreach learning. Do not dial.",
+      "input_refs": ["context.company", "context.baseline", "context.request", "context.target"],
+      "expected_artifacts": ["call_brief"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "call_brief", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "call_brief", "path": "data.phone"},
+        {"predicate": "all_have_nonempty_field", "select": "call_brief", "path": "data.goal"},
+        {"predicate": "is_source_backed", "select": "call_brief"}
+      ],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v1", "phase_kind": "prepare"}},
+      "transitions": [{"default": true, "to_stage": "prepare_call_contract"}],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "prepare_call_contract",
+      "objective": "Persist the immutable exact call contract without dialing.",
+      "input_refs": ["artifacts.call_brief"],
+      "expected_artifacts": ["call_contract"],
+      "completion_checks": [
+        {"predicate": "count_matches", "select": "call_contract", "target_select": "call_brief"},
+        {"predicate": "references_cover_all", "select": "call_contract", "path": "data.input_ref", "target_select": "call_brief"},
+        {"predicate": "all_have_nonempty_field", "select": "call_contract", "path": "data.campaign_ref"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "execute", "config": {"action": "prepare", "input_key": "call_brief", "output_key": "call_contract"}},
+      "transitions": [{"default": true, "to_stage": "place_call"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "place_call",
+      "objective": "Place the exact authority-approved TARA call and retain one conclusive outcome for its contract.",
+      "input_refs": ["artifacts.call_contract"],
+      "expected_artifacts": ["call_receipt", "call_rejection", "call_uncertain"],
+      "completion_checks": [
+        {"predicate": "references_cover_all", "select": ["call_receipt", "call_rejection", "call_uncertain"], "path": "data.input_ref", "target_select": "call_contract"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "execute", "config": {"action": "deliver", "input_key": "call_contract", "output_key": "call_receipt", "rejection_key": "call_rejection", "uncertain_key": "call_uncertain"}},
+      "authority_gate": "outbound_call", "authority_policy_key": "outbound_calls", "authority_binding": "stage_inputs",
+      "transitions": [
+        {"when": {"predicate": "has_min_count", "select": "call_receipt", "value": 1}, "to_stage": "observe_call"},
+        {"default": true, "to_terminal": "call_failed"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "observe_call",
+      "objective": "Register the canonical TARA session and wait for its real terminal result.",
+      "input_refs": ["artifacts.call_receipt"],
+      "expected_artifacts": ["call_subscription"],
+      "completion_checks": [
+        {"predicate": "count_matches", "select": "call_subscription", "target_select": "call_receipt"},
+        {"predicate": "all_have_nonempty_field", "select": "call_subscription", "path": "data.correlation_ref"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "tara-outreach", "operation": "monitor", "config": {"input_key": "call_receipt", "output_key": "call_subscription"}},
+      "waits_for_event": {"types": ["call.completed", "call.failed", "wait.timeout"], "correlation_path": "data.correlation_ref", "timeout_after_seconds": 7200},
+      "transitions": [{"default": true, "to_stage": "analyze_call"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "analyze_call",
+      "objective": "Retrieve the exact transcript and insight, determine the objective result, update lead-specific learning, isolate safe generalized learning, and select the required next action.",
+      "input_refs": ["artifacts.call_brief", "artifacts.call_contract", "artifacts.call_receipt", "artifacts.call_subscription", "event"],
+      "expected_artifacts": ["call_analysis"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "call_analysis", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "call_analysis", "path": "data.terminal_state"},
+        {"predicate": "all_have_nonempty_field", "select": "call_analysis", "path": "data.next_action.action_type"},
+        {"predicate": "is_source_backed", "select": "call_analysis"}
+      ],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v1", "phase_kind": "review"}},
+      "transitions": [
+        {"default": true, "to_stage": "record_lead_outcome"}
+      ],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "record_lead_outcome",
+      "objective": "Persist the lead-specific call outcome and next action from the accepted analysis before advancing the conversation lifecycle.",
+      "input_refs": ["artifacts.call_contract", "artifacts.call_analysis"],
+      "expected_artifacts": ["lead_timeline_record"],
+      "completion_checks": [
+        {"predicate": "references_cover_all", "select": "lead_timeline_record", "path": "data.input_ref", "target_select": "call_analysis"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "lead-timeline", "operation": "execute", "config": {"input_key": "call_analysis", "contract_key": "call_contract", "output_key": "lead_timeline_record"}},
+      "transitions": [
+        {"when": {"predicate": "field_equals", "select": "call_analysis", "path": "data.terminal_state", "value": "call_failed", "mode": "any"}, "to_terminal": "call_failed"},
+        {"when": {"predicate": "field_equals", "select": "call_analysis", "path": "data.next_action.requires_information", "value": true, "mode": "any"}, "to_stage": "request_summary_recipient"},
+        {"when": {"predicate": "field_equals", "select": "call_analysis", "path": "data.next_action.action_type", "value": "send_summary", "mode": "any"}, "to_stage": "prepare_summary"},
+        {"default": true, "to_terminal": "call_completed"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "request_summary_recipient",
+      "objective": "Request the missing verified recipient email while preserving this exact call execution.",
+      "input_refs": ["artifacts.call_analysis"],
+      "expected_artifacts": ["input_request"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "input_request", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "input_request", "path": "data.input_key"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "runtime-input", "operation": "execute", "config": {"input_key": "verified_email", "output_key": "input_request", "label": "Verified email", "description": "Provide the verified email requested during the call.", "value_type": "email"}},
+      "waits_for_event": {"type": "input.provided", "correlation_path": "data.input_key", "timeout_after_seconds": 604800},
+      "transitions": [{"default": true, "to_stage": "prepare_summary"}],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "prepare_summary",
+      "objective": "Prepare the personalized written summary requested in the call using exact transcript evidence, the retained company context, and a verified recipient address. Do not send.",
+      "input_refs": ["context.company", "context.supplied_inputs", "artifacts.call_brief", "artifacts.call_analysis", "event"],
+      "expected_artifacts": ["message_record"],
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "message_record", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.recipient"},
+        {"predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.subject"},
+        {"predicate": "all_have_nonempty_field", "select": "message_record", "path": "data.body"},
+        {"predicate": "is_source_backed", "select": "message_record"}
+      ],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v1", "phase_kind": "prepare"}},
+      "transitions": [{"default": true, "to_stage": "prepare_summary_draft"}],
+      "on_failure": "REPAIR", "max_attempts": 2
+    },
+    {
+      "id": "prepare_summary_draft",
+      "objective": "Create the provider draft for the requested summary.",
+      "input_refs": ["artifacts.message_record"],
+      "expected_artifacts": ["draft_record", "draft_rejection", "draft_uncertain"],
+      "completion_checks": [
+        {"predicate": "references_cover_all", "select": ["draft_record", "draft_rejection", "draft_uncertain"], "path": "data.input_ref", "target_select": "message_record"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": {"action": "prepare_drafts", "input_key": "message_record", "output_key": "draft_record", "rejection_key": "draft_rejection", "uncertain_key": "draft_uncertain"}},
+      "transitions": [
+        {"when": {"predicate": "has_min_count", "select": "draft_record", "value": 1}, "to_stage": "deliver_summary"},
+        {"default": true, "to_terminal": "summary_not_deliverable"}
+      ],
+      "on_failure": "ESCALATE"
+    },
+    {
+      "id": "deliver_summary",
+      "objective": "Send the exact authority-approved summary and retain the Gmail receipt.",
+      "input_refs": ["artifacts.draft_record"],
+      "expected_artifacts": ["delivery_receipt", "delivery_rejection", "delivery_uncertain"],
+      "completion_checks": [
+        {"predicate": "references_cover_all", "select": ["delivery_receipt", "delivery_rejection", "delivery_uncertain"], "path": "data.input_ref", "target_select": "draft_record"}
+      ],
+      "execution": {"mode": "adapter", "adapter_id": "gmail", "operation": "execute", "config": {"action": "deliver", "input_key": "draft_record", "output_key": "delivery_receipt", "rejection_key": "delivery_rejection", "uncertain_key": "delivery_uncertain"}},
+      "authority_gate": "outbound_summary", "authority_policy_key": "outbound_messages", "authority_binding": "stage_inputs",
+      "transitions": [
+        {"when": {"predicate": "has_min_count", "select": "delivery_receipt", "value": 1}, "to_terminal": "summary_sent"},
+        {"default": true, "to_terminal": "summary_not_deliverable"}
+      ],
+      "on_failure": "ESCALATE"
+    }
+  ]
+}

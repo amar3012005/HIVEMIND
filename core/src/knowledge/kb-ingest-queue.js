@@ -45,6 +45,10 @@ const ORG_CONCURRENCY = Number(process.env.KB_QUEUE_ORG_CONCURRENCY || 4);
 const MAX_DEPTH = Number(process.env.KB_QUEUE_MAX_DEPTH || 2000);
 const ORG_PENDING_CAP = Number(process.env.KB_QUEUE_ORG_PENDING_CAP || 500);
 
+export function durableQueueJobId(trackerJobId, processingVersion = 1) {
+  return `${String(trackerJobId).replace(/:/g, '-')}-v${Number(processingVersion) || 1}`;
+}
+
 function tryLoadBullMQ() {
   try {
     const bullmq = require_('bullmq');
@@ -100,10 +104,14 @@ export class KbIngestQueue {
    * @param {function} [deps.recordUsage]         (orgId, result) => void — plan-quota accounting post-success
    * @param {object} [deps.logger]
    */
-  constructor({ documentFirstIngestion, ingestTracker, recordUsage = null, logger = console }) {
+  constructor({ documentFirstIngestion, ingestTracker, recordUsage = null, jobStore = null,
+    validateJob = null, processUpload = null, logger = console }) {
     this.dfi = documentFirstIngestion;
     this.tracker = ingestTracker;
     this.recordUsage = recordUsage;
+    this.jobStore = jobStore;
+    this.validateJob = validateJob;
+    this.processUpload = processUpload;
     this.logger = logger;
     this.queue = null;
     this.worker = null;
@@ -112,13 +120,24 @@ export class KbIngestQueue {
     this._orgRunning = new Map();   // orgId -> running count (fairness)
     this._orgPending = new Map();   // orgId -> queued count (backpressure, best-effort)
     this._counters = { processed: 0, failed: 0, dead: 0, delayed_fair: 0, rejected_backpressure: 0 };
+    // DEGRADED MODE FLAG. When Redis is unreachable the queue disables itself and
+    // ingestion runs INLINE in the request: no retry, no DLQ, no cross-node status,
+    // no backpressure. That is a reasonable last resort but it was completely
+    // silent — two WARN lines at startup and nothing afterwards, so an operator
+    // could serve uploads for hours in a mode with none of the durability
+    // guarantees the rest of this file provides. Exposed via stats() so health and
+    // /api/knowledge/status can say so out loud.
+    this.inlineFallback = false;
+    this.inlineFallbackReason = null;
     this._ready = this._init();
   }
 
   async _init() {
     const deps = tryLoadBullMQ();
     if (!deps) {
-      this.logger.warn?.('[kb-queue] bullmq/ioredis unavailable — queue disabled (inline fallback)');
+      this.inlineFallback = true;
+      this.inlineFallbackReason = 'bullmq/ioredis module unavailable';
+      this.logger.warn?.('[kb-queue] DEGRADED: bullmq/ioredis unavailable — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)');
       return;
     }
     const { bullmq, IORedis } = deps;
@@ -145,7 +164,9 @@ export class KbIngestQueue {
       if (!host && attempt < PROBE_ATTEMPTS - 1) await new Promise(r => setTimeout(r, 2000));
     }
     if (!host) {
-      this.logger.warn?.(`[kb-queue] no reachable Redis after ${PROBE_ATTEMPTS} attempts — queue disabled (inline fallback)`);
+      this.inlineFallback = true;
+      this.inlineFallbackReason = `no reachable Redis after ${PROBE_ATTEMPTS} attempts`;
+      this.logger.warn?.(`[kb-queue] DEGRADED: no reachable Redis after ${PROBE_ATTEMPTS} attempts — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)`);
       return;
     }
     this._redisHost = host;
@@ -155,7 +176,24 @@ export class KbIngestQueue {
     };
     this.queue = new bullmq.Queue(QUEUE_NAME, { connection });
     this.worker = new bullmq.Worker(QUEUE_NAME, (job, token) => this._process(job, token), {
-      connection, concurrency: CONCURRENCY,
+      connection,
+      concurrency: CONCURRENCY,
+      // STALL WINDOW MUST EXCEED THE JOB'S OWN TIMEOUT.
+      // These were left at BullMQ's defaults (lockDuration 30s), while real ingests
+      // run 30-134s and the promote phase alone measured 25.4s. BullMQ renews the
+      // lock while the processor runs, but renewal rides the event loop — a long
+      // synchronous stretch (parse, embed batching) can miss it. A lapsed lock makes
+      // BullMQ re-deliver the job to another worker, which would ingest the SAME
+      // document twice: duplicate memories, duplicate edges, double usage billed.
+      //
+      // Sized so a job can never look stalled while it is still inside its own
+      // timeout: past JOB_TIMEOUT_MS it fails honestly instead of being re-run.
+      // Genuinely lost workers (container recreate) are recovered by the separate
+      // stale-job reaper, which marks them STALE_ABANDONED — that is the correct
+      // owner of that case, not lock expiry.
+      lockDuration: JOB_TIMEOUT_MS,
+      stalledInterval: Number(process.env.KB_QUEUE_STALLED_INTERVAL_MS || 60 * 1000),
+      maxStalledCount: Number(process.env.KB_QUEUE_MAX_STALLED || 1),
     });
     this.worker.on('failed', (job, err) => {
       this._counters.failed++;
@@ -175,6 +213,111 @@ export class KbIngestQueue {
     this.redis = new IORedis({ host, port, password, username, db, maxRetriesPerRequest: null });
     this.redis.on('error', () => {});
     this.logger.info?.(`[kb-queue] ready on redis://${host}:${port}/${db} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
+    this._startStaleJobReaper();
+    this._startRawFileSweeper();
+  }
+
+  /**
+   * Bound the retained raw-upload files.
+   *
+   * Terminal failures now KEEP their bytes so a dead job can be replayed (before
+   * this, the module promised "raw file kept for replay" while unlinking on the
+   * final attempt, so replay was impossible). Retention without a bound is a disk
+   * leak — this box was measured at 92% full earlier today — so anything older
+   * than KB_RAW_RETENTION_HOURS is removed on a slow tick.
+   *
+   * Deliberately time-based rather than status-based: reading job status per file
+   * would couple the sweeper to the DB, and a file older than the retention window
+   * is past the point where a human would still be retrying it.
+   */
+  _startRawFileSweeper() {
+    const hours = Number(process.env.KB_RAW_RETENTION_HOURS || 168); // 7 days
+    const everyMs = Number(process.env.KB_RAW_SWEEP_INTERVAL_MS || 60 * 60 * 1000);
+    if (!(hours > 0)) return;
+    const sweep = () => {
+      try {
+        // persistFile() writes KB_STORE_DIR/<orgId>/<checksum>/<filename>, so this
+        // walks exactly two levels — a flat readdir would sweep nothing.
+        if (!KB_STORE_DIR || !fs.existsSync(KB_STORE_DIR)) return;
+        const cutoff = Date.now() - hours * 3600 * 1000;
+        let removed = 0; let kept = 0;
+        for (const org of fs.readdirSync(KB_STORE_DIR)) {
+          const orgDir = path.join(KB_STORE_DIR, org);
+          let checksums = [];
+          try {
+            if (!fs.statSync(orgDir).isDirectory()) continue;
+            checksums = fs.readdirSync(orgDir);
+          } catch { continue; }
+          for (const sum of checksums) {
+            const sumDir = path.join(orgDir, sum);
+            try {
+              if (!fs.statSync(sumDir).isDirectory()) continue;
+              let emptied = true;
+              for (const name of fs.readdirSync(sumDir)) {
+                const p = path.join(sumDir, name);
+                const st = fs.statSync(p);
+                if (!st.isFile()) { emptied = false; continue; }
+                if (st.mtimeMs < cutoff) { fs.unlinkSync(p); removed += 1; } else { kept += 1; emptied = false; }
+              }
+              if (emptied) fs.rmdirSync(sumDir); // drop the now-empty checksum dir
+            } catch { /* raced with the worker or another node — skip */ }
+          }
+          try { if (!fs.readdirSync(orgDir).length) fs.rmdirSync(orgDir); } catch { /* non-empty */ }
+        }
+        if (removed) this.logger.info?.(`[kb-queue] raw-file sweep: removed ${removed} file(s) older than ${hours}h, ${kept} retained for replay`);
+      } catch (err) {
+        this.logger.warn?.(`[kb-queue] raw-file sweep failed: ${err.message}`);
+      }
+    };
+    this._rawSweepTimer = setInterval(sweep, everyMs);
+    this._rawSweepTimer.unref?.();
+  }
+
+  /**
+   * Reap jobs that died without ever reporting a terminal state.
+   *
+   * A container recreate loses in-flight BullMQ jobs, but the tracker row in
+   * knowledge_ingest_jobs stays exactly as it was — so the job sits `queued` or
+   * `processing` forever. Nothing times it out, nothing retries it, and nothing
+   * surfaces it: the FE just shows a spinner that never resolves.
+   *
+   * Measured 2026-08-02: `kb-canary-amr.md` and `kb-canary-hybrid.md` had been
+   * `queued` for over FIVE HOURS (18086s / 18524s) and had never started, and
+   * `BundB-Solvis_Pitch-Praesentation.pptx` had been `processing` for two hours.
+   * All three were orphaned by restarts during that session's deploys.
+   *
+   * Marking them failed is the honest outcome — an upload that is never going to
+   * finish should say so, so the user can retry. Silence is the worst option.
+   */
+  _startStaleJobReaper() {
+    const BOOTED_AT = new Date();
+    if (String(process.env.KB_QUEUE_REAPER ?? 'true').toLowerCase() === 'false') return;
+    const EVERY_MS = Number(process.env.KB_REAPER_INTERVAL_MS || 5 * 60 * 1000);
+    // Generous: a 54-page enriched PDF legitimately takes ~11 minutes, and with
+    // several workers a job can wait behind others. Only reap well past that.
+    const QUEUED_MAX_MIN = Number(process.env.KB_REAPER_QUEUED_MAX_MIN || 90);
+    const PROCESSING_MAX_MIN = Number(process.env.KB_REAPER_PROCESSING_MAX_MIN || 45);
+
+    const sweep = async () => {
+      if (!this.jobStore?.reapStale) return;
+      try {
+        await this.jobStore.reapStale({
+          queuedMaxMin: QUEUED_MAX_MIN,
+          processingMaxMin: PROCESSING_MAX_MIN,
+          // Anything non-terminal that predates this boot lost its BullMQ job when
+          // the previous container went away. Age it out in minutes, not 90.
+          bootedAt: BOOTED_AT,
+        });
+      } catch (e) {
+        this.logger.warn?.(`[kb-queue] reaper sweep failed: ${e.message}`);
+      }
+    };
+
+    // First sweep shortly after boot — a restart is exactly when jobs get orphaned.
+    this._reaperBoot = setTimeout(sweep, 30_000);
+    this._reaperTimer = setInterval(sweep, EVERY_MS);
+    this._reaperTimer.unref?.();
+    this._reaperBoot.unref?.();
   }
 
   async _setStatus(trackerJobId, obj) {
@@ -240,13 +383,38 @@ export class KbIngestQueue {
     return mode.split(',').map(s => s.trim()).filter(Boolean).includes(orgId);
   }
 
+  async isAvailable() {
+    await this._ready;
+    return !!this.queue;
+  }
+
   /** Persist raw bytes durably; returns the stored path. */
+  /**
+   * Where persistFile() put (or would put) the raw bytes for a job.
+   *
+   * Exposed so replay does not re-derive the layout: the path formula lives here,
+   * next to the writer, and nowhere else. A second copy in the route would drift
+   * the moment either changes — which is exactly how the sweeper was first written
+   * against a flat directory that never existed.
+   *
+   * Returns null when the bytes are gone. Terminal failures retain them now, but
+   * anything that failed BEFORE that change, or aged past
+   * KB_RAW_RETENTION_HOURS, has nothing to replay and the caller must say so
+   * rather than enqueue a job that will die on a missing file.
+   */
+  rawFilePath({ orgId, checksum, filename }) {
+    if (!orgId || !checksum || !filename) return null;
+    const safe = String(filename).replace(/[/\\]/g, '_');
+    const p = path.join(KB_STORE_DIR, String(orgId), String(checksum), safe);
+    try { return fs.existsSync(p) ? p : null; } catch { return null; }
+  }
+
   persistFile({ orgId, checksum, filename, fileBuffer }) {
     const dir = path.join(KB_STORE_DIR, orgId, checksum);
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const safe = filename.replace(/[/\\]/g, '_');
     const p = path.join(dir, safe);
-    if (!fs.existsSync(p)) fs.writeFileSync(p, fileBuffer);
+    if (!fs.existsSync(p)) fs.writeFileSync(p, fileBuffer, { mode: 0o600 });
     return p;
   }
 
@@ -254,7 +422,7 @@ export class KbIngestQueue {
    * Enqueue an upload. Returns { job_id } or { backpressure: true } (caller → 429).
    * Caller has already validated auth/quota and computed the checksum.
    */
-  async enqueue({ userId, orgId, filename, contentType, checksum, filePath, metadata }) {
+  async enqueue({ userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId = null, processingVersion = 1 }) {
     await this._ready;
     if (!this.queue) throw new Error('kb-queue unavailable');
 
@@ -268,7 +436,7 @@ export class KbIngestQueue {
       }
     } catch { /* counts best-effort — never block enqueue on stats */ }
 
-    const trackerJobId = `kbq_${checksum.slice(0, 12)}_${Date.now().toString(36)}`;
+    trackerJobId ||= `kbq_${checksum.slice(0, 12)}_${Date.now().toString(36)}`;
     try { this.tracker?.createJob(trackerJobId, { userId, orgId, filename, kind: 'knowledge_upload', queued: true }); } catch { /* noop */ }
     this._setStatus(trackerJobId, { status: 'queued', filename, progress: 0 });
 
@@ -282,9 +450,9 @@ export class KbIngestQueue {
     // stale completed id, `add` was IGNORED, the worker never ran, and the
     // status mirror stuck at 'queued' forever (FE "Processing" hang).
     const job = await this.queue.add('ingest', {
-      userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId,
+      userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId, processingVersion,
     }, {
-      jobId: trackerJobId,
+      jobId: durableQueueJobId(trackerJobId, processingVersion),
       attempts: ATTEMPTS,
       backoff: { type: 'exponential', delay: 5000 },
       removeOnComplete: 1000,
@@ -309,37 +477,117 @@ export class KbIngestQueue {
     this._orgPending.set(orgId, Math.max(0, (this._orgPending.get(orgId) || 1) - 1));
 
     try {
+      if (this.validateJob) await this.validateJob({ trackerJobId, userId, orgId, metadata });
+      await this.jobStore?.progress(trackerJobId, orgId, 'processing', 5, { attempt: job.attemptsMade + 1 });
       const fileBuffer = fs.readFileSync(filePath); // durable bytes
-      const work = this.dfi.ingestKnowledgeDocument({
-        userId, orgId, filename, fileBuffer,
-        contentType: contentType || 'application/octet-stream',
-        metadata: metadata || {},
-        onProgress: (p) => {
+      // Canonical front door: file uploads normalize into the IngestEnvelope
+      // (source.type='kb'); ingestSource routes document+file → the same
+      // ingestKnowledgeDocument pipeline, adding uniform provenance.
+      const onProgress = (p) => {
           try {
             const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
             this.tracker?.updateJob(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...p } });
           } catch { /* noop */ }
           this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename });
-        },
-      });
+          this.jobStore?.progress(trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0).catch(() => {});
+        };
+      const work = this.processUpload
+        ? this.processUpload({ userId, orgId, filename, contentType, fileBuffer, metadata: metadata || {}, onProgress })
+        : this.dfi.ingestSource({
+            userId, orgId,
+            source: { type: 'kb', filename },
+            file: { buffer: fileBuffer, contentType: contentType || 'application/octet-stream', filename },
+            metadata: metadata || {}, ingestMode: metadata?.ingest_mode || 'both', onProgress,
+          });
       // Hard timeout: poison-pill guard. The pipeline is idempotent (checksum
       // upserts + segment reuse), so an abandoned attempt is safe to retry.
       const result = await Promise.race([
         work,
         new Promise((_, rej) => setTimeout(() => rej(new Error(`kb-ingest timeout ${JOB_TIMEOUT_MS}ms`)), JOB_TIMEOUT_MS)),
       ]);
+      // An ingest that produced NO document is a failure, not a success. This
+      // block ran unconditionally on resolve, so an empty upload logged
+      //   [kb-queue] ✓ empty.txt org=1380251c doc=undefined segs=undefined promoted=undefined
+      // and the job went to status 'indexed', progress 100. The caller already
+      // holds its 202 {success:true}, so NOTHING anywhere said the upload produced
+      // nothing — the user waits for memories that will never arrive.
+      // A doc is a FAILURE only when NOTHING is recallable: no document, or a
+      // document with neither memories NOR evidence segments (parse fully
+      // collapsed — e.g. a PDF whose only retained content was page markers).
+      //
+      // A document WITH evidence segments but ZERO memories is NOT a failure —
+      // it is an evidence-only (degraded) success. This honors commit e8300bcf's
+      // owner invariant ("even if memories fail, the context is inside
+      // evidences"): the segments are committed, embedded and fully searchable,
+      // so evidence recall answers them; only synthesis-from-memory is reduced.
+      // Marking it 'failed' here (the old `promotedCount === 0` gate) contradicted
+      // that fix and made the user re-upload a doc that WAS ingested — the
+      // duplicate-row source the commit itself named. `Solvis_Branding_Skizze`
+      // (6 segments, 0 memories) is exactly this case.
+      const _promoted = Number(result?.promotedCount || 0);
+      const _segs = Number(result?.segmentCount || 0);
+      if (!result?.documentId || (_promoted === 0 && _segs === 0)) {
+        const reason = !result?.documentId
+          ? 'ingest produced no document (empty or unreadable content)'
+          : 'ingest produced no recallable content — the document could not be parsed into memories or evidence';
+        try {
+          this.tracker?.updateJob(trackerJobId, { status: 'failed', progress: 100, error: reason });
+        } catch { /* noop */ }
+        this._setStatus(trackerJobId, { status: 'failed', progress: 100, error: reason });
+        this._counters.failed = (this._counters.failed || 0) + 1;
+        this.logger.warn?.(`[kb-queue] ✗ ${filename} org=${orgId.slice(0, 8)} doc=${result?.documentId || 'none'} — ${reason}`);
+        const failed = Object.assign(new Error(reason), { code: 'NO_RECALLABLE_CONTENT' });
+        await this.jobStore?.fail(trackerJobId, orgId, failed);
+        // Retain for replay (see the terminal-failure path below) — a document that
+        // produced no recallable content is exactly the case a user wants to retry
+        // after a parser or model fix. Bounded by _sweepRawFiles().
+        return { documentId: result?.documentId || null, segmentCount: _segs, promotedCount: 0, error: reason };
+      }
+      const _evidenceOnly = _promoted === 0 && _segs > 0;
+      const _evidenceOnlyReason = result?.evidenceOnlyReason
+        || (_evidenceOnly ? (metadata?.ingest_mode === 'evidence' ? 'user_selected' : 'extraction_yield_zero') : null);
+      if (_evidenceOnlyReason && !result.evidenceOnlyReason) result.evidenceOnlyReason = _evidenceOnlyReason;
       try {
         const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
         this.tracker?.updateJob(trackerJobId, {
           status: 'indexed', progress: 100, memoryId: result.documentId,
-          metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount },
+          metadata: { ...prev, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, coverage: result.coverage || null },
         });
       } catch { /* noop */ }
-      try { this.recordUsage?.(orgId, result); } catch { /* quota accounting best-effort */ }
-      this._setStatus(trackerJobId, { status: 'indexed', progress: 100, document_id: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount, filename });
+      if (this.jobStore) await this.jobStore.complete(trackerJobId, orgId, userId, result);
+      else { try { this.recordUsage?.(orgId, result); } catch { /* legacy accounting */ } }
+      this._setStatus(trackerJobId, {
+        status: 'indexed', progress: 100, document_id: result.documentId,
+        segmentCount: result.segmentCount, promotedCount: result.promotedCount,
+        ingestMode: metadata?.ingest_mode || 'both', evidenceOnly: _evidenceOnly,
+        evidenceOnlyReason: _evidenceOnlyReason, coverage: result.coverage || null, filename,
+      });
       this._counters.processed++;
-      this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}`);
+      // P3 no-silent-partial: if any evidence segment did NOT embed even after the
+      // ingest-time heal, say so LOUD. The doc still indexes (evidence-only stays a
+      // success), but a partial-embed must never be reported as fully clean.
+      const _ee = result?.coverage?.evidence_embed;
+      if (_ee && Number(_ee.failed) > 0) {
+        this.logger.warn?.(`[kb-queue] ⚠ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} `
+          + `PARTIAL EMBED: ${_ee.failed}/${_ee.total} segments un-embedded after heal — recall will miss them until reconciled`);
+      }
+      const _eeStr = _ee ? ` embed=${_ee.embedded}/${_ee.total}${_ee.healed ? ` healed=${_ee.healed}` : ''}${_ee.failed ? ` FAILED=${_ee.failed}` : ''}` : '';
+      this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}${_eeStr}${_evidenceOnly ? ' (evidence-only: 0 memories, segments searchable)' : ''}`);
+      try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };
+    } catch (error) {
+      const finalAttempt = job.attemptsMade + 1 >= (job.opts?.attempts || ATTEMPTS);
+      if (finalAttempt) {
+        await this.jobStore?.fail(trackerJobId, orgId, error);
+        // RETAIN the raw bytes on terminal failure. This used to unlink here, which
+        // made the module's own "raw file kept for replay" promise false: a job that
+        // exhausted its attempts had nothing left to replay FROM, so a dead document
+        // was unrecoverable and the user was never told. Keeping the file is what
+        // makes a retry endpoint possible at all.
+        // Disk is bounded by _sweepRawFiles() below, not by deleting on failure.
+        this.logger.warn?.(`[kb-queue] retaining raw file for replay: ${filePath} (job ${trackerJobId} dead: ${error?.message})`);
+      }
+      throw error;
     } finally {
       const r = this._orgRunning.get(orgId) || 1;
       if (r <= 1) this._orgRunning.delete(orgId); else this._orgRunning.set(orgId, r - 1);
@@ -349,7 +597,18 @@ export class KbIngestQueue {
   /** Ops surface for /api/knowledge/queue-stats. */
   async stats() {
     await this._ready;
-    if (!this.queue) return { enabled: false, mode: this._readMode() };
+    // Degraded mode is a first-class answer, not an absence. `enabled:false` alone
+    // reads as "queueing is off by config"; inline_fallback says the durability
+    // guarantees are GONE and why.
+    if (!this.queue) {
+      return {
+        enabled: false,
+        mode: this._readMode(),
+        inline_fallback: this.inlineFallback,
+        inline_fallback_reason: this.inlineFallbackReason,
+        degraded: this.inlineFallback,
+      };
+    }
     let counts = {};
     try { counts = await this.queue.getJobCounts('waiting', 'delayed', 'active', 'completed', 'failed'); } catch { /* noop */ }
     return {
@@ -359,7 +618,14 @@ export class KbIngestQueue {
       per_org_running: Object.fromEntries(this._orgRunning),
       per_org_pending: Object.fromEntries(this._orgPending),
       lifetime: { ...this._counters },
-      config: { concurrency: CONCURRENCY, org_concurrency: ORG_CONCURRENCY, attempts: ATTEMPTS, max_depth: MAX_DEPTH, job_timeout_ms: JOB_TIMEOUT_MS },
+      inline_fallback: false,
+      degraded: false,
+      config: {
+        concurrency: CONCURRENCY, org_concurrency: ORG_CONCURRENCY, attempts: ATTEMPTS,
+        max_depth: MAX_DEPTH, job_timeout_ms: JOB_TIMEOUT_MS,
+        lock_duration_ms: JOB_TIMEOUT_MS,
+        raw_retention_hours: Number(process.env.KB_RAW_RETENTION_HOURS || 168),
+      },
     };
   }
 

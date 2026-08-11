@@ -26,6 +26,22 @@ emerges. Pair with `.claude/MEMORY.md` (the running decision/action log).
 - **`frontend/Da-vinci` is a git submodule** -> `git diff` at repo root shows nothing for
   its files; expected, not a lost edit.
 
+## Current production rules (2026-07-09, supersedes legacy Coolify/myserver guidance)
+- Production is `root@singulancelabs.com`, not the legacy `myserver`/Coolify deployment.
+  Live checkout `/root/hivemind` is dirty and must never be pulled, reset, or used as a build
+  source. Build from clean `/root/hivemind-next` on `codex/production-hardening-runtime`.
+- Use `/root/hivemind/infra/docker-compose.hetzner.yml` with
+  `--env-file /root/hivemind/.env` for every production Compose command. Omitting the env file
+  is a production incident: it blanks secret variables. Never `docker run` core/control.
+- Preserve a timestamped image rollback tag before retagging/recreating a service. Use
+  `--no-deps --force-recreate` only for the changed service and verify cold public endpoints.
+  Do not use `git reset --hard` or source-code rollback on the live checkout.
+- Caddy is `hm-caddy`, config `/root/hivemind/infra/Caddyfile`; restart the container after
+  a config edit. Production URLs are `core.singulancelabs.com`, `api.singulancelabs.com`, and
+  `next.singulancelabs.com` (single production-compatible frontend).
+- Do not log, print, commit, or place any production secret in memory/browser code. The
+  platform admin secret is only read from the production environment at runtime.
+
 ## Verification discipline (frontend)
 - Quick parse: `cd frontend/Da-vinci && node -e "require('@babel/core').transformFileSync('<path>',{presets:[require('@babel/preset-react')]});console.log('OK')"`.
 - Full gate: `CI=false npx react-scripts build` (exit 0 + "build folder is ready").

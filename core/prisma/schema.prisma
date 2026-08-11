@@ -40,6 +40,7 @@ model User {
   memoryProjects       MemoryProject[]       @relation("UserMemoryProjects")
   digitalEmployees     DigitalEmployee[]     @relation("UserCreatedEmployees")
   hyperRooms           HyperRoom[]           @relation("UserHyperRooms")
+  seoSearchConsoleProperties SeoSearchConsoleProperty[] @relation("UserSeoSearchConsoleProperties")
 
   @@map("users")
 }
@@ -58,6 +59,16 @@ model Organization {
   createdAt                    DateTime?          @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                    DateTime?          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   plan                         String?            @default("free") @map("plan") @db.VarChar(50)
+  // Where this org's memory data plane lives: 'managed' (we host) | 'self_host' (their agent box).
+  // Captured at onboarding so the dashboard can gate self-host orgs into the connect-your-agent flow
+  // before showing the workspace — independent of whether the agent has registered yet.
+  hostingMode                  String?            @default("managed") @map("hosting_mode") @db.VarChar(20)
+  // Commercial profile is explicit. Hosting/storage remain the data-plane
+  // settings; promotions may only select compatible combinations.
+  accountType                  String             @default("personal") @map("account_type") @db.VarChar(32)
+  // Memory plane is independent from billing plan: personal managed workspaces use embedded .amr,
+  // enterprise stays on the relational/vector hybrid unless explicitly migrated.
+  memoryStorageMode            String             @default("hybrid") @map("memory_storage_mode") @db.VarChar(32)
   // Stripe billing state — populated on first checkout, sync'd via webhook.
   stripeCustomerId             String?            @unique @map("stripe_customer_id") @db.VarChar(64)
   stripeSubscriptionId         String?            @map("stripe_subscription_id") @db.VarChar(64)
@@ -77,6 +88,7 @@ model Organization {
   // profiles). Durable DB toggle surfaced in the Cognition tab; read via raw SQL
   // in governance-routes.js + server.js profile-dream-cron. See migration 20260623.
   profileAutomaintainEnabled   Boolean            @default(false) @map("profile_automaintain_enabled")
+  campaignAutonomyMode         String             @default("MANUAL_REVIEW") @map("campaign_autonomy_mode") @db.VarChar(24)
   // Set to now() on the false→true toggle. The cognition loop clamps its
   // synthesis window to max(now-1h, this) so enabling NEVER backfills the
   // org's history — it starts from a 1h window at toggle-on and rolls forward.
@@ -112,6 +124,11 @@ model Organization {
   pageIndexNodes               PageIndexNode[]    @relation("OrgPageIndexNodes")
   ssoConfig                    OrgSsoConfig?      @relation("OrgSsoConfig")
   hyperRooms                   HyperRoom[]        @relation("OrgHyperRooms")
+  seoSearchConsoleProperties   SeoSearchConsoleProperty[] @relation("OrgSeoSearchConsoleProperties")
+  seoSearchConsoleSnapshots    SeoSearchConsoleSnapshot[] @relation("OrgSeoSearchConsoleSnapshots")
+  zernioExecutionProfile       ZernioOrgProfile? @relation("OrgZernioExecutionProfile")
+  zernioWebhookEvents          ZernioWebhookEvent[]
+  enterpriseInvitation         EnterpriseInvitation? @relation("RedeemedEnterpriseInvitation")
 
   @@map("organizations")
 }
@@ -125,6 +142,7 @@ model UserOrganization {
   role          String       @default("member") @db.VarChar(50)
   roles         String[]     @default([]) @map("roles")
   isActive      Boolean      @default(true) @map("is_active")
+  cognitionPersonalOptIn Boolean @default(false) @map("cognition_personal_opt_in")
   deactivatedAt DateTime?    @map("deactivated_at") @db.Timestamptz(6)
   invitedAt     DateTime?    @default(now()) @map("invited_at") @db.Timestamptz(6)
   joinedAt      DateTime?    @map("joined_at") @db.Timestamptz(6)
@@ -154,13 +172,37 @@ model OrgInvite {
   lastSentAt DateTime?    @map("last_sent_at") @db.Timestamptz(6)
   sendCount  Int          @default(1) @map("send_count")
   createdBy  String       @map("created_by") @db.Uuid
+  idempotencyKey String?  @map("idempotency_key") @db.VarChar(200)
   createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@index([orgId])
   @@index([email])
   @@index([expiresAt])
+  @@unique([orgId, createdBy, idempotencyKey])
   @@map("org_invites")
+}
+
+/// Tenant-scoped operational notifications for Workspace Admin. This is a
+/// focused event inbox, not a general messaging system.
+model WorkspaceNotification {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId        String    @map("org_id") @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  type         String    @db.VarChar(80)
+  title        String    @db.VarChar(180)
+  body         String?
+  resourceType String?   @map("resource_type") @db.VarChar(80)
+  resourceId   String?   @map("resource_id") @db.VarChar(128)
+  data         Json      @default("{}")
+  dedupeKey    String?   @map("dedupe_key") @db.VarChar(200)
+  readAt       DateTime? @map("read_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@index([orgId, userId, readAt])
+  @@unique([orgId, userId, dedupeKey])
+  @@map("workspace_notifications")
 }
 
 /// Team — sub-unit inside an Organization (Eng, Marketing, Sales).
@@ -300,6 +342,7 @@ model PlatformIntegration {
   teamId                 String?   @map("team_id") @db.Uuid
   user                   User      @relation("UserPlatformIntegrations", fields: [userId], references: [id], onDelete: Cascade)
   team                   Team?     @relation("TeamPlatformIntegrations", fields: [teamId], references: [id], onDelete: SetNull)
+  seoSearchConsoleProperties SeoSearchConsoleProperty[] @relation("IntegrationSeoSearchConsoleProperties")
 
   @@unique([userId, platformType])
   @@index([userId])
@@ -356,6 +399,49 @@ model NangoConnection {
   @@map("nango_connections")
 }
 
+/// One Search Console property explicitly selected for an organization.
+/// OAuth credentials remain user-owned in PlatformIntegration; this binding
+/// prevents a user's connection from silently crossing organization context.
+model SeoSearchConsoleProperty {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String   @unique(map: "seo_gsc_properties_org_key") @map("org_id") @db.Uuid
+  connectedByUserId String   @map("connected_by_user_id") @db.Uuid
+  integrationId     String   @map("integration_id") @db.Uuid
+  siteUrl           String   @map("site_url") @db.Text
+  permissionLevel   String   @map("permission_level") @db.VarChar(40)
+  selectedAt        DateTime @default(now()) @map("selected_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  org               Organization @relation("OrgSeoSearchConsoleProperties", fields: [orgId], references: [id], onDelete: Cascade)
+  connectedByUser   User @relation("UserSeoSearchConsoleProperties", fields: [connectedByUserId], references: [id], onDelete: Cascade)
+  integration       PlatformIntegration @relation("IntegrationSeoSearchConsoleProperties", fields: [integrationId], references: [id], onDelete: Cascade)
+  snapshots         SeoSearchConsoleSnapshot[] @relation("PropertySeoSearchConsoleSnapshots")
+
+  @@index([orgId, connectedByUserId], map: "seo_gsc_properties_tenant_user_idx")
+  @@index([integrationId], map: "seo_gsc_properties_integration_idx")
+  @@map("seo_search_console_properties")
+}
+
+/// Durable first-party performance evidence. Snapshots are immutable inputs
+/// for later trend and change-detection stages.
+model SeoSearchConsoleSnapshot {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String   @map("org_id") @db.Uuid
+  propertyId    String   @map("property_id") @db.Uuid
+  siteUrl       String   @map("site_url") @db.Text
+  startDate     DateTime @map("start_date") @db.Date
+  endDate       DateTime @map("end_date") @db.Date
+  dataState     String   @default("final") @map("data_state") @db.VarChar(20)
+  evidence      Json     @db.JsonB
+  fetchedAt     DateTime @default(now()) @map("fetched_at") @db.Timestamptz(6)
+  org           Organization @relation("OrgSeoSearchConsoleSnapshots", fields: [orgId], references: [id], onDelete: Cascade)
+  property      SeoSearchConsoleProperty @relation("PropertySeoSearchConsoleSnapshots", fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, propertyId, startDate, endDate], map: "seo_gsc_snapshots_period_key")
+  @@index([orgId, fetchedAt(sort: Desc)], map: "seo_gsc_snapshots_org_time_idx")
+  @@index([propertyId, fetchedAt(sort: Desc)], map: "seo_gsc_snapshots_property_time_idx")
+  @@map("seo_search_console_snapshots")
+}
+
 /// Pending writes from agent — held for explicit user approval before
 /// the write tool actually executes. Created by draft-approval middleware
 /// whenever the agent tries to call a non-readOnly tool
@@ -366,8 +452,15 @@ model PendingWrite {
   userId     String    @map("user_id") @db.Uuid
   orgId      String?   @map("org_id") @db.Uuid
   provider   String    @db.VarChar(50) // slack, notion, gmail, …
+  toolGroup  String?   @map("tool_group") @db.VarChar(120)
   toolName   String    @map("tool_name") @db.VarChar(120)
   toolArgs   Json      @map("tool_args") @db.JsonB
+  argsHash   String?   @map("args_hash") @db.VarChar(64)
+  projectId  String?   @map("project_id") @db.Uuid
+  connectionId String? @map("connection_id") @db.VarChar(160)
+  traceId    String?   @map("trace_id") @db.VarChar(160)
+  idempotencyKey String? @unique @map("idempotency_key") @db.VarChar(160)
+  expiresAt  DateTime? @map("expires_at") @db.Timestamptz(6)
   preview    String?   @db.Text // short human-readable summary for UI
   status     String    @default("draft") @db.VarChar(20) // draft | approved | cancelled | sent | failed
   result     Json?     @db.JsonB // tool response on send
@@ -378,7 +471,607 @@ model PendingWrite {
 
   @@index([userId, status, createdAt])
   @@index([orgId, createdAt])
+  @@index([orgId, status, expiresAt])
   @@map("pending_writes")
+}
+
+/// Connector Runtime V1 — durable background sync job (plan §7). Postgres is the
+/// job source of truth, replacing the file-backed MCPConnectorJobStore. Leased
+/// via SKIP LOCKED by the sync worker, which delegates to the canonical
+/// SyncEngine (→ ingestSource).
+model ConnectorSyncJob {
+  id                       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                    String    @map("org_id") @db.Uuid
+  userId                   String    @map("user_id") @db.Uuid
+  connectorId              String    @map("connector_id") @db.VarChar(120)
+  connectionId             String?   @map("connection_id") @db.VarChar(160)
+  mode                     String    @default("incremental") @db.VarChar(20)
+  status                   String    @default("queued") @db.VarChar(20)
+  cursor                   String?   @db.Text
+  requestedScope           String?   @map("requested_scope") @db.VarChar(20)
+  projectIds               String[]  @default([]) @map("project_ids") @db.Uuid
+  processed                Int       @default(0)
+  imported                 Int       @default(0)
+  skipped                  Int       @default(0)
+  failed                   Int       @default(0)
+  attempt                  Int       @default(0)
+  maxAttempts              Int       @default(5) @map("max_attempts")
+  leaseOwner               String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt           DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  idempotencyKey           String?   @unique @map("idempotency_key") @db.VarChar(200)
+  startedAt                DateTime? @map("started_at") @db.Timestamptz(6)
+  updatedAt                DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt              DateTime? @map("completed_at") @db.Timestamptz(6)
+  cancellationRequestedAt  DateTime? @map("cancellation_requested_at") @db.Timestamptz(6)
+  lastError                String?   @map("last_error") @db.Text
+  config                   Json?     @db.JsonB
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([status, leaseExpiresAt], map: "idx_connector_sync_jobs_lease")
+  @@index([orgId, connectorId, createdAt], map: "idx_connector_sync_jobs_org")
+  @@map("connector_sync_jobs")
+}
+
+/// Durable ledger of outbound VALUE ACTIONS that actually left the platform
+/// (HyperAgents closed loop): an approved email send or an outbound TARA call.
+/// One row per exit; `outcome` is filled later by the tracking side (Gmail
+/// reply-matcher, TARA call-end insight). Feeds the dashboard outcomes counter
+/// and (later) value-action billing.
+model OutboundAction {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId      String    @map("org_id") @db.Uuid
+  userId     String?   @map("user_id") @db.Uuid
+  roomId     String?   @map("room_id") @db.Uuid // hyper_rooms.id when sent from a room
+  campaignId String?   @map("campaign_id") @db.Uuid
+  campaignActionId String? @map("campaign_action_id") @db.Uuid
+  approvalId String?   @map("approval_id") @db.VarChar(80)
+  channel    String    @db.VarChar(20) // email | call
+  recipient  String?   @db.VarChar(320) // email address or E.164 number
+  subject    String?   @db.VarChar(500)
+  messageId  String?   @map("message_id") @db.VarChar(160) // gmail message id / telnyx call leg id
+  threadId   String?   @map("thread_id") @db.VarChar(160) // gmail thread id (reply matching)
+  status     String    @default("sent") @db.VarChar(20) // sent | failed
+  outcome    String?   @db.VarChar(40) // replied | booked | completed | bounced | no_answer
+  outcomeAt  DateTime? @map("outcome_at") @db.Timestamptz(6)
+  meta       Json?     @db.JsonB
+  sentAt     DateTime  @default(now()) @map("sent_at") @db.Timestamptz(6)
+
+  @@index([orgId, sentAt])
+  @@index([orgId, threadId])
+  @@index([orgId, outcome, sentAt])
+  @@index([campaignId, sentAt])
+  @@index([campaignActionId])
+  @@map("outbound_actions")
+}
+
+/// Organization-owned person or company identity used across campaigns.
+/// Campaign memberships snapshot this row so approved plans remain immutable.
+model AudienceContact {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  createdBy      String?  @map("created_by") @db.Uuid
+  lifecycle      String   @default("PROSPECT") @db.VarChar(24)
+  displayName    String?  @map("display_name") @db.VarChar(255)
+  company        String?  @db.VarChar(300)
+  email          String?  @db.VarChar(320)
+  phone          String?  @db.VarChar(40)
+  website        String?  @db.VarChar(500)
+  address        String?  @db.VarChar(500)
+  country        String?  @db.VarChar(2)
+  timezone       String?  @db.VarChar(80)
+  dedupeKey      String   @map("dedupe_key") @db.VarChar(700)
+  sourceType     String   @default("manual") @map("source_type") @db.VarChar(40)
+  sourceRef      String?  @map("source_ref") @db.VarChar(200)
+  provenance     Json     @default("{}") @db.JsonB
+  consent        Json     @default("{}") @db.JsonB
+  enrichment     Json     @default("{}") @db.JsonB
+  lastContactedAt DateTime? @map("last_contacted_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaignMembers CampaignAudienceMember[]
+
+  @@unique([orgId, dedupeKey])
+  @@index([orgId, lifecycle, updatedAt(sort: Desc)])
+  @@index([orgId, email])
+  @@index([orgId, phone])
+  @@map("audience_contacts")
+}
+
+/// Channel-independent campaign source of truth. Provider-specific campaigns
+/// remain separate and link back through unifiedCampaignId columns.
+model Campaign {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String    @map("org_id") @db.Uuid
+  ownerUserId          String    @map("owner_user_id") @db.Uuid
+  creationKey          String?   @map("creation_key") @db.VarChar(160)
+  name                 String    @db.VarChar(255)
+  objective            String    @db.VarChar(40)
+  goal                 String
+  brief                Json      @default("{}") @db.JsonB
+  requirements         Json      @default("[]") @db.JsonB
+  requestedChannels    String[]  @default([]) @map("requested_channels")
+  audiencePolicy       Json      @default("{}") @map("audience_policy") @db.JsonB
+  schedulePolicy       Json      @default("{}") @map("schedule_policy") @db.JsonB
+  autonomyMode         String    @default("APPROVE_PLAN_ONCE") @map("autonomy_mode") @db.VarChar(32)
+  status               String    @default("DRAFT") @db.VarChar(32)
+  roomId               String?   @map("room_id") @db.Uuid
+  currentPlanVersionId String?   @map("current_plan_version_id") @db.Uuid
+  approvedPlanVersionId String?  @map("approved_plan_version_id") @db.Uuid
+  sourceType           String?   @map("source_type") @db.VarChar(40)
+  sourceId             String?   @map("source_id") @db.Uuid
+  baseline             Json      @default("{}") @db.JsonB
+  lastError            String?   @map("last_error") @db.Text
+  startedAt            DateTime? @map("started_at") @db.Timestamptz(6)
+  pausedAt             DateTime? @map("paused_at") @db.Timestamptz(6)
+  completedAt          DateTime? @map("completed_at") @db.Timestamptz(6)
+  cancelledAt          DateTime? @map("cancelled_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  channels             CampaignChannel[]
+  runs                 CampaignRun[]
+  planVersions         CampaignPlanVersion[]
+  actions              CampaignAction[]
+  audience             CampaignAudienceMember[]
+  assets               CampaignAsset[]
+  approvals            CampaignApproval[]
+  events               CampaignEvent[]
+  metricSnapshots      CampaignMetricSnapshot[]
+
+  @@unique([orgId, sourceType, sourceId], map: "campaigns_legacy_source_key")
+  @@unique([orgId, ownerUserId, creationKey], map: "campaigns_creation_key")
+  @@index([roomId], map: "campaigns_room_id_idx")
+  @@index([orgId, status, createdAt(sort: Desc)])
+  @@index([ownerUserId, createdAt(sort: Desc)])
+  @@map("campaigns")
+}
+
+/// White-label Zernio execution boundary. One durable profile belongs to one
+/// Singulance organization; browser clients only receive the sanitized account
+/// and capability snapshots, never this provider identifier or API credential.
+model ZernioOrgProfile {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String       @unique @map("org_id") @db.Uuid
+  zernioProfileId   String       @unique @map("zernio_profile_id") @db.VarChar(80)
+  status            String       @default("ACTIVE") @db.VarChar(24)
+  displayName       String       @map("display_name") @db.VarChar(255)
+  connectedAccounts Json         @default("[]") @map("connected_accounts") @db.JsonB
+  capabilities      Json         @default("{}") @db.JsonB
+  selectedAdAccounts Json        @default("{}") @map("selected_ad_accounts") @db.JsonB
+  createdBy         String?      @map("created_by") @db.Uuid
+  lastSyncedAt      DateTime?    @map("last_synced_at") @db.Timestamptz(6)
+  lastError         String?      @map("last_error") @db.Text
+  createdAt         DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organization      Organization @relation("OrgZernioExecutionProfile", fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([status, lastSyncedAt])
+  @@map("zernio_org_profiles")
+}
+
+model ZernioWebhookEvent {
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  providerEventId String        @unique @map("provider_event_id") @db.VarChar(100)
+  eventType       String        @map("event_type") @db.VarChar(100)
+  providerProfileId String?     @map("provider_profile_id") @db.VarChar(80)
+  orgId           String?       @map("org_id") @db.Uuid
+  status          String        @default("ACCEPTED") @db.VarChar(24)
+  payload         Json          @default("{}") @db.JsonB
+  error           String?       @db.Text
+  receivedAt      DateTime      @default(now()) @map("received_at") @db.Timestamptz(6)
+  processedAt     DateTime?     @map("processed_at") @db.Timestamptz(6)
+  organization    Organization? @relation(fields: [orgId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, receivedAt(sort: Desc)])
+  @@index([status, receivedAt])
+  @@map("zernio_webhook_events")
+}
+
+model CampaignChannel {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId    String   @map("campaign_id") @db.Uuid
+  channel       String   @db.VarChar(40)
+  status        String   @default("DRAFT") @db.VarChar(24)
+  connectionRef Json     @default("{}") @map("connection_ref") @db.JsonB
+  config        Json     @default("{}") @db.JsonB
+  metrics       Json     @default("{}") @db.JsonB
+  lastError     String?  @map("last_error") @db.Text
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign      Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, channel])
+  @@index([campaignId, status])
+  @@map("campaign_channels")
+}
+
+model CampaignRun {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId    String    @map("campaign_id") @db.Uuid
+  roomId        String?   @map("room_id") @db.Uuid
+  turnId        String?   @unique(map: "campaign_runs_turn_id_key") @map("turn_id") @db.Uuid
+  status        String    @default("QUEUED") @db.VarChar(24)
+  briefSnapshot Json      @map("brief_snapshot") @db.JsonB
+  validation    Json      @default("{}") @db.JsonB
+  error         String?   @db.Text
+  startedAt     DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt   DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@map("campaign_runs")
+}
+
+model CampaignPlanVersion {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId     String    @map("campaign_id") @db.Uuid
+  version        Int
+  status         String    @default("GENERATING") @db.VarChar(24)
+  canonicalHash  String?   @map("canonical_hash") @db.VarChar(64)
+  bundle         Json      @default("{}") @db.JsonB
+  reportMarkdown String?   @map("report_markdown") @db.Text
+  validation     Json      @default("{}") @db.JsonB
+  createdBy      String?   @map("created_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  readyAt        DateTime? @map("ready_at") @db.Timestamptz(6)
+  campaign       Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  actions        CampaignAction[]
+  approvals      CampaignApproval[]
+
+  @@unique([campaignId, version])
+  @@index([campaignId, status])
+  @@map("campaign_plan_versions")
+}
+
+model CampaignAudienceMember {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId  String    @map("campaign_id") @db.Uuid
+  contactId   String?   @map("contact_id") @db.Uuid
+  sourceType  String    @map("source_type") @db.VarChar(40)
+  sourceRef   String?   @map("source_ref") @db.VarChar(200)
+  dedupeKey   String    @map("dedupe_key") @db.VarChar(700)
+  status      String    @default("PROPOSED") @db.VarChar(24)
+  snapshot    Json      @db.JsonB
+  evidence    Json      @default("{}") @db.JsonB
+  approvedAt  DateTime? @map("approved_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign    Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact     AudienceContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  actions     CampaignAction[]
+
+  @@unique([campaignId, dedupeKey])
+  @@index([campaignId, status])
+  @@index([contactId])
+  @@map("campaign_audience_members")
+}
+
+model CampaignAction {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId       String    @map("campaign_id") @db.Uuid
+  planVersionId    String    @map("plan_version_id") @db.Uuid
+  audienceMemberId String?   @map("audience_member_id") @db.Uuid
+  channel          String    @db.VarChar(40)
+  actionType       String    @map("action_type") @db.VarChar(40)
+  position         Int
+  status           String    @default("DRAFT") @db.VarChar(24)
+  scheduledAt      DateTime? @map("scheduled_at") @db.Timestamptz(6)
+  expiresAt        DateTime? @map("expires_at") @db.Timestamptz(6)
+  payload          Json      @db.JsonB
+  rationale        String?   @db.Text
+  successMetric    String?   @map("success_metric") @db.VarChar(200)
+  idempotencyKey   String    @map("idempotency_key") @db.VarChar(160)
+  externalId       String?   @map("external_id") @db.VarChar(200)
+  leaseOwner       String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt   DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  lastError        String?   @map("last_error") @db.Text
+  executedAt       DateTime? @map("executed_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign         Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  planVersion      CampaignPlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
+  audienceMember   CampaignAudienceMember? @relation(fields: [audienceMemberId], references: [id], onDelete: SetNull)
+  attempts         CampaignActionAttempt[]
+  assets           CampaignAsset[]
+
+  @@unique([campaignId, idempotencyKey])
+  @@index([status, scheduledAt, leaseExpiresAt])
+  @@index([campaignId, status, position])
+  @@index([planVersionId])
+  @@map("campaign_actions")
+}
+
+model CampaignActionAttempt {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actionId    String    @map("action_id") @db.Uuid
+  attempt     Int
+  status      String    @default("RUNNING") @db.VarChar(24)
+  requestHash String?   @map("request_hash") @db.VarChar(64)
+  externalId  String?   @map("external_id") @db.VarChar(200)
+  response    Json?     @db.JsonB
+  error       String?   @db.Text
+  startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  action      CampaignAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+
+  @@unique([actionId, attempt])
+  @@index([actionId, status])
+  @@map("campaign_action_attempts")
+}
+
+model CampaignApproval {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId     String   @map("campaign_id") @db.Uuid
+  planVersionId  String   @map("plan_version_id") @db.Uuid
+  actorUserId    String   @map("actor_user_id") @db.Uuid
+  canonicalHash  String   @map("canonical_hash") @db.VarChar(64)
+  channels       String[] @default([])
+  recipientCount Int      @default(0) @map("recipient_count")
+  caps           Json     @default("{}") @db.JsonB
+  autonomyMode   String   @map("autonomy_mode") @db.VarChar(32)
+  status         String   @default("ACTIVE") @db.VarChar(20)
+  approvedAt     DateTime @default(now()) @map("approved_at") @db.Timestamptz(6)
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz(6)
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  planVersion    CampaignPlanVersion @relation(fields: [planVersionId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, status, approvedAt(sort: Desc)])
+  @@index([planVersionId])
+  @@map("campaign_approvals")
+}
+
+model CampaignAsset {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId    String    @map("campaign_id") @db.Uuid
+  actionId      String?   @map("action_id") @db.Uuid
+  kind          String    @db.VarChar(32)
+  status        String    @default("GENERATING") @db.VarChar(24)
+  storageKey    String?   @map("storage_key") @db.VarChar(1000)
+  contentHash   String?   @map("content_hash") @db.VarChar(64)
+  contentType   String?   @map("content_type") @db.VarChar(80)
+  sizeBytes     Int?      @map("size_bytes")
+  width         Int?
+  height        Int?
+  provider      String?   @db.VarChar(60)
+  model         String?   @db.VarChar(120)
+  prompt        String?   @db.Text
+  metadata      Json      @default("{}") @db.JsonB
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt     DateTime? @map("deleted_at") @db.Timestamptz(6)
+  campaign      Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  action        CampaignAction? @relation(fields: [actionId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, status])
+  @@index([actionId])
+  @@map("campaign_assets")
+}
+
+model CampaignEvent {
+  id         BigInt   @id @default(autoincrement())
+  campaignId String   @map("campaign_id") @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  eventType  String   @map("event_type") @db.VarChar(60)
+  actorType  String   @default("system") @map("actor_type") @db.VarChar(24)
+  actorId    String?  @map("actor_id") @db.Uuid
+  data       Json     @default("{}") @db.JsonB
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, id])
+  @@index([orgId, createdAt(sort: Desc)])
+  @@map("campaign_events")
+}
+
+model CampaignMetricSnapshot {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId String   @map("campaign_id") @db.Uuid
+  channel    String?  @db.VarChar(40)
+  actionId   String?  @map("action_id") @db.Uuid
+  period     String   @db.VarChar(24)
+  metrics    Json     @db.JsonB
+  capturedAt DateTime @default(now()) @map("captured_at") @db.Timestamptz(6)
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, capturedAt(sort: Desc)])
+  @@index([campaignId, channel, capturedAt(sort: Desc)])
+  @@map("campaign_metric_snapshots")
+}
+
+/// OutreachCampaign — one durable batch-outreach run created when the user clicks
+/// "Send outreach emails" / "Start outreach calls" on a sealed turn's prospect stack.
+/// Hybrid control: FE drives pace while open; drain worker finishes if the tab dies.
+model OutreachCampaign {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  roomId      String           @map("room_id") @db.Uuid
+  turnId      String           @map("turn_id") @db.Uuid
+  userId      String           @map("user_id") @db.Uuid
+  orgId       String           @map("org_id") @db.Uuid
+  unifiedCampaignId String?     @map("unified_campaign_id") @db.Uuid
+  channel     String           @db.VarChar(8) // email | call
+  voiceProvider String?        @map("voice_provider") @db.VarChar(32)
+  voiceConfigSnapshot Json     @default("{}") @map("voice_config_snapshot")
+  status      String           @default("queued") @db.VarChar(12) // queued | running | paused | done | cancelled
+  senderEmail String?          @map("sender_email") @db.VarChar(160) // connected Gmail (email channel)
+  taraNumber  String?          @map("tara_number") @db.VarChar(32) // outbound caller id (call channel)
+  lastTickAt  DateTime?        @map("last_tick_at") @db.Timestamptz(6) // FE liveness — drain takes over when stale
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  startedAt   DateTime?        @map("started_at") @db.Timestamptz(6)
+  finishedAt  DateTime?        @map("finished_at") @db.Timestamptz(6)
+  targets     OutreachTarget[]
+
+  @@index([userId, status, createdAt])
+  @@index([orgId, status])
+  @@index([turnId])
+  @@index([unifiedCampaignId])
+  @@map("outreach_campaigns")
+}
+
+/// OutreachTarget — one prospect inside a campaign. Snapshot of the Places prospect
+/// row at click time + the per-prospect generated payload (email {subject,body} or
+/// call {goal,opener}) + run state. OutboundAction stays the sent-truth ledger;
+/// resultRef links there.
+model OutreachTarget {
+  id         String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId String           @map("campaign_id") @db.Uuid
+  position   Int
+  company    String           @db.VarChar(300)
+  email      String?          @db.VarChar(320)
+  phone      String?          @db.VarChar(40)
+  website    String?          @db.VarChar(500)
+  address    String?          @db.VarChar(500)
+  leadId     String?          @map("lead_id") @db.Uuid
+  inputContext Json           @default("{}") @map("input_context") @db.JsonB
+  payload    Json?            @db.JsonB // email: {subject, body} · call: {goal, opener} — editable until executed
+  state      String           @default("selected") @db.VarChar(20) // selected | deselected | generating | ready | dialing | in_call | analyzing | analyzed | sent | failed | skipped
+  resultRef  Json?            @map("result_ref") @db.JsonB // {outboundActionId} | {taraCallLegId, sessionId} + {error}
+  updatedAt  DateTime         @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign   OutreachCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, position])
+  @@index([campaignId, state])
+  @@index([leadId])
+  @@map("outreach_targets")
+}
+
+/// Customer-owned X paid campaign. X remains the delivery source of truth;
+/// this row owns the local draft, resumable publication state and metrics cache.
+model XAdsCredential {
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                 String   @map("org_id") @db.Uuid
+  userId                String   @map("user_id") @db.Uuid
+  authKind              String   @map("auth_kind") @db.VarChar(16)
+  xUserId               String?  @map("x_user_id") @db.VarChar(32)
+  xUsername             String?  @map("x_username") @db.VarChar(64)
+  accessTokenEncrypted  String   @map("access_token_encrypted") @db.Text
+  refreshTokenEncrypted String?  @map("refresh_token_encrypted") @db.Text
+  tokenSecretEncrypted  String?  @map("token_secret_encrypted") @db.Text
+  scopes                String[] @default([])
+  expiresAt             DateTime? @map("expires_at") @db.Timestamptz(6)
+  status                String   @default("active") @db.VarChar(20)
+  connectedAt           DateTime @default(now()) @map("connected_at") @db.Timestamptz(6)
+  updatedAt             DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, userId, authKind], map: "x_ads_credentials_tenant_auth_key")
+  @@index([orgId, userId, status], map: "x_ads_credentials_org_user_status_idx")
+  @@index([xUserId], map: "x_ads_credentials_x_user_idx")
+  @@map("x_ads_credentials")
+}
+
+/// Short-lived, one-time state for native X OAuth callbacks. Secrets are
+/// encrypted and bound to the originating organization, user and auth flow.
+model XAdsOAuthState {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                  String    @map("org_id") @db.Uuid
+  userId                 String    @map("user_id") @db.Uuid
+  authKind               String    @map("auth_kind") @db.VarChar(16)
+  stateHash              String?   @unique(map: "x_ads_oauth_states_state_hash_key") @map("state_hash") @db.VarChar(64)
+  requestTokenHash       String?   @unique(map: "x_ads_oauth_states_request_token_hash_key") @map("request_token_hash") @db.VarChar(64)
+  verifierEncrypted      String?   @map("verifier_encrypted") @db.Text
+  requestSecretEncrypted String?   @map("request_secret_encrypted") @db.Text
+  expiresAt              DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt             DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, authKind, expiresAt], map: "x_ads_oauth_states_tenant_expiry_idx")
+  @@map("x_ads_oauth_states")
+}
+
+model XAdsCampaign {
+  id                    String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                 String             @map("org_id") @db.Uuid
+  userId                String             @map("user_id") @db.Uuid
+  unifiedCampaignId     String?            @map("unified_campaign_id") @db.Uuid
+  adAccountId           String?            @map("ad_account_id") @db.VarChar(64)
+  adAccountName         String?            @map("ad_account_name") @db.VarChar(255)
+  fundingInstrumentId   String?            @map("funding_instrument_id") @db.VarChar(64)
+  xUserId               String?            @map("x_user_id") @db.VarChar(32)
+  xUsername             String?            @map("x_username") @db.VarChar(64)
+  name                  String             @db.VarChar(255)
+  destinationUrl        String             @map("destination_url") @db.VarChar(2048)
+  postText              String             @map("post_text") @db.VarChar(500)
+  imageData             Bytes?             @map("image_data")
+  imageContentType      String?            @map("image_content_type") @db.VarChar(64)
+  imageFilename         String?            @map("image_filename") @db.VarChar(255)
+  locationTargets       Json               @default("[]") @map("location_targets") @db.JsonB
+  languageTargets       Json               @default("[]") @map("language_targets") @db.JsonB
+  dailyBudgetMicros     BigInt?            @map("daily_budget_micros")
+  totalBudgetMicros     BigInt?            @map("total_budget_micros")
+  currency              String?            @db.VarChar(8)
+  accountTimezone       String?            @map("account_timezone") @db.VarChar(80)
+  endDate               String             @map("end_date") @db.VarChar(10)
+  endAt                 DateTime?           @map("end_at") @db.Timestamptz(6)
+  status                String             @default("DRAFT") @db.VarChar(32)
+  draftVersion          Int                @default(1) @map("draft_version")
+  confirmationHash      String?            @map("confirmation_hash") @db.VarChar(64)
+  confirmationExpiresAt DateTime?           @map("confirmation_expires_at") @db.Timestamptz(6)
+  publishLockAt         DateTime?           @map("publish_lock_at") @db.Timestamptz(6)
+  xCampaignId           String?            @map("x_campaign_id") @db.VarChar(64)
+  xLineItemId           String?            @map("x_line_item_id") @db.VarChar(64)
+  xMediaId              String?            @map("x_media_id") @db.VarChar(32)
+  xPostId               String?            @map("x_post_id") @db.VarChar(32)
+  xPromotedTweetId      String?            @map("x_promoted_tweet_id") @db.VarChar(64)
+  xApprovalStatus       String?            @map("x_approval_status") @db.VarChar(32)
+  xEffectiveStatus      String?            @map("x_effective_status") @db.VarChar(64)
+  xSnapshot             Json               @default("{}") @map("x_snapshot") @db.JsonB
+  metrics               Json               @default("{}") @db.JsonB
+  metricsSyncedAt       DateTime?           @map("metrics_synced_at") @db.Timestamptz(6)
+  lastError             String?            @map("last_error") @db.Text
+  createdAt             DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  publishedAt           DateTime?          @map("published_at") @db.Timestamptz(6)
+  steps                 XAdsCampaignStep[]
+
+  @@unique([orgId, xCampaignId])
+  @@index([orgId, status, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([unifiedCampaignId])
+  @@map("x_ads_campaigns")
+}
+
+/// One resumable external side effect in an X campaign publication.
+model XAdsCampaignStep {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId  String       @map("campaign_id") @db.Uuid
+  step        String       @db.VarChar(40)
+  status      String       @default("PENDING") @db.VarChar(20)
+  externalId  String?      @map("external_id") @db.VarChar(80)
+  attempts    Int          @default(0)
+  response    Json?        @db.JsonB
+  error       String?      @db.Text
+  startedAt   DateTime?    @map("started_at") @db.Timestamptz(6)
+  completedAt DateTime?    @map("completed_at") @db.Timestamptz(6)
+  updatedAt   DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  campaign    XAdsCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, step])
+  @@index([campaignId, status])
+  @@map("x_ads_campaign_steps")
+}
+
+/// HQActivity — the HQ "control room" feed. One row per non-HQ room run that
+/// seals, written control-plane-side from the seal event. Agents "report" their
+/// room activity to the owner here so the HQ room becomes a live overview of all
+/// company activity. Templated (no LLM) from the turn's own events.
+model HQActivity {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  hqRoomId       String   @map("hq_room_id") @db.Uuid
+  sourceRoomId   String   @map("source_room_id") @db.Uuid
+  sourceRoomName String?  @map("source_room_name") @db.VarChar(200)
+  turnId         String   @map("turn_id") @db.Uuid
+  agentName      String?  @map("agent_name") @db.VarChar(120)
+  agentRole      String?  @map("agent_role") @db.VarChar(120)
+  headline       String   @db.VarChar(400)
+  summary        String?  @db.Text
+  status         String   @default("complete") @db.VarChar(20)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([turnId])
+  @@index([orgId, hqRoomId, createdAt])
+  @@map("hq_activity")
 }
 
 /// Core memory storage with triple-operator versioning (Updates, Extends, Derives)
@@ -388,6 +1081,7 @@ model Memory {
   id                                                          String               @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
   userId                                                      String               @map("user_id") @db.Uuid
   orgId                                                       String?              @map("org_id") @db.Uuid
+  pipelineVersion                                             Int                  @default(1) @map("pipeline_version")
   content                                                     String
   memoryType                                                  MemoryType?          @default(fact) @map("memory_type")
   title                                                       String?              @db.VarChar(500)
@@ -396,6 +1090,13 @@ model Memory {
   sourceSessionId                                             String?              @map("source_session_id") @db.VarChar(255)
   sourceMessageId                                             String?              @map("source_message_id") @db.VarChar(255)
   sourceUrl                                                   String?              @map("source_url")
+  // P0 first-class HyperAgents provenance (nullable, additive; populated only for
+  // hyperagents-agent saves — see prisma-graph-store.createMemory). Applied to the DB
+  // via migration 20260723090000_add_hyperagents_provenance.
+  producedByTurn                                              String?              @map("produced_by_turn") @db.Uuid
+  producedByAgent                                             String?              @map("produced_by_agent") @db.VarChar(120)
+  actionable                                                  Boolean?             @map("actionable")
+  provenance                                                  Json?                @map("provenance")
   isLatest                                                    Boolean?             @default(true) @map("is_latest")
   supersedesId                                                String?              @map("supersedes_id") @db.Uuid
   strength                                                    Float?               @default(1.0) @db.Real
@@ -473,6 +1174,17 @@ model Memory {
   //   NULL       = ordinary evidence/memory tier (default)
   cognitiveLayerRole String? @map("cognitive_layer_role")
 
+  // Canonical Memory Engine V5: structured claim identity. A claim is
+  // subject+predicate(+qualifiers); claimKey is a stable hash used for dedup and
+  // contradiction/history clustering (NOT unique — historical + contradictory
+  // claims for the same key must coexist). extractionConfidence is the
+  // per-claim extractor confidence (distinct from synthesisConfidence).
+  claimKey             String?  @map("claim_key") @db.VarChar(128)
+  claimSubject         String?  @map("claim_subject") @db.VarChar(500)
+  claimPredicate       String?  @map("claim_predicate") @db.VarChar(500)
+  claimQualifiers      Json?    @map("claim_qualifiers")
+  extractionConfidence Float?   @map("extraction_confidence") @db.Real
+
   @@index([userId])
   @@index([orgId])
   @@index([project])
@@ -499,6 +1211,9 @@ model Memory {
   @@index([tier], map: "memories_tier_idx")
   @@index([userId, tier, lastAccessedAt(sort: Desc)], map: "memories_user_tier_lastaccess_idx")
   @@index([cognitiveLayerRole], map: "memories_cognitive_layer_role_idx")
+  // V5: claim clustering + dedup lookups. Non-unique (contradictory/historical
+  // claims coexist); the isLatest+deletedAt tail keeps the live-claim scan tight.
+  @@index([orgId, claimKey, isLatest, deletedAt], map: "memories_org_claim_latest_idx")
   // PHASE-A: a partial index `memories_principle_role_idx` on (org_id, updated_at DESC)
   // WHERE cognitive_layer_role = 'principle' exists in the DB (migration
   // 20260606000000_l2_principles_tier). The WHERE filter is not expressible in
@@ -627,10 +1342,366 @@ model SourceArtifact {
   @@map("source_artifacts")
 }
 
+/// GrowthGoal — organization-level outcome governed by Company HQ.
+model GrowthGoal {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String   @map("org_id") @db.Uuid
+  ownerUserId   String   @map("owner_user_id") @db.Uuid
+  title         String   @db.VarChar(255)
+  objective     String
+  status        String   @default("ACTIVE") @db.VarChar(24)
+  autonomyMode  String   @default("MANUAL_REVIEW") @map("autonomy_mode") @db.VarChar(24)
+  policy        Json     @default("{}")
+  sourceRefs    Json     @default("[]") @map("source_refs")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status])
+  @@index([ownerUserId, createdAt(sort: Desc)])
+  @@map("growth_goals")
+}
+
+/// GrowthStage — one bounded experiment or operating phase below a GrowthGoal.
+model GrowthStage {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String    @map("org_id") @db.Uuid
+  growthGoalId     String    @map("growth_goal_id") @db.Uuid
+  name             String    @db.VarChar(255)
+  objective        String
+  constraint       String    @map("growth_constraint") @db.VarChar(40)
+  status           String    @default("PLANNED") @db.VarChar(24)
+  startsAt         DateTime? @map("starts_at") @db.Timestamptz(6)
+  checkpointAt     DateTime? @map("checkpoint_at") @db.Timestamptz(6)
+  endsAt           DateTime? @map("ends_at") @db.Timestamptz(6)
+  channelPolicy    Json      @default("{}") @map("channel_policy")
+  measurement      Json      @default("{}")
+  sourceRefs       Json      @default("[]") @map("source_refs")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status, checkpointAt])
+  @@index([growthGoalId, createdAt(sort: Desc)])
+  @@map("growth_stages")
+}
+
+/// GrowthHypothesis — a falsifiable, evidence-backed claim belonging to a stage.
+model GrowthHypothesis {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String   @map("org_id") @db.Uuid
+  growthStageId   String   @map("growth_stage_id") @db.Uuid
+  statement       String
+  confidence      String   @default("MEDIUM") @db.VarChar(12)
+  evidenceRefs    Json     @default("[]") @map("evidence_refs")
+  expectedSignal  String?  @map("expected_signal")
+  falsification   String?  @map("falsification")
+  status          String   @default("OPEN") @db.VarChar(20)
+  observedOutcome Json     @default("{}") @map("observed_outcome")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status])
+  @@index([growthStageId, createdAt(sort: Desc)])
+  @@map("growth_hypotheses")
+}
+
+/// GrowthDelegation — an HQ handoff contract for a bounded specialist-room result.
+model GrowthDelegation {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  growthStageId  String    @map("growth_stage_id") @db.Uuid
+  roomId         String?   @map("room_id") @db.Uuid
+  roomTag        String    @map("room_tag") @db.VarChar(40)
+  objective      String
+  inputs         Json      @default("{}")
+  deliverable    String?   @db.VarChar(500)
+  successMetric  String?   @map("success_metric") @db.VarChar(500)
+  status         String    @default("PENDING") @db.VarChar(24)
+  result         Json      @default("{}")
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status])
+  @@index([growthStageId, createdAt(sort: Desc)])
+  @@index([roomId])
+  @@map("growth_delegations")
+}
+
+/// GrowthJournal — compact, append-only evidence and decision history for HQ.
+model GrowthJournal {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  growthGoalId   String?  @map("growth_goal_id") @db.Uuid
+  growthStageId  String?  @map("growth_stage_id") @db.Uuid
+  actorUserId    String?  @map("actor_user_id") @db.Uuid
+  eventType      String   @map("event_type") @db.VarChar(60)
+  summary        String
+  evidenceRefs   Json     @default("[]") @map("evidence_refs")
+  decision       Json     @default("{}")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, createdAt(sort: Desc)])
+  @@index([growthStageId, createdAt(sort: Desc)])
+  @@map("growth_journal")
+}
+
+/// HqRuntime — one persistent company operator per organization.
+model HqRuntime {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId           String    @unique @map("org_id") @db.Uuid
+  ownerUserId     String    @map("owner_user_id") @db.Uuid
+  epoch           String    @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  objective       String
+  state           String    @default("INACTIVE") @db.VarChar(24)
+  authorityPolicy Json      @default("{}") @map("authority_policy") @db.JsonB
+  activeGoalId    String?   @map("active_goal_id") @db.Uuid
+  activeStageId   String?   @map("active_stage_id") @db.Uuid
+  currentCycleId  String?   @map("current_cycle_id") @db.Uuid
+  nextWakeAt      DateTime? @map("next_wake_at") @db.Timestamptz(6)
+  pauseReason     String?   @map("pause_reason")
+  blockedReason   String?   @map("blocked_reason")
+  eventSequence   BigInt    @default(0) @map("event_sequence")
+  version         Int       @default(1)
+  activatedAt     DateTime? @map("activated_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([state, nextWakeAt])
+  @@index([orgId, epoch], map: "hq_runtimes_org_epoch_idx")
+  @@map("hq_runtimes")
+}
+
+/// HqCycle — one leased, resumable wake execution.
+model HqCycle {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId      String    @map("runtime_id") @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  runtimeEpoch   String    @map("runtime_epoch") @db.Uuid
+  idempotencyKey String    @map("idempotency_key") @db.VarChar(160)
+  triggerType    String    @map("trigger_type") @db.VarChar(60)
+  triggerPayload Json      @default("{}") @map("trigger_payload") @db.JsonB
+  inputRefs      Json      @default("[]") @map("input_refs") @db.JsonB
+  status         String    @default("QUEUED") @db.VarChar(24)
+  decision       Json      @default("{}") @db.JsonB
+  usage          Json      @default("{}") @db.JsonB
+  error          String?
+  leaseOwner     String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  startedAt      DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, idempotencyKey])
+  @@index([runtimeId, runtimeEpoch, createdAt(sort: Desc)])
+  @@index([runtimeId, createdAt(sort: Desc)])
+  @@index([status, leaseExpiresAt])
+  @@map("hq_cycles")
+}
+
+/// HqRuntimeEvent — append-only user-visible operational evidence.
+model HqRuntimeEvent {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId      String   @map("runtime_id") @db.Uuid
+  cycleId        String?  @map("cycle_id") @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  sequence       BigInt
+  eventType      String   @map("event_type") @db.VarChar(60)
+  title          String   @db.VarChar(240)
+  summary        String
+  details        Json     @default("{}") @db.JsonB
+  skillRef       String?  @map("skill_ref") @db.VarChar(160)
+  toolRef        String?  @map("tool_ref") @db.VarChar(160)
+  workOrderId    String?  @map("work_order_id") @db.Uuid
+  evidenceRefs   Json     @default("[]") @map("evidence_refs") @db.JsonB
+  visibility     String   @default("USER") @db.VarChar(20)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([runtimeId, sequence])
+  @@index([orgId, createdAt(sort: Desc)])
+  @@index([cycleId, sequence])
+  @@map("hq_runtime_events")
+}
+
+/// HqSchedule — a durable wake request leased by the HQ scheduler.
+model HqSchedule {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId      String    @map("runtime_id") @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  runtimeEpoch   String    @map("runtime_epoch") @db.Uuid
+  idempotencyKey String    @map("idempotency_key") @db.VarChar(160)
+  triggerType    String    @map("trigger_type") @db.VarChar(60)
+  payload        Json      @default("{}") @db.JsonB
+  dueAt          DateTime  @map("due_at") @db.Timestamptz(6)
+  status         String    @default("PENDING") @db.VarChar(24)
+  leaseOwner     String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  attempts       Int       @default(0)
+  lastError      String?   @map("last_error")
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, idempotencyKey])
+  @@index([runtimeId, runtimeEpoch, dueAt])
+  @@index([status, dueAt])
+  @@index([runtimeId, createdAt(sort: Desc)])
+  @@map("hq_schedules")
+}
+
+model HqInstruction {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId   String    @map("runtime_id") @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  body        String
+  status      String    @default("PENDING") @db.VarChar(24)
+  interpreted Json      @default("{}") @db.JsonB
+  appliedAt   DateTime? @map("applied_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  @@index([runtimeId, status, createdAt])
+  @@map("hq_instructions")
+}
+
+model HqTodo {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId            String    @map("runtime_id") @db.Uuid
+  orgId                String    @map("org_id") @db.Uuid
+  instructionId        String?   @map("instruction_id") @db.Uuid
+  title                String    @db.VarChar(240)
+  objective            String
+  kind                 String    @db.VarChar(60)
+  status               String    @default("READY") @db.VarChar(32)
+  priority             Int       @default(100)
+  position             Int       @default(0)
+  requiredCapabilities Json      @default("[]") @map("required_capabilities") @db.JsonB
+  context              Json      @default("{}") @db.JsonB
+  result               Json      @default("{}") @db.JsonB
+  blockedReason        String?   @map("blocked_reason")
+  startedAt            DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt          DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  @@index([runtimeId, status, priority, position])
+  @@map("hq_todos")
+}
+
+/// HqWorkflow is the durable operating graph owned by HQ. A workflow is not a
+/// report or a Room turn: it is the authoritative lifecycle for one bounded
+/// business outcome, whose individual steps may be delegated to specialist
+/// Rooms and resumed from external events.
+model HqWorkflow {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId         String    @map("runtime_id") @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  todoId            String?   @map("todo_id") @db.Uuid
+  kind              String    @db.VarChar(80)
+  title             String    @db.VarChar(240)
+  objective         String
+  status            String    @default("READY") @db.VarChar(32)
+  graphVersion      Int       @default(1) @map("graph_version")
+  authorityPolicy   Json      @default("{}") @map("authority_policy") @db.JsonB
+  context           Json      @default("{}") @db.JsonB
+  terminalReason    String?   @map("terminal_reason")
+  startedAt         DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  steps             HqWorkflowStep[]
+  artifacts         HqWorkflowArtifact[]
+
+  @@index([runtimeId, status, createdAt])
+  @@index([orgId, kind, status])
+  @@unique([runtimeId, todoId])
+  @@map("hq_workflows")
+}
+
+/// One idempotent, observable transition inside an HQ workflow. Each step is
+/// owned by HQ, but may point at exactly one delegated Room work order.
+model HqWorkflowStep {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workflowId        String    @map("workflow_id") @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  stepKey           String    @map("step_key") @db.VarChar(100)
+  title             String    @db.VarChar(240)
+  kind              String    @db.VarChar(80)
+  status            String    @default("PENDING") @db.VarChar(32)
+  position          Int
+  dependsOn         String[]  @default([]) @map("depends_on")
+  roomTag           String?   @map("room_tag") @db.VarChar(80)
+  workOrderId       String?   @map("work_order_id") @db.Uuid
+  acceptance        Json      @default("[]") @db.JsonB
+  input             Json      @default("{}") @db.JsonB
+  result            Json      @default("{}") @db.JsonB
+  retryCount        Int       @default(0) @map("retry_count")
+  maxRetries        Int       @default(2) @map("max_retries")
+  blockedReason     String?   @map("blocked_reason")
+  dueAt             DateTime? @map("due_at") @db.Timestamptz(6)
+  startedAt         DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  workflow          HqWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  artifacts         HqWorkflowArtifact[]
+
+  @@unique([workflowId, stepKey])
+  @@unique([workOrderId])
+  @@index([orgId, status, dueAt])
+  @@index([workflowId, position])
+  @@map("hq_workflow_steps")
+}
+
+/// Artifact records are the only completion evidence HQ accepts from a Room.
+/// Payloads may contain lead IDs, internal drafts, provider receipts, and
+/// source references, but never credentials.
+model HqWorkflowArtifact {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workflowId        String    @map("workflow_id") @db.Uuid
+  stepId            String?   @map("step_id") @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  artifactKey       String    @map("artifact_key") @db.VarChar(180)
+  artifactType      String    @map("artifact_type") @db.VarChar(80)
+  status            String    @default("READY") @db.VarChar(32)
+  externalRef       String?   @map("external_ref") @db.VarChar(500)
+  payload           Json      @default("{}") @db.JsonB
+  sourceRefs        Json      @default("[]") @map("source_refs") @db.JsonB
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  workflow          HqWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  step              HqWorkflowStep? @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, artifactKey])
+  @@index([orgId, artifactType, status])
+  @@index([stepId, createdAt])
+  @@map("hq_workflow_artifacts")
+}
+
+model HqCapabilityRequest {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runtimeId   String    @map("runtime_id") @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  todoId      String?   @map("todo_id") @db.Uuid
+  capability  String    @db.VarChar(100)
+  provider    String    @db.VarChar(100)
+  status      String    @default("REQUIRED") @db.VarChar(24)
+  reason      String
+  connectPath String?   @map("connect_path")
+  resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  @@index([orgId, status, createdAt])
+  @@map("hq_capability_requests")
+}
+
 /// Knowledge documents — parsed/normalized from source artifacts
 /// Represents threads, files, web pages, conversations
 model KnowledgeDocument {
   id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  // which ingestion pipeline produced this row — makes selective re-ingestion possible.
+  // NOT processing_version, which is a retry counter on the job.
+  pipelineVersion    Int                  @default(1) @map("pipeline_version")
+  ingestMode         String               @default("both") @map("ingest_mode") @db.VarChar(16)
   userId             String               @map("user_id") @db.Uuid
   orgId              String               @map("org_id") @db.Uuid
   sourceArtifactId   String?              @map("source_artifact_id") @db.Uuid
@@ -652,6 +1723,17 @@ model KnowledgeDocument {
   parseEngine        String?              @map("parse_engine") @db.VarChar(50) // 'docling' | 'pdf.js' | 'mammoth' | 'markdown'
   parseMetadata      Json                 @default("{}") @map("parse_metadata")
   structureExtracted Boolean              @default(false) @map("structure_extracted")
+  // Canonical Memory Engine V5: canonical source identity. canonicalIngestKey is
+  // a globally-unique hash of (org, source type, provider, external id, version,
+  // content hash) — the idempotency key for a source version. contentHash is the
+  // document-level content hash (segment-level hash already lives on
+  // KnowledgeSegment). processingVersion gates re-processing when the pipeline
+  // changes. These are additive + backward-compatible (all nullable).
+  canonicalIngestKey String?              @map("canonical_ingest_key") @db.VarChar(128)
+  sourceExternalId   String?              @map("source_external_id") @db.VarChar(500)
+  sourceVersion      String?              @map("source_version") @db.VarChar(100)
+  contentHash        String?              @map("content_hash") @db.VarChar(128)
+  processingVersion  Int?                 @map("processing_version")
   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?            @map("archived_at") @db.Timestamptz(6)
@@ -662,6 +1744,7 @@ model KnowledgeDocument {
   entityMentions     EntityMention[]
   memoryLinks        MemoryEvidenceLink[]
 
+  tables             DocumentTable[]
   @@unique([userId, orgId, sourcePlatform, sourceId])
   @@index([userId, orgId])
   @@index([documentType])
@@ -671,8 +1754,12 @@ model KnowledgeDocument {
   @@index([parentDocumentId])
   @@index([documentDate(sort: Desc)])
   @@index([parseStatus])
+  @@index([orgId, ingestMode])
   @@index([tags], type: Gin)
   @@index([createdAt(sort: Desc)])
+  // V5: idempotent source-version lookup. Unique per org so a re-ingest of the
+  // same source version dedups to one document (nullable → legacy rows unaffected).
+  @@unique([orgId, canonicalIngestKey], map: "knowledge_documents_org_canonical_key_uq")
   @@map("knowledge_documents")
 }
 
@@ -680,6 +1767,7 @@ model KnowledgeDocument {
 /// Chunks, sections, paragraphs, messages within documents
 model KnowledgeSegment {
   id                 String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pipelineVersion    Int                  @default(1) @map("pipeline_version")
   documentId         String               @map("document_id") @db.Uuid
   userId             String               @map("user_id") @db.Uuid
   orgId              String               @map("org_id") @db.Uuid
@@ -718,6 +1806,159 @@ model KnowledgeSegment {
   @@index([vectorStored])
   @@index([createdAt(sort: Desc)])
   @@map("knowledge_segments")
+}
+
+/// A spreadsheet is ROWS, not prose. The KB pipeline turns one into claims —
+/// readable and recallable, but you can no longer count, filter or sum it, and a
+/// question like "which channel indexes highest for Persona 3" becomes a guess.
+///
+/// Docling already returns {sheet, headers, rows}; document-first-ingestion
+/// carried it and then dropped it on the floor. These two tables persist that
+/// grid ALONGSIDE the summary claims, so tabular questions get an exact SQL
+/// answer while semantic recall still works.
+///
+/// org_id is on BOTH tables, not just the parent: a row must be unreachable
+/// without a tenant filter even if a query forgets to join.
+model DocumentTable {
+  id           String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentId   String              @map("document_id") @db.Uuid
+  orgId        String              @map("org_id") @db.Uuid
+  userId       String?             @map("user_id") @db.Uuid
+  sheet        String?             @db.VarChar(255)
+  tableIndex   Int                 @default(0) @map("table_index")
+  headers      String[]            @default([])
+  rowCount     Int                 @default(0) @map("row_count")
+  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  rows         DocumentTableRow[]
+  document     KnowledgeDocument   @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, tableIndex])
+  @@index([orgId])
+  @@index([documentId])
+  @@map("document_tables")
+}
+
+model DocumentTableRow {
+  id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tableId   String        @map("table_id") @db.Uuid
+  orgId     String        @map("org_id") @db.Uuid
+  rowIndex  Int           @map("row_index")
+  cells     Json
+  table     DocumentTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  @@unique([tableId, rowIndex])
+  @@index([orgId])
+  @@index([tableId])
+  @@map("document_table_rows")
+}
+
+/// Durable control-plane record for every Knowledge Base upload. Content stays
+/// in the tenant's selected storage backend; this row contains orchestration,
+/// authorization and billing metadata only.
+model KnowledgeIngestJob {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  scopeType         String    @map("scope_type") @db.VarChar(24)
+  scopeId           String?   @map("scope_id") @db.Uuid
+  scopeKey          String    @map("scope_key") @db.VarChar(160)
+  storageMode       String    @map("storage_mode") @db.VarChar(32)
+  filename          String    @db.VarChar(500)
+  contentType       String?   @map("content_type") @db.VarChar(160)
+  mediaKind         String    @map("media_kind") @db.VarChar(24)
+  ingestMode        String    @default("both") @map("ingest_mode") @db.VarChar(16)
+  evidenceOnlyReason String?  @map("evidence_only_reason") @db.VarChar(32)
+  checksum          String    @db.VarChar(64)
+  status            String    @default("queued") @db.VarChar(32)
+  stage             String    @default("accepted") @db.VarChar(48)
+  progress          Int       @default(0)
+  processingVersion Int       @default(1) @map("processing_version")
+  attempt           Int       @default(0)
+  queueJobId        String?   @map("queue_job_id") @db.VarChar(160)
+  documentId        String?   @map("document_id") @db.Uuid
+  memoryIds         String[]  @default([]) @map("memory_ids") @db.Uuid
+  pageCount         Int?      @map("page_count")
+  segmentCount      Int?      @map("segment_count")
+  candidateCount    Int?      @map("candidate_count")
+  promotedCount     Int?      @map("promoted_count")
+  usageSettledAt    DateTime? @map("usage_settled_at") @db.Timestamptz(6)
+  errorCode         String?   @map("error_code") @db.VarChar(80)
+  errorMessage      String?   @map("error_message")
+  metadata          Json      @default("{}")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@index([orgId, status, updatedAt])
+  @@index([orgId, scopeKey, checksum])
+  @@index([orgId, ingestMode, status])
+  @@index([queueJobId])
+  @@map("knowledge_ingest_jobs")
+}
+
+/// Exactly-once settlement markers for billable Knowledge Base metrics.
+model KnowledgeUsageSettlement {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  jobId     String   @map("job_id") @db.Uuid
+  metric    String   @db.VarChar(32)
+  amount    BigInt
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([jobId, metric])
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@map("knowledge_usage_settlements")
+}
+
+/// Durable, tenant-scoped Web Intelligence orchestration. Provider payloads are
+/// retained only as a bounded result manifest; credentials never enter this row.
+model WebIntelJob {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  type              String    @db.VarChar(24)
+  status            String    @default("queued") @db.VarChar(24)
+  request           Json      @default("{}")
+  result            Json?     
+  progress          Json      @default("[]")
+  providerAttempts  Json      @default("[]") @map("provider_attempts")
+  idempotencyKey    String?   @map("idempotency_key") @db.VarChar(128)
+  runtimeUsed       String?   @map("runtime_used") @db.VarChar(64)
+  fallbackApplied   Boolean   @default(false) @map("fallback_applied")
+  durationMs        Int?      @map("duration_ms")
+  pagesProcessed    Int       @default(0) @map("pages_processed")
+  errorCode         String?   @map("error_code") @db.VarChar(80)
+  errorMessage      String?   @map("error_message")
+  retriedFromId     String?   @map("retried_from_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  // PostgreSQL enforces idempotency only when a caller supplied a key. The
+  // partial unique index lives in the manual migration so anonymous browser
+  // requests can coexist without a synthetic key.
+  @@index([orgId, userId, idempotencyKey])
+  @@index([orgId, userId, updatedAt(sort: Desc)])
+  @@index([orgId, status, updatedAt])
+  @@map("web_intel_jobs")
+}
+
+/// Exactly-once customer and provider accounting marker for a Web Intel job.
+model WebIntelUsageSettlement {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  jobId     String   @map("job_id") @db.Uuid
+  metric    String   @db.VarChar(40)
+  amount    BigInt   @default(1)
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([jobId, metric])
+  @@index([orgId, userId, createdAt(sort: Desc)])
+  @@map("web_intel_usage_settlements")
 }
 
 /// Named entities — people, orgs, projects, topics, locations, dates
@@ -1033,6 +2274,8 @@ model ApiKey {
   userId             String        @map("user_id") @db.Uuid
   orgId              String?       @map("org_id") @db.Uuid
   name               String        @map("name") @db.VarChar(255)
+  keyKind            String        @default("personal") @map("key_kind") @db.VarChar(16)
+  createdByUserId    String?       @map("created_by_user_id") @db.Uuid
   keyHash            String        @unique @map("key_hash") @db.VarChar(255)
   keyPrefix          String        @map("key_prefix") @db.VarChar(20)
   expiresAt          DateTime?     @map("expires_at") @db.Timestamptz(6)
@@ -1057,6 +2300,7 @@ model ApiKey {
   @@index([keyPrefix], map: "idx_api_keys_key_prefix")
   @@index([orgId], map: "idx_api_keys_org")
   @@index([userId], map: "idx_api_keys_user")
+  @@index([orgId, keyKind], map: "idx_api_keys_org_kind")
   @@map("api_keys")
 }
 
@@ -1296,11 +2540,15 @@ model OrgUsage {
   tokensProcessed      BigInt   @default(0)
   searchQueries        BigInt   @default(0)
   knowledgeBaseUploads Int      @default(0)
+  knowledgeBasePages   Int      @default(0)
   memoriesIngested     Int      @default(0)
   deepResearchJobs     Int      @default(0)
   webIntelJobs         Int      @default(0)
   graphQueries         Int      @default(0)
   taraUsage            Int      @default(0)
+  taraSeconds          BigInt   @default(0)
+  hyperAgentRuns       Int      @default(0)
+  emailSends           Int      @default(0)
   connectorCount       Int      @default(0)
   webIntelDay          DateTime @default(now()) @db.Date
   updatedAt            DateTime @default(now()) @db.Timestamptz(6)
@@ -1322,15 +2570,350 @@ model OrgUsageDaily {
   tokensProcessed      BigInt   @default(0)
   searchQueries        BigInt   @default(0)
   knowledgeBaseUploads Int      @default(0)
+  knowledgeBasePages   Int      @default(0)
   memoriesIngested     Int      @default(0)
   deepResearchJobs     Int      @default(0)
   webIntelJobs         Int      @default(0)
   graphQueries         Int      @default(0)
   taraUsage            Int      @default(0)
+  taraSeconds          BigInt   @default(0)
+  hyperAgentRuns       Int      @default(0)
+  emailSends           Int      @default(0)
   updatedAt            DateTime @default(now()) @db.Timestamptz(6)
 
   @@unique([orgId, day])
   @@index([orgId, day], map: "idx_org_usage_daily_org_day")
+}
+
+/// Lifetime, monotonic usage counters. These are commercial/audit totals, not
+/// live storage counts: deleting a memory or document must never reduce them.
+model OrgUsageCumulative {
+  orgId                String   @id @map("org_id") @db.Uuid
+  tokensProcessed      BigInt   @default(0) @map("tokens_processed")
+  searchQueries        BigInt   @default(0) @map("search_queries")
+  knowledgeBaseUploads BigInt   @default(0) @map("knowledge_base_uploads")
+  knowledgeBasePages   BigInt   @default(0) @map("knowledge_base_pages")
+  memoriesIngested     BigInt   @default(0) @map("memories_ingested")
+  deepResearchJobs     BigInt   @default(0) @map("deep_research_jobs")
+  webIntelJobs         BigInt   @default(0) @map("web_intel_jobs")
+  graphQueries         BigInt   @default(0) @map("graph_queries")
+  taraUsage            BigInt   @default(0) @map("tara_usage")
+  taraSeconds          BigInt   @default(0) @map("tara_seconds")
+  hyperAgentRuns       BigInt   @default(0) @map("hyper_agent_runs")
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("org_usage_cumulative")
+}
+
+/// A server-managed referral campaign. Limits are stored as a snapshot-able
+/// JSON object so GTM terms can be changed for future redemptions only.
+model ReferralCampaign {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code             String    @unique @db.VarChar(64)
+  name             String    @db.VarChar(160)
+  active           Boolean   @default(true)
+  maxRedemptions   Int?      @map("max_redemptions")
+  redemptionCount  Int       @default(0) @map("redemption_count")
+  startsAt         DateTime? @map("starts_at") @db.Timestamptz(6)
+  endsAt           DateTime? @map("ends_at") @db.Timestamptz(6)
+  onboardingDays   Int       @default(14) @map("onboarding_days")
+  onboardingPlan   String    @default("enterprise") @map("onboarding_plan") @db.VarChar(50)
+  onboardingLimits Json      @default("{}") @map("onboarding_limits")
+  runwayPlan       String    @default("enterprise") @map("runway_plan") @db.VarChar(50)
+  runwayLimits     Json      @default("{}") @map("runway_limits")
+  runwayIntervalMonths Int   @default(1) @map("runway_interval_months")
+  /// 'none' | 'percentage' | 'fixed' — a code carries at most one discount shape.
+  discountKind        String  @default("none") @map("discount_kind") @db.VarChar(20)
+  discountPercent     Int?    @map("discount_percent")
+  discountAmountCents Int?    @map("discount_amount_cents")
+  discountCurrency    String  @default("EUR") @map("discount_currency") @db.VarChar(3)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  redemptions      ReferralRedemption[]
+
+  @@map("referral_campaigns")
+}
+
+/// One campaign redemption per organization. The copied terms make past
+/// commercial commitments immutable even when the campaign is later edited.
+model ReferralRedemption {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  campaignId      String   @map("campaign_id") @db.Uuid
+  orgId           String   @unique @map("org_id") @db.Uuid
+  redeemedByUserId String  @map("redeemed_by_user_id") @db.Uuid
+  codeSnapshot    String   @map("code_snapshot") @db.VarChar(64)
+  termsSnapshot   Json     @map("terms_snapshot")
+  redeemedAt      DateTime @default(now()) @map("redeemed_at") @db.Timestamptz(6)
+  campaign        ReferralCampaign @relation(fields: [campaignId], references: [id], onDelete: Restrict)
+
+  @@index([campaignId])
+  @@map("referral_redemptions")
+}
+
+/// Time-bounded entitlement snapshots. The resolver selects the row effective
+/// now, allowing onboarding to change to runway without mutating history.
+model OrganizationEntitlement {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  source         String    @db.VarChar(32)
+  phase          String    @db.VarChar(32)
+  planId         String    @map("plan_id") @db.VarChar(50)
+  limits         Json      @default("{}")
+  effectiveFrom  DateTime  @map("effective_from") @db.Timestamptz(6)
+  effectiveUntil DateTime? @map("effective_until") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, effectiveFrom, effectiveUntil])
+  @@map("organization_entitlements")
+}
+
+/// Immutable platform-wide cap snapshots. The newest version per plan is the
+/// runtime catalog overlay; code defaults remain the restore target.
+model PlanCatalogVersion {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  planId    String   @map("plan_id") @db.VarChar(50)
+  version   Int
+  limits    Json     @default("{}")
+  action    String   @db.VarChar(32)
+  operator  String   @db.VarChar(160)
+  requestId String?  @map("request_id") @db.VarChar(128)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([planId, version])
+  @@index([planId, createdAt])
+  @@map("plan_catalog_versions")
+}
+
+/// Platform-owned commercial offer. Codes are represented only by a keyed digest.
+model Promotion {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  legacyCampaignId  String?  @unique @map("legacy_campaign_id") @db.Uuid
+  internalName      String   @map("internal_name") @db.VarChar(160)
+  codeHash          String?  @unique @map("code_hash") @db.Char(64)
+  codeHint          String?  @map("code_hint") @db.VarChar(16)
+  visibility        String   @default("code") @db.VarChar(24)
+  status            String   @default("active") @db.VarChar(24)
+  billingMode       String   @default("entitlement_only") @map("billing_mode") @db.VarChar(32)
+  maxRedemptions    Int?     @map("max_redemptions")
+  redemptionCount   Int      @default(0) @map("redemption_count")
+  perEmailMax       Int      @default(1) @map("per_email_max")
+  startsAt          DateTime? @map("starts_at") @db.Timestamptz(6)
+  endsAt            DateTime? @map("ends_at") @db.Timestamptz(6)
+  notes             String?  @db.Text
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("promotions")
+}
+
+/// Immutable terms snapshot. Material offer changes create a new version.
+model PromotionVersion {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  promotionId     String   @map("promotion_id") @db.Uuid
+  version         Int
+  basePlan        String   @map("base_plan") @db.VarChar(50)
+  limits          Json     @default("{}")
+  accountType     String   @map("account_type") @db.VarChar(32)
+  hostingMode     String   @map("hosting_mode") @db.VarChar(24)
+  storageMode     String   @map("storage_mode") @db.VarChar(32)
+  commercialTerms Json     @default("{}") @map("commercial_terms")
+  fallbackAction  String   @default("manual_review") @map("fallback_action") @db.VarChar(32)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([promotionId, version])
+  @@map("promotion_versions")
+}
+
+model PromotionEligibility {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  promotionId     String   @map("promotion_id") @db.Uuid
+  eligibilityType String   @map("eligibility_type") @db.VarChar(24)
+  valueHash       String?  @map("value_hash") @db.Char(64)
+  valueHint       String?  @map("value_hint") @db.VarChar(160)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([promotionId, eligibilityType, valueHash])
+  @@map("promotion_eligibilities")
+}
+
+/// One durable commercial access grant per offer activation; its history is versions.
+model EntitlementGrant {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  promotionId    String?   @map("promotion_id") @db.Uuid
+  source         String    @db.VarChar(48)
+  status         String    @default("active") @db.VarChar(24)
+  startsAt       DateTime  @default(now()) @map("starts_at") @db.Timestamptz(6)
+  endsAt         DateTime? @map("ends_at") @db.Timestamptz(6)
+  fallbackAction String    @default("manual_review") @map("fallback_action") @db.VarChar(32)
+  suspendedAt    DateTime? @map("suspended_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status, startsAt])
+  @@map("entitlement_grants")
+}
+
+model EntitlementVersion {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  grantId          String    @map("grant_id") @db.Uuid
+  version          Int
+  planId           String    @map("plan_id") @db.VarChar(50)
+  limits           Json      @default("{}")
+  accountType      String    @map("account_type") @db.VarChar(32)
+  hostingMode      String    @map("hosting_mode") @db.VarChar(24)
+  storageMode      String    @map("storage_mode") @db.VarChar(32)
+  commercialTerms  Json      @default("{}") @map("commercial_terms")
+  effectiveFrom    DateTime  @default(now()) @map("effective_from") @db.Timestamptz(6)
+  effectiveUntil   DateTime? @map("effective_until") @db.Timestamptz(6)
+  transitionReason String    @map("transition_reason") @db.VarChar(80)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([grantId, version])
+  @@index([grantId, effectiveFrom])
+  @@map("entitlement_versions")
+}
+
+model PromotionRedemption {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  promotionId        String   @map("promotion_id") @db.Uuid
+  promotionVersionId String   @map("promotion_version_id") @db.Uuid
+  entitlementGrantId String   @map("entitlement_grant_id") @db.Uuid
+  orgId              String   @map("org_id") @db.Uuid
+  redeemedByUserId   String   @map("redeemed_by_user_id") @db.Uuid
+  emailHash          String   @map("email_hash") @db.Char(64)
+  codeHint           String?  @map("code_hint") @db.VarChar(16)
+  termsSnapshot      Json     @map("terms_snapshot")
+  requestId          String?  @map("request_id") @db.VarChar(128)
+  redeemedAt         DateTime @default(now()) @map("redeemed_at") @db.Timestamptz(6)
+
+  @@unique([promotionId, orgId])
+  @@index([promotionId, emailHash])
+  @@index([orgId, redeemedAt])
+  @@map("promotion_redemptions")
+}
+
+/// Platform-issued B2B onboarding invitation. The access code and activation
+/// link are represented only by keyed digests; the workspace does not exist
+/// until the invited owner redeems it successfully.
+model EnterpriseInvitation {
+  id                   String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  companyName          String        @map("company_name") @db.VarChar(255)
+  workspaceName        String?       @map("workspace_name") @db.VarChar(255)
+  recipientEmail       String        @map("recipient_email") @db.VarChar(255)
+  recipientEmailHash   String        @map("recipient_email_hash") @db.Char(64)
+  recipientEmailHint   String        @map("recipient_email_hint") @db.VarChar(160)
+  accountType          String        @map("account_type") @db.VarChar(32)
+  hostingMode          String        @map("hosting_mode") @db.VarChar(24)
+  storageMode          String        @map("storage_mode") @db.VarChar(32)
+  onboardingDays       Int           @default(14) @map("onboarding_days")
+  onboardingLimits     Json          @default("{}") @map("onboarding_limits")
+  configSnapshot       Json          @default("{}") @map("config_snapshot")
+  welcomeMessage       String?       @map("welcome_message") @db.Text
+  privateNotes         String?       @map("private_notes") @db.Text
+  status               String        @default("draft") @db.VarChar(24)
+  deliveryStatus       String        @default("not_sent") @map("delivery_status") @db.VarChar(24)
+  lastDeliveryError    String?       @map("last_delivery_error") @db.VarChar(240)
+  accessCodeHash       String        @unique @map("access_code_hash") @db.Char(64)
+  accessCodeHint       String        @map("access_code_hint") @db.VarChar(16)
+  accessCodeVersion    Int           @default(1) @map("access_code_version")
+  linkTokenHash        String        @unique @map("link_token_hash") @db.Char(64)
+  linkVersion          Int           @default(1) @map("link_version")
+  invitationExpiresAt  DateTime      @map("invitation_expires_at") @db.Timestamptz(6)
+  sentAt               DateTime?     @map("sent_at") @db.Timestamptz(6)
+  lastSentAt           DateTime?     @map("last_sent_at") @db.Timestamptz(6)
+  redeemedAt           DateTime?     @map("redeemed_at") @db.Timestamptz(6)
+  redeemedByUserId     String?       @map("redeemed_by_user_id") @db.Uuid
+  orgId                String?       @unique @map("org_id") @db.Uuid
+  revokedAt            DateTime?     @map("revoked_at") @db.Timestamptz(6)
+  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organization         Organization? @relation("RedeemedEnterpriseInvitation", fields: [orgId], references: [id], onDelete: Restrict)
+
+  @@index([recipientEmailHash, status])
+  @@index([status, invitationExpiresAt])
+  @@map("enterprise_invitations")
+}
+
+/// Pre-organization access request captured from Singulance public surfaces.
+/// It contains no tenant data and becomes tenant-linked only after an approved
+/// invitation is redeemed.
+model AccessApplication {
+  id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email                  String   @db.VarChar(255)
+  emailHash              String   @map("email_hash") @db.Char(64)
+  name                   String   @db.VarChar(160)
+  accountType            String   @map("account_type") @db.VarChar(24)
+  companyName            String?  @map("company_name") @db.VarChar(255)
+  useCase                String?  @map("use_case") @db.VarChar(120)
+  niche                  String?  @db.VarChar(120)
+  message                String?  @db.Text
+  source                 String   @default("singulancelabs.com") @db.VarChar(160)
+  status                 String   @default("pending") @db.VarChar(24)
+  reviewNote             String?  @map("review_note") @db.Text
+  reviewedBy             String?  @map("reviewed_by") @db.VarChar(160)
+  reviewedAt             DateTime? @map("reviewed_at") @db.Timestamptz(6)
+  invitationType         String?  @map("invitation_type") @db.VarChar(24)
+  enterpriseInvitationId String?  @map("enterprise_invitation_id") @db.Uuid
+  invitationSentAt       DateTime? @map("invitation_sent_at") @db.Timestamptz(6)
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([emailHash, accountType])
+  @@index([accountType, status, createdAt])
+  @@map("access_applications")
+}
+
+/// Provider-neutral checkout intent. The browser can request an offer but only
+/// a provider confirmation transitions it to paid and creates entitlements.
+model BillingCheckout {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  provider       String    @db.VarChar(24)
+  status         String    @default("pending") @db.VarChar(24)
+  targetPlanId   String    @map("target_plan_id") @db.VarChar(50)
+  offer          Json      @default("{}")
+  providerRef    String?   @unique @map("provider_ref") @db.VarChar(255)
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
+  confirmedAt    DateTime? @map("confirmed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([orgId, status, createdAt])
+  @@index([userId, createdAt])
+  @@map("billing_checkouts")
+}
+
+/// Per-API-key LLM usage rollup. Records EVERY LLM call against the org's HIVEMIND
+/// API key — org_id + api_key_id + model + feature — so spend is attributable per key,
+/// not just per org. OrgUsage stays the org-wide monthly total (unchanged); this is the
+/// per-key / per-model / per-feature breakdown. For system / background / master-key calls that
+/// run inside an org context but carry no request API key (cognition, dreaming, boot, worker jobs)
+/// the writer stores the all-zero SENTINEL uuid so they fold into a single per-(org,month,model)
+/// "system" row under the plain unique index (no NULLs → no expression-index fragility, and ON
+/// CONFLICT inference stays on plain columns). NO FK by design: a usage/billing ledger must keep
+/// spend history after a key is revoked, and the sentinel value has no api_keys row. Written
+/// fire-and-forget at the LLM chokepoint (litellm-client + groq-fallback); a metering failure
+/// never breaks a completion.
+model ApiKeyUsage {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId            String    @map("org_id") @db.Uuid
+  apiKeyId         String    @default("00000000-0000-0000-0000-000000000000") @map("api_key_id") @db.Uuid
+  month            String    @db.VarChar(7)
+  model            String    @default("") @db.VarChar(128)
+  feature          String    @default("") @db.VarChar(64)
+  tokensProcessed  BigInt    @default(0) @map("tokens_processed")
+  promptTokens     BigInt    @default(0) @map("prompt_tokens")
+  completionTokens BigInt    @default(0) @map("completion_tokens")
+  requests         BigInt    @default(0)
+  lastUsedAt       DateTime  @default(now()) @map("last_used_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, apiKeyId, month, model, feature], map: "uq_api_key_usage_org_key_month_model_feature")
+  @@index([orgId, month], map: "idx_api_key_usage_org_month")
+  @@index([apiKeyId, month], map: "idx_api_key_usage_key_month")
+  @@map("api_key_usage")
 }
 
 /// Per-org SSO configuration: Zitadel project mapping, SAML IdP metadata, SCIM token.
@@ -1427,6 +3010,14 @@ model DigitalEmployee {
   peerReviewTargets     String[]       @default([]) @map("peer_review_targets")
   tools                 String[]       @default([])
   policyRules           Json           @default("{}") @map("policy_rules")
+  // GLOBAL per-agent learned playbook (self-evolving Loop 1) — ordered operating
+  // lessons distilled across ALL rooms. One row per org+slug. Surfaced lazily via the
+  // recall_experience tool in rooms AND 1-on-1 chat. Stored here (NOT the vector KB) so
+  // lessons never pollute recall. Distinct from hyper_rooms.evo_playbooks (per-room).
+  evoPlaybook           Json           @default("[]") @map("evo_playbook")
+  // Per-agent connector grants → 1-on-1 chat registers the same toolkits the agent uses
+  // in rooms. Distinct from hyper_rooms.enabledConnectors (per-room). Empty = none.
+  enabledConnectors     String[]       @default([]) @map("enabled_connectors")
   status                String         @default("draft") @db.VarChar(20)
   // draft | deploying | running | paused | error
   replicas              Int            @default(1)
@@ -1463,6 +3054,12 @@ model HyperRoom {
   goal               String?
   participantIds     String[]     @default([]) @map("participant_ids") @db.Uuid
   template           String       @default("debate") @db.VarChar(40)
+  /// Dedicated expertise pack (general plus versioned SEO, marketing, brand, capital, product, design, legal, and research packs).
+  /// Orthogonal to template: a SEO room may still collaborate via debate/swarm/etc.
+  roomTag            String       @default("general") @map("room_tag") @db.VarChar(40)
+  /// Ownership boundary. Work rooms are human-facing, Director-led workspaces;
+  /// runtime rooms are bounded specialist operators invoked by an HQ playbook.
+  roomMode           String       @default("work") @map("room_mode") @db.VarChar(16)
   permanentLeadId    String?      @map("permanent_lead_id") @db.Uuid
   permanentSkepticId String?      @map("permanent_skeptic_id") @db.Uuid
   /// Per-character connector grants (legacy P2, superseded by enabledConnectors).
@@ -1480,6 +3077,9 @@ model HyperRoom {
   simMode            String       @default("off") @map("sim_mode") @db.VarChar(16)
   /// Population-Sim cast size (FE slider, 10-100). Default 24.
   simAgents          Int          @default(24) @map("sim_agents")
+  /// Bounded episodic summaries of completed Room runs. This is continuity memory,
+  /// distinct from the room method playbook and each employee's global playbook.
+  roomJournal        Json         @default("[]") @map("room_journal")
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   archivedAt         DateTime?    @map("archived_at") @db.Timestamptz(6)
@@ -1492,7 +3092,80 @@ model HyperRoom {
   @@index([userId, orgId])
   @@index([archivedAt])
   @@index([projectId])
+  @@index([orgId, roomMode])
   @@map("hyper_rooms")
+}
+
+/// HyperWorkOrder — a durable, bounded unit of agent work created by a Room
+/// Director for a specific turn. This is intentionally separate from TeamTask:
+/// TeamTask belongs to the older AgentScope team runtime, while WorkOrders are
+/// the shared execution substrate beneath every HyperRoom domain pack.
+model HyperWorkOrder {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId               String   @map("org_id") @db.Uuid
+  roomId              String   @map("room_id") @db.Uuid
+  turnId              String?  @map("turn_id") @db.Uuid
+  hqCycleId           String?  @map("hq_cycle_id") @db.Uuid
+  runtimeEpoch        String?  @map("runtime_epoch") @db.Uuid
+  growthDelegationId  String?  @map("growth_delegation_id") @db.Uuid
+  orderKey            String   @map("order_key") @db.VarChar(80)
+  planStepId          String?  @map("plan_step_id") @db.VarChar(80)
+  dependsOn           Json     @default("[]") @map("depends_on") @db.JsonB
+  kind                String   @db.VarChar(40)
+  status              String   @default("queued") @db.VarChar(40)
+  title               String   @db.VarChar(180)
+  objective           String   @db.Text
+  ownerEmployeeId     String?  @map("owner_employee_id") @db.Uuid
+  ownerSlug           String?  @map("owner_slug") @db.VarChar(120)
+  ownerLane           String?  @map("owner_lane") @db.VarChar(40)
+  selectedSkills      Json     @default("[]") @map("selected_skills") @db.JsonB
+  requiredEvidence    Json     @default("[]") @map("required_evidence") @db.JsonB
+  acceptanceCriteria  Json     @default("[]") @map("acceptance_criteria") @db.JsonB
+  inputSnapshot       Json     @default("{}") @map("input_snapshot") @db.JsonB
+  waitFor             Json     @default("{}") @map("wait_for") @db.JsonB
+  handoff             Json     @default("{}") @db.JsonB
+  artifactRefs        Json     @default("[]") @map("artifact_refs") @db.JsonB
+  evidenceRefs        Json     @default("[]") @map("evidence_refs") @db.JsonB
+  attempt             Int      @default(0)
+  error               String?  @db.Text
+  leaseOwner          String?  @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt      DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  lastHeartbeatAt     DateTime? @map("last_heartbeat_at") @db.Timestamptz(6)
+  startedAt           DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([turnId, orderKey])
+  @@unique([hqCycleId, orderKey])
+  @@index([orgId, roomId, status])
+  @@index([turnId])
+  @@index([turnId, planStepId])
+  @@index([hqCycleId, status])
+  @@index([orgId, runtimeEpoch, status])
+  @@index([status, leaseExpiresAt], map: "hyper_work_orders_status_lease_idx")
+  @@map("hyper_work_orders")
+}
+
+/// HyperWorkResult — append-only worker attempt output. The final Room
+/// synthesis consumes compact results rather than raw tool transcripts.
+model HyperWorkResult {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workOrderId String   @map("work_order_id") @db.Uuid
+  runtimeEpoch String? @map("runtime_epoch") @db.Uuid
+  attempt     Int      @default(1)
+  status      String   @default("completed") @db.VarChar(20)
+  summary     String   @db.Text
+  output      Json     @default("{}") @db.JsonB
+  evidence    Json     @default("[]") @db.JsonB
+  artifacts   Json     @default("[]") @db.JsonB
+  usage       Json     @default("{}") @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([workOrderId, attempt])
+  @@index([workOrderId])
+  @@index([runtimeEpoch, createdAt(sort: Desc)])
+  @@map("hyper_work_results")
 }
 
 /// AgentTrust — per-org meritocracy ledger. score in [0,1], starts 0.5.
@@ -1528,12 +3201,32 @@ model HyperTurn {
   startedAt      DateTime    @default(now()) @map("started_at") @db.Timestamptz(6)
   sealedAt       DateTime?   @map("sealed_at") @db.Timestamptz(6)
   idempotencyKey String      @unique @map("idempotency_key") @db.VarChar(64)
+  runtimePlaybookRunId String? @map("runtime_playbook_run_id") @db.Uuid
+  runtimeStageId String? @map("runtime_stage_id") @db.VarChar(120)
+  runtimeCheckpointSequence Int? @map("runtime_checkpoint_sequence")
+  runtimeAttempt Int? @map("runtime_attempt")
+  executionIdentity Json @default("{}") @map("execution_identity") @db.JsonB
+  // Which specialist engine this Work Room turn runs as, chosen ONCE by a Director
+  // classification call and never reselected — write-once at the DB level (see the
+  // 20260811100000_hyper_turn_execution_profile migration). Distinct from
+  // executionIdentity, which is the tamper-checked tenant envelope, not a routing
+  // decision; overwriting one with the other would silently break either guarantee.
+  executionProfile Json? @map("execution_profile") @db.JsonB
+  executionPhase String @default("ACCEPTED") @map("execution_phase") @db.VarChar(32)
+  candidateOutput Json @default("{}") @map("candidate_output") @db.JsonB
+  verificationVerdict Json @default("{}") @map("verification_verdict") @db.JsonB
+  lastProgressAt DateTime @default(now()) @map("last_progress_at") @db.Timestamptz(6)
+  terminalReason String? @map("terminal_reason") @db.Text
   room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
   evals          AgentEval[]
+  runtimePlaybookRun RuntimePlaybookRun? @relation(fields: [runtimePlaybookRunId], references: [id], onDelete: SetNull)
 
   @@unique([roomId, seq])
   @@index([roomId])
   @@index([status])
+  @@index([status, lastProgressAt])
+  @@index([runtimePlaybookRunId, runtimeCheckpointSequence])
+  @@index([runtimePlaybookRunId, runtimeStageId, runtimeAttempt])
   @@map("hyper_turns")
 }
 
@@ -1615,7 +3308,12 @@ model TaraCall {
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId            String    @map("org_id") @db.Uuid
   userId           String    @map("user_id") @db.Uuid
-  sessionId        String    @unique @map("session_id") @db.VarChar(120)
+  sessionId        String    @map("session_id") @db.VarChar(120)
+  provider         String    @default("deepgram") @db.VarChar(32)
+  providerModel    String?   @map("provider_model") @db.VarChar(120)
+  configRevision   Int       @default(1) @map("config_revision")
+  skillId          String?   @map("skill_id") @db.Uuid
+  goal             String?
   mode             String    @default("external") @db.VarChar(20) // internal | external
   voiceId          String?   @map("voice_id") @db.VarChar(120)
   language         String    @default("en") @db.VarChar(10)
@@ -1624,12 +3322,19 @@ model TaraCall {
   durationMs       Int       @default(0) @map("duration_ms")
   promptTokens     Int       @default(0) @map("prompt_tokens")
   completionTokens Int       @default(0) @map("completion_tokens")
+  inputAudioMs     Int       @default(0) @map("input_audio_ms")
+  outputAudioMs    Int       @default(0) @map("output_audio_ms")
+  billableMessages Int       @default(0) @map("billable_messages")
+  toolUsage        Json      @default("{}") @map("tool_usage")
+  estimatedCostMicros Int    @default(0) @map("estimated_cost_micros")
+  failureCode      String?   @map("failure_code") @db.VarChar(120)
   startedAt        DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
   endedAt          DateTime? @map("ended_at") @db.Timestamptz(6)
 
   @@index([orgId])
   @@index([userId])
   @@index([orgId, startedAt])
+  @@unique([orgId, sessionId])
   @@map("tara_calls")
 }
 
@@ -1654,7 +3359,90 @@ model TaraTurn {
 
   @@index([callId])
   @@index([orgId])
+  @@unique([callId, seq])
   @@map("tara_turns")
+}
+
+/// Provider-neutral voice configuration. Secrets are deliberately not stored here.
+model TaraRuntimeConfig {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @unique @map("org_id") @db.Uuid
+  defaultProvider String  @default("deepgram") @map("default_provider") @db.VarChar(32)
+  revision       Int      @default(1)
+  deepgramConfig Json     @default("{}") @map("deepgram_config")
+  grokConfig     Json     @default("{}") @map("grok_config")
+  updatedBy      String?  @map("updated_by") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("tara_runtime_configs")
+}
+
+model CapabilityAdapterState {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                String    @map("org_id") @db.Uuid
+  capabilityKey        String    @map("capability_key") @db.VarChar(120)
+  adapterId            String    @map("adapter_id") @db.VarChar(120)
+  state                String    @db.VarChar(32)
+  consecutiveNegatives Int       @default(0) @map("consecutive_negatives")
+  lastGoodAt           DateTime? @map("last_good_at") @db.Timestamptz(6)
+  lastCheckedAt        DateTime  @default(now()) @map("last_checked_at") @db.Timestamptz(6)
+  expiresAt            DateTime  @map("expires_at") @db.Timestamptz(6)
+  metadata             Json      @default("{}") @db.JsonB
+
+  @@unique([orgId, capabilityKey, adapterId])
+  @@index([orgId, capabilityKey, state, expiresAt])
+  @@map("capability_adapter_states")
+}
+
+model RuntimePerformanceMetric {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  runId     String?  @map("run_id") @db.Uuid
+  stageId   String?  @map("stage_id") @db.VarChar(120)
+  metric    String   @db.VarChar(120)
+  value     Float
+  unit      String   @db.VarChar(24)
+  source    String   @db.VarChar(120)
+  metadata  Json     @default("{}") @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, metric, createdAt(sort: Desc)])
+  @@index([runId, stageId])
+  @@map("runtime_performance_metrics")
+}
+
+/// One-time browser and listener capability issuance. The adapter atomically consumes it.
+model TaraVoiceSession {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  provider       String   @db.VarChar(32)
+  mode           String   @default("external") @db.VarChar(20)
+  capabilityJti  String   @unique @map("capability_jti") @db.VarChar(96)
+  configSnapshot Json     @default("{}") @map("config_snapshot")
+  expiresAt      DateTime @map("expires_at") @db.Timestamptz(6)
+  consumedAt     DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, expiresAt])
+  @@map("tara_voice_sessions")
+}
+
+/// Durable idempotency ledger for provider webhooks and adapter events.
+model TaraProviderEvent {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider        String   @db.VarChar(32)
+  providerEventId String   @map("provider_event_id") @db.VarChar(160)
+  sessionId       String?  @map("session_id") @db.VarChar(120)
+  orgId           String?  @map("org_id") @db.Uuid
+  eventType       String   @map("event_type") @db.VarChar(80)
+  payload         Json     @default("{}")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([provider, providerEventId])
+  @@index([orgId, sessionId])
+  @@map("tara_provider_events")
 }
 
 /// TaraInsight — one row per call, generated at call end (LLM over the transcript).
@@ -1680,9 +3468,12 @@ model TaraCampaign {
   id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId            String   @map("org_id") @db.Uuid
   userId           String   @map("user_id") @db.Uuid
+  unifiedCampaignId String? @map("unified_campaign_id") @db.Uuid
   name             String   @db.VarChar(200)
   status           String   @default("draft") @db.VarChar(20) // draft | active | paused | completed
   agentSkill       String?  @map("agent_skill") @db.VarChar(120)
+  provider         String   @default("deepgram") @db.VarChar(32)
+  configSnapshot   Json     @default("{}") @map("config_snapshot")
   goal             String?
   callingWindow    Json     @default("{}") @map("calling_window") // {tz, days[], startHour, endHour}
   caps             Json     @default("{}") // {concurrency, dailyMax}
@@ -1697,6 +3488,7 @@ model TaraCampaign {
   @@index([orgId])
   @@index([userId])
   @@index([orgId, status])
+  @@index([unifiedCampaignId])
   @@map("tara_campaigns")
 }
 
@@ -1744,7 +3536,21 @@ model TaraCallAttempt {
   disposition String?   @db.VarChar(30)
   gateResult  Json?     @map("gate_result")
   sessionId   String?   @map("session_id") @db.VarChar(120)
+  requestedSessionId String? @map("requested_session_id") @db.VarChar(120)
   callLegId   String?   @map("call_leg_id") @db.VarChar(120)
+  provider    String    @default("deepgram") @db.VarChar(32)
+  configSnapshot Json   @default("{}") @map("config_snapshot")
+  actionKey   String?   @unique @map("action_key") @db.VarChar(120)
+  runtimePlaybookRunId String? @map("runtime_playbook_run_id") @db.Uuid
+  runtimeStageId String? @map("runtime_stage_id") @db.VarChar(120)
+  outreachCampaignId String? @map("outreach_campaign_id") @db.Uuid
+  outreachTargetId String? @map("outreach_target_id") @db.Uuid
+  leadId String? @map("lead_id") @db.Uuid
+  outboundActionId String? @map("outbound_action_id") @db.Uuid
+  authorityRef String? @map("authority_ref") @db.VarChar(160)
+  reconciliationState String @default("pending") @map("reconciliation_state") @db.VarChar(32)
+  providerCandidates Json @default("[]") @map("provider_candidates")
+  lastError String? @map("last_error")
   scheduledAt DateTime? @map("scheduled_at") @db.Timestamptz(6)
   startedAt   DateTime? @map("started_at") @db.Timestamptz(6)
   endedAt     DateTime? @map("ended_at") @db.Timestamptz(6)
@@ -1757,6 +3563,9 @@ model TaraCallAttempt {
   @@index([orgId])
   @@index([campaignId, status])
   @@index([contactId])
+  @@index([runtimePlaybookRunId, runtimeStageId])
+  @@index([outreachCampaignId, outreachTargetId])
+  @@index([orgId, reconciliationState, updatedAt])
   @@map("tara_call_attempts")
 }
 
@@ -2034,6 +3843,7 @@ model CanonicalEntity {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   organizationId String   @map("organization_id") @db.Uuid
   canonicalName  String   @map("canonical_name")
+  normalizedName String   @map("normalized_name")
   entityKind     String   @map("entity_kind") @db.VarChar(40)
   aliases        String[] @default([])
   primaryEmail   String?  @map("primary_email") @db.VarChar(255)
@@ -2134,6 +3944,129 @@ model Playbook {
 
   @@index([organizationId, status])
   @@map("playbooks")
+}
+
+/// Immutable, versioned lifecycle data consumed by the domain-agnostic Room
+/// executor. This is intentionally separate from learned Playbook records.
+model RuntimePlaybookDefinition {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  scopeKey       String   @default("global") @map("scope_key") @db.VarChar(80)
+  organizationId String?  @map("organization_id") @db.Uuid
+  playbookId     String   @map("playbook_id") @db.VarChar(160)
+  version        Int
+  definition     Json     @db.JsonB
+  contentHash    String   @map("content_hash") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([scopeKey, playbookId, version])
+  @@index([organizationId])
+  @@index([playbookId, version(sort: Desc)])
+  @@map("runtime_playbook_definitions")
+}
+
+/// One tenant-scoped execution of an immutable Runtime playbook.
+model RuntimePlaybookRun {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  roomId            String?   @map("room_id") @db.Uuid
+  parentRunId       String?   @map("parent_run_id") @db.Uuid
+  parentStageId     String?   @map("parent_stage_id") @db.VarChar(120)
+  itemKey           String?   @map("item_key") @db.VarChar(160)
+  position          Int?
+  scopeKey          String    @default("global") @map("scope_key") @db.VarChar(80)
+  playbookId        String    @map("playbook_id") @db.VarChar(160)
+  playbookVersion   Int       @map("playbook_version")
+  idempotencyKey    String    @map("idempotency_key") @db.VarChar(180)
+  status            String    @default("ACTIVE") @db.VarChar(32)
+  currentStageId    String    @map("current_stage_id") @db.VarChar(120)
+  completedStageIds String[]  @default([]) @map("completed_stage_ids")
+  terminalState     String?   @map("terminal_state") @db.VarChar(120)
+  trigger           Json      @default("{}") @db.JsonB
+  context           Json      @default("{}") @db.JsonB
+  stageAttempts     Json      @default("{}") @map("stage_attempts") @db.JsonB
+  waitingFor        Json?     @map("waiting_for") @db.JsonB
+  lastVerdict       Json      @default("{}") @map("last_verdict") @db.JsonB
+  checkpointSequence Int      @default(0) @map("checkpoint_sequence")
+  version           Int       @default(1)
+  leaseOwner        String?   @map("lease_owner") @db.VarChar(160)
+  leaseExpiresAt    DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  artifacts         RuntimePlaybookArtifact[]
+  checkpoints       RuntimePlaybookCheckpoint[]
+  authorities       RuntimePlaybookAuthority[]
+  turns             HyperTurn[]
+
+  @@unique([orgId, idempotencyKey])
+  @@index([orgId, status, updatedAt(sort: Desc)])
+  @@index([roomId, status])
+  @@index([parentRunId, position])
+  @@index([status, leaseExpiresAt])
+  @@map("runtime_playbook_runs")
+}
+
+/// Immutable evidence emitted by one Runtime stage.
+model RuntimePlaybookArtifact {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId       String   @map("run_id") @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  stageId     String   @map("stage_id") @db.VarChar(120)
+  artifactId  String   @map("artifact_id") @db.VarChar(180)
+  artifactKey String   @map("artifact_key") @db.VarChar(180)
+  status      String   @default("READY") @db.VarChar(32)
+  data        Json     @default("{}") @db.JsonB
+  sourceRefs  Json     @default("[]") @map("source_refs") @db.JsonB
+  externalRef String?  @map("external_ref") @db.VarChar(500)
+  contentHash String   @map("content_hash") @db.VarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  run         RuntimePlaybookRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, artifactId])
+  @@index([orgId, artifactKey, createdAt(sort: Desc)])
+  @@index([runId, stageId])
+  @@map("runtime_playbook_artifacts")
+}
+
+/// Append-only execution state captured before and after every stage transition.
+model RuntimePlaybookCheckpoint {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId        String   @map("run_id") @db.Uuid
+  orgId        String   @map("org_id") @db.Uuid
+  sequence     Int
+  stageId      String?  @map("stage_id") @db.VarChar(120)
+  phase        String   @db.VarChar(40)
+  status       String   @db.VarChar(32)
+  state        Json     @default("{}") @db.JsonB
+  verdict      Json     @default("{}") @db.JsonB
+  artifactRefs Json     @default("[]") @map("artifact_refs") @db.JsonB
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  run          RuntimePlaybookRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, sequence])
+  @@index([orgId, createdAt(sort: Desc)])
+  @@index([runId, stageId, sequence])
+  @@map("runtime_playbook_checkpoints")
+}
+
+/// Explicit authority grant for one opaque playbook gate.
+model RuntimePlaybookAuthority {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId       String    @map("run_id") @db.Uuid
+  orgId       String    @map("org_id") @db.Uuid
+  gate        String    @db.VarChar(120)
+  status      String    @default("GRANTED") @db.VarChar(24)
+  grantedBy   String?   @map("granted_by") @db.Uuid
+  payload     Json      @default("{}") @db.JsonB
+  grantedAt   DateTime  @default(now()) @map("granted_at") @db.Timestamptz(6)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(6)
+  run         RuntimePlaybookRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, gate])
+  @@index([orgId, status])
+  @@map("runtime_playbook_authorities")
 }
 
 /// Durable cluster-state index — powers dirty-cluster scheduling in cognition-loop
@@ -2317,4 +4250,94 @@ model Meeting {
   @@index([orgId, createdAt(sort: Desc)], map: "meetings_org_created_idx")
   @@index([userId], map: "meetings_user_idx")
   @@map("meetings")
+}
+
+/// P1 — progressive durable transcript. Each 10-min recording segment is persisted
+/// here AS IT TRANSCRIBES (keyed by a client-generated session_id), so a long
+/// meeting survives a tab crash and the transcript is recoverable. At save the
+/// session's segments are linked to the new meeting row. Central durability for
+/// managed/personal orgs only — self-host (remote) orgs keep segments in-browser
+/// (transcript text must not transit central). meeting_id nullable until save.
+model MeetingSegment {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId  String   @map("session_id") @db.Uuid
+  meetingId  String?  @map("meeting_id") @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  idx        Int      @map("idx")
+  text       String   @map("text")
+  speakers   Json?    @map("speakers")
+  startMs    Int?     @map("start_ms")
+  endMs      Int?     @map("end_ms")
+  status     String   @default("transcribed") @map("status") @db.VarChar(16)
+  // P2 — per-segment Stage-1 extraction (entities/decisions/actions/topics),
+  // computed async during the meeting so Stop only reduces, never extracts.
+  extraction       Json?   @map("extraction")
+  extractionStatus String  @default("pending") @map("extraction_status") @db.VarChar(16)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([sessionId, idx], map: "meeting_segments_session_idx_key")
+  @@index([meetingId], map: "meeting_segments_meeting_idx")
+  @@index([orgId, userId], map: "meeting_segments_org_user_idx")
+  @@map("meeting_segments")
+}
+
+/// Durable outbox for engine→agent pushes (Phase 4 — remote/self-host orgs only).
+/// Every write/edge/update/updateTags/delete op destined for a remote agent is
+/// recorded here BEFORE the BullMQ job is enqueued. If Redis is unavailable at
+/// enqueue time the row persists; the reconciler sweep re-enqueues on the next
+/// worker boot / interval so no push is lost even across process restarts or
+/// Redis blips. Central / personal / managed (non-remote) orgs are never written
+/// here — the outbox engages ONLY when orgIsRemote(orgId) is true.
+///
+/// FIFO ordering is enforced per (recordId, seq): the worker will not dispatch
+/// op N+1 for a given recordId until op N is acked, so write→edge→updateTags
+/// for the same memory always land in the correct order on the agent.
+model MemoryOutbox {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  orgId         String    @map("org_id") @db.Uuid
+  /// The memory/edge id this op is scoped to — used for FIFO ordering (all ops
+  /// for the same recordId must process in seq order) and job dedup.
+  recordId      String    @map("record_id") @db.Uuid
+  /// Op type: 'write' | 'edge' | 'update' | 'updateTags' | 'delete'
+  op            String    @map("op") @db.VarChar(20)
+  /// Full replay envelope. Shape per op:
+  ///   write      → { record, vector, rels }
+  ///   edge       → { rel }
+  ///   update     → { id, patch }
+  ///   updateTags → { id, tags }
+  ///   delete     → { id, hard }
+  payload       Json      @map("payload") @db.JsonB
+  /// Monotonic counter per recordId — SELECT max(seq)+1 at insert time ensures
+  /// ordering is preserved across concurrent callers without a sequence object.
+  seq           BigInt    @map("seq")
+  /// 'pending' → BullMQ job dispatching; 'acked' → agent confirmed ok;
+  /// 'dead' → exhausted retries or poison (4xx non-429).
+  status        String    @default("pending") @map("status") @db.VarChar(10)
+  attempts      Int       @default(0) @map("attempts")
+  lastError     String?   @map("last_error") @db.Text
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  ackedAt       DateTime? @map("acked_at") @db.Timestamptz(6)
+
+  /// Primary sweep index: find pending rows whose retry window has passed.
+  @@index([orgId, status, nextAttemptAt], map: "memory_outbox_org_status_next_idx")
+  /// FIFO gate: find any earlier-seq pending rows for the same recordId.
+  @@index([recordId, seq], map: "memory_outbox_record_seq_idx")
+  @@map("memory_outbox")
+}
+
+/// Canonical V5 Phase 10 — per-organization ontology (opt-in). Extends the default
+/// pipeline: approved entity types, vocabulary/aliases, required metadata, relationship
+/// validation rules. Absence = default behavior; never forks canonical ingestion.
+model OrgOntology {
+  orgId                String   @id @map("org_id") @db.Uuid
+  approvedEntityTypes  String[] @default([]) @map("approved_entity_types")
+  vocabulary           Json     @default("{}")
+  requiredMetadata     String[] @default([]) @map("required_metadata")
+  relationshipRules    Json     @default("{}") @map("relationship_rules")
+  enabled              Boolean  @default(true)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  @@map("org_ontologies")
 }

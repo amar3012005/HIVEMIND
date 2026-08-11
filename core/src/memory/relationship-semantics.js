@@ -1,3 +1,4 @@
+import { assessClaimRelation } from './claim-signature.js';
 const RELATIONSHIP_ALIASES = new Map([
   ['update', 'Updates'],
   ['updates', 'Updates'],
@@ -317,4 +318,158 @@ export function buildSemanticMetadata({
     } : null,
     semantic_provenance: semanticProvenance,
   };
+}
+
+// ── Strict superseding-edge validator ────────────────────────────────────────
+// Deterministic structural gate for the DESTRUCTIVE relationship types
+// (Updates flips is_latest=false on the target; Contradicts asserts
+// incompatibility). Algorithmic edge factories (kb_hybrid_v1 gray-zone LLM,
+// entity-co-mention, kb-enrich contradiction pass) must pass this validator
+// before creating Updates/Contradicts or demoting is_latest — an LLM opinion
+// alone is not enough. Conversational hot-path classification (full-context,
+// user-driven) is intentionally NOT gated here.
+//
+// Rules (all must hold):
+//   1. SAME SUBJECT — the two memories share ≥1 entity slug.
+//   2. SPECIFIC SUBJECT — the shared set contains at least one NON-hub slug.
+//      Sharing only a generic hub entity (the org name — e.g. SOLVIS — that
+//      appears on most facts in a corpus) proves nothing about subject.
+//   3. NO EXCLUSIVE-SUBJECT CONFLICT — if each side carries its own distinct
+//      specific (non-hub, non-shared) entity, they are about DIFFERENT things
+//      (SolvisPia vs SolvisLea) and cannot update/contradict each other.
+//   4. SAME ATTRIBUTE (proxy) — content token overlap ≥ minAttributeOverlap
+//      (default 0.18 Jaccard on non-trivial tokens): a replacement/changed
+//      value keeps most of the sentence frame; disjoint statements (pellet
+//      requirements vs heating-oil requirements) do not.
+
+const _EDGE_STOP = new Set([
+  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'for', 'with', 'on', 'at', 'is', 'are', 'be', 'has', 'have',
+  'der', 'die', 'das', 'und', 'oder', 'von', 'zu', 'im', 'mit', 'auf', 'ist', 'sind', 'ein', 'eine', 'für', 'bei', 'den', 'dem', 'des',
+]);
+
+function _entitySlugs(tags = []) {
+  const out = new Set();
+  for (const t of Array.isArray(tags) ? tags : []) {
+    if (typeof t !== 'string') continue;
+    if (t.startsWith('entity:') || t.startsWith('person:')) {
+      const slug = t.replace(/^(entity|person):/, '').trim().toLowerCase();
+      if (slug) out.add(slug);
+    }
+  }
+  return out;
+}
+
+function _contentTokens(content = '') {
+  return new Set(
+    String(content || '')
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((t) => t.length >= 3 && !_EDGE_STOP.has(t)),
+  );
+}
+
+/**
+ * @param {object} from  the NEW memory (source of the edge) — needs {tags, content}
+ * @param {object} to    the OLD memory (target, would be demoted) — needs {tags, content}
+ * @param {object} [opts]
+ * @param {string[]} [opts.hubSlugs]  generic entity slugs (corpus-dominant, e.g. the org name)
+ * @param {number} [opts.minAttributeOverlap]
+ * @returns {{ok: boolean, reason: string, sharedSpecific: string[]}}
+ */
+export function validateSupersedingEdge(from = {}, to = {}, {
+  hubSlugs = [],
+  minAttributeOverlap = 0.18,
+  requireChangeEvidence = false,
+} = {}) {
+  // PRIMARY: structural claim comparison (claim-signature.js) — canonical
+  // subjects + typed value slots (numbers/units/years/dates/model ids).
+  // Language-neutral and deterministic: an LLM edge proposal survives only when
+  // the STRUCTURE supports it. Token-overlap Jaccard is retained ONLY as a
+  // fallback for value-less prose claims (see below), because it conflates
+  // "shares vocabulary" with "same attribute" and misses multilingual equals.
+  const assessment = assessClaimRelation(from, to, { hubSlugs });
+  switch (assessment.relation) {
+    case 'no-shared-subject':
+      return { ok: false, reason: 'no-shared-entity', sharedSpecific: [] };
+    case 'different-subject':
+      return { ok: false, reason: 'different-subjects', sharedSpecific: [] };
+    case 'topical':
+      if (assessment.reason === 'only corpus-hub subject shared') {
+        return { ok: false, reason: 'only-generic-entity-shared', sharedSpecific: [] };
+      }
+      if (assessment.reason === 'subject evidence on one side only') {
+        return { ok: false, reason: 'subject-evidence-one-sided', sharedSpecific: [] };
+      }
+      break; // same subject, no typed slots → fall through to frame fallback
+    case 'corroboration':
+      if (requireChangeEvidence) {
+        return { ok: false, reason: 'no-change-evidence(values-agree)', sharedSpecific: assessment.sharedSpecific };
+      }
+      return { ok: true, reason: 'corroboration', sharedSpecific: assessment.sharedSpecific };
+    case 'update':
+      return { ok: true, reason: 'value-change-evidence', sharedSpecific: assessment.sharedSpecific };
+    default:
+      break;
+  }
+
+  // FALLBACK for value-less prose (no typed slots either side): a genuine
+  // replacement keeps the sentence frame and swaps the value words; a
+  // near-verbatim duplicate keeps everything; unrelated statements share
+  // little. Weak signal — only when structure could not decide.
+  const a = _contentTokens(from.content);
+  const b = _contentTokens(to.content);
+  if (a.size && b.size) {
+    let inter = 0;
+    for (const t of a) if (b.has(t)) inter += 1;
+    const jac = inter / (a.size + b.size - inter);
+    if (jac < minAttributeOverlap) {
+      return { ok: false, reason: `attribute-mismatch(${jac.toFixed(2)})`, sharedSpecific: assessment.sharedSpecific };
+    }
+    if (requireChangeEvidence && jac >= 0.7) {
+      return { ok: false, reason: `no-change-evidence(${jac.toFixed(2)})`, sharedSpecific: assessment.sharedSpecific };
+    }
+  }
+  return { ok: true, reason: 'frame-fallback', sharedSpecific: assessment.sharedSpecific };
+}
+
+/**
+ * Corpus-dominant ("hub") entity slugs: entities present on ≥ threshold share
+ * of the given memories. In a product manual the manufacturer's org name tags
+ * nearly every fact — sharing it proves nothing (rule 2 above).
+ * @param {Array<{tags?: string[]}>} memories
+ * @param {number} [threshold]  fraction of memories (default 0.5)
+ * @returns {string[]}
+ */
+export function computeHubEntitySlugs(memories = [], threshold = 0.5) {
+  const counts = new Map();
+  let n = 0;
+  for (const m of memories) {
+    const ents = _entitySlugs(m?.tags);
+    if (!ents.size) continue;
+    n += 1;
+    for (const e of ents) counts.set(e, (counts.get(e) || 0) + 1);
+  }
+  if (n < 3) return []; // too few tagged memories to call anything "dominant"
+  const min = Math.ceil(n * threshold);
+  return [...counts.entries()].filter(([, c]) => c >= min).map(([e]) => e);
+}
+
+// ── Enforcement mode ─────────────────────────────────────────────────────────
+// The destructive-edge validator ships in SHADOW mode first: every gate still
+// COMPUTES the verdict and logs it, but does NOT act on it (no downgrade, no
+// is_latest withhold) until we have measured precision on a real corpus.
+//   RELATIONSHIP_VALIDATOR_MODE = shadow (default) | enforce | off
+//     shadow  → compute + log, take NO destructive action differently than before
+//     enforce → act on the verdict (downgrade edges / withhold demotion)
+//     off     → skip the validator entirely (legacy behaviour)
+// Read per-call (not cached) so the mode can be flipped via env without redeploy
+// where the process re-reads env, and always overridable in tests.
+export function relationshipValidatorMode() {
+  // DEFAULT enforce: the shadow measurement is complete (≈73% of algorithmic
+  // destructive edges were false, with sound rejections), so the deterministic
+  // validator now GATES every ingestion by default — no env needed, works the
+  // same on any box. Set RELATIONSHIP_VALIDATOR_MODE=shadow to observe-only or
+  // =off for the legacy (unsafe) behaviour.
+  const m = String(process.env.RELATIONSHIP_VALIDATOR_MODE || 'enforce').toLowerCase();
+  return (m === 'shadow' || m === 'off') ? m : 'enforce';
 }

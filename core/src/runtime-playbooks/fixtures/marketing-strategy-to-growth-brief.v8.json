@@ -1,0 +1,59 @@
+{
+  "playbook_id": "marketing.strategy-to-growth-brief",
+  "version": 8,
+  "status": "ACTIVE",
+  "name": "Marketing strategy to first-life program",
+  "description": "One Marketing Room execution turns retained company evidence into one complete strategy and its executable first-life portfolio; deterministic materialization follows without another Room turn.",
+  "metadata": {
+    "owner_room_tag": "marketing",
+    "supported_actions": ["formulate_go_to_market_strategy"],
+    "effect_class": "internal",
+    "first_life_program_builder": true,
+    "terminal_states_by_action": {
+      "formulate_go_to_market_strategy": ["strategy_program_ready", "strategy_needs_evidence", "cancelled"]
+    }
+  },
+  "input_contract": {"fields": [
+    {"path": "context.company", "type": "object", "description": "Persisted company identity and onboarding context.", "required": true},
+    {"path": "context.baseline", "type": "object", "description": "Persisted first-life baseline observations and evidence references.", "required": true},
+    {"path": "context.admin_current_status", "type": "object", "description": "Optional transcript-backed administrator current-status artifact.", "required": false},
+    {"path": "request.instruction", "type": "string", "description": "The retained first-life operating instruction in the user's locale.", "required": true}
+  ]},
+  "initial_stage_id": "form_strategy_program",
+  "terminal_states": ["strategy_program_ready", "strategy_needs_evidence", "cancelled"],
+  "stages": [
+    {
+      "id": "form_strategy_program",
+      "objective": "Create one complete, source-backed go-to-market strategy and its first-life operating portfolio in a single Marketing Room run. Use retained onboarding, baseline, administrator status when present, company memory, and current evidence. Load relevant Marketing skills directly and synthesize once; do not run another planning or validation conversation. Separate observed facts from professional recommendations and preserve material unknowns. Define a specific wedge, positioning, discoverable audience, offer framing, messaging pillars, alternatives, channel rationale, risks, measures with kill criteria, dependencies, and expected outcome. Design three or four evidence-backed, provider-neutral Runtime task proposals. The portfolio must include: (1) a bounded awareness-to-learning campaign experiment with motion_class market_response_experiment; (2) a pipeline motion with motion_class pipeline_development that discovers source-backed prospective organizations in the retained company geography and evidence-supported niche, preserves lead-specific customization notes, and prepares governed written outreach plus sequential voice-call follow-up without sending or dialing; and (3) a source-backed competitor, category, or market-opportunity decision with motion_class evidence_decision. Adapt the exact audience, geography, offer, channels, language, and scope to company evidence. Do not prescribe a provider or account, invent numeric targets, or pad unrelated work. Each proposal states title, bounded objective, reason, expected outcome, verifiable success measure, evidence references, dependencies, motion class, effect class, priority, and optional exact targets. Do not select a playbook, Company Room, provider, supported action, or execution mechanism. Perform no provider action.",
+      "input_refs": ["context.company", "context.baseline", "context.admin_current_status", "context.request"],
+      "expected_artifacts": ["marketing_strategy_program"],
+      "execution": {"mode": "room", "config": {"contract": "room-phase.v2", "phase_kind": "strategy_program", "required_skills": ["strategy-operating-loop", "strategy-kernel", "jtbd-trigger", "positioning-ladder", "beachhead-selection", "grand-slam-offer", "bullseye-channels", "north-star-measures"], "exclude_current_playbook_from_catalog": true, "discussion_mode": "disabled"}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "marketing_strategy_program", "value": 1},
+        {"predicate": "is_source_backed", "select": "marketing_strategy_program"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.positioning"},
+        {"predicate": "all_have_nonempty_field", "select": "marketing_strategy_program", "path": "data.audience"},
+        {"predicate": "all_have_min_items", "select": "marketing_strategy_program", "path": "data.motions", "value": 3},
+        {"predicate": "array_has_field_value", "select": "marketing_strategy_program", "path": "data.motions", "item_path": "motion_class", "value": "market_response_experiment"},
+        {"predicate": "array_has_field_value", "select": "marketing_strategy_program", "path": "data.motions", "item_path": "motion_class", "value": "pipeline_development"},
+        {"predicate": "array_has_field_value", "select": "marketing_strategy_program", "path": "data.motions", "item_path": "motion_class", "value": "evidence_decision"}
+      ],
+      "transitions": [{"default": true, "to_stage": "materialize_strategy_program"}],
+      "on_failure": "REPAIR",
+      "max_attempts": 3
+    },
+    {
+      "id": "materialize_strategy_program",
+      "objective": "Validate and materialize the accepted provider-neutral portfolio as ordered, idempotent proposed Runtime tasks.",
+      "input_refs": ["artifacts.marketing_strategy_program"],
+      "expected_artifacts": ["runtime_task_materialization"],
+      "execution": {"mode": "adapter", "adapter_id": "runtime-task-materializer", "operation": "execute", "config": {"input_key": "marketing_strategy_program", "strategy_key": "marketing_strategy_program", "first_life_policy_version": 10}},
+      "completion_checks": [
+        {"predicate": "has_min_count", "select": "runtime_task_materialization", "value": 1},
+        {"predicate": "all_have_nonempty_field", "select": "runtime_task_materialization", "path": "data.accepted_todo_ids"}
+      ],
+      "transitions": [{"default": true, "to_terminal": "strategy_program_ready"}],
+      "on_failure": "ESCALATE"
+    }
+  ]
+}

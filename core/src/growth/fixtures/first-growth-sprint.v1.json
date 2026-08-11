@@ -1,0 +1,45 @@
+{
+  "policy_id": "runtime.first-growth-sprint",
+  "version": 1,
+  "max_items": 4,
+  "required_slots": [
+    {
+      "id": "awareness_campaign",
+      "kind": "campaign",
+      "room_tag": "campaign",
+      "title": "Launch the first awareness campaign",
+      "objective": "Create and operate a focused 7-day awareness campaign grounded in the company baseline. Choose the strongest connected organic channels, produce the full scheduled sequence, define measurement, and prepare the exact launch batch for one coordinated review.",
+      "deliverable": "Approval-ready awareness campaign with scheduled actions, creative briefs, measurement and launch controls",
+      "success_measure": "A governed Campaign Contract is ready and every selected channel has an executable or explicitly blocked launch path.",
+      "skills": ["campaign-operating-system"],
+      "requested_action": "launch_and_measure_awareness_campaign",
+      "requested_terminal_outcome": "Launch the approved campaign, observe its first measurement window, and persist an evidence-backed campaign review.",
+      "external_action_requested": true,
+      "acceptance_criteria": [
+        "A source-grounded Campaign Contract is persisted",
+        "The complete 7-day action sequence is persisted",
+        "Launch authority is bound to the immutable campaign plan"
+      ],
+      "constraint_preferences": ["reach", "positioning", "measurement"]
+    },
+    {
+      "id": "lead_outreach",
+      "kind": "outreach",
+      "room_tag": "outreach",
+      "title": "Open the first qualified conversations",
+      "objective": "Use existing accepted leads first, then perform bounded source-backed discovery only when the retained lead book is insufficient. Prepare a distinct evidence-grounded outreach message for every verified recipient and bring the exact batch to the coordinated launch review.",
+      "deliverable": "Persisted qualified leads and personalized provider drafts ready for governed delivery",
+      "success_measure": "Every accepted recipient has a source-backed lead record and one independently traceable message outcome.",
+      "skills": ["outreach-operating-loop"],
+      "requested_action": "open_qualified_conversations",
+      "requested_terminal_outcome": "Deliver the approved personalized outreach, monitor every conversation, follow up under policy, and retain each explicit conversation outcome.",
+      "external_action_requested": true,
+      "acceptance_criteria": [
+        "Accepted leads are persisted with distinct fit rationale and outreach angle",
+        "Every verified recipient has one personalized message",
+        "Delivery waits for the immutable outbound authority gate"
+      ],
+      "constraint_preferences": ["qualified_pipeline", "conversion", "reach"]
+    }
+  ]
+}

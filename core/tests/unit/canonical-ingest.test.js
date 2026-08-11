@@ -1,0 +1,99 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  canonicalMemoryType,
+  canonicalSourceType,
+  detectMode,
+  legacyPayloadToEnvelope,
+  normalizeProvenance,
+  validateEnvelope,
+} from '../../src/knowledge/canonical-ingest.js';
+
+const base = {
+  userId: 'user-1', orgId: 'org-1', content: 'A durable source claim.',
+  source: { type: 'api', source_id: 'source-1' },
+};
+
+test('canonical envelope rejects relationship memory rows', () => {
+  const result = validateEnvelope({ ...base, metadata: { memory_type: 'relationship' } });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /memory_type/);
+});
+
+test('document ingestMode is independent from the legacy evidence record mode', () => {
+  assert.deepEqual(validateEnvelope({ ...base, mode: 'document', ingestMode: 'evidence' }), { ok: true });
+  const invalid = validateEnvelope({ ...base, ingestMode: 'semantic-only' });
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error, /ingestMode/);
+});
+
+test('canonical provenance accepts snake-case external source ids', () => {
+  const provenance = normalizeProvenance(base);
+  assert.equal(provenance.sourceMetadata.source_id, 'source-1');
+  assert.ok(provenance.provenanceTags.includes('source-id:source-1'));
+});
+
+test('canonical mode keeps explicit mode authoritative', () => {
+  assert.equal(detectMode({ ...base, mode: 'atomic', content: 'x'.repeat(5000) }), 'atomic');
+  assert.equal(detectMode({ ...base, source: { type: 'connector' }, content: 'x'.repeat(1300) }), 'document');
+});
+
+test('legacy source payloads normalize into the canonical envelope', () => {
+  const envelope = legacyPayloadToEnvelope({
+    user_id: 'user-1', org_id: 'org-1', content: 'A durable Slack decision.',
+    title: 'Decision', memory_type: 'note', scope: 'project', project_ids: ['project-1'],
+    source_metadata: {
+      source_platform: 'slack', source_id: 'thread-1', source_url: 'https://example.test/thread-1',
+      channel_id: 'C123', thread_ts: '171234.0001',
+    },
+  });
+  assert.equal(envelope.source.type, 'connector');
+  assert.equal(envelope.source.platform, 'slack');
+  assert.equal(envelope.source.sourceId, 'thread-1');
+  assert.equal(normalizeProvenance(envelope).sourceMetadata.channel_id, 'C123');
+  assert.equal(normalizeProvenance(envelope).sourceMetadata.thread_ts, '171234.0001');
+  assert.equal(envelope.metadata.memory_type, 'fact');
+  assert.equal(envelope.projectId, 'project-1');
+  assert.deepEqual(validateEnvelope(envelope), { ok: true });
+});
+
+test('canonical compatibility mapping never creates relationship memories', () => {
+  assert.equal(canonicalMemoryType('relationship'), 'fact');
+  assert.equal(canonicalMemoryType('commitment'), 'goal');
+  assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'talk-to-hive' } }), 'chat');
+  assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'google-drive' } }), 'connector');
+});
+
+test('every source type shares the same provenance and mode contract', () => {
+  const cases = [
+    ['kb', 'knowledge_base', 'document'],
+    ['connector', 'connector:gmail', 'document'],
+    ['mcp', 'mcp', 'atomic'],
+    ['meeting', 'meeting', 'document'],
+    ['chat', 'chat', 'atomic'],
+    ['api', 'api', 'document'],
+  ];
+
+  for (const [type, expectedPlatform, expectedMode] of cases) {
+    const envelope = {
+      userId: 'user-1',
+      orgId: 'org-1',
+      content: 'A'.repeat(1300),
+      occurredAt: '2026-07-16T10:00:00Z',
+      source: {
+        type,
+        ...(type === 'connector' ? { provider: 'gmail' } : {}),
+        sourceId: `${type}-source-1`,
+        title: `${type} source`,
+      },
+    };
+    const provenance = normalizeProvenance(envelope);
+
+    assert.deepEqual(validateEnvelope(envelope), { ok: true }, type);
+    assert.equal(provenance.sourcePlatform, expectedPlatform, type);
+    assert.equal(provenance.sourceMetadata.ingest_source, type, type);
+    assert.equal(provenance.sourceMetadata.source_id, `${type}-source-1`, type);
+    assert.ok(provenance.provenanceTags.includes(`source:${type}`), type);
+    assert.equal(detectMode(envelope), expectedMode, type);
+  }
+});

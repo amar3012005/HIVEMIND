@@ -1,0 +1,7 @@
+FROM hivemind/fe:prod-20260801-runtime-loop-v5
+
+USER root
+RUN set -eu; \
+    stylesheet="$(find /srv/static/css -maxdepth 1 -type f -name 'main*.css' | head -n 1)"; \
+    test -n "$stylesheet"; \
+    printf '\n[aria-label="Choose email send policy"]{z-index:10020!important}\n' >> "$stylesheet"

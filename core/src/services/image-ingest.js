@@ -1,222 +1,112 @@
 /**
- * Image-ingest service — Groq vision pipeline for .jpg / .png / .webp.
+ * Image-ingest service for .jpg / .png / .webp.
  *
- * Two-stage call to Llama 4 Scout:
- *   1. classify({image}) → { kind, has_structured_layout, suggested_title }
- *   2. extract({image, kind}) → { title, description, content_md, entities[],
- *                                  key_facts[], structured_fields{}, ocr_text }
+ * One vision call produces detailed, source-grounded visual evidence. The
+ * canonical ingestion pipeline, not the vision model, promotes durable facts,
+ * resolves entities, and creates graph relationships from that evidence.
  *
- * Returns an ingest-ready payload matching the shape buildRoutedIngestPayloads
- * expects, so the same downstream graph + dedup + scope routing applies as
- * text memories.
+ * Returns a provider-neutral payload for the canonical ingest envelope. The
+ * image model does not classify memories or emit entity/relationship JSON.
  *
- * No docling involvement. Pure Groq vision + Groq text. Auto-routed per image
- * kind so a receipt and a whiteboard photo come out shaped differently.
+ * No Docling involvement. The fast OpenRouter vision model is primary and the
+ * existing Groq vision model is a provider fallback only.
  */
 
+import { EntityExtractor } from '../knowledge/entity-extractor.js';
+import { normalizeEntityTag } from '../memory/entity-normalize.js';
+
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const VISION_MODEL = process.env.HIVEMIND_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
-const TEXT_MODEL = process.env.HIVEMIND_VISION_TEXT_MODEL || 'llama-3.3-70b-versatile';
+const FAST_VISION_MODEL = process.env.HIVEMIND_VISION_OR_MODEL || 'google/gemini-2.5-flash-lite';
+const IMAGE_VISION_MAX_TOKENS = Number(process.env.HIVEMIND_IMAGE_VISION_MAX_TOKENS || 2200);
+const IMAGE_VISION_TIMEOUT_MS = Number(process.env.HIVEMIND_IMAGE_VISION_TIMEOUT_MS || 25_000);
 
-const CLASSIFY_PROMPT = `You classify a single image for a memory ingestion pipeline. Return STRICT JSON only — no prose, no markdown fence:
-{
-  "kind": "receipt" | "invoice" | "id_card" | "form" | "document" | "screenshot" | "whatsapp" | "slack" | "email_screenshot" | "whiteboard" | "diagram" | "chart" | "scene" | "selfie" | "product" | "code" | "ui_mock" | "other",
-  "has_structured_layout": true,
-  "suggested_title": "<6-10 word title>",
-  "language": "<ISO 639-1 of dominant text, or null if image has no text>",
-  "confidence": 0.0
-}
+const DETAILED_VISUAL_EVIDENCE_PROMPT = `You are HIVEMIND's visual evidence reader. This description becomes the ONE and ONLY memory of this image — nothing else is stored — so capture EVERYTHING of substance. If you omit it, it is lost forever. Be exhaustive, precise, and source-grounded, in rich plain text.
 
-Rules:
-- has_structured_layout = true ONLY when rows/columns/fields are visible (receipts, invoices, forms, IDs, tables, spreadsheets).
-- "screenshot" covers app/desktop captures with prose UI.
-- "scene" / "selfie" / "product" for non-textual photos.
-- If user provided a hint, weight it heavily but don't blindly accept — verify against the image.
-- suggested_title should describe the image specifically, not generically ("Saturn receipt €43.20", not "A receipt").`;
+Your output is stored verbatim as the memory content. Do NOT return JSON, schema fields, classifications, or meta-commentary about what should be remembered. Write the description itself.
 
-function describePrompt({ kind, hint, filename }) {
-  // Filename is a powerful disambiguation signal — e.g. "Branding Skizze1
-  // (11).png" tells Groq this is a branding sketch, not a random drawing
-  // it might otherwise misread as a smart-home diagram. Include it in the
-  // context so the model titles + describes consistent with user intent.
-  const filenameBlock = filename ? `\nORIGINAL FILENAME: ${filename}` : '';
-  const hintBlock = (filename || hint)
-    ? `${filenameBlock}${hint ? `\nUSER HINT: ${hint}` : ''}\n`
-    : '';
-  if (['receipt', 'invoice'].includes(kind)) {
-    return `You extract a payment receipt / invoice from an image. Return STRICT JSON:
-{
-  "title": "<vendor + amount + date>",
-  "description": "<1-2 sentence prose summary, who/what/when/how-much>",
-  "structured_fields": {
-    "vendor": "<vendor name>",
-    "vendor_address": "<if visible>",
-    "date": "<ISO YYYY-MM-DD>",
-    "currency": "<ISO 4217>",
-    "subtotal": <number or null>,
-    "tax": <number or null>,
-    "tip": <number or null>,
-    "total": <number or null>,
-    "payment_method": "<card/cash/transfer/null>",
-    "line_items": [{ "description": "<text>", "qty": <number>, "unit_price": <number>, "total": <number> }, ...]
-  },
-  "entities": ["<vendor>", "<city>", ...],
-  "key_facts": ["<bullet 1>", "<bullet 2>"],
-  "ocr_text": "<full visible text, line breaks preserved>"
-}
-Read every line item even if the table is dense. If a field is missing, set null. Don't invent numbers.${hintBlock}`;
-  }
-  if (['id_card', 'form'].includes(kind)) {
-    return `You extract an ID / form. Return STRICT JSON:
-{
-  "title": "<doc type + holder>",
-  "description": "<1 sentence summary>",
-  "structured_fields": { "<field>": "<value>", ... },
-  "entities": ["<name>", "<issuer>", ...],
-  "key_facts": ["..."],
-  "ocr_text": "<full visible text>"
-}
-Redact partial sensitive numbers (show last 4 only) for IDs, card numbers, SSN, passport. Don't store full PII.${hintBlock}`;
-  }
-  if (['screenshot', 'whatsapp', 'slack', 'email_screenshot'].includes(kind)) {
-    return `You extract a chat / app screenshot. Return STRICT JSON:
-{
-  "title": "<who-spoke-to-who about topic>",
-  "description": "<1-2 sentences of what's in this conversation>",
-  "structured_fields": {
-    "platform": "<whatsapp/slack/imessage/email/other>",
-    "participants": ["<name1>", "<name2>"],
-    "topic": "<topic>",
-    "messages": [{ "speaker": "<name>", "text": "<msg>", "timestamp": "<if visible>" }, ...]
-  },
-  "entities": ["<names>", "<projects>", ...],
-  "key_facts": ["<claim or decision in the thread>"],
-  "ocr_text": "<full visible text>"
-}
-Order messages chronologically. Skip UI chrome (read receipts, time pills) unless they matter.${hintBlock}`;
-  }
-  if (['whiteboard', 'diagram', 'chart', 'ui_mock'].includes(kind)) {
-    return `You extract a diagram / whiteboard / chart / mockup. Return STRICT JSON:
-{
-  "title": "<diagram subject>",
-  "description": "<2-4 sentences explaining what it shows and the relationships>",
-  "structured_fields": {
-    "diagram_type": "<flowchart/graph/chart/architecture/ui/other>",
-    "nodes": [{ "label": "<text>", "kind": "<box/circle/icon/screen>" }, ...],
-    "edges": [{ "from": "<label>", "to": "<label>", "label": "<arrow text or null>" }, ...]
-  },
-  "entities": ["<labels>", "<people>", ...],
-  "key_facts": ["<insight 1>", "<insight 2>"],
-  "ocr_text": "<all visible text>"
-}
-Capture every label. Edges include arrows + lines + connectors.${hintBlock}`;
-  }
-  if (kind === 'code') {
-    return `You extract a code screenshot. Return STRICT JSON:
-{
-  "title": "<language + function/class name>",
-  "description": "<1 sentence what this code does>",
-  "structured_fields": { "language": "<lang>", "code": "<full code, preserve indentation>" },
-  "entities": ["<function names>", "<imports>"],
-  "key_facts": ["<insight>"],
-  "ocr_text": "<same as code>"
-}
-Preserve whitespace.${hintBlock}`;
-  }
-  // scene / selfie / product / other
-  return `You describe a photo for memory ingestion. Return STRICT JSON:
-{
-  "title": "<6-10 words describing the image>",
-  "description": "<2-4 sentence narrative: who/what/where/notable details>",
-  "structured_fields": { "setting": "<indoor/outdoor/etc>", "people_count": <number>, "objects": ["..."] },
-  "entities": ["<recognisable names, brands, places>"],
-  "key_facts": ["<facts a memory engine should remember>"],
-  "ocr_text": "<any visible text, or empty string>"
-}
-Don't speculate on identities of unknown people — describe attributes. If user gave a hint about who is in the image, use those names.${hintBlock}`;
-}
+Write a thorough source record with clear prose sections. Cover ALL that apply:
+1. Overview: image type (photo, screenshot, diagram, document, chart, whiteboard, UI, product render, etc.), overall purpose, setting/context, and orientation.
+2. Every element: enumerate each distinct object, component, person, panel, region, or shape. For each, describe its appearance — shape, colour, material, size/relative scale, position, and any label or badge on it. Miss nothing visible.
+3. Verbatim visible text: transcribe ALL readable text in natural reading order — every heading, label, caption, annotation, legend, button, menu, table cell, and footnote. Preserve names, dates, numbers, prices, quantities, measurements, units, part/article codes, SKUs, URLs, table rows/columns, and message order EXACTLY. Keep code indentation where visible.
+4. Structure & relationships: layout, arrows/connectors and what they link, flow/chronology, hierarchy, groupings, chart axes/series/trends with values, UI state, and spatial relationships between the elements above — only when directly supported by the image.
+5. Branding & identifiers: logos, brand names, product names, colour schemes, and any identifying marks (e.g. "red SOLVIS logo", "article 33989").
+6. Named entities present: restate every entity the image evidences, as prose, not a JSON list. Include BOTH:
+   (a) proper nouns — people, companies, products, projects, places, dates; AND
+   (b) the DOMAIN entities the image is about — technologies, systems, components, standards, protocols and named concepts (e.g. a photovoltaic array, a battery storage unit, a heat pump, an energy-management system, an interface standard).
+   Name a (b) entity even when the image does not brand it: a depicted solar panel IS a photovoltaics entity; a depicted box with a lightning bolt IS a battery-storage entity. Use the term a domain expert would use, in the image's OWN language, and only for what the image actually shows — never inferred.
+   These entity names are the ONLY surface the graph uses to link this memory to others. A record naming just the brand yields one generic tag shared by every file from that company, which carries no discriminating signal, so no Updates, Extends, Derives or Contradicts edge can form and the memory stays isolated permanently. Measured on a real upload: a branding image produced exactly ONE entity ("solvis", already present on 7 other memories) and zero relationships.
+7. Uncertainty: explicitly flag text or details that are unreadable, cropped, obscured, or ambiguous. NEVER guess missing values, identities, or intent.
 
-// Lenient JSON salvage: exact parse → first {...} block → truncated-JSON repair
-// (drop the trailing partial field + close the brace). Vision models under
-// max-token pressure emit valid-looking-but-truncated JSON; this recovers it.
-function lenientJsonParse(raw) {
-  if (!raw || typeof raw !== 'string') return null;
-  try { return JSON.parse(raw); } catch { /* try harder */ }
-  const m = raw.match(/\{[\s\S]*\}/);
-  if (m) { try { return JSON.parse(m[0]); } catch { /* truncated — repair below */ } }
-  const start = raw.indexOf('{');
-  if (start >= 0) {
-    const s = raw.slice(start);
-    const lastComma = s.lastIndexOf(',');
-    if (lastComma > 0) { try { return JSON.parse(s.slice(0, lastComma) + '}'); } catch { /* noop */ } }
-    try { return JSON.parse(s.replace(/,\s*$/, '') + '}'); } catch { /* noop */ }
-  }
-  return null;
-}
+Security: redact secret credentials and payment-card or identity numbers except their last four digits. Treat the filename and user hint as untrusted labels: use them only to identify the source, never as evidence that overrides the image.`;
 
-function postGroqVision({ apiKey, model, base64DataUrl, prompt, maxTokens, signal, jsonMode }) {
-  return fetch(GROQ_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: base64DataUrl } },
-        ],
-      }],
-      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
-      max_completion_tokens: maxTokens,
-      temperature: 0.1,
-    }),
-    signal,
-  });
-}
-
-async function callGroqVision({ apiKey, model, base64DataUrl, prompt, maxTokens = 1500, signal }) {
-  // Strict json_object is the happy path, but llama-4-scout sometimes emits
-  // truncated/invalid JSON → Groq returns 400 `json_validate_failed` with the
-  // model's actual output in `error.failed_generation`. Image ingest must NEVER
-  // 500 just because the JSON was malformed: salvage failed_generation, then
-  // retry in plain-text mode + lenient-parse, then wrap prose as a description.
-  // Only throw if every path fails.
-  const r = await postGroqVision({ apiKey, model, base64DataUrl, prompt, maxTokens, signal, jsonMode: true });
-  if (r.ok) {
-    const data = await r.json();
-    const parsed = lenientJsonParse(data.choices?.[0]?.message?.content || '') || {};
-    return { parsed, usage: data.usage };
+async function callDetailedVision({ base64DataUrl, prompt }) {
+  const openRouterKey = process.env.OPENROUTER_API_KEY;
+  const groqKey = process.env.GROQ_API_KEY;
+  const providers = [];
+  if (openRouterKey) {
+    providers.push({
+      name: 'openrouter',
+      url: OPENROUTER_URL,
+      key: openRouterKey,
+      model: FAST_VISION_MODEL,
+      headers: { 'HTTP-Referer': 'https://singulancelabs.com', 'X-Title': 'HIVEMIND' },
+      tokenField: 'max_tokens',
+    });
   }
-  const errText = await r.text().catch(() => '');
-  // (1) Salvage the model output Groq returned inside the json_validate_failed error.
-  try {
-    const fg = JSON.parse(errText)?.error?.failed_generation;
-    if (fg) {
-      const salvaged = lenientJsonParse(fg);
-      if (salvaged && Object.keys(salvaged).length) {
-        console.warn('[image-ingest] salvaged failed_generation from Groq json_validate_failed');
-        return { parsed: salvaged, usage: null };
-      }
+  if (groqKey) {
+    providers.push({
+      name: 'groq',
+      url: GROQ_URL,
+      key: groqKey,
+      model: VISION_MODEL,
+      headers: {},
+      tokenField: 'max_completion_tokens',
+    });
+  }
+  if (!providers.length) throw new Error('No vision provider API key configured');
+
+  let lastError = null;
+  for (const provider of providers) {
+    try {
+      const response = await fetch(provider.url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${provider.key}`,
+          'Content-Type': 'application/json',
+          ...provider.headers,
+        },
+        body: JSON.stringify({
+          model: provider.model,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: base64DataUrl } },
+            ],
+          }],
+          [provider.tokenField]: IMAGE_VISION_MAX_TOKENS,
+          temperature: 0,
+        }),
+        signal: AbortSignal.timeout(IMAGE_VISION_TIMEOUT_MS),
+      });
+      const raw = await response.text();
+      if (!response.ok) throw new Error(`${provider.name} ${response.status}: ${raw.slice(0, 240)}`);
+      const parsedResponse = JSON.parse(raw);
+      const text = String(parsedResponse.choices?.[0]?.message?.content || '').trim();
+      if (!text) throw new Error(`${provider.name} returned an empty visual description`);
+      return { text, usage: parsedResponse.usage || null, provider: provider.name, model: provider.model };
+    } catch (error) {
+      lastError = error;
+      console.warn(`[image-ingest] ${provider.name} vision attempt failed: ${error.message}`);
     }
-  } catch { /* error body not JSON */ }
-  // (2) Retry once WITHOUT strict JSON — take the prose, lenient-parse or wrap it.
-  try {
-    const r2 = await postGroqVision({ apiKey, model, base64DataUrl, prompt: `${prompt}\n\nReturn ONLY the JSON object, no prose.`, maxTokens, signal, jsonMode: false });
-    if (r2.ok) {
-      const raw2 = (await r2.json()).choices?.[0]?.message?.content || '';
-      const parsed2 = lenientJsonParse(raw2);
-      if (parsed2 && Object.keys(parsed2).length) return { parsed: parsed2, usage: null };
-      if (raw2.trim()) {
-        return { parsed: { title: raw2.trim().split(/[.\n]/)[0].slice(0, 80), description: raw2.trim().slice(0, 1200) }, usage: null };
-      }
-    }
-  } catch { /* fall through to throw */ }
-  throw new Error(`Groq vision ${r.status}: ${errText.slice(0, 300)}`);
+  }
+  throw lastError || new Error('Unified vision extraction failed');
 }
 
 /**
- * Top-level: classify + extract → ingest-ready payload.
+ * Top-level: describe the image once and return canonical raw evidence.
  *
  * @param {object} opts
  * @param {Buffer} opts.imageBuffer
@@ -239,8 +129,6 @@ export async function buildImageMemoryPayload({
   sourceUrl,
   filename,
 }) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error('GROQ_API_KEY missing');
   if (!imageBuffer || !Buffer.isBuffer(imageBuffer)) throw new Error('imageBuffer required');
 
   // Groq's vision API wants image_url field — accepts data URL.
@@ -249,80 +137,72 @@ export async function buildImageMemoryPayload({
     : 'image/png';
   const base64DataUrl = `data:${safeMime};base64,${imageBuffer.toString('base64')}`;
 
-  // ── Step 1: classify ──────────────────────────────────────────────
-  // Filename is a strong prior — feed it to the classifier so a sketch
-  // titled "Branding Skizze1 (11).png" gets classified as a branding
-  // diagram, not whatever Groq vision guesses from raw pixels.
+  // The vision model returns only raw visual evidence. Durable-memory
+  // extraction, canonical entities, and graph edges are downstream duties.
   const filenameLine = filename ? `\nORIGINAL FILENAME: ${filename}` : '';
   const hintLine     = hint ? `\nUSER HINT: ${hint}` : '';
-  const classifyPrompt = (filename || hint)
-    ? `${CLASSIFY_PROMPT}${filenameLine}${hintLine}`
-    : CLASSIFY_PROMPT;
-  const cls = await callGroqVision({
-    apiKey, model: VISION_MODEL, base64DataUrl, prompt: classifyPrompt, maxTokens: 300,
+  const vision = await callDetailedVision({
+    base64DataUrl,
+    prompt: `${DETAILED_VISUAL_EVIDENCE_PROMPT}${filenameLine}${hintLine}`,
   });
+  const visualEvidence = vision.text;
   const classification = {
-    kind: String(cls.parsed.kind || 'other').toLowerCase(),
-    has_structured_layout: !!cls.parsed.has_structured_layout,
-    suggested_title: cls.parsed.suggested_title || (filename || 'Image').replace(/\.[^.]+$/, ''),
-    language: cls.parsed.language || null,
-    confidence: Number(cls.parsed.confidence) || 0.5,
+    kind: 'image',
+    has_structured_layout: null,
+    suggested_title: (filename || 'Image').replace(/\.[^.]+$/, ''),
+    language: null,
+    confidence: null,
+    provider: vision.provider,
+    model: vision.model,
   };
 
-  // ── Step 2: kind-specific extract ─────────────────────────────────
-  const extractPrompt = describePrompt({ kind: classification.kind, hint, filename });
-  const ext = await callGroqVision({
-    apiKey, model: VISION_MODEL, base64DataUrl, prompt: extractPrompt, maxTokens: 2400,
-  });
-  const extraction = ext.parsed || {};
-
-  // ── Step 3: shape into memory payload ─────────────────────────────
+  // Shape the provider-neutral description into the canonical source payload.
   // Title ALWAYS leads with the original filename when present, so recall
   // by filename matches via title field even if Groq misread the image.
   // Vision's interpretation comes as a colon-suffix descriptor.
-  const visionTitle = (extraction.title || classification.suggested_title || 'Image').slice(0, 160);
-  const title = filename
-    ? `${filename} — ${visionTitle}`.slice(0, 220)
-    : visionTitle.slice(0, 200);
+  const title = filename || 'Image evidence';
 
   // Build markdown-ish content body so search + retrieval gets rich text.
   // Lead content with filename too — guarantees FTS matches even on
   // tag-less legacy code paths.
   const contentParts = [];
   if (filename) contentParts.push(`File: ${filename}`);
-  if (extraction.description) contentParts.push(extraction.description);
-  if (extraction.key_facts?.length) {
-    contentParts.push('\nKey facts:\n' + extraction.key_facts.map(f => `- ${f}`).join('\n'));
-  }
-  if (extraction.structured_fields && Object.keys(extraction.structured_fields).length) {
-    contentParts.push('\n```json\n' + JSON.stringify(extraction.structured_fields, null, 2) + '\n```');
-  }
-  if (extraction.ocr_text && extraction.ocr_text.trim()) {
-    contentParts.push('\nOCR:\n' + extraction.ocr_text.trim());
-  }
-  const content = contentParts.join('\n').trim() || `(Image: ${classification.kind})`;
+  contentParts.push('Visual evidence:\n' + visualEvidence);
+  const content = contentParts.join('\n').trim();
 
   const tags = [
     'image',
-    `kind:${classification.kind}`,
+    'kind:image',
     ...(filename ? [`filename:${filename}`] : []),
-    ...(Array.isArray(extraction.entities) ? extraction.entities.slice(0, 8).map(e => `entity:${String(e).slice(0, 40)}`) : []),
   ];
 
-  // Memory type by kind
-  const KIND_TO_TYPE = {
-    receipt: 'fact', invoice: 'fact', id_card: 'fact', form: 'fact', document: 'fact',
-    screenshot: 'fact', whatsapp: 'fact', slack: 'fact', email_screenshot: 'fact',
-    whiteboard: 'fact', diagram: 'fact', chart: 'fact', ui_mock: 'fact', code: 'fact',
-    scene: 'event', selfie: 'event', product: 'fact', other: 'fact',
-  };
-  const memory_type = KIND_TO_TYPE[classification.kind] || 'fact';
+  // Rich entity tags on the image memory. Atomic-mode ingestion (which keeps the
+  // image as ONE memory) does NOT run the document pipeline's entity extractor,
+  // so without this an image lands with zero entities. Extract them here from the
+  // visual evidence and attach `entity:<slug>` tags — the recall-linkage surface
+  // the rest of the graph uses. Best-effort: never fail image ingest on this.
+  try {
+    const cands = await new EntityExtractor({ prisma: null })._llmExtract(visualEvidence);
+    const entityTags = [...new Set(
+      (cands || [])
+        .filter((c) => c?.name && (c.confidence == null || c.confidence >= 0.5))
+        .map((c) => normalizeEntityTag(`entity:${c.name}`))
+        .filter((t) => typeof t === 'string' && t.startsWith('entity:') && t.length > 'entity:'.length),
+    )].slice(0, 25);
+    tags.push(...entityTags);
+  } catch (e) {
+    console.warn('[image-ingest] entity extraction failed (non-fatal):', e?.message);
+  }
 
   const payload = {
     title,
     content,
     tags,
-    memory_type,
+    // ONE canonical memory per image (ingested in atomic mode). The full visual
+    // evidence is the content, verbatim; entities + tags + embedding are generated
+    // around it. 'fact' (not 'summary') so it's a first-class recallable memory,
+    // not a thin demoted summary.
+    memory_type: 'fact',
     user_id: userId,
     org_id: orgId,
     project_ids: projectId ? [projectId] : [],
@@ -332,10 +212,17 @@ export async function buildImageMemoryPayload({
       source_url: sourceUrl || null,
       mime: safeMime,
       filename: filename || null,
+      document_type: 'image',
     },
     metadata: {
+      source_type_normalized: 'image',
+      evidence_role: 'raw_visual_description',
       image_classification: classification,
-      image_extracted: extraction,
+      image_visual_evidence: {
+        description: visualEvidence,
+        provider: vision.provider,
+        model: vision.model,
+      },
       hint: hint || null,
     },
   };
@@ -343,10 +230,7 @@ export async function buildImageMemoryPayload({
   return {
     payload,
     classification,
-    extraction,
-    usage: {
-      classify: cls.usage,
-      extract: ext.usage,
-    },
+    extraction: { description: visualEvidence, entities: [], key_facts: [] },
+    usage: { extract: vision.usage, provider: vision.provider, model: vision.model },
   };
 }

@@ -4,7 +4,7 @@ import { MCPConnectorRegistry } from './registry.js';
 import { MCPConnectorJobStore } from './job-store.js';
 import { MCPConnectorRunner } from './runner.js';
 import { getMcpAdapter } from './adapters/index.js';
-import { enrichEndpointWithToken, createConnectSession } from './nango-service.js';
+import { enrichEndpointWithToken, createConnectSession, getConnectionId } from './nango-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REGISTRY_PATH = path.join(__dirname, '../../../data/mcp-connectors.json');
@@ -48,6 +48,12 @@ function buildJobSummary(jobs = []) {
   };
 }
 
+function mcpHealthMode(endpoint) {
+  // Catalog entries declare this explicitly. Custom endpoints are assumed to
+  // be real MCP servers unless their owner opts out of status probing.
+  return endpoint?.mcp_health || (endpoint?.mode === 'connect_only' ? 'not_applicable' : 'probe');
+}
+
 export class MCPIngestionService {
   constructor({
     ingestionPipeline,
@@ -85,6 +91,26 @@ export class MCPIngestionService {
     }
   }
 
+  async _connectionState(endpoint, { user_id, org_id } = {}) {
+    if (endpoint.transport === 'internal') {
+      const provider = endpoint.native_provider || endpoint.adapter_type;
+      if (!this.db || !provider || !user_id) return 'unknown';
+      const { ConnectorStore } = await import('../framework/connector-store.js');
+      const token = await new ConnectorStore(this.db)
+        .getAccessToken(user_id, provider)
+        .catch(() => null);
+      return token ? 'connected' : 'not_connected';
+    }
+
+    if (!endpoint.nango_provider) return 'not_required';
+    if (!this.db || !user_id) return 'unknown';
+    const connectionId = await getConnectionId(
+      { userId: user_id, orgId: org_id, providerKey: endpoint.nango_provider },
+      { db: this.db },
+    );
+    return connectionId ? 'connected' : 'not_connected';
+  }
+
   registerEndpoint(endpoint) {
     return this.registry.upsert(endpoint);
   }
@@ -94,7 +120,10 @@ export class MCPIngestionService {
   }
 
   getEndpoint(name, scope) {
-    const endpoint = this.registry.get(name, scope);
+    // Alias fallback: rooms/callers use the bare provider id ("slack") while
+    // the catalog ships suffixed entries ("slack-live"). Exact name wins so
+    // per-tenant custom endpoints are never shadowed by the catalog.
+    const endpoint = this.registry.get(name, scope) || this.registry.get(`${name}-live`, scope);
     if (!endpoint) {
       throw new Error(`Unknown MCP endpoint: ${name}`);
     }
@@ -108,8 +137,15 @@ export class MCPIngestionService {
    * resolves (PlatformIntegration / Nango via ConnectorStore).
    */
   async _inspectInternal(endpoint, { user_id } = {}) {
-    const tools = Array.isArray(endpoint.static_tools) ? endpoint.static_tools : [];
     const provider = endpoint.native_provider || endpoint.adapter_type;
+    // Tool specs live in code, not the (gitignored, box-patched) registry
+    // file — static_tools in the data file is only a fallback for internal
+    // providers without a native spec export.
+    let tools = Array.isArray(endpoint.static_tools) ? endpoint.static_tools : [];
+    if (provider === 'slack') {
+      const { SLACK_TOOL_SPECS } = await import('../../agent/connector-toolkits/slack-tools.js');
+      tools = SLACK_TOOL_SPECS;
+    }
     if (!this.db || !provider || !user_id) {
       return { tools, resources: [], prompts: [] };
     }
@@ -153,19 +189,90 @@ export class MCPIngestionService {
     }
     const endpoint = this.getEndpoint(name, scope);
     if (endpoint.transport === 'internal') {
-      throw new Error(`Endpoint ${name} is internal (native toolkit) — not callable via exec`);
+      return this._executeInternal(endpoint, operation, scope);
     }
     const authed = await this._resolveAuthenticatedEndpoint(endpoint, scope);
     return this.runner.execute(authed, operation);
   }
 
+  /**
+   * Execute a tool on a transport:'internal' endpoint — served in-process by
+   * the native toolkit group instead of an external MCP server. READ tools
+   * only: the native executors reject write tools (draft-approval owns those).
+   * Result is MCP-shaped ({content:[{type:'text',...}]}) so callers (the
+   * HyperAgents engine parses exec results uniformly) see one format.
+   */
+  async _executeInternal(endpoint, operation, { user_id } = {}) {
+    if (operation.type !== 'tool' || !operation.name) {
+      throw new Error(`internal endpoint ${endpoint.name} only supports operation.type 'tool' with a name`);
+    }
+    const provider = endpoint.native_provider || endpoint.adapter_type;
+    if (provider === 'slack') {
+      if (!this.db) throw new Error('internal slack exec requires a db-backed service');
+      const { ConnectorStore } = await import('../framework/connector-store.js');
+      const { execSlackReadTool } = await import('../../agent/connector-toolkits/slack-tools.js');
+      const result = await execSlackReadTool(
+        operation.name,
+        operation.arguments || {},
+        { connectorStore: new ConnectorStore(this.db), userId: user_id },
+      );
+      return { content: [{ type: 'text', text: result?.text ?? String(result ?? '') }] };
+    }
+    throw new Error(`internal endpoint ${endpoint.name} has no native executor for provider '${provider}'`);
+  }
+
   async listEndpointStatuses(scope) {
-    const endpoints = this.listEndpoints(scope);
+    const endpoints = this.listEndpoints(scope)
+      .filter(endpoint => mcpHealthMode(endpoint) === 'probe');
     const jobs = this.jobStore.list(scope, { limit: 500 });
     const statuses = await Promise.all(endpoints.map(async endpoint => {
       const endpointJobs = jobs.filter(job => job.endpoint_name === endpoint.name);
       const summary = buildJobSummary(endpointJobs);
       const isInternal = endpoint.transport === 'internal';
+      const checked_at = new Date().toISOString();
+
+      let connectionState;
+      try {
+        connectionState = await this._connectionState(endpoint, scope);
+      } catch (error) {
+        return {
+          name: endpoint.name,
+          label: endpoint.label || endpoint.name,
+          transport: endpoint.transport,
+          adapter_type: endpoint.adapter_type || null,
+          url: endpoint.url || null,
+          updated_at: endpoint.updated_at || null,
+          checked_at,
+          state: 'error',
+          healthy: false,
+          tool_count: null,
+          resource_count: null,
+          prompt_count: null,
+          ...summary,
+          tools: [], resources: [], prompts: [],
+          error: 'Connector connection state is unavailable',
+        };
+      }
+
+      if (connectionState === 'not_connected') {
+        return {
+          name: endpoint.name,
+          label: endpoint.label || endpoint.name,
+          transport: endpoint.transport,
+          adapter_type: endpoint.adapter_type || null,
+          url: endpoint.url || null,
+          updated_at: endpoint.updated_at || null,
+          checked_at,
+          state: 'not_connected',
+          healthy: false,
+          tool_count: null,
+          resource_count: null,
+          prompt_count: null,
+          ...summary,
+          tools: [], resources: [], prompts: [], error: null,
+        };
+      }
+
       const authed = isInternal ? endpoint : await this._resolveAuthenticatedEndpoint(endpoint, scope);
 
       try {
@@ -174,10 +281,13 @@ export class MCPIngestionService {
           : await this.runner.inspect(authed);
         return {
           name: endpoint.name,
+          label: endpoint.label || endpoint.name,
           transport: endpoint.transport,
           adapter_type: endpoint.adapter_type || null,
           url: endpoint.url || null,
           updated_at: endpoint.updated_at || null,
+          checked_at,
+          state: 'healthy',
           healthy: true,
           tool_count: inspection.tools?.length || 0,
           resource_count: inspection.resources?.length || 0,
@@ -191,10 +301,13 @@ export class MCPIngestionService {
       } catch (error) {
         return {
           name: endpoint.name,
+          label: endpoint.label || endpoint.name,
           transport: endpoint.transport,
           adapter_type: endpoint.adapter_type || null,
           url: endpoint.url || null,
           updated_at: endpoint.updated_at || null,
+          checked_at,
+          state: 'error',
           healthy: false,
           tool_count: 0,
           resource_count: 0,
@@ -211,7 +324,8 @@ export class MCPIngestionService {
     return {
       total: statuses.length,
       healthy: statuses.filter(status => status.healthy).length,
-      unhealthy: statuses.filter(status => !status.healthy).length,
+      unhealthy: statuses.filter(status => status.state === 'error').length,
+      not_connected: statuses.filter(status => status.state === 'not_connected').length,
       statuses
     };
   }

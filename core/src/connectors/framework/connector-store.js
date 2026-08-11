@@ -112,7 +112,6 @@ export class ConnectorStore {
       teamId: teamId || null,
       platformUserId: accountRef,
       accessTokenEncrypted: encryptToken(accessToken),
-      refreshTokenEncrypted: encryptToken(refreshToken),
       tokenExpiresAt: tokenExpiresAt ? new Date(tokenExpiresAt) : null,
       oauthScopes: scopes || [],
       oauthGrantedAt: new Date(),
@@ -138,6 +137,11 @@ export class ConnectorStore {
         where: { id: existing.id },
         data: {
           ...data,
+          // Google may omit refresh_token during incremental consent. Keep the
+          // durable credential from the original grant unless a new one arrives.
+          refreshTokenEncrypted: refreshToken
+            ? encryptToken(refreshToken)
+            : existing.refreshTokenEncrypted,
           connectorMetadata: {
             ...readConnectorMetadata(existing),
             ...data.connectorMetadata,
@@ -150,6 +154,7 @@ export class ConnectorStore {
       data: {
         userId,
         platformType: provider,
+        refreshTokenEncrypted: encryptToken(refreshToken),
         ...data,
       },
     });
@@ -308,7 +313,7 @@ export class ConnectorStore {
     const record = await this.prisma.platformIntegration.findFirst({
       where: {
         platformType: provider,
-        userAccountRef: { equals: normalized, mode: 'insensitive' },
+        platformUserId: { equals: normalized, mode: 'insensitive' },
         syncStatus: { not: 'revoked' },
       },
     });
@@ -459,13 +464,16 @@ export class ConnectorStore {
       // Refresh the token
       try {
         const refreshToken = decryptToken(record.refreshTokenEncrypted);
-        if (refreshToken && provider === 'gmail') {
+        const isGoogleProvider = provider === 'gmail'
+          || provider.startsWith('google-')
+          || provider.startsWith('google_');
+        if (refreshToken && isGoogleProvider) {
           const resp = await fetch('https://oauth2.googleapis.com/token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: new URLSearchParams({
-              client_id: process.env.GOOGLE_CLIENT_ID,
-              client_secret: process.env.GOOGLE_CLIENT_SECRET,
+              client_id: process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_OAUTH_CLIENT_ID,
+              client_secret: process.env.GOOGLE_CLIENT_SECRET || process.env.GOOGLE_OAUTH_CLIENT_SECRET,
               refresh_token: refreshToken,
               grant_type: 'refresh_token',
             }),
@@ -483,6 +491,29 @@ export class ConnectorStore {
             });
             console.log(`[connector-store] Refreshed ${provider} token for user ${userId}`);
             return tokens.access_token;
+          }
+        } else if (refreshToken && provider === 'slack') {
+          // Slack's Token Rotation issues a short-lived (~12h) bot token plus
+          // a SINGLE-USE refresh_token — the old one is invalid after this
+          // call, so the new refresh_token must be persisted too, not just
+          // the new access_token (see refreshAccessToken's doc comment).
+          try {
+            const { refreshAccessToken } = await import('../providers/slack/oauth.js');
+            const tokens = await refreshAccessToken(refreshToken);
+            const newExpiresAt = tokens.expires_in ? new Date(Date.now() + tokens.expires_in * 1000) : null;
+            await this.prisma.platformIntegration.update({
+              where: { id: record.id },
+              data: {
+                accessTokenEncrypted: encryptToken(tokens.access_token),
+                refreshTokenEncrypted: encryptToken(tokens.refresh_token),
+                tokenExpiresAt: newExpiresAt,
+                oauthLastRefreshed: new Date(),
+              },
+            });
+            console.log(`[connector-store] Refreshed slack token for user ${userId}`);
+            return tokens.access_token;
+          } catch (slackRefreshErr) {
+            console.warn(`[connector-store] Slack token refresh failed for user ${userId}:`, slackRefreshErr.message);
           }
         }
       } catch (refreshErr) {

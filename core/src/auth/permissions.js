@@ -63,12 +63,17 @@ export const PERMISSIONS = {
     read:   new Set(['org_owner', 'org_admin', 'compliance_admin', 'team_lead']),
   },
   billing: {
-    read:   new Set(['org_owner', 'org_admin']),
-    manage: new Set(['org_owner']),
+    // Shared allowance is visible to every active member; commercial records
+    // and mutations remain an owner/admin responsibility.
+    read:   new Set(['org_owner', 'org_admin', 'compliance_admin', 'team_lead', 'member', 'viewer', 'service_account', 'guest']),
+    manage: new Set(['org_owner', 'org_admin']),
   },
   webhook: {
     manage: new Set(['org_owner', 'org_admin']),
     read:   new Set(['org_owner', 'org_admin']),
+  },
+  privileged_agent: {
+    use: new Set(['org_owner', 'org_admin', 'team_lead']),
   },
 };
 
@@ -113,6 +118,15 @@ export function effectiveRoles(membership) {
   };
   const mapped = legacyMap[membership.role] || 'member';
   return [mapped];
+}
+
+/**
+ * Expensive autonomous agents are restricted to organization leadership or
+ * the owner of the project they are scoped to. Project ownership is checked
+ * separately because it is not an organization role.
+ */
+export function canUsePrivilegedAgent(userRoles, projectRole = null) {
+  return hasPermission(userRoles, 'privileged_agent', 'use') || projectRole === 'owner';
 }
 
 // ─── Denial dedup ─────────────────────────────────────────────────────────────

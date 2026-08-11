@@ -1,0 +1,36 @@
+# Build-context excludes — keep `docker build` deterministic and small.
+# The build source (/root/hivemind-next @ singulance-main) is force-checked-out
+# on every deploy; anything untracked would otherwise leak into the context.
+
+.git
+.gitmodules
+
+# scratch / rollback markers written on the box
+.last-*
+.quickdeploy-*
+*.bak
+*.bak-*
+*.backup-*
+.deploy-cleanup-bak-*
+.pull-bak/
+
+# backups & dumps
+backups/
+*.sql
+*.sql.gz
+*.dump
+
+# deps / build output (rebuilt inside the image)
+node_modules
+**/node_modules
+frontend/Da-vinci/build
+frontend/Da-vinci/node_modules
+
+# local env / secrets (provided at runtime, never baked in)
+.env
+.env.*
+!.env.example
+
+# editor / OS noise
+.DS_Store
+*.log

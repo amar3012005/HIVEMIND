@@ -1,0 +1,26 @@
+{
+  "slug": "seo",
+  "version": 7,
+  "display_name": "SEO",
+  "description": "Search demand, technical discoverability, content gaps, and measurable organic growth.",
+  "lead_shape": "maker",
+  "default_skill": "technical-seo-audit",
+  "models": {
+    "director": "gpt-oss-120b",
+    "persona": "gpt-oss-120b",
+    "synthesis": "gpt-oss-120b"
+  },
+  "strict_model_provider": true,
+  "capabilities": [
+    {
+      "id": "seo.site-intelligence",
+      "version": "1.0.0",
+      "when": "A public website must be discovered, rendered, technically audited, or mapped before SEO recommendations are made."
+    },
+    {
+      "id": "seo.search-console",
+      "version": "1.0.0",
+      "when": "The organization has connected and selected a Google Search Console property; first-party performance should ground demand, page, and measurement decisions."
+    }
+  ]
+}

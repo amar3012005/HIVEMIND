@@ -2284,7 +2284,10 @@ async def _verify_turn(
         "source_evidence_count": len((blackboard or {}).get("facts") or []),
         "company_name": company_name or None,
         "company_context_missing": bool(company_context_missing),
-        "gathered_facts": [str(f)[:200] for f in ((blackboard or {}).get("facts") or [])][:24],
+        # Keep each authoritative source useful enough to verify product and
+        # company claims. The old 200-character slice routinely cut the
+        # company brief before its product definitions appeared.
+        "gathered_facts": [str(f)[:2000] for f in ((blackboard or {}).get("facts") or [])][:24],
         "final_excerpt": (final_text or "")[:8000],
     }
     prompt = (
@@ -2460,9 +2463,10 @@ async def _verify_turn(
 
 
 _SPECIFIC_CLAIM_RE = re.compile(
-    r"(?<![\w.])(?:\d+(?:[.,]\d+)?)\s*(?:%|percent|€|\$|£|days?|weeks?|months?|years?|"
+    r"(?<![\w.])(?:€|\$|£)\s*\d+(?:[.,]\d+)?|"
+    r"(?<![\w.])(?:\d+(?:[.,]\d+)?)\s*(?:%|percent|days?|weeks?|months?|years?|"
     r"fte|people|employees?|companies|enterprises|leads?|meetings?|calls?|emails?|posts?|touches?)\b|"
-    r"\b(?:q[1-4]\s*20\d{2}|20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b",
+    r"\b(?:q[1-4]\s*20\d{2}|20\d{2}(?:[-/]\d{1,2}[-/]\d{1,2})?)\b",
     re.IGNORECASE,
 )
 
@@ -2481,6 +2485,24 @@ def _unsupported_specific_claims(final_text: str, evidence: List[str], user_mess
                 unsupported.append(clean[:300])
                 break
     return list(dict.fromkeys(unsupported))[:10]
+
+
+def _remove_rejected_lines(final_text: str, unsupported_claims: List[str]) -> str:
+    """Remove exact verifier-rejected lines without regenerating the answer."""
+    rejected = {
+        re.sub(r"\s+", " ", str(item)).strip().casefold()
+        for item in unsupported_claims
+        if str(item).strip()
+    }
+    if not rejected:
+        return final_text
+    kept: List[str] = []
+    for line in str(final_text or "").splitlines():
+        normalized = re.sub(r"\s+", " ", line).strip().casefold()
+        if normalized and any(normalized == item or normalized in item or item in normalized for item in rejected):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def _md_table_to_rows(text: str) -> List[List[str]]:
@@ -3836,6 +3858,30 @@ async def _orchestrate_single_agent(
                         req, lead, final_text=repaired, blackboard=_quality_board, model=_m_recon,
                         company_name=_company_name, company_context_missing=_company_ctx_missing,
                     )
+                    # One additional editor pass is cheaper and safer than
+                    # replaying the Director. It receives only the still-rejected
+                    # lines and cannot perform tools or external writes.
+                    if isinstance(rechecked, dict) and not _should_commit_quality_repair(rechecked):
+                        second = await _repair_final_text(
+                            req, lead, final_text=repaired, verdict=rechecked,
+                            blackboard=_quality_board, model=_m_recon,
+                        )
+                        if second:
+                            repaired = second
+                            rechecked = await _verify_and_emit(
+                                req, lead, final_text=repaired, blackboard=_quality_board, model=_m_recon,
+                                company_name=_company_name, company_context_missing=_company_ctx_missing,
+                            )
+                    if isinstance(rechecked, dict) and not _should_commit_quality_repair(rechecked):
+                        sanitized = _remove_rejected_lines(
+                            repaired, rechecked.get("unsupported_claims") or [],
+                        )
+                        if sanitized and sanitized != repaired:
+                            repaired = sanitized
+                            rechecked = await _verify_and_emit(
+                                req, lead, final_text=repaired, blackboard=_quality_board, model=_m_recon,
+                                company_name=_company_name, company_context_missing=_company_ctx_missing,
+                            )
                     if isinstance(rechecked, dict):
                         rechecked["repair_attempted"] = True
                         plan = _PLAN_BY_TURN.get(req.turn_id)
@@ -3850,12 +3896,11 @@ async def _orchestrate_single_agent(
                                 "message": "The response was rewritten to remove unsupported claims and the repair passed verification.",
                             })
                         else:
-                            # A failed repair is not a better answer. Keep the
-                            # useful original candidate and expose its original
-                            # verification gaps instead of replacing it with a
-                            # stripped or boilerplate rewrite.
-                            final_text = original_text
-                            retained = dict(_quality_verdict)
+                            # Prefer the safer edited candidate over restoring
+                            # claims already proven unsupported. Its remaining
+                            # verifier gaps stay visible to the user.
+                            final_text = repaired or original_text
+                            retained = dict(rechecked)
                             retained["repair_attempted"] = True
                             retained["repair_rejected"] = True
                             if isinstance(plan, dict):
@@ -3863,7 +3908,7 @@ async def _orchestrate_single_agent(
                             await _emit({
                                 "t": "quality_repair_rejected",
                                 "reason": "repair_did_not_pass_grounding",
-                                "message": "The attempted repair was rejected; the original useful response was retained with explicit caveats.",
+                                "message": "The safer edited response was retained with its remaining evidence gaps.",
                             })
         except Exception as exc:  # noqa: BLE001
             log.warning("[single] verify failed: %s", exc)

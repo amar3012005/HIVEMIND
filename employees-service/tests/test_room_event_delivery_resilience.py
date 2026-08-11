@@ -145,6 +145,13 @@ class RoomEventDeliveryResilienceTest(unittest.TestCase):
         )
         self.assertEqual(allowed, [])
 
+    def test_rejected_lines_are_removed_without_rewriting_the_answer(self):
+        text = "Supported recommendation.\nPilot for 4 weeks with a 38% target.\nUseful next step."
+        cleaned = api_hyper_rooms._remove_rejected_lines(
+            text, ["Pilot for 4 weeks with a 38% target."],
+        )
+        self.assertEqual(cleaned, "Supported recommendation.\nUseful next step.")
+
 
 if __name__ == "__main__":
     unittest.main()

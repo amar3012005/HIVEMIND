@@ -2441,7 +2441,46 @@ async def _verify_turn(
         verdict["met"] = False
         verdict["gaps"] = (verdict.get("gaps") or [])[:7] + [
             f"deliverable never references the company's canonical name ({company_name}) — possible identity substitution"]
+    unsupported_specifics = _unsupported_specific_claims(
+        final_text,
+        [str(item) for item in ((blackboard or {}).get("facts") or [])],
+        req.user_message or "",
+    )
+    if unsupported_specifics:
+        verdict["grounded_ok"] = False
+        verdict["met"] = False
+        verdict["unsupported_claims"] = list(dict.fromkeys([
+            *(verdict.get("unsupported_claims") or []), *unsupported_specifics,
+        ]))[:10]
+        verdict["gaps"] = list(dict.fromkeys([
+            *(verdict.get("gaps") or []),
+            "specific numbers or dates appear without matching source evidence",
+        ]))[:8]
     return verdict
+
+
+_SPECIFIC_CLAIM_RE = re.compile(
+    r"(?<![\w.])(?:\d+(?:[.,]\d+)?)\s*(?:%|percent|€|\$|£|days?|weeks?|months?|years?|"
+    r"fte|people|employees?|companies|enterprises|leads?|meetings?|calls?|emails?|posts?|touches?)\b|"
+    r"\b(?:q[1-4]\s*20\d{2}|20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b",
+    re.IGNORECASE,
+)
+
+
+def _unsupported_specific_claims(final_text: str, evidence: List[str], user_message: str) -> List[str]:
+    """Find measurable specifics absent from both the request and source ledger."""
+    allowed = re.sub(r"\s+", " ", "\n".join([user_message, *evidence])).casefold()
+    unsupported: List[str] = []
+    for line in str(final_text or "").splitlines():
+        clean = re.sub(r"\s+", " ", line).strip()
+        if not clean:
+            continue
+        for match in _SPECIFIC_CLAIM_RE.finditer(clean):
+            token = re.sub(r"\s+", " ", match.group(0)).casefold()
+            if token not in allowed:
+                unsupported.append(clean[:300])
+                break
+    return list(dict.fromkeys(unsupported))[:10]
 
 
 def _md_table_to_rows(text: str) -> List[List[str]]:

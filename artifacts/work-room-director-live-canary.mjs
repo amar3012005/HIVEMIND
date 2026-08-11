@@ -5,6 +5,7 @@ const canaryRevision = process.env.CANARY_REVISION || 'v1';
 
 if (!roomId || !token) throw new Error('ROOM_ID and SESSION_TOKEN are required');
 
+const requestedCases = new Set((process.env.CANARY_CASES || 'direct,synthesis,decision').split(',').map((value) => value.trim()).filter(Boolean));
 const cases = [
   {
     id: 'direct',
@@ -18,7 +19,7 @@ const cases = [
     id: 'decision',
     request: 'Decide which first validation motion is stronger for Singulance: a small regulated-enterprise outreach test or an organic awareness test. Compare evidence, risk, measurement, and dependencies, then recommend one bounded next step. Do not send, publish, call, or create provider resources.',
   },
-];
+].filter((item) => requestedCases.has(item.id));
 
 const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 

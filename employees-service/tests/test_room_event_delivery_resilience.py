@@ -131,6 +131,20 @@ class RoomEventDeliveryResilienceTest(unittest.TestCase):
             "grounded_ok": True,
         }))
 
+    def test_unsourced_numeric_claims_are_rejected_deterministically(self):
+        unsupported = api_hyper_rooms._unsupported_specific_claims(
+            "Pilot for 4 weeks with 30 enterprises and a 38% target.",
+            ["The company serves regulated enterprises."],
+            "Compare outreach with awareness.",
+        )
+        self.assertEqual(len(unsupported), 1)
+        allowed = api_hyper_rooms._unsupported_specific_claims(
+            "The observed reply rate was 12%.",
+            ["Provider receipt: observed reply rate was 12%."],
+            "Summarize the observed result.",
+        )
+        self.assertEqual(allowed, [])
+
 
 if __name__ == "__main__":
     unittest.main()

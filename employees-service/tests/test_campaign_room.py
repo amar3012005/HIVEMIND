@@ -307,6 +307,7 @@ def test_campaign_compiler_normalizes_claim_synonym_without_bypassing_evidence_g
         bundle,
         channels=["x_organic"],
         requirements=["goal", "channel:x_organic"],
+        campaign_brief={"brief": {"duration_days": 7}},
     )
     assert errors == []
     assert accepted is not None
@@ -864,6 +865,60 @@ def test_campaign_governance_repairs_only_the_implicated_action(monkeypatch):
     repair_request = calls[1][1]["content"]
     assert "invalid-2" in repair_request
     assert "valid-1" not in repair_request.split("ACTIONS TO REPAIR:", 1)[1].split("ACCEPTED PLAN CONTEXT", 1)[0]
+
+
+def test_campaign_governance_repair_adds_exact_cadence_shortfall(monkeypatch):
+    calls = []
+    governed = []
+
+    async def emit(event):
+        return None
+
+    async def synthesize(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) == 1:
+            return {"content": json.dumps({"plan": {"actions": [
+                {"id": f"ig-{index}", "channel": "instagram", "final_copy": f"Post {index}"}
+                for index in range(1, 5)
+            ]}})}
+        return {"content": json.dumps({
+            "actions": [],
+            "added_actions": [
+                {"id": "ig-5", "channel": "instagram", "final_copy": "Post 5"},
+                {"id": "ig-6", "channel": "instagram", "final_copy": "Post 6"},
+            ],
+            "fields": {},
+        })}
+
+    def govern(candidate, **kwargs):
+        governed.append(candidate)
+        if len(governed) == 1:
+            return None, {"status": "unmet", "unmet_deliverables": [
+                "channel instagram needs 6-8 actions for this campaign pace; received 4"
+            ]}
+        return candidate, {"status": "accepted", "unmet_deliverables": []}
+
+    director = Director(
+        user_message="Create an Instagram awareness campaign",
+        user_id="user", org_id="org", project_id=None, participants=[], room_template="auto",
+        room_goal="Campaign", enabled_connectors=[], emit=emit,
+        room_kind="campaign", campaign_brief={
+            "channels": ["instagram"],
+            "brief": {"cadence": {"expected_actions_by_channel": {
+                "instagram": {"minimum": 6, "maximum": 8},
+            }}},
+        },
+    )
+    monkeypatch.setattr(director, "_groq", synthesize)
+    monkeypatch.setattr("hivemind_employees.hyper.campaign_contract.campaign__govern_delivery", govern)
+
+    bundle, errors = asyncio.run(director._synthesize_campaign_bundle(False, ""))
+
+    assert errors == []
+    assert [action["id"] for action in bundle["actions"]] == [
+        "ig-1", "ig-2", "ig-3", "ig-4", "ig-5", "ig-6",
+    ]
+    assert '"instagram": 2' in calls[1][1]["content"]
 
 
 def test_campaign_audience_policy_blocks_machine_prose_from_triggering_places():

@@ -5253,6 +5253,26 @@ class Director:
             if action_id and any(re.search(rf"\b{re.escape(action_id)}\b", str(error)) for error in errors)
         ]
 
+    def _campaign_action_deficits(self, actions: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Return only cadence minimum shortfalls declared by the campaign brief."""
+        brief = self.campaign_brief if isinstance(self.campaign_brief, dict) else {}
+        payload = brief.get("brief") if isinstance(brief.get("brief"), dict) else brief
+        cadence = payload.get("cadence") if isinstance(payload.get("cadence"), dict) else {}
+        expected = cadence.get("expected_actions_by_channel")
+        expected = expected if isinstance(expected, dict) else {}
+        deficits: Dict[str, int] = {}
+        for channel, bounds in expected.items():
+            if not isinstance(bounds, dict):
+                continue
+            minimum = max(0, int(bounds.get("minimum") or 0))
+            actual = sum(
+                1 for action in actions
+                if str(action.get("channel") or "").strip().lower() == str(channel).strip().lower()
+            )
+            if actual < minimum:
+                deficits[str(channel)] = minimum - actual
+        return deficits
+
     async def _repair_campaign_actions(
         self,
         *,
@@ -5271,6 +5291,7 @@ class Director:
         """
         actions = [action for action in (semantic.get("actions") or []) if isinstance(action, dict)]
         action_ids = self._campaign_action_ids_from_errors(errors, actions)
+        action_deficits = self._campaign_action_deficits(actions)
         semantic_fields = {
             "strategy", "strategy_options", "selected_strategy_id", "company_grounding",
             "positioning", "audience", "content_pillars", "kpis", "evidence",
@@ -5282,15 +5303,17 @@ class Director:
             for name in semantic_fields
             if any(name in str(error).lower() or name.replace("_", " ") in str(error).lower() for error in errors)
         }
-        if not action_ids and not relevant_fields:
+        if not action_ids and not relevant_fields and not action_deficits:
             return None
         invalid_actions = [action for action in actions if str(action.get("id") or "") in action_ids]
         repair_prompt = (
             system_contract
             + "\n\nYou are repairing only named parts of a Campaign Contract after deterministic governance. "
-            'Return JSON only as {"actions":[<complete replacement action objects>],"fields":{<named top-level field>:<replacement>}}. '
+            'Return JSON only as {"actions":[<complete replacement action objects>],"added_actions":[<new complete action objects>],"fields":{<named top-level field>:<replacement>}}. '
             "Return exactly one complete replacement for each requested action ID and no other actions. In fields, "
             "return every supplied field and no field that was not supplied. "
+            "In added_actions, return exactly the declared missing count for each supplied channel, with new unique IDs; "
+            "return an empty list when no additions are requested. "
             "Keep each action ID, channel, schedule position, hypothesis, and strategic job unchanged unless an unmet "
             "criterion explicitly requires changing that field. Build missing proof/fact lists only from VERIFIED CONTEXT "
             "and EVIDENCE BOARD below. Correct only the stated unmet criteria. Do not add facts, claims, URLs, recipients, "
@@ -5300,6 +5323,7 @@ class Director:
             f"UNMET CRITERIA:\n{json.dumps(errors, ensure_ascii=False)}\n\n"
             f"ACTIONS TO REPAIR:\n{json.dumps(invalid_actions, ensure_ascii=False)}\n\n"
             f"FIELDS TO REPAIR:\n{json.dumps(relevant_fields, ensure_ascii=False)}\n\n"
+            f"EXACT ACTIONS TO ADD BY CHANNEL:\n{json.dumps(action_deficits, ensure_ascii=False)}\n\n"
             f"ACCEPTED PLAN CONTEXT (read only):\n"
             f"{json.dumps({k: v for k, v in semantic.items() if k not in {'actions', *relevant_fields}}, ensure_ascii=False)[:6000]}\n\n"
             f"VERIFIED COMPANY CONTEXT:\n{self.company_brief[:2500]}\n\n"
@@ -5316,8 +5340,9 @@ class Director:
         )
         repaired_payload = _first_json_object(str((repaired_message or {}).get("content") or "").strip())
         replacements = repaired_payload.get("actions") if isinstance(repaired_payload, dict) else None
+        added_actions = repaired_payload.get("added_actions", []) if isinstance(repaired_payload, dict) else None
         patched_fields = repaired_payload.get("fields", {}) if isinstance(repaired_payload, dict) else None
-        if not isinstance(replacements, list) or not isinstance(patched_fields, dict):
+        if not isinstance(replacements, list) or not isinstance(added_actions, list) or not isinstance(patched_fields, dict):
             return None
         replacement_by_id = {
             str(action.get("id") or ""): action
@@ -5326,11 +5351,24 @@ class Director:
         }
         if set(replacement_by_id) != set(action_ids) or set(patched_fields) != set(relevant_fields):
             return None
+        added_by_channel: Dict[str, int] = {}
+        existing_ids = {str(action.get("id") or "") for action in actions}
+        for action in added_actions:
+            if not isinstance(action, dict):
+                return None
+            action_id = str(action.get("id") or "").strip()
+            channel = str(action.get("channel") or "").strip().lower()
+            if not action_id or action_id in existing_ids or channel not in action_deficits:
+                return None
+            existing_ids.add(action_id)
+            added_by_channel[channel] = added_by_channel.get(channel, 0) + 1
+        if added_by_channel != {str(channel).lower(): count for channel, count in action_deficits.items()}:
+            return None
         repaired_semantic = dict(semantic)
         repaired_semantic["actions"] = [
             replacement_by_id.get(str(action.get("id") or ""), action)
             for action in actions
-        ]
+        ] + added_actions
         repaired_semantic.update({name: patched_fields[name] for name in relevant_fields})
         return repaired_semantic
 

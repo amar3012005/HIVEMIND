@@ -3178,6 +3178,14 @@ _CAMPAIGN_PRIMARY_ROLES = (
 _CAMPAIGN_SYNTH_MODEL = "openai/gpt-oss-120b"
 
 
+def _campaign_result_accepted(result: Any) -> bool:
+    """A compiled dashboard is not the same thing as an accepted contract."""
+    if not isinstance(result, dict) or not isinstance(result.get("campaign_bundle"), dict):
+        return False
+    errors = result.get("campaign_bundle_errors")
+    return isinstance(errors, list) and not errors
+
+
 def _campaign_models() -> tuple:
     """Cheap campaign research/debate, with the contract compiler on 120B.
 
@@ -3770,13 +3778,14 @@ async def _orchestrate_single_agent(
     #    first produce that skipped is re-attempted here). Pass the gathered facts (recall +
     #    connector/Gmail reads) so the verifier doesn't flag connector-sourced claims.
     if _room_kind == "campaign":
-        accepted = bool(result.get("campaign_bundle"))
+        accepted = _campaign_result_accepted(result)
+        campaign_gaps = [str(gap) for gap in (result.get("campaign_bundle_errors") or []) if str(gap).strip()]
         verdict = {
             "met": accepted,
             "artifact_ok": accepted,
             "assignments_ok": bool(contributions),
             "grounded_ok": accepted,
-            "gaps": [] if accepted else ["The deterministic Campaign Contract was not accepted."],
+            "gaps": [] if accepted else (campaign_gaps or ["The deterministic Campaign Contract was not accepted."]),
             "note": "Campaign delivery accepted by governance." if accepted else "Campaign governance found unmet deliverables; nothing was approved.",
             "produced_artifacts": [],
             "pending_writes": [],
@@ -3922,7 +3931,7 @@ async def _orchestrate_single_agent(
     _vp = _PLAN_BY_TURN.get(req.turn_id) or {}
     _gv = _vp.get("verification") or {}
     status = "complete"
-    if result.get("room_kind") == "campaign" and not result.get("campaign_bundle"):
+    if result.get("room_kind") == "campaign" and not _campaign_result_accepted(result):
         status = "blocked"
     elif _vp.get("dead_end"):
         status = "blocked"

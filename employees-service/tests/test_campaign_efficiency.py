@@ -5,6 +5,20 @@ import pytest
 from hivemind_employees import api_hyper_rooms
 
 
+def test_campaign_acceptance_requires_bundle_without_governance_errors():
+    bundle = {"contract_version": 5}
+
+    assert api_hyper_rooms._campaign_result_accepted({
+        "campaign_bundle": bundle,
+        "campaign_bundle_errors": [],
+    }) is True
+    assert api_hyper_rooms._campaign_result_accepted({
+        "campaign_bundle": bundle,
+        "campaign_bundle_errors": ["channel instagram needs 6-8 actions; received 4"],
+    }) is False
+    assert api_hyper_rooms._campaign_result_accepted({"campaign_bundle": bundle}) is False
+
+
 def _employee(employee_id, lane, *, name=None, persona=""):
     return {
         "id": employee_id,

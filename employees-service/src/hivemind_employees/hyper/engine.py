@@ -6173,7 +6173,16 @@ class Director:
             await self.emit({"t": "campaign_stage", "stage": "brief", "status": "complete",
                              "title": "Campaign brief understood", "detail": "Objective, channels, horizon, pace, and operating constraints are set."})
         campaign_request = plan.get("campaign_request")
-        if isinstance(campaign_request, dict) and self.room_kind != "campaign":
+        # Human Work Room turns now select their specialist engine deterministically,
+        # BEFORE this Director ever runs (api_hyper_rooms._select_execution_profile).
+        # A campaign.contract.v1-profiled turn already has self.room_kind == "campaign"
+        # and is dispatched through _build_campaign_director, the correct existing path —
+        # this generic escape hatch existed for turns whose room_kind was frozen at
+        # "general" with no other way to reach Campaign. For room_mode == "work" that
+        # reason no longer applies: only profile_id == campaign.contract.v1 may invoke
+        # the Campaign compiler, never a planner freelancing a campaign_request object
+        # after already doing generic work under a different profile.
+        if isinstance(campaign_request, dict) and self.room_kind != "campaign" and self.room_mode != "work":
             await self.emit({"t": "typing", "agent": _lead,
                              "note": "Creating the dedicated Campaign Room…"})
             response = await campaign_create_emulated(

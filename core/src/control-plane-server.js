@@ -85,6 +85,7 @@ import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { renderTemplate, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails } from './email/email-service.js';
+import { createSignupWelcomeDispatcher } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
@@ -213,6 +214,7 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
+const signupWelcome = createSignupWelcomeDispatcher({ prisma, sendEmail: sendSystemEmail });
 async function taraProviderFor(orgId) {
   const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId }, select: { defaultProvider: true, revision: true, grokConfig: true } }).catch(() => null);
   const provider = runtime?.defaultProvider === 'grok' ? 'grok' : 'deepgram';
@@ -2051,12 +2053,7 @@ async function upsertUserFromZitadel(userInfo) {
       lastActiveAt: new Date()
     }
   });
-  const firstName = (created.displayName || created.email?.split('@')[0] || 'there').split(' ')[0];
-  sendSystemEmail({
-    templateId: 'welcome_signup',
-    to: created.email,
-    vars: { name: firstName, email: created.email },
-  }).then((delivery) => {
+  signupWelcome.deliver(created, { source: 'user_creation' }).then((delivery) => {
     if (!delivery.ok) {
       console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'signup_welcome_failed', userId: created.id, error: delivery.error }));
     }
@@ -4292,16 +4289,21 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { ok: false, error: 'no_user_email' });
     }
     const firstName = (user.displayName || user.email.split('@')[0] || 'there').split(' ')[0];
-    // First-ever login (brand-new account) gets the signup welcome; returning
-    // users get the login welcome. Heuristic: account created in the last 15
-    // minutes ⇒ this is their signup session. Avoids a DB migration; per-session
-    // dedup above already prevents repeats.
+    // First-ever login retries the durable signup delivery if the callback's
+    // fire-and-forget attempt was interrupted. The dispatcher owns durable
+    // user-level deduplication, so this cannot create a second welcome.
     const ageMs = user.createdAt ? Date.now() - new Date(user.createdAt).getTime() : Infinity;
     const isNewAccount = ageMs < 15 * 60 * 1000;
     if (isNewAccount) {
-      return jsonResponse(res, { ok: true, template: 'welcome_signup', deduped: true, source: 'user_creation' });
+      const delivery = await signupWelcome.deliver(user, { source: 'overview_recovery' });
+      return jsonResponse(res, {
+        ok: Boolean(delivery.ok),
+        template: 'welcome_signup',
+        deduped: Boolean(delivery.deduped),
+        delivery_status: delivery.deliveryStatus || null,
+      }, delivery.ok ? 200 : 202);
     }
-    const templateId = isNewAccount ? 'welcome_signup' : 'welcome_login';
+    const templateId = 'welcome_login';
     // Don't await the send — return immediately so login UX is never delayed.
     sendSystemEmail({
       templateId,

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import unittest
 from types import SimpleNamespace
@@ -151,6 +152,12 @@ class RoomEventDeliveryResilienceTest(unittest.TestCase):
             text, ["Pilot for 4 weeks with a 38% target."],
         )
         self.assertEqual(cleaned, "Supported recommendation.\nUseful next step.")
+
+    def test_quality_repair_does_not_reinject_the_rejected_draft(self):
+        source = inspect.getsource(api_hyper_rooms._repair_final_text)
+        self.assertIn("the rejected draft is", source)
+        self.assertIn("intentionally withheld", source)
+        self.assertNotIn("REPORT TO REPAIR", source)
 
 
 if __name__ == "__main__":

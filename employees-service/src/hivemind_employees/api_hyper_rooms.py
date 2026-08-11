@@ -3005,8 +3005,10 @@ async def _repair_final_text(
     facts = [str(item)[:400] for item in ((blackboard or {}).get("facts") or [])][:24]
     unsafe = [str(item)[:300] for item in (verdict.get("unsupported_claims") or []) if str(item).strip()][:10]
     prompt = (
-        "You are the final report editor. Return ONLY the revised report in the same useful format. "
-        "Preserve supported strategy and recommendations, but DELETE every unsupported number, date, named person, "
+        "You are the final answer editor. Rebuild the answer from the TASK and EVIDENCE below; the rejected draft is "
+        "intentionally withheld so none of its unsupported premises can leak into your answer. Return ONLY the useful "
+        "finished answer. Preserve the requested format, strategy, and recommendations only when supported by EVIDENCE. "
+        "DELETE every unsupported number, date, named person, "
         "performance result, source, customer, certification, or market claim. Never make an unsafe factual claim "
         "acceptable merely by appending a disclaimer. Do not replace it with a different fact. When comparative "
         "outcome evidence is absent, say that no verified comparison exists and base the recommendation on explicit "
@@ -3016,7 +3018,7 @@ async def _repair_final_text(
         f"VERIFIER GAPS:\n{json.dumps(verdict.get('gaps') or [], ensure_ascii=False)}\n"
         f"UNSAFE CLAIMS:\n{json.dumps(unsafe, ensure_ascii=False)}\n"
         f"EVIDENCE AVAILABLE:\n{json.dumps(facts, ensure_ascii=False)}\n\n"
-        f"REPORT TO REPAIR:\n{final_text[:12000]}"
+        f"TASK:\n{str(getattr(req, 'user_message', '') or '')[:6000]}"
     )
     try:
         boot = {item["id"]: item for item in await fetch_bootstrap()}

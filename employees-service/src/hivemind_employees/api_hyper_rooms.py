@@ -2281,11 +2281,11 @@ async def _verify_turn(
         "tools_used": {str(k): int(v) for k, v in (tool_call_counts or {}).items()},
         "writes_pending_approval": [p.get("label") for p in pending],
         "produced_artifacts": produced,
-        "memory_hits": int((blackboard or {}).get("hit_count", 0) or 0),
+        "source_evidence_count": len((blackboard or {}).get("facts") or []),
         "company_name": company_name or None,
         "company_context_missing": bool(company_context_missing),
         "gathered_facts": [str(f)[:200] for f in ((blackboard or {}).get("facts") or [])][:24],
-        "final_excerpt": (final_text or "")[:1600],
+        "final_excerpt": (final_text or "")[:8000],
     }
     prompt = (
         "You are the room's recon/verifier. Cross-check the team's result against the "
@@ -2309,7 +2309,7 @@ async def _verify_turn(
         "demanding one is a verifier error. For answer/decision, proposed next-steps and suggested "
         "owners are RECOMMENDATIONS, not claims-of-fact: do NOT mark them ungrounded merely because "
         "they haven't happened yet. grounded_ok here means the RECOMMENDATION rests on the gathered "
-        "evidence and names only real team members — not that every step is already done.\n"
+        "source evidence and names only real team members — not that every step is already done.\n"
         "- For a PRODUCED output (email/doc/sheet/slack/ticket/crm), artifact_ok is true ONLY with "
         "OBJECTIVE evidence it was produced or queued: produced_artifacts is non-empty, OR "
         "writes_pending_approval lists a write matching the intended_output, OR tools_used shows the "
@@ -2330,11 +2330,12 @@ async def _verify_turn(
         "slice in the EXECUTE phase this turn) AND the final text reflects that work. Do NOT require "
         "more than the plan assigned.\n"
         "- grounded_ok is a FABRICATION check ONLY — it does NOT measure completeness or HOW MANY "
-        "items are unverified. 'Backing' = a memory_hit OR a `gathered_facts` entry (what the team "
-        "actually READ this turn from memory AND connectors — Gmail/Docs/Sheets/Drive). A claim backed "
+        "items are unverified. 'Backing' means an exact `gathered_facts` entry (what the team "
+        "actually read this turn from company context, memory, web, or connectors). A count of memory "
+        "hits is never evidence, and agent work results or debate assertions are never evidence. A claim backed "
         "by a gathered_fact (e.g. an email body, poem, thread, doc the team read) is GROUNDED even if "
         "it is not a memory_hit — connector reads ARE evidence. DECISION RULE: grounded_ok=TRUE unless "
-        "the text states a specific fact AS TRUE that BOTH (a) has NO backing in a memory_hit / "
+        "the text states a specific fact AS TRUE that BOTH (a) has NO backing in a "
         "gathered_fact / tool result AND (b) is NOT labeled "
         "UNVERIFIED / unknown / 'not found'. The COUNT of UNVERIFIED-labeled items is IRRELEVANT to "
         "grounded_ok — a deliverable that honestly labels even 20 items UNVERIFIED is grounded_ok=TRUE "
@@ -2976,6 +2977,11 @@ async def _repair_final_text(
     except Exception as exc:  # noqa: BLE001 — verification status handles an unavailable repair path
         log.warning("[quality-repair] failed: %s", exc)
         return ""
+
+
+def _should_commit_quality_repair(verdict: Optional[Dict[str, Any]]) -> bool:
+    """A rewrite replaces the original candidate only after grounding passes."""
+    return bool(isinstance(verdict, dict) and verdict.get("grounded_ok"))
 
 
 # Dedicated doc-authoring guide injected into the LLM at production time — the
@@ -3779,27 +3785,45 @@ async def _orchestrate_single_agent(
             # surfaced as review-required rather than producing a speculative edit.
             if (_quality_verdict and _quality_verdict.get("verification_available")
                     and not _quality_verdict.get("grounded_ok")):
+                original_text = final_text
                 repaired = await _repair_final_text(
                     req, lead, final_text=final_text, verdict=_quality_verdict,
                     blackboard=_quality_board, model=_m_recon,
                 )
                 if repaired:
-                    final_text = repaired
-                    await _emit({
-                        "t": "quality_repair",
-                        "reason": "unsupported_claims",
-                        "claims_removed": len(_quality_verdict.get("unsupported_claims") or []),
-                        "message": "The report was rewritten to remove unsupported claims and rechecked.",
-                    })
                     rechecked = await _verify_and_emit(
-                        req, lead, final_text=final_text, blackboard=_quality_board, model=_m_recon,
+                        req, lead, final_text=repaired, blackboard=_quality_board, model=_m_recon,
                         company_name=_company_name, company_context_missing=_company_ctx_missing,
                     )
                     if isinstance(rechecked, dict):
                         rechecked["repair_attempted"] = True
                         plan = _PLAN_BY_TURN.get(req.turn_id)
-                        if isinstance(plan, dict):
-                            plan["verification"] = rechecked
+                        if _should_commit_quality_repair(rechecked):
+                            final_text = repaired
+                            if isinstance(plan, dict):
+                                plan["verification"] = rechecked
+                            await _emit({
+                                "t": "quality_repair",
+                                "reason": "unsupported_claims",
+                                "claims_removed": len(_quality_verdict.get("unsupported_claims") or []),
+                                "message": "The response was rewritten to remove unsupported claims and the repair passed verification.",
+                            })
+                        else:
+                            # A failed repair is not a better answer. Keep the
+                            # useful original candidate and expose its original
+                            # verification gaps instead of replacing it with a
+                            # stripped or boilerplate rewrite.
+                            final_text = original_text
+                            retained = dict(_quality_verdict)
+                            retained["repair_attempted"] = True
+                            retained["repair_rejected"] = True
+                            if isinstance(plan, dict):
+                                plan["verification"] = retained
+                            await _emit({
+                                "t": "quality_repair_rejected",
+                                "reason": "repair_did_not_pass_grounding",
+                                "message": "The attempted repair was rejected; the original useful response was retained with explicit caveats.",
+                            })
         except Exception as exc:  # noqa: BLE001
             log.warning("[single] verify failed: %s", exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side

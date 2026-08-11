@@ -120,6 +120,17 @@ class RoomEventDeliveryResilienceTest(unittest.TestCase):
         self.assertIsNone(captured["hyper"])
         self.assertIn("neutral final-report editor", captured["persona"].lower())
 
+    def test_failed_quality_repair_cannot_replace_original_candidate(self):
+        self.assertFalse(api_hyper_rooms._should_commit_quality_repair({
+            "met": False,
+            "grounded_ok": False,
+            "repair_attempted": True,
+        }))
+        self.assertTrue(api_hyper_rooms._should_commit_quality_repair({
+            "met": True,
+            "grounded_ok": True,
+        }))
+
 
 if __name__ == "__main__":
     unittest.main()

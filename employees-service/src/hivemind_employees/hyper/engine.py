@@ -1376,6 +1376,16 @@ class Director:
         self.evidence_mode = "standard"
         self.seo_task = "none"
 
+    def _source_evidence_snapshot(self) -> List[str]:
+        """Return durable inputs and tool observations, never agent assertions."""
+        excluded = ("WORK_RESULT[", "SKILL[")
+        return [
+            str(item) for item in self.blackboard
+            if str(item).strip()
+            and not str(item).startswith(excluded)
+            and "NOT AUTHORIZED" not in str(item)
+        ]
+
     @staticmethod
     def _parse_work_order_envelope(raw: str) -> Optional[Dict[str, Any]]:
         if "hq-work-order.v2" not in str(raw or ""):
@@ -6343,7 +6353,10 @@ class Director:
             "io": dict(self.io),
             "model_usage": list(self.model_usage.values()),
             "gathered_emails": sorted(self.gathered_emails),
-            "gather_facts": list(self.blackboard),
+            # Work results and debate claims are candidates, not evidence. The
+            # verifier may ground claims only in retained inputs or actual tool
+            # observations from this source-only snapshot.
+            "gather_facts": self._source_evidence_snapshot(),
             "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)
             "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
             "skills_used": list(self.skills_used),  # METHOD skills applied (reflection + FE chips)

@@ -31,6 +31,27 @@ def _director(*, message: str, room_kind: str = "general", company_brief: str = 
     return director, events
 
 
+def test_source_evidence_excludes_skills_and_agent_work_results():
+    director, _events = _director(message="Compare two options")
+    director.blackboard = [
+        "COMPANY CONTEXT[authoritative]: verified company fact",
+        "- Retained metric: 12 observed users",
+        "SKILL[evidence-first]: method guidance",
+        "WORK_RESULT[Analyst | compare]: invented 38 percent conversion",
+        "- gmail/thread: verified connector text",
+        "- gmail: NOT AUTHORIZED — reconnect required",
+    ]
+
+    evidence = director._source_evidence_snapshot()
+
+    assert any("verified company fact" in row for row in evidence)
+    assert any("12 observed users" in row for row in evidence)
+    assert any("verified connector text" in row for row in evidence)
+    assert not any("SKILL[" in row for row in evidence)
+    assert not any("WORK_RESULT[" in row for row in evidence)
+    assert not any("NOT AUTHORIZED" in row for row in evidence)
+
+
 def test_light_intensity_is_a_bounded_director_contract(monkeypatch):
     director, _events = _director(message="Can we run a campaign for law firms?")
     payload = {

@@ -34,7 +34,7 @@ async def run_check(iterations: int, concurrency: int) -> dict:
             models = api_hyper_rooms._campaign_models()
             assert len(roster) == 3
             assert rounds == (2 if index % 10 == 0 else 1)
-            assert models[2] == "openai/gpt-oss-120b"
+            assert models[2] == "gpt-oss-120b"
 
     started = time.perf_counter()
     await asyncio.gather(*(one(index) for index in range(iterations)))

@@ -3175,7 +3175,7 @@ _CAMPAIGN_PRIMARY_ROLES = (
     ("creative_lead", "Builder", ("creative", "content", "builder", "maker", "communicator", "writer")),
     ("critical_reviewer", "Skeptic", ("skeptic", "reviewer", "critic", "risk", "compliance")),
 )
-_CAMPAIGN_SYNTH_MODEL = "openai/gpt-oss-120b"
+_CAMPAIGN_DIRECT_MODEL = "gpt-oss-120b"
 
 
 def _campaign_result_accepted(result: Any) -> bool:
@@ -3187,16 +3187,16 @@ def _campaign_result_accepted(result: Any) -> bool:
 
 
 def _campaign_models() -> tuple:
-    """Cheap campaign research/debate, with the contract compiler on 120B.
+    """Run Campaign judgment on the configured direct Cerebras route.
 
-    Campaign Rooms intentionally ignore the room's generic ``best`` quality mode:
-    contract validation and repair still use the strongest model, while the much
-    larger gather/persona call volume stays on economical models.
+    The OpenRouter-hosted 20B route repeatedly fell through to slow providers,
+    making a bounded campaign slower than the stronger direct model. One model
+    also keeps planning, review, compilation, and repair semantically aligned.
     """
     return (
-        os.environ.get("HYPER_CAMPAIGN_GATHER_MODEL", "openai/gpt-oss-20b"),
-        os.environ.get("HYPER_CAMPAIGN_DEBATE_MODEL", "openai/gpt-oss-20b"),
-        _CAMPAIGN_SYNTH_MODEL,
+        os.environ.get("HYPER_CAMPAIGN_GATHER_MODEL", _CAMPAIGN_DIRECT_MODEL),
+        os.environ.get("HYPER_CAMPAIGN_DEBATE_MODEL", _CAMPAIGN_DIRECT_MODEL),
+        os.environ.get("HYPER_CAMPAIGN_SYNTH_MODEL", _CAMPAIGN_DIRECT_MODEL),
     )
 
 

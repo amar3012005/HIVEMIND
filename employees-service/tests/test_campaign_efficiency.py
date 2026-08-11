@@ -92,15 +92,15 @@ def test_campaign_debate_adds_decision_round_for_declared_conflict_or_risk(brief
     assert api_hyper_rooms._campaign_debate_rounds(brief) == 3
 
 
-def test_campaign_models_keep_synthesis_and_repair_on_120b(monkeypatch):
-    monkeypatch.setenv("HYPER_CAMPAIGN_GATHER_MODEL", "economical/gather")
-    monkeypatch.setenv("HYPER_CAMPAIGN_DEBATE_MODEL", "economical/debate")
-    monkeypatch.setenv("HYPER_CAMPAIGN_SYNTH_MODEL", "unsafe/override")
+def test_campaign_models_use_direct_120b_by_default(monkeypatch):
+    monkeypatch.delenv("HYPER_CAMPAIGN_GATHER_MODEL", raising=False)
+    monkeypatch.delenv("HYPER_CAMPAIGN_DEBATE_MODEL", raising=False)
+    monkeypatch.delenv("HYPER_CAMPAIGN_SYNTH_MODEL", raising=False)
 
     assert api_hyper_rooms._campaign_models() == (
-        "economical/gather",
-        "economical/debate",
-        "openai/gpt-oss-120b",
+        "gpt-oss-120b",
+        "gpt-oss-120b",
+        "gpt-oss-120b",
     )
 
 
@@ -113,13 +113,13 @@ def test_campaign_director_receives_bounded_round_policy(monkeypatch):
 
     monkeypatch.setattr(api_hyper_rooms, "Director", FakeDirector)
     result = api_hyper_rooms._build_campaign_director(
-        {"room_kind": "campaign", "synth_model": "openai/gpt-oss-120b"},
+        {"room_kind": "campaign", "synth_model": "gpt-oss-120b"},
         {"brief": {"prohibited_claims": "Guaranteed results"}},
     )
 
     assert isinstance(result, FakeDirector)
     assert captured["room_kind"] == "campaign"
-    assert captured["synth_model"] == "openai/gpt-oss-120b"
+    assert captured["synth_model"] == "gpt-oss-120b"
     assert captured["debate_max_rounds"] == 3
 
 

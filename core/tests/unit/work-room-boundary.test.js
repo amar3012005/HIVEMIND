@@ -18,6 +18,11 @@ test('follow-up turns preserve the persisted execution boundary', () => {
   assert.match(source, /roomMode:\s*'runtime'/);
 });
 
+test('stuck-turn recovery preserves the persisted Work Room mode', () => {
+  assert.match(source, /SELECT project_id, goal, room_tag, room_mode FROM/);
+  assert.match(source, /room_mode:\s*_sweepRoomMode/);
+});
+
 test('work rooms expose one durable work-plan projection', () => {
   assert.match(source, /hyper-rooms.*work-plan/);
   assert.match(source, /"hyper_work_orders"/);

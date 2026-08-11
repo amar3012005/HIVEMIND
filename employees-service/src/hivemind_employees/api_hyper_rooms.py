@@ -83,6 +83,10 @@ from .db import (
     get_trust_scores,
     get_turn_seq,
     list_employees_by_ids,
+    validate_work_room_execution,
+    persist_work_room_progress,
+    persist_hyper_turn_outbox_event,
+    mark_hyper_turn_outbox_delivered,
 )
 from .hivemind_client import (
     connector_exec_emulated,
@@ -830,6 +834,7 @@ def _pick_skeptic_rotating(
 # ─── Callback to control-plane ────────────────────────────────────────
 
 _CALLBACK_CLIENT: Optional[httpx.AsyncClient] = None
+_EXECUTION_IDENTITY_BY_TURN: Dict[str, Dict[str, Any]] = {}
 
 
 def _get_callback_client() -> httpx.AsyncClient:
@@ -855,7 +860,11 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
         "Content-Type": "application/json",
     }
     event.setdefault("event_id", str(uuid.uuid4()))
+    identity = _EXECUTION_IDENTITY_BY_TURN.get(turn_id)
+    outbox_persisted = bool(identity) and await persist_hyper_turn_outbox_event(turn_id, event)
     body = {"turn_id": turn_id, "event": event}
+    if identity:
+        body["execution_identity"] = identity
     critical = str(event.get("t") or "") in {
         "final_report", "seal", "connector_logo", "approval_request",
         "approval_required", "campaign_bundle", "campaign_bundle_partial", "runtime_stage_result",
@@ -868,6 +877,8 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
         try:
             response = await client.post(callback_url, headers=headers, content=json.dumps(body))
             response.raise_for_status()
+            if outbox_persisted:
+                await mark_hyper_turn_outbox_delivered(turn_id, str(event["event_id"]))
             return
         except Exception as exc:  # noqa: BLE001
             last_error = exc
@@ -1919,6 +1930,9 @@ class RoomTurnRequest(BaseModel):
     # Run-wide output language from the FE navbar i18n toggle (e.g. "de", "fr").
     # When set, the final report is written entirely in this language. Optional.
     language: Optional[str] = None
+    # Immutable identity for human Work Room turns. Historical callers remain
+    # readable; every new control-plane dispatch supplies this contract.
+    execution_identity: Optional[Dict[str, Any]] = None
 
 
 class RoomTurnResponse(BaseModel):
@@ -3744,6 +3758,18 @@ async def _orchestrate_single_agent(
         await _emit({"t": "verify", **verdict})
     else:
         try:
+            if (req.room_mode or "").strip().lower() == "work":
+                await persist_work_room_progress(
+                    turn_id=req.turn_id,
+                    phase="VERIFYING",
+                    identity=req.execution_identity or {},
+                    candidate={
+                        "contract": "work-room-candidate.v1",
+                        "content": final_text,
+                        "intended_output": intended_output,
+                        "created_at": int(time.time() * 1000),
+                    },
+                )
             _quality_board = {"hit_count": gather_count, "facts": result.get("gather_facts") or []}
             _quality_verdict = await _verify_and_emit(
                 req, lead, final_text=final_text, blackboard=_quality_board, model=_m_recon,
@@ -3791,6 +3817,31 @@ async def _orchestrate_single_agent(
         status = "escalated"
     elif _gv and not _gv.get("met"):
         status = "blocked"
+    if (req.room_mode or "").strip().lower() == "work" and final_text.strip():
+        # Human answers degrade honestly instead of disappearing. Runtime and
+        # provider effects retain their strict, predicate-owned status above.
+        caveated = bool(_gv) and (not _gv.get("met") or not _gv.get("verification_available", True))
+        status = "complete"
+        await persist_work_room_progress(
+            turn_id=req.turn_id,
+            phase="RESPONDING",
+            identity=req.execution_identity or {},
+            candidate={
+                "contract": "work-room-candidate.v1",
+                "content": final_text,
+                "intended_output": intended_output,
+                "quality": "caveated" if caveated else "validated",
+            },
+            verification=_gv if isinstance(_gv, dict) else {},
+            terminal_reason="verification_caveat" if caveated else "validated",
+        )
+        if caveated:
+            await _emit({
+                "t": "completion_caveat",
+                "status": "complete_with_caveats",
+                "gaps": list((_gv or {}).get("gaps") or [])[:8],
+                "message": "The best grounded result is available; unresolved evidence or verification limits are shown explicitly.",
+            })
 
     # The single-engine path must emit the same durable report contract as the
     # legacy orchestrator. CampaignOperatingReport uses this event as its render
@@ -4254,6 +4305,16 @@ def _goalkeeper_rounds_for_room(room_kind: str, *, work_order: bool = False,
     return 1 if work_order or str(room_kind or "").strip().lower() == "campaign" else _goalkeeper_max_rounds()
 
 
+def _goalkeeper_rounds_for_turn(room_kind: str, room_mode: str, *, work_order: bool = False,
+                                execution_context: str = "") -> int:
+    """Human turns repair their candidate locally; they never replay the full Room."""
+    if str(room_mode or "").strip().lower() == "work":
+        return 1
+    return _goalkeeper_rounds_for_room(
+        room_kind, work_order=work_order, execution_context=execution_context,
+    )
+
+
 def _execution_retry_owner(execution_context: str) -> str:
     """Read retry ownership from the private execution envelope.
 
@@ -4373,6 +4434,19 @@ async def post_room_turn(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ) -> RoomTurnResponse:
     _require_master_key(x_api_key)
+    if str(req.room_mode or "").strip().lower() == "work":
+        identity = req.execution_identity or {}
+        if identity:
+            if identity.get("contract") != "work-room-execution.v1":
+                raise HTTPException(status_code=409, detail="unsupported_work_room_execution_contract")
+            try:
+                await validate_work_room_execution(identity)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            _EXECUTION_IDENTITY_BY_TURN[req.turn_id] = dict(identity)
+            await persist_work_room_progress(
+                turn_id=req.turn_id, phase="ACCEPTED", identity=identity,
+            )
     # P2 Governor — master kill switch (all orgs, no DB write). Refuse instantly: no LLM
     # spend, no debate, no outbound. Emit a seal so the FE stream closes cleanly.
     if kill_switch_active():
@@ -4382,6 +4456,7 @@ async def post_room_turn(
                 "t": "line", "agent": "system", "kind": "disabled", "content": kill_switch_reason()})
             await _emit_event(req.callback_url, req.turn_id, {
                 "t": "seal", "status": "disabled", "cost_tokens": 0})
+        _EXECUTION_IDENTITY_BY_TURN.pop(req.turn_id, None)
         return RoomTurnResponse(ok=False, cost_tokens=0, status="disabled")
     # Phase 4 — arm the write-approval gate in THIS handler's context so every
     # fanned-out agent task (which copies the context) appends to the same
@@ -4404,8 +4479,9 @@ async def post_room_turn(
     # burns tokens, and can replace a nearly-complete campaign with a later draft.
     # Every other specialist Room keeps its independent goalkeeper policy.
     is_work_order = _is_hq_work_order_context(req.execution_context)
-    max_rounds = _goalkeeper_rounds_for_room(
-        room_kind, work_order=is_work_order, execution_context=req.execution_context or "")
+    max_rounds = _goalkeeper_rounds_for_turn(
+        room_kind, req.room_mode or "", work_order=is_work_order,
+        execution_context=req.execution_context or "")
     orig_msg = req.user_message
     total_cost = 0
     resp: Optional[RoomTurnResponse] = None
@@ -4469,6 +4545,9 @@ async def post_room_turn(
             # Re-rounds close GAPS — they never re-simulate the stakeholder population
             # (the sim's report doesn't change; it cost 11-31s per round for nothing).
             req.sim_mode = "off"
+    except Exception:
+        _EXECUTION_IDENTITY_BY_TURN.pop(req.turn_id, None)
+        raise
     finally:
         _GK_ACTIVE.pop(req.turn_id, None)
     # The turn's ONE seal — held past the approvals/artifacts drain below and emitted
@@ -4554,6 +4633,7 @@ async def post_room_turn(
         if resp.status and str(resp.status) != str(_final_seal.get("status")):
             _final_seal["status"] = resp.status  # dead-end downgrade (blocked) wins
         await _emit_event(req.callback_url, req.turn_id, _final_seal)
+    _EXECUTION_IDENTITY_BY_TURN.pop(req.turn_id, None)
     return resp
 
 

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   SEAM_SCHEMA_VERSION,
   buildRoomTurnPayload,
+  buildWorkRoomExecutionIdentity,
   normalizeTurnEvent,
 } from '../../src/contracts/hyper-seams.js';
 
@@ -16,6 +17,17 @@ test('buildRoomTurnPayload stamps version + drops undefined/null', () => {
   assert.ok(!('project_id' in p), 'undefined dropped');
   assert.ok(!('room_goal' in p), 'null dropped');
   assert.ok(!('unknown_future_field' in p), 'unknown key not forwarded');
+});
+
+test('work room execution identity is immutable and pins one canonical turn', () => {
+  const identity = buildWorkRoomExecutionIdentity({
+    room_id: 'room-1', turn_id: 'turn-1', user_id: 'user-1', org_id: 'org-1',
+  });
+  assert.deepEqual(identity, {
+    contract: 'work-room-execution.v1', execution_id: 'turn-1', room_id: 'room-1',
+    turn_id: 'turn-1', user_id: 'user-1', org_id: 'org-1', epoch: 1,
+  });
+  assert.equal(Object.isFrozen(identity), true);
 });
 
 test('buildRoomTurnPayload preserves a caller-supplied schema_version (negotiation)', () => {

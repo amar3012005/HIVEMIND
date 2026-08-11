@@ -3969,7 +3969,7 @@ class Director:
                 f"ACCEPTANCE CRITERIA:\n" + "\n".join(f"- {item}" for item in criteria) +
                 "\n\nReturn one compact working note, at most 120 words. Include only: the recommendation "
                 "or key finding, the evidence used, and any unresolved gap. Use short bullets, no tables, no "
-                "implementation plan, and no repeated brief. The final synthesizer writes the full report. Do not "
+                "implementation plan, and no repeated brief. The final synthesizer produces the requested response or artifact. Do not "
                 "discuss process, do not claim external actions were taken, and mark unsupported statements UNVERIFIED."
             )
             try:

@@ -3205,6 +3205,12 @@ model HyperTurn {
   runtimeStageId String? @map("runtime_stage_id") @db.VarChar(120)
   runtimeCheckpointSequence Int? @map("runtime_checkpoint_sequence")
   runtimeAttempt Int? @map("runtime_attempt")
+  executionIdentity Json @default("{}") @map("execution_identity") @db.JsonB
+  executionPhase String @default("ACCEPTED") @map("execution_phase") @db.VarChar(32)
+  candidateOutput Json @default("{}") @map("candidate_output") @db.JsonB
+  verificationVerdict Json @default("{}") @map("verification_verdict") @db.JsonB
+  lastProgressAt DateTime @default(now()) @map("last_progress_at") @db.Timestamptz(6)
+  terminalReason String? @map("terminal_reason") @db.Text
   room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
   evals          AgentEval[]
   runtimePlaybookRun RuntimePlaybookRun? @relation(fields: [runtimePlaybookRunId], references: [id], onDelete: SetNull)
@@ -3212,6 +3218,7 @@ model HyperTurn {
   @@unique([roomId, seq])
   @@index([roomId])
   @@index([status])
+  @@index([status, lastProgressAt])
   @@index([runtimePlaybookRunId, runtimeCheckpointSequence])
   @@index([runtimePlaybookRunId, runtimeStageId, runtimeAttempt])
   @@map("hyper_turns")

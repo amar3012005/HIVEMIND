@@ -33,7 +33,7 @@ class RoomEventDeliveryResilienceTest(unittest.TestCase):
         event = {"t": "final_report", "content": "Grounded result"}
         with patch.object(api_hyper_rooms, "_CALLBACK_CLIENT", client), patch.object(
             api_hyper_rooms.asyncio, "sleep", _no_wait
-        ):
+        ), patch.object(api_hyper_rooms, "persist_hyper_turn_outbox_event", return_value=False):
             asyncio.run(api_hyper_rooms._emit_event("http://control/internal", "turn-1", event))
 
         self.assertEqual(len(client.calls), 3)
@@ -75,6 +75,15 @@ class RoomEventDeliveryResilienceTest(unittest.TestCase):
             "repair_attempted": True,
         }
         self.assertFalse(api_hyper_rooms._goalkeeper_should_continue(verdict))
+
+    def test_human_work_room_never_replays_the_whole_turn(self):
+        with patch.object(api_hyper_rooms, "_goalkeeper_max_rounds", return_value=5):
+            self.assertEqual(
+                api_hyper_rooms._goalkeeper_rounds_for_turn("general", "work"), 1
+            )
+            self.assertEqual(
+                api_hyper_rooms._goalkeeper_rounds_for_turn("general", "runtime"), 5
+            )
 
     def test_report_repair_uses_a_neutral_editor_not_an_employee_persona(self):
         captured = {}

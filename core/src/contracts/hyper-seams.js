@@ -34,6 +34,7 @@ export const ROOM_TURN_FIELDS = [
   'callback_url', 'flyby_decision', 'flyby_spec', 'project_id', 'room_goal',
   'task_tag', 'campaign_id', 'campaign_brief', 'display_message', 'execution_context',
   'sim_mode', 'sim_agents', 'evo_mode', 'write_policy', 'agentic_model', 'language',
+  'execution_identity',
   'schema_version',
 ];
 
@@ -57,6 +58,28 @@ export function buildRoomTurnPayload(fields = {}) {
   }
   if (out.schema_version === undefined) out.schema_version = SEAM_SCHEMA_VERSION;
   return out;
+}
+
+/**
+ * Immutable identity for a human Work Room execution. The turn id is also the
+ * execution id: one persisted user turn owns one Director run and every event,
+ * work order, verification and repair produced by it.
+ */
+export function buildWorkRoomExecutionIdentity(fields = {}) {
+  const required = ['room_id', 'turn_id', 'user_id', 'org_id'];
+  const missing = required.filter((key) => !String(fields[key] || '').trim());
+  if (missing.length) {
+    throw new Error(`buildWorkRoomExecutionIdentity: missing required field(s): ${missing.join(', ')}`);
+  }
+  return Object.freeze({
+    contract: 'work-room-execution.v1',
+    execution_id: String(fields.turn_id),
+    room_id: String(fields.room_id),
+    turn_id: String(fields.turn_id),
+    user_id: String(fields.user_id),
+    org_id: String(fields.org_id),
+    epoch: 1,
+  });
 }
 
 /**

@@ -114,6 +114,22 @@ export async function handleInternalHyperTurnEventRoute({
   const body = await parseBody(req).catch(() => null);
   if (!body?.turn_id || !body?.event) return jsonResponse(res, { error: 'turn_id and event are required' }, 400);
 
+  if (body.execution_identity) {
+    const identity = body.execution_identity;
+    const turn = await prisma.hyperTurn.findUnique({
+      where: { id: body.turn_id },
+      select: { id: true, roomId: true, room: { select: { orgId: true, userId: true, roomMode: true } } },
+    });
+    const valid = identity.contract === 'work-room-execution.v1'
+      && identity.execution_id === turn?.id
+      && identity.turn_id === turn?.id
+      && identity.room_id === turn?.roomId
+      && identity.org_id === turn?.room?.orgId
+      && identity.user_id === turn?.room?.userId
+      && turn?.room?.roomMode === 'work';
+    if (!valid) return jsonResponse(res, { error: 'work_room_execution_identity_mismatch' }, 409);
+  }
+
   if (body.event.t === 'seal') {
     await sealTurn(prisma, body.turn_id, {
       status: body.event.status || 'complete',

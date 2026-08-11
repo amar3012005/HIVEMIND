@@ -25,7 +25,7 @@ import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
 import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
 import { provisionForPlan } from './vector/container-router.js';
-import { SEAM_SCHEMA_VERSION } from './contracts/hyper-seams.js';
+import { SEAM_SCHEMA_VERSION, buildWorkRoomExecutionIdentity } from './contracts/hyper-seams.js';
 import { memoryStorageLabel, memoryStorageModeFor } from './storage/memory-storage-policy.js';
 import { registerEmbeddedAmrOrg, unregisterEmbeddedAmrOrg } from './storage/amr-registry.js';
 import { PLANS } from './billing/plans.js';
@@ -613,11 +613,13 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
         let _sweepProjectId = null;
         let _sweepGoal = '';
         let _sweepRoomTag = 'general';
+        let _sweepRoomMode = 'work';
         try {
-          const _pr = await prisma.$queryRawUnsafe('SELECT project_id, goal, room_tag FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', t.roomId);
+          const _pr = await prisma.$queryRawUnsafe('SELECT project_id, goal, room_tag, room_mode FROM "hivemind"."hyper_rooms" WHERE id = $1::uuid', t.roomId);
           _sweepProjectId = _pr?.[0]?.project_id || null;
           _sweepGoal = _pr?.[0]?.goal || '';
           _sweepRoomTag = _pr?.[0]?.room_tag || 'general';
+          _sweepRoomMode = _pr?.[0]?.room_mode || 'work';
         } catch { /* org-wide re-kick is acceptable for recovery */ }
         _sweepKicked.add(t.id);
         console.warn('[hyper-sweeper] re-kicking stuck turn', t.id);
@@ -629,11 +631,15 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
             room_id: t.roomId, turn_id: t.id, user_id: room.userId, org_id: room.orgId,
             user_message: t.userMessage || '(continue)', participant_ids: room.participantIds || [], project_id: _sweepProjectId,
             room_goal: _sweepGoal,
+            room_mode: _sweepRoomMode,
             task_tag: `ROOM_${String(_sweepRoomTag).toUpperCase()}`,
             callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
           },
         }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));
       }
+      const { reconcileHyperTurnEventOutbox, reconcileStrandedWorkRoomTurns } = await import('./employees/hyper-rooms.js');
+      await reconcileHyperTurnEventOutbox(prisma);
+      await reconcileStrandedWorkRoomTurns(prisma);
     } catch (err) {
       // On a deployment where the HyperAgents tables were never migrated
       // (e.g. a self-host/managed box that doesn't run rooms), the query
@@ -1133,9 +1139,12 @@ function dispatchHyperRoomTurn(body) {
   // P1 seam contract: stamp the negotiated schema_version if the caller didn't (the
   // sidecar treats it as an optional hint, never a gate). Non-destructive — an already
   // stamped or unusual body passes through untouched, so no existing caller breaks.
-  const payload = (body && typeof body === 'object' && body.schema_version === undefined)
+  let payload = (body && typeof body === 'object' && body.schema_version === undefined)
     ? { ...body, schema_version: SEAM_SCHEMA_VERSION }
     : body;
+  if (payload?.room_mode === 'work' && !payload.execution_identity) {
+    payload = { ...payload, execution_identity: buildWorkRoomExecutionIdentity(payload) };
+  }
   return internalFetch(`${HYPER_SIDECAR_BASE_URL}/internal/hyper/room-turn`, {
     service: 'hm-employees',
     method: 'POST',

@@ -49,6 +49,107 @@ async def close_pool() -> None:
         _pool = None
 
 
+async def validate_work_room_execution(identity: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve and validate the canonical tenant-scoped Work Room turn.
+
+    The HTTP request is transport, not identity truth. Refuse stale or crossed
+    room/turn/org/user combinations before any model or worker can spend tokens.
+    """
+    pool = await init_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT t.id AS turn_id, t.room_id, r.org_id, r.user_id, r.room_mode
+              FROM hivemind.hyper_turns t
+              JOIN hivemind.hyper_rooms r ON r.id = t.room_id
+             WHERE t.id = $1::uuid
+            """,
+            str(identity.get("turn_id") or ""),
+        )
+    if not row:
+        raise ValueError("work_room_execution_turn_not_found")
+    expected = {
+        "execution_id": str(row["turn_id"]),
+        "turn_id": str(row["turn_id"]),
+        "room_id": str(row["room_id"]),
+        "org_id": str(row["org_id"]),
+        "user_id": str(row["user_id"]),
+    }
+    mismatched = [key for key, value in expected.items() if str(identity.get(key) or "") != value]
+    if str(row["room_mode"] or "") != "work":
+        mismatched.append("room_mode")
+    if mismatched:
+        raise ValueError("work_room_execution_identity_mismatch:" + ",".join(sorted(set(mismatched))))
+    return expected
+
+
+async def persist_work_room_progress(
+    *, turn_id: str, phase: str, identity: Dict[str, Any] | None = None,
+    candidate: Dict[str, Any] | None = None,
+    verification: Dict[str, Any] | None = None,
+    terminal_reason: str | None = None,
+) -> bool:
+    """Checkpoint a Work Room phase independently from callback delivery."""
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE hivemind.hyper_turns
+                   SET execution_phase = $2,
+                       execution_identity = CASE WHEN $3::jsonb = '{}'::jsonb THEN execution_identity ELSE $3::jsonb END,
+                       candidate_output = CASE WHEN $4::jsonb = '{}'::jsonb THEN candidate_output ELSE $4::jsonb END,
+                       verification_verdict = CASE WHEN $5::jsonb = '{}'::jsonb THEN verification_verdict ELSE $5::jsonb END,
+                       terminal_reason = COALESCE($6, terminal_reason),
+                       last_progress_at = now()
+                 WHERE id = $1::uuid
+                """,
+                turn_id, phase[:32], json.dumps(identity or {}, ensure_ascii=False),
+                json.dumps(candidate or {}, ensure_ascii=False),
+                json.dumps(verification or {}, ensure_ascii=False), terminal_reason,
+            )
+        return result.endswith("1")
+    except Exception as exc:  # additive migration may not be live yet
+        log.info("persist_work_room_progress unavailable (non-fatal): %s", exc)
+        return False
+
+
+async def persist_hyper_turn_outbox_event(turn_id: str, event: Dict[str, Any]) -> bool:
+    """Persist an event before transport so callback loss cannot lose truth."""
+    event_id = str(event.get("event_id") or "").strip()
+    if not event_id:
+        return False
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO hivemind.hyper_turn_event_outbox (turn_id, event_id, event)
+                VALUES ($1::uuid, $2, $3::jsonb)
+                ON CONFLICT (turn_id, event_id) DO NOTHING
+                """,
+                turn_id, event_id[:120], json.dumps(event, ensure_ascii=False),
+            )
+        return True
+    except Exception as exc:
+        log.info("persist_hyper_turn_outbox_event unavailable (non-fatal): %s", exc)
+        return False
+
+
+async def mark_hyper_turn_outbox_delivered(turn_id: str, event_id: str) -> bool:
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE hivemind.hyper_turn_event_outbox SET delivered_at = now()
+                     WHERE turn_id = $1::uuid AND event_id = $2""",
+                turn_id, event_id[:120],
+            )
+        return True
+    except Exception:
+        return False
+
+
 async def list_running_employees() -> List[Dict[str, Any]]:
     """Pull every active employee row — gateway iterates this on boot
     and on every reconcile tick."""

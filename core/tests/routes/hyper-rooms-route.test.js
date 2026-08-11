@@ -107,3 +107,27 @@ test('internal hyper turn event route rejects unauthorized callers', async () =>
   assert.equal(result.statusCode, 401);
   assert.equal(result.body.error, 'Unauthorized');
 });
+
+test('internal hyper turn event route rejects a crossed work room identity', async () => {
+  const result = await handleInternalHyperTurnEventRoute({
+    req: { headers: { 'x-api-key': 'k' } }, res: {},
+    prisma: { hyperTurn: { findUnique: async () => ({
+      id: 'turn-1', roomId: 'room-1',
+      room: { orgId: 'org-1', userId: 'user-1', roomMode: 'work' },
+    }) } },
+    jsonResponse: (_res, body, statusCode = 200) => ({ statusCode, body }),
+    parseBody: async () => ({
+      turn_id: 'turn-1',
+      execution_identity: {
+        contract: 'work-room-execution.v1', execution_id: 'turn-1', turn_id: 'turn-1',
+        room_id: 'stale-room', org_id: 'org-1', user_id: 'user-1', epoch: 1,
+      },
+      event: { t: 'line', content: 'must not append' },
+    }),
+    hasInternalApiKey: () => true,
+    appendTurnEvent: async () => { throw new Error('crossed identity must not append'); },
+    sealTurn: async () => {},
+  });
+  assert.equal(result.statusCode, 409);
+  assert.equal(result.body.error, 'work_room_execution_identity_mismatch');
+});

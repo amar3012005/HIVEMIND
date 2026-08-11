@@ -3,7 +3,8 @@ import crypto from 'crypto';
 const sessions = new Map();
 const states = new Map();
 let redisClientPromise = null;
-let redisConnectionAttempted = false;
+let redisRetryAfter = 0;
+const REDIS_RETRY_BACKOFF_MS = 1000;
 
 function buildRedisConfig(config) {
   if (config.redisUrl) {
@@ -34,7 +35,7 @@ async function loadRedis() {
 }
 
 export async function getRedisClient(config) {
-  if (redisConnectionAttempted && !redisClientPromise) {
+  if (!redisClientPromise && Date.now() < redisRetryAfter) {
     return null;
   }
 
@@ -44,7 +45,6 @@ export async function getRedisClient(config) {
   }
 
   if (!redisClientPromise) {
-    redisConnectionAttempted = true;
     redisClientPromise = (async () => {
       const Redis = await loadRedis();
       // ioredis auto-connects on construction. Calling .connect() again
@@ -62,12 +62,14 @@ export async function getRedisClient(config) {
       client.on('error', () => {});
       await client.connect();
       await client.ping();
+      redisRetryAfter = 0;
       return client;
     })().catch((err) => {
       // Log so silent failures show up in observability instead of just
       // returning null from every subsequent session lookup.
       try { console.warn('[session-store] Redis init failed:', err?.message || err); } catch {}
       redisClientPromise = null;
+      redisRetryAfter = Date.now() + REDIS_RETRY_BACKOFF_MS;
       return null;
     });
   }

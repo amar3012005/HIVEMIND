@@ -150,6 +150,57 @@ async def mark_hyper_turn_outbox_delivered(turn_id: str, event_id: str) -> bool:
         return False
 
 
+async def get_work_room_execution_profile(turn_id: str) -> Optional[Dict[str, Any]]:
+    """Read a turn's already-selected execution profile, if any.
+
+    Called BEFORE running the profile-selection classifier, so a resume, retry,
+    or reconnected turn re-enters the exact same specialist engine instead of
+    asking the classifier again — an LLM call is not guaranteed to repeat its
+    own answer, so "read before select" is what actually makes reselection
+    impossible, not just unlikely.
+    """
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT execution_profile FROM hivemind.hyper_turns WHERE id = $1::uuid",
+                turn_id,
+            )
+    except Exception as exc:  # additive migration may not be live yet
+        log.info("get_work_room_execution_profile unavailable (non-fatal): %s", exc)
+        return None
+    if not row or not row["execution_profile"]:
+        return None
+    value = row["execution_profile"]
+    return json.loads(value) if isinstance(value, str) else dict(value)
+
+
+async def persist_work_room_execution_profile(turn_id: str, profile: Dict[str, Any]) -> bool:
+    """Write a turn's selected execution profile EXACTLY ONCE.
+
+    The `WHERE execution_profile IS NULL` guard makes "never reclassify the
+    same turn" an atomic property of this single UPDATE, not an application
+    race between an earlier read and this write. Returns False (not an error)
+    when a profile was already persisted — the caller should read it back with
+    `get_work_room_execution_profile` rather than treat this as failure.
+    """
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE hivemind.hyper_turns
+                   SET execution_profile = $2::jsonb
+                 WHERE id = $1::uuid AND execution_profile IS NULL
+                """,
+                turn_id, json.dumps(profile, ensure_ascii=False),
+            )
+        return result.endswith("1")
+    except Exception as exc:  # additive migration may not be live yet
+        log.info("persist_work_room_execution_profile unavailable (non-fatal): %s", exc)
+        return False
+
+
 async def list_running_employees() -> List[Dict[str, Any]]:
     """Pull every active employee row — gateway iterates this on boot
     and on every reconcile tick."""

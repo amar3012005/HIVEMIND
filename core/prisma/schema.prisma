@@ -3206,6 +3206,12 @@ model HyperTurn {
   runtimeCheckpointSequence Int? @map("runtime_checkpoint_sequence")
   runtimeAttempt Int? @map("runtime_attempt")
   executionIdentity Json @default("{}") @map("execution_identity") @db.JsonB
+  // Which specialist engine this Work Room turn runs as, chosen ONCE by a Director
+  // classification call and never reselected — write-once at the DB level (see the
+  // 20260811100000_hyper_turn_execution_profile migration). Distinct from
+  // executionIdentity, which is the tamper-checked tenant envelope, not a routing
+  // decision; overwriting one with the other would silently break either guarantee.
+  executionProfile Json? @map("execution_profile") @db.JsonB
   executionPhase String @default("ACCEPTED") @map("execution_phase") @db.VarChar(32)
   candidateOutput Json @default("{}") @map("candidate_output") @db.JsonB
   verificationVerdict Json @default("{}") @map("verification_verdict") @db.JsonB

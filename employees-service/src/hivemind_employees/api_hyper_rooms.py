@@ -60,6 +60,10 @@ from .agents.agentscope_tools import (
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
 from .config import get_settings
 from .governor import kill_switch_active, kill_switch_reason, outbound_cap, turn_token_cap
+from .hyper.execution_profiles import (
+    DEFAULT_PROFILE_ID, get_execution_profile, default_execution_profile,
+    profile_registry_manifest,
+)
 from .db import (
     get_permanent_lead_id,
     get_permanent_skeptic_id,
@@ -87,6 +91,8 @@ from .db import (
     persist_work_room_progress,
     persist_hyper_turn_outbox_event,
     mark_hyper_turn_outbox_delivered,
+    get_work_room_execution_profile,
+    persist_work_room_execution_profile,
 )
 from .hivemind_client import (
     connector_exec_emulated,
@@ -3319,6 +3325,121 @@ def _derive_intended_output(user_message: str) -> str:
     return "answer"
 
 
+_PROFILE_SELECTION_SCHEMA: Dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "profile_id": {"type": "string", "enum": [p["profile_id"] for p in profile_registry_manifest()]},
+        "reason": {"type": "string"},
+    },
+    "required": ["profile_id", "reason"],
+}
+
+
+async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) -> Dict[str, Any]:
+    """Choose which existing specialist engine a human Work Room turn runs as.
+
+    A General Work Room's room_kind was frozen to "general" for its entire life —
+    resolve_turn_room_kind hard-returns "general" whenever room_mode == "work",
+    so a Work Room could never deterministically invoke the Campaign compiler or
+    the Outreach lifecycle contract; it could only improvise a report while
+    borrowing a method skill for flavor. self.room_kind gates ~40 branches in
+    engine.py (domain pack load, outreach_request population, the campaign
+    system contract, ...), so this ONE classification, done once per turn,
+    reactivates all of that already-working machinery — nothing downstream
+    needs to change to reuse it.
+
+    Semantic, not keyword-based: the model reads the raw request the same way a
+    human dispatcher would, not a substring match. A message that happens to
+    contain the word "lead" must not become Outreach on that basis alone — the
+    registry only carries (profile_id, room_kind, allowed_outputs, effect); the
+    model never sees provider names, connector implementations, playbook ids,
+    or authority state, none of which this decision may touch.
+
+    Fails to general.answer.v1 on ANY error — a broken classifier must degrade
+    to the safest, most permissive profile, never block or crash the turn.
+    """
+    manifest = profile_registry_manifest()
+    system = (
+        "Classify ONE human work request into exactly one execution profile from the "
+        "supplied registry. You are choosing WHAT KIND of specialist work this is, not "
+        "which tool, connector, or provider will run it — those are decided later by the "
+        "chosen specialist engine. Prefer general.answer.v1 whenever the request is a "
+        "question, a direct answer, or does not clearly justify a specialist engine. A "
+        "message merely containing a word like 'campaign' or 'lead' is NOT sufficient "
+        "grounds on its own — judge the actual intent of the request."
+    )
+    user = json.dumps({
+        "user_message": str(req.user_message or "")[:4000],
+        "room_goal": str(req.room_goal or "")[:500],
+        "connected_capabilities": list(conns)[:20],
+        "profile_registry": manifest,
+    }, ensure_ascii=False)
+    body = {
+        "model": os.environ.get("HYPER_PROFILE_SELECTOR_MODEL", "openai/gpt-oss-120b"),
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "temperature": 0.1, "max_tokens": 300,
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "execution_profile_selection", "schema": _PROFILE_SELECTION_SCHEMA, "strict": True,
+        }},
+    }
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    data: Optional[Dict[str, Any]] = None
+    try:
+        if api_key:
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+                resp = await client.post("https://api.groq.com/openai/v1/chat/completions",
+                                         headers=headers, json=body)
+                resp.raise_for_status()
+                data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log.info("[profile-select] groq unavailable turn=%s: %s", req.turn_id, exc)
+    if not data:
+        try:
+            data = await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
+        except Exception as exc:  # noqa: BLE001
+            log.info("[profile-select] openrouter fallback unavailable turn=%s: %s", req.turn_id, exc)
+    profile_id = ""
+    reason = ""
+    try:
+        text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        parsed = json.loads(text)
+        profile_id = str(parsed.get("profile_id") or "")
+        reason = str(parsed.get("reason") or "")[:500]
+    except Exception as exc:  # noqa: BLE001
+        log.info("[profile-select] parse failed turn=%s: %s", req.turn_id, exc)
+    profile = get_execution_profile(profile_id) or default_execution_profile()
+    if profile.id != profile_id:
+        reason = reason or "classifier unavailable or returned an unregistered profile — defaulted"
+    return {
+        "contract": "execution-profile.v1",
+        "profile_id": profile.id, "room_kind": profile.room_kind,
+        "allowed_outputs": list(profile.allowed_outputs), "effect": profile.effect,
+        "required_artifacts": list(profile.required_artifacts),
+        "review_policy": profile.review_policy, "reason": reason,
+        "selected_at": int(time.time() * 1000),
+    }
+
+
+async def _resolve_work_room_execution_profile(req: "RoomTurnRequest", conns: List[str]) -> Dict[str, Any]:
+    """Resume-safe wrapper: read the persisted choice before ever classifying again.
+
+    An LLM call is not guaranteed to repeat its own answer for the same input, so
+    "read before select" is what actually makes reselection impossible for a
+    resumed/retried/reconnected turn — not merely unlikely.
+    """
+    existing = await get_work_room_execution_profile(req.turn_id)
+    if isinstance(existing, dict) and existing.get("profile_id"):
+        return existing
+    selected = await _select_execution_profile(req, conns)
+    await persist_work_room_execution_profile(req.turn_id, selected)
+    # Someone else may have persisted first (concurrent dispatch of the same
+    # turn_id) — the write-once guard means our own write was a no-op then, so
+    # read back the winner rather than trust the value we just computed.
+    winner = await get_work_room_execution_profile(req.turn_id)
+    return winner if isinstance(winner, dict) and winner.get("profile_id") else selected
+
+
 async def _orchestrate_single_agent(
     req: "RoomTurnRequest",
     participants: List[Dict[str, Any]],
@@ -3334,8 +3455,25 @@ async def _orchestrate_single_agent(
     swarm — only the executor changes. Reuses _produce_output / _verify_and_emit /
     _register_and_emit_approvals so dead-end, recipient resolution and HITL are intact."""
     conns = [str(c) for c in (enabled_connectors or [])]
-    from .hyper.skills import resolve_turn_room_kind
-    _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
+    _work_room_profile: Optional[Dict[str, Any]] = None
+    if str(req.room_mode or "").strip().lower() == "work":
+        # A human Work Room's specialist engine is chosen ONCE per turn, semantically,
+        # by _select_execution_profile — never by keyword match, and never reselected on
+        # resume (see _resolve_work_room_execution_profile). Runtime/HQ rooms are
+        # UNTOUCHED below: they keep their exact existing playbook-selected identity.
+        try:
+            _work_room_profile = await _resolve_work_room_execution_profile(req, conns)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[profile-select] resolve failed turn=%s, defaulting to general: %s", req.turn_id, exc)
+        _room_kind = str((_work_room_profile or {}).get("room_kind") or "general")
+        if _work_room_profile:
+            await _emit_event(req.callback_url, req.turn_id, {
+                "t": "profile_selected", "profile_id": _work_room_profile.get("profile_id"),
+                "room_kind": _room_kind, "reason": _work_room_profile.get("reason"),
+            })
+    else:
+        from .hyper.skills import resolve_turn_room_kind
+        _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
     _m_recon = (getattr(req, "agentic_model", None)
                 or os.environ.get("HYPER_MODEL_RECON") or "deepseek/deepseek-v4-flash")
 
@@ -3939,7 +4077,48 @@ async def _orchestrate_single_agent(
         status = "escalated"
     elif _gv and not _gv.get("met"):
         status = "blocked"
-    if (req.room_mode or "").strip().lower() == "work" and final_text.strip():
+    # Operational profiles (outreach.prepare.v1, campaign.contract.v1, ...) declare
+    # required_artifacts and MUST NOT let a prose report substitute for them — that
+    # is the whole point of choosing that profile. Without this check, the line
+    # below unconditionally forced status="complete" for ANY work-mode turn with
+    # non-empty text, silently discarding even the pre-existing campaign-specific
+    # "blocked" verdict computed just above (result.get("room_kind") == "campaign"
+    # and not _campaign_result_accepted(result)) the moment campaign ran inside a
+    # Work Room. general.answer.v1 and every other non-operational profile are
+    # completely unaffected — this only tightens profiles that declared artifacts.
+    _operational_profile = bool(_work_room_profile) and bool(_work_room_profile.get("required_artifacts"))
+    _operational_incomplete = _operational_profile and (
+        (result.get("room_kind") == "campaign" and not _campaign_result_accepted(result))
+        or bool(_gv and not _gv.get("met"))
+    )
+    if (req.room_mode or "").strip().lower() == "work" and final_text.strip() and _operational_incomplete:
+        # Never silently pass on prose alone, and never strand the turn either —
+        # persist a real terminal state naming exactly what's missing.
+        status = "blocked"
+        await persist_work_room_progress(
+            turn_id=req.turn_id,
+            phase="RESPONDING",
+            identity=req.execution_identity or {},
+            candidate={
+                "contract": "work-room-candidate.v1",
+                "content": final_text,
+                "intended_output": intended_output,
+                "quality": "needs_evidence",
+            },
+            verification=_gv if isinstance(_gv, dict) else {},
+            terminal_reason="operational_evidence_incomplete",
+        )
+        await _emit({
+            "t": "completion_caveat",
+            "status": "needs_evidence",
+            "profile_id": _work_room_profile.get("profile_id"),
+            "required_artifacts": _work_room_profile.get("required_artifacts"),
+            "gaps": list((_gv or {}).get("gaps") or [])[:8],
+            "message": f"{_work_room_profile.get('profile_id')} requires persisted "
+                       f"{', '.join(_work_room_profile.get('required_artifacts') or [])} — a report alone cannot "
+                       "satisfy it. The prepared work and exact gaps are shown; nothing was silently accepted.",
+        })
+    elif (req.room_mode or "").strip().lower() == "work" and final_text.strip():
         # Human answers degrade honestly instead of disappearing. Runtime and
         # provider effects retain their strict, predicate-owned status above.
         caveated = bool(_gv) and (not _gv.get("met") or not _gv.get("verification_available", True))

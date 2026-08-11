@@ -56,6 +56,27 @@ def test_source_evidence_excludes_skills_and_agent_work_results():
     assert not any("NOT AUTHORIZED" in row for row in evidence)
 
 
+def test_synthesis_context_keeps_agent_claims_out_of_source_evidence():
+    director, _events = _director(
+        message="Compare two options",
+        company_brief="Singulance Labs provides HIVEMIND and TARA.",
+    )
+    director.blackboard = [
+        "RECALL[company]: GDPR-native operating layer",
+        "SKILL[evidence-first]: compare source lineage",
+        "WORK_RESULT[Analyst | compare]: prior pilot converted 38 percent",
+    ]
+
+    context = director._synthesis_context(8000)
+    source, remainder = context.split("METHOD GUIDANCE", 1)
+
+    assert "GDPR-native operating layer" in source
+    assert "provides HIVEMIND and TARA" in source
+    assert "38 percent" not in source
+    assert "38 percent" in remainder
+    assert "instructions only; never evidence" in context
+
+
 def test_light_intensity_is_a_bounded_director_contract(monkeypatch):
     director, _events = _director(message="Can we run a campaign for law firms?")
     payload = {

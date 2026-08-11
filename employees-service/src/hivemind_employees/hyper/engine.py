@@ -1389,6 +1389,24 @@ class Director:
             evidence.insert(0, "COMPANY CONTEXT[authoritative]: " + self.company_brief[:8000])
         return evidence
 
+    def _synthesis_context(self, source_limit: int) -> str:
+        """Separate factual sources from methods and unverified team analysis."""
+        sources = "\n".join(self._source_evidence_snapshot())[:source_limit]
+        methods = "\n".join(
+            str(item) for item in self.blackboard if str(item).startswith("SKILL[")
+        )[:4000]
+        analysis = "\n".join(
+            str(item) for item in self.blackboard if str(item).startswith("WORK_RESULT[")
+        )[:6000]
+        return (
+            "SOURCE EVIDENCE (the only factual authority):\n"
+            f"{sources or '(no source evidence was gathered)'}\n\n"
+            "METHOD GUIDANCE (instructions only; never evidence):\n"
+            f"{methods or '(none)'}\n\n"
+            "TEAM ANALYSIS (candidate reasoning only; verify every factual premise against SOURCE EVIDENCE):\n"
+            f"{analysis or '(none)'}"
+        )
+
     @staticmethod
     def _parse_work_order_envelope(raw: str) -> Optional[Dict[str, Any]]:
         if "hq-work-order.v2" not in str(raw or ""):
@@ -5547,7 +5565,7 @@ class Director:
             raise RuntimeError("Campaign Rooms may complete only through campaign__govern_delivery")
         depth = self.response_depth if self.response_depth in {"direct", "focused", "operating"} else "focused"
         board_limit = {"direct": 3000, "focused": 4500, "operating": 8000}[depth]
-        board = "\n".join(self.blackboard)[:board_limit] or "(no grounded facts were gathered)"
+        board = self._synthesis_context(board_limit)
         debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
                       if forced_debate else "")
         # Additional: a population simulation's report (if it ran) is folded in so the final
@@ -5622,6 +5640,10 @@ class Director:
                 "WEB, CONNECTOR, or deterministic domain-artifact entries on the board establish facts. "
                 "WORK_RESULT entries are employees' analysis and recommendations, never independent evidence: "
                 "use them to shape the answer only when their factual premise is independently present on the board. "
+                "Never copy a number, result, source, current asset, owner, customer, budget, timeline, or capability "
+                "from TEAM ANALYSIS unless the same claim appears in SOURCE EVIDENCE. In requested fact-versus-assumption "
+                "formats, the observed/fact column may contain SOURCE EVIDENCE only; place plausible but unverified ideas "
+                "in the assumption column without presenting them as current company or market facts. "
                 "An absence of a competitor, proof, source, metric, or capability in the current material is a "
                 "gap, not proof that none exists.\nCLAIM SAFETY: never state or imply guarantees, legal compliance "
                 "approval, certification, exclusivity, market white space, performance improvement, a date, an owner, "

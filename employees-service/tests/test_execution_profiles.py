@@ -56,9 +56,23 @@ def test_get_execution_profile_unknown_id_returns_none_not_a_default():
 def test_registry_manifest_never_leaks_engine_internals_to_the_selector():
     # "The model never sees provider names, connector implementations, playbook ids, or
     # authority state" — enforced structurally: the manifest can only ever contain the
-    # four fields below, because profile_registry_manifest() builds them by hand.
+    # five fields below, because profile_registry_manifest() builds them by hand.
     for row in profile_registry_manifest():
-        assert set(row.keys()) == {"profile_id", "room_kind", "allowed_outputs", "effect"}
+        assert set(row.keys()) == {"profile_id", "room_kind", "allowed_outputs", "effect", "when"}
+
+
+def test_every_profile_declares_a_nonempty_disambiguating_when():
+    # Regression for the confirmed misroute: "8 feature requests, prioritize 3" landed on
+    # research.decision.v1 instead of product.artifact.v1 because the selector saw only
+    # bare id/room_kind/allowed_outputs/effect — no natural-language trigger to tell
+    # "decision" and "product" apart. `when` is the ONLY disambiguating signal the
+    # selector model gets; a profile with an empty one is exactly as blind as before.
+    for profile_id, profile in EXECUTION_PROFILES.items():
+        assert profile.when.strip(), f"{profile_id} has no `when` — selector cannot disambiguate it"
+
+    manifest_by_id = {row["profile_id"]: row["when"] for row in profile_registry_manifest()}
+    for profile_id, profile in EXECUTION_PROFILES.items():
+        assert manifest_by_id[profile_id] == profile.when, f"{profile_id}'s when did not survive into the manifest"
 
 
 def test_eleven_profiles_cover_every_requested_domain():

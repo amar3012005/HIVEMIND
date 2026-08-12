@@ -46,7 +46,7 @@ export function getAuthConfigId(toolkitSlug) {
   return authConfigMap()[toolkitSlug] || null;
 }
 
-async function _composioRequest(method, path, body, { retries = 2 } = {}) {
+async function _composioRequest(method, path, body, { retries = 2, timeoutMs = 15_000 } = {}) {
   if (!COMPOSIO_API_KEY) {
     throw new Error('Composio is not configured on this deployment (COMPOSIO_API_KEY missing)');
   }
@@ -60,7 +60,7 @@ async function _composioRequest(method, path, body, { retries = 2 } = {}) {
           'Content-Type': 'application/json',
         },
         body: body ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const text = await res.text().catch(() => '');
       let parsed;
@@ -89,7 +89,17 @@ function composioDelete(path) { return _composioRequest('DELETE', path); }
  * Returns the number of accounts removed.
  */
 export async function disconnectToolkit(orgId, toolkitSlug) {
-  const accounts = await listConnectedAccounts(orgId);
+  const accountData = await _composioRequest(
+    'GET',
+    `/api/v3.1/connected_accounts?user_ids=${encodeURIComponent(orgId)}`,
+    null,
+    { retries: 0, timeoutMs: 3_000 },
+  );
+  const accounts = (accountData?.items || []).map((item) => ({
+    id: item.id,
+    toolkit: item.toolkit?.slug,
+    status: item.status,
+  }));
   const rows = accounts.filter((a) => a.toolkit === toolkitSlug);
   let removed = 0;
   for (const row of rows) {
@@ -318,10 +328,10 @@ function collectToolSlugs(value, prefixes, output = new Set()) {
 }
 
 async function executeSessionMeta(sessionId, slug, args) {
-  const result = await composioPost(`/api/v3/tool_router/session/${encodeURIComponent(sessionId)}/execute_meta`, {
+  const result = await _composioRequest('POST', `/api/v3/tool_router/session/${encodeURIComponent(sessionId)}/execute_meta`, {
     slug,
     arguments: { ...(args || {}), session_id: sessionId },
-  });
+  }, { retries: 0, timeoutMs: 6_500 });
   if (result?.error) throw new Error(typeof result.error === 'string' ? result.error : JSON.stringify(result.error));
   return result;
 }
@@ -341,13 +351,13 @@ export async function getToolRouterSession(orgId, toolkits) {
     if (!account) throw new Error(`No active Composio account for ${toolkit}`);
     connectedAccounts[toolkit] = account.id;
   }
-  const data = await composioPost('/api/v3/tool_router/session', {
+  const data = await _composioRequest('POST', '/api/v3/tool_router/session', {
     user_id: orgId,
     toolkits: { enable: enabled },
     connected_accounts: connectedAccounts,
     manage_connections: { enable: false },
     workbench: { enable: false },
-  });
+  }, { retries: 0, timeoutMs: 5_000 });
   const value = { id: data?.session_id, toolkits: enabled, connectedAccounts };
   if (!value.id) throw new Error('Composio Session did not return a session_id');
   TOOL_ROUTER_SESSION_CACHE.set(key, { at: Date.now(), value });

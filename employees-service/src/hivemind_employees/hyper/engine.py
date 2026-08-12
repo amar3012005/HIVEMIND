@@ -862,16 +862,28 @@ async def make_journal_entry(user_message: str, final_text: str, *,
                 slug = next((str(p.get("slug") or p.get("id") or "") for p in (participants or [])
                              if str(p.get("name") or p.get("slug") or "") == name), "")
                 agents.append({"slug": slug, "name": name, "contribution": contribution[:260]})
+        # A truthy check alone let a degenerate LLM response ("...", "N/A", a
+        # single word) through untouched — confirmed live 2026-08-12: this
+        # exact call returned swarm_summary="..." for a "what did we learn"
+        # turn, permanently writing a content-free entry that then polluted
+        # every later turn's journal context (the compounding failure: once
+        # one entry is garbage, the room's own history looks empty even
+        # though the write itself "succeeded"). Require a real minimum
+        # length — not a content check (too fragile), just enough to reject
+        # ellipsis/placeholder-shaped non-answers.
+        _summary = str(data.get("swarm_summary") or "").strip()
+        if len(_summary) < 15:
+            _summary = ""
         entry = {
             "turn_id": str(turn_id or ""),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": str(status or "complete"),
             "asked": str(data.get("asked") or user_message).strip()[:240],
-            "swarm_summary": str(data.get("swarm_summary") or final_text).strip()[:520],
+            "swarm_summary": (_summary or str(final_text or "")).strip()[:520],
             "agents": agents[:5],
             "final_report_excerpt": str(final_text or "").strip()[:1800],
         }
-        return entry if entry["swarm_summary"] else _fallback()
+        return entry if len(entry["swarm_summary"]) >= 15 else _fallback()
     except Exception as exc:  # noqa: BLE001
         log.warning("[hyper-engine] journal entry failed (non-fatal): %s", exc)
         return _fallback()

@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import json
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from agentscope.agent import ReActAgent
 from agentscope.formatter import (
@@ -346,6 +346,41 @@ def _resolve_formatter(provider: str) -> FormatterBase:
     return OpenAIMultiAgentFormatter()
 
 
+_DEFAULT_HIVEMIND_TOOLS = [
+    "hivemind_recall",
+    "hivemind_list_memories",
+    "hivemind_get_memory",
+    "hivemind_traverse_graph",
+    "hivemind_query_with_ai",
+    "hivemind_save_memory",
+]
+
+
+def resolve_agent_tool_names(configured_tools: Optional[List[str]]) -> List[str]:
+    """Decide which tools an agent gets, given its employee_row['tools'] config.
+
+    HIVEMIND is the company brain — recall is not an opt-in per-employee
+    setting, it's core infrastructure. A real employee whose configured
+    `tools` list happens to omit hivemind_recall (e.g. a room agent set up
+    with just a connector like ["gmail_search"]) was silently losing ALL
+    company-memory access, because the old code was a bare `or` that
+    discarded the wide default the instant ANY tools list was configured.
+    Confirmed live 2026-08-12: a real turn asking to prioritize named
+    HIVEMIND/TARA/HYPERAGENTS/RUNTIME features issued zero recall queries and
+    the lead agent had no recall tool to reach for as a fallback.
+
+    Sentinel toolless agents (the verifier's ["_verify_noop"], the planner's
+    ["_plan_noop"]) are left exactly as configured — they deliberately run
+    with NO tools to keep judgment/planning pure; force-injecting recall
+    there would reintroduce the tool-call drift they exist to prevent.
+    """
+    if not configured_tools:
+        return list(_DEFAULT_HIVEMIND_TOOLS)
+    if any(str(t).startswith("_") for t in configured_tools):
+        return list(configured_tools)
+    return list(dict.fromkeys(list(configured_tools) + ["hivemind_recall"]))
+
+
 def build_react_agent(
     employee_row: dict,
     hivemind_api_key: str,
@@ -434,16 +469,11 @@ def build_react_agent(
         "only `list_prospects` first when you need a number you don't have. Use a call only when it "
         "clearly beats an email."
     ).strip()
-    # Default fallback is wider than before — gives a fresh employee
-    # the full HIVEMIND reach. Hyper-room agents override via merged_emp.
-    requested_tools = employee_row.get("tools") or [
-        "hivemind_recall",
-        "hivemind_list_memories",
-        "hivemind_get_memory",
-        "hivemind_traverse_graph",
-        "hivemind_query_with_ai",
-        "hivemind_save_memory",
-    ]
+    # Default fallback is wider than before — gives a fresh employee the full
+    # HIVEMIND reach; a configured-but-incomplete list still gets recall
+    # merged in (see resolve_agent_tool_names). Hyper-room agents override
+    # via merged_emp.
+    requested_tools = resolve_agent_tool_names(employee_row.get("tools"))
     enabled_tools = list(requested_tools)
 
     provider = employee_row.get("llm_provider") or "anthropic"

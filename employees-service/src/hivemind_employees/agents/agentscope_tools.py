@@ -1495,10 +1495,20 @@ def build_hivemind_toolkit(
 
     if "hivemind_recall" in enabled_tool_names:
         def recall(query: str, max_memories: int = 5) -> ToolResponse:
-            """Recall memories from HIVEMIND knowledge graph.
+            """Search HIVEMIND — the company's memory / knowledge graph. This is the
+            company brain: prior decisions, product and feature context, past
+            conversations, documents, named people and entities the org already
+            knows about. IMPORTANT — call this whenever the task names a specific
+            product, feature, decision, person, or topic, even if you think you
+            already have enough context from the current conversation alone. A
+            quick recall check beats reasoning from assumption or from training
+            knowledge about what a product "probably" does — this org's own
+            record is the authority on its own products. Call it more than once
+            with different focused queries when the task spans several distinct
+            topics or named entities.
 
             Args:
-                query: What to search for.
+                query: short, focused search phrase — one topic/entity per call.
                 max_memories: Max memories to return (default 5).
             """
             with _client(api_key, user_id, org_id) as c:

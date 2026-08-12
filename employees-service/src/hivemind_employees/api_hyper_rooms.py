@@ -2499,24 +2499,6 @@ def _unsupported_specific_claims(final_text: str, evidence: List[str], user_mess
     return list(dict.fromkeys(unsupported))[:10]
 
 
-def _remove_rejected_lines(final_text: str, unsupported_claims: List[str]) -> str:
-    """Remove exact verifier-rejected lines without regenerating the answer."""
-    rejected = {
-        re.sub(r"\s+", " ", str(item)).strip().casefold()
-        for item in unsupported_claims
-        if str(item).strip()
-    }
-    if not rejected:
-        return final_text
-    kept: List[str] = []
-    for line in str(final_text or "").splitlines():
-        normalized = re.sub(r"\s+", " ", line).strip().casefold()
-        if normalized and any(normalized == item or normalized in item or item in normalized for item in rejected):
-            continue
-        kept.append(line)
-    return "\n".join(kept).strip()
-
-
 def _md_table_to_rows(text: str) -> List[List[str]]:
     """Parse the first markdown table in `text` into rows (skips the |---| rule)."""
     rows: List[List[str]] = []
@@ -2995,70 +2977,6 @@ async def _verify_and_emit(
              req.room_id, verdict["met"], verdict["artifact_ok"],
              verdict["assignments_ok"], verdict["grounded_ok"], len(verdict["gaps"]))
     return verdict
-
-
-async def _repair_final_text(
-    req: "RoomTurnRequest",
-    lead: Dict[str, Any],
-    *,
-    final_text: str,
-    verdict: Dict[str, Any],
-    blackboard: Optional[Dict[str, Any]] = None,
-    model: Optional[str] = None,
-) -> str:
-    """Rewrite only a verifier-flagged report; never regenerate the whole turn.
-
-    The Director's synthesis is the product. A second model call is warranted
-    only when the independent verifier finds an unsupported assertion. It gets
-    the actual evidence slice and the exact verdict, then removes or clearly
-    relabels unsafe claims without inventing a replacement.
-    """
-    facts = [str(item)[:400] for item in ((blackboard or {}).get("facts") or [])][:24]
-    unsafe = [str(item)[:300] for item in (verdict.get("unsupported_claims") or []) if str(item).strip()][:10]
-    prompt = (
-        "You are the final answer editor. Rebuild the answer from the TASK and EVIDENCE below; the rejected draft is "
-        "intentionally withheld so none of its unsupported premises can leak into your answer. Return ONLY the useful "
-        "finished answer. Preserve the requested format, strategy, and recommendations only when supported by EVIDENCE. "
-        "DELETE every unsupported number, date, named person, "
-        "performance result, source, customer, certification, or market claim. Never make an unsafe factual claim "
-        "acceptable merely by appending a disclaimer. Do not replace it with a different fact. When comparative "
-        "outcome evidence is absent, say that no verified comparison exists and base the recommendation on explicit "
-        "operational tradeoffs. Future measures may be qualitative or labelled 'proposed validation target', but do "
-        "not invent a numeric threshold. Use role labels instead of invented owners. Do not introduce new numbers, "
-        "dates, sources, guarantees, certifications, competitors, or market claims.\n\n"
-        f"VERIFIER GAPS:\n{json.dumps(verdict.get('gaps') or [], ensure_ascii=False)}\n"
-        f"UNSAFE CLAIMS:\n{json.dumps(unsafe, ensure_ascii=False)}\n"
-        f"EVIDENCE AVAILABLE:\n{json.dumps(facts, ensure_ascii=False)}\n\n"
-        f"TASK:\n{str(getattr(req, 'user_message', '') or '')[:6000]}"
-    )
-    try:
-        boot = {item["id"]: item for item in await fetch_bootstrap()}
-        boot_emp = boot.get(lead.get("id"), {}) or {}
-        repair_emp = {
-            **lead,
-            "tools": ["_verify_noop"],
-            "connectors": [],
-            "persona": "A neutral final-report editor. Revise the supplied report directly; never critique it or role-play.",
-            "hyper": None,
-            "active_prompt_version": None,
-            "max_iters": 1,
-            "model": model or "deepseek/deepseek-v4-flash",
-            "llm_provider": "openrouter",
-        }
-        agent = build_react_agent(
-            repair_emp, boot_emp.get("api_key") or "",
-            user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
-        )
-        repaired = (_msg_to_text(await agent(Msg(name="user", content=prompt, role="user"))) or "").strip()
-        return repaired if len(repaired) >= 80 else ""
-    except Exception as exc:  # noqa: BLE001 — verification status handles an unavailable repair path
-        log.warning("[quality-repair] failed: %s", exc)
-        return ""
-
-
-def _should_commit_quality_repair(verdict: Optional[Dict[str, Any]]) -> bool:
-    """A rewrite replaces the original candidate only after grounding passes."""
-    return bool(isinstance(verdict, dict) and verdict.get("grounded_ok"))
 
 
 # Dedicated doc-authoring guide injected into the LLM at production time — the
@@ -3994,62 +3912,22 @@ async def _orchestrate_single_agent(
                         "created_at": int(time.time() * 1000),
                     },
                 )
+            # Single governance pass — one judge call decides met/gaps, full stop.
+            # This used to cascade into a rewrite pass + a recheck of that rewrite
+            # (up to 3 verify-shaped LLM calls, and before an earlier fix, up to 6
+            # across two repair rounds). The empirical 12-turn robustness battery
+            # showed the extra rounds didn't reliably improve anything — one run's
+            # recheck already said grounded_ok=true and a further round still fired
+            # anyway. A judge that finds a real gap should SAY SO (the existing
+            # completion_caveat/gaps display already does this honestly), not
+            # trigger a second LLM rewriting text it never saw the user's actual
+            # bar for. `_verify_and_emit` already stores its verdict onto
+            # `plan["verification"]` as a side effect — nothing else to do here.
             _quality_board = {"hit_count": gather_count, "facts": result.get("gather_facts") or []}
-            _quality_verdict = await _verify_and_emit(
+            await _verify_and_emit(
                 req, lead, final_text=final_text, blackboard=_quality_board, model=_m_recon,
                 company_name=_company_name, company_context_missing=_company_ctx_missing,
             )
-            # Repair only a real, available quality finding. A verifier outage is
-            # surfaced as review-required rather than producing a speculative edit.
-            if (_quality_verdict and _quality_verdict.get("verification_available")
-                    and not _quality_verdict.get("grounded_ok")):
-                original_text = final_text
-                repaired = await _repair_final_text(
-                    req, lead, final_text=final_text, verdict=_quality_verdict,
-                    blackboard=_quality_board, model=_m_recon,
-                )
-                if repaired:
-                    # ONE repair + ONE recheck, full stop — never chain further.
-                    # This used to cascade up to 3 repair/recheck rounds (a second
-                    # repair, then a line-sanitize pass, each with its own recheck
-                    # call): up to 6 sequential LLM calls per turn, and the empirical
-                    # 5x-repeat probe showed the extra rounds didn't reliably improve
-                    # anything — one run's recheck already said grounded_ok=true and
-                    # a further round still fired (driven by the now-removed
-                    # deterministic company-name gate flipping grounded_ok back to
-                    # false after the fact). One governance pass, accept its verdict.
-                    rechecked = await _verify_and_emit(
-                        req, lead, final_text=repaired, blackboard=_quality_board, model=_m_recon,
-                        company_name=_company_name, company_context_missing=_company_ctx_missing,
-                    )
-                    if isinstance(rechecked, dict):
-                        rechecked["repair_attempted"] = True
-                        plan = _PLAN_BY_TURN.get(req.turn_id)
-                        if _should_commit_quality_repair(rechecked):
-                            final_text = repaired
-                            if isinstance(plan, dict):
-                                plan["verification"] = rechecked
-                            await _emit({
-                                "t": "quality_repair",
-                                "reason": "unsupported_claims",
-                                "claims_removed": len(_quality_verdict.get("unsupported_claims") or []),
-                                "message": "The response was rewritten to remove unsupported claims and the repair passed verification.",
-                            })
-                        else:
-                            # Prefer the safer edited candidate over restoring
-                            # claims already proven unsupported. Its remaining
-                            # verifier gaps stay visible to the user.
-                            final_text = repaired or original_text
-                            retained = dict(rechecked)
-                            retained["repair_attempted"] = True
-                            retained["repair_rejected"] = True
-                            if isinstance(plan, dict):
-                                plan["verification"] = retained
-                            await _emit({
-                                "t": "quality_repair_rejected",
-                                "reason": "repair_did_not_pass_grounding",
-                                "message": "The safer edited response was retained with its remaining evidence gaps.",
-                            })
         except Exception as exc:  # noqa: BLE001
             log.warning("[single] verify failed: %s", exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side

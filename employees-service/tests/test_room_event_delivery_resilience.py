@@ -86,52 +86,6 @@ class RoomEventDeliveryResilienceTest(unittest.TestCase):
                 api_hyper_rooms._goalkeeper_rounds_for_turn("general", "runtime"), 5
             )
 
-    def test_report_repair_uses_a_neutral_editor_not_an_employee_persona(self):
-        captured = {}
-
-        async def _bootstrap():
-            return [{"id": "lead-1", "api_key": "test-key", "hyper": {"persona_contract": "critic"}}]
-
-        async def _agent(_message):
-            return SimpleNamespace(content=(
-                "## Revised report\nGrounded and directly usable. This revision preserves the supported "
-                "recommendation while removing the unsupported assertion."
-            ))
-
-        def _build(employee, *_args, **_kwargs):
-            captured.update(employee)
-            return _agent
-
-        request = SimpleNamespace(user_id="user", org_id="org", project_id=None)
-        lead = {"id": "lead-1", "slug": "skeptic", "persona": "Write a risk critique."}
-        with patch.object(api_hyper_rooms, "fetch_bootstrap", _bootstrap), patch.object(
-            api_hyper_rooms, "build_react_agent", _build
-        ):
-            repaired = asyncio.run(api_hyper_rooms._repair_final_text(
-                request,
-                lead,
-                final_text="Unsupported report",
-                verdict={"gaps": ["unsupported claim"], "unsupported_claims": ["guaranteed"]},
-                blackboard={"facts": ["Verified fact"]},
-                model="deepseek/deepseek-v4-flash",
-            ))
-
-        self.assertIn("Revised report", repaired)
-        self.assertIsNone(captured["active_prompt_version"])
-        self.assertIsNone(captured["hyper"])
-        self.assertIn("neutral final-report editor", captured["persona"].lower())
-
-    def test_failed_quality_repair_cannot_replace_original_candidate(self):
-        self.assertFalse(api_hyper_rooms._should_commit_quality_repair({
-            "met": False,
-            "grounded_ok": False,
-            "repair_attempted": True,
-        }))
-        self.assertTrue(api_hyper_rooms._should_commit_quality_repair({
-            "met": True,
-            "grounded_ok": True,
-        }))
-
     def test_unsourced_numeric_claims_are_rejected_deterministically(self):
         unsupported = api_hyper_rooms._unsupported_specific_claims(
             "Pilot for 4 weeks with 30 enterprises and a 38% target.",
@@ -146,18 +100,13 @@ class RoomEventDeliveryResilienceTest(unittest.TestCase):
         )
         self.assertEqual(allowed, [])
 
-    def test_rejected_lines_are_removed_without_rewriting_the_answer(self):
-        text = "Supported recommendation.\nPilot for 4 weeks with a 38% target.\nUseful next step."
-        cleaned = api_hyper_rooms._remove_rejected_lines(
-            text, ["Pilot for 4 weeks with a 38% target."],
-        )
-        self.assertEqual(cleaned, "Supported recommendation.\nUseful next step.")
-
-    def test_quality_repair_does_not_reinject_the_rejected_draft(self):
-        source = inspect.getsource(api_hyper_rooms._repair_final_text)
-        self.assertIn("the rejected draft is", source)
-        self.assertIn("intentionally withheld", source)
-        self.assertNotIn("REPORT TO REPAIR", source)
+    def test_single_governance_pass_never_triggers_a_repair_rewrite(self):
+        # The verify->repair->recheck cascade (up to 3 verify-shaped LLM calls per
+        # turn) was removed in favor of one judge call whose verdict is trusted
+        # as-is; a real gap is surfaced via completion_caveat, never rewritten.
+        source = inspect.getsource(api_hyper_rooms._orchestrate_single_agent)
+        self.assertNotIn("_repair_final_text", source)
+        self.assertNotIn("quality_repair", source)
 
 
 if __name__ == "__main__":

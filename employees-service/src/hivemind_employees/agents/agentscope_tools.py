@@ -1205,6 +1205,84 @@ def register_experience_tool(tk: Toolkit, org_id: Optional[str], slug: Optional[
         log.warning("register_experience_tool failed: %s", exc)
 
 
+def register_delegate_to_tool(
+    tk: Toolkit,
+    participants: List[Dict[str, Any]],
+    build_sub_agent: Any,  # async Callable[[Dict[str, Any]], ReActAgent]
+    max_delegations: int,
+) -> None:
+    """Register `delegate_to` — hand off ONE bounded subtask to a real
+    teammate's OWN agent (their persona, their tools/connectors, their own
+    reasoning loop), instead of faking their voice with a single-shot text
+    call. `build_sub_agent` is injected by the caller (api_hyper_rooms.py
+    owns `_build_agent_for_room`) so this module never imports upward and
+    stays free of a circular dependency.
+
+    Bounded by `max_delegations` per turn — a runaway plan can't fan out an
+    unbounded number of real sub-agent loops, each its own LLM+tool cost.
+    """
+    roster = {
+        str(p.get("slug") or p.get("id")): p
+        for p in (participants or []) if p.get("slug") or p.get("id")
+    }
+    if not roster:
+        return
+    state = {"used": 0}
+    roster_line = ", ".join(
+        f"{slug} ({p.get('_lane') or p.get('role_archetype') or 'Communicator'})"
+        for slug, p in roster.items()
+    )
+
+    async def delegate_to(employee_slug: str, subtask: str) -> ToolResponse:
+        """Delegate ONE bounded subtask to a specific real teammate, who
+        works it with THEIR OWN persona and tool access (recall, connectors)
+        in their own reasoning loop, and returns their result to you. Use
+        this when a subtask genuinely needs a different specialist's
+        expertise or tool grants — not for trivial steps you can do
+        yourself, and not to simulate a debate. `employee_slug` MUST be one
+        of this room's real participants (see the roster below); `subtask`
+        should be a clear, bounded ask — not the whole task.
+
+        Available teammates (slug — lane): {roster}
+        """
+        if state["used"] >= max_delegations:
+            return _tool_response_text(
+                f"Delegation budget exhausted ({max_delegations} max this turn) — "
+                "handle the remaining work yourself or wrap up with what you have."
+            )
+        target = roster.get(str(employee_slug or "").strip())
+        if not target:
+            return _tool_response_text(
+                f"No teammate named '{employee_slug}' in this room. Real teammates: {roster_line}"
+            )
+        state["used"] += 1
+        try:
+            sub_agent = await build_sub_agent(target)
+            from agentscope.message import Msg  # local import — avoid a module-load-order dependency
+            reply = await sub_agent(Msg("user", str(subtask or "")[:2000], role="user"))
+            content = reply.content if reply is not None else None
+            if isinstance(content, list):
+                text = "\n".join(
+                    (blk.get("text") or "") if isinstance(blk, dict) else str(blk)
+                    for blk in content
+                ).strip()
+            else:
+                text = str(content or "").strip()
+            return _tool_response_text(
+                text or f"({target.get('name') or employee_slug} returned no result)",
+                metadata={"delegated_to": employee_slug},
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed delegation never kills the lead's loop
+            log.warning("delegate_to(%s) failed: %s", employee_slug, exc)
+            return _tool_response_text(f"Delegation to {employee_slug} failed: {str(exc)[:200]}")
+
+    delegate_to.__doc__ = (delegate_to.__doc__ or "").format(roster=roster_line)
+    try:
+        tk.register_tool_function(delegate_to)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("register_delegate_to_tool failed: %s", exc)
+
+
 def build_hivemind_toolkit(
     api_key: str,
     enabled_tool_names: List[str],

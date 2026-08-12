@@ -4103,13 +4103,23 @@ class Director:
                 "or key finding, the evidence used, and any unresolved gap. Use short bullets, no tables, no "
                 "implementation plan, and no repeated brief. The final synthesizer produces the requested response or artifact. Do not "
                 "discuss process, do not claim external actions were taken, and mark unsupported statements UNVERIFIED."
+                # Confirmed live 2026-08-13: a "Discover GDPR-sensitive prospects"
+                # work order invented two named people (with fabricated emails)
+                # and cited a nonexistent "ECB supervisory contacts list (public
+                # PDF, 2026-07)" — "mark unsupported UNVERIFIED" did not stop a
+                # specific fake person + fake source from being written as fact.
+                " NEVER invent a named person, job title, email address, phone number, or a specific "
+                "document/registry/list as a source unless that EXACT contact or document is present in "
+                "the EVIDENCE BOARD below. If the evidence board does not contain a real contact, say plainly "
+                "'no verified contact found in gathered evidence' — do not manufacture one, even hedged."
             )
             try:
                 response = await self._groq([
                     {"role": "system", "content": (
                         _now_block() + f"You are {persona_name}, a {lane}. {persona}\n"
                         "You are completing one bounded work order for your Room. Work from the supplied evidence "
-                        "and selected methods only. Be concise, concrete, and produce the actual work product.")},
+                        "and selected methods only — never invent a fact, contact, or source not present in that "
+                        "evidence. Be concise, concrete, and produce the actual work product.")},
                     {"role": "user", "content": f"{prompt}\n\nEVIDENCE BOARD:\n{context}"},
                 ], model=self.persona_model, temp=0.35, bucket="worker", max_tokens=220)
                 text = _strip_cot((response or {}).get("content") or "").strip()

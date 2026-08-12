@@ -1309,6 +1309,7 @@ class Director:
         self.blackboard: List[str] = []
         self._retained_prospect_rows: List[Dict[str, Any]] = []
         self.transcript: List[Dict[str, Any]] = []
+        self._debate_disagreement_note: str = ""
         self.tokens = 0
         self.gather_count = 0
         self._round_seq = 0
@@ -4185,8 +4186,22 @@ class Director:
                 continue
             self.transcript.append({"round": 1, "agent": c["name"], "text": c["text"]})
 
-        # Round 2 — react/challenge each other on the shared board
+        # Round 2 gate — a REAL moderator judgment, not a fixed count. This used
+        # to run round 2 unconditionally whenever the caller allowed up to 2
+        # rounds; now a lightweight structured judge (AgentScope multi-agent-
+        # debate pattern: a moderator scores each round and decides whether more
+        # debate would change the outcome) checks round 1 first. Fail-open: any
+        # judge error or unparseable reply defaults to running round 2 exactly
+        # like the old behavior — a judge outage can only ADD a round, never
+        # silently skip real debate.
+        _judge = {"sufficient": False, "disagreement_note": "", "judged": False}
+        _skip_round_2 = False
         if rounds >= 2:
+            _judge = await self._judge_debate_round(topic, r1)
+            _skip_round_2 = bool(_judge.get("judged") and _judge.get("sufficient"))
+
+        # Round 2 — react/challenge each other on the shared board
+        if rounds >= 2 and not _skip_round_2:
             self._round_seq += 1
             await self.emit({"t": "round_start", "round": self._round_seq, "max_rounds": rounds})
             # P7: each expert reacts to the VERBATIM round-1 messages of the OTHERS
@@ -4207,11 +4222,55 @@ class Director:
                     continue
                 self.transcript.append({"round": 2, "agent": c["name"], "text": c["text"]})
 
-        await self.emit({"t": "swarm_verdict", "round": self._round_seq, "converged": True})
+        self._debate_disagreement_note = _judge.get("disagreement_note") or ""
+        await self.emit({
+            "t": "swarm_verdict", "round": self._round_seq, "converged": True,
+            "skipped_round_2": _skip_round_2,
+            "disagreement_note": self._debate_disagreement_note,
+        })
         return json.dumps({
             "rounds": rounds,
             "transcript": [{"r": x["round"], "agent": x["agent"], "said": x["text"][:400]} for x in self.transcript],
         })
+
+    async def _judge_debate_round(self, topic: str, round_transcript: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Moderator-style structured judge (AgentScope multi-agent-debate
+        pattern), run once after round 1. Decides whether the stances already
+        converge or clearly diverge enough that a second peer-rebuttal round
+        would not change the outcome, and captures the real disagreement for
+        the aggregator to cite — replacing the old hardcoded converged=True
+        that carried no actual signal. Fail-open on any error: caller treats
+        judged=False as "run round 2", matching the pre-existing behavior."""
+        lines = "\n".join(f"{c['name']}: {c['text'][:600]}" for c in round_transcript if not c.get("empty"))
+        if not lines:
+            return {"sufficient": False, "disagreement_note": "", "judged": False}
+        prompt = (
+            "You are the room's debate moderator. The team just gave independent stances "
+            f"on: {topic}\n\nSTANCES:\n{lines}\n\n"
+            "Decide: do these stances already converge (broad agreement), or is any "
+            "disagreement already clearly articulated — such that a second round of "
+            "direct peer rebuttal would NOT change the outcome? Or is there a live, "
+            "unresolved disagreement worth one more round of rebuttal?\n"
+            "Reply with STRICT JSON only, no prose:\n"
+            '{"sufficient": <true if a second round would not change the outcome>, '
+            '"disagreement_note": "<one sentence: what they agree or disagree on, for the report writer>"}'
+        )
+        try:
+            reply = await self._groq(
+                [{"role": "user", "content": prompt}],
+                model=self.director_model, temp=0.1, bucket="director",
+                force_text=True, json_object=True, max_tokens=200,
+            )
+            obj = _first_json_object(str((reply or {}).get("content") or "")) or {}
+            if "sufficient" in obj:
+                return {
+                    "sufficient": bool(obj.get("sufficient")),
+                    "disagreement_note": str(obj.get("disagreement_note") or "")[:300],
+                    "judged": True,
+                }
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[debate] round judge failed, defaulting to round 2: %s", exc)
+        return {"sufficient": False, "disagreement_note": "", "judged": False}
 
     def _uses_prospect_debate(self, campaign_channels: List[str]) -> bool:
         if self.room_kind != "campaign":
@@ -5606,6 +5665,7 @@ class Director:
         board_limit = {"direct": 3000, "focused": 4500, "operating": 8000}[depth]
         board = self._synthesis_context(board_limit)
         debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
+                      + (f"\nMODERATOR NOTE: {self._debate_disagreement_note}" if self._debate_disagreement_note else "")
                       if forced_debate else "")
         # Additional: a population simulation's report (if it ran) is folded in so the final
         # deliverable reflects the simulated stakeholder population — not just the room.

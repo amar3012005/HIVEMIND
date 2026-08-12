@@ -282,6 +282,12 @@ export function legacyPayloadToEnvelope(payload, overrides = {}) {
     metadata: {
       ...(payload.metadata || {}),
       memory_type: memoryType,
+      // Structured save intents already extracted these entities. Preserve
+      // them across the legacy compatibility boundary so entity materialization
+      // does not depend on a second LLM returning valid JSON.
+      ...(Array.isArray(payload.entities) && payload.entities.length
+        ? { extracted_entities: payload.entities.slice(0, 12) }
+        : {}),
       visibility: payload.visibility || payload.metadata?.visibility,
       project_ids: projectIds,
       // V5: bounded engine processing-flag passthrough (enterprise/bulk callers).

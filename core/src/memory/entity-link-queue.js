@@ -22,6 +22,8 @@
  */
 
 const DEFAULT_CONCURRENCY = Math.max(1, Number(process.env.ENTITY_LINK_QUEUE_CONCURRENCY || 4));
+const MAX_JOB_ATTEMPTS = Math.max(1, Number(process.env.ENTITY_LINK_QUEUE_ATTEMPTS || 2));
+const RETRY_DELAY_MS = Math.max(1000, Number(process.env.ENTITY_LINK_QUEUE_RETRY_MS || 5000));
 
 export class EntityLinkQueue {
   constructor({ engine, concurrency = DEFAULT_CONCURRENCY, logger = console } = {}) {
@@ -52,7 +54,7 @@ export class EntityLinkQueue {
     // Capture the request's API key NOW (enqueue runs inside the request/ingest-worker context) so the
     // detached drain can attribute this memory's entity-link LLM spend to the originating org key.
     const apiKeyId = (() => { try { return globalThis.__hivemindOrgCtx?.currentApiKey?.() || null; } catch { return null; } })();
-    this.pending.push({ key: memoryId, memory, memoryId, apiKeyId, peers, enqueuedAt: Date.now() });
+    this.pending.push({ key: memoryId, memory, memoryId, apiKeyId, peers, attempt: 1, enqueuedAt: Date.now() });
     this.counters.enqueued += 1;
     setImmediate(() => this._drain());
     return true;
@@ -116,7 +118,22 @@ export class EntityLinkQueue {
         ? (fn) => _ctx.runWithOrg(_org, fn, job.apiKeyId || null)
         : (fn) => fn();
       const peers = Array.isArray(job.peers) ? job.peers : [];
-      await _run(() => this.engine._attachEntityCoMentionEdges(memory, this.engine.store, peers));
+      const result = await _run(() => this.engine._attachEntityCoMentionEdges(memory, this.engine.store, peers));
+      if (!result || result.ok !== true) {
+        this.counters.failed += 1;
+        this.logger.warn?.(`[entity-link-queue] ✗ ${String(job.memoryId).slice(0, 8)} ${result.error || 'fallback'} — fallback entities retained; durable retry eligible`);
+        if ((job.attempt || 1) < MAX_JOB_ATTEMPTS) {
+          const nextJob = { ...job, attempt: (job.attempt || 1) + 1, enqueuedAt: Date.now() + RETRY_DELAY_MS };
+          setTimeout(() => {
+            if (this.running.has(job.memoryId) || this.queuedKeys.has(job.memoryId)) return;
+            this.queuedKeys.add(job.memoryId);
+            this.pending.push(nextJob);
+            this.counters.enqueued += 1;
+            this._drain();
+          }, RETRY_DELAY_MS);
+        }
+        return;
+      }
       this.counters.completed += 1;
     } catch (err) {
       this.counters.failed += 1;

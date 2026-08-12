@@ -13,9 +13,15 @@ function makePrisma({ existing = [], reviewMatch = null } = {}) {
     entities, links, reviews,
     externalRef: { findFirst: async () => null },
     canonicalEntity: {
+      findFirst: async ({ where }) => entities.find((e) => {
+        if (e.organizationId !== where.organizationId) return false;
+        if (where.normalizedName?.in) return where.normalizedName.in.includes(e.normalizedName);
+        return false;
+      }) || null,
       findMany: async ({ where }) => entities.filter((e) => {
         if (e.organizationId !== where.organizationId) return false;
-        if (where.entityKind && e.entityKind !== where.entityKind) return false;
+        if (where.entityKind?.in && !where.entityKind.in.includes(e.entityKind)) return false;
+        if (typeof where.entityKind === 'string' && e.entityKind !== where.entityKind) return false;
         if (where.OR) {
           return where.OR.some((cond) => {
             if (cond.canonicalName?.equals) return e.canonicalName.toLowerCase() === cond.canonicalName.equals.toLowerCase();

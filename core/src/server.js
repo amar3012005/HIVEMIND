@@ -40,6 +40,7 @@ import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 import { isOrganizationAdmin } from './workspace/access-policy.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
+import { getEntityLinkQueue } from './memory/entity-link-queue.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
@@ -550,6 +551,10 @@ const persistentMemoryEngine = persistentMemoryStore ? new MemoryGraphEngine({
 const enrichmentQueue = persistentMemoryEngine ? getEnrichmentQueue(persistentMemoryEngine) : null;
 if (enrichmentQueue) {
   console.log(`[boot] EnrichmentQueue ready (concurrency=${enrichmentQueue.concurrency})`);
+}
+const entityLinkQueue = persistentMemoryEngine ? getEntityLinkQueue(persistentMemoryEngine) : null;
+if (entityLinkQueue) {
+  console.log(`[boot] EntityLinkQueue ready (concurrency=${entityLinkQueue.concurrency})`);
 }
 
 // Bounded ingest concurrency. REQUIRED: without it, a burst of unbounded
@@ -19102,6 +19107,81 @@ exit \$RC
                 queue: enrichmentQueue.stats(),
                 memories: counts?.[0] || {},
               });
+            } catch (err) {
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
+        // ── Entity-link recovery ────────────────────────────────────
+        // Failed co-mention inference must be visible and retryable. The
+        // fallback entity tags/canonical links are retained while this queue
+        // retries only relationship inference and any missing materialization.
+        case '/api/memory/entity-link/backfill':
+          if (req.method === 'POST') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/memory/entity-link/backfill')) return;
+            if (!entityLinkQueue) return jsonResponse(res, { error: 'entity-link queue unavailable' }, 503);
+            try {
+              const limit = Math.min(Number(body?.limit) || 200, 2000);
+              const includeErrors = body?.include_errors !== false;
+              const memoryId = typeof body?.memory_id === 'string' ? body.memory_id : null;
+              const orphanCutoff = new Date(Date.now() - 5 * 60 * 1000);
+              const params = [userId, orgId, orphanCutoff.toISOString()];
+              const filters = [
+                `m.user_id = $1::uuid`, `m.org_id = $2::uuid`,
+                `m.deleted_at IS NULL`, `m.is_latest = true`,
+              ];
+              if (memoryId) { params.push(memoryId); filters.push(`m.id = $${params.length}::uuid`); }
+              const statuses = [
+                `(sm.metadata->>'entity_link_status') IS NULL`,
+                `((sm.metadata->>'entity_link_status') = 'in_progress' AND COALESCE((sm.metadata->>'entity_link_started_at')::timestamptz, to_timestamp(0)) < $3::timestamptz)`,
+              ];
+              if (includeErrors) statuses.push(`(sm.metadata->>'entity_link_status') LIKE 'error:%'`);
+              filters.push(`(${statuses.join(' OR ')})`);
+              params.push(limit);
+              const eligible = await prisma.$queryRawUnsafe(`
+                SELECT m.id, m.user_id, m.org_id, m.title, m.content, m.tags,
+                       m.memory_type::text AS memory_type, sm.metadata
+                FROM memories m
+                JOIN source_metadata sm ON sm.memory_id = m.id
+                WHERE ${filters.join(' AND ')}
+                ORDER BY m.created_at DESC
+                LIMIT $${params.length}::int
+              `, ...params);
+              const enqueued = entityLinkQueue.enqueueBatch(eligible.map((m) => ({
+                id: m.id, user_id: m.user_id, org_id: m.org_id,
+                title: m.title, content: m.content, tags: m.tags,
+                memory_type: m.memory_type,
+                metadata: m.metadata || {},
+              })));
+              return jsonResponse(res, {
+                candidates: eligible.length,
+                enqueued,
+                filter: { memory_id: memoryId, include_errors: includeErrors, limit },
+              });
+            } catch (err) {
+              console.error('[entity-link-backfill] error:', err);
+              return jsonResponse(res, { error: 'entity-link backfill failed', message: err.message }, 500);
+            }
+          }
+          break;
+
+        case '/api/memory/entity-link/stats':
+          if (req.method === 'GET') {
+            if (!entityLinkQueue) return jsonResponse(res, { error: 'entity-link queue unavailable' }, 503);
+            try {
+              const rows = await prisma.$queryRawUnsafe(`
+                SELECT
+                  COUNT(*) FILTER (WHERE (sm.metadata->>'entity_link_status') = 'done')::int AS done,
+                  COUNT(*) FILTER (WHERE (sm.metadata->>'entity_link_status') = 'in_progress')::int AS in_progress,
+                  COUNT(*) FILTER (WHERE (sm.metadata->>'entity_link_status') LIKE 'error:%')::int AS errors,
+                  COUNT(*) FILTER (WHERE (sm.metadata->>'entity_link_status') IS NULL)::int AS missing
+                FROM memories m
+                JOIN source_metadata sm ON sm.memory_id = m.id
+                WHERE m.user_id = $1::uuid AND m.org_id = $2::uuid
+                  AND m.deleted_at IS NULL AND m.is_latest = true
+              `, userId, orgId);
+              return jsonResponse(res, { memories: rows?.[0] || {} });
             } catch (err) {
               return jsonResponse(res, { error: err.message }, 500);
             }

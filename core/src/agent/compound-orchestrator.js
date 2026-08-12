@@ -959,7 +959,13 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // service (lazy import so tests can pass a stub without hitting the API).
   const composioSvc = composio || await (async () => {
     const m = await import('../connectors/composio/composio-service.js');
-    return { getToolkitTools: m.getToolkitTools, executeTool: m.executeTool, generateToolInputs: m.generateToolInputs };
+    return {
+      getToolkitTools: m.getToolkitTools,
+      executeTool: m.executeTool,
+      generateToolInputs: m.generateToolInputs,
+      discoverSessionTools: m.discoverSessionTools,
+      executeSessionTool: m.executeSessionTool,
+    };
   })();
 
   // Native HIVEMIND step (recall / save / projects) — NOT a connector. Run it
@@ -987,14 +993,46 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         tools = [];
         composioSlugByTool = new Map();
         composioManifestByTool = new Map();
-        const raw = await composioSvc.getToolkitTools(composioToolkit);
-      // PROGRESSIVE LOADING: narrow the toolkit's full tool list to only the
-      // tools relevant to THIS subtask's operation + message. Composio has no
-      // semantic /tools/search on this deployment (probed → 404), so we do a
-      // lightweight local relevance filter on the tool name + description.
-      // This keeps each subtask's prompt small (a handful of tools, not the
-      // whole toolkit) — the exact "don't bloat the prompt" goal, achieved
-      // with what actually exists.
+        let raw;
+        const sessionPrimary = process.env.COMPOSIO_SESSION_PRIMARY_ENABLED !== 'false'
+          && selectTool === defaultSelectTool
+          && typeof composioSvc.discoverSessionTools === 'function';
+        if (sessionPrimary) {
+          try {
+            const discovery = await composioSvc.discoverSessionTools(ctx?.orgId, {
+              toolkits: [composioToolkit],
+              useCases: [buildSubtaskExecutionMessage(message, priorOutputs)],
+            });
+            raw = discovery.tools;
+            emit({
+              type: 'tool_discovery',
+              name: 'composio_session',
+              status: 'completed',
+              toolkit: composioToolkit,
+              tool_count: raw.length,
+              session_cache_hit: discovery.sessionCacheHit,
+              discovery_cache_hit: discovery.discoveryCacheHit,
+            });
+          } catch (sessionError) {
+            // Rapid compatibility fallback: Session discovery has not caused
+            // a provider side effect, so the established toolkit path is safe
+            // to run immediately without asking the user to retry.
+            emit({
+              type: 'tool_discovery',
+              name: 'composio_session',
+              status: 'fallback',
+              toolkit: composioToolkit,
+              summary: sessionError.message,
+            });
+            raw = await composioSvc.getToolkitTools(composioToolkit);
+          }
+        } else {
+          raw = await composioSvc.getToolkitTools(composioToolkit);
+        }
+      // PROGRESSIVE LOADING: Session discovery is primary when available; its
+      // compact result and schemas are cached. The established toolkit list is
+      // the rapid fallback. In both cases, narrow the result to the single tool
+      // relevant to THIS subtask before any schema reaches the selector.
       // The production path selects semantically from compact cards, then
       // supplies exactly one full schema to argument generation. Test
       // selectors retain the complete local list for deterministic fixtures.
@@ -1141,7 +1179,27 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
   // 4. Dispatch through Composio. Reads execute immediately; writes go through
   //    the pendingWrite draft-approval flow (never reported as done until the
   //    user approves and the write actually executes).
-  const composioExecute = composioSvc.executeTool;
+  const sessionId = selectedManifest?._composio?.sessionId || null;
+  const composioExecute = sessionId && typeof composioSvc.executeSessionTool === 'function'
+    ? async (_orgId, slug, toolArgs) => {
+        try {
+          return await composioSvc.executeSessionTool(sessionId, slug, toolArgs);
+        } catch (sessionExecutionError) {
+          // A connector read is idempotent from HIVE-MIND's authority model.
+          // If the Session wrapper itself expires or becomes unavailable, run
+          // the exact same selected slug/args through the proven direct path.
+          // Provider validation failures are returned (not thrown) and remain
+          // eligible for the bounded schema-repair path below.
+          emit({
+            type: 'tool_result',
+            name: toolName,
+            status: 'fallback',
+            summary: `Composio Session unavailable; using rapid connector fallback: ${sessionExecutionError.message}`,
+          });
+          return composioSvc.executeTool(_orgId, slug, toolArgs);
+        }
+      }
+    : composioSvc.executeTool;
   const orgId = ctx?.orgId;
   if (!orgId || !composioSlug) {
     emit({ type: 'tool_result', name: toolName, status: 'error', summary: 'no composio connection' });

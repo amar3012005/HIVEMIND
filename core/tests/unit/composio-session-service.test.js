@@ -33,6 +33,10 @@ test('Tool Router caches session discovery and executes the selected provider re
       return json({
         data: {
           tool_schemas: {
+            GMAIL_GET_CURRENT_TIME: {
+              toolkit: 'GMAIL', description: 'Get current time.',
+              input_schema: { type: 'object', properties: {} },
+            },
             GMAIL_FETCH_EMAILS: {
               toolkit: 'GMAIL', description: 'Fetch email messages.',
               input_schema: { type: 'object', properties: { max_results: { type: 'integer' } } },
@@ -62,8 +66,8 @@ test('Tool Router caches session discovery and executes the selected provider re
     assert.equal(first.discoveryCacheHit, false);
     assert.equal(second.sessionCacheHit, true);
     assert.equal(second.discoveryCacheHit, true);
-    assert.equal(second.tools[0]._composio.slug, 'GMAIL_FETCH_EMAILS');
-    assert.equal(second.tools.length, 1, 'prerequisites and related tools must not compete with the terminal capability');
+    assert.deepEqual(second.tools.map((tool) => tool._composio.slug), ['GMAIL_GET_CURRENT_TIME', 'GMAIL_FETCH_EMAILS']);
+    assert.equal(second.tools.length, 2, 'primary tools remain available while related tools stay excluded');
     assert.equal(executed.successful, true);
     assert.equal(executed.data.messages[0].subject, 'Latest');
     assert.equal(calls.filter((call) => call.body?.slug === 'COMPOSIO_SEARCH_TOOLS').length, 1);

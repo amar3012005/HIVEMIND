@@ -321,7 +321,12 @@ export function filterProviderDraftToolsForTerminalOperation(tools, canonicalOpe
 export function rankToolSelectionCards(cards, canonicalOperation = '') {
   const tokens = (value) => new Set(String(value || '').toLocaleLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
-    .filter((token) => token.length >= 3));
+    .filter((token) => token.length >= 3)
+    // Provider manifests commonly pluralize resources while the planner uses
+    // a singular output operation (event/events, email/emails). This is
+    // structural normalization of controlled identifiers, not user-language
+    // keyword routing.
+    .map((token) => token.length > 4 && token.endsWith('s') ? token.slice(0, -1) : token));
   const intentTokens = tokens(canonicalOperation);
   if (!intentTokens.size) return [...cards];
   return cards.map((card, index) => {

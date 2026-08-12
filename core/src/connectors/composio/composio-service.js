@@ -327,21 +327,18 @@ function collectToolSlugs(value, prefixes, output = new Set()) {
   return output;
 }
 
-function collectTerminalPrimaryToolSlugs(value, prefixes, output = new Set()) {
+function collectPrimaryToolSlugs(value, prefixes, output = new Set()) {
   if (Array.isArray(value)) {
-    for (const item of value) collectTerminalPrimaryToolSlugs(item, prefixes, output);
+    for (const item of value) collectPrimaryToolSlugs(item, prefixes, output);
   } else if (value && typeof value === 'object') {
     for (const [key, item] of Object.entries(value)) {
       if (key === 'primary_tool_slugs' && Array.isArray(item)) {
-        // Composio orders primary tools as prerequisites → terminal action.
-        // One compound subtask must expose its terminal capability; otherwise
-        // the local selector can stop after a prerequisite such as “get current
-        // time” and falsely report that the requested calendar read completed.
-        const terminal = [...item].reverse().find((slug) => typeof slug === 'string'
-          && (!prefixes.length || prefixes.some((prefix) => slug.startsWith(`${prefix}_`))));
-        if (terminal) output.add(terminal);
+        for (const slug of item) {
+          if (typeof slug === 'string'
+            && (!prefixes.length || prefixes.some((prefix) => slug.startsWith(`${prefix}_`)))) output.add(slug);
+        }
       } else {
-        collectTerminalPrimaryToolSlugs(item, prefixes, output);
+        collectPrimaryToolSlugs(item, prefixes, output);
       }
     }
   }
@@ -406,8 +403,8 @@ export async function discoverSessionTools(orgId, { toolkits, useCases }) {
     model: process.env.COMPOSIO_SESSION_SEARCH_MODEL || 'openai/gpt-oss-20b',
   });
   const prefixes = session.toolkits.map((toolkit) => toolkit.replace(/[^a-z0-9]/gi, '').toUpperCase());
-  const terminalPrimary = collectTerminalPrimaryToolSlugs(searched?.data, prefixes);
-  const slugs = [...(terminalPrimary.size ? terminalPrimary : collectToolSlugs(searched?.data, prefixes))].slice(0, 24);
+  const primary = collectPrimaryToolSlugs(searched?.data, prefixes);
+  const slugs = [...(primary.size ? primary : collectToolSlugs(searched?.data, prefixes))].slice(0, 24);
   if (!slugs.length) throw new Error('Composio Session found no matching tools');
   const schemaResult = await executeSessionMeta(session.id, 'COMPOSIO_GET_TOOL_SCHEMAS', { tool_slugs: slugs });
   const schemas = schemaResult?.data?.tool_schemas || {};

@@ -38,6 +38,7 @@ from ..db import (
     start_hyper_work_order,
     complete_hyper_work_order,
     pause_hyper_work_order,
+    get_room_journal,
 )
 from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog, work_skill_catalog
 from .domains import get_domain_pack
@@ -2009,6 +2010,9 @@ class Director:
             if name == "load_skill":
                 return _SKILLS.get(str(args.get("skill_name", "")),
                                    "unknown skill — choose one of: " + ", ".join(_SKILLS.keys()))
+
+            if name == "load_room_history":
+                return await self._load_room_history(int(args.get("turns_back", 20) or 20))
 
             return json.dumps({"error": f"unknown tool {name}"})
         except Exception as exc:  # noqa: BLE001 — surface as a tool error so the director adapts
@@ -4620,6 +4624,7 @@ class Director:
             "type": "object",
             "properties": {
                 "recall_queries": {"type": "array", "items": {"type": "string"}},
+                "history_turns_back": {"type": "integer", "minimum": 0, "maximum": 50},
                 "connector_calls": {"type": "array", "items": {
                     "type": "object",
                     "properties": {"name": {"type": "string"}, "args_json": {"type": "string"}},
@@ -4699,7 +4704,7 @@ class Director:
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "collaboration_intensity", "response_depth", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
+            "required": ["recall_queries", "history_turns_back", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "collaboration_intensity", "response_depth", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -4776,6 +4781,14 @@ class Director:
             "inline, e.g. 'prioritize these 4 requests: X, Y, Z'), that name IS a distinct entity worth a "
             "recall query — do not skip recall just because the task looks self-contained on its face. "
             "Empty recall_queries should be rare, not the default.\n"
+            "- history_turns_back: the ROOM JOURNAL block below already shows this room's last few real "
+            "turns — treat those as settled fact, not a hint. If the CURRENT request is asking what this "
+            "room already learned/decided/discussed (\"what did we learn\", \"what did we decide about X\", "
+            "\"remind me what we found\"), and the journal window shown does not go back far enough to "
+            "answer it, set history_turns_back to how many turns back you actually need (e.g. 15, 30) so "
+            "the room's real older history loads before you answer — do NOT re-run gather+debate from "
+            "scratch for something this room already settled. Set 0 when the journal already covers it or "
+            "the request needs fresh evidence instead.\n"
             "- connector_calls: reads from the listed connector tools. Each item is {name, args_json} where "
             "args_json is a JSON STRING of the tool's arguments, e.g. {\"name\":\"notion__notion-search\","
             "\"args_json\":\"{\\\"query\\\":\\\"HIVEMIND Amar\\\"}\"}. ONLY listed names; [] if none help.\n"
@@ -5254,6 +5267,31 @@ class Director:
                 self.skills_used.append(sname)
                 self.blackboard.append(f"SKILL[{sname}]:\n{body}")
                 await self.emit({"t": "skill_used", "skill": sname, "room_kind": self.room_kind})
+        # Progressive room-history load: the eager journal window (_JOURNAL_KEEP,
+        # already in every prompt) covers only the last few turns. When the
+        # planner recognizes a direct "what did we learn/decide" question that
+        # needs to go further back, this pulls real older turns on demand —
+        # same progressive pattern as method_skills, storage no longer
+        # destructively capped at the eager window (see append_room_journal_entry).
+        _history_back = int(plan.get("history_turns_back") or 0)
+        if _history_back > 0:
+            _hist_json = await self._load_room_history(_history_back)
+            try:
+                _hist = json.loads(_hist_json)
+            except Exception:
+                _hist = {}
+            for entry in (_hist.get("history") or [])[:_history_back]:
+                agent_notes = "; ".join(
+                    f"{a.get('name')}: {a.get('contribution')}" for a in (entry.get("agents") or [])
+                    if isinstance(a, dict) and a.get("name")
+                )
+                row = f"- ROOM HISTORY — Asked: {entry.get('asked', '')} | Swarm: {entry.get('swarm_summary', '')}"
+                if agent_notes:
+                    row += f" | Agents: {agent_notes}"
+                self.blackboard.append(row[:900])
+            await self.emit({"t": "gather", "sources": ["room_history"],
+                             "memory_hits": len(_hist.get("history") or []),
+                             "connector_hits": [], "contacts": 0, "correspondence": 0})
         campaign_method_count = 0
         if self.room_kind == "campaign" and plan.get("campaign_method_assignments"):
             from .claude_ads_toolkit import load_assignments
@@ -5350,7 +5388,14 @@ class Director:
             f"HYPERAGENTS), URLs, and email addresses verbatim.")
 
     def _room_journal_context(self) -> str:
-        """Bounded continuity for planning and synthesis, never full turn history."""
+        """Eager continuity window for planning and synthesis — the last
+        _JOURNAL_KEEP entries, unconditionally injected every turn. These ARE
+        this room's real prior decisions, not a soft consistency hint: a
+        question asking what the room already learned/decided should be
+        answered FROM this directly, not treated as secondary to a fresh
+        gather. If a question needs more history than fits here, the
+        load_room_history tool pulls further back on demand — this block is
+        the near-term window, not the room's only memory of itself."""
         if not _JOURNAL_ENABLED or not self.room_journal:
             return ""
         rows = []
@@ -5364,10 +5409,42 @@ class Director:
             rows.append(row[:900])
         latest = str(self.room_journal[-1].get("final_report_excerpt") or "").strip()[:1800]
         return (
-            "\nROOM JOURNAL — compact continuity from prior runs. Use it for consistency, while the current "
-            "brief and current verified evidence remain authoritative:\n" + "\n".join(rows)
+            "\nROOM JOURNAL — this room's actual prior turns, most recent last. These are "
+            "REAL decisions this room already made, not background color: if the current "
+            "request is asking what the room learned/decided/discussed before, ANSWER FROM "
+            "THIS DIRECTLY — do not re-run a fresh gather+debate for something already "
+            "settled here. Only gather fresh evidence for what this journal does NOT cover. "
+            f"If this window doesn't go back far enough, call load_room_history for more:\n"
+            + "\n".join(rows)
             + (f"\n\nLATEST FINAL REPORT EXCERPT:\n{latest}" if latest else "") + "\n"
         )
+
+    async def _load_room_history(self, turns_back: int) -> str:
+        """On-demand progressive load of room history beyond the eager
+        _JOURNAL_KEEP window — the same pattern as load_method_skill: a small
+        summary is always present, the full depth is fetched only when a
+        question actually needs it. Storage itself is no longer destructively
+        capped at the eager window (see append_room_journal_entry) — real
+        older turns exist to load."""
+        if not self.room_id or not self.org_id:
+            return json.dumps({"error": "no room to load history from"})
+        bounded = max(1, min(200, int(turns_back or 20)))
+        try:
+            entries = await get_room_journal(self.room_id, self.org_id, limit=bounded)
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"error": str(exc)[:200]})
+        rows = [
+            {
+                "asked": entry.get("asked", ""),
+                "swarm_summary": entry.get("swarm_summary", ""),
+                "agents": [
+                    {"name": a.get("name"), "contribution": a.get("contribution")}
+                    for a in (entry.get("agents") or [])[:5] if isinstance(a, dict)
+                ],
+            }
+            for entry in entries if isinstance(entry, dict)
+        ]
+        return json.dumps({"turns_returned": len(rows), "history": rows}, ensure_ascii=False)
 
     def _campaign_requirements(self) -> Tuple[List[str], List[str]]:
         source = self.campaign_brief.get("channels") or self.campaign_brief.get("requestedChannels") or []

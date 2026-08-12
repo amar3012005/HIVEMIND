@@ -728,8 +728,15 @@ async def update_room_playbook(room_id: str, org_id: str, lessons: list) -> bool
             return False
 
 
-async def get_room_journal(room_id: str, org_id: str) -> list:
-    """Return the Room's bounded episodic journal. Always tenant-scoped."""
+async def get_room_journal(room_id: str, org_id: str, limit: int = 8) -> list:
+    """Return the Room's episodic journal, most-recent-last, capped at `limit`.
+
+    Default `limit=8` is the EAGER continuity window — what's injected into
+    every turn's prompt unconditionally (cheap, bounded, always present).
+    Callers doing on-demand progressive loading (a Director tool reaching
+    further back than the eager window) pass a larger `limit` — the stored
+    array itself is no longer destructively trimmed to 8 on write (see
+    append_room_journal_entry), so real older history exists to load."""
     try:
         pool = await init_pool()
         async with pool.acquire() as conn:
@@ -741,14 +748,28 @@ async def get_room_journal(room_id: str, org_id: str) -> list:
         raw = row["room_journal"] if row else []
         if isinstance(raw, str):
             raw = json.loads(raw)
-        return [item for item in (raw or []) if isinstance(item, dict)][-8:]
+        items = [item for item in (raw or []) if isinstance(item, dict)]
+        return items[-max(1, int(limit or 8)):]
     except Exception as exc:  # noqa: BLE001
         log.warning("get_room_journal failed (non-fatal): %s", exc)
         return []
 
 
-async def append_room_journal_entry(room_id: str, org_id: str, entry: dict, keep: int = 8) -> bool:
-    """Append one journal entry atomically and retain only the newest entries."""
+# Storage cap — generous enough that a room's real turn history survives for
+# progressive on-demand loading (get_room_journal(limit=N) for N > 8), while
+# still bounding jsonb column growth. NOT the same as the eager-injection
+# window (8) — that's a read-time slice, not a storage limit. Before this,
+# append_room_journal_entry trimmed the STORED array to 8 on every write,
+# permanently deleting anything older — there was no history to "progressively
+# load" because it never existed past turn 8. Confirmed live 2026-08-12: a
+# room's own prior "Validate European AI Compliance Demand" decision was
+# already gone from what the next turn could ever see beyond the eager block.
+_JOURNAL_STORAGE_CAP = 200
+
+
+async def append_room_journal_entry(room_id: str, org_id: str, entry: dict, keep: int = _JOURNAL_STORAGE_CAP) -> bool:
+    """Append one journal entry atomically and retain the newest `keep` (storage
+    cap, not the eager-injection window — see get_room_journal)."""
     if not isinstance(entry, dict):
         return False
     try:
@@ -770,7 +791,7 @@ async def append_room_journal_entry(room_id: str, org_id: str, entry: dict, keep
                 if turn_id:
                     journal = [item for item in journal if str(item.get("turn_id") or "") != turn_id]
                 journal.append(entry)
-                journal = journal[-max(2, min(20, int(keep or 8))):]
+                journal = journal[-max(8, min(500, int(keep or _JOURNAL_STORAGE_CAP))):]
                 await conn.execute(
                     "UPDATE hivemind.hyper_rooms SET room_journal = $1::jsonb, updated_at = now() "
                     "WHERE id = $2::uuid AND org_id = $3::uuid",

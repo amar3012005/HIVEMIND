@@ -1179,17 +1179,6 @@ def _groq_key() -> str:
     return (s.groq_api_key or os.environ.get("GROQ_API_KEY") or os.environ.get("LLM_API_KEY") or "")
 
 
-def _tool(name: str, desc: str, props: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": desc,
-            "parameters": {"type": "object", "properties": props, "required": required},
-        },
-    }
-
-
 def _parse_json_loose(text: str) -> Any:
     """Best-effort JSON from a model message (handles ```json fences + surrounding prose).
     Used by the Population-Sim where 8b returns JSON without strict-schema enforcement."""
@@ -1424,9 +1413,9 @@ class Director:
             "verified_recipients": 0,
         }
         self._web_budget = max(0, int(os.environ.get("HYPER_WEB_BUDGET", "3") or "3"))
-        # Connector tools (toggled on the room) registered dynamically at run() start:
-        # JSON schemas the director sees + a route map name -> (bridge, provider, tool).
-        self._connector_tools: List[Dict[str, Any]] = []
+        # Connector routes (toggled on the room) registered dynamically at run()
+        # start: name -> (bridge, provider, tool), what _exec()/_connector_read()
+        # dispatch a planner-named connector_calls entry through.
         self._connector_routes: Dict[str, tuple] = {}
         # Token accounting by pipeline phase (for cost analysis). director = the
         # gpt-oss-120b agentic loop (gather decisions + reading tool results +
@@ -1842,20 +1831,30 @@ class Director:
         return None
 
     async def _init_connector_tools(self) -> None:
-        """Register the room's toggled connectors as READ-only director tools (the
-        local-tool-calling pattern: schema → bridge exec → loop). Google connectors
-        use a curated read surface; other Nango/MCP connectors are discovered via the
-        bridge inspect (best-effort, only tools with a real input schema). Capped +
-        read-only — writes stay with the centralized producer + HITL. Never raises."""
-        registered: List[Dict[str, Any]] = []
+        """Register the room's toggled connectors as READ-only director tools —
+        builds self._connector_routes, the name -> (bridge, provider, real_tool)
+        map _exec()/_connector_read() dispatch through (the planner names a tool
+        by string in its plan JSON; this is what makes that string executable).
+        Google connectors use a curated read surface; other Nango/MCP connectors
+        are discovered via the bridge inspect (best-effort, only tools with a
+        real input schema). Capped + read-only — writes stay with the
+        centralized producer + HITL. Never raises.
+
+        Note: this does NOT build an OpenAI-function-schema tool list — Director
+        never does native tool-calling for connectors (that's AgentScope's job,
+        for the lead's own real tool-using agent — see agentscope_tools.py's
+        _register_connector_tools, sourced from the SAME get_room_enabled_
+        connectors() call as this one, so both paths already see identical
+        connector data). A `self._connector_tools` schema list used to be built
+        here too; removed 2026-08-12 — confirmed via a whole-repo grep that
+        nothing ever read it, only self._connector_routes."""
         routes: Dict[str, tuple] = {}
         seen: set = set()
 
         def _add(tname: str, tdesc: str, props: Dict[str, Any], req: List[str], bridge: str, provider: str, real_tool: str) -> None:
-            if tname in seen or len(registered) >= _CONNECTOR_TOOL_CAP:
+            if tname in seen or len(routes) >= _CONNECTOR_TOOL_CAP:
                 return
             seen.add(tname)
-            registered.append(_tool(tname, tdesc, props, req))
             routes[tname] = (bridge, provider, real_tool)
 
         # Prefetch every non-Google inspect CONCURRENTLY. Each cold MCP inspect is ~20s
@@ -1872,7 +1871,7 @@ class Director:
             _pre = {n: (r if isinstance(r, list) else []) for n, r in zip(_need, _res)}
 
         for cid in self.connectors:
-            if len(registered) >= _CONNECTOR_TOOL_CAP:
+            if len(routes) >= _CONNECTOR_TOOL_CAP:
                 break
             norm = _norm_connector(cid)
             google = _GOOGLE_READ_TOOLS.get(norm)
@@ -1883,7 +1882,7 @@ class Director:
             raw = _pre.get(norm) or []
             count = 0
             for tspec in (raw if isinstance(raw, list) else []):
-                if count >= _MCP_TOOLS_PER_CONNECTOR or len(registered) >= _CONNECTOR_TOOL_CAP:
+                if count >= _MCP_TOOLS_PER_CONNECTOR or len(routes) >= _CONNECTOR_TOOL_CAP:
                     break
                 tname = str((tspec or {}).get("name") or "")
                 if not tname or not _is_read_tool(tname):
@@ -1898,11 +1897,9 @@ class Director:
                         + f" (live read from the {norm} connector).")
                 _add(public, desc, props, req, "mcp", norm, tname)
                 count += 1
-        self._connector_tools = registered
         self._connector_routes = routes
-        if registered:
-            log.info("[hyper-engine] connector tools registered: %s",
-                     [t["function"]["name"] for t in registered])
+        if routes:
+            log.info("[hyper-engine] connector tools registered: %s", list(routes.keys()))
 
     async def _connector_read(self, name: str, args: Dict[str, Any]) -> str:
         bridge, provider, tool = self._connector_routes[name]

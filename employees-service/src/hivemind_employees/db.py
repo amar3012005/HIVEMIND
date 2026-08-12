@@ -557,12 +557,19 @@ async def get_room_sim_agents(room_id: str, org_id: Optional[str] = None) -> int
 
 
 async def get_room_evo_mode(room_id: str, org_id: Optional[str] = None) -> str:
-    """Self-evolving employees toggle ('on' = reflect+inject per-employee playbooks,
-    else 'off'). Defaults to 'off' (graceful pre-migration: a missing column means the
-    additional feature is dormant and the turn runs untouched). org_id scopes the read."""
-    pool = await init_pool()
-    async with pool.acquire() as conn:
-        try:
+    """Self-evolving employees toggle ('on' = reflect+inject per-employee playbooks).
+    Defaults to 'on' for a never-configured room — confirmed live 2026-08-12: a real
+    turn generated genuinely useful, transferable lessons ("verify claims with
+    external data", "state concrete next steps with dates/owners") from its own
+    verify verdict, persisted them to digital_employees.evo_playbook, and a
+    follow-up turn's get_employee_playbooks_map read them straight back — the
+    write/read loop works end to end. A room that explicitly stores 'off' still
+    gets 'off' (this only changes the NULL/never-set case, which used to silently
+    mean dormant); any DB read failure also now fails open toward 'on' rather than
+    silently disabling learning. org_id scopes the read."""
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
             if org_id is not None:
                 row = await conn.fetchrow(
                     "SELECT evo_mode FROM hivemind.hyper_rooms WHERE id = $1 AND org_id = $2::uuid",
@@ -574,9 +581,9 @@ async def get_room_evo_mode(room_id: str, org_id: Optional[str] = None) -> str:
                 )
             if row and row["evo_mode"]:
                 return str(row["evo_mode"])
-        except Exception as exc:  # noqa: BLE001
-            log.warning("get_room_evo_mode fallback: %s", exc)
-    return "off"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_room_evo_mode fallback: %s", exc)
+    return "on"
 
 
 async def get_employee_playbook(org_id: str, slug: str) -> list:

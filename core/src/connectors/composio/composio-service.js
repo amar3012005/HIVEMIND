@@ -321,6 +321,36 @@ export async function listToolkits({ search = '', cursor = null, limit = 40 } = 
   };
 }
 
+const TOOLKIT_CATALOG_TTL_MS = 10 * 60 * 1000;
+let toolkitCatalogCache = null;
+
+/**
+ * Return the complete toolkit catalog for app recognition and suggestions.
+ * The catalog is public provider metadata, so it is safe to cache globally;
+ * tenant-specific connection state is overlaid by the authenticated route.
+ */
+export async function listAllToolkits({ search = '' } = {}) {
+  const normalizedSearch = String(search || '').trim().toLowerCase();
+  const now = Date.now();
+  if (!toolkitCatalogCache || (now - toolkitCatalogCache.loadedAt) > TOOLKIT_CATALOG_TTL_MS) {
+    const items = [];
+    let cursor = null;
+    do {
+      const page = await listToolkits({ cursor, limit: 100 });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor && items.length < 2000);
+    toolkitCatalogCache = { loadedAt: now, items };
+  }
+  const items = normalizedSearch
+    ? toolkitCatalogCache.items.filter((toolkit) => {
+      const haystack = `${toolkit.slug} ${toolkit.name} ${toolkit.description || ''}`.toLowerCase();
+      return haystack.includes(normalizedSearch);
+    })
+    : toolkitCatalogCache.items;
+  return { items, nextCursor: null, totalItems: items.length };
+}
+
 /**
  * Resolve (creating on demand if needed) the auth_config to connect a
  * toolkit through. Static COMPOSIO_AUTH_CONFIGS entries win — e.g. the

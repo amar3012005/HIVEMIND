@@ -121,6 +121,57 @@ export class AmrMemoryStore {
     return Number(reclaimed) || 0;
   }
 
+  /**
+   * Train the PQ (Product Quantization) codebook and enable `recallPq()` — an alternative to
+   * `recall()`'s HNSW/brute path with a different tradeoff, not a universal upgrade:
+   *
+   *   measured on real bge-m3 data (mneme/bench/RESULTS.md) —
+   *     10k vectors:  PQ build 7.2s,   query 1.71ms @ recall=1.00  (beats HNSW on BOTH)
+   *     100k vectors: PQ build 54.2s (6.3x faster than HNSW's 341.5s),
+   *                   query 13.58ms @ recall=1.00  (HNSW queries at 4.44ms — HNSW wins here)
+   *
+   * PQ stays O(n) per query with a cheap per-item cost (128-byte codes vs full f32 vectors);
+   * HNSW's near-O(log n) traversal wins on query latency once the shard grows. Good fit: shards
+   * you rebuild often (dev/test, small/personal-tier orgs, frequently-retrained data) where
+   * build time matters more than the last few ms of query latency. Measure your own shard size
+   * before reaching for this over `enableHnsw()` at real scale.
+   *
+   * Blocks the event loop for its duration (k-means over every live vector) — call it from a
+   * background job or right after a bulk load, same caution as `enableHnsw()`/`compact()`.
+   * `seed` makes training deterministic (same seed -> same codebook -> same recallPq results).
+   */
+  trainPq(seed = 42) {
+    this.store.trainPq(seed);
+  }
+
+  /** True if `trainPq()` has run at least once for this shard. */
+  pqTrained() {
+    return this.store.pqTrained();
+  }
+
+  /**
+   * PQ/ADC-backed recall — see `trainPq()`'s doc comment for the real tradeoff before reaching
+   * for this. FAILS CLOSED: throws a clear, actionable error if `trainPq()` hasn't run yet,
+   * rather than silently falling back to `recall()` — a caller who explicitly asked for PQ
+   * recall should get a real answer about why it can't, not a different search they didn't ask
+   * for. Same result shape as `recall()`: `[{ id, score, payload }]`.
+   */
+  recallPq(vector, limit = 10, filter = {}) {
+    if (!this.pqTrained()) {
+      throw new Error('recallPq: no PQ codebook trained yet — call trainPq() first (see pqTrained())');
+    }
+    const vec = vector instanceof Float32Array ? vector : Float32Array.from(vector);
+    const hits = this.store.recallPq(vec, Math.min(limit * 4, 200));
+    const out = [];
+    for (const h of hits) {
+      let rec; try { rec = JSON.parse(h.text); } catch { continue; }
+      if (!this._passesFilter(rec, filter)) continue;
+      out.push({ id: rec.id, score: h.score, payload: rec });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
   // ── point reads ─────────────────────────────────────────────────────────────────────────────
   _recAt(slot) {
     try { return JSON.parse(this.store.slotText(slot)); } catch { return null; }

@@ -3155,18 +3155,14 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await parseBody(req).catch(() => ({}));
       const created = await createEnterpriseInvitation({ prisma, input: body });
-      const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: created.invitation.id } });
-      let sent = null;
-      if (body.send_email !== false) sent = await dispatchEnterpriseInvitation({ invitation: raw, token: created.plaintextToken, code: created.plaintextCode });
       await audit({ eventType: 'commercial.enterprise_invitation_created', eventCategory: 'billing', action: 'create',
         resourceType: 'enterprise_invitation', resourceId: created.invitation.id,
-        metadata: { operator: operator.operator, session_id: operator.sessionId, account_type: created.invitation.account_type, delivery_status: sent?.invitation?.delivery_status || 'not_sent' },
+        metadata: { operator: operator.operator, session_id: operator.sessionId, account_type: created.invitation.account_type, delivery_status: 'not_sent' },
         ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-      if (sent) await audit({ eventType: sent.delivery.ok ? 'commercial.enterprise_invitation_sent' : 'commercial.enterprise_invitation_delivery_failed', eventCategory: 'billing', action: 'create',
-        resourceType: 'enterprise_invitation', resourceId: created.invitation.id,
-        metadata: { operator: operator.operator, session_id: operator.sessionId, safe_error: sent.delivery.error || null },
-        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
-      return jsonResponse(res, { invitation: sent?.invitation || created.invitation, code: created.plaintextCode, ...(sent ? { activation_url: sent.activationUrl, email_dispatch: sent.delivery } : {}) }, 201);
+      // Creation never sends mail. Operators must inspect the server-rendered
+      // preview and explicitly confirm the `send` action. Ignore legacy
+      // `send_email` payloads so an old frontend cannot bypass that review.
+      return jsonResponse(res, { invitation: created.invitation, code: created.plaintextCode }, 201);
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 400);
     }
@@ -3318,6 +3314,10 @@ const server = http.createServer(async (req, res) => {
           invitation,
           invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent`,
         }));
+        await audit({ eventType: 'commercial.enterprise_invitation_previewed', eventCategory: 'billing', action: 'read',
+          resourceType: 'enterprise_invitation', resourceId: invitation.id,
+          metadata: { operator: operator.operator, session_id: operator.sessionId },
+          ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
         return jsonResponse(res, {
           from: 'welcome@admin.singulancelabs.com',
           to: invitation.recipientEmail,

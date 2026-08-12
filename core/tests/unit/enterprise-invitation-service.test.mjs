@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  createEnterpriseInvitation,
   enterpriseInvitationCodeDigest,
   enterpriseInvitationEmailDigest,
   findEnterpriseInvitationAdmission,
@@ -14,6 +15,27 @@ import {
 import { renderTemplate } from '../../src/email/email-service.js';
 
 describe('EnterpriseInvitationService', () => {
+  it('creates a draft without any delivery state so email is always an explicit later action', async () => {
+    const now = new Date('2026-08-08T00:00:00.000Z');
+    let persisted = null;
+    const prisma = {
+      enterpriseInvitation: {
+        create: async ({ data }) => {
+          persisted = { id: '11111111-1111-4111-8111-111111111111', ...data, createdAt: now, updatedAt: now };
+          return persisted;
+        },
+      },
+    };
+    const created = await createEnterpriseInvitation({ prisma, now, input: {
+      company_name: 'Example GmbH', recipient_email: 'owner@example.com',
+      account_type: 'enterprise_managed', storage_mode: 'hybrid', code: 'HM-EXPLICIT1',
+    } });
+    assert.equal(persisted.status, 'draft');
+    assert.equal(persisted.deliveryStatus, 'not_sent');
+    assert.equal(created.invitation.status, 'draft');
+    assert.equal(created.plaintextCode, 'HM-EXPLICIT1');
+  });
+
   it('creates a fixed unlimited commercial onboarding profile without accepting arbitrary caps', () => {
     const input = normalizeEnterpriseInvitationInput({
       company_name: 'Example GmbH', recipient_email: 'Owner@Example.com',

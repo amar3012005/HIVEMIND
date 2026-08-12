@@ -27,7 +27,7 @@ import re
 import time
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -172,6 +172,16 @@ _OR_PROVIDER_PIN = {
     "openai/gpt-oss": ["Cerebras"],
     "qwen/": ["Alibaba"],
     "moonshotai/": ["Moonshot AI", "Novita"],
+    # Verified live 2026-08-12: nvidia/nemotron-3.5-lightning has only two
+    # OpenRouter hosts (DeepInfra, CoreWeave). The global HYPER_OR_IGNORE
+    # default blacklists DeepInfra — reproduced exactly: sending its ignore
+    # list alone against this model returned 404 "All providers have been
+    # ignored" (not an account-level privacy block as first suspected — a
+    # collision with our OWN default blacklist, since this model has too few
+    # hosts to survive it). Pinning both here is necessary but not
+    # sufficient by itself — see the ignore-list filter right below, which
+    # keeps a pinned provider from also being ignored.
+    "nvidia/nemotron-3.5-lightning": ["DeepInfra", "CoreWeave"],
 }
 
 # Models that default to reasoning ON with no way to ask for it off implicitly —
@@ -304,6 +314,28 @@ def _or_provider_pin(model: str) -> Optional[List[str]]:
     return None
 
 
+def _or_provider_routing(model: str) -> Tuple[Optional[List[str]], List[str]]:
+    """(order, ignore) for one OpenRouter request. A provider explicitly
+    pinned for THIS model is dropped from the global ignore list — sending
+    both order+ignore naming the same host 404s with "All providers have
+    been ignored" when no other host survives. Verified live 2026-08-12
+    against nvidia/nemotron-3.5-lightning: it has only two OpenRouter hosts
+    (DeepInfra, CoreWeave), and DeepInfra sits in the global HYPER_OR_IGNORE
+    default — reproduced the exact 404 by sending that ignore list alone.
+    ignore: measured-slow hosts that keep winning price-ranked fallbacks
+    (DekaLLM served 20-60 tok/s twice). Env-overridable; empty string
+    disables the blacklist. SiliconFlow/Phala added 2026-07-07: fallback-
+    pool leaks measured 9-36s per 20b debate call."""
+    pin = _or_provider_pin(model)
+    ignore = [s.strip() for s in os.environ.get(
+        "HYPER_OR_IGNORE", "DekaLLM,WandB,DeepInfra,Novita,Mancer,SiliconFlow,Phala"
+    ).split(",") if s.strip()]
+    if pin:
+        pinned = {p.lower() for p in pin}
+        ignore = [p for p in ignore if p.lower() not in pinned]
+    return pin, ignore
+
+
 async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> Optional[Dict[str, Any]]:
     """Replay a Groq chat body against OpenRouter when Groq is unavailable.
 
@@ -327,12 +359,7 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     or_body["reasoning"] = {**(or_body.get("reasoning") or {}), "exclude": True, "effort": "low"}  # effort=low → gpt-oss emits clean content for extractive tasks
     # Fastest provider that supports the request's params (tools / response_format),
     # with OpenRouter's own cross-provider fallback enabled.
-    _pin = _or_provider_pin(or_model)
-    # ignore: measured-slow hosts that keep winning price-ranked fallbacks (DekaLLM
-    # served 20-60 tok/s twice). Env-overridable; empty string disables the blacklist.
-    # SiliconFlow/Phala added 2026-07-07: fallback-pool leaks measured 9-36s per
-    # 20b debate call (the room's remaining latency gap after the pin fix).
-    _ignore = [s.strip() for s in os.environ.get("HYPER_OR_IGNORE", "DekaLLM,WandB,DeepInfra,Novita,Mancer,SiliconFlow,Phala").split(",") if s.strip()]
+    _pin, _ignore = _or_provider_routing(or_model)
     or_body["provider"] = {**({"order": _pin} if _pin else {}),
                            **({"ignore": _ignore} if _ignore else {}),
                            "sort": "throughput", "allow_fallbacks": True, "require_parameters": True}

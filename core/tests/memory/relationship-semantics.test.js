@@ -134,3 +134,39 @@ test('LLM co-mention linker preserves Derives edge type', async () => {
   assert.equal(deriveEdges[0].to_id, source.id);
   assert.equal(deriveEdges[0].metadata.classification_source, 'llm');
 });
+
+test('malformed entity-link output retains structured entities and explicit type', async () => {
+  const previousAttempts = process.env.ENTITY_LINK_MAX_ATTEMPTS;
+  process.env.ENTITY_LINK_MAX_ATTEMPTS = '1';
+  try {
+    const store = new InMemoryGraphStore();
+    const memoryChatClient = async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '{"entities":["truncated"' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+    const engine = new MemoryGraphEngine({ store, predictCalibrate: false, memoryChatClient });
+    const memory = await store.createMemory({
+      id: '00000000-0000-4000-8000-000000009304',
+      user_id: '00000000-0000-4000-8000-000000009301',
+      org_id: '00000000-0000-4000-8000-000000009302',
+      content: 'Consolidate HIVEMIND and BRAIN into one product.',
+      title: 'Product consolidation',
+      memory_type: 'decision',
+      is_latest: true,
+      tags: ['talk-to-hive'],
+      metadata: { extracted_entities: ['HIVEMIND', { name: 'BRAIN', kind: 'product' }] },
+      created_at: new Date().toISOString(),
+    });
+
+    const result = await engine._attachEntityCoMentionEdges(memory, store, []);
+    const stored = await store.getMemory(memory.id);
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'fallback');
+    assert.ok(stored.tags.includes('entity:hivemind'));
+    assert.ok(stored.tags.includes('entity:brain'));
+    assert.equal(stored.memory_type, 'decision');
+  } finally {
+    if (previousAttempts === undefined) delete process.env.ENTITY_LINK_MAX_ATTEMPTS;
+    else process.env.ENTITY_LINK_MAX_ATTEMPTS = previousAttempts;
+  }
+});

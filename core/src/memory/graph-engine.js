@@ -21,6 +21,7 @@ import {
 import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity, normalizeTagsArray } from './entity-normalize.js';
 import { getEntityLinkQueue } from './entity-link-queue.js';
+import { persistCanonicalLinks } from './canonical-entity-persister.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -65,6 +66,41 @@ const MEMORY_INGEST_MODEL = process.env.MEMORY_INGEST_MODEL || 'openai/gpt-oss-2
 // Sleep helper for retry backoff.
 function _sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const ENTITY_MEMORY_TYPES = new Set(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'relationship']);
+
+function extractedEntityCandidates(memory) {
+  const out = [];
+  const seen = new Set();
+  const add = (value, kind = null) => {
+    const name = typeof value === 'string'
+      ? value.trim()
+      : (value && typeof value.name === 'string' ? value.name.trim() : '');
+    if (!name || name.length >= 120) return;
+    const slug = normalizeEntity(name);
+    if (!slug || seen.has(slug)) return;
+    seen.add(slug);
+    const resolvedKind = kind || (value && typeof value === 'object' ? value.kind : null);
+    out.push(resolvedKind ? { name, kind: resolvedKind } : name);
+  };
+
+  for (const value of (memory?.metadata?.extracted_entities || [])) add(value);
+  for (const value of (memory?.metadata?.extracted_facts?.entities || [])) add(value);
+  const canonical = memory?.metadata?.enrichment?.canonical_entities;
+  if (canonical && typeof canonical === 'object') {
+    for (const [key, value] of Object.entries(canonical)) {
+      add(value?.display || key, value?.kind || null);
+    }
+  }
+  return out.slice(0, 12);
+}
+
+function inferredMemoryTypeFallback(memory) {
+  const explicit = String(memory?.memory_type || memory?.memoryType || 'fact').toLowerCase();
+  if (explicit !== 'fact') return explicit;
+  const kind = String(memory?.metadata?.enrichment?.memory_kind || '').toLowerCase();
+  return ENTITY_MEMORY_TYPES.has(kind) ? kind : explicit;
 }
 
 // Extract the first JSON object from a raw LLM response. Handles:
@@ -2078,6 +2114,21 @@ OUTPUT JSON only.`;
       return null;
     }
 
+    // Structured enrichment is the language-independent semantic classifier
+    // shared by all sources. Preserve an explicit caller type; only upgrade
+    // the generic default `fact` to a more specific valid type.
+    const enrichedKind = String(parsed.memory_kind || '').toLowerCase();
+    if (ENTITY_MEMORY_TYPES.has(enrichedKind) && enrichedKind !== 'fact') {
+      try {
+        const existing = await this.store?.getMemory?.(memoryId);
+        if ((existing?.memory_type || existing?.memoryType) === 'fact') {
+          await this.store.updateMemory(memoryId, { memoryType: enrichedKind });
+        }
+      } catch (typeErr) {
+        console.warn(`[structured-enrich] memory type upgrade failed for ${memoryId.slice(0, 8)}: ${typeErr.message}`);
+      }
+    }
+
     // Distilled high-signal tags from enrichment (independent of where the row lives).
     const enrichTags = [];
     if (parsed.urgency) enrichTags.push(`urgency:${parsed.urgency}`);
@@ -2273,11 +2324,6 @@ OUTPUT JSON only.`;
   }
 
   async _attachEntityCoMentionEdges(baseMemory, store, similar = []) {
-    if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') return;
-    if (!process.env.GROQ_API_KEY && !this.hasInjectedMemoryChatClient) {
-      console.warn('[entity-co-mention] GROQ_API_KEY missing — skipping LLM extraction');
-      return;
-    }
     const content = baseMemory.content || '';
     // Short content is OK when the caller explicitly forced linking (chat
     // saves), since user-typed short facts like "meet Ethan Tuesday 7pm"
@@ -2285,7 +2331,45 @@ OUTPUT JSON only.`;
     // floor is enough to weed out single-word noise.
     const forceLink = baseMemory.metadata?.force_entity_linking === true;
     const minLen = forceLink ? 1 : 10;
-    if (content.length < minLen) return;
+    const structuredFallbackEntities = extractedEntityCandidates(baseMemory);
+    const entityStatusClient = (store && store.client) || this.store?.client;
+    const persistEntityStatus = async (status, extra = {}) => {
+      if (orgIsRemote(baseMemory.org_id) || !entityStatusClient?.sourceMetadata) return;
+      try {
+        const sm = await entityStatusClient.sourceMetadata.findFirst({
+          where: { memoryId: baseMemory.id },
+          select: { id: true, metadata: true },
+        });
+        if (!sm) return;
+        const current = (sm.metadata && typeof sm.metadata === 'object') ? sm.metadata : {};
+        const statusExtra = { ...extra };
+        if (status === 'in_progress') {
+          statusExtra.entity_link_attempts = Number(current.entity_link_attempts || 0) + 1;
+        }
+        await entityStatusClient.sourceMetadata.update({
+          where: { id: sm.id },
+          data: { metadata: { ...current, entity_link_status: status, ...statusExtra } },
+        });
+      } catch (e) {
+        console.warn(`[entity-co-mention] status persist failed for ${String(baseMemory.id).slice(0, 8)}: ${e.message}`);
+      }
+    };
+    if ((process.env.MEMORY_ENTITY_LINKING || 'true').toLowerCase() === 'false') {
+      await persistEntityStatus('skipped:disabled', { entity_link_completed_at: nowIso() });
+      return { ok: true, status: 'skipped', reason: 'disabled', entities: 0, edges: 0 };
+    }
+    if (!process.env.GROQ_API_KEY && !this.hasInjectedMemoryChatClient) {
+      console.warn('[entity-co-mention] GROQ_API_KEY missing — skipping LLM extraction');
+      await persistEntityStatus('error:provider_unavailable', { entity_link_error: 'provider_unavailable' });
+      return { ok: false, status: 'error', error: 'provider_unavailable', entities: 0, edges: 0 };
+    }
+    if (content.length < minLen) {
+      await persistEntityStatus('skipped:short_content', { entity_link_completed_at: nowIso() });
+      return { ok: true, status: 'skipped', reason: 'short_content', entities: 0, edges: 0 };
+    }
+    await persistEntityStatus('in_progress', {
+      entity_link_started_at: nowIso(),
+    });
 
     // Filter the recall set: drop self, drop empty bodies, cap at 8 to
     // keep the prompt small + cost predictable.
@@ -2599,6 +2683,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     const LINK_TIMEOUT_MS = Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000);
     const LINK_MAX_ATTEMPTS = Number(process.env.ENTITY_LINK_MAX_ATTEMPTS || 3);
     let parsed;
+    let lastRaw = '';
     let linkLastErr = null;
     for (let attempt = 1; attempt <= LINK_MAX_ATTEMPTS; attempt++) {
       try {
@@ -2639,10 +2724,12 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
             await new Promise((r) => setTimeout(r, 400 * attempt * attempt)); // 400ms, 1.6s
             continue;
           }
-          return;
+          linkLastErr = Object.assign(new Error(`HTTP ${resp.status}`), { code: `http_${resp.status}` });
+          break;
         }
         const data = await resp.json();
         const raw = data?.choices?.[0]?.message?.content || '{}';
+        lastRaw = raw;
         try {
           parsed = JSON.parse(raw);
         } catch (strictErr) {
@@ -2662,10 +2749,31 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     }
     if (!parsed) {
       if (linkLastErr) console.warn('[entity-co-mention] LLM exhausted retries:', linkLastErr.message);
-      return;
+      parsed = {
+        entities: structuredFallbackEntities,
+        temporal: {},
+        memory_type: inferredMemoryTypeFallback(baseMemory),
+        links: [],
+      };
+      await persistEntityStatus(`error:${linkLastErr?.code || 'parse_error'}`, {
+        entity_link_error: {
+          code: linkLastErr?.code || 'parse_error',
+          message: String(linkLastErr?.message || 'entity linker returned malformed output').slice(0, 240),
+          raw_excerpt: String(lastRaw || '').slice(0, 400),
+          model: LINK_MODEL,
+          attempted_at: nowIso(),
+        },
+        entity_link_fallback_applied: structuredFallbackEntities.length > 0,
+      });
     }
 
-    const entities = Array.isArray(parsed?.entities) ? parsed.entities.map(String).slice(0, 12) : [];
+    const entityBySlug = new Map();
+    for (const rawEntity of [...structuredFallbackEntities, ...(Array.isArray(parsed?.entities) ? parsed.entities : [])]) {
+      const name = typeof rawEntity === 'string' ? rawEntity.trim() : rawEntity?.name?.trim();
+      const slug = name ? normalizeEntity(name) : null;
+      if (slug && !entityBySlug.has(slug)) entityBySlug.set(slug, rawEntity);
+    }
+    const entities = [...entityBySlug.values()].slice(0, 12);
     const links = Array.isArray(parsed?.links) ? parsed.links : [];
     const inferredType = (typeof parsed?.memory_type === 'string' && parsed.memory_type.trim()) || null;
     const temporal = (parsed && typeof parsed.temporal === 'object' && parsed.temporal) || {};
@@ -2686,7 +2794,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       temporalTags.push(`time:recurring-${temporal.recurring.trim().toLowerCase().replace(/\s+/g, '-')}`);
     }
 
-    console.log(`[entity-co-mention] entities=[${entities.join(',')}] type=${inferredType || '-'} temporal=[${temporalTags.join(',')}] links=${links.length}`);
+    console.log(`[entity-co-mention] entities=[${entities.map((e) => typeof e === 'string' ? e : e.name).join(',')}] type=${inferredType || '-'} temporal=[${temporalTags.join(',')}] links=${links.length}`);
 
     // If the LLM inferred a more specific memory_type than the caller
     // supplied (caller likely defaulted to 'fact'), upgrade it. Only
@@ -2713,6 +2821,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     if (entities.length > 0 || temporalTags.length > 0) {
       try {
         const cleanEntities = entities
+          .map((e) => typeof e === 'string' ? e : e?.name)
           .filter(e => typeof e === 'string' && e.length > 0 && e.length < 60)
           // Canonicalize: collapse case/dash/underscore/legal-suffix duplicates
           // so SOLVIS / Solvis / SOLVIS_GmbH all become entity:solvis. Pure +
@@ -2730,6 +2839,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         // Resync the entity:* tags into the .amr (remote/self-host) so recalled candidates carry their
         // tags and the co-mention overlap gate finds shared entities on the NEXT ingest.
         try { amrUpdateTags(baseMemory.org_id, baseMemory.id, newTags); } catch { /* best-effort */ }
+        baseMemory.tags = newTags;
       } catch (tagErr) {
         console.warn('[entity-co-mention] tag update failed:', tagErr.message);
         // Postgres 25P02 = transaction aborted by earlier failure.
@@ -2741,6 +2851,19 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
           return;
         }
       }
+    }
+
+    // Canonical entity registry is the durable cross-source entity graph.
+    // This is idempotent and intentionally independent of relationship
+    // inference: malformed relationship JSON must never erase entities the
+    // save planner or memory processor already extracted.
+    if (entities.length > 0 && !orgIsRemote(baseMemory.org_id) && !store?.inTransaction && entityStatusClient?.canonicalEntity) {
+      await persistCanonicalLinks({
+        prisma: entityStatusClient,
+        organizationId: baseMemory.org_id,
+        items: [{ memoryId: baseMemory.id, entities }],
+        logger: console,
+      });
     }
 
     // Edge cap. Chat-bucket saves with force_entity_linking get a higher
@@ -2838,7 +2961,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       .filter((t) => typeof t === 'string' && t.startsWith('entity:'))
       .map((t) => normEntity(t.slice('entity:'.length).replace(/_/g, ' ')));
     const newEntitiesLower = new Set(
-      [...entities.map(normEntity), ...baseTagEnts].filter((e) => e && !OWNER_COMMON.has(e)),
+      [...entities.map((e) => normEntity(typeof e === 'string' ? e : e?.name)), ...baseTagEnts].filter((e) => e && !OWNER_COMMON.has(e)),
     );
 
     const sorted = links
@@ -2926,6 +3049,8 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     }
 
     let txnPoisoned = false;
+    let edgeWrites = 0;
+    let edgeWriteFailures = 0;
     for (const l of sorted) {
       if (txnPoisoned) break;
       const cand = candidates[l.index];
@@ -2971,6 +3096,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
             classification_source: 'llm',
           },
         });
+        edgeWrites += 1;
       } catch (edgeErr) {
         const msg = String(edgeErr.message || '');
         // Foreign-key violation = candidate memory was deleted between
@@ -3006,7 +3132,9 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
               fallback_reason: edgeErr.message,
             },
           });
+          edgeWrites += 1;
         } catch (fb) {
+          edgeWriteFailures += 1;
           // If fallback also hits FK or 25P02 → abort loop.
           if (/Foreign key|transaction is aborted/i.test(String(fb.message)) || fb.code === '23503' || fb.code === '25P02') {
             txnPoisoned = true;
@@ -3047,6 +3175,23 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         }
       }
     }
+    const relationshipWriteFailed = edgeWriteFailures > 0 || txnPoisoned;
+    if (parsed && !linkLastErr && !relationshipWriteFailed) {
+      await persistEntityStatus('done', {
+        entity_link_completed_at: nowIso(),
+        entity_link_model: LINK_MODEL,
+        entity_link_entity_count: entities.length,
+        entity_link_edge_count: edgeWrites,
+        entity_link_fallback_applied: false,
+      });
+    }
+    return {
+      ok: !linkLastErr && !relationshipWriteFailed,
+      status: linkLastErr ? 'fallback' : relationshipWriteFailed ? 'partial' : 'done',
+      entities: entities.length,
+      edges: edgeWrites,
+      error: linkLastErr ? (linkLastErr.code || linkLastErr.message) : relationshipWriteFailed ? 'relationship_write_failed' : null,
+    };
   }
 
   async ingestMemoryTree(tree) {

@@ -3590,6 +3590,12 @@ Every item must include a non-empty content field and one or more valid support_
       project: envelope.metadata?.project || undefined,
       tags: normalizeTagsArray([...callerTags, ...prov.provenanceTags]),
       code_metadata: envelope.metadata?.code_metadata || undefined,
+      metadata: {
+        ...(envelope.metadata || {}),
+        ...(Array.isArray(envelope.metadata?.extracted_entities)
+          ? { extracted_entities: envelope.metadata.extracted_entities.slice(0, 12) }
+          : {}),
+      },
       // V5: bounded engine processing-flag passthrough (see legacyPayloadToEnvelope).
       skip_fact_extraction: envelope.metadata?.skip_fact_extraction === true || undefined,
       skipPredictCalibrate: envelope.metadata?.skipPredictCalibrate === true || undefined,
@@ -3628,6 +3634,10 @@ Every item must include a non-empty content field and one or more valid support_
             .filter((t) => typeof t === 'string' && (t.startsWith('entity:') || t.startsWith('person:')))
             .map((t) => t.replace(/^(entity|person):/, '').replace(/-/g, ' ').trim())
             .filter(Boolean);
+          for (const e of (m?.metadata?.extracted_entities || envelope.metadata?.extracted_entities || [])) {
+            if (typeof e === 'string' && e.trim()) names.push(e.trim());
+            else if (e && typeof e.name === 'string' && e.name.trim()) names.push(e);
+          }
           if (names.length) items.push({ memoryId: id, entities: names });
         }
         if (items.length) await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items, logger: this.logger });

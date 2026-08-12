@@ -64,6 +64,21 @@ test('canonical compatibility mapping never creates relationship memories', () =
   assert.equal(canonicalSourceType({ source_metadata: { source_platform: 'google-drive' } }), 'connector');
 });
 
+test('legacy chat save preserves structured entities and explicit memory type', () => {
+  const envelope = legacyPayloadToEnvelope({
+    user_id: 'user-1', org_id: 'org-1',
+    title: 'Product decision',
+    content: 'We decided to consolidate HIVEMIND, BRAIN, OS, and VOICE.',
+    memory_type: 'decision',
+    entities: ['HIVEMIND', { name: 'BRAIN', kind: 'product' }],
+    source_metadata: { source_platform: 'talk-to-hive', source_type: 'chat-turn' },
+  }, { mode: 'atomic' });
+
+  assert.equal(envelope.metadata.memory_type, 'decision');
+  assert.deepEqual(envelope.metadata.extracted_entities, ['HIVEMIND', { name: 'BRAIN', kind: 'product' }]);
+  assert.equal(detectMode(envelope), 'atomic');
+});
+
 test('every source type shares the same provenance and mode contract', () => {
   const cases = [
     ['kb', 'knowledge_base', 'document'],

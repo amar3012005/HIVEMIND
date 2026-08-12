@@ -174,6 +174,39 @@ _OR_PROVIDER_PIN = {
     "moonshotai/": ["Moonshot AI", "Novita"],
 }
 
+# Models that default to reasoning ON with no way to ask for it off implicitly —
+# OpenRouter sends chain-of-thought unless the request explicitly disables it.
+# Verified live 2026-08-12 (curl against the real endpoint): nvidia/nemotron-
+# 3.5-lightning burned its ENTIRE token budget on `reasoning` and returned
+# content=null/finish_reason="length" at our real profile-selector budget (300
+# tok) AND our real synth budget (2200 tok) — it never reached the answer.
+# Explicitly setting reasoning.enabled=false fixed both: 300-tok profile
+# selection succeeded in 1.0s/62 tokens, 2200-tok synthesis in 5.7s/872 tokens,
+# both well under budget. Prefix-matched so any future nemotron variant is
+# covered without a code change.
+_REASONING_OFF_MODEL_PREFIXES = ("nvidia/nemotron-",)
+
+
+def _needs_reasoning_disabled(model: str) -> bool:
+    return str(model or "").lower().startswith(_REASONING_OFF_MODEL_PREFIXES)
+
+
+# Experimental candidate models fall back to the proven default on ANY failure
+# — a flaky/unavailable experimental host must never take an already-working
+# step down with it. nvidia/nemotron-3.5-lightning's own OpenRouter endpoints
+# measured 94.8%/98.9% 24h uptime (2026-08-12) — good, not prod-grade-solid —
+# so a single retry against the known-good model is cheap insurance, not
+# over-engineering.
+_EXPERIMENTAL_MODEL_FALLBACK = {"nvidia/nemotron-": "openai/gpt-oss-120b"}
+
+
+def _fallback_model_for(model: str) -> Optional[str]:
+    low = str(model or "").lower()
+    for prefix, fallback in _EXPERIMENTAL_MODEL_FALLBACK.items():
+        if low.startswith(prefix):
+            return fallback
+    return None
+
 
 # Set True the first time Groq returns a billing-block error → gpt-oss/llama then
 # route DIRECT to OpenRouter→Cerebras (skip the wasted Groq 400 round-trips). Resets
@@ -1625,6 +1658,8 @@ class Director:
                                        "json_schema": {"name": schema_name, "schema": schema, "strict": True}}
         elif json_object:
             body["response_format"] = {"type": "json_object"}
+        if _needs_reasoning_disabled(body["model"]):
+            body["reasoning"] = {"enabled": False}
         # Provider-aware routing: a non-Groq-native model (gemini/claude/deepseek…)
         # goes DIRECT to OpenRouter (provider-pinned) — skip the Groq round-trip.
         # gpt-oss/llama stay Groq-primary below + the OpenRouter failover. Non-
@@ -1677,6 +1712,14 @@ class Director:
                 return None
         if _route_direct_openrouter(body.get("model")):
             j = await _openrouter_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
+            if j is None:
+                _fallback = _fallback_model_for(body.get("model"))
+                if _fallback:
+                    log.warning("[hyper-engine] experimental model %s unavailable — falling back to %s",
+                                body.get("model"), _fallback)
+                    body["model"] = _fallback
+                    body.pop("reasoning", None)  # the fallback model doesn't need/want this override
+                    j = await _openrouter_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
             if j is not None:
                 u = j.get("usage") or {}
                 self._record_model_usage(body.get("model"), u, bucket)

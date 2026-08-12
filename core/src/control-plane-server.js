@@ -6386,12 +6386,17 @@ const server = http.createServer(async (req, res) => {
     }
     try {
       const orgId = current.session.orgId || current.session.org_id;
-      const [page, accounts] = await Promise.all([
-        composioService.listToolkits({
-          search: url.searchParams.get('search') || '',
+      const wantsCatalog = url.searchParams.get('catalog') === 'all';
+      const search = url.searchParams.get('search') || '';
+      const pagePromise = wantsCatalog
+        ? composioService.listAllToolkits({ search })
+        : composioService.listToolkits({
+          search,
           cursor: url.searchParams.get('cursor') || null,
           limit: Math.min(Number(url.searchParams.get('limit')) || 40, 100),
-        }),
+        });
+      const [page, accounts] = await Promise.all([
+        pagePromise,
         orgId ? composioService.listConnectedAccounts(orgId).catch(() => []) : Promise.resolve([]),
       ]);
       // Real per-org connection state, not something the FE has to remember

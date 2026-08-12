@@ -375,3 +375,17 @@ confirmed.
 - Operational cleanup: before the first temporal candidate, only confirmed non-running, rebuildable superseded images and builder cache were removed to satisfy the immutable release disk gate. Active containers, application data, and rollback images were retained.
 - Known release-metadata gap: the canonical release deployed and verified the immutable image and manifest, but legacy `/root/hivemind/.env VERSION` and vNext `NEXT_VERSION` remained at `prod-20260809-74d7422ed3ee`. Runtime truth is the image, OCI revision, and manifest above; no unsafe shared-env rewrite was performed after service recreation.
 - External side effects: tenant-scoped memory and Gmail reads only. No memory mutation, draft, approval, email send, document creation, calendar action, campaign, or other provider mutation occurred.
+
+## prod-20260812-b5c2d8a8 — recoverable Talk-to-HIVE entity enrichment
+
+- Parent SHA: `b5c2d8a8a7380422504a80026b1c69d8f8fd481c` on `singulance-main` (PR #155); frontend unchanged. Migration: none.
+- Runtime tuple: Core `hivemind/core-api:sha-b5c2d8a8`, digest `sha256:41672c3797e1c0af2c394f30eba171f068577b4c71e2717cf15f19c25da8407e`, matching OCI revision; healthy.
+- Fix: structured entities emitted by Talk-to-HIVE now survive canonical normalization and atomic ingestion. Malformed entity-linker JSON retains those entities as normalized tags and canonical entity links, without overwriting an explicit memory type. Relationship completion counts only successful writes.
+- Recovery: central tenant memories now carry durable entity-link status/attempt telemetry and have authenticated, user+organization-scoped backfill/stats routes. Queue failures remain retryable; process-global queue counters are not exposed to tenants. Canonical registry persistence remains post-commit, outside the authoritative memory transaction.
+- Tests: 18/18 focused canonical-ingest, relationship-semantics, and canonical-entity tests passed, including malformed JSON fallback preserving `decision` plus structured entities.
+- Authenticated repair acceptance: failed memory `a6d023b1-5ddf-446c-a8e0-1dc06a4f14b1` was backfilled. It retained `decision`, gained `entity:hivemind`, `entity:brain`, `entity:os`, `entity:voice`, four canonical entity links, and one grounded `Mentions` relationship. Status became `done`, attempts `1`, edge count `1`.
+- Authenticated save/chat acceptance: Talk-to-HIVE saved a Project Aster decision in 2.584 s; persistence produced normalized Project Aster and Helios Engine entity tags and canonical links with status `done`. A follow-up chat answered the selected inference platform in 2.477 s with `grounded:true` and two sources.
+- Public/runtime acceptance: `https://core.singulancelabs.com/health` returned 200 in 60 ms. Fresh fatal/panic/unhandled/entity-link failure audit returned no matches.
+- Rollback: `hivemind/core-api:prod-20260811-47516dd8806a`; manifest `/root/releases/manifests/b5c2d8a8/20260812T171450Z/RELEASE_MANIFEST.json`.
+- Operational cleanup: only Docker builder cache was pruned to satisfy the immutable 25 GB release gate; no images, volumes, databases, or user data were removed.
+- External side effects: one explicit user-authorized verification memory was saved and the previously failed memory was enriched. No connector/provider write ran.

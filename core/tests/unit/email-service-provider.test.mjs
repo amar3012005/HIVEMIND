@@ -71,6 +71,19 @@ test('a Cloudflare permanent bounce is not retried through another provider', as
   assert.equal(calls, 1);
 });
 
+test('profiled welcome templates render distinct personal and enterprise workspace messages', async () => {
+  const { renderTemplate } = await import('../../src/email/email-service.js');
+  const personal = renderTemplate('welcome_personal_workspace', { name: 'Maya', accountType: 'personal' });
+  const enterprise = renderTemplate('welcome_enterprise_workspace', {
+    name: 'Maya', orgName: 'Northstar', accountType: 'enterprise_managed', hostingMode: 'managed', onboardingEndsAt: '2026-08-26',
+  });
+  assert.match(personal.subject, /your HIVEMIND/);
+  assert.match(personal.html, /PERSONAL WORKSPACE ACTIVATED/);
+  assert.match(enterprise.subject, /Northstar/);
+  assert.match(enterprise.html, /ENTERPRISE WORKSPACE ACTIVATED/);
+  assert.match(enterprise.html, /Northstar/);
+});
+
 test('no configured provider fails safely without attempting a network call', async () => {
   setEnv({});
   global.fetch = async () => { throw new Error('network must not run'); };

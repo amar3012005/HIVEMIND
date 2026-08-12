@@ -244,6 +244,11 @@ export function renderTemplate(templateId, vars = {}) {
       appUrl: escapeHtml(ctx.appUrl),
       assetBaseUrl: escapeHtml(EMAIL_ASSET_BASE_URL),
       year: escapeHtml(ctx.year),
+      orgName: escapeHtml(ctx.orgName),
+      accountType: escapeHtml(ctx.accountType),
+      welcomeKind: /_login$/.test(templateId) ? 'login' : 'workspace',
+      hostingMode: escapeHtml(ctx.hostingMode),
+      onboardingEndsAt: escapeHtml(ctx.onboardingEndsAt),
     })
     : tpl.layout === 'singulance_transactional'
       ? renderSingulanceTransactionalEmail({ preheader, innerHtml: inner, year: escapeHtml(ctx.year) })

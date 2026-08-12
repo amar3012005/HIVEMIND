@@ -1,5 +1,16 @@
-const DELIVERED_EVENT = 'notification.welcome_signup_delivered';
-const FAILED_EVENT = 'notification.welcome_signup_failed';
+const GENERIC_DELIVERED_EVENT = 'notification.welcome_signup_delivered';
+const GENERIC_FAILED_EVENT = 'notification.welcome_signup_failed';
+
+export function welcomeProfileForWorkspace(workspace = null, { returning = false } = {}) {
+  const enterprise = String(workspace?.accountType || '').startsWith('enterprise_');
+  const prefix = enterprise ? 'enterprise' : 'personal';
+  const suffix = returning ? 'login' : 'workspace';
+  return {
+    templateId: `welcome_${prefix}_${suffix}`,
+    deliveredEvent: `notification.welcome_${prefix}_${suffix}_delivered`,
+    failedEvent: `notification.welcome_${prefix}_${suffix}_failed`,
+  };
+}
 
 function firstNameFor(user) {
   return String(user?.displayName || user?.email?.split('@')[0] || 'there').trim().split(/\s+/)[0];
@@ -14,27 +25,28 @@ export function createSignupWelcomeDispatcher({ prisma, sendEmail, logger = cons
   const inFlight = new Map();
   const deliveredThisProcess = new Set();
 
-  async function hasReceipt(userId) {
-    if (deliveredThisProcess.has(userId)) return true;
+  async function hasReceipt(userId, organizationId, deliveredEvent, receiptKey) {
+    if (deliveredThisProcess.has(receiptKey)) return true;
     const receipt = await prisma?.auditLog?.findFirst({
-      where: { userId, eventType: DELIVERED_EVENT },
+      where: { userId, organizationId: organizationId || null, eventType: deliveredEvent },
       select: { id: true },
     });
-    if (receipt) deliveredThisProcess.add(userId);
+    if (receipt) deliveredThisProcess.add(receiptKey);
     return Boolean(receipt);
   }
 
-  async function appendReceipt(user, eventType, source, delivery) {
+  async function appendReceipt(user, workspace, eventType, source, templateId, delivery) {
     try {
       await prisma?.auditLog?.create({
         data: {
           userId: user.id,
+          organizationId: workspace?.id || null,
           eventType,
           eventCategory: 'notification',
           action: 'send',
           actorType: 'system',
           metadata: {
-            template_id: 'welcome_signup',
+            template_id: templateId,
             source,
             provider: delivery?.provider || null,
             delivery_status: delivery?.deliveryStatus || null,
@@ -49,33 +61,45 @@ export function createSignupWelcomeDispatcher({ prisma, sendEmail, logger = cons
     }
   }
 
-  async function deliver(user, { source = 'user_creation' } = {}) {
+  async function deliver(user, { source = 'workspace_activation', workspace = null } = {}) {
     if (!user?.id || !user?.email) return { ok: false, skipped: true, error: 'no_user_email' };
-    if (await hasReceipt(user.id)) return { ok: true, deduped: true, template: 'welcome_signup' };
-    if (inFlight.has(user.id)) return inFlight.get(user.id);
+    const profile = workspace
+      ? welcomeProfileForWorkspace(workspace)
+      : { templateId: 'welcome_signup', deliveredEvent: GENERIC_DELIVERED_EVENT, failedEvent: GENERIC_FAILED_EVENT };
+    const receiptKey = `${user.id}:${workspace?.id || 'account'}:${profile.templateId}`;
+    if (await hasReceipt(user.id, workspace?.id || null, profile.deliveredEvent, receiptKey)) {
+      return { ok: true, deduped: true, template: profile.templateId };
+    }
+    if (inFlight.has(receiptKey)) return inFlight.get(receiptKey);
 
     const pending = (async () => {
       const delivery = await sendEmail({
-        templateId: 'welcome_signup',
+        templateId: profile.templateId,
         to: user.email,
-        vars: { name: firstNameFor(user), email: user.email },
+        vars: {
+          name: firstNameFor(user),
+          email: user.email,
+          orgName: workspace?.name || '',
+          accountType: workspace?.accountType || 'personal',
+          hostingMode: workspace?.hostingMode || 'managed',
+          onboardingEndsAt: workspace?.onboardingEndsAt || '',
+        },
       });
-      const eventType = delivery?.ok ? DELIVERED_EVENT : FAILED_EVENT;
-      const receiptPersisted = await appendReceipt(user, eventType, source, delivery);
-      if (delivery?.ok) deliveredThisProcess.add(user.id);
-      return { ...delivery, template: 'welcome_signup', receiptPersisted };
+      const eventType = delivery?.ok ? profile.deliveredEvent : profile.failedEvent;
+      const receiptPersisted = await appendReceipt(user, workspace, eventType, source, profile.templateId, delivery);
+      if (delivery?.ok) deliveredThisProcess.add(receiptKey);
+      return { ...delivery, template: profile.templateId, receiptPersisted };
     })().catch(async (error) => {
       const failure = { ok: false, error: error.message || 'delivery_failed' };
-      await appendReceipt(user, FAILED_EVENT, source, failure);
-      return { ...failure, template: 'welcome_signup' };
-    }).finally(() => inFlight.delete(user.id));
+      await appendReceipt(user, workspace, profile.failedEvent, source, profile.templateId, failure);
+      return { ...failure, template: profile.templateId };
+    }).finally(() => inFlight.delete(receiptKey));
 
-    inFlight.set(user.id, pending);
+    inFlight.set(receiptKey, pending);
     return pending;
   }
 
   return { deliver, hasReceipt };
 }
 
-export const SIGNUP_WELCOME_DELIVERED_EVENT = DELIVERED_EVENT;
-
+export const SIGNUP_WELCOME_DELIVERED_EVENT = GENERIC_DELIVERED_EVENT;

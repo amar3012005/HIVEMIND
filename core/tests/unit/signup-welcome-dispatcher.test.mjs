@@ -3,12 +3,20 @@ import test from 'node:test';
 import { createSignupWelcomeDispatcher } from '../../src/email/signup-welcome-dispatcher.js';
 
 function harness({ delivered = false, sendResult = { ok: true, provider: 'cloudflare', deliveryStatus: 'delivered' } } = {}) {
-  const receipts = delivered ? [{ id: 'existing' }] : [];
+  const receipts = delivered ? [{ id: 'existing', userId: 'user-1', organizationId: null, eventType: 'notification.welcome_signup_delivered' }] : [];
   const events = [];
   let sends = 0;
   const prisma = { auditLog: {
-    findFirst: async () => receipts[0] || null,
-    create: async ({ data }) => { events.push(data); if (data.eventType.endsWith('_delivered')) receipts.push({ id: 'new' }); return data; },
+    findFirst: async ({ where }) => receipts.find((receipt) => (
+      receipt.userId === where.userId
+      && receipt.organizationId === (where.organizationId || null)
+      && receipt.eventType === where.eventType
+    )) || null,
+    create: async ({ data }) => {
+      events.push(data);
+      if (data.eventType.endsWith('_delivered')) receipts.push({ id: 'new', userId: data.userId, organizationId: data.organizationId || null, eventType: data.eventType });
+      return data;
+    },
   } };
   const sendEmail = async () => { sends += 1; await new Promise(resolve => setTimeout(resolve, 5)); return sendResult; };
   const dispatcher = createSignupWelcomeDispatcher({ prisma, sendEmail, logger: { warn() {} } });
@@ -43,3 +51,22 @@ test('failed delivery is recorded and remains retryable', async () => {
   assert.equal(h.events[0].eventType.endsWith('_failed'), true);
 });
 
+test('workspace activation selects a personal or enterprise welcome and deduplicates per workspace', async () => {
+  const h = harness();
+  const user = { id: 'user-1', email: 'maya@example.com', displayName: 'Maya Chen' };
+  const personal = await h.dispatcher.deliver(user, {
+    workspace: { id: 'org-personal', name: 'Maya', accountType: 'personal', hostingMode: 'managed' },
+  });
+  const enterprise = await h.dispatcher.deliver(user, {
+    workspace: { id: 'org-enterprise', name: 'Northstar', accountType: 'enterprise_managed', hostingMode: 'managed' },
+  });
+  const duplicate = await h.dispatcher.deliver(user, {
+    workspace: { id: 'org-enterprise', name: 'Northstar', accountType: 'enterprise_managed', hostingMode: 'managed' },
+  });
+  assert.equal(personal.template, 'welcome_personal_workspace');
+  assert.equal(enterprise.template, 'welcome_enterprise_workspace');
+  assert.equal(duplicate.deduped, true);
+  assert.equal(h.sends(), 2);
+  assert.equal(h.events[0].organizationId, 'org-personal');
+  assert.equal(h.events[1].organizationId, 'org-enterprise');
+});

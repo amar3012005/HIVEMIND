@@ -24,6 +24,30 @@
     "text": "Hi {{name}},\n\nWelcome to HIVEMIND — the AI Operating System for your company.\n\nYour AI workforce now works inside your company brain, using approved context to coordinate work, execute tasks, and preserve durable organizational intelligence under your control.\n\nStart by connecting your company context:\n\n{{appUrl}}\n\nWe're glad you're here.\nThe HIVEMIND team\n\n© {{year}} Da'vinci Solutions",
     "html": "<div style=\"margin:0 0 18px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:16px;font-weight:700;letter-spacing:2px;color:#117dff\">ACCOUNT ACTIVATED</div><h1 style=\"margin:0 0 22px;font-family:'Space Grotesk',Arial,sans-serif;font-size:32px;line-height:39px;letter-spacing:-0.4px;color:#0a0a0a\">Welcome to HIVEMIND, {{name}}</h1><p style=\"margin:0 0 26px;font-size:17px;line-height:28px;color:#5d5d5d\">Your company AI Operating System is ready. HIVEMIND gives your AI workforce approved context inside your company brain, so it can coordinate work while your organization retains control.</p><p style=\"margin:0 0 28px\"><a href=\"{{appUrl}}\" style=\"display:inline-block;background:#117dff;color:#ffffff;text-decoration:none;font-family:'Space Grotesk',Arial,sans-serif;font-weight:700;font-size:15px;letter-spacing:0.6px;padding:15px 24px;border-radius:6px\">OPEN HIVEMIND</a></p><p style=\"margin:0;font-size:13px;line-height:22px;color:#7b7b7b\">The HIVEMIND team</p>"
   },
+  "welcome_personal_workspace": {
+    "layout": "hivemind_cartesia_welcome",
+    "subject": "Welcome to your HIVEMIND, {{name}}",
+    "preheader": "Your personal AI Operating System is ready.",
+    "text": "Hi {{name}},\n\nYour personal HIVEMIND workspace is ready. Your AI workforce can now work from the context you approve and keep your knowledge under your control.\n\nOpen HIVEMIND:\n{{appUrl}}\n\nThe HIVEMIND team"
+  },
+  "welcome_enterprise_workspace": {
+    "layout": "hivemind_cartesia_welcome",
+    "subject": "{{orgName}} is ready on HIVEMIND, {{name}}",
+    "preheader": "Your enterprise AI Operating System is activated.",
+    "text": "Hi {{name}},\n\n{{orgName}}'s enterprise HIVEMIND workspace is ready. Your AI workforce can coordinate work from approved company context while your organization retains control.\n\nOpen HIVEMIND:\n{{appUrl}}\n\nThe HIVEMIND team"
+  },
+  "welcome_personal_login": {
+    "layout": "hivemind_cartesia_welcome",
+    "subject": "Welcome back to your HIVEMIND, {{name}}",
+    "preheader": "Your personal AI Operating System is ready.",
+    "text": "Hi {{name}},\n\nWelcome back to your personal HIVEMIND workspace.\n\nOpen HIVEMIND:\n{{appUrl}}\n\nThe HIVEMIND team"
+  },
+  "welcome_enterprise_login": {
+    "layout": "hivemind_cartesia_welcome",
+    "subject": "Welcome back to {{orgName}}, {{name}}",
+    "preheader": "Your enterprise AI Operating System is ready.",
+    "text": "Hi {{name}},\n\nWelcome back to {{orgName}}'s HIVEMIND workspace.\n\nOpen HIVEMIND:\n{{appUrl}}\n\nThe HIVEMIND team"
+  },
   "team_invite": {
     "subject": "{{orgName}} is on HIVEMIND — you're invited 🐝",
     "preheader": "Your admin invited you to join {{orgName}} on HIVEMIND.",

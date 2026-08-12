@@ -85,7 +85,7 @@ import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { renderTemplate, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
-import { createSignupWelcomeDispatcher } from './email/signup-welcome-dispatcher.js';
+import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
@@ -2065,13 +2065,8 @@ async function upsertUserFromZitadel(userInfo) {
       lastActiveAt: new Date()
     }
   });
-  signupWelcome.deliver(created, { source: 'user_creation' }).then((delivery) => {
-    if (!delivery.ok) {
-      console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'signup_welcome_failed', userId: created.id, error: delivery.error }));
-    }
-  }).catch((error) => {
-    console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'signup_welcome_failed', userId: created.id, error: error.message }));
-  });
+  // A user identity alone does not have a trustworthy personal/enterprise
+  // profile. Deliver the welcome only once its workspace is activated.
   return created;
 }
 
@@ -4342,26 +4337,45 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { ok: false, error: 'no_user_email' });
     }
     const firstName = (user.displayName || user.email.split('@')[0] || 'there').split(' ')[0];
-    // First-ever login retries the durable signup delivery if the callback's
-    // fire-and-forget attempt was interrupted. The dispatcher owns durable
-    // user-level deduplication, so this cannot create a second welcome.
+    const membership = await prisma.userOrganization.findFirst({
+      where: { userId: user.id, orgId: current.session.orgId || undefined, isActive: true },
+      select: { org: { select: { id: true, name: true, accountType: true, hostingMode: true, trialEndsAt: true } } },
+    }).catch(() => null);
+    const workspace = membership?.org || null;
+    // First-ever login retries workspace activation delivery if its asynchronous
+    // send was interrupted. The durable receipt prevents duplicate delivery.
     const ageMs = user.createdAt ? Date.now() - new Date(user.createdAt).getTime() : Infinity;
     const isNewAccount = ageMs < 15 * 60 * 1000;
     if (isNewAccount) {
-      const delivery = await signupWelcome.deliver(user, { source: 'overview_recovery' });
+      if (!workspace) {
+        // Do not send a generic email before onboarding has selected the
+        // workspace profile. Organization creation will dispatch the correct
+        // personal or enterprise welcome.
+        return jsonResponse(res, { ok: true, pending_workspace_activation: true, template: null });
+      }
+      const delivery = await signupWelcome.deliver(user, { source: 'overview_recovery', workspace });
       return jsonResponse(res, {
         ok: Boolean(delivery.ok),
-        template: 'welcome_signup',
+        template: delivery.template,
         deduped: Boolean(delivery.deduped),
         delivery_status: delivery.deliveryStatus || null,
       }, delivery.ok ? 200 : 202);
     }
-    const templateId = 'welcome_login';
+    const templateId = workspace
+      ? welcomeProfileForWorkspace(workspace, { returning: true }).templateId
+      : 'welcome_login';
     // Don't await the send — return immediately so login UX is never delayed.
     sendSystemEmail({
       templateId,
       to: user.email,
-      vars: { name: firstName, email: user.email },
+      vars: {
+        name: firstName,
+        email: user.email,
+        orgName: workspace?.name || '',
+        accountType: workspace?.accountType || 'personal',
+        hostingMode: workspace?.hostingMode || 'managed',
+        onboardingEndsAt: workspace?.trialEndsAt ? workspace.trialEndsAt.toISOString().slice(0, 10) : '',
+      },
     }).catch((err) => console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'welcome_dispatch_failed', error: err.message })));
     return jsonResponse(res, { ok: true, template: templateId });
   }
@@ -4602,6 +4616,25 @@ const server = http.createServer(async (req, res) => {
         metadata: { onboarding_ends_at: enterpriseInvitationRedemption.onboardingEndsAt, account_type: enterpriseInvitationRedemption.invitation.account_type },
         ..._reqMeta(req) });
     }
+
+    // Deliver one profile-specific welcome only after the workspace exists.
+    // The durable receipt is scoped to this user and organization, so an OAuth
+    // callback retry or a browser refresh cannot create a duplicate email.
+    prisma.user.findUnique({ where: { id: current.session.userId }, select: { id: true, email: true, displayName: true } })
+      .then((workspaceOwner) => signupWelcome.deliver(workspaceOwner, {
+        source: 'workspace_activation',
+        workspace: {
+          id: org.id,
+          name: org.name,
+          accountType,
+          hostingMode,
+          onboardingEndsAt: enterpriseInvitationRedemption?.onboardingEndsAt || null,
+        },
+      }))
+      .then((delivery) => {
+        if (!delivery.ok) console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'workspace_welcome_failed', orgId: org.id, error: delivery.error }));
+      })
+      .catch((error) => console.error(JSON.stringify({ svc: 'email', level: 'error', event: 'workspace_welcome_failed', orgId: org.id, error: error.message })));
 
     // Route the org to its Qdrant home by PLAN:
     //   enterprise (paid)  → own collection org_<id> (provisioned now, fire-and-forget)

@@ -285,6 +285,145 @@ export async function generateToolInputs(toolSlug, text, { systemPrompt = null }
 }
 
 // ---------------------------------------------------------------------------
+// Tool Router Sessions — bounded discovery/execution for chat.
+//
+// Sessions are deliberately kept behind the existing compound planner. The
+// planner still owns the DAG, native HIVE-MIND tools still execute locally,
+// and writes still become pendingWrite drafts. Sessions only replace repeated
+// per-toolkit schema enumeration and direct connector READ execution. Any
+// Session failure is safe to fall back from because no write is executed here.
+// ---------------------------------------------------------------------------
+
+const SESSION_TTL_MS = Number(process.env.COMPOSIO_SESSION_TTL_MS || 10 * 60 * 1000);
+const SESSION_DISCOVERY_TTL_MS = Number(process.env.COMPOSIO_SESSION_DISCOVERY_TTL_MS || 10 * 60 * 1000);
+const TOOL_ROUTER_SESSION_CACHE = new Map();
+const TOOL_ROUTER_DISCOVERY_CACHE = new Map();
+
+function normalizedSessionKey(orgId, toolkits) {
+  return `${orgId}:${[...new Set(toolkits || [])].map(String).sort().join(',')}`;
+}
+
+function collectToolSlugs(value, prefixes, output = new Set()) {
+  if (typeof value === 'string') {
+    if (/^[A-Z][A-Z0-9]+_[A-Z0-9_]+$/.test(value)
+      && (!prefixes.length || prefixes.some((prefix) => value.startsWith(`${prefix}_`)))) output.add(value);
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectToolSlugs(item, prefixes, output);
+  } else if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) collectToolSlugs(item, prefixes, output);
+  }
+  return output;
+}
+
+async function executeSessionMeta(sessionId, slug, args) {
+  const result = await composioPost(`/api/v3/tool_router/session/${encodeURIComponent(sessionId)}/execute_meta`, {
+    slug,
+    arguments: { ...(args || {}), session_id: sessionId },
+  });
+  if (result?.error) throw new Error(typeof result.error === 'string' ? result.error : JSON.stringify(result.error));
+  return result;
+}
+
+/** Create or reuse a tenant-scoped Tool Router Session. */
+export async function getToolRouterSession(orgId, toolkits) {
+  const enabled = [...new Set((toolkits || []).map((toolkit) => String(toolkit).toLowerCase()).filter(Boolean))].sort();
+  if (!orgId || !enabled.length) throw new Error('Composio Session requires an org and at least one toolkit');
+  const key = normalizedSessionKey(orgId, enabled);
+  const cached = TOOL_ROUTER_SESSION_CACHE.get(key);
+  if (cached && Date.now() - cached.at < SESSION_TTL_MS) return { ...cached.value, cacheHit: true };
+
+  const accounts = await listConnectedAccounts(orgId);
+  const connectedAccounts = {};
+  for (const toolkit of enabled) {
+    const account = accounts.find((row) => row.toolkit === toolkit && row.status === 'ACTIVE');
+    if (!account) throw new Error(`No active Composio account for ${toolkit}`);
+    connectedAccounts[toolkit] = account.id;
+  }
+  const data = await composioPost('/api/v3/tool_router/session', {
+    user_id: orgId,
+    toolkits: { enable: enabled },
+    connected_accounts: connectedAccounts,
+    manage_connections: { enable: false },
+    workbench: { enable: false },
+  });
+  const value = { id: data?.session_id, toolkits: enabled, connectedAccounts };
+  if (!value.id) throw new Error('Composio Session did not return a session_id');
+  TOOL_ROUTER_SESSION_CACHE.set(key, { at: Date.now(), value });
+  return { ...value, cacheHit: false };
+}
+
+/**
+ * Discover a compact, schema-complete tool set for one or more natural
+ * language use-cases. Search and schemas are cached with the Session so a
+ * repeated chat turn goes directly to provider execution.
+ */
+export async function discoverSessionTools(orgId, { toolkits, useCases }) {
+  const session = await getToolRouterSession(orgId, toolkits);
+  const normalizedCases = (useCases || []).map((item) => String(item || '').trim()).filter(Boolean);
+  if (!normalizedCases.length) throw new Error('Composio Session discovery requires a use-case');
+  const cacheKey = `${session.id}:${JSON.stringify(normalizedCases.map((item) => item.toLowerCase()))}`;
+  const cached = TOOL_ROUTER_DISCOVERY_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.at < SESSION_DISCOVERY_TTL_MS) {
+    return { ...cached.value, sessionCacheHit: session.cacheHit, discoveryCacheHit: true };
+  }
+
+  const searched = await executeSessionMeta(session.id, 'COMPOSIO_SEARCH_TOOLS', {
+    queries: normalizedCases.map((use_case) => ({ use_case })),
+    session: { id: session.id },
+    model: process.env.COMPOSIO_SESSION_SEARCH_MODEL || 'openai/gpt-oss-20b',
+  });
+  const prefixes = session.toolkits.map((toolkit) => toolkit.replace(/[^a-z0-9]/gi, '').toUpperCase());
+  const slugs = [...collectToolSlugs(searched?.data, prefixes)].slice(0, 24);
+  if (!slugs.length) throw new Error('Composio Session found no matching tools');
+  const schemaResult = await executeSessionMeta(session.id, 'COMPOSIO_GET_TOOL_SCHEMAS', { tool_slugs: slugs });
+  const schemas = schemaResult?.data?.tool_schemas || {};
+  const tools = Object.entries(schemas).map(([slug, schema]) => ({
+    type: 'function',
+    function: {
+      name: `composio_${slug}`.toLowerCase(),
+      description: String(schema?.description || slug).slice(0, 1024),
+      parameters: schema?.input_schema || { type: 'object', properties: {} },
+    },
+    _composio: {
+      toolkit: String(schema?.toolkit || slug.split('_')[0]).toLowerCase(),
+      slug,
+      sessionId: session.id,
+    },
+  }));
+  const value = { sessionId: session.id, tools, searchedLogId: searched?.log_id || null, schemaLogId: schemaResult?.log_id || null };
+  TOOL_ROUTER_DISCOVERY_CACHE.set(cacheKey, { at: Date.now(), value });
+  return { ...value, sessionCacheHit: session.cacheHit, discoveryCacheHit: false };
+}
+
+/** Execute one already-discovered READ through the same Session. */
+export async function executeSessionTool(sessionId, toolSlug, args = {}) {
+  const result = await executeSessionMeta(sessionId, 'COMPOSIO_MULTI_EXECUTE_TOOL', {
+    tools: [{ tool_slug: toolSlug, arguments: args || {} }],
+    thought: 'Execute the selected read-only capability for the current workflow step.',
+    current_step: 'EXECUTING_TOOL',
+    current_step_metric: '0/1 tools',
+  });
+  const response = result?.data?.results?.[0]?.response;
+  return {
+    successful: Boolean(response?.successful),
+    data: response?.data ?? null,
+    error: response?.error ?? result?.error ?? null,
+    session_log_id: result?.log_id || null,
+  };
+}
+
+export function getToolRouterCacheStats() {
+  return { sessions: TOOL_ROUTER_SESSION_CACHE.size, discoveries: TOOL_ROUTER_DISCOVERY_CACHE.size };
+}
+
+export function clearToolRouterCaches() {
+  TOOL_ROUTER_SESSION_CACHE.clear();
+  TOOL_ROUTER_DISCOVERY_CACHE.clear();
+}
+
+// ---------------------------------------------------------------------------
 // Toolkit catalog browser — Composio's full ~1,100-toolkit catalog (Gmail,
 // Perplexity, SerpApi, Airtable, ...), not just the handful HIVEMIND
 // curates in connectors-catalog.js. Used by the "browse all toolkits" grid.

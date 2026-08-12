@@ -1854,7 +1854,10 @@ function applyCorsHeaders(req, res) {
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control');
+  // Idempotency-Key is used by durable mutation clients, including workspace
+  // invitation creation. Leaving it out makes browsers reject the preflight
+  // before the server can provide exactly-once semantics.
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control, Idempotency-Key');
 }
 
 function sanitizeSlug(input) {

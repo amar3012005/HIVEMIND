@@ -35,6 +35,8 @@ import {
   shouldStartHttpServer,
 } from './runtime/runtime-role.js';
 import { scheduleRecurringMaintenanceJob } from './runtime/maintenance-job.js';
+import { runShardCompaction } from './vector/mneme/shard-maintenance.js';
+import { snapshotAllOpenShards, pruneOldSnapshots } from './vector/mneme/shard-backup.js';
 import { requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 import { isOrganizationAdmin } from './workspace/access-policy.js';
@@ -424,6 +426,42 @@ if (auditLogger && shouldRunRecurringMaintenanceJobs()) {
     initialDelayMs: 10 * 60 * 1000,
     intervalMs: AUDIT_CHECKPOINT_INTERVAL_MS,
     run: async () => { await auditLogger.checkpointAllOrgs().catch(() => {}); },
+  });
+}
+// .amr shard compaction (Phase A production-trust gate item 1) — reclaims dead .txt/.edg bytes
+// from tombstoned/superseded slots + overflow blocks. compact() is synchronous/native and blocks
+// the event loop for its duration, so this runs infrequently and skips any org already compacted
+// within MNEME_COMPACT_MIN_INTERVAL_MS (default 6h) — see shard-maintenance.js. Default ON: the
+// primitive is well-isolated (per-org try/catch) and every tick with it off is pure disk waste.
+if (shouldRunRecurringMaintenanceJobs()) {
+  scheduleRecurringMaintenanceJob({
+    enabled: ['0', 'false', 'no', 'off'].includes(String(process.env.MNEME_COMPACT_ENABLED || '').toLowerCase()) === false,
+    jobName: 'amr-shard-compaction',
+    initialDelayMs: 5 * 60 * 1000,
+    intervalMs: Number(process.env.MNEME_COMPACT_TICK_MS || 30 * 60 * 1000),
+    singleton: false,
+    run: async () => { runShardCompaction(); },
+  });
+}
+// .amr shard backup (Phase A production-trust gate item 2) — a dead box currently means that
+// org's memory is offline permanently; this is the first real mitigation. Snapshots every
+// currently-open shard (flush-then-sync-copy, see shard-backup.js) on a slow cadence, pruning to
+// the newest MNEME_BACKUP_KEEP snapshots per org. Default OFF: unlike compaction this costs real
+// disk (a full copy per org per run) and needs an operator-chosen MNEME_BACKUP_ROOT — opt in once
+// that's set.
+if (shouldRunRecurringMaintenanceJobs() && process.env.MNEME_BACKUP_ROOT) {
+  const backupRoot = process.env.MNEME_BACKUP_ROOT;
+  const keep = Number(process.env.MNEME_BACKUP_KEEP || 3);
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    jobName: 'amr-shard-backup',
+    initialDelayMs: 15 * 60 * 1000,
+    intervalMs: Number(process.env.MNEME_BACKUP_TICK_MS || 24 * 60 * 60 * 1000),
+    singleton: false,
+    run: async () => {
+      snapshotAllOpenShards({ backupRoot });
+      pruneOldSnapshots({ backupRoot, keep });
+    },
   });
 }
 const webhookManager = prisma ? new WebhookManager(prisma) : null;

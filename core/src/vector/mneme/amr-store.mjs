@@ -79,6 +79,12 @@ export class AmrMemoryStore {
 
   liveCount() { return this.store.liveCount(); }
 
+  // Reclaim dead .txt/.edg bytes from tombstoned/superseded slots + overflow blocks. Blocks the
+  // event loop for its full duration (native, synchronous) — call from a low-frequency background
+  // job, not per-request. Calls flush() internally, so no separate flush is needed after. Returns
+  // bytes reclaimed (0 is a valid, non-error result — nothing to reclaim).
+  compact() { return this.store.compact(); }
+
   // ── point reads ─────────────────────────────────────────────────────────────────────────────
   _recAt(slot) {
     try { return JSON.parse(this.store.slotText(slot)); } catch { return null; }

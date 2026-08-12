@@ -440,6 +440,14 @@ const ctxCache = new Map();
 // Memoising the in-flight PROMISE — not just the result — makes concurrent callers share one open.
 const ctxPending = new Map();
 
+// Snapshot of every currently-open shard's context, for background jobs that need to iterate all
+// live orgs (compaction, backup) rather than open one on demand. Returns [{ orgId, ctx }] — a
+// COPY of the entries, not a live view, so a job iterating this can't be affected by concurrent
+// LRU eviction/reopen happening mid-iteration.
+export function listOpenShards() {
+  return Array.from(ctxCache.entries()).map(([orgId, ctx]) => ({ orgId, ctx }));
+}
+
 async function getCtx(orgId) {
   if (ctxCache.has(orgId)) {
     const c = ctxCache.get(orgId);

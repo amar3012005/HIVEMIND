@@ -3456,6 +3456,29 @@ async def _resolve_work_room_execution_profile(req: "RoomTurnRequest", conns: Li
     return winner if isinstance(winner, dict) and winner.get("profile_id") else selected
 
 
+async def _run_direct_answer_agent(
+    room_id: str, lead: Dict[str, Any], user_id: str, org_id: str, project_id: Optional[str],
+    turn_id: str, user_message: str, board_context: str,
+) -> Optional[str]:
+    """Invoke the lead's real AgentScope agent to answer directly — LIVE tool
+    access (recall, connectors), not limited to whatever gather pre-fetched.
+    None on any failure (agent build, invocation, empty reply); Director's
+    _try_direct_answer_hook treats None as "fall through to normal synth"."""
+    try:
+        agent = await _build_agent_for_room(room_id, lead, user_id=user_id, org_id=org_id, project_id=project_id)
+        prompt = (
+            f"Answer this directly and concisely, in character: {user_message}\n\n"
+            f"CONTEXT ALREADY GATHERED THIS TURN (use it; call your own tools for "
+            f"anything more you need):\n{board_context}"
+        )
+        reply = await agent(Msg(name="user", content=prompt, role="user"))
+        text = _msg_to_text(reply).strip()
+        return text or None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[direct-answer] agent invocation failed turn=%s: %s", turn_id, exc)
+        return None
+
+
 async def _orchestrate_single_agent(
     req: "RoomTurnRequest",
     participants: List[Dict[str, Any]],
@@ -3642,6 +3665,20 @@ async def _orchestrate_single_agent(
     except Exception:  # noqa: BLE001
         _room_instructions = ""
 
+    # Direct-answer via a real tool-using agent — only exercised by Director for
+    # response_depth=="direct" plain-answer turns (see engine.py run()). The
+    # lead's ACTUAL AgentScope agent answers with LIVE tool access (recall,
+    # connectors — progressive, on-demand, not limited to whatever gather
+    # pre-fetched), instead of Director's own tool-less synth. None on any
+    # failure — Director falls back to normal synth automatically. Output
+    # flows through the SAME final_text the existing verify/governance pass
+    # already checks below — no separate safety net needed.
+    async def _direct_answer_via_agent(user_message: str, board_context: str) -> Optional[str]:
+        return await _run_direct_answer_agent(
+            req.room_id, lead, req.user_id, req.org_id, req.project_id, req.turn_id,
+            user_message, board_context,
+        )
+
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -3662,6 +3699,7 @@ async def _orchestrate_single_agent(
             "sender_email": _sender_email, "out_language": (req.language or ""),
             "campaign_brief": req.campaign_brief,
             "room_id": req.room_id, "turn_id": req.turn_id,
+            "direct_answer_hook": _direct_answer_via_agent,
         }
         if _room_kind == "campaign":
             result = await _build_campaign_director(director_kwargs, req.campaign_brief).run()

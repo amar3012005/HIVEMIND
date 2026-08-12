@@ -103,7 +103,8 @@ from .hivemind_client import (
     runtime_connectors_emulated,
 )
 from .hyper.engine import (Director, _openrouter_chat, run_director, evo_reflect_and_merge, run_mention_reply,
-                           make_journal_entry, _persona_fields, _evo_recall)
+                           make_journal_entry, _persona_fields, _evo_recall, _needs_reasoning_disabled,
+                           _fallback_model_for)
 
 log = logging.getLogger(__name__)
 
@@ -3305,6 +3306,8 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
             "name": "execution_profile_selection", "schema": _PROFILE_SELECTION_SCHEMA, "strict": True,
         }},
     }
+    if _needs_reasoning_disabled(body["model"]):
+        body["reasoning"] = {"enabled": False}
     # Route straight to OpenRouter — no direct api.groq.com attempt. The direct
     # Groq key is confirmed delinquent (billing-dead), so every direct call here
     # was a guaranteed 400 followed by this exact fallback anyway (verified live
@@ -3318,6 +3321,17 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
         data = await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
     except Exception as exc:  # noqa: BLE001
         log.info("[profile-select] openrouter unavailable turn=%s: %s", req.turn_id, exc)
+    if data is None:
+        _fallback = _fallback_model_for(body["model"])
+        if _fallback:
+            log.warning("[profile-select] experimental model %s unavailable turn=%s — falling back to %s",
+                        body["model"], req.turn_id, _fallback)
+            body["model"] = _fallback
+            body.pop("reasoning", None)
+            try:
+                data = await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
+            except Exception as exc:  # noqa: BLE001
+                log.info("[profile-select] fallback model also unavailable turn=%s: %s", req.turn_id, exc)
     profile_id = ""
     reason = ""
     try:

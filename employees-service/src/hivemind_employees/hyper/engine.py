@@ -1307,6 +1307,7 @@ class Director:
         campaign_brief: Optional[Dict[str, Any]] = None,
         room_id: str = "",
         turn_id: str = "",
+        direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
     ) -> None:
         # Run-wide output language from the FE navbar toggle (locale code/name →
         # language NAME, '' for English). Drives a strict "write in X only" directive.
@@ -1317,6 +1318,13 @@ class Director:
         self.project_id = project_id
         self.room_id = str(room_id or "")
         self.turn_id = str(turn_id or "")
+        # Direct-answer via a real tool-using agent, instead of this Director's own
+        # tool-less _synthesize() — only exercised for response_depth=="direct" +
+        # a plain-answer turn (see run()). None (default) preserves today's
+        # behavior completely: every turn's synth is unaffected unless the caller
+        # explicitly supplies this hook. Callable(user_message, board_context) ->
+        # the agent's answer, or None to fall through to normal synth.
+        self.direct_answer_hook = direct_answer_hook
         self.participants = participants
         self.roster = {(p.get("slug") or p.get("id")): p for p in participants}
         self.room_template = room_template or "debate"
@@ -5827,6 +5835,35 @@ class Director:
                 errors.append("The plan does not delegate one Company Room")
         return report, contract, errors
 
+    async def _try_direct_answer_hook(self) -> Optional[str]:
+        """A real tool-using agent answers directly, instead of this Director's
+        own tool-less synth — only for response_depth=="direct" plain-answer
+        turns, and only when the caller supplied direct_answer_hook (None by
+        default; today's every other turn is completely unaffected). The
+        agent gets LIVE tool access (recall, connectors) while composing the
+        answer, progressive and on-demand, not limited to whatever gather
+        pre-fetched upfront — the same reach a produce/artifact turn's agent
+        already gets. Ask 2026-08-12: route direct-classified queries to an
+        agent with progressive skills/tools "exactly like" the @mention and
+        implicit-direct-agent routing already shipped this session, instead
+        of Director's own synth writing the answer.
+
+        Returns None to mean "fall through to normal synth" — either the
+        gate condition isn't met, or the hook itself failed/returned nothing.
+        Whatever text DOES come back flows through the exact same final_text
+        the caller's existing verify/governance pass already checks — no
+        separate safety net needed here.
+        """
+        if not (self.response_depth == "direct" and self.intended_output in ("answer", "")
+                and self.direct_answer_hook is not None):
+            return None
+        try:
+            answer = await self.direct_answer_hook(self.user_message, self._synthesis_context(3000))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] direct_answer_hook failed, falling back to synth: %s", exc)
+            return None
+        return answer.strip() if isinstance(answer, str) and answer.strip() else None
+
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
         on the synth model — no tool-call transcript → no harmony glitch, full quality."""
@@ -6617,7 +6654,8 @@ class Director:
                     "message": "Measured sections were compiled from the deterministic SEO artifact.",
                 })
             else:
-                final_text = await self._synthesize(forced_debate, transcript_json)
+                agent_answer = await self._try_direct_answer_hook()
+                final_text = agent_answer or await self._synthesize(forced_debate, transcript_json)
         if not final_text:
             # Every synthesis attempt failed — never return empty at the emit boundary.
             final_text = ("(The room could not produce a grounded answer this turn — "
@@ -6717,6 +6755,7 @@ async def run_director(
     campaign_brief: Optional[Dict[str, Any]] = None,
     room_id: str = "",
     turn_id: str = "",
+    direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -6736,5 +6775,6 @@ async def run_director(
         out_language=out_language,
         campaign_brief=campaign_brief,
         room_id=room_id, turn_id=turn_id,
+        direct_answer_hook=direct_answer_hook,
     )
     return await director.run()

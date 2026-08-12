@@ -566,6 +566,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // async
   }
 
+  // ── Browser Actions: the extension-side twin of hm-playwright's
+  // /v1/sessions — same action set, but against the user's REAL, already
+  // signed-in tab instead of a headless copy. Structurally read-only: none
+  // of navigate/scroll/extract/screenshot can post/like/follow/send by
+  // themselves. A click action deliberately does not exist here yet — see
+  // browser-actions.js's own comment on why.
+  if (message.action === 'browserAction') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.id) { sendResponse({ error: 'No active tab' }); return; }
+        const act = message.browserAct || {};
+
+        if (act.type === 'navigate') {
+          if (!act.url) { sendResponse({ error: 'navigate: url is required' }); return; }
+          await chrome.tabs.update(tab.id, { url: act.url });
+          sendResponse({ ok: true, url: act.url });
+          return;
+        }
+        if (act.type === 'screenshot') {
+          const shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 });
+          sendResponse({ ok: true, screenshot: shot });
+          return;
+        }
+
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['browser-actions.js'] });
+        if (act.type === 'scroll') {
+          const res = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (direction, amount) => (window.__hmBrowserActions ? window.__hmBrowserActions.scroll(direction, amount) : null),
+            args: [act.direction || 'down', act.amount || 800],
+          });
+          sendResponse((res && res[0] && res[0].result) || { error: 'scroll failed' });
+          return;
+        }
+        if (act.type === 'extract') {
+          const res = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => (window.__hmBrowserActions ? window.__hmBrowserActions.extract() : null),
+          });
+          sendResponse((res && res[0] && res[0].result) || { error: 'extract failed' });
+          return;
+        }
+        sendResponse({ error: `unknown browser action: ${act.type}` });
+      } catch (e) {
+        sendResponse({ error: e.message || 'Browser action failed' });
+      }
+    })();
+    return true; // async
+  }
+
   if (message.action === 'getSelectionContext') {
     getSelectionContext().then(sendResponse).catch(() => sendResponse(null));
     return true;

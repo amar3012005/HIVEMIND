@@ -1960,7 +1960,15 @@ ${message}`;
 
   if (streamValidated && String(model || '').startsWith('nvidia/nemotron-3.5-lightning')) {
     return callValidatedClaimStream({
-      messages: [{ role: 'system', content: synthesisPrompt.dynamic_prompt }, ...tail, { role: 'user', content: userBlock }],
+      // Streaming has its own NDJSON output contract, but it must retain the
+      // same persona and grounding voice as non-streamed synthesis. Keep the
+      // persona module here without duplicating the JSON-object contract.
+      messages: [
+        { role: 'system', content: ORGANIZATIONAL_BRAIN_PERSONA },
+        { role: 'system', content: synthesisPrompt.dynamic_prompt },
+        ...tail,
+        { role: 'user', content: userBlock },
+      ],
       model, apiKey, maxTokens: answerCap, signal,
       promptCacheKey: synthesisPrompt.cache.key,
       recallPackets: evidence.recall_packets || [], allowGeneralKnowledge, onEvent,

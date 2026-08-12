@@ -18,7 +18,16 @@ test('Tool Router caches session discovery and executes the selected provider re
     }
     if (String(url).endsWith('/api/v3/tool_router/session')) return json({ session_id: 'trs_test' });
     if (body?.slug === 'COMPOSIO_SEARCH_TOOLS') {
-      return json({ data: { results: [{ primary_tool_slugs: ['GMAIL_FETCH_EMAILS'] }] }, log_id: 'search_log' });
+      return json({
+        data: {
+          results: [{
+            primary_tool_slugs: ['GMAIL_GET_CURRENT_TIME', 'GMAIL_FETCH_EMAILS'],
+            related_tool_slugs: ['GMAIL_LIST_LABELS'],
+          }],
+          tool_schemas: { GMAIL_LIST_LABELS: { tool_slug: 'GMAIL_LIST_LABELS' } },
+        },
+        log_id: 'search_log',
+      });
     }
     if (body?.slug === 'COMPOSIO_GET_TOOL_SCHEMAS') {
       return json({
@@ -54,6 +63,7 @@ test('Tool Router caches session discovery and executes the selected provider re
     assert.equal(second.sessionCacheHit, true);
     assert.equal(second.discoveryCacheHit, true);
     assert.equal(second.tools[0]._composio.slug, 'GMAIL_FETCH_EMAILS');
+    assert.equal(second.tools.length, 1, 'prerequisites and related tools must not compete with the terminal capability');
     assert.equal(executed.successful, true);
     assert.equal(executed.data.messages[0].subject, 'Latest');
     assert.equal(calls.filter((call) => call.body?.slug === 'COMPOSIO_SEARCH_TOOLS').length, 1);

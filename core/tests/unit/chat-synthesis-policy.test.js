@@ -50,14 +50,16 @@ test('progressive canonical query is rewritten only after first recall has zero 
   assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: true }), false);
 });
 
-test('legacy DeepSeek flags cannot override or shadow the configured final synthesis model', () => {
+test('Nemotron serves only native fact recall and preserves GPT-OSS as fallback', () => {
   const native = chooseSynthesisModel({
     operation: 'recall', recallMode: 'fact', useTools: false,
     currentModel: 'openai/gpt-oss-20b:nitro', shadowEnabled: true, canaryEnabled: true,
   });
-  assert.equal(native.served, 'openai/gpt-oss-20b:nitro');
+  assert.equal(native.served, 'nvidia/nemotron-3.5-lightning:nitro');
   assert.equal(native.shadow, null);
-  assert.equal(native.eligible, false);
+  assert.equal(native.eligible, true);
+  assert.equal(native.fallback, 'openai/gpt-oss-20b:nitro');
+  assert.equal(native.reasoning, 'disabled');
 
   const compound = chooseSynthesisModel({
     operation: 'compound', recallMode: 'fact', useTools: true,
@@ -65,6 +67,7 @@ test('legacy DeepSeek flags cannot override or shadow the configured final synth
   });
   assert.equal(compound.served, 'openai/gpt-oss-20b:nitro');
   assert.equal(compound.shadow, null);
+  assert.equal(compound.eligible, false);
 });
 
 test('usage summary separates cached and uncached input from per-stage usage', () => {

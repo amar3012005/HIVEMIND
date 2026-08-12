@@ -45,6 +45,7 @@ import {
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 import {
   chatCompletionFetch,
+  chatCompletionStream,
   DEFAULT_CHAT_PLANNER_MODEL,
   resolveChatSynthesisModel,
 } from '../llm/chat-provider.js';
@@ -149,6 +150,7 @@ function languageName(code) {
 // ── Provider-aware JSON helper ─────────────────────────────────────────
 
 async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy, promptCacheKey }) {
+  const reasoningDisabled = String(model || '').startsWith('nvidia/nemotron-3.5-lightning');
   const resp = await chatCompletionFetch(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -165,6 +167,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
       // the job is to WRITE a cited answer. Pass a low/medium effort when the
       // caller asks. Harmless on non-reasoning providers (ignored field).
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      ...(reasoningDisabled ? { reasoning: { enabled: false } } : {}),
       ...(providerPolicy ? { provider: providerPolicy } : {}),
       ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
     }),
@@ -177,6 +180,80 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
   const data = await resp.json();
   const raw = data.choices?.[0]?.message?.content || '{}';
   return { parsed: parseJsonObjectContent(raw), usage: data.usage };
+}
+
+async function callValidatedClaimStream({ messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, allowGeneralKnowledge, onEvent }) {
+  const streamInstruction = `STREAMING OUTPUT CONTRACT: Return newline-delimited JSON (NDJSON), one complete object per line and no markdown.
+For every factual sentence emit {"type":"claim","text":"a complete natural sentence","citation_ids":["P1-C1"]}. Each claim must use only delivered evidence and include valid delivered citation IDs. Emit claims in the order the user should read them. Then emit exactly one final {"type":"meta","confidence":0.0,"gaps":[],"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Never emit uncited prose.`;
+  const streamedClaims = [];
+  const rejectedClaims = [];
+  let meta = {};
+  let pending = '';
+  let started = false;
+  const consumeLine = (rawLine) => {
+    const line = String(rawLine || '').trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
+    if (!line) return;
+    let item;
+    try { item = JSON.parse(line); } catch { return; }
+    if (item?.type === 'meta') {
+      meta = item;
+      return;
+    }
+    if (item?.type !== 'claim' || typeof item.text !== 'string') return;
+    const candidate = {
+      text: item.text.trim(), grounded: true,
+      citation_ids: Array.isArray(item.citation_ids) ? item.citation_ids : [],
+    };
+    const validated = validateChatAnswer({ answer: candidate.text, claims: [candidate] }, recallPackets, { allowGeneralKnowledge });
+    if (!validated.claims.length) {
+      rejectedClaims.push(...(validated.rejected_claims || [candidate]));
+      return;
+    }
+    const claim = validated.claims[0];
+    streamedClaims.push(claim);
+    if (!started) {
+      onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
+      started = true;
+    }
+    onEvent?.({ type: 'answer_delta', schema_version: 1, delta: `${claim.text}${/\s$/.test(claim.text) ? '' : ' '}`, validated: true, citation_ids: claim.citation_ids });
+  };
+  const result = await chatCompletionStream(model, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      messages: [{ role: 'system', content: streamInstruction }, ...messages],
+      max_completion_tokens: maxTokens,
+      temperature: 0,
+      reasoning: { enabled: false },
+      prompt_cache_key: promptCacheKey,
+    }),
+    signal,
+  }, {
+    fallbackApiKey: apiKey,
+    onContent: (delta) => {
+      pending += delta;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() || '';
+      lines.forEach(consumeLine);
+    },
+  });
+  consumeLine(pending);
+  if (!result.ok || !streamedClaims.length) throw new Error(`validated_stream_failed:${result.status || 'no_claims'}`);
+  onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
+  return {
+    response: streamedClaims.map((claim) => claim.text).join(' '),
+    claims: streamedClaims,
+    rejected_claims: rejectedClaims,
+    grounded: true,
+    evidence_used: [],
+    confidence: Number.isFinite(meta.confidence) ? Math.max(0, Math.min(1, meta.confidence)) : 0.5,
+    gaps: Array.isArray(meta.gaps) ? meta.gaps : [],
+    context_status: ['sufficient', 'relevant_but_incomplete', 'query_mismatch'].includes(meta.context_status) ? meta.context_status : 'sufficient',
+    recall_packets: recallPackets,
+    usage: result.usage,
+    usage_stages: { synthesis: result.usage },
+    streaming_emitted: true,
+  };
 }
 
 // ── STEP 1 — quick direct-answer for greetings / smalltalk / self-Q ───
@@ -1295,7 +1372,7 @@ function sourceUnavailableResponse({ evidence, language }) {
   return responses[lang] || responses.en;
 }
 
-export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '' }) {
+export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '', streamValidated = false, onEvent = null }) {
   const synthesisPrompt = buildSynthesisPromptArtifact({ language, operation: plan.operation, recallMode: plan.recall_mode });
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
       && Number.isInteger(evidence.aggregate?.count)) {
@@ -1879,6 +1956,15 @@ ${message}`;
     ? { order: finalSynthesisProviderOrder }
     : undefined;
 
+  if (streamValidated && String(model || '').startsWith('nvidia/nemotron-3.5-lightning')) {
+    return callValidatedClaimStream({
+      messages: [{ role: 'system', content: synthesisPrompt.dynamic_prompt }, ...tail, { role: 'user', content: userBlock }],
+      model, apiKey, maxTokens: answerCap, signal,
+      promptCacheKey: synthesisPrompt.cache.key,
+      recallPackets: evidence.recall_packets || [], allowGeneralKnowledge, onEvent,
+    });
+  }
+
   const { parsed, usage } = await callJsonLLM({
     // temperature:0 — grounded synthesis over already-ranked evidence must be
     // DETERMINISTIC. At 0.1 the model occasionally picked a competing memory
@@ -2433,6 +2519,7 @@ export async function runReactAgentV2({
   language,
   ctx,
   onEvent,
+  streamAnswer = false,
   router: _deprecatedRouter,
   recallMode,
   recallSource,
@@ -2705,6 +2792,9 @@ export async function runReactAgentV2({
     });
     const modelPolicy = chooseSynthesisModel({
       currentModel: requestedAnswerModel,
+      operation: plan.operation,
+      recallMode: plan.recall_mode,
+      useTools,
     });
     answerModel = modelPolicy.served;
     trace.models.synthesis = answerModel;
@@ -3283,6 +3373,7 @@ export async function runReactAgentV2({
     const answerInput = {
       message, history, evidence, plan, language, assistantName, orgName,
       apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge, preloadedProfileContext,
+      streamValidated: streamAnswer, onEvent,
     };
     let answer;
     try {
@@ -3290,6 +3381,7 @@ export async function runReactAgentV2({
     } catch (error) {
       if (answerModel !== requestedAnswerModel) {
         trace.model_policy = { ...modelPolicy, fallback_reason: error.message || 'candidate_synthesis_failed' };
+        if (streamAnswer) onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'candidate_fallback' });
         answerModel = requestedAnswerModel;
         trace.models.synthesis = answerModel;
         answer = await answerStep({ ...answerInput, model: answerModel });
@@ -3388,6 +3480,17 @@ export async function runReactAgentV2({
     const finalResponse = recallProjectChoice
       ? mutationConfirmation('saved', intentDecision.response_language || language, { needs_project_choice: true })
       : `${answer.response}${savedDisclosure}`;
+    if (streamAnswer && answer.streaming_emitted !== true) {
+      onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
+      const chunks = String(finalResponse).match(/[^.!?\n]+[.!?]+(?:\s+|$)|[^\n]+\n+|[^.!?\n]+$/g) || [String(finalResponse)];
+      for (const delta of chunks) {
+        onEvent?.({ type: 'answer_delta', schema_version: 1, delta, validated: true });
+        // Yield between validated sentence chunks so proxies and browsers can
+        // flush incrementally without ever exposing unvalidated model JSON.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
+    }
     onEvent?.({ type: 'finish', text: finalResponse });
     onEvent?.({ type: 'turn_completed', grounded: answer.grounded, confidence: answer.confidence });
 

@@ -4,6 +4,7 @@ const OPENROUTER_CHAT_URL = `${(process.env.OPENROUTER_BASE_URL || 'https://open
 
 export const DEFAULT_CHAT_PLANNER_MODEL = 'google/gemini-2.5-flash-lite';
 export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'openai/gpt-oss-20b:nitro';
+export const DEFAULT_CHAT_CANDIDATE_SYNTHESIS_MODEL = 'nvidia/nemotron-3.5-lightning:nitro';
 export const DEFAULT_HQ_AWAKENING_MODEL = 'deepseek/deepseek-v4-flash-0731';
 export const DEFAULT_HQ_DISPATCH_MODEL = 'deepseek/deepseek-v4-flash-0731';
 
@@ -91,6 +92,25 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
       wireModel: requested,
       providerPolicy: {
         sort: process.env.OPENROUTER_DEEPSEEK_SORT || 'throughput',
+        allow_fallbacks: true,
+        require_parameters: true,
+        data_collection: 'deny',
+      },
+    };
+  }
+
+  if (requested.startsWith('nvidia/')) {
+    if (!process.env.OPENROUTER_API_KEY) throw new Error('chat_provider_not_configured:openrouter');
+    return {
+      provider: 'openrouter:nvidia',
+      url: OPENROUTER_CHAT_URL,
+      apiKey: process.env.OPENROUTER_API_KEY,
+      wireModel: requested,
+      providerPolicy: {
+        // Nemotron Lightning currently has a very small provider pool. Keep
+        // the benchmarked providers explicit so a global ignore list tuned
+        // for unrelated models can never leave it with zero eligible hosts.
+        order: ['DeepInfra', 'CoreWeave'],
         allow_fallbacks: true,
         require_parameters: true,
         data_collection: 'deny',

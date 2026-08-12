@@ -55,14 +55,24 @@ export function scheduleShadowEvaluation({ execute, timeoutMs = 5000, onResult =
 
 export function chooseSynthesisModel({
   currentModel,
+  operation,
+  recallMode,
+  useTools = false,
 } = {}) {
-  // Final synthesis is server-owned. Historical DeepSeek shadow/canary flags
-  // must not silently replace the configured final-answer model or duplicate
-  // a user turn after this policy was promoted to GPT-OSS-20B Nitro.
+  const candidate = String(
+    process.env.HIVEMIND_FACT_SYNTHESIS_MODEL || 'nvidia/nemotron-3.5-lightning:nitro',
+  ).trim();
+  const enabled = process.env.HIVEMIND_NEMOTRON_SYNTHESIS_ENABLED !== 'false';
+  const eligible = enabled
+    && useTools !== true
+    && operation === 'recall'
+    && !['timeline', 'aggregate', 'relation_between', 'source_read', 'profile', 'connector_read'].includes(recallMode);
   return {
-    served: currentModel,
+    served: eligible ? candidate : currentModel,
     shadow: null,
-    eligible: false,
+    eligible,
+    fallback: currentModel,
+    reasoning: eligible ? 'disabled' : 'provider_default',
   };
 }
 

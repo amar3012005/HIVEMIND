@@ -2471,6 +2471,32 @@ async def _verify_turn(
             *(verdict.get("gaps") or []),
             "specific numbers or dates appear without matching source evidence",
         ]))[:8]
+    # ── Deterministic contact-grounding gate ──
+    # Two live incidents (2026-08-13): a debate round invented a named
+    # "internal audit" + competitor names, and a work-order worker invented
+    # named contacts with fabricated emails, both fixed at their prompt call
+    # sites. But that's whack-a-mole — every new LLM call site can leak the
+    # same way again. _unsupported_specific_claims above already catches
+    # numbers/dates/currency deterministically; it does NOT catch emails or
+    # phone numbers, the exact artifact class both incidents fabricated. This
+    # closes that gap the same way, independent of which call site produced
+    # the text and independent of the LLM verifier's own judgment.
+    # The room's own connected sender address is a legitimate sign-off, never
+    # a fabrication — allow it explicitly (it lives on `plan`, not the board).
+    _contact_evidence = [str(item) for item in ((blackboard or {}).get("facts") or [])]
+    if plan.get("sender_email"):
+        _contact_evidence.append(str(plan["sender_email"]))
+    unsupported_contacts = _unsupported_contact_claims(final_text, _contact_evidence)
+    if unsupported_contacts:
+        verdict["grounded_ok"] = False
+        verdict["met"] = False
+        verdict["unsupported_claims"] = list(dict.fromkeys([
+            *(verdict.get("unsupported_claims") or []), *unsupported_contacts,
+        ]))[:10]
+        verdict["gaps"] = list(dict.fromkeys([
+            *(verdict.get("gaps") or []),
+            "an email address or phone number appears without matching source evidence — likely a fabricated contact",
+        ]))[:8]
     return verdict
 
 
@@ -2494,6 +2520,33 @@ def _unsupported_specific_claims(final_text: str, evidence: List[str], user_mess
             continue
         for match in _SPECIFIC_CLAIM_RE.finditer(clean):
             token = re.sub(r"\s+", " ", match.group(0)).casefold()
+            if token not in allowed:
+                unsupported.append(clean[:300])
+                break
+    return list(dict.fromkeys(unsupported))[:10]
+
+
+_CONTACT_CLAIM_RE = re.compile(
+    r"[\w.+-]+@[\w-]+\.[\w.-]+|"       # email address
+    r"\+[1-9]\d{7,14}",                # E.164-ish phone number
+)
+
+
+def _unsupported_contact_claims(final_text: str, evidence: List[str]) -> List[str]:
+    """Find an email/phone asserted in the deliverable that appears in NO
+    gathered evidence line. `evidence` here is always the durable-only
+    snapshot (RECALL/WEB/CONNECTOR/PROSPECT/COMPANY — WORK_RESULT and debate
+    prose are excluded upstream by `_source_evidence_snapshot`), so a
+    worker's own hallucinated contact can never "self-ground" against its
+    own fabricated blackboard line."""
+    allowed = "\n".join(evidence).casefold()
+    unsupported: List[str] = []
+    for line in str(final_text or "").splitlines():
+        clean = re.sub(r"\s+", " ", line).strip()
+        if not clean:
+            continue
+        for match in _CONTACT_CLAIM_RE.finditer(clean):
+            token = match.group(0).casefold()
             if token not in allowed:
                 unsupported.append(clean[:300])
                 break

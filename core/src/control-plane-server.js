@@ -2761,6 +2761,53 @@ const server = http.createServer(async (req, res) => {
     a.log(entry).catch(err => console.warn('[audit] log failed:', err.message));
   }
 
+  // An invitation is durable before delivery begins. Do not keep the browser
+  // request open while an external mail provider retries: Caddy can time out
+  // the request, making a valid invite look like a failed one. Completion is
+  // reconciled against the invite row and recorded in the append-only audit.
+  function queueWorkspaceInvitationDelivery({ invite, orgId, actorId, adminEmail, vars, expiresAt = null, requestMeta = {} }) {
+    const timeoutMs = 20_000;
+    const timeout = new Promise((resolve) => setTimeout(() => resolve({
+      member: { ok: false, retryable: true, error: 'delivery_timeout' },
+      admin: { ok: false, skipped: true, error: 'delivery_timeout' },
+    }), timeoutMs));
+    const delivery = Promise.race([sendTeamInvitationEmails({
+      memberEmail: invite.email,
+      adminEmail,
+      vars,
+    }), timeout]);
+
+    void delivery.then(async (result) => {
+      const member = result?.member || { ok: false, error: 'delivery_failed' };
+      if (member.ok) {
+        await prisma.orgInvite.update({
+          where: { id: invite.id },
+          data: {
+            ...(expiresAt ? { expiresAt } : {}),
+            lastSentAt: new Date(),
+            sendCount: { increment: 1 },
+          },
+        });
+      }
+      await audit({
+        organizationId: orgId,
+        userId: actorId,
+        eventType: member.ok ? 'invite.email_delivered' : 'invite.email_failed',
+        eventCategory: 'auth',
+        action: member.ok ? 'deliver' : 'fail',
+        resourceType: 'org_invite',
+        resourceId: invite.id,
+        newValue: {
+          provider: member.provider || null,
+          ...(member.ok ? { delivery_status: member.deliveryStatus || 'accepted' } : { failure: member.error || 'delivery_failed' }),
+        },
+        ...requestMeta,
+      });
+    }).catch((error) => {
+      console.warn('[workspace-invite] delivery handoff failed:', error?.message || error);
+    });
+  }
+
   async function dispatchEnterpriseInvitation({ invitation, token, code = null }) {
     const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
     const activationUrl = `${base}/hivemind/invite?enterprise_invite=${encodeURIComponent(token)}`;
@@ -4698,24 +4745,15 @@ const server = http.createServer(async (req, res) => {
           },
         });
         const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
-        let emailOk = false; let emailError = null; let adminEmailOk = false;
-        try {
-          const delivery = await sendTeamInvitationEmails({
-            memberEmail: email,
-            adminEmail: inviter?.email,
-            vars: { orgName, inviterName, joinUrl, expiresOn },
-          });
-          emailOk = Boolean(delivery.member?.ok);
-          adminEmailOk = Boolean(delivery.admin?.ok);
-          emailError = delivery.member?.ok ? null : delivery.member?.error || 'delivery_failed';
-        } catch (mailErr) { emailError = mailErr.message; }
-        if (emailOk) {
-          await prisma.orgInvite.update({
-            where: { id: invite.id },
-            data: { lastSentAt: new Date(), sendCount: { increment: 1 } },
-          });
-        }
-        results.push({ email, status: 'invited', invite_id: invite.id, join_url: joinUrl, email_sent: emailOk, admin_confirmation_sent: adminEmailOk, ...(emailError ? { email_error: emailError } : {}) });
+        queueWorkspaceInvitationDelivery({
+          invite,
+          orgId,
+          actorId: current.session.userId,
+          adminEmail: inviter?.email,
+          vars: { orgName, inviterName, joinUrl, expiresOn },
+          requestMeta: _reqMeta(req),
+        });
+        results.push({ email, status: 'invited', invite_id: invite.id, join_url: joinUrl, email_dispatch: { attempted: true, pending: true } });
         audit({
           organizationId: orgId, userId: current.session.userId,
           eventType: 'org.invite_created', eventCategory: 'org', action: 'create',
@@ -4723,21 +4761,13 @@ const server = http.createServer(async (req, res) => {
           newValue: { email, role: bulkRole, bulk: true },
           ..._reqMeta(req),
         });
-        audit({
-          organizationId: orgId, userId: current.session.userId,
-          eventType: emailOk ? 'org.invite_email_delivered' : 'org.invite_email_failed',
-          eventCategory: 'org', action: emailOk ? 'deliver' : 'fail',
-          resourceType: 'org_invite', resourceId: invite.id,
-          newValue: { provider: emailOk ? 'transactional_email' : null, bulk: true, ...(emailError ? { failure: emailError } : {}) },
-          ..._reqMeta(req),
-        });
       } catch (rowErr) {
         results.push({ email, status: 'failed', error: rowErr.message });
       }
     }
     const created = results.filter((r) => r.status === 'invited').length;
-    const delivered = results.filter((r) => r.email_sent).length;
-    return jsonResponse(res, { ok: true, total: emails.length, invited: created, email_delivered: delivered, results }, 201);
+    const queued = results.filter((r) => r.email_dispatch?.pending).length;
+    return jsonResponse(res, { ok: true, total: emails.length, invited: created, email_queued: queued, results }, 201);
   }
 
   const inviteCollectionMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/invites$/);
@@ -4829,63 +4859,29 @@ const server = http.createServer(async (req, res) => {
     const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu').replace(/\/$/, '');
     const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
 
-    // Send invitation email via the SYSTEM email pipeline (same Gmail-backed
-    // sendSystemEmail as the login welcome mails) with the branded
-    // `team_invite` template. The old ./services/email-sender.js path had no
-    // provider configured in prod → every invite showed "Email dispatch
-    // failed: no provider configured".
-    let emailReport = { attempted: false };
+    // Queue Cloudflare delivery after the durable invitation exists. The admin
+    // gets an immediate, idempotent response; the result is reconciled into
+    // last_sent_at/send_count once the provider accepts the recipient mail.
+    let emailReport = { attempted: false, pending: false };
     if (inviteEmail && !reusedInvite) {
-      try {
-        const inviter = await prisma.user.findUnique({
-          where: { id: current.session.userId },
-          select: { email: true, displayName: true },
-        }).catch(() => null);
-        const delivery = await sendTeamInvitationEmails({
-          memberEmail: inviteEmail,
-          adminEmail: inviter?.email,
-          vars: {
-            orgName: membership.org.name || 'your team',
-            inviterName: inviter?.displayName || inviter?.email || 'your admin',
-            joinUrl,
-            expiresOn: expiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-          },
-        });
-        emailReport = {
-          attempted: true,
-          ok: Boolean(delivery.member?.ok),
-          provider: delivery.member?.provider || null,
-          delivery_status: delivery.member?.deliveryStatus || null,
-          admin_confirmation_sent: Boolean(delivery.admin?.ok),
-          ...(delivery.member?.ok ? {} : { error: delivery.member?.error || 'delivery_failed' }),
-        };
-      } catch (mailErr) {
-        emailReport = { attempted: true, ok: false, error: mailErr.message };
-      }
-    }
-
-    if (emailReport.ok) {
-      invite = await prisma.orgInvite.update({
-        where: { id: invite.id },
-        data: { lastSentAt: new Date(), sendCount: { increment: 1 } },
-      });
-    }
-
-    if (inviteEmail && !reusedInvite) {
-      audit({
-        organizationId: orgId,
-        userId: current.session.userId,
-        eventType: emailReport.ok ? 'invite.email_delivered' : 'invite.email_failed',
-        eventCategory: 'auth',
-        action: emailReport.ok ? 'deliver' : 'fail',
-        resourceType: 'org_invite',
-        resourceId: invite.id,
-        newValue: {
-          provider: emailReport.provider || null,
-          ...(emailReport.ok ? {} : { failure: emailReport.error || 'delivery_failed' }),
+      const inviter = await prisma.user.findUnique({
+        where: { id: current.session.userId },
+        select: { email: true, displayName: true },
+      }).catch(() => null);
+      queueWorkspaceInvitationDelivery({
+        invite,
+        orgId,
+        actorId: current.session.userId,
+        adminEmail: inviter?.email,
+        vars: {
+          orgName: membership.org.name || 'your team',
+          inviterName: inviter?.displayName || inviter?.email || 'your admin',
+          joinUrl,
+          expiresOn: expiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
         },
-        ..._reqMeta(req),
+        requestMeta: _reqMeta(req),
       });
+      emailReport = { attempted: true, pending: true };
     }
 
     // Invitee status — tell the admin UP FRONT how this person will join:
@@ -5093,73 +5089,34 @@ const server = http.createServer(async (req, res) => {
     const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || CONFIG.publicBaseUrl).replace(/\/$/, '');
     const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
 
-    // Resend via the SYSTEM email pipeline (sendSystemEmail + team_invite
-    // template) — the old email-sender path had no provider configured.
-    let dispatch = { attempted: true };
-    try {
-      const inviter = await prisma.user.findUnique({
-        where: { id: current.session.userId },
-        select: { email: true, displayName: true },
-      }).catch(() => null);
-      const delivery = await sendTeamInvitationEmails({
-        memberEmail: invite.email,
-        adminEmail: inviter?.email,
-        vars: {
-          orgName: membership.org.name || 'your team',
-          inviterName: inviter?.displayName || inviter?.email || 'your admin',
-          joinUrl,
-          expiresOn: newExpiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-        },
-      });
-      dispatch = {
-        attempted: true,
-        ok: Boolean(delivery.member?.ok),
-        provider: delivery.member?.provider || null,
-        delivery_status: delivery.member?.deliveryStatus || null,
-        admin_confirmation_sent: Boolean(delivery.admin?.ok),
-        ...(delivery.member?.ok ? {} : { error: delivery.member?.error || 'delivery_failed' }),
-      };
-    } catch (mailErr) {
-      dispatch = { attempted: true, ok: false, error: mailErr.message };
-    }
-
-    // A provider failure must leave the durable invite untouched: it remains
-    // retryable, but the list cannot claim that a resend happened or that its
-    // expiry was extended when no recipient was reached.
-    const updated = dispatch.ok
-      ? await prisma.orgInvite.update({
-          where: { id: inviteId },
-          data: {
-            expiresAt: newExpiresAt,
-            lastSentAt: new Date(),
-            sendCount: { increment: 1 },
-          },
-        })
-      : invite;
-
-    audit({
-      organizationId: orgId,
-      userId: current.session.userId,
-      eventType: dispatch.ok ? 'invite.email_resent' : 'invite.email_resend_failed',
-      eventCategory: 'auth',
-      action: dispatch.ok ? 'deliver' : 'fail',
-      resourceType: 'org_invite',
-      resourceId: invite.id,
-      newValue: {
-        provider: dispatch.provider || null,
-        ...(dispatch.ok ? { expires_at: updated.expiresAt } : { failure: dispatch.error || 'delivery_failed' }),
-      },
-      ..._reqMeta(req),
+    const inviter = await prisma.user.findUnique({
+      where: { id: current.session.userId },
+      select: { email: true, displayName: true },
     });
+    queueWorkspaceInvitationDelivery({
+      invite,
+      orgId,
+      actorId: current.session.userId,
+      adminEmail: inviter?.email,
+      expiresAt: newExpiresAt,
+      vars: {
+        orgName: membership.org.name || 'your team',
+        inviterName: inviter?.displayName || inviter?.email || 'your admin',
+        joinUrl,
+        expiresOn: newExpiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      },
+      requestMeta: _reqMeta(req),
+    });
+    const dispatch = { attempted: true, pending: true };
 
     return jsonResponse(res, {
       success: true,
       invite: {
-        id: updated.id,
-        email: updated.email,
-        expires_at: updated.expiresAt,
-        last_sent_at: updated.lastSentAt,
-        send_count: updated.sendCount,
+        id: invite.id,
+        email: invite.email,
+        expires_at: invite.expiresAt,
+        last_sent_at: invite.lastSentAt,
+        send_count: invite.sendCount,
         join_url: joinUrl,
       },
       email_dispatch: dispatch,

@@ -9,6 +9,9 @@ test('fact synthesis loads only the compact grounding and citation contract', ()
   assert.match(prompt, /SPANISH/);
   assert.match(prompt, /citation_ids/);
   assert.match(prompt, /closely related grounded details/i);
+  assert.match(prompt, /living memory/i);
+  assert.match(prompt, /thoughtful colleague/i);
+  assert.match(prompt, /Humanity never licenses invention/i);
   assert.match(prompt, /targeted clarification question/i);
   assert.match(prompt, /Never collapse partial knowledge/i);
   assert.match(prompt, /response.*must end with one natural, targeted clarification question/i);

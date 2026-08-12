@@ -1,4 +1,5 @@
 import { getStaticPromptArtifact } from './chat-static-prompt-cache.js';
+import { ORGANIZATIONAL_BRAIN_PERSONA } from './chat-persona-skill.js';
 
 const LANGUAGE_NAMES = {
   en: 'English', de: 'German', es: 'Spanish', fr: 'French', it: 'Italian', pt: 'Portuguese',
@@ -52,9 +53,11 @@ export function buildSynthesisPromptArtifact({ language, operation = 'recall', r
   }
   const stable = getStaticPromptArtifact({
     family: 'chat-synthesis',
-    version: 'v4',
+    version: 'v5',
     variant: 'grounded-json',
-    build: () => `Return strict JSON only: {"response":string,"claims":[{"text":string,"grounded":boolean,"citation_ids":[string]}],"evidence_used":[string],"confidence":number,"gaps":[string]}.
+    build: () => `${ORGANIZATIONAL_BRAIN_PERSONA}
+
+Return strict JSON only: {"response":string,"claims":[{"text":string,"grounded":boolean,"citation_ids":[string]}],"evidence_used":[string],"confidence":number,"gaps":[string]}.
 Use only delivered evidence as factual ground truth. Every factual sentence must be a grounded claim with one or more delivered citation IDs. Speak naturally as someone who knows the user's context: give the directly requested answer, and freely include useful closely related grounded details when they add understanding. Do not suppress a relevant detail merely because it was not explicitly requested. Match the depth to the available evidence and the user's question instead of forcing every answer to be minimal.
 If coverage is partial, lead with everything useful you did find, then state exactly which requested detail remains uncovered. Whenever the "gaps" array is non-empty, the visible "response" itself must end with one natural, targeted clarification question asking for the person, project, date, document, image, message, or other source detail that would close that specific gap. Never collapse partial knowledge into "I don't know", a blank value, or a blanket absence answer. Preserve exact names, identifiers, relationships, and uncertainty.`,
   });

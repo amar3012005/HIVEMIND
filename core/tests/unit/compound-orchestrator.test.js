@@ -257,6 +257,30 @@ test('structured newest policy preserves a real sender/content filter', () => {
   assert.equal(args.max_results, 10);
 });
 
+test('soonest-upcoming policy anchors provider arguments and removes past events', () => {
+  const schema = { properties: {
+    timeMin: { type: 'string' }, orderBy: { type: 'string' },
+    singleEvents: { type: 'boolean' }, maxResults: { type: 'integer' },
+  } };
+  const args = applyConnectorRetrievalPolicy({}, schema, {
+    result_order: 'soonest_upcoming', result_limit: 1,
+  });
+  assert.ok(Number.isFinite(Date.parse(args.timeMin)));
+  assert.equal(args.orderBy, 'startTime');
+  assert.equal(args.singleEvents, true);
+  assert.equal(args.maxResults, 10);
+
+  const future = new Date(Date.now() + 86_400_000).toISOString();
+  const later = new Date(Date.now() + 172_800_000).toISOString();
+  const past = new Date(Date.now() - 86_400_000).toISOString();
+  const projected = applyConnectorResultPolicy({ items: [
+    { id: 'past', start: { dateTime: past } },
+    { id: 'later', start: { dateTime: later } },
+    { id: 'next', start: { dateTime: future } },
+  ] }, { result_order: 'soonest_upcoming', result_limit: 1 });
+  assert.deepEqual(projected.items.map((item) => item.id), ['next']);
+});
+
 test('connector result policy sorts provider candidates and exposes only the requested newest row', () => {
   const data = { messages: [
     { subject: 'third', messageTimestamp: '2026-08-08T19:19:09Z' },

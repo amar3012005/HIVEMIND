@@ -64,7 +64,7 @@ export const HIGH_TOOLS = [
     parameters: object({
       provider: { type: 'string', enum: ['gmail', 'google-drive', 'google-docs', 'google-sheets', 'google-calendar', 'google-tasks', 'google-gemini', 'slack', 'notion', 'github', 'linear'] },
       intent: { type: 'string', enum: ['read', 'write'] }, request: { type: 'string' }, response_language: { type: 'string' },
-      result_order: { type: 'string', enum: ['provider_default', 'newest', 'oldest'], description: 'Semantic ordering requested by the user in any language. "Last/latest/most recent" means newest.' },
+      result_order: { type: 'string', enum: ['provider_default', 'newest', 'oldest', 'soonest_upcoming'], description: 'Semantic ordering requested by the user in any language. Use soonest_upcoming for the next future event/task, newest for the latest past or current record.' },
       result_limit: { type: ['integer', 'null'], minimum: 1, maximum: 100 },
       has_explicit_filter: { type: 'boolean', description: 'True only when the user supplied a sender, entity, date, label, or content constraint; relative ordering words alone are not filters.' },
     }) } },
@@ -84,7 +84,7 @@ export const HIGH_TOOLS = [
         depends_on: { type: ['array', 'null'], items: { type: 'integer' }, description: 'Indices of prior subtasks this step depends on, or null if independent.' },
         message: { type: 'string', description: 'The instruction for this single step, in the user\'s language, with exact identifiers preserved.' },
         query: { type: ['string', 'null'], description: 'Compact canonical semantic query for retrieval/lookup steps, preserving the entity and requested attributes but excluding workflow verbs and downstream actions. Null for pure action steps.' },
-        result_order: { type: 'string', enum: ['provider_default', 'newest', 'oldest'] },
+        result_order: { type: 'string', enum: ['provider_default', 'newest', 'oldest', 'soonest_upcoming'] },
         result_limit: { type: ['integer', 'null'], minimum: 1, maximum: 100 },
         has_explicit_filter: { type: 'boolean' },
       }) },
@@ -148,7 +148,7 @@ Use hivemind_memory for remember/save/update/delete/rename requests in every lan
 Use hivemind_projects for project listing/resolution. Use web_research only for the public internet.
 ALWAYS classify answer_type on every hivemind_context call, by MEANING in the user's language: decisions/agreements/choices => decision; goals/targets/action items/next steps => goal; likes/preferences => preference; learnings/takeaways => lesson; things that happened, meetings, quotes => event; how entities relate => relationship; plain attribute lookups => fact or null. Asking WHAT WAS DECIDED is answer_type=decision even when the topic is pricing, dates, or vendors.
 Use use_connector whenever Gmail, email, Google Drive, Google Docs, Google Sheets, Google Calendar, Google Tasks, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
-For every connector read, classify ordering structurally in any language: last/latest/most recent means result_order=newest; earliest/oldest means result_order=oldest; otherwise provider_default. Ordering words are not content filters. Set has_explicit_filter=true only for an actual sender, entity, date, label, or content constraint, and set result_limit to the number of records requested (1 for one latest item).
+For every connector read, classify ordering structurally in any language: a requested next future event/task means result_order=soonest_upcoming; last/latest/most recent means newest; earliest historical means oldest; otherwise provider_default. Ordering words are not content filters. Set has_explicit_filter=true only for an actual sender, entity, date, label, or content constraint, and set result_limit to the number of records requested (1 for one item).
 Use use_campaign whenever the user asks to create, run, start, inspect, improve, pause, or check an AI campaign. Starting a campaign creates its dedicated Campaign Room; it does not publish. Use intent=write for create, regenerate, or pause and intent=read for list, status, or metrics.
 Use hivemind_context operation=timeline for version history / change questions: "what was X before", "the previous value", "how has X changed", "show the timeline of X", "what did we update". Use operation=diff only to compare workspace state at two instants: "what changed between date A and B". Use operation=temporal for a point-in-time snapshot: "what was true / known on date D". Use operation=temporal_range for events, work, meetings, decisions, messages, records, or other activity that occurred during a period such as yesterday, today, last week, or the last N days.
 DATES ARE MANDATORY on temporal_range, diff, and temporal. For temporal_range fill range_start and range_end with the inclusive event-time window. "Last N days" means exactly N UTC calendar dates including today, so its start is CURRENT_UTC_DATE minus N-1 days. For diff fill both comparison instants. For temporal fill valid_at (or known_at when the user asks what was KNOWN/recorded rather than what was true). Emit ISO timestamps, resolving relative expressions against CURRENT_UTC_DATE supplied in the dynamic policy. Never turn an activity window into an as-of snapshot or a snapshot diff.
@@ -475,7 +475,7 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
         queries: [s(args?.request, 2000) || message],
         connector_provider: provider,
         connector_retrieval: {
-          result_order: ['newest', 'oldest'].includes(args?.result_order) ? args.result_order : 'provider_default',
+          result_order: ['newest', 'oldest', 'soonest_upcoming'].includes(args?.result_order) ? args.result_order : 'provider_default',
           result_limit: Number.isInteger(args?.result_limit) ? Math.max(1, Math.min(100, args.result_limit)) : null,
           has_explicit_filter: args?.has_explicit_filter === true,
         },
@@ -517,7 +517,7 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
         message: s(st?.message, 2000) || '',
         query: s(st?.query, 500) || null,
         retrieval: {
-          result_order: ['newest', 'oldest'].includes(st?.result_order) ? st.result_order : 'provider_default',
+          result_order: ['newest', 'oldest', 'soonest_upcoming'].includes(st?.result_order) ? st.result_order : 'provider_default',
           result_limit: Number.isInteger(st?.result_limit) ? Math.max(1, Math.min(100, st.result_limit)) : null,
           has_explicit_filter: st?.has_explicit_filter === true,
         },

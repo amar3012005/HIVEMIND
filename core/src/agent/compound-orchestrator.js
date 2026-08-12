@@ -523,6 +523,20 @@ function injectDependencies(args, priorOutputs, toolSchema) {
 export function applyConnectorRetrievalPolicy(args, toolSchema, retrieval = {}) {
   const next = { ...(args || {}) };
   const props = toolSchema?.properties || {};
+  if (retrieval?.result_order === 'soonest_upcoming') {
+    const now = new Date().toISOString();
+    for (const key of ['timeMin', 'time_min', 'start_min', 'starts_after']) {
+      if (props[key]) { next[key] = now; break; }
+    }
+    if (props.orderBy) next.orderBy = 'startTime';
+    if (props.singleEvents) next.singleEvents = true;
+    const requested = Number.isInteger(retrieval?.result_limit)
+      ? Math.max(1, Math.min(100, retrieval.result_limit)) : 1;
+    for (const key of ['maxResults', 'max_results', 'limit', 'page_size', 'pageSize']) {
+      if (props[key]) { next[key] = Math.max(requested, 10); break; }
+    }
+    return next;
+  }
   if (retrieval?.result_order !== 'newest') return next;
 
   // Relative ordering is not a content query. Remove model-invented search
@@ -550,6 +564,11 @@ const CONNECTOR_TIME_FIELDS = [
 ];
 
 function connectorTimestamp(item) {
+  for (const value of [item?.start?.dateTime, item?.start?.date, item?.due?.dateTime, item?.due?.date]) {
+    if (!value) continue;
+    const parsed = Date.parse(String(value));
+    if (Number.isFinite(parsed)) return parsed;
+  }
   for (const field of CONNECTOR_TIME_FIELDS) {
     const value = item?.[field];
     if (value == null || value === '') continue;
@@ -563,7 +582,7 @@ function connectorTimestamp(item) {
 
 /** Sort bounded live-provider candidates, then deliver only the requested rows. */
 export function applyConnectorResultPolicy(data, retrieval = {}) {
-  if (!data || !['newest', 'oldest'].includes(retrieval?.result_order)) return data;
+  if (!data || !['newest', 'oldest', 'soonest_upcoming'].includes(retrieval?.result_order)) return data;
   const requested = Number.isInteger(retrieval?.result_limit)
     ? Math.max(1, Math.min(100, retrieval.result_limit))
     : 1;
@@ -572,8 +591,12 @@ export function applyConnectorResultPolicy(data, retrieval = {}) {
   for (const key of keys) {
     const rows = key == null ? next : next[key];
     if (!Array.isArray(rows) || rows.length === 0) continue;
-    const stamped = rows.map((row, index) => ({ row, index, ts: connectorTimestamp(row) }));
+    let stamped = rows.map((row, index) => ({ row, index, ts: connectorTimestamp(row) }));
     if (!stamped.some((entry) => entry.ts != null)) continue;
+    if (retrieval.result_order === 'soonest_upcoming') {
+      const now = Date.now();
+      stamped = stamped.filter((entry) => entry.ts != null && entry.ts >= now);
+    }
     stamped.sort((a, b) => {
       if (a.ts == null && b.ts == null) return a.index - b.index;
       if (a.ts == null) return 1;

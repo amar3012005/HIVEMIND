@@ -3305,23 +3305,19 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
             "name": "execution_profile_selection", "schema": _PROFILE_SELECTION_SCHEMA, "strict": True,
         }},
     }
-    api_key = os.environ.get("GROQ_API_KEY", "")
+    # Route straight to OpenRouter — no direct api.groq.com attempt. The direct
+    # Groq key is confirmed delinquent (billing-dead), so every direct call here
+    # was a guaranteed 400 followed by this exact fallback anyway (verified live
+    # 2026-08-12: two calls in one turn's log, both 400 then OpenRouter-served).
+    # _openrouter_chat's provider pin for openai/gpt-oss-120b includes "Groq" —
+    # OpenRouter's own hosted Groq capacity, billed through OpenRouter, unaffected
+    # by our dead key — so this still reaches Groq's infra when it's the fastest
+    # candidate, just without the wasted direct round-trip.
     data: Optional[Dict[str, Any]] = None
     try:
-        if api_key:
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
-                resp = await client.post("https://api.groq.com/openai/v1/chat/completions",
-                                         headers=headers, json=body)
-                resp.raise_for_status()
-                data = resp.json()
+        data = await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
     except Exception as exc:  # noqa: BLE001
-        log.info("[profile-select] groq unavailable turn=%s: %s", req.turn_id, exc)
-    if not data:
-        try:
-            data = await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
-        except Exception as exc:  # noqa: BLE001
-            log.info("[profile-select] openrouter fallback unavailable turn=%s: %s", req.turn_id, exc)
+        log.info("[profile-select] openrouter unavailable turn=%s: %s", req.turn_id, exc)
     profile_id = ""
     reason = ""
     try:

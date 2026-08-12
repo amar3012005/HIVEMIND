@@ -6,13 +6,28 @@ import {
   requireSameOrganizationMember,
 } from '../../src/workspace/access-policy.js';
 
-function prismaFor(membership) {
-  return { userOrganization: { findUnique: async () => membership } };
+function prismaFor(membership, capture = null) {
+  return {
+    userOrganization: {
+      findUnique: async (query) => {
+        if (capture) capture.query = query;
+        return membership;
+      },
+    },
+  };
 }
 
 test('only active organization memberships satisfy workspace access', async () => {
   assert.equal(await getActiveOrganizationMembership(prismaFor({ isActive: false }), { orgId: 'org', userId: 'user' }), null);
   assert.deepEqual(await getActiveOrganizationMembership(prismaFor({ isActive: true, role: 'member', roles: [] }), { orgId: 'org', userId: 'user' }), { isActive: true, role: 'member', roles: [] });
+});
+
+test('workspace access resolves the canonical organization with the active membership', async () => {
+  const capture = {};
+  const membership = { isActive: true, role: 'owner', roles: ['org_owner'], org: { id: 'org', slug: 'workspace' } };
+  const result = await getActiveOrganizationMembership(prismaFor(membership, capture), { orgId: 'org', userId: 'user' });
+  assert.equal(result.org.slug, 'workspace');
+  assert.deepEqual(capture.query.include, { org: true });
 });
 
 test('canonical organization admin roles are accepted', () => {

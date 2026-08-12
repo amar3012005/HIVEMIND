@@ -10,6 +10,10 @@ export async function getActiveOrganizationMembership(prisma, { orgId, userId })
   if (!orgId || !userId) return null;
   return prisma.userOrganization.findUnique({
     where: { userId_orgId: { userId, orgId } },
+    // Admin-facing callers need the resolved organization's canonical slug to
+    // construct scoped links. Keep that data on the access-policy result so a
+    // permitted route never has to reconstruct tenant identity from input.
+    include: { org: true },
   }).then((membership) => (membership?.isActive ? membership : null));
 }
 

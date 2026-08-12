@@ -9,7 +9,7 @@ an already-working step down with it.
 import asyncio
 
 from hivemind_employees.hyper.engine import (
-    Director, _fallback_model_for, _needs_reasoning_disabled,
+    Director, _fallback_model_for, _needs_reasoning_disabled, _or_provider_routing,
 )
 
 
@@ -31,6 +31,34 @@ def test_fallback_model_for_nemotron_is_the_proven_default():
 def test_no_fallback_for_models_without_a_configured_fallback():
     assert _fallback_model_for("openai/gpt-oss-120b") is None
     assert _fallback_model_for("anthropic/claude-3.5-sonnet") is None
+
+
+def test_nemotron_pin_excludes_deepinfra_from_its_own_ignore_list(monkeypatch):
+    # Reproduced live 2026-08-12: nemotron has only DeepInfra + CoreWeave as
+    # OpenRouter hosts, and the global ignore list blacklists DeepInfra —
+    # sending both order+ignore naming DeepInfra 404s with "All providers
+    # have been ignored" since no other host survives.
+    monkeypatch.delenv("HYPER_OR_IGNORE", raising=False)
+    pin, ignore = _or_provider_routing("nvidia/nemotron-3.5-lightning")
+    assert pin == ["DeepInfra", "CoreWeave"]
+    assert "DeepInfra" not in ignore
+    assert "deepinfra" not in [p.lower() for p in ignore]
+
+
+def test_unpinned_model_keeps_the_full_default_ignore_list(monkeypatch):
+    monkeypatch.delenv("HYPER_OR_IGNORE", raising=False)
+    pin, ignore = _or_provider_routing("mistralai/mistral-large")
+    assert pin is None
+    assert "DeepInfra" in ignore  # unaffected — no pin to protect from the blacklist
+
+
+def test_gpt_oss_120b_pin_is_unaffected_by_the_filter(monkeypatch):
+    # None of its pinned providers (Cerebras/Groq/Together) are in the
+    # default ignore list, so the filter must be a complete no-op here.
+    monkeypatch.delenv("HYPER_OR_IGNORE", raising=False)
+    pin, ignore = _or_provider_routing("openai/gpt-oss-120b")
+    assert pin == ["Cerebras", "Groq", "Together"]
+    assert ignore == ["DekaLLM", "WandB", "DeepInfra", "Novita", "Mancer", "SiliconFlow", "Phala"]
 
 
 def _director(**overrides):

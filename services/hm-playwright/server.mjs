@@ -101,7 +101,13 @@ async function createInteractiveSession({ orgId, sessionName }) {
   page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
 
   const id = crypto.randomUUID();
-  const entry = { orgId, context, page, idleTimer: null, hardTimer: null };
+  const entry = { orgId, context, page, idleTimer: null, hardTimer: null, consoleLogs: [] };
+  // Capped buffer, not unbounded — a chatty page (or a long-lived session)
+  // should not be able to grow this without limit.
+  page.on('console', (msg) => {
+    entry.consoleLogs.push({ type: msg.type(), text: msg.text().slice(0, 2000), ts: Date.now() });
+    if (entry.consoleLogs.length > 500) entry.consoleLogs.shift();
+  });
   entry.hardTimer = setTimeout(() => closeInteractiveSession(id), SESSION_MAX_MS);
   entry.hardTimer.unref();
   touchInteractiveSession(entry, id);
@@ -318,6 +324,14 @@ async function runInteractiveAction(entry, input) {
     await page.locator(selector).first().fill(String(input.text ?? '').slice(0, 2000));
     return { ok: true };
   }
+  if (action === 'go_back') {
+    await page.goBack({ waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => {});
+    return { ok: true, url: page.url() };
+  }
+  if (action === 'go_forward') {
+    await page.goForward({ waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => {});
+    return { ok: true, url: page.url() };
+  }
   if (action === 'scroll') {
     const direction = ['down', 'up', 'top', 'bottom'].includes(input.direction) ? input.direction : 'down';
     const amount = Math.max(0, Math.min(Number(input.amount) || 800, 4000));
@@ -328,9 +342,45 @@ async function runInteractiveAction(entry, input) {
     return { ok: true };
   }
   if (action === 'screenshot') {
-    const buf = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: Boolean(input.full_page), timeout: NAVIGATION_TIMEOUT_MS });
+    const selector = typeof input.selector === 'string' ? input.selector : null;
+    const shotOpts = { type: 'jpeg', quality: 70, timeout: NAVIGATION_TIMEOUT_MS };
+    const buf = selector
+      ? await page.locator(selector).first().screenshot(shotOpts)
+      : await page.screenshot({ ...shotOpts, fullPage: Boolean(input.full_page) });
     if (buf.length > 5 * 1024 * 1024) throw Object.assign(new Error('screenshot_too_large'), { status: 500 });
     return { ok: true, screenshot: `data:image/jpeg;base64,${buf.toString('base64')}` };
+  }
+  if (action === 'html') {
+    const selector = typeof input.selector === 'string' ? input.selector : null;
+    const maxLength = Math.max(0, Math.min(Number(input.max_length) || 20000, 200000));
+    let html = selector
+      ? await page.locator(selector).first().innerHTML().catch(() => '')
+      : await page.content();
+    if (input.remove_scripts !== false) html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+    if (input.remove_styles) html = html.replace(/<style[\s\S]*?<\/style>/gi, '');
+    if (input.remove_comments) html = html.replace(/<!--[\s\S]*?-->/g, '');
+    if (input.remove_meta) html = html.replace(/<meta[^>]*>/gi, '');
+    if (input.minify) html = html.replace(/\s+/g, ' ').trim();
+    return { ok: true, html: html.slice(0, maxLength), truncated: html.length > maxLength };
+  }
+  if (action === 'pdf') {
+    const buf = await page.pdf({
+      format: typeof input.format === 'string' ? input.format : 'A4',
+      printBackground: input.print_background !== false,
+    });
+    if (buf.length > 10 * 1024 * 1024) throw Object.assign(new Error('pdf_too_large'), { status: 500 });
+    return { ok: true, pdf: `data:application/pdf;base64,${buf.toString('base64')}` };
+  }
+  if (action === 'console_logs') {
+    const type = typeof input.log_type === 'string' ? input.log_type : 'all';
+    const search = typeof input.search === 'string' ? input.search.toLowerCase() : null;
+    const limit = Math.max(1, Math.min(Number(input.limit) || 100, 1000));
+    let logs = entry.consoleLogs || [];
+    if (type !== 'all') logs = logs.filter((l) => l.type === type);
+    if (search) logs = logs.filter((l) => l.text.toLowerCase().includes(search));
+    logs = logs.slice(-limit);
+    if (input.clear) entry.consoleLogs = [];
+    return { ok: true, logs };
   }
   if (action === 'snapshot') {
     // page.accessibility.snapshot() is gone in this Playwright version

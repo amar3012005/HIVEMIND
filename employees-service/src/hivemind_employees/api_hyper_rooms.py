@@ -3258,6 +3258,89 @@ _PROFILE_SELECTION_SCHEMA: Dict[str, Any] = {
     "required": ["profile_id", "reason"],
 }
 
+_DIRECT_AGENT_ROUTE_SCHEMA: Dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "direct_to_agent": {"type": "boolean"},
+        "agent_slug": {"type": ["string", "null"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["direct_to_agent", "agent_slug", "reason"],
+}
+
+
+async def _classify_implicit_direct_route(req: "RoomTurnRequest", participants: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Same decision an explicit @mention already makes deterministically, made
+    for a message that never typed the tag. Confirmed live 2026-08-12:
+    "@ravi-patel-6 what are our next steps" got a real, fast, in-character
+    answer from Ravi alone — the user then asked for the SAME routing
+    whenever a question is clearly meant for one specific person, tag or not.
+
+    Conservative by design: this must NOT steal genuinely group-shaped
+    questions (open strategy, a decision needing debate, anything asking
+    for the team's view) away from the full multi-agent pipeline — those
+    need the debate + governance pass this fast-path skips entirely. Only
+    route direct when the message unambiguously names or clearly targets
+    one participant's specific role/expertise (e.g. "what's Lina's take on
+    X", "what should legal review here"). Defaults to NOT routing (False)
+    on any ambiguity, and fails to False on any classifier error — a wrong
+    "no" costs one extra debate round; a wrong "yes" silently drops
+    debate+verification for a question that needed it.
+    """
+    if len(participants) < 2:
+        return None  # nothing to route away from
+    roster = [{"slug": p.get("slug"), "name": p.get("name"), "lane": p.get("_lane")} for p in participants]
+    system = (
+        "Decide whether this message is CLEARLY meant for one specific team member to answer "
+        "directly, or whether it's a genuine team question that needs the group's discussion. "
+        "Route direct_to_agent=true ONLY when the message unambiguously names a participant "
+        "(by name, role, or lane) or asks for THAT ONE person's take/view/status specifically. "
+        "Default to direct_to_agent=false for anything open-ended, strategic, a decision, or "
+        "asking what 'we' or 'the team' should do — those need real debate, not one voice. "
+        "When uncertain, choose false."
+    )
+    user = json.dumps({
+        "user_message": str(req.user_message or "")[:2000],
+        "room_goal": str(req.room_goal or "")[:300],
+        "participants": roster,
+    }, ensure_ascii=False)
+    body = {
+        "model": os.environ.get("HYPER_DIRECT_ROUTE_MODEL", "openai/gpt-oss-120b"),
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "temperature": 0.1, "max_tokens": 200,
+        "response_format": {"type": "json_schema", "json_schema": {
+            "name": "direct_agent_route", "schema": _DIRECT_AGENT_ROUTE_SCHEMA, "strict": True,
+        }},
+    }
+    if _needs_reasoning_disabled(body["model"]):
+        body["reasoning"] = {"enabled": False}
+    try:
+        data = await _openrouter_chat(body, timeout=httpx.Timeout(10.0, connect=5.0))
+    except Exception as exc:  # noqa: BLE001
+        log.info("[direct-route] classifier unavailable turn=%s: %s", req.turn_id, exc)
+        return None
+    if data is None:
+        _fallback = _fallback_model_for(body["model"])
+        if _fallback:
+            body["model"] = _fallback
+            body.pop("reasoning", None)
+            try:
+                data = await _openrouter_chat(body, timeout=httpx.Timeout(10.0, connect=5.0))
+            except Exception:  # noqa: BLE001
+                return None
+    try:
+        text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        parsed = json.loads(text)
+    except Exception:  # noqa: BLE001
+        return None
+    if not parsed.get("direct_to_agent"):
+        return None
+    slug = str(parsed.get("agent_slug") or "").strip().lower()
+    target = next((p for p in participants if str(p.get("slug") or "").lower() == slug), None)
+    if not target:
+        return None
+    return target
+
 
 async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) -> Dict[str, Any]:
     """Choose which existing specialist engine a human Work Room turn runs as.
@@ -4348,6 +4431,19 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
                         or _first_name(p) == _tag), None)
         if _target is not None:
             return await _run_mention_turn(req, _target, started)
+    else:
+        # No explicit @tag — but the SAME direct-answer routing an explicit
+        # mention already gets deterministically. Confirmed live 2026-08-12:
+        # "@ravi-patel-6 what are our next steps" got a fast, correct,
+        # in-character answer; the ask was to route the same way even without
+        # typing the tag, when the message is clearly meant for one person.
+        try:
+            _implicit_target = await _classify_implicit_direct_route(req, participants)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[direct-route] classification failed (non-fatal) turn=%s: %s", req.turn_id, exc)
+            _implicit_target = None
+        if _implicit_target is not None:
+            return await _run_mention_turn(req, _implicit_target, started)
 
     # The room executor: a single Groq native-tool-calling director. Everything above
     # this line (tenant scope, participant resolution, router/template/skeptic/trust) is

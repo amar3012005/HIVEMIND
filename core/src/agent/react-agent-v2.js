@@ -31,6 +31,7 @@ import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
 import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
+import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
 import { chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
@@ -271,15 +272,15 @@ async function answerDirectly({ message, gateKind, language, assistantName, orgN
     : '';
 
   const prompts = {
-    greeting: `${LANG_BLOCK}\n\nYou are ${name}. Reply with a warm one-line greeting + ONE short offer-to-help. Plain text only. No JSON, no tool talk.`,
-    smalltalk: `${LANG_BLOCK}\n\nYou are ${name}. Reply with one short polite sentence. Plain text only. No follow-up question.`,
-    self_q: `${LANG_BLOCK}\n\nYou are ${name}, the internal voice of ${orgLabel}. Reply in 2-3 sentences:\n` +
+    greeting: `${LANG_BLOCK}\n\n${organizationalBrainIdentity({ name, orgLabel })}\n${ORGANIZATIONAL_BRAIN_PERSONA}\nReply with a warm one-line greeting + ONE short offer-to-help. Plain text only. No JSON, no tool talk.`,
+    smalltalk: `${LANG_BLOCK}\n\n${organizationalBrainIdentity({ name, orgLabel })}\n${ORGANIZATIONAL_BRAIN_PERSONA}\nReply with one short, genuinely human sentence. Plain text only. No follow-up question.`,
+    self_q: `${LANG_BLOCK}\n\n${organizationalBrainIdentity({ name, orgLabel })}\n${ORGANIZATIONAL_BRAIN_PERSONA}\nReply in 2-3 sentences:\n` +
             `  - You carry persistent memory of our team's facts, decisions, projects, people.\n` +
             `  - You can recall, save, link, time-travel through that memory, and pull live web results when needed.\n` +
             `Do NOT cite memories. Do NOT mention internal tool names. Plain text only.`,
     general: plannerDraft
-      ? `${LANG_BLOCK}\n\nYou are ${name}. Produce the final reply using the planner draft below only as a bounded intent draft. Preserve its meaning, answer the user concisely, and do not introduce claims or topics absent from the user request or draft. Plain text only.\n\nPLANNER DRAFT:\n${String(plannerDraft).slice(0, 1200)}`
-      : `${LANG_BLOCK}\n\nYou are ${name}. Reply concisely and only address the user's request. Do not introduce unrelated claims. Plain text only. No JSON, no tool talk.`,
+      ? `${LANG_BLOCK}\n\n${organizationalBrainIdentity({ name, orgLabel })}\n${ORGANIZATIONAL_BRAIN_PERSONA}\nProduce the final reply using the planner draft below only as a bounded intent draft. Preserve its meaning, answer the user concisely, and do not introduce claims or topics absent from the user request or draft. Plain text only.\n\nPLANNER DRAFT:\n${String(plannerDraft).slice(0, 1200)}`
+      : `${LANG_BLOCK}\n\n${organizationalBrainIdentity({ name, orgLabel })}\n${ORGANIZATIONAL_BRAIN_PERSONA}\nReply naturally and only address the user's request. Do not introduce unrelated claims. Plain text only. No JSON, no tool talk.`,
   };
 
   const resp = await chatCompletionFetch(model, {
@@ -1075,7 +1076,8 @@ function answerPrompt({ language, assistantName, orgName }) {
   const name = assistantName || 'HIVE';
   return `LANGUAGE: ALL OUTPUT MUST BE IN ${lang.toUpperCase()}. Even if the user wrote in another language, the "response" field is written in ${lang}. Sub-queries and tool args may stay English (already executed); the user-facing prose is ${lang} only.
 
-You are ${name} — the internal voice of ${orgLabel}'s collective brain.
+${organizationalBrainIdentity({ name, orgLabel })}
+${ORGANIZATIONAL_BRAIN_PERSONA}
 
 You will be given a user message + a numbered EVIDENCE block of memories
 already retrieved for you. Compose the final answer using ONLY those

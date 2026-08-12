@@ -54,6 +54,7 @@ from .agents.agentscope_tools import (
     execute_pending_write,
     queue_email_approval,
     record_artifact,
+    register_delegate_to_tool,
     reset_turn_outputs,
     set_turn_provenance,
 )
@@ -154,6 +155,22 @@ WEB_INTEL_GROQ_TOOLS = ("web_search", "visit_website")
 
 HYPER_ROOM_AGENT_MAX_ITERS = int(os.environ.get("HYPER_ROOM_AGENT_MAX_ITERS", "3"))
 BLACKBOARD_MIN_SCORE = float(os.environ.get("HYPER_ROOM_BLACKBOARD_MIN_SCORE", "0.45"))
+
+# Agentic task engine (dual-engine, 2026-08-13): default-off. When on, the
+# planner may route a turn to a real multi-step ReAct loop (lead agent +
+# delegate_to specialist sub-agents) instead of the fixed plan-once gather→
+# debate→synth pipeline. Off means the branch in engine.py never fires
+# (agentic_task_hook stays None) — zero behavior change to any existing room.
+HYPER_AGENTIC_ENGINE = os.environ.get("HYPER_AGENTIC_ENGINE", "").lower() == "true"
+# Separate, higher iteration budget than HYPER_ROOM_AGENT_MAX_ITERS (3) — a
+# real multi-step task (discover → act → verify → maybe delegate) needs more
+# room than the shared default, which was tuned for the narrow direct-answer
+# hook's single-question use.
+HYPER_AGENTIC_MAX_ITERS = int(os.environ.get("HYPER_AGENTIC_MAX_ITERS", "18"))
+# How many subtasks the lead may delegate to specialist sub-agents in one
+# turn — a hard ceiling so a runaway plan can't fan out unbounded real
+# sub-agent loops (each one is its own LLM+tool cost).
+HYPER_AGENTIC_MAX_DELEGATIONS = int(os.environ.get("HYPER_AGENTIC_MAX_DELEGATIONS", "4"))
 
 ROLE_LANES = ("Strategist", "Builder", "Skeptic", "Researcher", "Communicator")
 
@@ -964,6 +981,68 @@ async def _build_agent_for_room(
     }
     agent = build_react_agent(merged, api_key, user_id=user_id, org_id=org_id, project_id=project_id)
     _ROOM_AGENTS[key] = agent
+    return agent
+
+
+async def _build_lead_task_agent(
+    room_id: str,
+    lead: Dict[str, Any],
+    participants: List[Dict[str, Any]],
+    user_id: Optional[str] = None,
+    org_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> ReActAgent:
+    """Build the lead's real ReAct agent for the AGENTIC TASK ENGINE
+    (dual-engine, 2026-08-13, flag-gated HYPER_AGENTIC_ENGINE) — a genuinely
+    autonomous multi-step loop for turns the planner routes with
+    execution_engine=="agentic", instead of the fixed plan-once gather→
+    debate→synth pipeline every other turn still uses unchanged.
+
+    Same full HIVEMIND toolkit + connector reach as `_build_agent_for_room`,
+    PLUS:
+      - a real AgentScope `PlanNotebook` (create_plan / update_subtask_state
+        / finish_subtask) so the lead can decompose the task instead of
+        guessing everything in one shot;
+      - a `delegate_to` tool so the lead can hand a bounded subtask to a
+        real teammate's OWN agent (their persona, their tools/connectors,
+        their own reasoning loop) instead of doing everything alone or
+        faking their voice with a single-shot debate-style text call.
+
+    NOT cached like `_build_agent_for_room` (`_ROOM_AGENTS`) — each agentic
+    task run gets a fresh plan notebook; caching would leak one turn's plan/
+    subtask state into the next.
+    """
+    from agentscope.plan import PlanNotebook
+    try:
+        emp_connectors = await get_room_enabled_connectors(room_id, org_id=org_id)
+    except Exception:  # noqa: BLE001 — never fail the turn over connectors
+        emp_connectors = []
+    boot = {b["id"]: b for b in await fetch_bootstrap()}
+    boot_emp = boot.get(lead["id"], {}) or {}
+    api_key = boot_emp.get("api_key") or ""
+    merged = {
+        **lead,
+        "tools": DEFAULT_HYPER_TOOLS + WEB_INTEL_TOOLS,
+        "connectors": emp_connectors,
+        "max_iters": HYPER_AGENTIC_MAX_ITERS,
+        "hyper": boot_emp.get("hyper"),
+        "active_prompt_version": boot_emp.get("active_prompt_version"),
+    }
+    agent = build_react_agent(
+        merged, api_key, user_id=user_id, org_id=org_id, project_id=project_id,
+        plan_notebook=PlanNotebook(),
+    )
+
+    async def _build_sub_agent(target_row: Dict[str, Any]) -> ReActAgent:
+        # A delegated specialist runs its own bounded reply with its own
+        # persona/tools — reuse the normal per-room CACHED agent rather than
+        # building a second plan-notebook lead; a sub-agent answers one
+        # subtask, it doesn't need to decompose further itself.
+        return await _build_agent_for_room(
+            room_id, target_row, user_id=user_id, org_id=org_id, project_id=project_id,
+        )
+
+    register_delegate_to_tool(agent.toolkit, participants, _build_sub_agent, HYPER_AGENTIC_MAX_DELEGATIONS)
     return agent
 
 
@@ -3532,6 +3611,43 @@ async def _run_direct_answer_agent(
         return None
 
 
+async def _run_agentic_task_agent(
+    room_id: str, lead: Dict[str, Any], participants: List[Dict[str, Any]],
+    user_id: str, org_id: str, project_id: Optional[str],
+    turn_id: str, user_message: str, board_context: str,
+) -> Optional[str]:
+    """Invoke the AGENTIC TASK ENGINE (dual-engine, flag-gated
+    HYPER_AGENTIC_ENGINE) — the lead's real ReAct agent with a native
+    PlanNotebook and a delegate_to tool for handing bounded subtasks to real
+    teammate sub-agents, working the request step by step with LIVE tool
+    access instead of a fixed plan-once pipeline.
+
+    None on any failure (agent build, invocation, empty reply); Director's
+    _run_agentic_task treats None as 'fall through to the normal pipeline'
+    — this engine can only ADD behavior, never break a turn."""
+    try:
+        agent = await _build_lead_task_agent(
+            room_id, lead, participants, user_id=user_id, org_id=org_id, project_id=project_id,
+        )
+        prompt = (
+            f"TASK: {user_message}\n\n"
+            "Work this step by step with your real tools — recall, connectors, and "
+            "delegate_to for handing a bounded subtask to a real teammate when their "
+            "specific expertise or tool access genuinely helps. Use create_plan first "
+            "if the task has multiple distinct parts, then work through the subtasks. "
+            "Finish with the complete, publish-ready deliverable the user asked for — "
+            "not a status update on your plan.\n\n"
+            f"CONTEXT ALREADY GATHERED THIS TURN (use it; call your own tools for "
+            f"anything more you need):\n{board_context}"
+        )
+        reply = await agent(Msg(name="user", content=prompt, role="user"))
+        text = _msg_to_text(reply).strip()
+        return text or None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[agentic-task] agent invocation failed turn=%s: %s", turn_id, exc)
+        return None
+
+
 async def _orchestrate_single_agent(
     req: "RoomTurnRequest",
     participants: List[Dict[str, Any]],
@@ -3732,6 +3848,18 @@ async def _orchestrate_single_agent(
             user_message, board_context,
         )
 
+    # Agentic task engine (dual-engine, 2026-08-13) — flag-gated, default off.
+    # Only exercised when the planner routes a turn with execution_engine==
+    # "agentic" AND this hook is actually wired (HYPER_AGENTIC_ENGINE=true).
+    # Off means Director never even sees a non-None hook, so the branch in
+    # engine.py's run() cannot fire — zero behavior change to any room until
+    # explicitly turned on.
+    async def _agentic_task_via_agent(user_message: str, board_context: str) -> Optional[str]:
+        return await _run_agentic_task_agent(
+            req.room_id, lead, participants, req.user_id, req.org_id, req.project_id, req.turn_id,
+            user_message, board_context,
+        )
+
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/
     #    react/swarm_verdict/line, the same events the FE already renders).
     try:
@@ -3753,6 +3881,7 @@ async def _orchestrate_single_agent(
             "campaign_brief": req.campaign_brief,
             "room_id": req.room_id, "turn_id": req.turn_id,
             "direct_answer_hook": _direct_answer_via_agent,
+            "agentic_task_hook": _agentic_task_via_agent if HYPER_AGENTIC_ENGINE else None,
         }
         if _room_kind == "campaign":
             result = await _build_campaign_director(director_kwargs, req.campaign_brief).run()

@@ -1297,6 +1297,7 @@ class Director:
         room_id: str = "",
         turn_id: str = "",
         direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
+        agentic_task_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
     ) -> None:
         # Run-wide output language from the FE navbar toggle (locale code/name →
         # language NAME, '' for English). Drives a strict "write in X only" directive.
@@ -1314,6 +1315,15 @@ class Director:
         # explicitly supplies this hook. Callable(user_message, board_context) ->
         # the agent's answer, or None to fall through to normal synth.
         self.direct_answer_hook = direct_answer_hook
+        # Agentic multi-step task engine — a genuinely autonomous ReAct loop
+        # (real tool-calling, dynamic tool-group equipping, native plan/
+        # subtask decomposition) instead of the fixed plan-once gather→debate
+        # →synth pipeline. Only exercised when the planner sets
+        # execution_engine=="agentic" (see _plan_gather / run()); None
+        # preserves today's behavior completely for every other turn.
+        # Callable(user_message, board_context) -> the agent's final answer,
+        # or None to fall through to the normal pipeline.
+        self.agentic_task_hook = agentic_task_hook
         self.participants = participants
         self.roster = {(p.get("slug") or p.get("id")): p for p in participants}
         self.room_template = room_template or "debate"
@@ -4714,6 +4724,7 @@ class Director:
                     }, "required": ["owner", "objective", "rationale"], "additionalProperties": False},
                 }, "required": ["id", "depends_on", "kind", "owner_lane", "title", "objective", "required_evidence", "acceptance_criteria"], "additionalProperties": False}},
                 "turn_mode": {"type": "string", "enum": ["chat", "task"]},
+                "execution_engine": {"type": "string", "enum": ["debate", "agentic"]},
                 "collaboration_intensity": {"type": "string", "enum": ["light", "standard", "deep"]},
                 "response_depth": {"type": "string", "enum": ["direct", "focused", "operating"]},
                 "evidence_mode": {"type": "string", "enum": ["standard", "prospecting"]},
@@ -4744,7 +4755,7 @@ class Director:
                     "autonomy_mode": {"type": "string", "enum": ["APPROVE_PLAN_ONCE", "REVIEW_EVERY_ACTION"]},
                 }, "required": ["goal", "name", "objective", "channels", "duration_days", "intensity", "autonomy_mode"], "additionalProperties": False},
             },
-            "required": ["recall_queries", "history_turns_back", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "collaboration_intensity", "response_depth", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
+            "required": ["recall_queries", "history_turns_back", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "execution_engine", "collaboration_intensity", "response_depth", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
             "additionalProperties": False,
         }
         sysp = (
@@ -4757,6 +4768,14 @@ class Director:
             "deliverable ('hallo', 'who are you?', 'thanks!', 'what can you do?') — the room just REPLIES "
             "as people; every other field must then be empty/null/false. 'task' = real work is requested. "
             "The ROOM GOAL does NOT make a greeting a task — judge the MESSAGE, not the goal.\n"
+            "- execution_engine: 'agentic' when the ask needs a real actor working the problem step by step "
+            "with tools — building or generating a concrete asset (an image, a file, a multi-part deliverable "
+            "assembled from several tool calls), executing a real multi-step workflow where later steps depend "
+            "on what earlier tool calls returned, or open-ended work where the right sequence of tools can't be "
+            "decided upfront. 'debate' (default) for everything the current team already does well: answering "
+            "a question, producing a report/recommendation/decision from a discussion, drafting one email or "
+            "doc from already-gathered context. When in doubt, default to 'debate' — 'agentic' is for tasks "
+            "that genuinely need to discover-then-act in a loop, not just any request that uses a tool.\n"
             "- collaboration_intensity: FIRST size how much of the team this ACTIVE MESSAGE needs, never from "
             "the standing Room goal. light = greeting, capability question, quick answer, small copy change, "
             "or tentative/exploratory request; standard = bounded planning, diagnosis, research, or a decision "
@@ -6401,6 +6420,57 @@ class Director:
             "duration_ms": int((time.time() - started_at) * 1000),
         }
 
+    async def _run_agentic_task(self, plan: Dict[str, Any], t0: float) -> Optional[Dict[str, Any]]:
+        """Delegate this ENTIRE turn to the agentic task engine (a real
+        multi-step ReAct loop + delegate_to specialists — see
+        api_hyper_rooms._build_lead_task_agent) instead of this Director's
+        own fixed gather→debate→synth pipeline.
+
+        Returns None on ANY failure or empty result so `run()` falls through
+        to the normal pipeline unchanged — this path can only ADD behavior,
+        never break a turn that would otherwise have worked. The returned
+        text still flows through the SAME `_verify_turn` safety net as every
+        other turn (unchanged) — no separate grounding logic here.
+        """
+        if self.agentic_task_hook is None:
+            return None
+        try:
+            board_context = self._synthesis_context(4000)
+            final_text = await self.agentic_task_hook(self.user_message, board_context)
+        except Exception as exc:  # noqa: BLE001 — never fail the turn over this engine
+            log.warning("[hyper-engine] agentic_task_hook failed, falling back to normal pipeline: %s", exc)
+            return None
+        if not final_text or not str(final_text).strip():
+            return None
+        await self.emit({"t": "line", "agent": (self.participants[0].get("slug") if self.participants else "director"),
+                         "kind": "synthesis", "content": final_text})
+        log.info("[hyper-engine] agentic task done — %d tokens, %dms",
+                 self.tokens, int((time.time() - t0) * 1000))
+        return {
+            "cost_tokens": self.tokens,
+            "final_text": final_text,
+            "transcript": self.transcript,
+            "gather_count": self.gather_count,
+            "tool_calls": 0,
+            "tok_by": dict(self.tok_by),
+            "io": dict(self.io),
+            "gather_facts": self._source_evidence_snapshot(),
+            "sim_report": None,
+            "evo_playbooks": self.evo_playbooks,
+            "skills_used": list(self.skills_used),
+            "room_kind": self.room_kind,
+            "collaboration_intensity": self.collaboration_intensity,
+            "intended_output": self.intended_output,
+            "post_output_actions": list(self.post_output_actions),
+            "outreach_request": plan.get("outreach_request"),
+            "outreach_metrics": dict(self._outreach_metrics),
+            "work_orders": [],
+            "work_results": [],
+            "turn_mode": "task",
+            "execution_engine": "agentic",
+            "duration_ms": int((time.time() - t0) * 1000),
+        }
+
     async def run(self) -> Dict[str, Any]:
         t0 = time.time()
         # Instant feedback from t=0: connector-tool init + the first model call run
@@ -6464,6 +6534,21 @@ class Director:
         # pipeline ending in a fabricated report.
         if str(plan.get("turn_mode") or "task").lower() == "chat":
             return await self._chat_turn(t0)
+        # AGENTIC TASK ENGINE — a genuinely autonomous multi-step ReAct loop
+        # (real tool-calling, dynamic tool-group equipping, native plan/
+        # subtask decomposition) instead of this Director's own fixed
+        # plan-once gather→debate→synth pipeline. Only when the planner
+        # picked it AND the caller wired a hook; any failure falls through
+        # to the normal pipeline below rather than failing the turn.
+        # Campaign rooms are EXCLUDED: their own structured contract/bundle
+        # governance (_synthesize_campaign_bundle) has no analogue here, and
+        # skipping it silently would be a real governance gap, not a safe
+        # fallthrough.
+        if (str(plan.get("execution_engine") or "debate").lower() == "agentic"
+                and self.agentic_task_hook is not None and self.room_kind != "campaign"):
+            agentic_result = await self._run_agentic_task(plan, t0)
+            if agentic_result is not None:
+                return agentic_result
         await self._emit_work_brief(plan)
         if self.collaboration_intensity == "light":
             await self._emit_light_collaboration(plan)
@@ -6786,6 +6871,7 @@ async def run_director(
     room_id: str = "",
     turn_id: str = "",
     direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
+    agentic_task_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -6806,5 +6892,6 @@ async def run_director(
         campaign_brief=campaign_brief,
         room_id=room_id, turn_id=turn_id,
         direct_answer_hook=direct_answer_hook,
+        agentic_task_hook=agentic_task_hook,
     )
     return await director.run()

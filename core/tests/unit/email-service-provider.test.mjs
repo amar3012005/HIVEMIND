@@ -10,7 +10,13 @@ const originalEnv = {
   SYSTEM_EMAIL_FROM: process.env.SYSTEM_EMAIL_FROM,
 };
 
-const { sendSystemEmail, sendTeamInvitationEmails } = await import('../../src/email/email-service.js');
+const {
+  queueSystemEmailBundle,
+  queueEmailDelivery,
+  sendSystemEmail,
+  sendSystemEmailBundle,
+  sendTeamInvitationEmails,
+} = await import('../../src/email/email-service.js');
 
 function setEnv(values) {
   for (const key of Object.keys(originalEnv)) {
@@ -70,6 +76,56 @@ test('no configured provider fails safely without attempting a network call', as
   global.fetch = async () => { throw new Error('network must not run'); };
   const result = await sendSystemEmail({ templateId: 'welcome_login', to: 'owner@example.com' });
   assert.deepEqual(result, { ok: false, skipped: true, error: 'no_email_provider' });
+});
+
+test('shared bundle preserves message keys and rejects unsafe recipients before transport', async () => {
+  setEnv({
+    CLOUDFLARE_EMAIL_API_TOKEN: 'unit-token',
+    CLOUDFLARE_ACCOUNT_ID: 'unit-account',
+    CLOUDFLARE_EMAIL_FROM: 'Singulance Support <support@singulancelabs.com>',
+  });
+  let calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ success: true, result: { queued: ['member@example.com'] } }), { status: 200 });
+  };
+  const results = await sendSystemEmailBundle([
+    { key: 'member', templateId: 'welcome_login', to: 'member@example.com' },
+    { key: 'bad', templateId: 'welcome_login', to: 'member@example.com\r\nBcc: leak@example.com' },
+  ]);
+  assert.equal(results.member.ok, true);
+  assert.equal(results.bad.error, 'invalid_recipient');
+  assert.equal(calls, 1);
+});
+
+test('shared queue returns immediately and reconciles the provider result once', async () => {
+  setEnv({
+    CLOUDFLARE_EMAIL_API_TOKEN: 'unit-token',
+    CLOUDFLARE_ACCOUNT_ID: 'unit-account',
+    CLOUDFLARE_EMAIL_FROM: 'Singulance Support <support@singulancelabs.com>',
+  });
+  global.fetch = async () => new Response(JSON.stringify({ success: true, result: { queued: ['member@example.com'] } }), { status: 200 });
+  let reconciled = null;
+  const queued = queueSystemEmailBundle(
+    [{ key: 'member', templateId: 'welcome_login', to: 'member@example.com' }],
+    { context: { kind: 'test' }, onSettled: async (results) => { reconciled = results; } },
+  );
+  assert.equal(queued.accepted, true);
+  const results = await queued.delivery;
+  assert.equal(results.member.ok, true);
+  assert.equal(reconciled.member.deliveryStatus, 'queued');
+});
+
+test('generic queue supports composed transactional workflows', async () => {
+  let reconciled = null;
+  const queued = queueEmailDelivery(
+    async () => ({ member: { ok: true, provider: 'test' }, admin: { ok: true, provider: 'test' } }),
+    { context: { kind: 'workspace_invitation' }, onSettled: async (results) => { reconciled = results; } },
+  );
+  assert.equal(queued.accepted, true);
+  const results = await queued.delivery;
+  assert.equal(results.admin.ok, true);
+  assert.equal(reconciled.member.provider, 'test');
 });
 
 test('team invitation sends the secure link only to the member and a separate admin confirmation', async () => {

@@ -84,7 +84,7 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { renderTemplate, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails } from './email/email-service.js';
+import { renderTemplate, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { createSignupWelcomeDispatcher } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
@@ -2766,18 +2766,13 @@ const server = http.createServer(async (req, res) => {
   // the request, making a valid invite look like a failed one. Completion is
   // reconciled against the invite row and recorded in the append-only audit.
   function queueWorkspaceInvitationDelivery({ invite, orgId, actorId, adminEmail, vars, expiresAt = null, requestMeta = {} }) {
-    const timeoutMs = 20_000;
-    const timeout = new Promise((resolve) => setTimeout(() => resolve({
-      member: { ok: false, retryable: true, error: 'delivery_timeout' },
-      admin: { ok: false, skipped: true, error: 'delivery_timeout' },
-    }), timeoutMs));
-    const delivery = Promise.race([sendTeamInvitationEmails({
+    queueEmailDelivery(() => sendTeamInvitationEmails({
       memberEmail: invite.email,
       adminEmail,
       vars,
-    }), timeout]);
-
-    void delivery.then(async (result) => {
+    }), {
+      context: { kind: 'workspace_invitation' },
+      onSettled: async (result) => {
       const member = result?.member || { ok: false, error: 'delivery_failed' };
       if (member.ok) {
         await prisma.orgInvite.update({
@@ -2803,8 +2798,7 @@ const server = http.createServer(async (req, res) => {
         },
         ...requestMeta,
       });
-    }).catch((error) => {
-      console.warn('[workspace-invite] delivery handoff failed:', error?.message || error);
+      },
     });
   }
 

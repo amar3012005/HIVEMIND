@@ -50,6 +50,11 @@ const EMAIL_ASSET_BASE_URL = process.env.HIVEMIND_EMAIL_ASSET_BASE_URL || 'https
 let _templates = null;
 let _warnedNoProvider = false;
 
+// Transactional email is deliberately separate from user-connected Gmail. A
+// caller selects an approved template and recipient; this module owns
+// rendering, provider selection, retries, and safe delivery results.
+const EMAIL_ADDRESS = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+
 function log(level, event, extra = {}) {
   const rec = { svc: 'email', level, event, ...extra };
   // single structured line — keep prod logs quiet and greppable
@@ -93,6 +98,17 @@ function toBase64Url(str) {
 
 function recipientDomain(to) {
   return String(to || '').split('@')[1]?.toLowerCase() || 'invalid';
+}
+
+function validEmailAddress(value) {
+  return typeof value === 'string'
+    && value.length <= 320
+    && !/[\r\n]/.test(value)
+    && EMAIL_ADDRESS.test(value.trim());
+}
+
+function validFromHeader(value) {
+  return !value || (typeof value === 'string' && value.length <= 512 && !/[\r\n]/.test(value));
 }
 
 function configuredProviders() {
@@ -289,6 +305,8 @@ function buildRawMessage({ to, from, subject, text, html }) {
  */
 export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId } = {}) {
   if (!to) return { ok: false, skipped: true, error: 'no_recipient' };
+  if (!validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
+  if (!validFromHeader(from)) return { ok: false, skipped: true, error: 'invalid_sender' };
 
   const providers = configuredProviders();
   const gmail = connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
@@ -317,26 +335,75 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
 }
 
 /**
+ * Send a named group of approved transactional messages.  The result shape is
+ * stable for every caller, while preserving the exact message key chosen by
+ * the product flow (for example `member`, `admin`, or `owner`).
+ *
+ * @param {Array<{key?: string, templateId: string, to: string, vars?: object, from?: string, connectionId?: string}>} messages
+ * @returns {Promise<Record<string, object>>}
+ */
+export async function sendSystemEmailBundle(messages = []) {
+  const entries = Array.isArray(messages) ? messages : [];
+  const seen = new Set();
+  const results = {};
+  for (let index = 0; index < entries.length; index += 1) {
+    const message = entries[index] || {};
+    const key = String(message.key || `message_${index + 1}`);
+    if (seen.has(key)) {
+      results[key] = { ok: false, skipped: true, error: 'duplicate_message_key' };
+      continue;
+    }
+    seen.add(key);
+    // Send in a deliberate order. Some workflows use the first receipt to
+    // safely describe the state of the second notification.
+    // eslint-disable-next-line no-await-in-loop
+    results[key] = await sendSystemEmail(message);
+  }
+  return results;
+}
+
+/**
+ * Start transactional delivery without keeping an HTTP request open. This is
+ * the canonical handoff for durable product actions: persist the action first,
+ * call this function, then reconcile delivery in `onSettled`.
+ *
+ * The returned object contains no provider secret or recipient content.
+ */
+export function queueEmailDelivery(execute, { onSettled, context = {} } = {}) {
+  const delivery = Promise.resolve()
+    .then(execute)
+    .then(async (results) => {
+      try { await onSettled?.(results); }
+      catch (error) { log('error', 'reconciliation_failed', { context: context?.kind || 'system', error: error?.name || 'error' }); }
+      return results;
+    })
+    .catch(async (error) => {
+      const results = { delivery: { ok: false, retryable: true, error: 'delivery_failed' } };
+      log('error', 'queue_failed', { context: context?.kind || 'system', error: error?.name || 'error' });
+      try { await onSettled?.(results); }
+      catch (reconciliationError) { log('error', 'reconciliation_failed', { context: context?.kind || 'system', error: reconciliationError?.name || 'error' }); }
+      return results;
+    });
+  return { accepted: true, delivery };
+}
+
+export function queueSystemEmailBundle(messages = [], options = {}) {
+  return queueEmailDelivery(() => sendSystemEmailBundle(messages), options);
+}
+
+/**
  * Send a workspace invitation to the member and a separate confirmation to the
  * inviting administrator. The confirmation never contains the invitation URL
  * or token, so forwarding an admin receipt cannot grant workspace access.
  */
 export async function sendTeamInvitationEmails({ memberEmail, adminEmail, vars = {} } = {}) {
-  const member = await sendSystemEmail({
-    templateId: 'team_invite',
-    to: memberEmail,
-    vars,
-  });
+  const { member } = await sendSystemEmailBundle([{ key: 'member', templateId: 'team_invite', to: memberEmail, vars }]);
   const admin = adminEmail
-    ? await sendSystemEmail({
-        templateId: 'team_invite_admin_confirmation',
-        to: adminEmail,
-        vars: {
-          ...vars,
-          inviteeEmail: memberEmail,
-          deliveryState: member.ok ? (member.deliveryStatus || 'accepted') : 'failed',
-        },
-      })
+    ? (await sendSystemEmailBundle([{ key: 'admin', templateId: 'team_invite_admin_confirmation', to: adminEmail, vars: {
+      ...vars,
+      inviteeEmail: memberEmail,
+      deliveryState: member.ok ? (member.deliveryStatus || 'accepted') : 'failed',
+    } }])).admin
     : { ok: false, skipped: true, error: 'no_admin_email' };
   return { member, admin };
 }
@@ -387,4 +454,12 @@ export async function sendSystemEmailBatch(recipients = [], opts = {}) {
   return result;
 }
 
-export default { sendSystemEmail, sendSystemEmailBatch, renderTemplate };
+export default {
+  sendSystemEmail,
+  sendSystemEmailBatch,
+  sendSystemEmailBundle,
+  queueEmailDelivery,
+  queueSystemEmailBundle,
+  sendTeamInvitationEmails,
+  renderTemplate,
+};

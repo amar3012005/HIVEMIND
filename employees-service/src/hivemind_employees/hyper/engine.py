@@ -157,7 +157,15 @@ _OR_PROVIDER_PIN = {
     # 2.4k tok ≈ 2s) while Groq under load served the same call in 12-18s
     # (logged "SLOW — fell off the fast-provider pin" on 2026-07-14). Groq stays
     # the immediate fallback.
-    "openai/gpt-oss-120b": ["Cerebras", "Together"],  # canonical 2026-07-23: Groq dropped (owner no-groq)
+    # 2026-08-12: Groq re-added as a candidate (owner instruction) — our DIRECT
+    # Groq key is confirmed delinquent (billing-dead, causing repeated 400s on
+    # every call site that still hits api.groq.com raw, see _select_execution_
+    # profile in api_hyper_rooms.py). "Groq" here is OpenRouter's OWN hosted
+    # Groq capacity, billed through OpenRouter — unaffected by our dead key.
+    # Cerebras stays first per the 2026-07-14 measured finding (wafer-scale
+    # ~3000 tok/s vs Groq under load 12-18s for the same call); Groq is an
+    # explicit fallback candidate instead of being excluded outright.
+    "openai/gpt-oss-120b": ["Cerebras", "Groq", "Together"],
     # Fireworks dropped from the 20b pin — measured 13.5s and 39.3s per call live
     # (2026-07-07) vs Groq ~1.6-2.5s on the same calls; it was the plan-phase spike.
     "openai/gpt-oss-20b": ["Together", "Cerebras"],  # canonical: no Groq (Cerebras lacks 20b)

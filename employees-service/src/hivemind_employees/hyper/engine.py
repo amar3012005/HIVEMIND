@@ -4268,13 +4268,24 @@ class Director:
                          f"the sharpest why-now hook for each, the objection each is likely to raise, and how "
                          f"the outreach should open. Be concrete about the named firms; no generic theory.")
         else:
-            r1_prompt = f"What is your stance on: {topic}? Give your view + your single biggest concern."
+            # Confirmed live 2026-08-13: a fundraising-room debater invented a
+            # named "internal product-risk audit (Q3 2026)" and three named
+            # competitor startups (PrivAI/SecureMind/DataGuardAI) wholesale —
+            # none were on the board. Labeling it "UNVERIFIED" did not stop the
+            # model from dressing up a guess with a specific fake source; the
+            # campaign-only guard below never reached this room_kind. Made
+            # universal: every room kind gets the same explicit ban.
+            r1_prompt = (
+                f"What is your stance on: {topic}? Give your view + your single biggest concern. "
+                "Use only facts in the CONTEXT above. Do not invent named entities: competitor names, "
+                "internal documents, audits, logs, customer results, testimonials, case studies, dates, "
+                "or metrics that are not present in the CONTEXT. When proof is missing, say so plainly and "
+                "name the gap — never dress up an unverifiable guess with a specific fabricated source "
+                "(e.g. a named 'audit' or 'log') to make it sound real."
+            )
             if self.room_kind == "campaign":
                 r1_prompt += (
-                    " Use only facts on the shared board. Do not invent customer results, metrics, "
-                    "testimonials, dates, competitor capabilities, case studies, or performance targets. "
-                    "When proof is missing, identify the gap and propose claim-safe messaging instead of "
-                    "supplying a hypothetical number as if it were real."
+                    " Do not supply a hypothetical performance number as if it were real."
                 )
         r1 = await asyncio.gather(*[
             _consult_and_emit(m, r1_prompt, self._round_seq, ("challenge", "contribute"))
@@ -4312,7 +4323,9 @@ class Director:
             r2 = await asyncio.gather(*[
                 _consult_and_emit(m, (f"Your teammates said:\n{_peers_prior(m.get('slug'))}\n\nREACT: name whose "
                                       f"point is weakest and why; challenge or build on THEIR argument — be specific. "
-                                      f"Do you change your view on '{topic}'?"),
+                                      f"If a teammate cited a named source, document, or entity not in the original "
+                                      f"CONTEXT, treat it as unverified and say so — do not build on it as if it were "
+                                      f"real. Do you change your view on '{topic}'?"),
                                   self._round_seq, ("challenge", "support"))
                 for m in members
             ])

@@ -4358,9 +4358,13 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
 
 async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started: float) -> RoomTurnResponse:
     """Direct single-employee turn for an @mention. Grounding: cached company brief +
-    the employee's GLOBAL learned playbook (lexical top-k on the message) + one recall.
-    One LLM call, events typing → line → seal (the same contract the FE renders).
-    Read-only: no artifact produce, no reflection write-back, no approval gate."""
+    the employee's GLOBAL learned playbook (lexical top-k on the message) + one recall
+    + the room's own journal continuity. One LLM call, events typing → line → seal (the
+    same contract the FE renders). Read-only: no artifact produce, no approval gate —
+    but the answer IS written back to room_journal (see the end of this function), same
+    as every full Director turn. Before that fix (2026-08-12), a tagged reply was
+    invisible to every later turn's continuity — a real decision (e.g. "next steps for
+    the MOU with Pablo") made here simply never existed for the room to recall."""
     async def _emit(ev: Dict[str, Any]) -> None:
         await _emit_event(req.callback_url, req.turn_id, ev)
 
@@ -4411,7 +4415,17 @@ async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started
             history.append(f"{(h.get('agent') or 'team').upper()} answered: {h['answer'][:700]}")
     except Exception:  # noqa: BLE001
         history = []
+    journal_rows = []
+    try:
+        journal = await get_room_journal(req.room_id, req.org_id)
+        for entry in journal:
+            journal_rows.append(f"- Asked: {entry.get('asked', '')} | Learned: {entry.get('swarm_summary', '')}")
+    except Exception:  # noqa: BLE001
+        journal_rows = []
     user_parts = []
+    if journal_rows:
+        user_parts.append("ROOM JOURNAL — this room's real prior decisions. If asked what the room "
+                          "already learned/decided, answer FROM this directly:\n" + "\n".join(journal_rows)[:2500])
     if history:
         user_parts.append("RECENT ROOM DISCUSSION (oldest first — this is what your team already said; "
                           "when asked about a teammate's position, it is HERE):\n" + "\n".join(history)[:3000])
@@ -4432,6 +4446,19 @@ async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started
                  "tokens_out": int((usage or {}).get("out", 0)),
                  "tokens_cached": int((usage or {}).get("cached", 0))})
     log.info("[mention] room=%s agent=%s tokens=%d", req.room_id, slug, tokens)
+    # Same continuity write-back every full Director turn gets — a tagged reply is a
+    # real room decision too, and must exist for the next turn's journal to cite.
+    try:
+        _journal_entry = await make_journal_entry(
+            req.user_message, content, transcript=[{"agent": name, "text": content}],
+            participants=[{"slug": slug, "name": name}], turn_id=req.turn_id, status="complete",
+        )
+        if _journal_entry:
+            _journal_ok = await append_room_journal_entry(req.room_id, req.org_id, _journal_entry)
+            if _journal_ok:
+                await _emit({"t": "room_journal", "entry": _journal_entry})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[mention] room journal failed (non-fatal): %s", exc)
     return RoomTurnResponse(ok=True, cost_tokens=tokens, status="complete")
 
 async def _resolve_write_policy(req: "RoomTurnRequest") -> str:

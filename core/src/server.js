@@ -23361,6 +23361,7 @@ exit \$RC
                         webIntelligence: globalThis.webIntelligence || null,
                       },
                       onEvent: emit,
+                      streamAnswer: true,
                     });
                     if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
                       result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };

@@ -5,6 +5,7 @@ import {
   chatCompletionFetch,
   chatCompletionStream,
   DEFAULT_CHAT_PLANNER_MODEL,
+  DEFAULT_CHAT_CANDIDATE_SYNTHESIS_MODEL,
   DEFAULT_CHAT_SYNTHESIS_MODEL,
   DEFAULT_HQ_AWAKENING_MODEL,
   DEFAULT_HQ_DISPATCH_MODEL,
@@ -33,6 +34,22 @@ test('GPT-OSS-20B Nitro final synthesis uses OpenRouter variant routing without 
     assert.equal(route.providerPolicy.order, undefined);
     assert.equal(route.providerPolicy.allow_fallbacks, true);
     assert.equal(route.providerPolicy.data_collection, 'deny');
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
+});
+
+test('Nemotron final synthesis pins its viable providers and never inherits an ignore list', () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  try {
+    const route = resolveChatCompletionRoute(DEFAULT_CHAT_CANDIDATE_SYNTHESIS_MODEL);
+    assert.equal(route.provider, 'openrouter:nvidia');
+    assert.deepEqual(route.providerPolicy.order, ['DeepInfra', 'CoreWeave']);
+    assert.equal(route.providerPolicy.ignore, undefined);
+    assert.equal(route.providerPolicy.allow_fallbacks, true);
+    assert.equal(route.providerPolicy.require_parameters, true);
   } finally {
     if (prior == null) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = prior;

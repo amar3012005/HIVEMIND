@@ -10577,13 +10577,22 @@ Write the persona now.`;
         // Human task clicks always enter a neutral Work Room. The Director decides
         // whether this turn needs a direct answer, research, debate, an artifact,
         // or a proposal for a governed Runtime lifecycle.
-        const kickoff = [
-          `You are working with the ${company.company} team on a human request.`,
-          `REQUEST: ${task.title}`,
-          task.detail ? `CONTEXT: ${task.detail}` : '',
-          company.mission ? `COMPANY CONTEXT: ${company.company} — ${company.mission}` : '',
-          'Choose the smallest useful approach. Answer directly when that satisfies the request. Research, deliberate, create an internal artifact, or propose Runtime work only when the request and evidence require it. Never claim an external action occurred without a provider receipt.',
-        ].filter(Boolean).join('\n');
+        //
+        // kickoff is the room's user_message — what the FE shows as "the user
+        // asked". It used to wrap task.title in a "You are working with the X
+        // team..." framing + a restated COMPANY CONTEXT line + a "choose the
+        // smallest useful approach... never claim an external action occurred"
+        // policy paragraph, all bolted onto the request text. Every one of
+        // those was already duplicated elsewhere in the turn: Director builds
+        // its own, richer company_brief separately (2000+ chars vs this one
+        // line), room_goal already carries the company mission (see `goal`
+        // below and rr?.goal for the existing-room branch), and the
+        // response-depth/no-fabrication policy is already baked into
+        // Director's own synth system prompt — it doesn't need to be told
+        // twice, and stuffing it into user_message just made the room look
+        // like the user typed a paragraph of boilerplate. Trimmed to exactly
+        // the concise request: task title + its real, non-duplicated detail.
+        const kickoff = task.detail ? `${task.title}\n\n${task.detail}` : task.title;
         if (task.room_id) {
           const existing = await prisma.hyperRoom.findFirst({
             where: { id: task.room_id, orgId: current.session.orgId, archivedAt: null },

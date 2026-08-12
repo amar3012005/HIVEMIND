@@ -4689,6 +4689,9 @@ const server = http.createServer(async (req, res) => {
             orgId, email, role: bulkRole, roles: bulkRoles,
             teamIds: [], projectIds: bulkProjectIds, token, expiresAt,
             createdBy: current.session.userId,
+            // Delivery is accounted for only after the recipient provider has
+            // accepted the message. A created invite is not necessarily sent.
+            sendCount: 0,
           },
         });
         const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
@@ -4703,6 +4706,12 @@ const server = http.createServer(async (req, res) => {
           adminEmailOk = Boolean(delivery.admin?.ok);
           emailError = delivery.member?.ok ? null : delivery.member?.error || 'delivery_failed';
         } catch (mailErr) { emailError = mailErr.message; }
+        if (emailOk) {
+          await prisma.orgInvite.update({
+            where: { id: invite.id },
+            data: { lastSentAt: new Date(), sendCount: { increment: 1 } },
+          });
+        }
         results.push({ email, status: 'invited', invite_id: invite.id, join_url: joinUrl, email_sent: emailOk, admin_confirmation_sent: adminEmailOk, ...(emailError ? { email_error: emailError } : {}) });
         audit({
           organizationId: orgId, userId: current.session.userId,
@@ -4711,12 +4720,21 @@ const server = http.createServer(async (req, res) => {
           newValue: { email, role: bulkRole, bulk: true },
           ..._reqMeta(req),
         });
+        audit({
+          organizationId: orgId, userId: current.session.userId,
+          eventType: emailOk ? 'org.invite_email_delivered' : 'org.invite_email_failed',
+          eventCategory: 'org', action: emailOk ? 'deliver' : 'fail',
+          resourceType: 'org_invite', resourceId: invite.id,
+          newValue: { provider: emailOk ? 'transactional_email' : null, bulk: true, ...(emailError ? { failure: emailError } : {}) },
+          ..._reqMeta(req),
+        });
       } catch (rowErr) {
         results.push({ email, status: 'failed', error: rowErr.message });
       }
     }
-    const sent = results.filter((r) => r.status === 'invited').length;
-    return jsonResponse(res, { ok: true, total: emails.length, invited: sent, results }, 201);
+    const created = results.filter((r) => r.status === 'invited').length;
+    const delivered = results.filter((r) => r.email_sent).length;
+    return jsonResponse(res, { ok: true, total: emails.length, invited: created, email_delivered: delivered, results }, 201);
   }
 
   const inviteCollectionMatch = pathname.match(/^\/v1\/orgs\/([^/]+)\/invites$/);
@@ -4788,6 +4806,8 @@ const server = http.createServer(async (req, res) => {
             expiresAt,
             createdBy: current.session.userId,
             idempotencyKey,
+            // Do not make the list claim delivery before the provider confirms it.
+            sendCount: 0,
           },
         });
       } catch (err) {
@@ -4839,6 +4859,30 @@ const server = http.createServer(async (req, res) => {
       } catch (mailErr) {
         emailReport = { attempted: true, ok: false, error: mailErr.message };
       }
+    }
+
+    if (emailReport.ok) {
+      invite = await prisma.orgInvite.update({
+        where: { id: invite.id },
+        data: { lastSentAt: new Date(), sendCount: { increment: 1 } },
+      });
+    }
+
+    if (inviteEmail && !reusedInvite) {
+      audit({
+        organizationId: orgId,
+        userId: current.session.userId,
+        eventType: emailReport.ok ? 'invite.email_delivered' : 'invite.email_failed',
+        eventCategory: 'auth',
+        action: emailReport.ok ? 'deliver' : 'fail',
+        resourceType: 'org_invite',
+        resourceId: invite.id,
+        newValue: {
+          provider: emailReport.provider || null,
+          ...(emailReport.ok ? {} : { failure: emailReport.error || 'delivery_failed' }),
+        },
+        ..._reqMeta(req),
+      });
     }
 
     // Invitee status — tell the admin UP FRONT how this person will join:
@@ -5076,13 +5120,33 @@ const server = http.createServer(async (req, res) => {
       dispatch = { attempted: true, ok: false, error: mailErr.message };
     }
 
-    const updated = await prisma.orgInvite.update({
-      where: { id: inviteId },
-      data: {
-        expiresAt: newExpiresAt,
-        lastSentAt: new Date(),
-        sendCount: { increment: 1 },
+    // A provider failure must leave the durable invite untouched: it remains
+    // retryable, but the list cannot claim that a resend happened or that its
+    // expiry was extended when no recipient was reached.
+    const updated = dispatch.ok
+      ? await prisma.orgInvite.update({
+          where: { id: inviteId },
+          data: {
+            expiresAt: newExpiresAt,
+            lastSentAt: new Date(),
+            sendCount: { increment: 1 },
+          },
+        })
+      : invite;
+
+    audit({
+      organizationId: orgId,
+      userId: current.session.userId,
+      eventType: dispatch.ok ? 'invite.email_resent' : 'invite.email_resend_failed',
+      eventCategory: 'auth',
+      action: dispatch.ok ? 'deliver' : 'fail',
+      resourceType: 'org_invite',
+      resourceId: invite.id,
+      newValue: {
+        provider: dispatch.provider || null,
+        ...(dispatch.ok ? { expires_at: updated.expiresAt } : { failure: dispatch.error || 'delivery_failed' }),
       },
+      ..._reqMeta(req),
     });
 
     return jsonResponse(res, {

@@ -6499,6 +6499,8 @@ class Director:
         # decides what to recall / which connectors to read / web + debate. Replaces the
         # old 15-round sequential agentic loop: one round-trip, no harmony tool glitch.
         plan = await self._plan_gather()
+        log.info("[hyper-engine] planner picked execution_engine=%s turn_mode=%s room_kind=%s",
+                 plan.get("execution_engine"), plan.get("turn_mode"), self.room_kind)
         self.post_output_actions = list(plan.get("post_output_actions") or [])
         if self.post_output_actions:
             self.intended_output = str(self.post_output_actions[-1].get("artifact_kind") or "answer")

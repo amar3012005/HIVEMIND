@@ -57,6 +57,7 @@ from .agents.agentscope_tools import (
     register_delegate_to_tool,
     register_load_skill_tool,
     reset_turn_outputs,
+    set_current_turn_id,
     set_turn_provenance,
 )
 from .bootstrap_client import fetch_bootstrap, report_eval, report_metrics
@@ -3618,6 +3619,7 @@ async def _run_direct_answer_agent(
     None on any failure (agent build, invocation, empty reply); Director's
     _try_direct_answer_hook treats None as "fall through to normal synth"."""
     try:
+        set_current_turn_id(turn_id)  # real leads-persist tools (save_prospect/places_search) need this
         agent = await _build_agent_for_room(room_id, lead, user_id=user_id, org_id=org_id, project_id=project_id)
         prompt = (
             f"Answer this directly and concisely, in character: {user_message}\n\n"
@@ -3649,6 +3651,7 @@ async def _run_agentic_task_agent(
     _run_agentic_task treats None as 'fall through to the normal pipeline'
     — this engine can only ADD behavior, never break a turn."""
     try:
+        set_current_turn_id(turn_id)  # real leads-persist tools (save_prospect/places_search) need this
         agent = await _build_lead_task_agent(
             room_id, lead, participants, user_id=user_id, org_id=org_id, project_id=project_id,
             room_kind=room_kind,

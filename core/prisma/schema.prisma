@@ -3302,6 +3302,27 @@ model HyperRelation {
   @@map("hyper_relations")
 }
 
+/// HyperApprovalRule — fine-grained, per-action-type standing approval rule.
+/// Grok-Bot-style "always allow: create a Drive doc" while a different action
+/// (e.g. gmail_send) still requires approval, per action label. Org-scoped
+/// (an action type means the same thing everywhere in that org), not room-
+/// scoped. No row for a label = existing per-turn write policy applies
+/// unchanged (default behavior is completely untouched by this table).
+model HyperApprovalRule {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId        String   @map("org_id") @db.Uuid
+  actionLabel  String   @map("action_label") @db.VarChar(160)
+  decision     String   @db.VarChar(20)
+  // always_allow | always_deny
+  createdBy    String?  @map("created_by") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, actionLabel])
+  @@index([orgId])
+  @@map("hyper_approval_rules")
+}
+
 /// TaraCall — one row per TARA voice call (self-hosted AaaS). Org-scoped.
 /// Created on WS connect, finalized on disconnect. Aggregates usage.
 model TaraCall {

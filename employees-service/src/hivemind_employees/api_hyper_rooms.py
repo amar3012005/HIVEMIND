@@ -57,6 +57,7 @@ from .agents.agentscope_tools import (
     register_delegate_to_tool,
     register_load_skill_tool,
     reset_turn_outputs,
+    set_approval_rules,
     set_current_turn_id,
     set_turn_provenance,
 )
@@ -68,6 +69,7 @@ from .hyper.execution_profiles import (
     profile_registry_manifest,
 )
 from .db import (
+    get_org_approval_rules,
     get_permanent_lead_id,
     get_permanent_skeptic_id,
     get_room_enabled_connectors,
@@ -3620,6 +3622,10 @@ async def _run_direct_answer_agent(
     _try_direct_answer_hook treats None as "fall through to normal synth"."""
     try:
         set_current_turn_id(turn_id)  # real leads-persist tools (save_prospect/places_search) need this
+        try:
+            set_approval_rules(await get_org_approval_rules(org_id))
+        except Exception:  # noqa: BLE001 — a failed rule load must fail open to the normal ask/deny policy
+            set_approval_rules(None)
         agent = await _build_agent_for_room(room_id, lead, user_id=user_id, org_id=org_id, project_id=project_id)
         prompt = (
             f"Answer this directly and concisely, in character: {user_message}\n\n"
@@ -3652,6 +3658,10 @@ async def _run_agentic_task_agent(
     — this engine can only ADD behavior, never break a turn."""
     try:
         set_current_turn_id(turn_id)  # real leads-persist tools (save_prospect/places_search) need this
+        try:
+            set_approval_rules(await get_org_approval_rules(org_id))
+        except Exception:  # noqa: BLE001 — a failed rule load must fail open to the normal ask/deny policy
+            set_approval_rules(None)
         agent = await _build_lead_task_agent(
             room_id, lead, participants, user_id=user_id, org_id=org_id, project_id=project_id,
             room_kind=room_kind,

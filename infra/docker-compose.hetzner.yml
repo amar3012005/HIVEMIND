@@ -61,6 +61,10 @@ services:
       NANGO_ENCRYPTION_KEY: ${NANGO_ENCRYPTION_KEY}
       NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-http://nango:3003}
       HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
+      # Keep the Core-to-browser service credential explicit. `env_file` also
+      # supplies it today, but Core must retain this dependency if env loading
+      # is narrowed in a later production compose change.
+      PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
     volumes:
       - hivemind-data:/app/data        # ← .amr files live here; BACK UP
       - hivemind-logs:/app/logs
@@ -336,12 +340,13 @@ services:
     image: hivemind/hm-playwright:${VERSION:-latest}
     container_name: hm-playwright
     restart: unless-stopped
-    mem_limit: 1536m
-    memswap_limit: 2304m
-    cpus: 0.75
+    mem_limit: 2560m
+    memswap_limit: 3328m
+    cpus: 1.5
     environment:
       PLAYWRIGHT_SERVICE_TOKEN: ${PLAYWRIGHT_SERVICE_TOKEN:?PLAYWRIGHT_SERVICE_TOKEN is required}
       PLAYWRIGHT_SESSIONS_DIR: /app/sessions
+      PLAYWRIGHT_CRAWL_CONCURRENCY: "4"
     volumes:
       # Captured storageState files are credentials: host-managed, never baked
       # into an image, and mounted read-only into the browser service.

@@ -6471,6 +6471,42 @@ class Director:
                          "kind": "synthesis", "content": final_text})
         log.info("[hyper-engine] agentic task done — %d tokens, %dms",
                  self.tokens, int((time.time() - t0) * 1000))
+        # HQ CONTRACT BRIDGE — an HQ-dispatched work order (routine/hyper-cycle)
+        # goes through this SAME Director.run() (work-dispatcher.js posts to
+        # /internal/hyper/room-turn, the identical route every turn uses), so
+        # execution_engine=="agentic" can fire for HQ work exactly like any
+        # other turn. But core's roomVerdict() only accepts a
+        # work-order-result.v2 contract (self.work_results-derived, built by
+        # _synthesize_work_order_result) — this engine has no equivalent
+        # per-subtask deterministic checks yet. Without this bridge, HQ would
+        # mark genuinely completed agentic work "blocked" for want of a
+        # contract it never produced. Deliberately conservative: the subtask
+        # is never marked "completed" (no deterministic check backs that claim
+        # yet) — checkpoint disposition defaults to request_hq, so a human/HQ
+        # reviews the real output rather than either silently trusting an
+        # unverified completion or discarding real work as a false failure.
+        work_order_result = None
+        if self.work_order:
+            try:
+                from .work_order_contract import assemble_work_order_result, govern_work_order_result
+                subtask = {
+                    "id": "agentic-engine", "title": "Agentic task engine execution",
+                    "status": "partial",
+                    "output": {"report_markdown": final_text},
+                    "checks": [],
+                    "gaps": [{"why": "The agentic task engine has no deterministic per-check verification "
+                                     "bridge yet — route this for HQ/human review before treating it as complete."}],
+                }
+                semantic = {"report_markdown": final_text, "deliverables": [], "needs_input": [], "blockers": []}
+                assembled = assemble_work_order_result(
+                    semantic, envelope=self.work_order, subtasks=[subtask],
+                    metrics={"tool_calls_total": 0},
+                )
+                work_order_result = govern_work_order_result(assembled)["result"]
+                await self.emit({"t": "work_order_result", "result": work_order_result})
+            except Exception as exc:  # noqa: BLE001 — never fail the turn over the HQ contract bridge
+                log.warning("[hyper-engine] HQ contract bridge failed, returning without a contract: %s", exc)
+                work_order_result = None
         return {
             "cost_tokens": self.tokens,
             "final_text": final_text,
@@ -6491,6 +6527,7 @@ class Director:
             "outreach_metrics": dict(self._outreach_metrics),
             "work_orders": [],
             "work_results": [],
+            "work_order_result": work_order_result,
             "turn_mode": "task",
             "execution_engine": "agentic",
             "duration_ms": int((time.time() - t0) * 1000),

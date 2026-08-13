@@ -5523,6 +5523,31 @@ class Director:
             match = re.search(r"^CHANNELS:\s*(.+)$", self.user_message or "", re.M | re.I)
             if match:
                 channels = [x.strip().lower() for x in match.group(1).split(",") if x.strip()]
+        # Confirmed live 2026-08-13: a campaign room whose brief never carried
+        # `channels` (created outside the channel-picker flow, e.g. a free-text
+        # "Launch X Campaign" ask) reached the compiler with channels=[]. The
+        # compiler correctly produced an empty actions/media_plan for zero
+        # requested channels, governance correctly rejected it, and the repair
+        # loop's guard (`_repair_campaign_actions`) has nothing to key off when
+        # NO action/field/channel-deficit signal exists — an empty bundle isn't
+        # a few broken actions, it's a missing precondition repair can't fix.
+        # Infer a real channel instead of asking the compiler to build a plan
+        # for zero channels: prefer whatever this room actually has connected,
+        # else default to x_organic — the one channel the contract can validate
+        # with no connector/token at all (publish is still gated by the room's
+        # own approval flow downstream; this only unblocks PLANNING).
+        if not channels:
+            _connector_channel = {
+                "gmail": "gmail", "google-mail": "gmail",
+                "x": "x_organic", "x-twitter": "x_organic", "twitter": "x_organic",
+                "linkedin": "linkedin", "instagram": "instagram", "facebook": "facebook",
+                "tiktok": "tiktok", "youtube": "youtube",
+            }
+            inferred = list(dict.fromkeys(
+                _connector_channel[c] for c in (self.connectors or []) if c in _connector_channel
+            ))
+            channels = inferred or ["x_organic"]
+            log.info("[hyper-engine] campaign brief carried no channels — inferred %s", channels)
         return channels, ["goal"] + [f"channel:{channel}" for channel in channels]
 
     @staticmethod

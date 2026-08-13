@@ -1141,6 +1141,25 @@ async def get_room_connector_grants(room_id: str, org_id: Optional[str] = None) 
     return {}
 
 
+async def get_org_approval_rules(org_id: str) -> Dict[str, str]:
+    """Fine-grained, per-action-type standing approval rules for this org
+    (Grok-Bot-style "always allow: create a doc" while a different action
+    still asks). {action_label: 'always_allow'|'always_deny'}. Empty dict if
+    none/pre-migration — the existing per-turn write policy applies exactly
+    as before with no rows."""
+    pool = await init_pool()
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                'SELECT action_label, decision FROM hivemind.hyper_approval_rules WHERE org_id = $1::uuid',
+                org_id,
+            )
+            return {str(r["action_label"]): str(r["decision"]) for r in rows}
+    except Exception as exc:  # noqa: BLE001 — a failed read must fail OPEN to the ask/deny policy, not crash
+        log.warning("get_org_approval_rules failed: %s", exc)
+        return {}
+
+
 async def get_room_enabled_connectors(room_id: str, org_id: Optional[str] = None) -> list:
     """Room-level connector toggles — the connectors enabled for this room
     (every agent may use them in the run). Empty list if none/pre-migration."""

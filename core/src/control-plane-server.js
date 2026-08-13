@@ -10403,6 +10403,74 @@ Write the persona now.`;
       }
     }
 
+    // Fine-grained, per-action-type standing approval rules (Grok-Bot-style
+    // "always allow: create a doc" while a different action still asks) — the
+    // gap vs. the coarse per-room autoSend toggle. Org-scoped, admin-gated:
+    // this changes autonomous-write behavior for the whole org, not just the
+    // caller's own rooms. No FE surface yet — this is the backend + API only;
+    // configure via this endpoint until a settings UI exists.
+    if (pathname === '/v1/hyper/approval-rules' && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const membership = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+      if (!membership) return;
+      try {
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT action_label, decision, created_at, updated_at
+             FROM hivemind.hyper_approval_rules
+            WHERE org_id = $1::uuid
+            ORDER BY action_label`,
+          current.session.orgId,
+        );
+        return jsonResponse(res, { rules: rows });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    if (pathname === '/v1/hyper/approval-rules' && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const membership = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+      if (!membership) return;
+      const body = await parseBody(req).catch(() => ({}));
+      const actionLabel = String(body?.action_label || '').trim().slice(0, 160);
+      const decision = String(body?.decision || '').trim().toLowerCase();
+      if (!actionLabel || !['always_allow', 'always_deny'].includes(decision)) {
+        return jsonResponse(res, { error: 'action_label and decision (always_allow|always_deny) are required' }, 400);
+      }
+      try {
+        await prisma.$executeRawUnsafe(
+          `INSERT INTO hivemind.hyper_approval_rules (org_id, action_label, decision, created_by)
+           VALUES ($1::uuid, $2, $3, $4::uuid)
+           ON CONFLICT (org_id, action_label)
+           DO UPDATE SET decision = $3, updated_at = now()`,
+          current.session.orgId, actionLabel, decision, current.session.userId,
+        );
+        return jsonResponse(res, { status: 'saved', action_label: actionLabel, decision });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
+    if (pathname === '/v1/hyper/approval-rules' && req.method === 'DELETE') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const membership = await requireOrgAdmin(req, res, current.session.userId, current.session.orgId);
+      if (!membership) return;
+      const actionLabel = String(url.searchParams.get('action_label') || '').trim().slice(0, 160);
+      if (!actionLabel) return jsonResponse(res, { error: 'action_label is required' }, 400);
+      try {
+        await prisma.$executeRawUnsafe(
+          `DELETE FROM hivemind.hyper_approval_rules WHERE org_id = $1::uuid AND action_label = $2`,
+          current.session.orgId, actionLabel,
+        );
+        return jsonResponse(res, { status: 'deleted', action_label: actionLabel });
+      } catch (err) {
+        return jsonResponse(res, { error: err.message }, 500);
+      }
+    }
+
     // GET /v1/hyper/leads — the "Your Leads" board: one row per prospect the org
     // has run outreach on, with all firm info + latest send state, sent date/time,
     // reply/booking outcome, and a coarse "potential" derived from the outcome.

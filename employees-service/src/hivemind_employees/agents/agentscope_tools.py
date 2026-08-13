@@ -107,6 +107,23 @@ def set_current_turn_id(turn_id: Optional[str]) -> None:
     _CURRENT_TURN_ID.set(str(turn_id) if turn_id else None)
 
 
+# Fine-grained, per-action-type standing approval rules (Grok-Bot-style
+# "always allow: create a doc" while a different action still asks) — the gap
+# vs. the coarse per-room autoSend toggle. Loaded ONCE per turn (async DB read
+# happens before the agent's tool loop starts, same as _CURRENT_TURN_ID) so
+# the sync write-gate (_gate_write, called from inside sync tool functions)
+# can check it without an async round-trip. Empty dict = no rules configured
+# for this org = existing ask/deny policy applies exactly as before.
+_APPROVAL_RULES: "contextvars.ContextVar[Dict[str, str]]" = contextvars.ContextVar(
+    "hyper_approval_rules", default={}
+)
+
+
+def set_approval_rules(rules: Optional[Dict[str, str]]) -> None:
+    """Arm this turn's org-level fine-grained approval rules."""
+    _APPROVAL_RULES.set(dict(rules) if rules else {})
+
+
 def get_places_search_count() -> int:
     return int(_PLACES_SEARCH_COUNT.get() or 0)
 
@@ -282,7 +299,22 @@ def _gate_write(
     return a "pending" ToolResponse WITHOUT executing. Returns None when the
     write may run now. `force` is for outward SENDS (gmail send/reply, trash),
     which ALWAYS require the user's approval regardless of policy. `descriptor`
-    carries everything the approve endpoint needs to replay the bridge call."""
+    carries everything the approve endpoint needs to replay the bridge call.
+
+    Fine-grained per-action rule check runs FIRST, ahead of the coarse turn
+    policy: an org can explicitly stand a rule for one action LABEL (e.g.
+    always_allow docs_create, always_deny gmail_send) via set_approval_rules.
+    No rule for this label = falls through to the existing policy unchanged."""
+    rule = _APPROVAL_RULES.get().get(label)
+    if rule == "always_deny":
+        return _tool_response_text(
+            f"⛔ WRITE DENIED — '{label}' was NOT executed. This org has a standing "
+            "rule denying this action type. Continue with evidence gathering and "
+            "report the blocked write as an exact gap; do not retry it.",
+            metadata={"status": "write_denied", "label": label, "reason": "org_approval_rule"},
+        )
+    if rule == "always_allow":
+        return None
     policy = _WRITE_POLICY.get()
     if policy == "deny":
         return _tool_response_text(

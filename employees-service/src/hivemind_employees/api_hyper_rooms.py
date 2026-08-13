@@ -55,6 +55,7 @@ from .agents.agentscope_tools import (
     queue_email_approval,
     record_artifact,
     register_delegate_to_tool,
+    register_load_skill_tool,
     reset_turn_outputs,
     set_turn_provenance,
 )
@@ -991,6 +992,7 @@ async def _build_lead_task_agent(
     user_id: Optional[str] = None,
     org_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    room_kind: str = "",
 ) -> ReActAgent:
     """Build the lead's real ReAct agent for the AGENTIC TASK ENGINE
     (dual-engine, 2026-08-13, flag-gated HYPER_AGENTIC_ENGINE) — a genuinely
@@ -1006,7 +1008,18 @@ async def _build_lead_task_agent(
       - a `delegate_to` tool so the lead can hand a bounded subtask to a
         real teammate's OWN agent (their persona, their tools/connectors,
         their own reasoning loop) instead of doing everything alone or
-        faking their voice with a single-shot debate-style text call.
+        faking their voice with a single-shot debate-style text call;
+      - a `load_skill` tool over the room's OWN domain-pack skill catalog
+        (campaign/seo/marketing/outreach/branding/fundraising/research/
+        product/design/legal_finance) — the SAME strategy playbooks the
+        debate pipeline already uses, loaded on demand mid-task instead of
+        dumped upfront. No-op when room_kind has no domain pack.
+
+    Connectors: the room-level toggle is often empty (never set via the FE
+    channel-picker for a free-text ask) even when the ORG genuinely has real
+    connectors authorized. Union both so the agent sees everything actually
+    available and decides for itself what to equip — never assume a fixed
+    per-domain toolbelt.
 
     NOT cached like `_build_agent_for_room` (`_ROOM_AGENTS`) — each agentic
     task run gets a fresh plan notebook; caching would leak one turn's plan/
@@ -1014,9 +1027,15 @@ async def _build_lead_task_agent(
     """
     from agentscope.plan import PlanNotebook
     try:
-        emp_connectors = await get_room_enabled_connectors(room_id, org_id=org_id)
+        room_connectors = await get_room_enabled_connectors(room_id, org_id=org_id)
     except Exception:  # noqa: BLE001 — never fail the turn over connectors
-        emp_connectors = []
+        room_connectors = []
+    try:
+        connector_state = await runtime_connectors_emulated(user_id=user_id, org_id=org_id)
+        org_connectors = [str(c).strip().lower() for c in (connector_state.get("connectors") or []) if str(c).strip()]
+    except Exception:  # noqa: BLE001
+        org_connectors = []
+    emp_connectors = list(dict.fromkeys([*room_connectors, *org_connectors]))
     boot = {b["id"]: b for b in await fetch_bootstrap()}
     boot_emp = boot.get(lead["id"], {}) or {}
     api_key = boot_emp.get("api_key") or ""
@@ -1043,6 +1062,7 @@ async def _build_lead_task_agent(
         )
 
     register_delegate_to_tool(agent.toolkit, participants, _build_sub_agent, HYPER_AGENTIC_MAX_DELEGATIONS)
+    register_load_skill_tool(agent.toolkit, room_kind)
     return agent
 
 
@@ -3615,12 +3635,14 @@ async def _run_agentic_task_agent(
     room_id: str, lead: Dict[str, Any], participants: List[Dict[str, Any]],
     user_id: str, org_id: str, project_id: Optional[str],
     turn_id: str, user_message: str, board_context: str,
+    room_kind: str = "",
 ) -> Optional[str]:
     """Invoke the AGENTIC TASK ENGINE (dual-engine, flag-gated
     HYPER_AGENTIC_ENGINE) — the lead's real ReAct agent with a native
-    PlanNotebook and a delegate_to tool for handing bounded subtasks to real
-    teammate sub-agents, working the request step by step with LIVE tool
-    access instead of a fixed plan-once pipeline.
+    PlanNotebook, a delegate_to tool for handing bounded subtasks to real
+    teammate sub-agents, and a load_skill tool over the room's own domain
+    playbooks, working the request step by step with LIVE tool access
+    instead of a fixed plan-once pipeline.
 
     None on any failure (agent build, invocation, empty reply); Director's
     _run_agentic_task treats None as 'fall through to the normal pipeline'
@@ -3628,13 +3650,17 @@ async def _run_agentic_task_agent(
     try:
         agent = await _build_lead_task_agent(
             room_id, lead, participants, user_id=user_id, org_id=org_id, project_id=project_id,
+            room_kind=room_kind,
         )
         prompt = (
             f"TASK: {user_message}\n\n"
-            "Work this step by step with your real tools — recall, connectors, and "
-            "delegate_to for handing a bounded subtask to a real teammate when their "
-            "specific expertise or tool access genuinely helps. Use create_plan first "
-            "if the task has multiple distinct parts, then work through the subtasks. "
+            "Work this step by step with your real tools — recall, connectors, "
+            "load_skill for this domain's own strategy playbooks when you reach the "
+            "step they apply to, and delegate_to for handing a bounded subtask to a "
+            "real teammate when their specific expertise or tool access genuinely "
+            "helps. Use create_plan first if the task has multiple distinct parts, "
+            "then work through the subtasks. Decide for yourself which of your "
+            "connected tools this task actually needs — do not assume a fixed set. "
             "Finish with the complete, publish-ready deliverable the user asked for — "
             "not a status update on your plan.\n\n"
             f"CONTEXT ALREADY GATHERED THIS TURN (use it; call your own tools for "
@@ -3857,7 +3883,7 @@ async def _orchestrate_single_agent(
     async def _agentic_task_via_agent(user_message: str, board_context: str) -> Optional[str]:
         return await _run_agentic_task_agent(
             req.room_id, lead, participants, req.user_id, req.org_id, req.project_id, req.turn_id,
-            user_message, board_context,
+            user_message, board_context, room_kind=_room_kind,
         )
 
     # 1. RUN THE DIRECTOR — gather → debate → synthesis (emits gather/round_start/

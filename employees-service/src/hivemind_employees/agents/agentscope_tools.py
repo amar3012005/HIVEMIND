@@ -1205,6 +1205,43 @@ def register_experience_tool(tk: Toolkit, org_id: Optional[str], slug: Optional[
         log.warning("register_experience_tool failed: %s", exc)
 
 
+def register_load_skill_tool(tk: Toolkit, room_kind: str) -> None:
+    """Register `load_skill` — the domain's own strategy/method playbooks,
+    loaded ON DEMAND mid-task instead of dumped upfront. Reuses the SAME
+    skill catalogs the debate pipeline already uses (`hyper/domains/<slug>/
+    skills/*.md`, one per domain: campaign, seo, marketing, outreach,
+    branding, fundraising, research, product, design, legal_finance) — no
+    new skills, no duplication. A no-op for room kinds with no domain pack
+    (e.g. "general") — the tool is simply never registered.
+    """
+    from ..hyper.domains import domain_skill_catalog, load_domain_skill
+    catalog = domain_skill_catalog(room_kind)
+    if not catalog:
+        return
+    catalog_line = "\n".join(f"- {name}: {when}" for name, when in catalog)
+
+    async def load_skill(name: str) -> ToolResponse:
+        """Load one of this domain's strategy/method playbooks by name, at the
+        point in the task where that method actually applies — not upfront,
+        and not every skill "just in case". Call this when you reach the step
+        it's meant for.
+
+        Available skills for this domain:
+        {catalog}
+        """
+        body = load_domain_skill(str(name or "").strip())
+        if not body:
+            names = ", ".join(n for n, _ in catalog)
+            return _tool_response_text(f"No skill named '{name}' in this domain. Available: {names}")
+        return _tool_response_text(body)
+
+    load_skill.__doc__ = (load_skill.__doc__ or "").format(catalog=catalog_line)
+    try:
+        tk.register_tool_function(load_skill)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("register_load_skill_tool failed: %s", exc)
+
+
 def register_delegate_to_tool(
     tk: Toolkit,
     participants: List[Dict[str, Any]],

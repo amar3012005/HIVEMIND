@@ -99,6 +99,7 @@ import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { runtimeTransportStats } from './runtime-transport/client.js';
 import { internalFetch } from './internal/internal-fetch.js';
 import {
+  getRuntimeRole,
   shouldRunRecurringMaintenanceJobs,
   shouldStartHttpServer,
 } from './runtime/runtime-role.js';
@@ -580,6 +581,16 @@ async function recordHqActivity(prisma, turnId, event) {
 // (~30s), at most ONCE, so a dropped kick self-heals instead of leaving the FE
 // spinning forever. Real in-flight turns emit a line within seconds, so they
 // drop out of the watch set before the re-kick threshold.
+//
+// Diagnostic (2026-08-14): this gate's own boot log ('sweeper active (15s)')
+// was never observed in a live production boot, despite prisma and the role
+// check both confirmed truthy at runtime. Logging the decision unconditionally
+// (not just the enabled branch) so a future boot proves definitively whether
+// this line is even reached, and with what values.
+console.log('[hyper-sweeper] gate check', {
+  prisma_truthy: Boolean(prisma), role: getRuntimeRole(),
+  should_run: shouldRunRecurringMaintenanceJobs(),
+});
 if (prisma && shouldRunRecurringMaintenanceJobs()) {
   const _sweepSeen = new Map();   // turnId -> consecutive empty-tick count
   const _sweepKicked = new Set(); // turnId -> already re-kicked once

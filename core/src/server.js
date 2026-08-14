@@ -24,6 +24,7 @@ import { buildChatRecallContext } from './routes/chat.js';
 import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
 import { KnowledgeUploadService } from './knowledge/upload-service.js';
 import { deriveMeetingSessionIntegrity } from './knowledge/meeting-session-contract.js';
+import { processMeetingSegmentExtraction, reconcileMeetingSegmentExtractions } from './knowledge/meeting-segment-extractor.js';
 import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
 import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
@@ -549,6 +550,17 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     intervalMs: 15_000,
     singleton: false,
     run: async () => { await processQueuedCampaignAssets({ prisma, limit: 2 }); },
+  });
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'meeting-segment-extraction',
+    initialDelayMs: 20_000,
+    intervalMs: Math.max(15_000, Number(process.env.MEETING_SEGMENT_RECONCILE_INTERVAL_MS || 60_000)),
+    run: async () => {
+      const result = await reconcileMeetingSegmentExtractions(prisma, { limit: Number(process.env.MEETING_SEGMENT_RECONCILE_LIMIT || 25) });
+      if (result.scanned) console.info('[meeting-segment-reconciler]', result);
+    },
   });
 }
 // Periodic signed audit checkpoints (H5 tail-truncation defense). First run
@@ -6975,27 +6987,11 @@ exit \$RC
             Number.isFinite(body.start_ms) ? body.start_ms : null,
             Number.isFinite(body.end_ms) ? body.end_ms : null,
           );
-          // P2: fire-and-forget Stage-1 extraction — runs DURING the meeting so
-          // Stop only reduces, never extracts. fetch→groqFetch openrouter failover.
-          (async () => {
-            try {
-              const sys = 'Extract from this meeting transcript SEGMENT. STRICT JSON {"entities":{"people":string[],"organizations":string[]},"decisions":string[],"actions":[{"task":string,"owner":string|null}],"topics":string[]}. Faithful — never invent. Empty arrays when none.';
-              const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: process.env.MEETING_EXTRACT_MODEL || process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: text.slice(0, 20000) }] }),
-                signal: AbortSignal.timeout(60_000),
-              });
-              if (!r.ok) throw new Error(`llm ${r.status}`);
-              const ex = JSON.parse((await r.json()).choices[0].message.content);
-              await prisma.$executeRawUnsafe(
-                `UPDATE hivemind.meeting_segments SET extraction=$1::jsonb, extraction_status='done' WHERE session_id=$2::uuid AND idx=$3`,
-                JSON.stringify(ex), sid, idx,
-              );
-            } catch (_e) {
-              await prisma.$executeRawUnsafe(`UPDATE hivemind.meeting_segments SET extraction_status='error' WHERE session_id=$1::uuid AND idx=$2`, sid, idx).catch(() => {});
-            }
-          })();
+          // Stage-1 extraction is now a durable claim/retry lifecycle. The
+          // request path starts it for low latency; the maintenance worker
+          // replays pending/error rows after provider or process failure.
+          void processMeetingSegmentExtraction(prisma, { sessionId: sid, idx, orgId: mOrg, userId: mUser })
+            .catch((error) => console.warn('[meeting-segment-extraction] start failed:', error?.message || error));
           return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, durability: 'server_persisted' });
         } catch (e) {
           return jsonResponse(res, { error: 'segment_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);

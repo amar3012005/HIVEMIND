@@ -4318,6 +4318,10 @@ model MeetingSegment {
   // computed async during the meeting so Stop only reduces, never extracts.
   extraction       Json?   @map("extraction")
   extractionStatus String  @default("pending") @map("extraction_status") @db.VarChar(16)
+  extractionAttempts Int   @default(0) @map("extraction_attempts")
+  extractionNextAttemptAt DateTime? @map("extraction_next_attempt_at") @db.Timestamptz(6)
+  extractionLeaseExpiresAt DateTime? @map("extraction_lease_expires_at") @db.Timestamptz(6)
+  extractionLastError String? @map("extraction_last_error")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@unique([sessionId, idx], map: "meeting_segments_session_idx_key")

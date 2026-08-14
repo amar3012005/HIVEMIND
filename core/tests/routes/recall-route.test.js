@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleQuickSearchRoute, handleRecallRoute, normalizeRecallLimit } from '../../src/routes/recall.js';
+import {
+  handleQuickSearchRoute,
+  handleRecallRoute,
+  legacyInitialCrossRerank,
+  normalizeRecallLimit,
+} from '../../src/routes/recall.js';
 
 function jsonResponse(_res, body, statusCode = 200) {
   return { statusCode, body };
@@ -87,6 +92,13 @@ test('recall route returns rate limit response before recall work', async () => 
 
   assert.equal(result.statusCode, 429);
   assert.equal(called, false);
+});
+
+test('legacy recall selects one cross-encoder authority for each response mode', () => {
+  assert.equal(legacyInitialCrossRerank('quick', true), false);
+  assert.equal(legacyInitialCrossRerank('auto', null), false);
+  assert.equal(legacyInitialCrossRerank('memory', true), true);
+  assert.equal(legacyInitialCrossRerank('memory', null), null);
 });
 
 test('explicit recall modes use the bounded context service and return a RecallPacket', async () => {

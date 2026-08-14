@@ -1,0 +1,162 @@
+import {
+  remoteKbSegment,
+  remoteList,
+  remoteVectorPending,
+  remoteVectorRepair,
+  remoteVectorStatus,
+  remoteWrite,
+} from './remote-backend.js';
+
+const DEFAULT_BATCH = Math.min(Math.max(Number(process.env.REMOTE_VECTOR_RECONCILE_BATCH || 20), 1), 100);
+
+export function remoteMemoryRecord(row, orgId) {
+  return {
+    id: row.id,
+    orgId,
+    userId: row.user_id || row.userId || null,
+    content: String(row.content || ''),
+    title: row.title || null,
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    memoryType: row.memory_type || row.memoryType || null,
+    isLatest: row.is_latest ?? row.isLatest ?? true,
+    layer: row.layer || 'memory',
+    cognitiveLayerRole: row.cognitive_layer_role || row.cognitiveLayerRole || null,
+    confidence: row.confidence ?? null,
+    createdAt: row.created_at || row.createdAt || null,
+    validFrom: row.valid_from || row.validFrom || null,
+    validTo: row.valid_to || row.validTo || null,
+    documentDate: row.document_date || row.documentDate || null,
+    project: row.project || null,
+    projectIds: row.project_ids || row.projectIds || [],
+    scope: row.scope || null,
+    primaryTeamId: row.primary_team_id || row.primaryTeamId || null,
+    recallCount: row.recall_count ?? row.recallCount ?? 0,
+    strength: row.strength ?? 1,
+    metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
+  };
+}
+
+export function remoteEvidenceSegment(row) {
+  return {
+    id: row.id,
+    userId: row.user_id || row.userId || null,
+    documentId: row.document_id || row.documentId,
+    content: String(row.content || ''),
+    contentHash: row.content_hash || row.contentHash || null,
+    segmentType: row.segment_type || row.segmentType || 'chunk',
+    segmentIndex: row.segment_index ?? row.segmentIndex ?? 0,
+    previousSegmentId: row.previous_segment_id || row.previousSegmentId || null,
+    metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
+    startPage: row.start_page ?? row.startPage ?? null,
+    endPage: row.end_page ?? row.endPage ?? null,
+    wordCount: row.word_count ?? row.wordCount ?? null,
+    createdAt: row.created_at || row.createdAt || null,
+  };
+}
+
+async function collectPending(orgId, kind, batchSize, deps) {
+  const pending = [];
+  let cursor = null;
+  let modern = true;
+  do {
+    const page = await deps.remoteVectorPending(orgId, { kind, cursor, limit: batchSize });
+    if (!page) { modern = false; break; }
+    pending.push(...page.items);
+    cursor = page.cursor;
+  } while (cursor);
+
+  if (modern || kind === 'evidence') return { pending, modern };
+
+  // Compatibility recovery for already-deployed agents that predate
+  // /v1/vector-pending. Their /v1/list includes vector_synced.
+  cursor = null;
+  do {
+    const page = await deps.remoteList(orgId, { is_latest: true, layer: 'memory' }, cursor, 500, 0);
+    const rows = page?.memories || [];
+    pending.push(...rows.filter((row) => row.vector_synced !== true));
+    cursor = page?.cursor || null;
+  } while (cursor);
+  return { pending, modern: false };
+}
+
+export async function reconcileRemoteVectors(orgId, options = {}) {
+  if (!orgId) throw new Error('orgId is required');
+  const commit = options.commit === true;
+  const batchSize = Math.min(Math.max(Number(options.batchSize || DEFAULT_BATCH), 1), 100);
+  const embedService = options.deps?.embedService
+    || (await import('../../embeddings/factory.js')).getEmbedService();
+  const deps = {
+    embedService,
+    remoteKbSegment,
+    remoteList,
+    remoteVectorPending,
+    remoteVectorRepair,
+    remoteVectorStatus,
+    remoteWrite,
+    ...(options.deps || {}),
+  };
+  const before = await deps.remoteVectorStatus(orgId);
+  const memories = await collectPending(orgId, 'memory', batchSize, deps);
+  const evidence = await collectPending(orgId, 'evidence', batchSize, deps);
+  const report = {
+    orgId,
+    commit,
+    before,
+    compatibility_mode: !memories.modern,
+    memory: { pending: memories.pending.length, repaired: 0, failed: [] },
+    evidence: { pending: evidence.pending.length, repaired: 0, failed: [] },
+  };
+  if (!commit) return report;
+
+  for (let i = 0; i < memories.pending.length; i += batchSize) {
+    const rows = memories.pending.slice(i, i + batchSize);
+    const vectors = await deps.embedService.embed(rows.map((row) => String(row.content || '')));
+    for (let j = 0; j < rows.length; j++) {
+      const ok = memories.modern
+        ? await deps.remoteVectorRepair(orgId, { kind: 'memory', id: rows[j].id, vector: vectors[j] })
+        : await deps.remoteWrite(orgId, remoteMemoryRecord(rows[j], orgId), vectors[j], []);
+      if (ok) report.memory.repaired += 1;
+      else report.memory.failed.push(rows[j].id);
+    }
+  }
+  for (let i = 0; i < evidence.pending.length; i += batchSize) {
+    const rows = evidence.pending.slice(i, i + batchSize);
+    const vectors = await deps.embedService.embed(rows.map((row) => String(row.content || '')));
+    for (let j = 0; j < rows.length; j++) {
+      const ok = await deps.remoteVectorRepair(orgId, { kind: 'evidence', id: rows[j].id, vector: vectors[j] });
+      if (ok) report.evidence.repaired += 1;
+      else report.evidence.failed.push(rows[j].id);
+    }
+  }
+  report.after = await deps.remoteVectorStatus(orgId);
+  return report;
+}
+
+let reconcileTimer = null;
+export function startRemoteVectorReconciler() {
+  if (reconcileTimer || (process.env.REMOTE_VECTOR_RECONCILE_ENABLED ?? 'true') !== 'true') return;
+  const intervalMs = Math.max(Number(process.env.REMOTE_VECTOR_RECONCILE_INTERVAL_MS || 600_000), 60_000);
+  const run = async () => {
+    const { remoteAgentOrgIds } = await import('./remote-backend.js');
+    for (const orgId of remoteAgentOrgIds()) {
+      try {
+        const report = await reconcileRemoteVectors(orgId, { commit: true, batchSize: DEFAULT_BATCH });
+        if (report.memory.pending || report.evidence.pending) {
+          console.log('[remote-vector-reconcile]', JSON.stringify({
+            orgId,
+            memory: report.memory,
+            evidence: report.evidence,
+            compatibility_mode: report.compatibility_mode,
+          }));
+        }
+      } catch (error) {
+        console.warn(`[remote-vector-reconcile] org=${orgId} failed: ${error.message}`);
+      }
+    }
+  };
+  reconcileTimer = setInterval(run, intervalMs);
+  reconcileTimer.unref?.();
+  setTimeout(run, Number(process.env.REMOTE_VECTOR_RECONCILE_INITIAL_DELAY_MS || 30_000)).unref?.();
+}
+
+export default reconcileRemoteVectors;

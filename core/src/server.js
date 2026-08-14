@@ -19128,6 +19128,32 @@ exit \$RC
               const limit = Math.min(Number(body?.limit) || 200, 2000);
               const includeErrors = body?.include_errors !== false;
               const memoryId = typeof body?.memory_id === 'string' ? body.memory_id : null;
+              if (orgIsRemote(orgId)) {
+                const remote = await remoteList(orgId, { user_id: userId, is_latest: true }, null, limit, 0);
+                const eligible = (remote?.memories || []).filter((memory) => {
+                  if (memoryId && memory.id !== memoryId) return false;
+                  const status = memory?.metadata?.entity_link_status;
+                  if (!status) return true;
+                  if (includeErrors && String(status).startsWith('error:')) return true;
+                  if (status === 'in_progress') {
+                    const started = Date.parse(memory?.metadata?.entity_link_started_at || 0);
+                    return !Number.isFinite(started) || started < Date.now() - 5 * 60 * 1000;
+                  }
+                  return false;
+                });
+                const enqueued = entityLinkQueue.enqueueBatch(eligible.map((memory) => ({
+                  ...memory,
+                  user_id: memory.user_id || userId,
+                  org_id: memory.org_id || orgId,
+                  memory_type: memory.memory_type || memory.memoryType || 'fact',
+                })));
+                return jsonResponse(res, {
+                  candidates: eligible.length,
+                  enqueued,
+                  residency: 'remote',
+                  filter: { memory_id: memoryId, include_errors: includeErrors, limit },
+                });
+              }
               const orphanCutoff = new Date(Date.now() - 5 * 60 * 1000);
               const params = [userId, orgId, orphanCutoff.toISOString()];
               const filters = [
@@ -19173,6 +19199,20 @@ exit \$RC
           if (req.method === 'GET') {
             if (!entityLinkQueue) return jsonResponse(res, { error: 'entity-link queue unavailable' }, 503);
             try {
+              if (orgIsRemote(orgId)) {
+                const remote = await remoteList(orgId, { user_id: userId, is_latest: true }, null, 2000, 0);
+                const summary = { done: 0, in_progress: 0, errors: 0, missing: 0, partial: 0, skipped: 0 };
+                for (const memory of (remote?.memories || [])) {
+                  const status = String(memory?.metadata?.entity_link_status || '');
+                  if (!status) summary.missing += 1;
+                  else if (status === 'done') summary.done += 1;
+                  else if (status === 'in_progress') summary.in_progress += 1;
+                  else if (status.startsWith('error:')) summary.errors += 1;
+                  else if (status === 'partial') summary.partial += 1;
+                  else if (status.startsWith('skipped:')) summary.skipped += 1;
+                }
+                return jsonResponse(res, { memories: summary, residency: 'remote' });
+              }
               const rows = await prisma.$queryRawUnsafe(`
                 SELECT
                   COUNT(*) FILTER (WHERE (sm.metadata->>'entity_link_status') = 'done')::int AS done,
@@ -24598,11 +24638,17 @@ async function warmUpRecall() {
   const warmTenant = async (uid, oid, pids) => {
     try {
       if (typeof recallPersistedMemories === 'function' && persistentMemoryStore) {
-        await recallPersistedMemories(persistentMemoryStore, {
-          query_context: 'system keep-warm probe', user_id: uid, org_id: oid,
-          ...(Array.isArray(pids) && pids.length ? { project_ids: pids } : {}),
-          max_memories: 3,
-        });
+        await Promise.all([
+          recallPersistedMemories(persistentMemoryStore, {
+            query_context: 'system keep-warm probe', user_id: uid, org_id: oid,
+            ...(Array.isArray(pids) && pids.length ? { project_ids: pids } : {}),
+            max_memories: 3,
+          }),
+          // Profile context is part of final synthesis. Warm it beside recall
+          // for every recently active tenant so this benefits web, mobile,
+          // Slack, API, and rooms rather than being tied to one chat page.
+          profileStore?.buildProfileContext(uid, oid).catch(() => ''),
+        ]);
         return true;
       }
     } catch { /* fall through */ }

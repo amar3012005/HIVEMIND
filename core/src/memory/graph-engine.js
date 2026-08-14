@@ -690,7 +690,9 @@ export class MemoryGraphEngine {
       ? (uid, fn) => fn((isMnemeOrg(baseMemory.org_id) && mnemeMode() === 'sole') ? this.store.inProcessTx() : this.store)
       : (uid, fn) => this.store.advisoryLock(uid, fn, baseMemory.org_id);
 
-    return _acquire(baseMemory.user_id, async lockedStore => {
+    let postCommitRecallSimilar = [];
+    let shouldEnqueueEntityLink = false;
+    const ingestResult = await _acquire(baseMemory.user_id, async lockedStore => {
       const transactionalStore = lockedStore || this.store;
       return transactionalStore.transaction(async store => {
         const latestMemories = await store.listLatestMemories(baseMemory);
@@ -1367,27 +1369,14 @@ export class MemoryGraphEngine {
           });
         }
 
-        // Post-save: entity co-mention linker fires AFTER createMemory +
-        // sourceMetadata + codeMetadata persist, so the new row exists by
-        // the time we search for co-mentioning peers. Awaited inside the
-        // transaction so the edges land in the same atomic batch — if
-        // ingest fails everything rolls back together.
-        //
-        // For high-throughput callers (bulk KB promotion), this adds
-        // 1 extra query per save. We accept that cost in exchange for
-        // ALL ingest paths (chat, MCP, KB, connectors) producing
-        // entity-rich graphs without per-callsite wiring.
-        // defer_entity_linking: bulk callers (KB promotion) skip the in-lock
-        // entity-link LLM (~2s) so the per-user advisory lock + transaction stay
-        // short (just the DB write). They run linkEntitiesForMemories() concurrently
-        // AFTER commit instead — turning a serial 2s/memory tax into a parallel pass.
+        // Entity enrichment MUST run after commit. Calling the LLM and the
+        // canonical registry from this transaction held the per-user lock for
+        // seconds and allowed a swallowed Prisma error to poison the ingest
+        // transaction. Capture the bounded peer set here and enqueue only after
+        // the canonical memory row + source metadata have committed.
         if (!input.defer_entity_linking) {
-          try {
-            await this._attachEntityCoMentionEdges(baseMemory, store, recallSimilar);
-          } catch (entityErr) {
-            // Non-fatal — entity linking is best-effort enrichment.
-            console.warn('[entity-co-mention] failed:', entityErr.message);
-          }
+          postCommitRecallSimilar = recallSimilar;
+          shouldEnqueueEntityLink = true;
         }
 
         // WS1: mark this memory's clusters dirty so the scheduler can dream
@@ -1770,6 +1759,23 @@ export class MemoryGraphEngine {
         return result;
       });
     });
+
+    if (shouldEnqueueEntityLink && ingestResult?.memoryId === baseMemory.id) {
+      const q = getEntityLinkQueue(this);
+      if (q) {
+        q.enqueue(baseMemory, postCommitRecallSimilar);
+      } else {
+        // Queue construction should only fail during partial boot/tests. Keep a
+        // bounded post-commit fallback so enrichment never re-enters the ingest
+        // transaction and a provider failure can never roll back the memory.
+        try {
+          await this._attachEntityCoMentionEdges(baseMemory, this.store, postCommitRecallSimilar);
+        } catch (entityErr) {
+          console.warn('[entity-co-mention] post-commit fallback failed:', entityErr.message);
+        }
+      }
+    }
+    return ingestResult;
   }
 
   async ingestCodeMemory({ content, filepath, language, user_id, org_id, project, tags = [], source_metadata = {}, metadata = {} }) {
@@ -2334,7 +2340,19 @@ OUTPUT JSON only.`;
     const structuredFallbackEntities = extractedEntityCandidates(baseMemory);
     const entityStatusClient = (store && store.client) || this.store?.client;
     const persistEntityStatus = async (status, extra = {}) => {
-      if (orgIsRemote(baseMemory.org_id) || !entityStatusClient?.sourceMetadata) return;
+      if (orgIsRemote(baseMemory.org_id)) {
+        const current = (baseMemory.metadata && typeof baseMemory.metadata === 'object') ? baseMemory.metadata : {};
+        const statusExtra = { ...extra };
+        if (status === 'in_progress') {
+          statusExtra.entity_link_attempts = Number(current.entity_link_attempts || 0) + 1;
+        }
+        const metadata = { ...current, entity_link_status: status, ...statusExtra };
+        baseMemory.metadata = metadata;
+        try { await (store || this.store).updateMemory(baseMemory.id, { metadata }); }
+        catch (e) { console.warn(`[entity-co-mention] remote status persist failed for ${String(baseMemory.id).slice(0, 8)}: ${e.message}`); }
+        return;
+      }
+      if (!entityStatusClient?.sourceMetadata) return;
       try {
         const sm = await entityStatusClient.sourceMetadata.findFirst({
           where: { memoryId: baseMemory.id },
@@ -3183,6 +3201,16 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
         entity_link_entity_count: entities.length,
         entity_link_edge_count: edgeWrites,
         entity_link_fallback_applied: false,
+      });
+    } else if (parsed && !linkLastErr && relationshipWriteFailed) {
+      const code = edgeWrites > 0 ? 'relationship_write_partial' : 'relationship_write_failed';
+      await persistEntityStatus(`error:${code}`, {
+        entity_link_completed_at: nowIso(),
+        entity_link_model: LINK_MODEL,
+        entity_link_entity_count: entities.length,
+        entity_link_edge_count: edgeWrites,
+        entity_link_edge_failures: edgeWriteFailures + (txnPoisoned ? 1 : 0),
+        entity_link_error: { code, attempted_at: nowIso() },
       });
     }
     return {

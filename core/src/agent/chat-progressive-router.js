@@ -23,6 +23,7 @@ import { getStaticPromptArtifact, promptContributionTelemetry } from './chat-sta
 // Router model: Cerebras-direct gpt-oss-120b (the hardened synthesis path).
 // Env-overridable for A/B; falls back to the resolved synthesis model.
 const ROUTER_MODEL = process.env.CHAT_PROGRESSIVE_ROUTER_MODEL || 'cerebras/gpt-oss-120b';
+const ROUTER_FALLBACK_MODEL = process.env.CHAT_PROGRESSIVE_ROUTER_FALLBACK_MODEL || 'openai/gpt-oss-20b:nitro';
 
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });
 const nullable = (type) => ({ type: [type, 'null'] });
@@ -295,25 +296,42 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
     ...(dynamicPolicy ? [{ role: 'system', content: dynamicPolicy }] : []),
     ...(workflowPolicy ? [{ role: 'system', content: workflowPolicy }] : []),
   ];
-  const resp = await chatCompletionFetch(ROUTER_MODEL, {
-    method: 'POST',
-    // chatCompletionFetch sets Authorization from the resolved route; no header here.
-    body: JSON.stringify({
-      messages: [...systemMessages, ...histMsgs, { role: 'user', content: message }],
-      tools: workflowPlanner ? getWorkflowPlannerTool() : getProgressiveTools({ useTools, connectedProviders }),
-      tool_choice: workflowPlanner
-        ? { type: 'function', function: { name: 'compound_plan' } }
-        : 'required',
-      parallel_tool_calls: false,
-      temperature: 0,
-      max_tokens: workflowPlanner ? 1400 : 900,
-      prompt_cache_key: staticPrompt.key,
-    }),
-    signal,
-  }, { fallbackApiKey: apiKey });
-  if (!resp.ok) throw new Error(`progressive router ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
-  const data = await resp.json();
-  const call = data.choices?.[0]?.message?.tool_calls?.[0] || null;
+  const requestBody = {
+    messages: [...systemMessages, ...histMsgs, { role: 'user', content: message }],
+    tools: workflowPlanner ? getWorkflowPlannerTool() : getProgressiveTools({ useTools, connectedProviders }),
+    tool_choice: workflowPlanner
+      ? { type: 'function', function: { name: 'compound_plan' } }
+      : 'required',
+    parallel_tool_calls: false,
+    temperature: 0,
+    max_tokens: workflowPlanner ? 1400 : 900,
+    prompt_cache_key: staticPrompt.key,
+  };
+  const routerModels = [...new Set([ROUTER_MODEL, ROUTER_FALLBACK_MODEL].filter(Boolean))];
+  let data = null;
+  let call = null;
+  let usedModel = null;
+  let lastError = null;
+  for (const candidateModel of routerModels) {
+    try {
+      const resp = await chatCompletionFetch(candidateModel, {
+        method: 'POST',
+        // chatCompletionFetch sets Authorization from the resolved route; no header here.
+        body: JSON.stringify(requestBody),
+        signal,
+      }, { fallbackApiKey: apiKey });
+      if (!resp.ok) throw new Error(`progressive router ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+      data = await resp.json();
+      call = data.choices?.[0]?.message?.tool_calls?.[0] || null;
+      if (!call?.function?.name) throw new Error('progressive_router_missing_tool_call');
+      usedModel = candidateModel;
+      break;
+    } catch (error) {
+      lastError = error;
+      if (signal?.aborted) break;
+    }
+  }
+  if (!call) throw lastError || new Error('progressive_router_all_models_failed');
   let args = {};
   try { args = call ? JSON.parse(call.function.arguments) : {}; } catch { args = {}; }
   const dynamicPrompt = `${dynamicPolicy}\n${histMsgs.map((item) => item.content).join('\n')}\n${message}`;
@@ -322,6 +340,8 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
     args,
     usage: {
       ...(data.usage || {}),
+      routing_model: usedModel,
+      routing_fallback_used: usedModel !== ROUTER_MODEL,
       hivemind_prompt_cache: {
         static_prompt_cag: { key: staticPrompt.key, status: staticPrompt.cache, fingerprint: staticPrompt.fingerprint },
         provider_prefix: promptContributionTelemetry({ staticPrompt: staticPrompt.value, dynamicPrompt }),

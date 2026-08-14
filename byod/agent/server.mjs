@@ -667,7 +667,7 @@ const routes = {
     return { ok: true, bumped: r.rowCount };
   },
 
-  // Generic partial update: tags / is_latest / memory_type / valid_to. Used by the central engine's
+  // Generic partial update: tags / is_latest / memory_type / valid_to / metadata. Used by the central engine's
   // updateMemory seam for remote orgs (entity-link type upgrades, supersession is_latest flips).
   '/v1/update': async (b) => {
     if (!b.id) return { ok: false, error: 'id required' };
@@ -676,6 +676,7 @@ const routes = {
     if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
     if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
     if (b.valid_to !== undefined) { args.push(b.valid_to); sets.push(`valid_to=$${args.length}::timestamptz`); }
+    if (b.metadata !== undefined) { args.push(JSON.stringify(b.metadata || {})); sets.push(`metadata=$${args.length}::jsonb`); }
     if (!sets.length) return { ok: true };
     await pg.query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
     const payload = {
@@ -683,6 +684,7 @@ const routes = {
       ...(b.is_latest !== undefined ? { is_latest: !!b.is_latest } : {}),
       ...(b.memory_type !== undefined ? { memory_type: b.memory_type } : {}),
       ...(b.valid_to !== undefined ? { valid_to: b.valid_to } : {}),
+      ...(b.metadata !== undefined ? { metadata: b.metadata || {} } : {}),
     };
     if (Object.keys(payload).length > 0) {
       qFetch(`/collections/${QCOLL}/points/payload`, { method: 'POST',

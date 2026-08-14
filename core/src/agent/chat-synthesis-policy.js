@@ -1,5 +1,10 @@
 export function shouldOptimizeRecallQuery({ router, canonicalQuery } = {}) {
-  return router !== 'progressive' || !String(canonicalQuery || '').trim();
+  // Every retrieval-bearing chat turn gets one compact semantic rewrite.
+  // Router output remains a useful seed, but it is not assumed to be the best
+  // retrieval representation across languages, shorthand, or follow-ups.
+  // The caller invokes this only on recall lanes, so greetings/direct answers
+  // still pay no optimizer cost.
+  return true;
 }
 
 export function shouldRetryAfterZeroCoverage({ router, canonicalQuery, coverage, alreadyOptimized = false } = {}) {
@@ -18,6 +23,12 @@ export function isCandidateSynthesisAcceptable(answer) {
     && answer.claims.every((claim) => claim?.grounded === true
       && Array.isArray(claim?.citation_ids)
       && claim.citation_ids.length > 0);
+}
+
+export function buildSynthesisFallbackChain({ served, requested, finalFallback } = {}) {
+  return [...new Set([served, requested, finalFallback]
+    .map((model) => String(model || '').trim())
+    .filter(Boolean))];
 }
 
 /**

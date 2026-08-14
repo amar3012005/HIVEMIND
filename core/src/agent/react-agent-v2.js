@@ -34,6 +34,7 @@ import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-syn
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
 import { buildSynthesisFallbackChain, chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
+import { buildRecallIntentContext, fallbackRecallQueries, normalizeRecallOptimization } from './chat-query-optimizer.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
 import {
@@ -818,39 +819,24 @@ const OP_STAGE = [
 // the Stage C refactor safety net. Tests drive it with an injected ctx._toolkit
 // fake dispatcher — no real recall/LLM. Not part of the public module surface.
 // ── Query optimisation ─────────────────────────────────────────────────────
-// Recall ranks best on SHORT, ENGLISH, keyword queries (entity + attribute).
-// The raw chat message is conversational ("when is the launch day for solvis
-// pia?") and may be non-English ("was ist der Umsatz von Solvis?") — both hurt
-// retrieval: stopwords/question-words dilute the embedding and a foreign query
-// barely overlaps English-stored memory. optimizeRecallQueries rewrites the
-// message into optimised queries used AS the recall search (the answer LLM
-// still sees the user's original wording). Populates plan.query_canonical_en,
-// which gatherEvidence then leads the recall packet with instead of the raw
-// message. Deterministic fallback keeps recall from ever running on nothing.
-const _QOPT_STOP = new Set(['what','whats','when','where','who','whom','which','why','how','is','are','was','were','the','a','an','of','for','to','do','does','did','tell','me','about','please','can','you','our','my','we','us','on','in','at','and','ist','der','die','das','von','und','wie','wann','wo','wer','warum','ein','eine','mir','uns','über','ich']);
-function _deterministicOptimize(message, plan) {
-  const ents = Array.isArray(plan?.named_entities) ? plan.named_entities.filter((e) => typeof e === 'string' && e.trim()) : [];
-  const keywords = String(message || '').replace(/[?!.,;:]/g, ' ').split(/\s+/).filter((w) => w && !_QOPT_STOP.has(w.toLowerCase()));
-  const out = [];
-  if (ents.length) out.push(ents.join(' '));
-  const base = [...new Set([...ents, ...keywords])].join(' ').trim();
-  if (base && base !== out[0]) out.push(base);
-  return out.length ? out.slice(0, 3) : [String(message || '').trim()].filter(Boolean);
-}
+// Query optimisation is an intent-preserving representation step, not a
+// keyword stripper. Recall already performs multilingual hybrid retrieval;
+// this stage removes conversational/workflow framing while retaining the
+// entity, requested attribute, relation, qualifiers, negation, time window,
+// and source constraint. The first query is always the most specific semantic
+// expression because gatherEvidence treats it as canonical.
 async function optimizeRecallQueries({ message, plan, model, apiKey, signal }) {
-  const fallback = _deterministicOptimize(message, plan);
+  const fallback = fallbackRecallQueries(message, plan);
   try {
+    const intentContext = buildRecallIntentContext(message, plan);
     const { parsed, usage } = await callJsonLLM({
       messages: [
-        { role: 'system', content: 'You rewrite a user message into search queries for an ENGLISH memory store. Output STRICT JSON {"queries":[...]} with 1-3 queries. Rules: ALWAYS English (translate any other language, including technical nouns); DROP question words and filler ("when is", "what is the", "tell me about"); each query = the entity/proper-noun + the specific attribute asked; 2-6 words; no punctuation; broadest entity-only query first. Examples: "when is the launch day for solvis pia?" -> {"queries":["Solvis PIA","Solvis PIA launch date"]}; "was ist der Umsatz von Solvis 2021?" -> {"queries":["Solvis","Solvis revenue 2021"]}.' },
-        { role: 'user', content: String(message || '').slice(0, 800) },
+        { role: 'system', content: 'Understand the retrieval intent, then rewrite it as one compact semantic search expression. Return STRICT JSON {"semantic_query":string}. Preserve every answer-bearing constraint: named entity, requested attribute or small detail, relation/direction, qualifiers, negation, time window, and requested source. Remove only conversational filler and downstream workflow actions. Never reduce an attribute question to an entity-only topic. Use natural semantic language, not a bag of keywords. The memory store and embeddings are multilingual, so translate only when it faithfully improves cross-language retrieval without weakening the intent. Do not answer the question.' },
+        { role: 'user', content: JSON.stringify(intentContext) },
       ],
-      model, apiKey, maxTokens: 160, temperature: 0, signal, reasoningEffort: 'low',
+      model, apiKey, maxTokens: 140, temperature: 0, signal, reasoningEffort: 'low',
     });
-    const qs = Array.isArray(parsed?.queries)
-      ? parsed.queries.filter((q) => typeof q === 'string' && q.trim()).map((q) => q.trim().slice(0, 120))
-      : [];
-    return { queries: qs.length ? [...new Set(qs)].slice(0, 3) : fallback, usage };
+    return { queries: normalizeRecallOptimization(parsed, fallback), usage };
   } catch {
     return { queries: fallback, usage: null };
   }

@@ -733,9 +733,20 @@ export function normalizeCompoundDependencies(subtasks) {
     // authoritative semantic output contract. Message/document artifacts must
     // receive preceding governed read results so provider input generation can
     // produce complete content. This is language and toolkit independent.
+    const isConnectorStep = step.tool_groups.length > 0
+      && !step.tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group));
     const contentProducingStep = step.authority === 'write'
       || step.output_kind === 'message'
-      || step.output_kind === 'document';
+      || step.output_kind === 'document'
+      // Planner authority/output-kind are advisory. A connector capability is
+      // selected from its controlled manifest later, and can turn out to be a
+      // write even when the planner labelled the step as a generic read. When
+      // the user explicitly placed a native recall before that connector step,
+      // retain the earlier governed result as a dependency so a provider-
+      // required body/document field can be materialized without asking the
+      // user to repeat information HIVE-MIND already retrieved. This is based
+      // on the plan graph and controlled tool groups, not words or language.
+      || isConnectorStep;
     if (!contentProducingStep || step.depends_on.length) continue;
     const priorReads = normalized.slice(0, index).flatMap((candidate, priorIndex) => {
       const nativeRead = candidate.tool_groups.some((group) => NATIVE_HIVEMIND_GROUPS.has(group));

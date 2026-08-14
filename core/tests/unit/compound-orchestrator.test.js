@@ -614,6 +614,20 @@ test('plan validation attaches earlier reads to semantic artifacts despite malfo
   assert.deepEqual(normalized[1].depends_on, [0]);
 });
 
+test('plan validation retains native recall for a generic connector step with malformed authority', () => {
+  const normalized = normalizeCompoundDependencies([
+    {
+      operation: 'recall', authority: 'read', output_kind: 'knowledge',
+      tool_groups: ['hivemind-recall'], depends_on: [],
+    },
+    {
+      operation: 'connector_action', authority: 'read', output_kind: 'generic',
+      tool_groups: ['gmail'], depends_on: [],
+    },
+  ]);
+  assert.deepEqual(normalized[1].depends_on, [0]);
+});
+
 test('missing write fields produce a resumable generalized field-input request', async () => {
   const created = [];
   const schema = {

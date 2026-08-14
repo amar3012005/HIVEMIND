@@ -67,6 +67,41 @@ export function isRerankEnabled() {
   return ENABLED && !!URL;
 }
 
+let warmupInFlight = null;
+
+/**
+ * Prime the remote reranker independently of tenant data.
+ *
+ * A tenant recall is not a reliable warm-up: an empty/single-result tenant
+ * never reaches the provider, leaving the first real mixed result to pay the
+ * provider's scale-from-idle latency. Two synthetic documents guarantee one
+ * harmless inference while containing no customer data. Concurrent boot and
+ * keep-warm calls coalesce into the same request.
+ */
+export async function warmUpReranker({
+  enabled = isRerankEnabled(),
+  run = rerank,
+} = {}) {
+  if (!enabled) return { ok: false, skipped: true };
+  if (warmupInFlight) return warmupInFlight;
+
+  warmupInFlight = run(
+    'hivemind retrieval readiness probe',
+    [
+      { id: 'warm-relevant', content: 'retrieval readiness probe' },
+      { id: 'warm-control', content: 'unrelated control passage' },
+    ],
+    { topN: 1 },
+  ).then((rows) => ({
+    ok: Number.isFinite(rows?.[0]?.rerank_score),
+    skipped: false,
+  })).finally(() => {
+    warmupInFlight = null;
+  });
+
+  return warmupInFlight;
+}
+
 function textOf(c) {
   return [c.title, typeof c.content === 'string' ? c.content : '']
     .filter(Boolean).join('\n').slice(0, 2000);

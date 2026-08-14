@@ -98,12 +98,23 @@ test('active Room work outranks an older lifecycle wait in Runtime narration', (
   assert.equal(selectPendingPlaybookRun([waiting, authority]), authority);
 });
 
-test('capability and authority waits retain lifecycle capacity until the playbook explicitly releases it', () => {
+test('authority waits and undeclared event waits retain lifecycle capacity until the playbook explicitly releases it', () => {
   assert.equal(playbookRunOwnsCapacity({ status: 'ACTIVE' }), true);
   assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_AUTHORITY' }), true);
-  assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_EVENT', waitingFor: { types: ['capability.connected'] } }), true);
+  assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_EVENT', waitingFor: { types: ['some_other_event'] } }), true);
   assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_EVENT', waitingFor: { releases_execution_slot: true } }), false);
   assert.equal(playbookRunOwnsCapacity({ status: 'COMPLETED' }), false);
+});
+
+// Regression: a run parked waiting on a missing connector must NEVER hold the
+// company's execution slot, however long the human takes to connect it — this
+// was root-caused live for org DIOR (2026-08-14/15): an X campaign sat
+// WAITING_EVENT on the X connector for 30+ hours and silently blocked a fully
+// independent, READY "Find Clients in New York" todo the entire time.
+test('a capability.connected wait always releases lifecycle capacity, even without releases_execution_slot', () => {
+  assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_EVENT', waitingFor: { types: ['capability.connected'] } }), false);
+  assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_EVENT', waitingFor: { types: ['capability.connected'], releases_execution_slot: false } }), false);
+  assert.equal(playbookRunOwnsCapacity({ status: 'WAITING_EVENT', waitingFor: { types: ['campaign.connection_changed', 'capability.connected', 'wait.timeout'] } }), false);
 });
 
 test('HQ work-result reconciliation never reads a missing work order or result', () => {

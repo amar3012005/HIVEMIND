@@ -27,6 +27,7 @@ import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
 import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
+import { warmUpReranker } from './memory/reranker.js';
 import {
   getRuntimeRole,
   shouldRunConnectorBackground,
@@ -24636,6 +24637,9 @@ async function warmUpRecall() {
             query_context: 'system keep-warm probe', user_id: uid, org_id: oid,
             ...(Array.isArray(pids) && pids.length ? { project_ids: pids } : {}),
             max_memories: 3,
+            // The provider is primed once below with a synthetic, tenant-free
+            // request. This tenant sweep exists to warm storage/routing only.
+            cross_rerank: false,
           }),
           // Profile context is part of final synthesis. Warm it beside recall
           // for every recently active tenant so this benefits web, mobile,
@@ -24678,7 +24682,9 @@ async function warmUpRecall() {
     }
     // Full-pipeline warm at boot (not just embed) so the FIRST real recall after
     // a restart is already warm across the reranker + lanes + pool.
-    if (warm) { await synthRecall(); }
+    if (warm) {
+      await Promise.all([synthRecall(), warmUpReranker()]);
+    }
     console.log(warm ? '✅ Recall warm-up complete (full pipeline ready)' : '⚠️  Recall warm-up timed out — embedding service still cold');
     // KEEP-WARM: a full synthetic recall every N min keeps the WHOLE pipeline hot
     // (embed gateway scale-to-zero + reranker connection + Qdrant + PG pool +
@@ -24686,7 +24692,11 @@ async function warmUpRecall() {
     // idle-to-zero window); RECALL_KEEPWARM_MS=0 disables. Idempotent + unref'd.
     const keepWarmMs = Number(process.env.RECALL_KEEPWARM_MS || 240000);
     if (keepWarmMs > 0 && !warmUpRecall._keepWarm) {
-      warmUpRecall._keepWarm = setInterval(() => { synthRecall(); }, keepWarmMs);
+      warmUpRecall._keepWarm = setInterval(() => {
+        Promise.all([synthRecall(), warmUpReranker()]).catch((error) => {
+          console.warn('recall keep-warm pass failed:', error.message);
+        });
+      }, keepWarmMs);
       warmUpRecall._keepWarm.unref?.();
     }
   } catch (e) { console.warn('recall warm-up skipped:', e.message); }

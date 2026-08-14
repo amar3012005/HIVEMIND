@@ -3393,8 +3393,11 @@ export async function runReactAgentV2({
     });
     const synthesizeWithFallback = async (input, { validateCandidate = true } = {}) => {
       let lastError = null;
-      for (let index = 0; index < synthesisModels.length; index += 1) {
-        const candidateModel = synthesisModels[index];
+      // Once a model has successfully taken over, progressive expansions start
+      // there instead of re-paying the failed candidate on every revealed page.
+      const attemptModels = [...new Set([answerModel, ...synthesisModels])];
+      for (let index = 0; index < attemptModels.length; index += 1) {
+        const candidateModel = attemptModels[index];
         try {
           const candidateAnswer = await answerStep({ ...input, model: candidateModel });
           if (validateCandidate && candidateModel !== requestedAnswerModel
@@ -3418,7 +3421,7 @@ export async function runReactAgentV2({
         } catch (error) {
           lastError = error;
           trace.warnings.push(`synthesis_model_failed:${candidateModel}:${error.message || 'unknown'}`);
-          if (streamAnswer && index + 1 < synthesisModels.length) {
+          if (streamAnswer && index + 1 < attemptModels.length) {
             onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'synthesis_model_fallback' });
           }
         }

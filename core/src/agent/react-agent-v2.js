@@ -3432,6 +3432,28 @@ export async function runReactAgentV2({
           }
         }
       }
+      if (streamAnswer) {
+        // Some OpenRouter models support transport streaming but do not obey
+        // the NDJSON claim contract. After every validated stream candidate
+        // fails closed, preserve availability and answer quality with one
+        // ordinary JSON synthesis on the final safety model. The caller then
+        // emits its validated sentence chunks over the existing SSE channel.
+        const fallbackAnswer = await answerStep({
+          ...input,
+          streamValidated: false,
+          model: FINAL_FALLBACK_MODEL,
+        });
+        trace.model_policy = {
+          ...modelPolicy,
+          fallback_reason: lastError?.message || 'validated_stream_exhausted',
+          fallback_model: FINAL_FALLBACK_MODEL,
+          fallback_transport: 'validated_json_then_sse',
+        };
+        trace.warnings.push('validated_stream_exhausted:used_json_synthesis_fallback');
+        answerModel = FINAL_FALLBACK_MODEL;
+        trace.models.synthesis = FINAL_FALLBACK_MODEL;
+        return fallbackAnswer;
+      }
       throw lastError || new Error('all_synthesis_models_failed');
     };
     let answer = await synthesizeWithFallback(answerInput);

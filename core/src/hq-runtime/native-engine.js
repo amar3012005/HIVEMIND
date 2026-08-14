@@ -104,10 +104,21 @@ export function shouldOfferFirstLifeAdminCheckin({ initialPlanAbsent, optionalAd
   return initialPlanAbsent === true && optionalAdminCheckin === true && runtimePlaybooksAvailable === true;
 }
 
-export function growthPlanModeForState({ latestGrowthPlan, focusedOutcome, policy, firstLifeGate }) {
-  if (latestGrowthPlan || focusedOutcome) return null;
-  if (policy?.initial_lifecycle?.bypass_growth_plan !== true) return 'initial_full';
+// Phase 3 of the recurring-operating-cycle build (2026-08-15): before this
+// change, an existing latestGrowthPlan permanently disabled replanning for
+// BOTH 'initial_full' (correct — bootstrap is genuinely one-time) and
+// v7's recurring 'operate' mode (a bug — it meant "operate" could only ever
+// fire ONE extra time, right after first-life motions complete, then never
+// again; not a real recurring loop). cadenceRequested lets a daily_cadence
+// wake re-enter 'operate' mode even with a plan already on file — every
+// other caller is unaffected (cadenceRequested defaults false, so every
+// existing call site behaves byte-identical to before this change).
+export function growthPlanModeForState({ latestGrowthPlan, focusedOutcome, policy, firstLifeGate, cadenceRequested = false }) {
+  if (focusedOutcome) return null;
+  const bootstrapActive = policy?.initial_lifecycle?.bypass_growth_plan !== true;
+  if (bootstrapActive) return latestGrowthPlan ? null : 'initial_full';
   if (policy?.ongoing_operation?.growth_plan_enabled !== true || firstLifeGate?.motions_complete !== true) return null;
+  if (latestGrowthPlan && !cadenceRequested) return null;
   return String(policy.ongoing_operation.mode || 'operate');
 }
 
@@ -197,6 +208,79 @@ function unattendedExternalAllowed() {
   return String(process.env.HQ_ALLOW_UNATTENDED_EXTERNAL || '').trim().toLowerCase() === 'true';
 }
 
+// Phase 1 of the recurring-operating-cycle build (2026-08-15): today, once the
+// first Growth Plan's todos are exhausted, HQ has no wake left to fire and
+// simply goes quiet forever — purely event-reactive, never revisits the
+// company on its own. daily_cadence is the fix: a wake driven by the
+// passage of time, not an external event. Default OFF so it cannot affect
+// any currently-running org until explicitly enabled. The cadence mode
+// branch itself (what a daily_cadence wake actually DOES) is Phase 2 — this
+// flag and the first-arm call below only make the trigger exist.
+export function dailyCadenceEnabled() {
+  return String(process.env.HQ_DAILY_CADENCE_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
+export function nextCadenceDueAt(from = new Date()) {
+  const hourUtc = Math.min(23, Math.max(0, parseInt(process.env.HQ_DAILY_CADENCE_HOUR_UTC || '13', 10) || 13));
+  const next = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate(), hourUtc, 0, 0, 0));
+  if (next.getTime() <= from.getTime()) next.setUTCDate(next.getUTCDate() + 1);
+  return next;
+}
+
+export function cadenceIdempotencyKey(runtimeId, dueAt) {
+  return `daily_cadence:${runtimeId}:${dueAt.toISOString().slice(0, 10)}`;
+}
+
+// Phase 4 of the recurring-operating-cycle build (2026-08-15): the
+// operating_cycle_brief. Populated ONLY from persisted state (hq_todos,
+// hq_runtime_events) — never from the model's own recollection of what it
+// did, per the same rule that already governs every other completion claim
+// in this file (artifacts/predicates, not prose). Reuses hq_runtime_events
+// as the storage — it's already the durable, queryable log of everything
+// a runtime has ever done, and adding a dedicated table/migration for one
+// more event shape would duplicate that without a real need (HqWorkflowArtifact
+// requires a non-nullable workflowId FK to an unrelated subsystem, so it's
+// not a natural fit here).
+const BRIEF_BLOCKED_STATUSES = ['BLOCKED', 'WAITING_FOR_CONNECTOR', 'WAITING_FOR_AUTHORITY'];
+const BRIEF_WAITING_STATUSES = ['READY', 'PROPOSED'];
+const BRIEF_DECISION_EVENT_TYPES = ['approval_required', 'capability_required'];
+
+export function projectOperatingCycleBrief({ todos = [], events = [], periodStartedAt, periodEndedAt }) {
+  const completed = todos
+    .filter((todo) => todo.status === 'COMPLETED' && todo.completedAt && new Date(todo.completedAt) >= periodStartedAt)
+    .map((todo) => ({ todo_id: todo.id, title: todo.title, completed_at: new Date(todo.completedAt).toISOString() }));
+  const blocked = todos
+    .filter((todo) => BRIEF_BLOCKED_STATUSES.includes(todo.status))
+    .map((todo) => ({ todo_id: todo.id, title: todo.title, status: todo.status, blocked_reason: todo.blockedReason || null }));
+  const waiting = todos
+    .filter((todo) => BRIEF_WAITING_STATUSES.includes(todo.status))
+    .map((todo) => ({ todo_id: todo.id, title: todo.title, status: todo.status }));
+  const decisionsNeeded = events
+    .filter((evt) => BRIEF_DECISION_EVENT_TYPES.includes(evt.eventType))
+    .map((evt) => ({ event_id: evt.id, event_type: evt.eventType, title: evt.title, summary: evt.summary }));
+  return {
+    schema: 'operating-cycle-brief.v1',
+    period: { started_at: periodStartedAt.toISOString(), ended_at: periodEndedAt.toISOString() },
+    completed,
+    blocked,
+    waiting,
+    decisions_needed: decisionsNeeded,
+    counts: { completed: completed.length, blocked: blocked.length, waiting: waiting.length, decisions_needed: decisionsNeeded.length },
+  };
+}
+
+export async function buildOperatingCycleBrief({ prisma, runtime, periodStartedAt }) {
+  const periodEndedAt = new Date();
+  const [todos, events] = await Promise.all([
+    prisma.hqTodo.findMany({ where: { runtimeId: runtime.id, orgId: runtime.orgId }, orderBy: { updatedAt: 'desc' }, take: 100 }),
+    prisma.hqRuntimeEvent.findMany({
+      where: { runtimeId: runtime.id, orgId: runtime.orgId, createdAt: { gte: periodStartedAt } },
+      orderBy: { createdAt: 'asc' }, take: 200,
+    }),
+  ]);
+  return projectOperatingCycleBrief({ todos, events, periodStartedAt, periodEndedAt });
+}
+
 export function resolveAuthorityDecision(stage, authorityPolicy = {}) {
   const gate = String(stage?.authority_gate || '').trim() || null;
   const policyKey = String(stage?.authority_policy_key || '').trim() || null;
@@ -274,7 +358,52 @@ export class NativeHqEngine {
     // internal churn stays silent while real decisions, delegations, blocks, approvals and
     // sleeps still always emit.
     const narrateRoutine = firstAwakening || ['user_wake', 'instruction_updated', 'connector_changed',
-      'onboarding_complete', 'user_first_activation', 'checkpoint', 'material_evidence'].includes(String(trigger.type || ''));
+      'onboarding_complete', 'user_first_activation', 'checkpoint', 'material_evidence', 'daily_cadence'].includes(String(trigger.type || ''));
+    // Phase 2 of the recurring-operating-cycle build (2026-08-15): daily_cadence is
+    // self-perpetuating — it must re-arm tomorrow's wake on every cadence cycle,
+    // not just the first time (Phase 1 only arms it once, from initial_plan_ready).
+    // Done FIRST, before any other logic this cycle, so tomorrow's wake exists even
+    // if something later in this specific cycle throws. Re-checks the flag (not just
+    // trigger.type) so disabling HQ_DAILY_CADENCE_ENABLED mid-flight is a real kill
+    // switch, not just a no-op for new arms. Everything else this cycle needs — the
+    // baseline/growth-plan bootstrap skip — falls out for free: buildingInitialPlan
+    // and growthPlanModeForState are already gated on real state (a plan already
+    // exists by the time cadence runs), not on trigger type, so no special-casing
+    // was needed to keep a cadence wake from re-running Stage 1/2 bootstrap logic.
+    if (trigger.type === 'daily_cadence' && dailyCadenceEnabled()) {
+      const nextDueAt = nextCadenceDueAt();
+      await scheduleHqWake({
+        prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+        idempotencyKey: cadenceIdempotencyKey(runtime.id, nextDueAt),
+        triggerType: 'daily_cadence', dueAt: nextDueAt,
+        payload: { armed_from: 'daily_cadence_self_rearm' },
+      });
+      // Phase 4: the operating_cycle_brief — wrapped so a brief-building
+      // failure can NEVER block the self-rearm above (already run) or crash
+      // the cycle; this is observability, not load-bearing logic.
+      try {
+        const priorCadence = await prisma.hqSchedule.findFirst({
+          where: {
+            runtimeId: runtime.id, orgId: runtime.orgId, triggerType: 'daily_cadence', status: 'COMPLETED',
+            ...(trigger.schedule_id ? { id: { not: trigger.schedule_id } } : {}),
+          },
+          orderBy: { completedAt: 'desc' },
+        });
+        const periodStartedAt = priorCadence?.completedAt ? new Date(priorCadence.completedAt) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const brief = await buildOperatingCycleBrief({ prisma, runtime, periodStartedAt });
+        const hadActivity = brief.counts.completed || brief.counts.blocked || brief.counts.waiting || brief.counts.decisions_needed;
+        await event(prisma, runtime, cycle, {
+          eventType: 'operating_cycle_brief',
+          title: hadActivity ? 'Operating cycle brief' : 'No material change detected',
+          summary: hadActivity
+            ? `${brief.counts.completed} completed, ${brief.counts.blocked} blocked, ${brief.counts.waiting} waiting, ${brief.counts.decisions_needed} decision(s) needed since the last review.`
+            : 'No material change since the last review. Existing work remains owned; no new task batch was created.',
+          details: brief,
+        });
+      } catch (briefError) {
+        this.logger?.warn?.('[hq-runtime] operating_cycle_brief failed (non-fatal):', briefError?.message || briefError);
+      }
+    }
     if (narrateRoutine) await event(prisma, runtime, cycle, {
       eventType: 'context_loaded', title: 'I have the company in view',
       summary: `${String(context.company?.company || context.company?.name || context.company?.profile?.name || 'The company')} has ${context.evidence.baseline ? 'a retained baseline' : 'no current baseline yet'}, ${context.pending_work.length} active work order(s), and ${context.capabilities.connected.length} connected ${context.capabilities.connected.length === 1 ? 'capability' : 'capabilities'}. I will use only what is actually present.`,
@@ -683,6 +812,7 @@ export class NativeHqEngine {
       focusedOutcome,
       policy: firstLifePolicy,
       firstLifeGate: firstLifeOperatingGate,
+      cadenceRequested: trigger.type === 'daily_cadence',
     });
     if (trigger.type === 'runtime_playbook_result') {
       const runId = String(trigger.payload?.run_id || '');
@@ -1354,6 +1484,15 @@ export class NativeHqEngine {
         details: { todo_ids: result.committed?.todo_ids || [], operating_queue: result.plan?.operating_queue || [] }, evidenceRefs: [result.artifact_id],
       });
       initialPolicyCommitted = true;
+      if (dailyCadenceEnabled()) {
+        const cadenceDueAt = nextCadenceDueAt();
+        await scheduleHqWake({
+          prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+          idempotencyKey: cadenceIdempotencyKey(runtime.id, cadenceDueAt),
+          triggerType: 'daily_cadence', dueAt: cadenceDueAt,
+          payload: { armed_from: 'initial_plan_ready', growth_plan_artifact_id: result.artifact_id },
+        });
+      }
       if (firstLifePolicy.auto_start_initial_plan === true) {
         const activation = await activateEligibleFirstLifeWork({
           prisma, runtime, expansionTrigger: 'initial_plan_ready',

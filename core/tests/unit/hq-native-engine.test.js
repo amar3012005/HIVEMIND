@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective } from '../../src/hq-runtime/native-engine.js';
+import fs from 'node:fs';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -133,4 +134,213 @@ test('HQ work-result reconciliation prefers returned todo ownership and falls ba
     resolveWorkResultTodo({ order, result: { output: null } }),
     { todoId: 'todo-from-order', resultOutput: {} },
   );
+});
+
+// Phase 1 of the recurring-operating-cycle build (2026-08-15): daily_cadence
+// is the wake driven by the passage of time, not an external event — the fix
+// for HQ going permanently quiet once the first Growth Plan's todos run out.
+// Default-OFF so no currently-running org is affected until explicitly enabled.
+
+test('dailyCadenceEnabled defaults to false and only flips on an explicit true', () => {
+  const original = process.env.HQ_DAILY_CADENCE_ENABLED;
+  try {
+    delete process.env.HQ_DAILY_CADENCE_ENABLED;
+    assert.equal(dailyCadenceEnabled(), false);
+    process.env.HQ_DAILY_CADENCE_ENABLED = 'false';
+    assert.equal(dailyCadenceEnabled(), false);
+    process.env.HQ_DAILY_CADENCE_ENABLED = 'garbage';
+    assert.equal(dailyCadenceEnabled(), false);
+    process.env.HQ_DAILY_CADENCE_ENABLED = 'true';
+    assert.equal(dailyCadenceEnabled(), true);
+    process.env.HQ_DAILY_CADENCE_ENABLED = 'TRUE';
+    assert.equal(dailyCadenceEnabled(), true);
+  } finally {
+    if (original === undefined) delete process.env.HQ_DAILY_CADENCE_ENABLED;
+    else process.env.HQ_DAILY_CADENCE_ENABLED = original;
+  }
+});
+
+test('nextCadenceDueAt lands on today\'s cadence hour if not yet passed, else tomorrow', () => {
+  const original = process.env.HQ_DAILY_CADENCE_HOUR_UTC;
+  try {
+    process.env.HQ_DAILY_CADENCE_HOUR_UTC = '13';
+    const before = new Date('2026-08-15T10:00:00.000Z');
+    const due1 = nextCadenceDueAt(before);
+    assert.equal(due1.toISOString(), '2026-08-15T13:00:00.000Z');
+
+    const after = new Date('2026-08-15T14:00:00.000Z');
+    const due2 = nextCadenceDueAt(after);
+    assert.equal(due2.toISOString(), '2026-08-16T13:00:00.000Z');
+
+    const exact = new Date('2026-08-15T13:00:00.000Z');
+    const due3 = nextCadenceDueAt(exact);
+    assert.equal(due3.toISOString(), '2026-08-16T13:00:00.000Z', 'never schedules in the past — exactly-at-hour rolls to tomorrow');
+  } finally {
+    if (original === undefined) delete process.env.HQ_DAILY_CADENCE_HOUR_UTC;
+    else process.env.HQ_DAILY_CADENCE_HOUR_UTC = original;
+  }
+});
+
+test('nextCadenceDueAt clamps an out-of-range hour instead of producing an invalid date', () => {
+  const original = process.env.HQ_DAILY_CADENCE_HOUR_UTC;
+  try {
+    process.env.HQ_DAILY_CADENCE_HOUR_UTC = '99';
+    const due = nextCadenceDueAt(new Date('2026-08-15T00:00:00.000Z'));
+    assert.equal(due.toISOString(), '2026-08-15T23:00:00.000Z');
+  } finally {
+    if (original === undefined) delete process.env.HQ_DAILY_CADENCE_HOUR_UTC;
+    else process.env.HQ_DAILY_CADENCE_HOUR_UTC = original;
+  }
+});
+
+test('cadenceIdempotencyKey is stable per runtime+day and distinct across days — the dedup that prevents a wake storm', () => {
+  const day1 = new Date('2026-08-15T13:00:00.000Z');
+  const day1Again = new Date('2026-08-15T13:00:00.000Z');
+  const day2 = new Date('2026-08-16T13:00:00.000Z');
+  assert.equal(cadenceIdempotencyKey('runtime-a', day1), cadenceIdempotencyKey('runtime-a', day1Again));
+  assert.notEqual(cadenceIdempotencyKey('runtime-a', day1), cadenceIdempotencyKey('runtime-a', day2));
+  assert.notEqual(cadenceIdempotencyKey('runtime-a', day1), cadenceIdempotencyKey('runtime-b', day1));
+  assert.equal(cadenceIdempotencyKey('runtime-a', day1), 'daily_cadence:runtime-a:2026-08-15');
+});
+
+// Phase 2 source-guard: runCycle has no dedicated integration test harness
+// (confirmed: no test in this repo constructs NativeHqEngine and calls
+// runCycle directly — every existing test exercises its extracted pure
+// functions instead, which is why Phase 1 tests dailyCadenceEnabled/
+// nextCadenceDueAt/cadenceIdempotencyKey directly). This locks in the wiring
+// itself: a daily_cadence cycle must re-arm tomorrow's wake before anything
+// else runs, gated on the live flag (not just on having been armed once).
+test('a daily_cadence cycle self-rearms tomorrow\'s wake, gated on the live flag, before any other cycle logic', () => {
+  const source = fs.readFileSync(
+    new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8',
+  );
+  const gateIndex = source.indexOf("if (trigger.type === 'daily_cadence' && dailyCadenceEnabled()) {");
+  assert.ok(gateIndex > 0, 'expected a self-rearm block gated on both trigger.type and the live dailyCadenceEnabled() flag');
+  const rearmCallIndex = source.indexOf('scheduleHqWake({', gateIndex);
+  const rearmCall = source.slice(rearmCallIndex, rearmCallIndex + 400);
+  assert.match(rearmCall, /triggerType: 'daily_cadence'/);
+  assert.match(rearmCall, /idempotencyKey: cadenceIdempotencyKey\(/);
+  assert.match(rearmCall, /dueAt: nextDueAt/);
+  // Must appear before the first-plan/baseline bootstrap gates, so a crash
+  // later in a cadence cycle can never prevent tomorrow's wake from existing.
+  const baselineGateIndex = source.indexOf('const baselineMissingBeforeCollection');
+  assert.ok(baselineGateIndex > 0 && gateIndex < baselineGateIndex,
+    'self-rearm must run before the baseline/growth-plan bootstrap gates');
+});
+
+// Phase 3 of the recurring-operating-cycle build (2026-08-15): v7's recurring
+// 'operate' mode could only ever fire ONE extra time (right after first-life
+// motions complete), then latestGrowthPlan being non-null blocked it forever
+// — not a real recurring loop. cadenceRequested lets a daily_cadence wake
+// re-enter 'operate' even with a plan on file. Every existing call site is
+// unaffected: cadenceRequested defaults false.
+test('a daily_cadence wake can re-enter recurring operate mode even with an existing plan', () => {
+  const v7Policy = {
+    initial_lifecycle: { bypass_growth_plan: true },
+    ongoing_operation: { growth_plan_enabled: true, mode: 'operate' },
+  };
+  const gate = { motions_complete: true };
+  // Non-cadence: byte-identical to pre-Phase-3 behavior — a plan blocks replanning.
+  assert.equal(growthPlanModeForState({ policy: v7Policy, firstLifeGate: gate, latestGrowthPlan: { id: 'plan' } }), null);
+  // Cadence: the same existing plan no longer blocks it.
+  assert.equal(growthPlanModeForState({ policy: v7Policy, firstLifeGate: gate, latestGrowthPlan: { id: 'plan' }, cadenceRequested: true }), 'operate');
+  // A Room mid-lifecycle (focusedOutcome) still wins over cadence, always.
+  assert.equal(growthPlanModeForState({ policy: v7Policy, firstLifeGate: gate, focusedOutcome: { id: 'todo' }, cadenceRequested: true }), null);
+});
+
+test('cadenceRequested never reactivates one-time bootstrap planning', () => {
+  // initial_full is genuinely one-time — cadence must never re-trigger it,
+  // only the recurring 'operate' path is cadence-eligible.
+  const bootstrapPolicy = { runtime_selects_lifecycle: true, ongoing_operation: { growth_plan_enabled: true } };
+  assert.equal(growthPlanModeForState({ policy: bootstrapPolicy, firstLifeGate: null, latestGrowthPlan: { id: 'plan' }, cadenceRequested: true }), null);
+  assert.equal(growthPlanModeForState({ policy: bootstrapPolicy, firstLifeGate: null, cadenceRequested: true }), 'initial_full', 'no plan yet at all still bootstraps normally, cadence or not');
+});
+
+// Phase 4 of the recurring-operating-cycle build (2026-08-15): the
+// operating_cycle_brief must be built ONLY from persisted state — this is
+// the pure projection function, independently testable without a DB.
+test('projectOperatingCycleBrief classifies todos by status into the right bucket', () => {
+  const periodStartedAt = new Date('2026-08-14T13:00:00.000Z');
+  const periodEndedAt = new Date('2026-08-15T13:00:00.000Z');
+  const todos = [
+    { id: 't-done-in-window', title: 'Shipped inside window', status: 'COMPLETED', completedAt: '2026-08-15T01:00:00.000Z' },
+    { id: 't-done-before-window', title: 'Shipped before window', status: 'COMPLETED', completedAt: '2026-08-10T01:00:00.000Z' },
+    { id: 't-blocked', title: 'Stuck on connector', status: 'WAITING_FOR_CONNECTOR', blockedReason: 'Missing: x' },
+    { id: 't-waiting', title: 'Not started yet', status: 'PROPOSED' },
+    { id: 't-ready', title: 'Next up', status: 'READY' },
+    { id: 't-running', title: 'In flight', status: 'RUNNING' },
+  ];
+  const events = [
+    { id: 'e-1', eventType: 'approval_required', title: 'Approval required: X', summary: 'Needs a human decision.' },
+    { id: 'e-2', eventType: 'observation', title: 'Just narration', summary: 'Not a decision.' },
+  ];
+  const brief = projectOperatingCycleBrief({ todos, events, periodStartedAt, periodEndedAt });
+  assert.equal(brief.schema, 'operating-cycle-brief.v1');
+  assert.deepEqual(brief.completed.map((item) => item.todo_id), ['t-done-in-window']);
+  assert.deepEqual(brief.blocked.map((item) => item.todo_id), ['t-blocked']);
+  assert.deepEqual(brief.waiting.map((item) => item.todo_id).sort(), ['t-ready', 't-waiting']);
+  assert.deepEqual(brief.decisions_needed.map((item) => item.event_id), ['e-1']);
+  assert.deepEqual(brief.counts, { completed: 1, blocked: 1, waiting: 2, decisions_needed: 1 });
+  assert.equal(brief.period.started_at, periodStartedAt.toISOString());
+  assert.equal(brief.period.ended_at, periodEndedAt.toISOString());
+});
+
+test('projectOperatingCycleBrief reports zero counts on a genuinely quiet window — the no-change cycle', () => {
+  const periodStartedAt = new Date('2026-08-14T13:00:00.000Z');
+  const periodEndedAt = new Date('2026-08-15T13:00:00.000Z');
+  const brief = projectOperatingCycleBrief({ todos: [], events: [], periodStartedAt, periodEndedAt });
+  assert.deepEqual(brief.counts, { completed: 0, blocked: 0, waiting: 0, decisions_needed: 0 });
+  assert.deepEqual(brief.completed, []);
+  assert.deepEqual(brief.blocked, []);
+});
+
+// Phase 5 — cadence regression suite. buildOperatingCycleBrief is the async
+// DB-facing wrapper; projectOperatingCycleBrief (tested above) is the pure
+// core it delegates to. This exercises the actual query shape with a mocked
+// prisma, matching this repo's established mocked-prisma test convention
+// (see tests/unit/work-room-reconciler.test.js).
+test('buildOperatingCycleBrief queries only this runtime/org, scoped to the period window, and delegates to the pure projector', async () => {
+  const calls = { hqTodoWhere: null, eventWhere: null };
+  const prisma = {
+    hqTodo: {
+      findMany: async ({ where }) => { calls.hqTodoWhere = where; return [
+        { id: 'todo-1', title: 'Done thing', status: 'COMPLETED', completedAt: '2026-08-15T05:00:00.000Z' },
+      ]; },
+    },
+    hqRuntimeEvent: {
+      findMany: async ({ where }) => { calls.eventWhere = where; return [
+        { id: 'evt-1', eventType: 'capability_required', title: 'Need x', summary: 'Connect x.' },
+      ]; },
+    },
+  };
+  const runtime = { id: 'runtime-1', orgId: 'org-1' };
+  const periodStartedAt = new Date('2026-08-14T13:00:00.000Z');
+  const brief = await buildOperatingCycleBrief({ prisma, runtime, periodStartedAt });
+
+  assert.equal(calls.hqTodoWhere.runtimeId, 'runtime-1');
+  assert.equal(calls.hqTodoWhere.orgId, 'org-1');
+  assert.equal(calls.eventWhere.runtimeId, 'runtime-1');
+  assert.equal(calls.eventWhere.orgId, 'org-1');
+  assert.equal(calls.eventWhere.createdAt.gte, periodStartedAt);
+
+  assert.equal(brief.schema, 'operating-cycle-brief.v1');
+  assert.equal(brief.counts.completed, 1);
+  assert.equal(brief.counts.decisions_needed, 1);
+  assert.equal(brief.completed[0].todo_id, 'todo-1');
+});
+
+test('buildOperatingCycleBrief propagates a query failure rather than silently returning an empty brief', async () => {
+  const prisma = {
+    hqTodo: { findMany: async () => { throw new Error('db unreachable'); } },
+    hqRuntimeEvent: { findMany: async () => [] },
+  };
+  await assert.rejects(
+    () => buildOperatingCycleBrief({ prisma, runtime: { id: 'r', orgId: 'o' }, periodStartedAt: new Date() }),
+    /db unreachable/,
+  );
+  // Intentional: the caller (runCycle's daily_cadence branch) wraps this in
+  // its own try/catch so a brief failure never blocks the self-rearm or
+  // crashes the cycle — but the function itself must not swallow the error,
+  // or a real, silent data-access bug would be indistinguishable from a
+  // genuinely quiet cycle.
 });

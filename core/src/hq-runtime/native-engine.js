@@ -71,7 +71,19 @@ export function resolveWorkResultTodo({ order, result }) {
 
 export function playbookRunOwnsCapacity(run) {
   if (!run || !['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'].includes(run.status)) return false;
-  return run.status !== 'WAITING_EVENT' || run.waitingFor?.releases_execution_slot !== true;
+  if (run.status !== 'WAITING_EVENT') return true;
+  // A run parked on capability.connected is waiting on a HUMAN to connect a tool —
+  // that can take days. It must never freeze the rest of the company; independent
+  // safe work must keep moving. Every other WAITING_EVENT kind still needs its
+  // playbook to explicitly opt in via releases_execution_slot, but a missing-
+  // connector wait always releases the slot regardless of that flag. Root-caused
+  // 2026-08-14/15: DIOR's X campaign sat WAITING_EVENT for 30+ hours waiting on
+  // the X connector, and that alone silently held the company's single execution
+  // slot the entire time — a READY, fully independent "Find Clients in New York"
+  // todo never got dispatched, despite the design intent (see roomInFlight above)
+  // being exactly the opposite.
+  if ((run.waitingFor?.types || []).includes('capability.connected')) return false;
+  return run.waitingFor?.releases_execution_slot !== true;
 }
 
 // The first-life browser check-in is OPTIONAL: it may briefly hold planning

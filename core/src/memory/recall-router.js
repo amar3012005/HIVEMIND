@@ -36,6 +36,7 @@ import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
 import { scopedMemoryWhere } from './prisma-graph-store.js';
 import { dedupeMemoriesById } from './recall-dedup.js';
 import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
+import { initialMemoryCrossRerank } from './recall-rerank-policy.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -608,6 +609,8 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
     // may progressively reveal this list without another retrieval/rerank.
     ranked_candidates: rankedCandidates.slice(0, Math.max(15, deliverN + evidenceN)),
     ranking_mode: usedCrossEncoder ? 'cross_encoder' : 'lane_interleave_fallback',
+    rerank_passes: usedCrossEncoder ? 1 : 0,
+    rerank_ms: Date.now() - _rrStart,
   };
 }
 
@@ -707,7 +710,13 @@ async function hop1Memory({ store, query, options, ctx }) {
     scope_filter: options.scope_filter || null,
     structured_intent: options.structured_intent === true,
     semantic_recovery: options.semantic_recovery === true,
-    cross_rerank: options.semantic_recovery === true ? true : null,
+    // The final delivery boundary runs one cross-encoder over the combined
+    // memory + evidence pool (or applies chronological ordering for timeline).
+    // A memory-only pass here was paid twice and then discarded.
+    cross_rerank: initialMemoryCrossRerank({
+      laterAuthoritativeOrdering: true,
+      requested: options.semantic_recovery === true ? true : null,
+    }),
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride

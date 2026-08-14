@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { initialMemoryCrossRerank } from '../memory/recall-rerank-policy.js';
 
 export function normalizeRecallLimit(value, fallback = 15) {
   const parsed = Number(value);
@@ -7,6 +8,14 @@ export function normalizeRecallLimit(value, fallback = 15) {
 
 export function shouldRecallEvidence(mode = 'auto') {
   return String(mode || 'auto').toLowerCase() !== 'memory';
+}
+
+export function legacyInitialCrossRerank(mode = 'auto', requested = null) {
+  const normalizedMode = String(mode || 'auto').toLowerCase();
+  return initialMemoryCrossRerank({
+    laterAuthoritativeOrdering: shouldRecallEvidence(normalizedMode) && normalizedMode !== 'memory',
+    requested,
+  });
 }
 
 async function unifiedResultsFor({ memories = [], evidence = [], rankedCandidates = [] }) {
@@ -335,6 +344,7 @@ export async function handleRecallRoute(ctx = {}) {
       ? { valid_at: validAt, transaction_at: transactionAt }
       : null;
 
+    const legacyMode = body.mode || 'auto';
     const result = await recallPersistedMemories(persistentMemoryStore, {
       query_context: effectiveRecallQuery,
       raw_query: rawRecallQuery,
@@ -362,7 +372,7 @@ export async function handleRecallRoute(ctx = {}) {
       scope_filter: body.scope_filter || null,
       entity_filter_mode: body.entity_filter_mode || null,
       tiered_view: body.tiered_view ?? null,
-      cross_rerank: body.cross_rerank ?? null,
+      cross_rerank: legacyInitialCrossRerank(legacyMode, body.cross_rerank ?? null),
       query_expansion: body.query_expansion ?? null,
       bitemporal: bitemporalFilter,
     });
@@ -472,7 +482,7 @@ export async function handleRecallRoute(ctx = {}) {
       stripped: rewritten.stripped,
     };
 
-    const mode = body.mode || 'auto';
+    const mode = legacyMode;
     const wantEvidence = shouldRecallEvidence(mode);
     const memoryHits = Array.isArray(result.memories) ? result.memories : [];
     result.mode_used = mode;
@@ -539,6 +549,8 @@ export async function handleRecallRoute(ctx = {}) {
           result.memories = mixed.memories;
           result.ranked_candidates = mixed.ranked_candidates;
           result.ranking_mode = mixed.ranking_mode;
+          result.rerank_passes = mixed.rerank_passes;
+          result.rerank_ms = mixed.rerank_ms;
         }
         const deliveredEvidence = mixed?.evidence || enhanced.evidence || [];
         result.evidence = deliveredEvidence

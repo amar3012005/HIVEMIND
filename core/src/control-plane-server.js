@@ -637,9 +637,10 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
           },
         }).catch((err) => console.warn('[hyper-sweeper] re-kick failed:', err.message));
       }
-      const { reconcileHyperTurnEventOutbox, reconcileStrandedWorkRoomTurns } = await import('./employees/hyper-rooms.js');
+      const { reconcileHyperTurnEventOutbox, reconcileStrandedWorkRoomTurns, failDeadTurns } = await import('./employees/hyper-rooms.js');
       await reconcileHyperTurnEventOutbox(prisma);
       await reconcileStrandedWorkRoomTurns(prisma);
+      await failDeadTurns(prisma);
     } catch (err) {
       // On a deployment where the HyperAgents tables were never migrated
       // (e.g. a self-host/managed box that doesn't run rooms), the query

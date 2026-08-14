@@ -302,6 +302,70 @@ export async function reconcileStrandedWorkRoomTurns(prisma, {
 }
 
 /**
+ * Fail turns that made genuinely NO recoverable progress and have gone
+ * stale — the gap neither existing reconciler covers. The 15s sweeper above
+ * only catches a turn whose INITIAL kick was dropped (zero lines, ~30s
+ * window). reconcileStrandedWorkRoomTurns only recovers a Work Room turn
+ * that reached a durable checkpoint (candidate_output or an existing
+ * synthesis line) before dying. Neither catches the real remaining case:
+ * hm-employees restarts mid-turn (e.g. mid-deploy — this happens routinely)
+ * for a turn that already streamed some lines but produced no recoverable
+ * answer. That turn sits status='live' forever with no seal, no error, and
+ * the FE spins indefinitely. This marks it FAILED with an honest message
+ * instead — never silently "complete" (nothing to recover), never left
+ * hanging. Applies to every room mode, not just Work Rooms; an HQ work
+ * order behind a now-failed turn is picked up by reconcileExpiredWorkOrders
+ * once its lease expires, same as any other failure.
+ */
+export async function failDeadTurns(prisma, {
+  // Generous relative to the sweeper's 30s window and the stranded-turn
+  // reconciler's 10-minute checkpoint wait — this is the LAST resort for a
+  // turn neither of those could recover, so it only fires once both have had
+  // a real chance to.
+  staleBefore = new Date(Date.now() - 15 * 60 * 1000), limit = 50,
+} = {}) {
+  let rows = [];
+  try {
+    rows = await prisma.$queryRawUnsafe(
+      `SELECT t.id
+         FROM "hivemind"."hyper_turns" t
+        WHERE t.status = 'live' AND t.sealed_at IS NULL
+          AND t.last_progress_at < $1
+          AND COALESCE(t.candidate_output->>'content', '') = ''
+          AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(t.lines) e
+                           WHERE e->>'t' = 'line' AND e->>'kind' = 'synthesis')
+        ORDER BY t.last_progress_at ASC LIMIT $2`,
+      staleBefore, Math.max(1, Math.min(200, Number(limit) || 50)),
+    );
+  } catch {
+    return 0;
+  }
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      await sealTurn(prisma, row.id, {
+        status: 'failed', costTokens: 0,
+        event: {
+          t: 'seal', event_id: `dead-turn-failed:${row.id}`, status: 'failed',
+          error: 'This turn stopped making progress (the service likely restarted mid-turn) '
+            + 'and could not be recovered. Please retry.',
+          recovered: false,
+        },
+      });
+      await prisma.$executeRawUnsafe(
+        `UPDATE "hivemind"."hyper_turns"
+            SET terminal_reason = 'dead_turn_no_recoverable_checkpoint', last_progress_at = NOW()
+          WHERE id = $1::uuid`, row.id,
+      );
+      failed += 1;
+    } catch {
+      // Idempotent seal + write; a later retry of this reconciler is safe.
+    }
+  }
+  return failed;
+}
+
+/**
  * Build the "is this room ready for a turn?" preflight check.
  * Returns null if OK, or an error object {code, message} for the caller.
  */

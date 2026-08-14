@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -27,6 +27,7 @@ import { deriveMeetingSessionIntegrity } from './knowledge/meeting-session-contr
 import { processMeetingSegmentExtraction, reconcileMeetingSegmentExtractions } from './knowledge/meeting-segment-extractor.js';
 import { persistMeetingAudio, meetingAudioStoreIsDurable } from './knowledge/meeting-audio-store.js';
 import { processMeetingAudioSegment, reconcileMeetingAudioSegments, pruneFinalizedMeetingAudio } from './knowledge/meeting-audio-worker.js';
+import { processRemoteMeetingAudioSegment, reconcileRemoteMeetingAudio } from './knowledge/meeting-remote-audio-worker.js';
 import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
 import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
@@ -544,6 +545,7 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     singleton: false,
     run: async () => { await processDueCampaignActions({ prisma, limit: 20 }); },
   });
+  scheduleRecurringMaintenanceJob({ enabled: true, prisma, jobName: 'meeting-remote-audio-transcription', initialDelayMs: 15_000, intervalMs: Math.max(15_000, Number(process.env.MEETING_REMOTE_AUDIO_RECONCILE_INTERVAL_MS || 30_000)), run: async () => { await reconcileRemoteMeetingAudio({ limitPerOrg: Number(process.env.MEETING_REMOTE_AUDIO_RECONCILE_LIMIT || 10) }); } });
   scheduleRecurringMaintenanceJob({
     enabled: meetingAudioStoreIsDurable(),
     prisma,
@@ -6519,9 +6521,8 @@ exit \$RC
         const audioMatch = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})\/audio\/(\d+)$/);
         if (audioMatch && req.method === 'POST') {
           const mOrg = _mOrgId, mUser = _mUserId, sid = audioMatch[1], idx = Number(audioMatch[2]);
-          if (orgIsRemote(mOrg)) return jsonResponse(res, { error: 'remote_meeting_audio_pipeline_pending', session_id: sid }, 501);
-          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
-          if (!meetingAudioStoreIsDurable()) return jsonResponse(res, { error: 'meeting_audio_store_not_durable' }, 503);
+          if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!orgIsRemote(mOrg) && !meetingAudioStoreIsDurable()) return jsonResponse(res, { error: 'meeting_audio_store_not_durable' }, 503);
           if (!_ct.startsWith('audio/')) return jsonResponse(res, { error: 'audio_unsupported' }, 415);
           const maxMb = Number(process.env.MEETING_STT_MAX_MB || process.env.GROQ_WHISPER_MAX_MB || 24);
           const maxBytes = maxMb * 1024 * 1024;
@@ -6534,13 +6535,19 @@ exit \$RC
           const audio = Buffer.concat(chunks);
           if (!audio.length) return jsonResponse(res, { error: 'empty_audio' }, 400);
           try {
+            const startMs = Number(url.searchParams.get('start_ms'));
+            const endMs = Number(url.searchParams.get('end_ms'));
+            const checksum = crypto.createHash('sha256').update(audio).digest('hex');
+            if (orgIsRemote(mOrg)) {
+              const stored = await amrMeetingAudioWrite(mOrg, { session_id: sid, user_id: mUser, idx, checksum, content_type: _ct, audio_base64: audio.toString('base64'), start_ms: Number.isFinite(startMs) ? startMs : null, end_ms: Number.isFinite(endMs) ? endMs : null });
+              if (!stored?.ok) return jsonResponse(res, { error: stored?.error || 'storage_unavailable' }, stored?.error === 'audio_segment_conflict' ? 409 : 503);
+              void processRemoteMeetingAudioSegment({ orgId: mOrg, sessionId: sid, idx, userId: mUser }).catch((error) => console.warn('[meeting-remote-audio] start failed:', error?.message || error));
+              return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, status: stored.status || 'queued', durability: 'amr_persisted' }, 202);
+            }
             const session = await prisma.$queryRawUnsafe(
               `SELECT id FROM hivemind.meeting_sessions WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid`, sid, mOrg, mUser,
             );
             if (!session?.[0]) return jsonResponse(res, { error: 'not_found' }, 404);
-            const startMs = Number(url.searchParams.get('start_ms'));
-            const endMs = Number(url.searchParams.get('end_ms'));
-            const checksum = crypto.createHash('sha256').update(audio).digest('hex');
             const existing = await prisma.$queryRawUnsafe(
               `SELECT checksum, status FROM hivemind.meeting_audio_segments WHERE session_id=$1::uuid AND idx=$2 AND org_id=$3::uuid AND user_id=$4::uuid`,
               sid, idx, mOrg, mUser,

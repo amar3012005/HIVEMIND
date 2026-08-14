@@ -303,6 +303,14 @@ async function ensureSchema() {
       PRIMARY KEY (session_id, idx)
     );
     CREATE INDEX IF NOT EXISTS meeting_segments_owner_idx ON meeting_segments(org_id, user_id, session_id);
+    CREATE TABLE IF NOT EXISTS meeting_audio_segments (
+      session_id uuid NOT NULL, org_id uuid NOT NULL, user_id uuid NOT NULL, idx int NOT NULL,
+      checksum varchar(64) NOT NULL, content_type varchar(160) NOT NULL, audio bytea NOT NULL,
+      start_ms int, end_ms int, status varchar(16) NOT NULL DEFAULT 'queued', attempts int NOT NULL DEFAULT 0,
+      next_attempt_at timestamptz, lease_expires_at timestamptz, last_error text,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (session_id, idx)
+    );
+    CREATE INDEX IF NOT EXISTS meeting_audio_segments_retry_idx ON meeting_audio_segments(status, next_attempt_at, created_at);
     CREATE TABLE IF NOT EXISTS tara_calls (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       org_id uuid NOT NULL,
@@ -2025,6 +2033,33 @@ function routesFor(ctx) {
       const { rows } = await db().query(
         'SELECT idx,text,speakers,start_ms,end_ms,meeting_id FROM meeting_segments WHERE session_id=$1 AND org_id=$2 AND user_id=$3 ORDER BY idx',
         [f.session_id, org, f.user_id]);
+      return { segments: rows };
+    },
+
+    '/v1/meeting-audio-write': async (b) => {
+      const s = b.segment || {};
+      if (!s.session_id || !s.user_id || !Number.isInteger(s.idx) || !/^[a-f0-9]{64}$/i.test(String(s.checksum || '')) || !String(s.audio_base64 || '')) return { ok: false, error: 'invalid audio segment' };
+      const bytes = Buffer.from(String(s.audio_base64), 'base64');
+      if (!bytes.length || bytes.length > 24 * 1024 * 1024) return { ok: false, error: 'invalid audio bytes' };
+      await db().query(`INSERT INTO meeting_audio_segments (session_id,org_id,user_id,idx,checksum,content_type,audio,start_ms,end_ms,status) VALUES ($1,$2,$3,$4,$5,$6,decode($7,'base64'),$8,$9,'queued') ON CONFLICT (session_id,idx) DO UPDATE SET updated_at=now() WHERE meeting_audio_segments.checksum=EXCLUDED.checksum`, [s.session_id, org, s.user_id, s.idx, s.checksum, String(s.content_type || 'audio/webm').slice(0,160), String(s.audio_base64), s.start_ms ?? null, s.end_ms ?? null]);
+      const existing = await db().query('SELECT checksum,status FROM meeting_audio_segments WHERE session_id=$1 AND idx=$2 AND org_id=$3 AND user_id=$4', [s.session_id, s.idx, org, s.user_id]);
+      if (existing.rows[0]?.checksum !== s.checksum) return { ok: false, error: 'audio_segment_conflict' };
+      return { ok: true, status: existing.rows[0]?.status || 'queued' };
+    },
+    '/v1/meeting-audio-claim': async (b) => {
+      const f = b.filter || {};
+      if (!f.session_id || !f.user_id || !Number.isInteger(f.idx)) return { ok: false, error: 'invalid audio claim' };
+      const { rows } = await db().query(`WITH candidate AS (SELECT session_id,idx FROM meeting_audio_segments WHERE session_id=$1 AND idx=$2 AND org_id=$3 AND user_id=$4 AND (status IN ('queued','error') OR (status='processing' AND lease_expires_at < now())) AND attempts < 3 AND (next_attempt_at IS NULL OR next_attempt_at <= now()) FOR UPDATE SKIP LOCKED) UPDATE meeting_audio_segments a SET status='processing',attempts=a.attempts+1,next_attempt_at=NULL,lease_expires_at=now()+interval '10 minutes',last_error=NULL,updated_at=now() FROM candidate c WHERE a.session_id=c.session_id AND a.idx=c.idx RETURNING a.session_id,a.idx,a.user_id,a.content_type,encode(a.audio,'base64') AS audio_base64,a.start_ms,a.end_ms,a.attempts`, [f.session_id,f.idx,org,f.user_id]);
+      return { ok: true, segment: rows[0] || null };
+    },
+    '/v1/meeting-audio-settle': async (b) => {
+      const r = b.result || {};
+      if (!r.session_id || !r.user_id || !Number.isInteger(r.idx) || !['transcribed','error'].includes(r.status)) return { ok: false, error: 'invalid audio settlement' };
+      await db().query('UPDATE meeting_audio_segments SET status=$1,lease_expires_at=NULL,next_attempt_at=$2,last_error=$3,updated_at=now() WHERE session_id=$4 AND idx=$5 AND org_id=$6 AND user_id=$7', [r.status,r.next_attempt_at || null,r.last_error ? String(r.last_error).slice(0,500) : null,r.session_id,r.idx,org,r.user_id]);
+      return { ok:true };
+    },
+    '/v1/meeting-audio-pending': async (b) => {
+      const { rows } = await db().query(`SELECT session_id,idx,user_id FROM meeting_audio_segments WHERE (status IN ('queued','error') OR (status='processing' AND lease_expires_at < now())) AND attempts < 3 AND (next_attempt_at IS NULL OR next_attempt_at <= now()) ORDER BY created_at ASC LIMIT $1`, [Math.min(Math.max(Number(b.limit)||10,1),50)]);
       return { segments: rows };
     },
 

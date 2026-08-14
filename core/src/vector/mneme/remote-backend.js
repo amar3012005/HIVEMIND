@@ -243,7 +243,7 @@ async function _call(orgId, path, body, options = {}) {
     // The parent deadline has its own AbortSignal. Keep the transport timer at
     // the transport budget so two same-millisecond timers cannot misclassify a
     // caller cancellation as a network outage and poison the circuit.
-    const requestTimeoutMs = TIMEOUT_MS;
+    const requestTimeoutMs = Number(options.timeoutMs || TIMEOUT_MS);
     let transportTimeoutFired = false;
     const abortFromParent = () => {
       if (!ctrl.signal.aborted) ctrl.abort(parentSignal?.reason);
@@ -634,6 +634,26 @@ export async function remoteMeetingSegmentWrite(orgId, segment) {
 export async function remoteMeetingSegmentList(orgId, filter) {
   try { const out = await _call(orgId, '/v1/meeting-segment-list', { filter }); return out?.segments || []; }
   catch (e) { console.warn(`[mneme/remote] meeting-segment-list failed org=${orgId}: ${e.message}`); return null; }
+}
+
+// The agent owns raw bytes; Core merely claims one bounded chunk into memory to
+// run the shared Singulance transcription engine, then settles the tenant row.
+const MEETING_AUDIO_TIMEOUT_MS = Number(process.env.MEETING_REMOTE_AUDIO_TIMEOUT_MS || 300_000);
+export async function remoteMeetingAudioWrite(orgId, segment) {
+  try { return await _call(orgId, '/v1/meeting-audio-write', { segment }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-audio-write failed org=${orgId}: ${e.message}`); return null; }
+}
+export async function remoteMeetingAudioClaim(orgId, filter) {
+  try { return await _call(orgId, '/v1/meeting-audio-claim', { filter }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-audio-claim failed org=${orgId}: ${e.message}`); return null; }
+}
+export async function remoteMeetingAudioSettle(orgId, result) {
+  try { return await _call(orgId, '/v1/meeting-audio-settle', { result }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-audio-settle failed org=${orgId}: ${e.message}`); return null; }
+}
+export async function remoteMeetingAudioPending(orgId, limit = 10) {
+  try { const out = await _call(orgId, '/v1/meeting-audio-pending', { limit }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); return out?.segments || []; }
+  catch (e) { console.warn(`[mneme/remote] meeting-audio-pending failed org=${orgId}: ${e.message}`); return []; }
 }
 
 // Fetch one meeting by id. Returns the meeting object or null.

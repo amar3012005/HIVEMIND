@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -343,4 +343,32 @@ test('buildOperatingCycleBrief propagates a query failure rather than silently r
   // crashes the cycle — but the function itself must not swallow the error,
   // or a real, silent data-access bug would be indistinguishable from a
   // genuinely quiet cycle.
+});
+
+// Fix for a real production noise complaint (2026-08-15, org DIOR): the
+// capacity/dedup fixes shipped earlier this session made scheduling correct
+// (exactly one wake/minute, zero duplicate schedule rows) — but every one of
+// those legitimate wakes still re-narrated the FULL "company in view / checked
+// instructions / re-ranked queue / one task at a time / waiting for access"
+// block even when nothing had changed since the last identical cycle. 191
+// near-duplicate cycles were observed over 2h44m for a single disconnected
+// connector. isRepeatCapabilityWait is the pure signature-comparison this
+// suppression is built on.
+test('isRepeatCapabilityWait only fires for connector_changed with a real, matching prior wait', () => {
+  assert.equal(isRepeatCapabilityWait({ triggerType: 'connector_changed', lastObservationDetails: null, openCapabilityId: 'cap-1' }), false, 'no prior observation yet — never suppress the first time');
+  assert.equal(isRepeatCapabilityWait({ triggerType: 'connector_changed', lastObservationDetails: {}, openCapabilityId: null }), false, 'nothing currently blocking — never suppress');
+  assert.equal(isRepeatCapabilityWait({
+    triggerType: 'connector_changed', lastObservationDetails: { capability_request_id: 'cap-1' }, openCapabilityId: 'cap-1',
+  }), true, 'same connector still missing as last cycle — this IS the repeat to suppress');
+  assert.equal(isRepeatCapabilityWait({
+    triggerType: 'connector_changed', lastObservationDetails: { capability_request_id: 'cap-1' }, openCapabilityId: 'cap-2',
+  }), false, 'a DIFFERENT capability is now the blocker — real change, must narrate');
+  // Never suppress a human-initiated or otherwise-meaningful trigger, even
+  // with an identical blocking reason — only the automated poll-driven
+  // connector_changed repeat is noise.
+  for (const triggerType of ['user_wake', 'instruction_updated', 'checkpoint', 'daily_cadence', 'work_result', 'queue_advance']) {
+    assert.equal(isRepeatCapabilityWait({
+      triggerType, lastObservationDetails: { capability_request_id: 'cap-1' }, openCapabilityId: 'cap-1',
+    }), false, `${triggerType} must always narrate in full, never suppressed`);
+  }
 });

@@ -281,6 +281,36 @@ export async function buildOperatingCycleBrief({ prisma, runtime, periodStartedA
   return projectOperatingCycleBrief({ todos, events, periodStartedAt, periodEndedAt });
 }
 
+// Root-caused live 2026-08-15 for org DIOR: a legitimate, correctly-deduped
+// connector_changed wake (one per minute, exactly as the earlier dedup fix
+// intends) still re-narrated the FULL "company in view / checked instructions
+// / re-ranked queue / one task at a time / waiting for access" block every
+// single time, forever, while a connector stayed disconnected — 191
+// near-identical cycles over 2h44m. The scheduling was never the bug; the
+// narration never asked "did anything actually change since last time."
+export function isRepeatCapabilityWait({ triggerType, lastObservationDetails, openCapabilityId }) {
+  if (triggerType !== 'connector_changed') return false;
+  if (!openCapabilityId) return false;
+  return Boolean(lastObservationDetails) && lastObservationDetails.capability_request_id === openCapabilityId;
+}
+
+async function detectNoisyConnectorRepeat({ prisma, runtime, triggerType }) {
+  if (triggerType !== 'connector_changed') return false;
+  const [openRequest, lastObservation] = await Promise.all([
+    prisma.hqCapabilityRequest.findFirst({
+      where: { runtimeId: runtime.id, orgId: runtime.orgId, status: 'REQUIRED' },
+      orderBy: { createdAt: 'asc' },
+    }),
+    prisma.hqRuntimeEvent.findFirst({
+      where: { runtimeId: runtime.id, orgId: runtime.orgId, eventType: { in: ['observation', 'sleep', 'blocked'] } },
+      orderBy: { createdAt: 'desc' },
+    }),
+  ]);
+  return isRepeatCapabilityWait({
+    triggerType, lastObservationDetails: lastObservation?.details || null, openCapabilityId: openRequest?.id || null,
+  });
+}
+
 export function resolveAuthorityDecision(stage, authorityPolicy = {}) {
   const gate = String(stage?.authority_gate || '').trim() || null;
   const policyKey = String(stage?.authority_policy_key || '').trim() || null;
@@ -326,6 +356,18 @@ export class NativeHqEngine {
     }
     const firstAwakening = trigger.type === 'onboarding_complete' || trigger.type === 'user_first_activation';
     const restartAwakening = firstAwakening && Boolean(trigger.payload?.restart);
+    // A poller hitting /v1/hq/capabilities/recheck legitimately once a minute,
+    // forever, while a connector stays disconnected is CORRECT behavior for the
+    // capacity/dedup fixes already shipped this session — but it means an
+    // identical "waiting for access" outcome was re-narrated in full every single
+    // minute (observed live: 191 near-duplicate cycles for org DIOR over 2h44m,
+    // all correctly deduped at the schedule level, none of it a bug in scheduling
+    // — just the narration never checking whether anything had actually changed).
+    // Suppress the routine boilerplate + repeat wait narration ONLY when this is a
+    // connector_changed cycle whose blocking reason is byte-identical to the last
+    // one narrated; any real change (different capability, connector resolved, a
+    // human-initiated wake) narrates in full exactly as before.
+    const isNoisyRepeatCycle = await detectNoisyConnectorRepeat({ prisma, runtime, triggerType: trigger.type }).catch(() => false);
     let context = await buildHqContext({ prisma, runtime, trigger });
     const awakeningStreamId = firstAwakening ? `awakening:${cycle.id}` : null;
     if (awakeningStreamId) await publishHqRuntimeTransient({
@@ -347,7 +389,7 @@ export class NativeHqEngine {
       runtimeId: runtime.id, orgId: runtime.orgId,
       event: { type: 'model_stream', phase: 'done', stream_id: awakeningStreamId, event_type: 'wake' },
     });
-    await event(prisma, runtime, cycle, { eventType: 'wake', title: firstAwakening ? 'I am here' : 'I am awake', summary: firstAwakening
+    if (!isNoisyRepeatCycle) await event(prisma, runtime, cycle, { eventType: 'wake', title: firstAwakening ? 'I am here' : 'I am awake', summary: firstAwakening
       ? awakening.narration
       : `I am awake. ${String(trigger.type || 'An event').replaceAll('_', ' ')} moved, so I am reading the company before I touch anything.`, details: firstAwakening ? { stream_id: awakeningStreamId, model_streamed: !awakening.fallback, narration_model: awakening.model, narration_provider: awakening.provider, narration_fallback: awakening.fallback, usage: awakening.usage } : {} });
     // NARRATION GATE. A lifecycle walking its stages produces many internal wakes
@@ -356,9 +398,12 @@ export class NativeHqEngine {
     // console spam and made a [Sleeping] line look like it never slept. Narrate the
     // boilerplate only for the first awakening and for triggers a human would recognise;
     // internal churn stays silent while real decisions, delegations, blocks, approvals and
-    // sleeps still always emit.
-    const narrateRoutine = firstAwakening || ['user_wake', 'instruction_updated', 'connector_changed',
-      'onboarding_complete', 'user_first_activation', 'checkpoint', 'material_evidence', 'daily_cadence'].includes(String(trigger.type || ''));
+    // sleeps still always emit. isNoisyRepeatCycle additionally suppresses a
+    // connector_changed cycle whose blocking reason is byte-identical to the
+    // immediately preceding one — a real, different, or human-initiated wake
+    // always narrates in full regardless.
+    const narrateRoutine = !isNoisyRepeatCycle && (firstAwakening || ['user_wake', 'instruction_updated', 'connector_changed',
+      'onboarding_complete', 'user_first_activation', 'checkpoint', 'material_evidence', 'daily_cadence'].includes(String(trigger.type || '')));
     // Phase 2 of the recurring-operating-cycle build (2026-08-15): daily_cadence is
     // self-perpetuating — it must re-arm tomorrow's wake on every cadence cycle,
     // not just the first time (Phase 1 only arms it once, from initial_plan_ready).
@@ -523,8 +568,11 @@ export class NativeHqEngine {
       }).catch(() => null)) : false);
     // Only narrate the queue when it actually has something to say — a real next item,
     // or a human-recognisable trigger. Announcing 'there is no executable todo' on every
-    // internal wake was the other half of the duplicated spam.
-    if (readyTodo || narrateRoutine) await event(prisma, runtime, cycle, {
+    // internal wake was the other half of the duplicated spam. readyTodo alone used to
+    // force this through even when isNoisyRepeatCycle was true (a still-READY todo behind
+    // an unchanged connector wait re-narrated "next priority" every single minute) — now
+    // explicitly excluded too.
+    if (!isNoisyRepeatCycle && (readyTodo || narrateRoutine)) await event(prisma, runtime, cycle, {
       eventType: 'queue_checked', title: 'I re-ranked the operating queue',
       summary: readyTodo
         ? `The next executable priority is ${readyTodo.title}. Waiting items remain retained but will not stall safe work behind them.`
@@ -1384,7 +1432,10 @@ export class NativeHqEngine {
     } else if (readyTodo && roomInFlight) {
       // A Room is already working. Do NOT dispatch the next todo and do NOT re-plan —
       // one steady step at a time. The in-flight Room's result will wake us to continue.
-      await event(prisma, runtime, cycle, {
+      // isNoisyRepeatCycle: skip re-narrating "still working" every single minute for
+      // a connector_changed repeat where nothing changed — the Room's own real
+      // work_result wake still narrates normally when it actually returns.
+      if (!isNoisyRepeatCycle) await event(prisma, runtime, cycle, {
         eventType: 'observation',
         title: 'One task at a time — the current Room is still working',
         summary: `${readyTodo.title} is queued next, but a specialist Room already owns the active task. I will not open parallel work; I dispatch the next item only when this Room returns its result.`,
@@ -1627,7 +1678,10 @@ export class NativeHqEngine {
       : waitingForResponse ? String(waitingPresentation.title || 'I am waiting for lifecycle evidence')
       : pendingSpecialist ? 'I am waiting for specialist work'
       : blockedTodos.length ? 'The operating queue needs intervention' : 'I am sleeping';
-    await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled || waitingForResponse ? 'observation' : blockedTodos.length ? 'blocked' : 'sleep', title: waitingTitle, summary: sleepReason, details: { due_at: dueAt?.toISOString() || null, capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist, blocked_todo_ids: blockedTodos.map((todo) => todo.id) } });
+    // isNoisyRepeatCycle: the final wait/sleep narration is the last of the
+    // repeated block — the move('WAITING', ...) state transition above still
+    // always runs; only this specific duplicate event is skipped.
+    if (!isNoisyRepeatCycle) await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled || waitingForResponse ? 'observation' : blockedTodos.length ? 'blocked' : 'sleep', title: waitingTitle, summary: sleepReason, details: { due_at: dueAt?.toISOString() || null, capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist, blocked_todo_ids: blockedTodos.map((todo) => todo.id) } });
     return { transition: 'WAIT', nextWakeAt: dueAt };
   }
 }

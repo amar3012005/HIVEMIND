@@ -118,6 +118,7 @@ const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_M
 //   • non-user-facing legacy helpers retain the internal Groq model.
 // Both are env-overridable so we can A/B without code changes.
 const INTERNAL_MODEL = process.env.HIVEMIND_AGENT_INTERNAL_MODEL || 'openai/gpt-oss-20b';
+const QUERY_OPTIMIZER_MODEL = process.env.CHAT_QUERY_OPTIMIZER_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
 const FINAL_FALLBACK_MODEL = process.env.HIVEMIND_AGENT_FINAL_FALLBACK_MODEL || 'openai/gpt-oss-120b';
 // The caller-selected model is reserved for user-facing synthesis below.
 const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
@@ -2577,6 +2578,7 @@ export async function runReactAgentV2({
     warnings: [],
     models: {
       planner: INTENT_MODEL,
+      query_optimizer: QUERY_OPTIMIZER_MODEL,
       synthesis: requestedAnswerModel,
     },
     usage_stages: usageStages,
@@ -3288,9 +3290,10 @@ export async function runReactAgentV2({
     if (!_dedicatedLane
         && shouldOptimizeRecallQuery({ router: intentDecision._router, canonicalQuery: plan.query_canonical_en })
         && Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
+      const optimizerStartedAt = Date.now();
       try {
         const optimizedResult = await optimizeRecallQueries({
-          message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
+          message, plan, model: QUERY_OPTIMIZER_MODEL, apiKey, signal: abortCtrl.signal,
         });
         const optimized = optimizedResult.queries;
         queryOptimizerRan = true;
@@ -3302,6 +3305,7 @@ export async function runReactAgentV2({
           onEvent?.({ type: 'query_optimized', queries: plan.sub_queries });
         }
       } catch { /* keep planner queries on any failure */ }
+      trace.phases.query_optimizer_ms = (trace.phases.query_optimizer_ms || 0) + (Date.now() - optimizerStartedAt);
     }
 
     // STEP 3 — Evidence
@@ -3329,9 +3333,11 @@ export async function runReactAgentV2({
       coverage: evidence.coverage,
       alreadyOptimized: queryOptimizerRan,
     })) {
+      const retryOptimizerStartedAt = Date.now();
       const retryResult = await optimizeRecallQueries({
-        message, plan, model: INTERNAL_MODEL, apiKey, signal: abortCtrl.signal,
+        message, plan, model: QUERY_OPTIMIZER_MODEL, apiKey, signal: abortCtrl.signal,
       });
+      trace.phases.query_optimizer_ms = (trace.phases.query_optimizer_ms || 0) + (Date.now() - retryOptimizerStartedAt);
       recordUsage('query_optimizer_retry', retryResult.usage);
       queryOptimizerRan = true;
       if (retryResult.queries.length) {

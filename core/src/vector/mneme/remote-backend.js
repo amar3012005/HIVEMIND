@@ -77,6 +77,12 @@ export function isRemoteReady(orgId) { return !!agentFor(orgId); }
 // True only for self-host-.amr: an hm-agent HTTP endpoint serves recall/.amr. Self-host-HYBRID
 // (pgUrl + qdrantUrl, no agent url) is NOT remote — core connects to the customer PG+Qdrant directly.
 export function hasRemoteAgent(orgId) { return !!agentFor(orgId)?.url; }
+export function remoteAgentOrgIds() {
+  _loadFile();
+  return [..._registry.entries()]
+    .filter(([, value]) => value?.url && value.url !== 'local:' && value.kind === 'selfhost')
+    .map(([orgId]) => orgId);
+}
 
 // Full-residency self-host: the customer's Postgres connection string (via their tunnel), recorded at
 // enrollment. null → that org's relational data is NOT on a customer box (managed / vectors-only).
@@ -96,7 +102,9 @@ async function _call(orgId, path, body) {
   // route table, same shapes, no HTTP. Lazy import keeps deployments without the binding inert.
   if (a.url === 'local:') {
     const { dispatch } = await import('./embedded-agent.mjs');
-    return dispatch(orgId, path, body);
+    const out = await dispatch(orgId, path, body);
+    if (out?.ok === false) throw new Error(`agent ${path} rejected request: ${out.error || 'ok=false'}`);
+    return out;
   }
   const tokens = [a.token, ...(a.fallbackTokens || [])].filter(Boolean);
   let lastStatus = null;
@@ -110,7 +118,17 @@ async function _call(orgId, path, body) {
         body: JSON.stringify(body),
         signal: ctrl.signal,
       });
-      if (res.ok) return await res.json();
+      if (res.ok) {
+        const out = await res.json();
+        // The agent intentionally persists the relational row before attempting
+        // the Qdrant write and reports a failed second phase as HTTP 200
+        // {ok:false}. Treating transport success as operation success skipped the
+        // durable outbox and left sovereign memories permanently lexical-only.
+        if (out?.ok === false) {
+          throw new Error(`agent ${path} rejected request: ${out.error || 'ok=false'}`);
+        }
+        return out;
+      }
       lastStatus = res.status;
       // Only 401 can indicate a Box that has not switched to the rotated token.
       if (res.status !== 401) break;
@@ -194,6 +212,33 @@ export async function remoteDelete(orgId, id, hard = false) {
 export async function remoteStats(orgId, filter = {}) {
   try { return await _call(orgId, '/v1/stats', { filter }); }
   catch (e) { console.warn(`[mneme/remote] stats failed org=${orgId}: ${e.message}`); return null; }
+}
+
+// Durable vector-sync observability for upgraded agents. Older agents return
+// null, allowing callers/backfill scripts to fall back to /v1/list for memories.
+export async function remoteVectorStatus(orgId) {
+  try { return await _call(orgId, '/v1/vector-status', {}); }
+  catch (e) { console.warn(`[mneme/remote] vector-status unavailable org=${orgId}: ${e.message}`); return null; }
+}
+
+export async function remoteVectorPending(orgId, { kind = 'memory', cursor = null, limit = 100 } = {}) {
+  try {
+    const out = await _call(orgId, '/v1/vector-pending', { kind, cursor, limit });
+    return { items: Array.isArray(out?.items) ? out.items : [], cursor: out?.cursor || null };
+  } catch (e) {
+    console.warn(`[mneme/remote] vector-pending unavailable org=${orgId} kind=${kind}: ${e.message}`);
+    return null;
+  }
+}
+
+export async function remoteVectorRepair(orgId, { kind = 'memory', id, vector } = {}) {
+  try {
+    const out = await _call(orgId, '/v1/vector-repair', { kind, id, vector });
+    return out?.ok === true;
+  } catch (e) {
+    console.warn(`[mneme/remote] vector-repair failed org=${orgId} kind=${kind} id=${id}: ${e.message}`);
+    return null;
+  }
 }
 
 // Graph nodes+edges for a remote org's Memory Graph view.

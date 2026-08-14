@@ -246,7 +246,25 @@ export function amrLexicalRemote(orgId, text, filter, limit) {
 // KB layer (self-host): route document + evidence-segment writes/reads to the agent for remote orgs.
 // All return null/[] for non-remote (caller uses the central path). Async.
 export function amrKbDoc(orgId, doc) { return orgIsRemote(orgId) ? remoteKbDoc(orgId, doc) : null; }
-export function amrKbSegment(orgId, segment, vector) { return orgIsRemote(orgId) ? remoteKbSegment(orgId, segment, vector) : null; }
+export async function amrKbSegment(orgId, segment, vector) {
+  if (!orgIsRemote(orgId)) return null;
+  const ok = await remoteKbSegment(orgId, segment, vector);
+  if (ok) return ok;
+  // Evidence vectors need the same crash/retry guarantee as memories. The
+  // original bounded request retry was lost after process restart.
+  try {
+    const enqueue = await _getEnqueuePush();
+    if (enqueue) {
+      await enqueue(orgId, 'kbSegment', segment.id, {
+        segment,
+        vector: Array.from(vector || []),
+      });
+    }
+  } catch (enqErr) {
+    console.error(`[amrKbSegment][outbox] enqueue failed org=${orgId} segment=${segment?.id}: ${enqErr.message}`);
+  }
+  return null;
+}
 export function amrKbRecall(orgId, vector, opts) { return orgIsRemote(orgId) ? remoteKbRecall(orgId, vector, opts) : null; }
 export function amrKbLexicalRemote(orgId, text, opts) { return orgIsRemote(orgId) ? remoteKbLexical(orgId, text, opts) : null; }
 export function amrKbHydrate(orgId, ids, access) { return orgIsRemote(orgId) ? remoteKbHydrate(orgId, ids, access) : null; }

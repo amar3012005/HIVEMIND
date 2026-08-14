@@ -2417,6 +2417,9 @@ try {
   const { startPushWorker } = await import('./memory/outbox.js');
   await startPushWorker();
   console.log('[boot] Memory outbox push worker started');
+  const { startRemoteVectorReconciler } = await import('./vector/mneme/vector-reconciler.js');
+  startRemoteVectorReconciler();
+  console.log('[boot] Remote vector reconciler scheduled');
 } catch (err) {
   console.warn('[boot] Memory outbox push worker failed to start (non-fatal):', err.message);
 }

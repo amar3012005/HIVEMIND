@@ -11,9 +11,11 @@ const ids = {
   edge: '00000000-0000-4000-8000-00000000c103',
   document: '00000000-0000-4000-8000-00000000c201',
   segment: '00000000-0000-4000-8000-00000000c202',
+  repair: '00000000-0000-4000-8000-00000000c104',
 };
 const vector = (index) => Array.from({ length: 8 }, (_, position) => position === index ? 1 : 0);
 const access = { userId: '00000000-0000-4000-8000-00000000c301' };
+const longClaim = `Records are retained for seven years. ${'Complete supporting context must survive. '.repeat(20)}`;
 
 async function call(path, body, customHeaders = headers) {
   const response = await fetch(`${base}${path}`, {
@@ -44,12 +46,22 @@ if (process.argv[2] === 'write') {
   assert.equal((await call('/v1/write', {
     record: {
       id: ids.claim, userId: '00000000-0000-4000-8000-00000000c301',
-      title: 'Retention period', content: 'Records are retained for seven years.', memoryType: 'fact',
+      title: 'Retention period', content: longClaim, memoryType: 'fact',
       tags: ['promoted-memory', 'entity:retention-policy'], layer: 'memory', isLatest: true,
       scope: 'organization', metadata: { segment_id: ids.segment, importance_score: 0.92 },
     }, vector: vector(1), rels: [{
       id: ids.edge, fromId: ids.claim, toId: ids.parent, type: 'PartOf', confidence: 1,
     }],
+  })).payload.ok, true);
+  // A relational-first row simulates the exact failure window: PostgreSQL
+  // committed, vector phase pending. The specialized repair must index it
+  // without replaying or mutating the canonical row.
+  assert.equal((await call('/v1/write', {
+    record: {
+      id: ids.repair, userId: access.userId, title: 'Pending vector',
+      content: 'The recovery code is VECTOR-35113.', memoryType: 'fact',
+      tags: ['entity:vector-recovery'], layer: 'memory', isLatest: true,
+    },
   })).payload.ok, true);
   assert.equal((await call('/v1/kb-doc', { doc: {
     id: ids.document, userId: '00000000-0000-4000-8000-00000000c301',
@@ -65,11 +77,23 @@ if (process.argv[2] === 'write') {
   }, vector: vector(1) })).payload.ok, true);
 }
 
+if (process.argv[2] === 'write') {
+  const statusBefore = await call('/v1/vector-status', {});
+  assert.equal(statusBefore.payload.memories.pending, 1);
+  const pending = await call('/v1/vector-pending', { kind: 'memory', limit: 10 });
+  assert.deepEqual(pending.payload.items.map((row) => row.id), [ids.repair]);
+  assert.equal((await call('/v1/vector-repair', { kind: 'memory', id: ids.repair, vector: vector(2) })).payload.ok, true);
+  // Idempotent replay: same point, same row, still successful.
+  assert.equal((await call('/v1/vector-repair', { kind: 'memory', id: ids.repair, vector: vector(2) })).payload.ok, true);
+  const statusAfter = await call('/v1/vector-status', {});
+  assert.equal(statusAfter.payload.memories.pending, 0);
+}
+
 const recalled = await call('/v1/recall', { vector: vector(1), limit: 5, filter: { layer: 'memory', is_latest: true } });
 assert.equal(recalled.status, 200);
 assert.equal(recalled.payload.results[0].id, ids.claim);
 const hydrated = await call('/v1/hydrate', { ids: [ids.claim] });
-assert.equal(hydrated.payload.memories[0].content, 'Records are retained for seven years.');
+assert.equal(hydrated.payload.memories[0].content, longClaim);
 const evidence = await call('/v1/kb-recall', { vector: vector(1), limit: 5, documentId: ids.document, access });
 assert.equal(evidence.payload.results[0].segment_id, ids.segment);
 assert.equal(evidence.payload.results[0].title, 'German policy');
@@ -90,7 +114,7 @@ assert.equal(listed.payload.documents[0].id, ids.document);
 const relationships = await call('/v1/mem-relationships', { memoryId: ids.claim });
 assert.equal(relationships.payload.out[0].type, 'PartOf');
 const stats = await call('/v1/stats', {});
-assert.equal(stats.payload.memories, 2);
+assert.equal(stats.payload.memories, 3);
 assert.equal(stats.payload.relationships, 1);
 assertCanonicalBackendContract({
   backend: 'byod',

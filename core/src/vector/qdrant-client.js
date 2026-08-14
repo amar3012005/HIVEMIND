@@ -344,7 +344,10 @@ export class QdrantClient {
     if (orgIsRemote(memory.org_id)) {
       const _rrec = {
         id: memory.id, orgId: memory.org_id, userId: memory.user_id || null,
-        content: String(memory.content || '').slice(0, Number(process.env.QDRANT_PAYLOAD_PREVIEW_CHARS || 400)), title: memory.title || null, tags: memory.tags || [],
+        // This record is the customer's canonical PostgreSQL row, not merely a
+        // Qdrant payload. Sending the bounded vector-preview here overwrote the
+        // full sovereign memory during the second-phase same-id upsert.
+        content: String(memory.content || ''), title: memory.title || null, tags: memory.tags || [],
         memoryType: memory.memory_type || null, isLatest: memory.is_latest ?? true,
         layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
         cognitiveLayerRole: memory.cognitive_layer_role || null,
@@ -355,8 +358,13 @@ export class QdrantClient {
         documentDate: memory.document_date || null,
         metadata: memory.metadata || {},
       };
-      try { await amrWrite(memory.org_id, _rrec, point.vector); }
-      catch (e) { console.warn('[mneme] remote .amr write failed:', e.message); }
+      try {
+        const written = await amrWrite(memory.org_id, _rrec, point.vector);
+        if (!written) return null; // durable outbox was enqueued by amrWrite
+      } catch (e) {
+        console.warn('[mneme] remote .amr write failed:', e.message);
+        return null;
+      }
       return { id: memory.id, status: 'amr-remote' };
     }
 

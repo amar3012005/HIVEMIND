@@ -33,6 +33,7 @@ import {
   remoteUpdate,
   remoteUpdateTags,
   remoteDelete,
+  remoteKbSegment,
 } from '../vector/mneme/remote-backend.js';
 
 const require_ = createRequire(import.meta.url);
@@ -130,6 +131,8 @@ async function dispatch(row) {
       return remoteUpdateTags(orgId, payload.id, payload.tags);
     case 'delete':
       return remoteDelete(orgId, payload.id, payload.hard ?? false);
+    case 'kbSegment':
+      return remoteKbSegment(orgId, payload.segment, payload.vector);
     default:
       throw new Error(`[outbox] unknown op '${op}' for org=${orgId}`);
   }
@@ -155,7 +158,7 @@ function tryLoadIORedis() {
  * Insert a pending outbox row and enqueue a BullMQ job.
  *
  * @param {string} orgId
- * @param {'write'|'edge'|'update'|'updateTags'|'delete'} op
+ * @param {'write'|'edge'|'update'|'updateTags'|'delete'|'kbSegment'} op
  * @param {string} recordId  — the memory/edge id (FIFO partition key)
  * @param {object} payload   — full replay envelope
  * @returns {Promise<string>} outboxId

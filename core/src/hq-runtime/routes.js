@@ -1450,7 +1450,13 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);
         const result = await reconcileRuntimeCapabilities({ prisma, runtime, wakeScheduler });
-        const schedule = result.resolved.length ? null : await requestWake({ prisma, runtime, triggerType: 'connector_changed', key: `connector_changed:${Date.now()}` });
+        // No custom key here — a Date.now()-suffixed key was unique every call,
+        // defeating the orgId+idempotencyKey dedup and turning rapid /recheck
+        // polling into a full HQ wake-and-reprocess cycle on every single call
+        // (observed as a sub-second noise storm for a still-unresolved
+        // capability). requestWake's own default key (triggerType + minute
+        // bucket) coalesces repeated rechecks to at most one real wake/minute.
+        const schedule = result.resolved.length ? null : await requestWake({ prisma, runtime, triggerType: 'connector_changed' });
         Promise.resolve(wakeScheduler?.()).catch(() => {});
         return jsonResponse(res, { schedule, resolved: result.resolved, platform_managed: result.platform_managed }, 202);
       }

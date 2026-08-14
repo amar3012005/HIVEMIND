@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildSynthesisFallbackChain,
   chooseSynthesisModel,
   isCandidateSynthesisAcceptable,
   normalizeJsonObject,
@@ -11,6 +12,23 @@ import {
   shouldOptimizeRecallQuery,
   summarizeUsage,
 } from '../../src/agent/chat-synthesis-policy.js';
+
+test('synthesis fallback chain preserves candidate, requested model, and final safety model without duplicates', () => {
+  assert.deepEqual(buildSynthesisFallbackChain({
+    served: 'nvidia/nemotron-3.5-lightning:nitro',
+    requested: 'openai/gpt-oss-20b:nitro',
+    finalFallback: 'openai/gpt-oss-120b',
+  }), [
+    'nvidia/nemotron-3.5-lightning:nitro',
+    'openai/gpt-oss-20b:nitro',
+    'openai/gpt-oss-120b',
+  ]);
+  assert.deepEqual(buildSynthesisFallbackChain({
+    served: 'openai/gpt-oss-20b:nitro',
+    requested: 'openai/gpt-oss-20b:nitro',
+    finalFallback: 'openai/gpt-oss-20b:nitro',
+  }), ['openai/gpt-oss-20b:nitro']);
+});
 
 test('JSON synthesis normalizes provider nulls and scalars to an object', () => {
   assert.deepEqual(normalizeJsonObject(null), {});
@@ -22,8 +40,8 @@ test('JSON synthesis normalizes provider nulls and scalars to an object', () => 
   assert.deepEqual(parseJsonObjectContent('not JSON'), {});
 });
 
-test('router canonical query suppresses duplicate query optimization', () => {
-  assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color' }), false);
+test('every retrieval-bearing turn receives one query optimization pass', () => {
+  assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color' }), true);
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: '' }), true);
 });
 

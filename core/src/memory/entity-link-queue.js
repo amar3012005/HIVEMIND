@@ -24,6 +24,7 @@
 const DEFAULT_CONCURRENCY = Math.max(1, Number(process.env.ENTITY_LINK_QUEUE_CONCURRENCY || 4));
 const MAX_JOB_ATTEMPTS = Math.max(1, Number(process.env.ENTITY_LINK_QUEUE_ATTEMPTS || 2));
 const RETRY_DELAY_MS = Math.max(1000, Number(process.env.ENTITY_LINK_QUEUE_RETRY_MS || 5000));
+const MAX_QUEUE_SIZE = Math.max(100, Number(process.env.ENTITY_LINK_QUEUE_MAX || 10000));
 
 export class EntityLinkQueue {
   constructor({ engine, concurrency = DEFAULT_CONCURRENCY, logger = console } = {}) {
@@ -48,6 +49,11 @@ export class EntityLinkQueue {
     if (!memoryId) return false;
     if (this.running.has(memoryId) || this.queuedKeys.has(memoryId)) {
       this.counters.dropped += 1; // already queued/in-flight — idempotent
+      return false;
+    }
+    if (this.pending.length >= MAX_QUEUE_SIZE) {
+      this.counters.dropped += 1;
+      this.logger.warn?.(`[entity-link-queue] capacity ${MAX_QUEUE_SIZE} reached; ${memoryId.slice(0, 8)} remains eligible for durable backfill`);
       return false;
     }
     this.queuedKeys.add(memoryId);

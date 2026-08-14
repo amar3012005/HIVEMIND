@@ -33,7 +33,7 @@ import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from
 import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
-import { chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
+import { buildSynthesisFallbackChain, chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
 import {
@@ -118,6 +118,7 @@ const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_M
 //   • non-user-facing legacy helpers retain the internal Groq model.
 // Both are env-overridable so we can A/B without code changes.
 const INTERNAL_MODEL = process.env.HIVEMIND_AGENT_INTERNAL_MODEL || 'openai/gpt-oss-20b';
+const FINAL_FALLBACK_MODEL = process.env.HIVEMIND_AGENT_FINAL_FALLBACK_MODEL || 'openai/gpt-oss-120b';
 // The caller-selected model is reserved for user-facing synthesis below.
 const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
 
@@ -3385,26 +3386,49 @@ export async function runReactAgentV2({
       apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge, preloadedProfileContext,
       streamValidated: streamAnswer, onEvent,
     };
-    let answer;
-    try {
-      answer = await answerStep({ ...answerInput, model: answerModel });
-    } catch (error) {
-      if (answerModel !== requestedAnswerModel) {
-        trace.model_policy = { ...modelPolicy, fallback_reason: error.message || 'candidate_synthesis_failed' };
-        if (streamAnswer) onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'candidate_fallback' });
-        answerModel = requestedAnswerModel;
-        trace.models.synthesis = answerModel;
-        answer = await answerStep({ ...answerInput, model: answerModel });
-      } else {
-        throw error;
+    const synthesisModels = buildSynthesisFallbackChain({
+      served: answerModel,
+      requested: requestedAnswerModel,
+      finalFallback: FINAL_FALLBACK_MODEL,
+    });
+    const synthesizeWithFallback = async (input, { validateCandidate = true } = {}) => {
+      let lastError = null;
+      // Once a model has successfully taken over, progressive expansions start
+      // there instead of re-paying the failed candidate on every revealed page.
+      const attemptModels = [...new Set([answerModel, ...synthesisModels])];
+      for (let index = 0; index < attemptModels.length; index += 1) {
+        const candidateModel = attemptModels[index];
+        try {
+          const candidateAnswer = await answerStep({ ...input, model: candidateModel });
+          if (validateCandidate && candidateModel !== requestedAnswerModel
+              && candidateModel !== FINAL_FALLBACK_MODEL
+              && !isCandidateSynthesisAcceptable(candidateAnswer)) {
+            lastError = new Error('candidate_synthesis_validation_failed');
+            if (streamAnswer) onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'candidate_validation_fallback' });
+            continue;
+          }
+          if (index > 0) {
+            trace.model_policy = {
+              ...modelPolicy,
+              fallback_reason: lastError?.message || 'synthesis_fallback',
+              fallback_model: candidateModel,
+              fallback_depth: index,
+            };
+          }
+          answerModel = candidateModel;
+          trace.models.synthesis = candidateModel;
+          return candidateAnswer;
+        } catch (error) {
+          lastError = error;
+          trace.warnings.push(`synthesis_model_failed:${candidateModel}:${error.message || 'unknown'}`);
+          if (streamAnswer && index + 1 < attemptModels.length) {
+            onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'synthesis_model_fallback' });
+          }
+        }
       }
-    }
-    if (answerModel !== requestedAnswerModel && !isCandidateSynthesisAcceptable(answer)) {
-      trace.model_policy = { ...modelPolicy, fallback_reason: 'candidate_synthesis_validation_failed' };
-      answerModel = requestedAnswerModel;
-      trace.models.synthesis = answerModel;
-      answer = await answerStep({ ...answerInput, model: answerModel });
-    }
+      throw lastError || new Error('all_synthesis_models_failed');
+    };
+    let answer = await synthesizeWithFallback(answerInput);
     const progressiveAnswers = [answer];
     while (progressiveSession.candidates.length > 0 && shouldExpandProgressiveRecall(answer, progressiveSession)) {
       const previousUntil = progressiveSession.delivered_until;
@@ -3416,7 +3440,7 @@ export async function runReactAgentV2({
         from_rank: previousUntil + 1, to_rank: progressiveSession.delivered_until,
         candidate_count: progressiveSession.candidates.length,
       });
-      const expandedAnswer = await answerStep({ ...answerInput, model: answerModel });
+      const expandedAnswer = await synthesizeWithFallback(answerInput);
       answer = expandedAnswer;
       progressiveAnswers.push(expandedAnswer);
       trace.recall.progressive.delivered_until = progressiveSession.delivered_until;

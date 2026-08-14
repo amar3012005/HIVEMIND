@@ -383,33 +383,50 @@ Authorized projects:\n${JSON.stringify((projectCatalog || []).slice(0, 24))}\nAv
     temperature: 0,
     max_tokens: 650,
   };
-  const parserController = new AbortController();
-  const timeout = setTimeout(() => parserController.abort(), Number(process.env.CHAT_INTENT_TIMEOUT_MS || 2500));
-  if (signal) {
-    if (signal.aborted) parserController.abort();
-    else signal.addEventListener('abort', () => parserController.abort(), { once: true });
+  const fallbackModel = String(process.env.CHAT_INTENT_FALLBACK_MODEL || 'openai/gpt-oss-20b:nitro').trim();
+  const models = [...new Set([model, fallbackModel].filter(Boolean))];
+  let lastError = null;
+  let firstError = null;
+  for (let index = 0; index < models.length; index += 1) {
+    const candidateModel = models[index];
+    const parserController = new AbortController();
+    const timeoutMs = index === 0
+      ? Number(process.env.CHAT_INTENT_TIMEOUT_MS || 2500)
+      : Number(process.env.CHAT_INTENT_FALLBACK_TIMEOUT_MS || 4500);
+    const timeout = setTimeout(() => parserController.abort(), timeoutMs);
+    const abortFromParent = () => parserController.abort();
+    if (signal) {
+      if (signal.aborted) parserController.abort();
+      else signal.addEventListener('abort', abortFromParent, { once: true });
+    }
+    try {
+      const response = await chatCompletionFetch(candidateModel, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...body, model: candidateModel }), signal: parserController.signal,
+      }, { fallbackApiKey: apiKey, fetchImpl });
+      if (!response.ok) throw new Error(`intent_parser_http_${response.status}`);
+      const data = await response.json();
+      const call = data?.choices?.[0]?.message?.tool_calls?.find((item) => item.function?.name === 'route_chat_turn');
+      if (!call) throw new Error('intent_parser_missing_tool_call');
+      let parsed;
+      try { parsed = JSON.parse(call.function.arguments || '{}'); } catch { throw new Error('intent_parser_invalid_json'); }
+      return {
+        decision: normalizeIntentDecision(parsed, { message, language, allowedGroups }),
+        usage: data.usage || null,
+        model: candidateModel,
+        fallback_used: index > 0,
+      };
+    } catch (error) {
+      if (!firstError) firstError = error;
+      lastError = error;
+      if (signal?.aborted) break;
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener?.('abort', abortFromParent);
+    }
   }
-  try {
-    const response = await chatCompletionFetch(model, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body), signal: parserController.signal,
-    }, { fallbackApiKey: apiKey, fetchImpl });
-    if (!response.ok) throw new Error(`intent_parser_http_${response.status}`);
-    const data = await response.json();
-    const call = data?.choices?.[0]?.message?.tool_calls?.find((item) => item.function?.name === 'route_chat_turn');
-    if (!call) throw new Error('intent_parser_missing_tool_call');
-    let parsed;
-    try { parsed = JSON.parse(call.function.arguments || '{}'); } catch { throw new Error('intent_parser_invalid_json'); }
-    return {
-      decision: normalizeIntentDecision(parsed, { message, language, allowedGroups }),
-      usage: data.usage || null,
-    };
-  } catch (error) {
-    return { decision: safeRecallDecision({ message, language, reason: error.message }), usage: null };
-  } finally {
-    clearTimeout(timeout);
-  }
+  return { decision: safeRecallDecision({ message, language, reason: firstError?.message || lastError?.message }), usage: null, fallback_used: true };
 }
 
 export function intentDecisionToPlan(decision, message) {

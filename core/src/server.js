@@ -25,6 +25,8 @@ import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
 import { KnowledgeUploadService } from './knowledge/upload-service.js';
 import { deriveMeetingSessionIntegrity } from './knowledge/meeting-session-contract.js';
 import { processMeetingSegmentExtraction, reconcileMeetingSegmentExtractions } from './knowledge/meeting-segment-extractor.js';
+import { persistMeetingAudio, meetingAudioStoreIsDurable } from './knowledge/meeting-audio-store.js';
+import { processMeetingAudioSegment, reconcileMeetingAudioSegments, pruneFinalizedMeetingAudio } from './knowledge/meeting-audio-worker.js';
 import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
 import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
@@ -541,6 +543,31 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     intervalMs: 30_000,
     singleton: false,
     run: async () => { await processDueCampaignActions({ prisma, limit: 20 }); },
+  });
+  scheduleRecurringMaintenanceJob({
+    enabled: meetingAudioStoreIsDurable(),
+    prisma,
+    jobName: 'meeting-audio-retention',
+    initialDelayMs: 10 * 60 * 1000,
+    intervalMs: 24 * 60 * 60 * 1000,
+    run: async () => {
+      const result = await pruneFinalizedMeetingAudio(prisma, {
+        limit: Number(process.env.MEETING_AUDIO_RETENTION_SWEEP_LIMIT || 50),
+        retentionDays: Number(process.env.MEETING_AUDIO_RETENTION_DAYS || 30),
+      });
+      if (result.removed) console.info('[meeting-audio-retention]', result);
+    },
+  });
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'meeting-audio-transcription',
+    initialDelayMs: 10_000,
+    intervalMs: Math.max(15_000, Number(process.env.MEETING_AUDIO_RECONCILE_INTERVAL_MS || 30_000)),
+    run: async () => {
+      const result = await reconcileMeetingAudioSegments(prisma, { limit: Number(process.env.MEETING_AUDIO_RECONCILE_LIMIT || 10) });
+      if (result.scanned) console.info('[meeting-audio-reconciler]', result);
+    },
   });
   scheduleRecurringMaintenanceJob({
     enabled: true,
@@ -6387,6 +6414,28 @@ exit \$RC
         });
       }
 
+      if (pathname === '/api/meetings/sessions' && req.method === 'GET') {
+        if (orgIsRemote(_mOrgId)) return jsonResponse(res, { error: 'remote_session_lifecycle_pending' }, 501);
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT s.id, s.status, s.updated_at, s.expected_segments,
+                    COUNT(DISTINCT a.id)::int AS audio_count,
+                    COUNT(DISTINCT a.id) FILTER (WHERE a.status='transcribed')::int AS audio_transcribed_count,
+                    COUNT(DISTINCT a.id) FILTER (WHERE a.status='error')::int AS audio_error_count,
+                    COUNT(DISTINCT g.id)::int AS transcript_count
+               FROM hivemind.meeting_sessions s
+               LEFT JOIN hivemind.meeting_audio_segments a ON a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id
+               LEFT JOIN hivemind.meeting_segments g ON g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id
+              WHERE s.org_id=$1::uuid AND s.user_id=$2::uuid AND s.status <> 'ready'
+              GROUP BY s.id ORDER BY s.updated_at DESC LIMIT 25`, _mOrgId, _mUserId,
+          );
+          return jsonResponse(res, { sessions: rows || [], durability: 'server_persisted' });
+        } catch (error) {
+          return jsonResponse(res, { error: 'meeting_sessions_list_error' }, 500);
+        }
+      }
+
       if (pathname === '/api/meetings/sessions' && req.method === 'POST') {
         if (body?.consent !== true) {
           return jsonResponse(res, {
@@ -6459,6 +6508,63 @@ exit \$RC
         } catch (e) {
           console.error('[meetings] session create failed', { org_id: _mOrgId, user_id: _mUserId, error: e?.message || String(e) });
           return jsonResponse(res, { error: 'meeting_session_create_error' }, 500);
+        }
+      }
+
+      // POST /api/meetings/sessions/:sid/audio/:idx — the recorder's durable
+      // boundary. Bytes are atomically committed to the configured persistent
+      // meeting-audio volume before the browser may delete its IndexedDB copy;
+      // a background worker owns STT retries after the HTTP response returns.
+      {
+        const audioMatch = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})\/audio\/(\d+)$/);
+        if (audioMatch && req.method === 'POST') {
+          const mOrg = _mOrgId, mUser = _mUserId, sid = audioMatch[1], idx = Number(audioMatch[2]);
+          if (orgIsRemote(mOrg)) return jsonResponse(res, { error: 'remote_meeting_audio_pipeline_pending', session_id: sid }, 501);
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!meetingAudioStoreIsDurable()) return jsonResponse(res, { error: 'meeting_audio_store_not_durable' }, 503);
+          if (!_ct.startsWith('audio/')) return jsonResponse(res, { error: 'audio_unsupported' }, 415);
+          const maxMb = Number(process.env.MEETING_STT_MAX_MB || process.env.GROQ_WHISPER_MAX_MB || 24);
+          const maxBytes = maxMb * 1024 * 1024;
+          const chunks = []; let received = 0;
+          for await (const chunk of req) {
+            received += chunk.length;
+            if (received > maxBytes) return jsonResponse(res, { error: 'audio_too_large', max_mb: maxMb }, 413);
+            chunks.push(chunk);
+          }
+          const audio = Buffer.concat(chunks);
+          if (!audio.length) return jsonResponse(res, { error: 'empty_audio' }, 400);
+          try {
+            const session = await prisma.$queryRawUnsafe(
+              `SELECT id FROM hivemind.meeting_sessions WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid`, sid, mOrg, mUser,
+            );
+            if (!session?.[0]) return jsonResponse(res, { error: 'not_found' }, 404);
+            const startMs = Number(url.searchParams.get('start_ms'));
+            const endMs = Number(url.searchParams.get('end_ms'));
+            const checksum = crypto.createHash('sha256').update(audio).digest('hex');
+            const existing = await prisma.$queryRawUnsafe(
+              `SELECT checksum, status FROM hivemind.meeting_audio_segments WHERE session_id=$1::uuid AND idx=$2 AND org_id=$3::uuid AND user_id=$4::uuid`,
+              sid, idx, mOrg, mUser,
+            );
+            if (existing?.[0] && existing[0].checksum !== checksum) {
+              return jsonResponse(res, { error: 'audio_segment_conflict', session_id: sid, segment_index: idx }, 409);
+            }
+            const stored = await persistMeetingAudio({ orgId: mOrg, sessionId: sid, idx, contentType: _ct, bytes: audio });
+            await prisma.$executeRawUnsafe(
+              `INSERT INTO hivemind.meeting_audio_segments
+                 (session_id,org_id,user_id,idx,storage_key,checksum,content_type,byte_size,start_ms,end_ms,status)
+               VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,'queued')
+               ON CONFLICT (session_id,idx) DO UPDATE SET updated_at=now()
+               WHERE hivemind.meeting_audio_segments.checksum=EXCLUDED.checksum`,
+              sid, mOrg, mUser, idx, stored.storageKey, stored.checksum, _ct.slice(0, 160), stored.byteSize,
+              Number.isFinite(startMs) ? startMs : null, Number.isFinite(endMs) ? endMs : null,
+            );
+            void processMeetingAudioSegment(prisma, { sessionId: sid, idx, orgId: mOrg, userId: mUser })
+              .catch((error) => console.warn('[meeting-audio] start failed:', error?.message || error));
+            return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, status: existing?.[0]?.status === 'transcribed' ? 'transcribed' : 'queued', durability: 'server_persisted' }, 202);
+          } catch (error) {
+            console.error('[meetings] audio persist failed', { session_id: sid, org_id: mOrg, user_id: mUser, error: error?.message || String(error) });
+            return jsonResponse(res, { error: 'meeting_audio_save_error' }, 500);
+          }
         }
       }
 
@@ -6652,10 +6758,22 @@ exit \$RC
             windows.push(transcript.slice(i, end));
             i = end - WINDOW; // align next start to the (possibly shifted) boundary
           }
-          const parts = await Promise.all(windows.map((w, idx) => callLLM([
-            { role: 'system', content: sysEnt },
-            { role: 'user', content: `${participantsBlock}${notes ? `USER NOTES:\n${notes}\n\n` : ''}TRANSCRIPT (part ${idx + 1}/${windows.length}):\n${w}` },
-          ]).catch(() => null)));
+          // Never fan a five-hour meeting into dozens of concurrent model
+          // requests. A small bounded map preserves all windows while keeping
+          // provider rate limits, memory and retry pressure predictable.
+          const parts = new Array(windows.length).fill(null);
+          let nextWindow = 0;
+          const workers = Array.from({ length: Math.min(2, windows.length) }, async () => {
+            while (nextWindow < windows.length) {
+              const idx = nextWindow++;
+              const w = windows[idx];
+              parts[idx] = await callLLM([
+                { role: 'system', content: sysEnt },
+                { role: 'user', content: `${participantsBlock}${notes ? `USER NOTES:\n${notes}\n\n` : ''}TRANSCRIPT (part ${idx + 1}/${windows.length}):\n${w}` },
+              ]).catch(() => null);
+            }
+          });
+          await Promise.all(workers);
           const ok = parts.filter(Boolean);
           if (!ok.length) return jsonResponse(res, { error: 'insights_failed' }, 502);
           // Merge: union + dedup arrays; keep last non-empty scalars.
@@ -7017,13 +7135,17 @@ exit \$RC
             const rows = await prisma.$queryRawUnsafe(
               `SELECT s.id, s.status, s.consent_recorded, s.expected_segment_ms, s.expected_segments,
                       s.finalized_meeting_id, s.failure_code, s.failure_detail, s.created_at, s.updated_at, s.finalized_at,
-                      COUNT(g.id)::int AS segment_count,
+                      COUNT(DISTINCT g.id)::int AS segment_count,
                       COALESCE(MAX(g.idx), -1)::int AS max_segment_index,
-                      COUNT(*) FILTER (WHERE g.extraction_status='done')::int AS extracted_count,
-                      COUNT(*) FILTER (WHERE g.extraction_status='error')::int AS extraction_error_count,
-                      ARRAY_REMOVE(ARRAY_AGG(g.idx ORDER BY g.idx), NULL) AS segment_indexes
+                      COUNT(DISTINCT g.id) FILTER (WHERE g.extraction_status='done')::int AS extracted_count,
+                      COUNT(DISTINCT g.id) FILTER (WHERE g.extraction_status='error')::int AS extraction_error_count,
+                      COUNT(DISTINCT a.id)::int AS audio_count,
+                      COUNT(DISTINCT a.id) FILTER (WHERE a.status='transcribed')::int AS audio_transcribed_count,
+                      COUNT(DISTINCT a.id) FILTER (WHERE a.status='error')::int AS audio_error_count,
+                      ARRAY_REMOVE(ARRAY_AGG(DISTINCT g.idx ORDER BY g.idx), NULL) AS segment_indexes
                  FROM hivemind.meeting_sessions s
                  LEFT JOIN hivemind.meeting_segments g ON g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id
+                 LEFT JOIN hivemind.meeting_audio_segments a ON a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id
                 WHERE s.id=$1::uuid AND s.org_id=$2::uuid AND s.user_id=$3::uuid
                 GROUP BY s.id`,
               sid, mOrg, mUser,
@@ -7059,6 +7181,9 @@ exit \$RC
                 missing_indexes: integrity.missingIndexes,
                 extraction_done: Number(session.extracted_count || 0),
                 extraction_errors: Number(session.extraction_error_count || 0),
+                audio_uploaded: Number(session.audio_count || 0),
+                audio_transcribed: Number(session.audio_transcribed_count || 0),
+                audio_errors: Number(session.audio_error_count || 0),
               },
               complete: integrity.complete,
               durability: 'server_persisted',

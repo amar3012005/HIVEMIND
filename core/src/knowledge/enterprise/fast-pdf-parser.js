@@ -92,3 +92,45 @@ export async function fastPdfExtract(filePath) {
     return { text: '', pages: 0, isImageHeavy: true, error: err.message };
   }
 }
+
+/**
+ * Split pdf-parse's flat text into page blocks without dropping the text before
+ * the first emitted page marker.
+ *
+ * pdf-parse does not consistently emit `-- 1 of N --` at byte zero. A common
+ * shape is:
+ *
+ *   <all page-one text>\n-- 2 of 2 --\n<page-two text>
+ *
+ * The previous upload adapter iterated only the marker captures, so the
+ * preamble (the whole first page in this shape) vanished from hybrid chunks.
+ * The document still reported the full parser character count, which made the
+ * partial ingest look healthy. Preserve that preamble as the page immediately
+ * preceding the first marker, and merge duplicate page blocks defensively.
+ */
+export function splitFastPdfPageBlocks(text) {
+  const source = String(text || '');
+  if (!source.trim()) return [];
+  const parts = source.split(/\n?-- (\d+) of \d+ --\n?/);
+  const blocks = [];
+  const firstMarkedPage = Number(parts[1]);
+  const preamble = String(parts[0] || '').trim();
+  if (preamble.length >= 20) {
+    blocks.push({
+      page: Number.isFinite(firstMarkedPage) && firstMarkedPage > 1
+        ? firstMarkedPage - 1
+        : 1,
+      text: preamble,
+    });
+  }
+  for (let i = 1; i < parts.length; i += 2) {
+    const page = Number(parts[i]);
+    const pageText = String(parts[i + 1] || '').trim();
+    if (!Number.isFinite(page) || page <= 0 || pageText.length < 20) continue;
+    const previous = blocks.at(-1);
+    if (previous?.page === page) previous.text = `${previous.text}\n${pageText}`.trim();
+    else blocks.push({ page, text: pageText });
+  }
+  if (!blocks.length) return [{ page: 1, text: source.trim() }];
+  return blocks;
+}

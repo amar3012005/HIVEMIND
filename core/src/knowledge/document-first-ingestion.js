@@ -232,6 +232,26 @@ export function markdownFromHeadedChunks(chunks) {
   return emitted ? out.join('\n\n') : null;
 }
 
+/**
+ * Reconstruct markdown only when parser chunks account for most of the parser's
+ * canonical text. A partial chunk list must never replace complete flat text.
+ *
+ * This is an ingestion-boundary invariant, not a parser-specific workaround:
+ * any future tier that returns complete `text` plus incomplete `hybridChunks`
+ * will retain the complete text and let semantic segmentation slice it safely.
+ */
+export function completeChunkMarkdown(fullText, chunks, minCoverage = 0.8) {
+  const markdown = markdownFromHeadedChunks(chunks);
+  if (!markdown) return { markdown: null, coverage: 0 };
+  const visible = (value) => String(value || '').replace(/\s+/g, '');
+  const fullLength = visible(fullText).length;
+  if (!fullLength) return { markdown, coverage: 1 };
+  const deliveredLength = (Array.isArray(chunks) ? chunks : [])
+    .reduce((sum, chunk) => sum + visible(chunk?.text).length, 0);
+  const coverage = Math.min(1, deliveredLength / fullLength);
+  return { markdown: coverage >= minCoverage ? markdown : null, coverage };
+}
+
 export function sanitizeSegmentText(text) {
   return String(text || '')
     .replace(/\u0000/g, '')
@@ -3681,6 +3701,11 @@ Every item must include a non-empty content field and one or more valid support_
             const synthesizedText = parseOk
               ? doclingResult.text
               : (doclingResult.hybridChunks || []).map(c => c.text).join('\n\n');
+            const rebuilt = completeChunkMarkdown(synthesizedText, doclingResult.hybridChunks);
+            if (!doclingResult.markdown && rebuilt.coverage > 0 && !rebuilt.markdown) {
+              console.warn(`[segments] rejected partial reconstructed markdown: chunks cover `
+                + `${Math.round(rebuilt.coverage * 100)}% of parser text; preserving full text`);
+            }
             return {
               success: true,
               // REPORT THE TIER THAT ACTUALLY RAN. This hardcoded 'docling', overwriting the
@@ -3700,9 +3725,7 @@ Every item must include a non-empty content field and one or more valid support_
               // from the chunk headings we already fetched (chunks-only = parser failed, chunker
               // did not), and only then fall back to NULL — so a consumer can still tell "no
               // structure available" from "structure that happens to be flat".
-              markdown: doclingResult.markdown
-                || markdownFromHeadedChunks(doclingResult.hybridChunks)
-                || null,
+              markdown: doclingResult.markdown || rebuilt.markdown || null,
               structure: doclingResult.json,
               tables: doclingResult.tables || [],
               pages: doclingResult.pages || [],

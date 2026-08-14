@@ -6,6 +6,17 @@
 // Zero impact on dual/sole orgs — only invoked when mnemeMode()==='remote'.
 
 const TIMEOUT_MS = Number(process.env.MNEME_REMOTE_TIMEOUT_MS || 4000);
+const FAILURE_COOLDOWN_MS = Number(process.env.MNEME_REMOTE_FAILURE_COOLDOWN_MS || 5000);
+const _failureCircuitUntil = new Map();
+
+function _circuitKey(orgId, path) {
+  // Keep write durability independent from read availability. A timed-out
+  // recall must not suppress a subsequent write/outbox attempt, while repeated
+  // read hops during the same outage should fail fast instead of each spending
+  // the full transport timeout.
+  const isWrite = /^\/v1\/(write|edge|update|update-tags|delete|kb-doc|kb-segment|kb-table|kb-table-row|vector-repair)/.test(path);
+  return `${orgId}:${isWrite ? 'write' : 'read'}`;
+}
 
 // orgId → { url, token }. Sources, in order:
 //   1. in-memory (registerAgent — same-process enrollment).
@@ -106,6 +117,11 @@ async function _call(orgId, path, body) {
     if (out?.ok === false) throw new Error(`agent ${path} rejected request: ${out.error || 'ok=false'}`);
     return out;
   }
+  const circuitKey = _circuitKey(orgId, path);
+  const unavailableUntil = _failureCircuitUntil.get(circuitKey) || 0;
+  if (unavailableUntil > Date.now()) {
+    throw new Error(`agent ${path} transport circuit open`);
+  }
   const tokens = [a.token, ...(a.fallbackTokens || [])].filter(Boolean);
   let lastStatus = null;
   for (const token of tokens) {
@@ -127,11 +143,21 @@ async function _call(orgId, path, body) {
         if (out?.ok === false) {
           throw new Error(`agent ${path} rejected request: ${out.error || 'ok=false'}`);
         }
+        _failureCircuitUntil.delete(circuitKey);
         return out;
       }
       lastStatus = res.status;
       // Only 401 can indicate a Box that has not switched to the rotated token.
       if (res.status !== 401) break;
+    } catch (error) {
+      // Only transport failures open the circuit. Authentication, capability
+      // 404s and operation-level {ok:false} responses are deterministic and
+      // must remain observable/retryable on their own terms.
+      if (error?.name === 'AbortError'
+          || /fetch failed|socket|network|aborted|ECONN|ENOTFOUND|EAI_AGAIN/i.test(String(error?.message || ''))) {
+        _failureCircuitUntil.set(circuitKey, Date.now() + FAILURE_COOLDOWN_MS);
+      }
+      throw error;
     } finally {
       clearTimeout(t);
     }

@@ -1911,7 +1911,7 @@ if (process.env.DOCLING_URL) {
         let _pdfProbe = null;
         if (ext === 'pdf') {
           try {
-            const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
+            const { fastPdfExtract, splitFastPdfPageBlocks } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
             _pdfProbe = fast;
             // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
@@ -1971,20 +1971,10 @@ if (process.env.DOCLING_URL) {
               // map cleanly to pages. Heading derived from first line of each page.
               let hybridChunks = [];
               try {
-                const PAGE_SPLIT = /\n?-- (\d+) of \d+ --\n?/;
-                const parts = fast.text.split(PAGE_SPLIT);
-                // parts = [pre, '1', 'pageText', '2', 'pageText', ...]
-                const pageBlocks = [];
-                for (let i = 1; i < parts.length; i += 2) {
-                  const pageNum = Number(parts[i]);
-                  const pageText = (parts[i + 1] || '').trim();
-                  if (pageText.length < 20) continue;
-                  pageBlocks.push({ page: pageNum, text: pageText });
-                }
-                // Fallback: no page markers → treat whole doc as one block
-                if (pageBlocks.length === 0) {
-                  pageBlocks.push({ page: 1, text: fast.text.trim() });
-                }
+                // pdf-parse may emit its first marker only BETWEEN pages (for
+                // example the first marker is `-- 2 of 2 --`). The pre-marker
+                // bytes are page one, not disposable parser furniture.
+                const pageBlocks = splitFastPdfPageBlocks(fast.text);
                 const CHUNK_TARGET = 1500;
                 const CHUNK_OVERLAP = 200;
                 // Heading detector: skip running-header/footer noise (date stamps,

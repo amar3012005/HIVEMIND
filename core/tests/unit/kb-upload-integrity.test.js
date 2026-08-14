@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chunkText } from '../../src/knowledge/document-chunker.js';
-import { estimateFactBearingSentences, LLM_PROFILES, llmProfile } from '../../src/knowledge/document-first-ingestion.js';
+import {
+  completeChunkMarkdown,
+  estimateFactBearingSentences,
+  LLM_PROFILES,
+  llmProfile,
+} from '../../src/knowledge/document-first-ingestion.js';
+import { splitFastPdfPageBlocks } from '../../src/knowledge/enterprise/fast-pdf-parser.js';
 
 // A 3-section markdown doc with facts spread across sections (shape of the
 // 2026-08-05 live repro: segment 1 began "val from Martina Berger").
@@ -59,4 +65,27 @@ test('claim-structuring budget is reachable: batch cap fits under the token ceil
 
 test('llmProfile throws on unknown feature (no silent default budget)', () => {
   assert.throws(() => llmProfile('nope-not-a-feature'), /no profile/);
+});
+
+test('fast-pdf page splitting retains page one when the first marker is page two', () => {
+  const pageOne = `Course registration\n${'Module A instructor and assessment details. '.repeat(24)}`;
+  const pageTwo = `Advanced Photonics\n${'Module B instructor and examination details. '.repeat(10)}`;
+  const blocks = splitFastPdfPageBlocks(`${pageOne}\n-- 2 of 2 --\n${pageTwo}`);
+
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0].page, 1);
+  assert.equal(blocks[1].page, 2);
+  assert.match(blocks[0].text, /Module A instructor/);
+  assert.match(blocks[1].text, /Advanced Photonics/);
+});
+
+test('partial hybrid chunks cannot replace complete parser text', () => {
+  const firstPage = `Course registration page one. ${'Required course information. '.repeat(45)}`;
+  const lastPage = `Advanced Photonics page two. ${'Signature field. '.repeat(8)}`;
+  const result = completeChunkMarkdown(`${firstPage}\n${lastPage}`, [
+    { text: lastPage, headings: ['Advanced Photonics'], page: 2 },
+  ]);
+
+  assert.ok(result.coverage < 0.5, `expected visibly partial coverage, got ${result.coverage}`);
+  assert.equal(result.markdown, null);
 });

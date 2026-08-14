@@ -4273,6 +4273,29 @@ model Meeting {
   @@map("meetings")
 }
 
+/// Durable lifecycle owner for an in-progress recorder session. A meeting row
+/// only exists after finalization; this record is the source of truth while
+/// audio/transcript segments are still arriving or being retried.
+model MeetingSession {
+  id                String    @id @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  status            String    @default("recording") @db.VarChar(24)
+  consentRecorded   Boolean   @default(false) @map("consent_recorded")
+  expectedSegmentMs Int       @default(600000) @map("expected_segment_ms")
+  expectedSegments  Int?      @map("expected_segments")
+  finalizedMeetingId String?  @map("finalized_meeting_id") @db.Uuid
+  failureCode       String?   @map("failure_code") @db.VarChar(80)
+  failureDetail     String?   @map("failure_detail")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  finalizedAt       DateTime? @map("finalized_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, status, updatedAt(sort: Desc)], map: "meeting_sessions_org_user_status_idx")
+  @@index([finalizedMeetingId], map: "meeting_sessions_finalized_meeting_idx")
+  @@map("meeting_sessions")
+}
+
 /// P1 — progressive durable transcript. Each 10-min recording segment is persisted
 /// here AS IT TRANSCRIBES (keyed by a client-generated session_id), so a long
 /// meeting survives a tab crash and the transcript is recoverable. At save the

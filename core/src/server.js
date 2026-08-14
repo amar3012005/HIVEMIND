@@ -23,6 +23,7 @@ import { OAuthStateStore } from './oauth/oauth-state-store.js';
 import { buildChatRecallContext } from './routes/chat.js';
 import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
 import { KnowledgeUploadService } from './knowledge/upload-service.js';
+import { deriveMeetingSessionIntegrity } from './knowledge/meeting-session-contract.js';
 import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
 import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
@@ -6403,11 +6404,50 @@ exit \$RC
             plan: usage.plan, reason: 'Meeting notes monthly allowance reached.',
           }, 'meetingMinutes'), 402);
         }
-        return jsonResponse(res, {
-          session_id: crypto.randomUUID(),
-          remaining_seconds: remainingSeconds,
-          consent_recorded: true,
-        }, 201);
+        const requestedSessionId = typeof body?.session_id === 'string' && /^[0-9a-fA-F-]{36}$/.test(body.session_id)
+          ? body.session_id
+          : null;
+        const sessionId = requestedSessionId || crypto.randomUUID();
+        const expectedSegmentMs = Math.min(30 * 60 * 1000, Math.max(60 * 1000, Number(body?.expected_segment_ms) || 10 * 60 * 1000));
+
+        // Remote sessions must be persisted by the remote agent. Do not quietly
+        // create a central row: that would violate residency and falsely claim
+        // that a crash is recoverable from the tenant's selected storage.
+        if (orgIsRemote(_mOrgId)) {
+          return jsonResponse(res, {
+            session_id: sessionId,
+            remaining_seconds: remainingSeconds,
+            consent_recorded: true,
+            durability: 'remote_segments_only',
+            recovery_status: 'remote_session_lifecycle_pending',
+          }, 201);
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `INSERT INTO hivemind.meeting_sessions
+               (id, org_id, user_id, status, consent_recorded, expected_segment_ms)
+             VALUES ($1::uuid,$2::uuid,$3::uuid,'recording',true,$4)
+             ON CONFLICT (id) DO UPDATE
+               SET updated_at=now()
+             WHERE hivemind.meeting_sessions.org_id=EXCLUDED.org_id
+               AND hivemind.meeting_sessions.user_id=EXCLUDED.user_id
+             RETURNING id, status, consent_recorded, expected_segment_ms, created_at`,
+            sessionId, _mOrgId, _mUserId, expectedSegmentMs,
+          );
+          if (!rows?.[0]) return jsonResponse(res, { error: 'session_id_conflict' }, 409);
+          return jsonResponse(res, {
+            session_id: rows[0].id,
+            remaining_seconds: remainingSeconds,
+            consent_recorded: rows[0].consent_recorded,
+            expected_segment_ms: rows[0].expected_segment_ms,
+            status: rows[0].status,
+            durability: 'server_persisted',
+          }, 201);
+        } catch (e) {
+          console.error('[meetings] session create failed', { org_id: _mOrgId, user_id: _mUserId, error: e?.message || String(e) });
+          return jsonResponse(res, { error: 'meeting_session_create_error' }, 500);
+        }
       }
 
       // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.
@@ -6863,6 +6903,20 @@ exit \$RC
                 WHERE session_id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid AND meeting_id IS NULL`,
               _newId, body.session_id, mOrg, mUser,
             ).catch((e) => console.warn('[meetings] segment link failed:', e.message));
+            // The meeting row is the terminal durable result for this session.
+            // Mark this only after the row and its segment links exist, so a
+            // lost HTTP response can safely retry without producing a duplicate.
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.meeting_sessions
+                  SET status='ready', finalized_meeting_id=$1::uuid,
+                      expected_segments=COALESCE($5::int, (SELECT COUNT(*)::int FROM hivemind.meeting_segments WHERE session_id=$2::uuid)),
+                      finalized_at=now(), updated_at=now(), failure_code=NULL, failure_detail=NULL
+                WHERE id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid`,
+              _newId, body.session_id, mOrg, mUser,
+              Number.isInteger(Number(body.expected_segment_count)) && Number(body.expected_segment_count) >= 0
+                ? Math.min(1000, Number(body.expected_segment_count))
+                : null,
+            ).catch((e) => console.warn('[meetings] session finalize mark failed:', e.message));
           }
           if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
@@ -6902,6 +6956,15 @@ exit \$RC
         }
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
+          // Pre-session clients are still accepted, but their recovery mode is
+          // visible: this creates an authenticated legacy session rather than
+          // silently relying only on browser memory.
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO hivemind.meeting_sessions (id, org_id, user_id, status, consent_recorded)
+             VALUES ($1::uuid,$2::uuid,$3::uuid,'recording',false)
+             ON CONFLICT (id) DO NOTHING`,
+            sid, mOrg, mUser,
+          );
           await prisma.$executeRawUnsafe(
             `INSERT INTO hivemind.meeting_segments (session_id, org_id, user_id, idx, text, speakers, start_ms, end_ms)
                VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::jsonb,$7,$8)
@@ -6933,9 +6996,81 @@ exit \$RC
               await prisma.$executeRawUnsafe(`UPDATE hivemind.meeting_segments SET extraction_status='error' WHERE session_id=$1::uuid AND idx=$2`, sid, idx).catch(() => {});
             }
           })();
-          return jsonResponse(res, { ok: true });
+          return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, durability: 'server_persisted' });
         } catch (e) {
           return jsonResponse(res, { error: 'segment_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
+      // GET /api/meetings/sessions/:sid — authoritative recovery/status view.
+      // It intentionally reports gaps and failed extraction rather than treating
+      // missing transcript segments as empty text or a successful meeting.
+      {
+        const mSession = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})$/);
+        if (mSession && req.method === 'GET') {
+          const mOrg = _mOrgId, mUser = _mUserId, sid = mSession[1];
+          if (orgIsRemote(mOrg)) {
+            return jsonResponse(res, {
+              error: 'remote_session_lifecycle_pending',
+              session_id: sid,
+              recoverable: false,
+            }, 501);
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT s.id, s.status, s.consent_recorded, s.expected_segment_ms, s.expected_segments,
+                      s.finalized_meeting_id, s.failure_code, s.failure_detail, s.created_at, s.updated_at, s.finalized_at,
+                      COUNT(g.id)::int AS segment_count,
+                      COALESCE(MAX(g.idx), -1)::int AS max_segment_index,
+                      COUNT(*) FILTER (WHERE g.extraction_status='done')::int AS extracted_count,
+                      COUNT(*) FILTER (WHERE g.extraction_status='error')::int AS extraction_error_count,
+                      ARRAY_REMOVE(ARRAY_AGG(g.idx ORDER BY g.idx), NULL) AS segment_indexes
+                 FROM hivemind.meeting_sessions s
+                 LEFT JOIN hivemind.meeting_segments g ON g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id
+                WHERE s.id=$1::uuid AND s.org_id=$2::uuid AND s.user_id=$3::uuid
+                GROUP BY s.id`,
+              sid, mOrg, mUser,
+            );
+            const session = rows?.[0];
+            if (!session) return jsonResponse(res, { error: 'not_found' }, 404);
+            const expected = session.expected_segments == null ? null : Number(session.expected_segments);
+            const segmentCount = Number(session.segment_count || 0);
+            const integrity = deriveMeetingSessionIntegrity({
+              status: session.status,
+              expectedSegments: expected,
+              segmentCount,
+              maxSegmentIndex: session.max_segment_index,
+              segmentIndexes: session.segment_indexes,
+            });
+            return jsonResponse(res, {
+              session: {
+                id: session.id,
+                status: session.status,
+                consent_recorded: session.consent_recorded,
+                expected_segment_ms: Number(session.expected_segment_ms),
+                expected_segments: expected,
+                finalized_meeting_id: session.finalized_meeting_id,
+                failure_code: session.failure_code,
+                failure_detail: session.failure_detail,
+                created_at: session.created_at,
+                updated_at: session.updated_at,
+                finalized_at: session.finalized_at,
+              },
+              segments: {
+                count: segmentCount,
+                indexes: integrity.indexes,
+                missing_indexes: integrity.missingIndexes,
+                extraction_done: Number(session.extracted_count || 0),
+                extraction_errors: Number(session.extraction_error_count || 0),
+              },
+              complete: integrity.complete,
+              durability: 'server_persisted',
+            });
+          } catch (e) {
+            console.error('[meetings] session status failed', { org_id: mOrg, user_id: mUser, session_id: sid, error: e?.message || String(e) });
+            return jsonResponse(res, { error: 'meeting_session_status_error' }, 500);
+          }
         }
       }
 

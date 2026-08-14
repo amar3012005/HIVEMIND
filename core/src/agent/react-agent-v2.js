@@ -1960,7 +1960,7 @@ ${message}`;
     ? { order: finalSynthesisProviderOrder }
     : undefined;
 
-  if (streamValidated && String(model || '').startsWith('nvidia/nemotron-3.5-lightning')) {
+  if (streamValidated) {
     return callValidatedClaimStream({
       // Streaming has its own NDJSON output contract, but it must retain the
       // same persona and grounding voice as non-streamed synthesis. Keep the

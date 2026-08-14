@@ -489,12 +489,16 @@ const routes = {
          -- ingest upsert — keep the existing values so a re-ingest / 2-phase
          -- vector write never resets a memory's accumulated recall_count/strength.
          recall_count=memories.recall_count, strength=memories.strength,
-         vector_synced=false, deleted_at=NULL`,
+         -- A metadata/relationship replay without a vector must not mark a
+         -- previously indexed row unsynced. Only a new vector-bearing write
+         -- begins the two-phase vector replacement.
+         vector_synced=CASE WHEN $23::boolean THEN false ELSE memories.vector_synced END,
+         deleted_at=NULL`,
       [r.id, ORG, r.userId || null, r.content || null, r.title || null, r.tags || [], r.memoryType || null,
        r.isLatest ?? true, r.layer || 'memory', r.cognitiveLayerRole || null, r.confidence ?? null,
        r.createdAt || null, r.validFrom || null, r.validTo || null, r.documentDate || null, r.project || null,
        r.projectIds || [], JSON.stringify(r.metadata || {}), r.scope || null, r.primaryTeamId || null,
-       r.recallCount ?? 0, r.strength ?? 1.0]
+       r.recallCount ?? 0, r.strength ?? 1.0, Array.isArray(b.vector)]
     );
     if (Array.isArray(b.vector)) {
       const qr = await qFetch(`/collections/${QCOLL}/points`, {
@@ -605,6 +609,117 @@ const routes = {
     return { memories: mem.rows[0]?.c || 0, relationships: rel.rows[0]?.c || 0 };
   },
 
+  // Vector durability is explicit and queryable. These endpoints expose only
+  // this agent's fixed ORG and require the same bearer authentication as every
+  // other data-plane route.
+  '/v1/vector-status': async () => {
+    const [mem, seg] = await Promise.all([
+      pg.query(`SELECT count(*)::int AS total,
+                  count(*) FILTER (WHERE vector_synced=false)::int AS pending
+                 FROM memories
+                WHERE org_id=$1 AND deleted_at IS NULL AND is_latest=true
+                  AND layer IN ('memory','cognitive')`, [ORG]),
+      pg.query(`SELECT count(*)::int AS total,
+                  count(*) FILTER (WHERE s.vector_synced=false)::int AS pending
+                 FROM knowledge_segments s
+                 JOIN knowledge_documents d ON d.id=s.document_id
+                WHERE s.org_id=$1 AND d.org_id=$1 AND d.deleted_at IS NULL`, [ORG]),
+    ]);
+    return {
+      ok: true,
+      memories: mem.rows[0] || { total: 0, pending: 0 },
+      evidence: seg.rows[0] || { total: 0, pending: 0 },
+    };
+  },
+
+  '/v1/vector-pending': async (b) => {
+    const kind = b.kind === 'evidence' ? 'evidence' : 'memory';
+    const limit = Math.min(Math.max(Number(b.limit) || 100, 1), 500);
+    const cursor = b.cursor || null;
+    if (kind === 'memory') {
+      const args = [ORG];
+      let cursorSql = '';
+      if (cursor) { args.push(cursor); cursorSql = ` AND id > $${args.length}::uuid`; }
+      args.push(limit);
+      const { rows } = await pg.query(
+        `SELECT * FROM memories
+          WHERE org_id=$1 AND deleted_at IS NULL AND is_latest=true
+            AND layer IN ('memory','cognitive') AND vector_synced=false${cursorSql}
+          ORDER BY id ASC LIMIT $${args.length}`,
+        args,
+      );
+      return { ok: true, items: rows, cursor: rows.length === limit ? rows.at(-1).id : null };
+    }
+    const args = [ORG];
+    let cursorSql = '';
+    if (cursor) { args.push(cursor); cursorSql = ` AND s.id > $${args.length}::uuid`; }
+    args.push(limit);
+    const { rows } = await pg.query(
+      `SELECT s.* FROM knowledge_segments s
+       JOIN knowledge_documents d ON d.id=s.document_id
+       WHERE s.org_id=$1 AND d.org_id=$1 AND d.deleted_at IS NULL
+         AND s.vector_synced=false${cursorSql}
+       ORDER BY s.id ASC LIMIT $${args.length}`,
+      args,
+    );
+    return { ok: true, items: rows, cursor: rows.length === limit ? rows.at(-1).id : null };
+  },
+
+  // Specialized id+vector repair: the canonical row never leaves this box and
+  // cannot be overwritten by replay. The agent rebuilds the payload from its
+  // own PostgreSQL row, acknowledges Qdrant wait=true, then flips the status.
+  '/v1/vector-repair': async (b) => {
+    const kind = b.kind === 'evidence' ? 'evidence' : 'memory';
+    if (!b.id || !Array.isArray(b.vector) || b.vector.length !== DIM
+        || b.vector.some((value) => !Number.isFinite(value))) {
+      return { ok: false, error: `id and a finite ${DIM}-dimension vector are required` };
+    }
+    if (kind === 'memory') {
+      const { rows } = await pg.query(
+        `SELECT * FROM memories WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL`,
+        [b.id, ORG],
+      );
+      const row = rows[0];
+      if (!row) return { ok: false, error: 'memory not found' };
+      const record = {
+        id: row.id, userId: row.user_id, content: row.content, title: row.title,
+        tags: row.tags, project: row.project, projectIds: row.project_ids,
+        scope: row.scope, primaryTeamId: row.primary_team_id,
+        memoryType: row.memory_type, layer: row.layer,
+        cognitiveLayerRole: row.cognitive_layer_role, isLatest: row.is_latest,
+        createdAt: row.created_at, documentDate: row.document_date,
+        validFrom: row.valid_from, validTo: row.valid_to,
+      };
+      const qr = await qFetch(`/collections/${QCOLL}/points`, {
+        method: 'PUT',
+        body: JSON.stringify({ points: [{ id: row.id, vector: b.vector, payload: payloadOf(record) }], wait: true }),
+      });
+      if (!qr.ok) return { ok: false, error: `qdrant repair ${qr.status}: ${(await qr.text()).slice(0, 300)}` };
+      await pg.query('UPDATE memories SET vector_synced=true WHERE id=$1 AND org_id=$2', [row.id, ORG]);
+      return { ok: true, id: row.id, kind };
+    }
+    const { rows } = await pg.query(
+      `SELECT s.* FROM knowledge_segments s
+       JOIN knowledge_documents d ON d.id=s.document_id
+       WHERE s.id=$1 AND s.org_id=$2 AND d.org_id=$2 AND d.deleted_at IS NULL`,
+      [b.id, ORG],
+    );
+    const row = rows[0];
+    if (!row) return { ok: false, error: 'evidence segment not found' };
+    const payload = {
+      segment_id: row.id, document_id: row.document_id, org_id: ORG,
+      user_id: row.user_id || null, layer: 'segment',
+      content: String(row.content || '').slice(0, 400),
+    };
+    const qr = await qFetch(`/collections/${QCOLL}/points`, {
+      method: 'PUT',
+      body: JSON.stringify({ points: [{ id: row.id, vector: b.vector, payload }], wait: true }),
+    });
+    if (!qr.ok) return { ok: false, error: `qdrant evidence repair ${qr.status}: ${(await qr.text()).slice(0, 300)}` };
+    await pg.query('UPDATE knowledge_segments SET vector_synced=true WHERE id=$1 AND org_id=$2', [row.id, ORG]);
+    return { ok: true, id: row.id, kind };
+  },
+
   // Graph nodes (memories) + edges (relationships) for the Memory Graph view. Remote orgs' graph lives
   // here, not central.
   '/v1/graph': async (b) => {
@@ -667,7 +782,7 @@ const routes = {
     return { ok: true, bumped: r.rowCount };
   },
 
-  // Generic partial update: tags / is_latest / memory_type / valid_to. Used by the central engine's
+  // Generic partial update: tags / is_latest / memory_type / valid_to / metadata. Used by the central engine's
   // updateMemory seam for remote orgs (entity-link type upgrades, supersession is_latest flips).
   '/v1/update': async (b) => {
     if (!b.id) return { ok: false, error: 'id required' };
@@ -676,6 +791,7 @@ const routes = {
     if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
     if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
     if (b.valid_to !== undefined) { args.push(b.valid_to); sets.push(`valid_to=$${args.length}::timestamptz`); }
+    if (b.metadata !== undefined) { args.push(JSON.stringify(b.metadata || {})); sets.push(`metadata=$${args.length}::jsonb`); }
     if (!sets.length) return { ok: true };
     await pg.query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
     const payload = {
@@ -683,6 +799,7 @@ const routes = {
       ...(b.is_latest !== undefined ? { is_latest: !!b.is_latest } : {}),
       ...(b.memory_type !== undefined ? { memory_type: b.memory_type } : {}),
       ...(b.valid_to !== undefined ? { valid_to: b.valid_to } : {}),
+      ...(b.metadata !== undefined ? { metadata: b.metadata || {} } : {}),
     };
     if (Object.keys(payload).length > 0) {
       qFetch(`/collections/${QCOLL}/points/payload`, { method: 'POST',

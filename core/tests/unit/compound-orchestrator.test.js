@@ -536,6 +536,18 @@ test('grounded write validation rejects unresolved templates and accepts detaile
   );
 });
 
+test('exact governed dependency content may contain bracketed source notation', () => {
+  const content = 'Singulance builds sovereign memory. [Source section omitted in this projection] It also provides governed HyperAgents.';
+  const prior = { recall: JSON.stringify({ memories: [{ content }] }) };
+  const schema = {
+    type: 'object',
+    properties: { body: { type: 'string' } },
+  };
+  const exact = exactGroundedDependencyContent(prior);
+  assert.equal(exact, content);
+  assert.deepEqual(unresolvedGroundedWriteFields('document', schema, { body: exact }, prior), []);
+});
+
 test('grounded fallback payload keeps evidence visible ahead of a compact provider schema', () => {
   const evidence = 'G ROCHER handbag with a gold JL logo. '.repeat(200);
   const payload = buildGroundedWriteFallbackPayload({

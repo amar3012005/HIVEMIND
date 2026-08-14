@@ -434,10 +434,18 @@ async function selectToolCard({ rawTools, message, canonicalOperation, requiredA
       parameters: tool?.function?.parameters,
     },
   }));
-  const fallback = await defaultSelectTool({ tools: providerTools, message, apiKey, signal });
-  const selected = resolveSelectedTool(eligibleTools, fallback?.toolName);
-  if (selected) return selected;
-  throw new Error('tool-card selector returned an unavailable tool after retry and governed fallback');
+  try {
+    const fallback = await defaultSelectTool({ tools: providerTools, message, apiKey, signal });
+    const selected = resolveSelectedTool(eligibleTools, fallback?.toolName);
+    if (selected) return selected;
+  } catch { /* deterministic controlled-manifest fallback below */ }
+  // Cards are already authority-filtered and ranked against the planner's
+  // canonical operation using provider-controlled identifiers. If both model
+  // selectors violate their forced contract, choose the top ranked manifest
+  // instead of turning valid connected-app work into a transient chat error.
+  const rankedFallback = resolveSelectedTool(eligibleTools, cards[0]?.name);
+  if (rankedFallback) return rankedFallback;
+  throw new Error('tool-card selector returned an unavailable tool after governed fallbacks');
 }
 
 /**
@@ -670,10 +678,16 @@ export function unresolvedGroundedWriteFields(outputKind, schema, args, priorOut
   if (!priorOutputs || Object.keys(priorOutputs).length === 0) return [];
   const priorText = JSON.stringify(priorOutputs);
   if (priorText.length < 80) return [];
+  const exactDependency = exactGroundedDependencyContent(priorOutputs);
   const priorTokens = normalizedGroundingTokens(priorText);
   return semanticContentFields(outputKind, schema).filter((name) => {
     const value = String(args?.[name] || '').trim();
     if (!value) return true;
+    // The deterministic last-resort hand-off is the exact content extracted
+    // from the governed dependency. It may legitimately contain bracketed
+    // source notation or an ellipsis marker, so it must not be mistaken for a
+    // model-authored template merely because of its punctuation.
+    if (exactDependency && value === exactDependency) return false;
     // Bracketed prose without a following Markdown link target is an unresolved
     // template slot regardless of the language used inside the brackets.
     if (/\[[^\]\n]{4,}\](?!\s*\()/u.test(value) || /\{\{[^}\n]{2,}\}\}/u.test(value)) return true;

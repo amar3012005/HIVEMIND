@@ -676,6 +676,7 @@ async function vectorCandidatesForRecall(store, {
   is_latest = true,
   access_context = null,
   scope_filter = null,
+  timing = null,
 }) {
   const qdrantClient = getQdrantClient();
   if (memoryBackend(org_id) === 'central') {
@@ -691,6 +692,7 @@ async function vectorCandidatesForRecall(store, {
   // diverged supersets — NOT identical) is DEFERRED. Any future unification MUST preserve
   // the LIVE matchesHardScope scope-filtering in src/search/hybrid.js and the
   // ThreeTierRetrieval path (server.js → three-tier-retrieval.js → ResultReranker).
+  const vectorLaneStartedAt = timing ? Date.now() : 0;
   const results = await qdrantClient.hybridSearch(query_context, {
     user_id,
     org_id,
@@ -713,8 +715,10 @@ async function vectorCandidatesForRecall(store, {
     // route this way via createMemory). Previously this forced the legacy
     // 'BUNDB AGENT' collection, which bypassed EVERY per-tenant collection where the
     // real bge-m3 vectors live — recall reads were searching the wrong store.
-    collectionName: undefined
+    collectionName: undefined,
+    timing,
   });
+  if (timing) timing.vector_lane_ms = (timing.vector_lane_ms || 0) + (Date.now() - vectorLaneStartedAt);
 
   // Batch-hydrate every candidate id in ONE findMany. Previously this fanned out
   // N concurrent store.getMemory() (findUnique) calls inside Promise.all — under
@@ -722,9 +726,11 @@ async function vectorCandidatesForRecall(store, {
   // returned null, silently collapsing the vector lane from ~150 hits to ~1. The
   // batch is a single query (no contention) and also populates project_ids.
   const _vecIds = (results || []).map(r => r.payload?.memory_id || r.id).filter(Boolean);
+  const hydrateStartedAt = timing ? Date.now() : 0;
   const _vecMemById = store.getMemories
     ? await store.getMemories(_vecIds, { valid_at: validAt, known_at: knownAt })
     : new Map();
+  if (timing) timing.vector_hydrate_ms = (timing.vector_hydrate_ms || 0) + (Date.now() - hydrateStartedAt);
   const hydrated = (results || []).map(result => {
     const sourcePlatform = result.payload?.source_platform || result.payload?.source || null;
     if (source_platforms.length > 0 && !source_platforms.includes(sourcePlatform)) {
@@ -1330,6 +1336,8 @@ async function _recallPersistedMemoriesImpl(store, {
   alternate_lexical_query = null,
   semantic_recovery = false,
   include_injection_context = true,
+  trace_stages = false,
+  timing = null,
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1365,7 +1373,8 @@ async function _recallPersistedMemoriesImpl(store, {
   };
   // Env-gated stage timing (RECALL_LAP=true). Zero cost when off. Used to find
   // the latency hotspot inside the recall pipeline without per-stage tracing.
-  const _RLAP = process.env.RECALL_LAP === 'true';
+  const _LOG_LAP = process.env.RECALL_LAP === 'true';
+  const _RLAP = _LOG_LAP || trace_stages;
   const _t0 = _RLAP ? Date.now() : 0;
   const _lap = {};
   const candidatePoolSize = boundedCandidatePool(max_memories, temporalComparison ? 8 : 4);
@@ -1490,6 +1499,7 @@ async function _recallPersistedMemoriesImpl(store, {
     is_latest: effectiveIsLatest,
     access_context,
     scope_filter,
+    timing,
   })
     // Drop old TARA turn/insight vectors still living in Qdrant from past calls.
     .then((cands) => cands.filter((c) => !isTaraActivity(c?.memory) && !isRecallNoise(c?.memory)));
@@ -1605,8 +1615,10 @@ async function _recallPersistedMemoriesImpl(store, {
   const lexicalQueries = [...new Set([query_context, alternate_lexical_query]
     .filter((value) => typeof value === 'string' && value.trim())
     .map((value) => value.trim()))].slice(0, 2);
+  const lexicalStartedAt = timing ? Date.now() : 0;
   const lexicalLanes = await Promise.all(lexicalQueries.map((query) =>
     store.searchMemories({ ...lexicalArgs, query })));
+  if (timing) timing.lexical_ms = Date.now() - lexicalStartedAt;
   const lexicalCandidates = [...new Map(
     lexicalLanes.flat().filter((memory) => memory?.id).map((memory) => [memory.id, memory]),
   ).values()];
@@ -2724,7 +2736,17 @@ async function _recallPersistedMemoriesImpl(store, {
     };
   }));
 
-  if (_RLAP) {
+  const timingBreakdown = _RLAP ? {
+    fetch_ms: _lap.fetch ?? null,
+    graph_expand_ms: (_lap.expand ?? 0) - (_lap.fetch ?? 0),
+    score_fusion_ms: (_lap.score ?? 0) - (_lap.expand ?? 0),
+    delivery_ms: (_lap.obs ?? _lap.score ?? 0) - (_lap.score ?? 0),
+    profile_ms: (_lap.profile ?? _lap.obs ?? 0) - (_lap.obs ?? 0),
+    synthesis_format_ms: (Date.now() - _t0) - (_lap.profile ?? _lap.obs ?? _lap.score ?? 0),
+    total_ms: Date.now() - _t0,
+    ...(timing || {}),
+  } : null;
+  if (_LOG_LAP) {
     _lap.total = Date.now() - _t0;
     // Derived per-stage: front-fetch | expand | sync-score | tail(rerank/operator/format)
     console.log('[recall-lap]', JSON.stringify({
@@ -2770,6 +2792,7 @@ async function _recallPersistedMemoriesImpl(store, {
       included_count:   top.filter(item => item.graph_expanded).length,
       synthesis_count:  synthesized.length,
     },
+    ...(trace_stages ? { timing_breakdown: timingBreakdown } : {}),
     // PHASE-B: tiered "recall spine" view. Additive + dark by default — the key is
     // absent entirely unless RECALL_TIERED_VIEW=true, so legacy clients see the
     // byte-identical shape. memories/synthesized/raw kept for backcompat.

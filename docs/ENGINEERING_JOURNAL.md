@@ -649,3 +649,22 @@ slides that find no unique anchor get a page instead of `null`.
 - Production: not deployed
 - Rollback: not applicable
 - Next: implement and verify request-scoped deadlines with real cancellation.
+
+## 2026-08-15 UTC - Recall transport and recovery hardening committed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/recall-reliability-e2e`
+- Base / commit: `b584f3562199c1b0f8fc9ceb872e70402a2bd29a` -> `9b4f7b39`
+- Scope: one inherited cancellation deadline across chat/tool/recall/rerank/
+  Memory Box/Qdrant; per-tenant transport bulkhead; typed unavailable results;
+  maintenance-only stale-box quarantine; agent capability handshake; bounded
+  two-attempt reranking; Cohere v4-fast production default; query optimization
+  on every native retrieval turn.
+- Verification: 34 focused route/policy/transport/reranker/ingestion tests pass
+  locally; Cohere v4-fast and Voyage each score 10/10 on the retrieval corpus,
+  with v4-fast faster on both the small corpus and 150-document benchmark.
+- Production: not deployed
+- Rollback: not applicable
+- Next: run Linux native-AMR suites and real authenticated acceptance before
+  landing on `singulance-main`.

@@ -343,7 +343,7 @@ test('named source hydration returns ordered raw segments around evidence anchor
   });
   assert.deepEqual(segmentQuery.where, {
     userId: 'user-1', orgId: 'org-1', documentId: 'doc-1',
-    document: { archivedAt: null }, segmentIndex: { gte: 3 },
+    document: { archivedAt: null }, segmentIndex: { in: [3, 4, 5] },
   });
   assert.deepEqual(rows.map((row) => row.metadata.segmentIndex), [3, 4]);
   assert.equal(rows[0].document.title, 'Board Notes.pdf');

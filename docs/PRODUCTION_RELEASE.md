@@ -491,6 +491,16 @@ confirmed.
 - Rollback: `rollback-20260814-203428` / previous immutable Core `hivemind/core-api:prod-20260814-cee9687a1654`; the pre-change image is `hivemind/core-api:prod-20260814-79a56768677b`.
 - External side effects: none. Acceptance performed read-only recall/chat requests and synthetic provider readiness probes; no memory or connector/provider write occurred.
 
+## prod-20260815-b829468a912d — bounded progressive chat and Nitro terminal recovery
+
+- Canonical SHAs: `5c9cc1359b1a7b30d6b92b8972ee1a7304249b12` (PR #239) bounded progressive synthesis to one justified ranks 6–10 expansion with at least 12 seconds of turn headroom; `b829468a912d6e1577adb94760079691d61b2ee2` (PR #240) replaced the stale 120B terminal fallback with `openai/gpt-oss-20b:nitro`. Frontend SHA `2886b5e06ad0e48ff4b41cee783682aa3e7e122a`; migration: none.
+- Incident proof before the terminal fix: the exact authenticated SSE request `what do you know about solvis?` completed retrieval but took 58.534 seconds once and then failed at 60.149 seconds on repeat. A validated-stream contract miss fell through to legacy `openai/gpt-oss-120b`, consuming the entire turn budget.
+- Authenticated acceptance after deployment: the same `use_tools:false` request completed successfully in 4.824 seconds with first answer at 4.816 seconds. Trace reported one retrieval pass, one unified memory-plus-evidence rerank (326 ms), ranks 1–5 only, zero expansions, and complete source/entity coverage. Final synthesis was `openai/gpt-oss-20b:nitro`; prompt caching served 2,176 of 5,199 prompt tokens (41.85%).
+- Additive tools acceptance: the same request with `use_tools:true` completed in 8.154 seconds using only `hivemind_recall`, with one retrieval, one rerank (335 ms), one justified ranks 6–10 reveal, and no drafts or external provider side effects.
+- Tests: 29/29 focused chat-provider, synthesis-policy, progressive-recall, and semantic-fallback tests passed locally. The guarded image build passed its 21/21 chat/router/security suite. Four public release gates returned 200. Fresh Core scan found zero bulkhead-full, abort, synthesis-failure, or socket-hang-up errors.
+- Runtime: Core `hivemind/core-api:prod-20260815-b829468a912d`, digest `sha256:07d896ea47f18ebec5345caea5ae3956d6e21656b59a8ac0a5e9f32003165204`, healthy. Control Plane, Employees, TARA Deepgram, and frontend remain on the immediately prior same-source release `prod-20260815-5c9cc1359b1a` because PR #240 changed Core only. Source-diff audits confirmed no newer code for BYOD agent/broker, Playwright, or TARA Grok; stable data/infrastructure containers were not restarted.
+- Rollback: `hivemind/core-api:rollback-20260815-095901` (the healthy `prod-20260815-5c9cc1359b1a` Core). External side effects: none; acceptance was read-only.
+
 ## prod-20260814-b1f6098537d2 — HQ daily cadence (flag-gated, default OFF)
 
 - Parent SHA: `b1f6098537d29f5e3378d8ea354837a5047e495c` on `singulance-main` (PR #219, control-plane only). Migration: none.

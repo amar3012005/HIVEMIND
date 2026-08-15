@@ -259,3 +259,23 @@ test('a persistently stale box is quarantined from scheduled maintenance without
     quarantined_until: null,
   });
 });
+
+test('maintenance quarantine is persisted in the agent registry and survives module reloads', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-remote-durable-quarantine-'));
+  const registry = join(directory, 'agents.json');
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  process.env.MNEME_AGENT_REGISTRY_FILE = registry;
+  await writeFile(registry, JSON.stringify({
+    org: { url: 'http://100.64.0.1:8787', token: 'token', kind: 'selfhost' },
+  }));
+
+  const first = await import(`../../src/vector/mneme/remote-backend.js?durable-a=${Date.now()}`);
+  assert.deepEqual(first.remoteAgentOrgIds(), ['org']);
+  assert.equal(first.quarantineRemoteAgentMaintenance('org', Date.now() + 60_000), true);
+
+  const second = await import(`../../src/vector/mneme/remote-backend.js?durable-b=${Date.now()}`);
+  assert.deepEqual(second.remoteAgentOrgIds(), []);
+  assert.ok(second.agentFor('org'), 'interactive routing must retain the registered agent');
+  assert.equal(second.clearRemoteAgentMaintenanceQuarantine('org'), true);
+  assert.deepEqual(second.remoteAgentOrgIds(), ['org']);
+});

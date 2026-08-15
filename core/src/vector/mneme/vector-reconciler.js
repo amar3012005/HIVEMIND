@@ -1,5 +1,7 @@
 import {
   remoteCapabilities,
+  clearRemoteAgentMaintenanceQuarantine,
+  quarantineRemoteAgentMaintenance,
   remoteKbSegment,
   remoteList,
   remoteVectorPending,
@@ -15,6 +17,7 @@ const maintenanceState = new Map();
 
 export function recordRemoteMaintenanceSuccess(orgId) {
   maintenanceState.delete(orgId);
+  clearRemoteAgentMaintenanceQuarantine(orgId);
   return { failures: 0, quarantined_until: null };
 }
 
@@ -28,6 +31,7 @@ export function recordRemoteMaintenanceFailure(orgId, {
   const quarantinedUntil = failures >= threshold ? now + quarantineMs : prior.quarantinedUntil;
   const next = { failures, quarantinedUntil };
   maintenanceState.set(orgId, next);
+  if (quarantinedUntil) quarantineRemoteAgentMaintenance(orgId, quarantinedUntil);
   return { failures, quarantined_until: quarantinedUntil || null };
 }
 

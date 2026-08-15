@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { getMaxListeners } from 'node:events';
 
 import {
   StageDeadlineError,
@@ -50,4 +51,14 @@ test('deadline errors remain typed for callers that require fail-closed behavior
     }), { timeoutMs: 20, label: 'strict-stage' }),
     (error) => error instanceof StageDeadlineError && error.code === 'STAGE_DEADLINE_EXCEEDED',
   );
+});
+
+test('a stage signal supports the bounded recall fan-out without disabling leak detection', async () => {
+  const limit = await runWithStageDeadline(async ({ signal }) => getMaxListeners(signal), {
+    timeoutMs: 100,
+    label: 'fanout-listener-budget',
+  });
+
+  assert.ok(limit >= 16);
+  assert.ok(Number.isFinite(limit));
 });

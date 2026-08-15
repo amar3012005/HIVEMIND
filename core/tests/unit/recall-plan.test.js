@@ -15,12 +15,21 @@ test('legacy recall modes preserve their existing event-driven behavior', () => 
   assert.equal(plan.include_live, true);
 });
 
+test('documented quick mode uses the parallel bounded hybrid plan and retains top fifteen', () => {
+  const plan = resolveRecallPlan({ mode: 'quick' });
+  assert.equal(plan.legacy, false);
+  assert.equal(plan.requested_mode, 'quick');
+  assert.equal(plan.mode, 'fact');
+  assert.equal(plan.expand_evidence, true);
+  assert.equal(plan.max_memories, 15);
+});
+
 test('explicit fact stays on the fast recall path', () => {
   const plan = resolveRecallPlan({ mode: 'fact', include_live: true, temporal: 'known_at' });
-  assert.equal(plan.expand_evidence, false);
+  assert.equal(plan.expand_evidence, true);
   assert.equal(plan.include_live, false);
   assert.equal(plan.max_graph_hops, 0);
-  assert.equal(plan.max_memories, 5);
+  assert.equal(plan.max_memories, 15);
   assert.equal(plan.context_budget, 2_000);
   assert.equal(plan.latency_budget_ms, 1_500);
   assert.equal(plan.temporal, 'known_at');
@@ -50,8 +59,9 @@ test('live expansion requires a surface policy and an evidence anchor or explici
   }), false);
 });
 
-test('explicit explain and full are source-first while fact remains anchor-only', () => {
-  assert.equal(resolveRecallPlan({ mode: 'fact' }).expand_evidence, false);
+test('explicit quick, fact, explain and full all include the parallel evidence lane', () => {
+  assert.equal(resolveRecallPlan({ mode: 'quick' }).expand_evidence, true);
+  assert.equal(resolveRecallPlan({ mode: 'fact' }).expand_evidence, true);
   assert.equal(resolveRecallPlan({ mode: 'explain' }).expand_evidence, true);
   assert.equal(resolveRecallPlan({ mode: 'full', explicit_mode: true }).expand_evidence, true);
 });

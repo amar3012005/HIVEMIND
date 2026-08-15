@@ -222,8 +222,8 @@ export async function handleRecallRoute(ctx = {}) {
     }
     const recallPlan = recallRuntime.resolvePlan({ ...body, explicit_mode: true });
 
-    // Explicit fact/explain/full modes use the bounded, source-grounded
-    // internal service. Unspecified and legacy modes retain the established
+    // Explicit quick/fact/explain/full modes use the bounded, source-grounded
+    // parallel service. Unspecified and legacy modes retain the established
     // backwards-compatible HTTP response pipeline below.
     if (!recallPlan.legacy) {
       if (!query || typeof query !== 'string') {
@@ -319,17 +319,20 @@ export async function handleRecallRoute(ctx = {}) {
         evidence: bounded.evidence || [],
         rankedCandidates: bounded.ranked_candidates || [],
       });
+      const routeLatencyMs = Date.now() - _recallT0;
       return jsonResponse(res, {
         results: unifiedResults,
         memories: _boundedScoped.memories,
         evidence: bounded.evidence || [],
         live: bounded.live || [],
-        mode_used: effectivePlan.mode,
+        mode_used: effectivePlan.requested_mode === 'quick' ? 'quick' : effectivePlan.mode,
+        search_method: 'hybrid',
         recall_plan: effectivePlan,
         evidence_packet: packet,
         cutoff_reason: cutoffReason,
         project_scope_applied: _boundedScoped.project_scope_applied,
-        latency_ms: Date.now() - _recallT0,
+        latency_ms: routeLatencyMs,
+        timing_ms: routeLatencyMs,
       });
     }
 

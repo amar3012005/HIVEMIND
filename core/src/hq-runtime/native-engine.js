@@ -1201,6 +1201,28 @@ export class NativeHqEngine {
         workOrderId: order.id,
       });
     } else if (readyTodo && !roomInFlight) {
+      // The first-life "wow batch" burst: first-life-control.js's
+      // initial_plan_ready promotion now marks EVERY cohort proposal READY
+      // at once (not just the recommendation), specifically so the founder
+      // sees the company move on multiple fronts immediately. Detect that
+      // burst here — multiple simultaneously-READY todos sharing the same
+      // activation_sprint_id, none dispatched yet — and dispatch all of
+      // them in this one cycle instead of just the first found. Every
+      // subsequent cycle goes back to strict one-at-a-time: once any of
+      // these moves to RUNNING, it no longer matches `status === 'READY'`,
+      // so a later cycle's burstSiblings collapses back to a single todo
+      // and roomInFlight naturally blocks further dispatch until it clears.
+      const burstSiblings = readyTodo.context?.activation_sprint_id
+        ? capabilityState.todos.filter((todo) => todo.status === 'READY'
+          && todo.context?.activation_sprint_id === readyTodo.context.activation_sprint_id)
+        : [readyTodo];
+      const todosToDispatchThisCycle = burstSiblings.length > 1 ? burstSiblings : [readyTodo];
+      if (todosToDispatchThisCycle.length > 1) await event(prisma, runtime, cycle, {
+        eventType: 'decision', title: 'Starting the first-life batch in parallel',
+        summary: `${todosToDispatchThisCycle.length} evidenced proposals from the first operating plan start together: ${todosToDispatchThisCycle.map((todo) => todo.title).join('; ')}. Every task after this one goes back to one bounded step at a time.`,
+        details: { todo_ids: todosToDispatchThisCycle.map((todo) => todo.id) },
+      });
+      for (const readyTodo of todosToDispatchThisCycle) {
       await move('DIAGNOSING');
       await move('DELEGATING');
       const skillId = 'specialist-delegation';
@@ -1428,6 +1450,7 @@ export class NativeHqEngine {
             },
           });
         }
+      }
       }
     } else if (readyTodo && roomInFlight) {
       // A Room is already working. Do NOT dispatch the next todo and do NOT re-plan —

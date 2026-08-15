@@ -372,3 +372,23 @@ test('isRepeatCapabilityWait only fires for connector_changed with a real, match
     }), false, `${triggerType} must always narrate in full, never suppressed`);
   }
 });
+
+// First-life parallel burst (2026-08-15, per explicit request): every
+// evidenced proposal from the first-life cohort dispatches together, in
+// parallel, in the SAME cycle — every subsequent cycle goes back to strict
+// one-at-a-time. This locks in the burst-detection wiring in runCycle
+// (source-guard, matching this repo's convention for logic embedded in the
+// large if/else dispatch chain rather than an extracted pure function).
+test('runCycle detects a first-life burst (multiple simultaneously-READY siblings sharing activation_sprint_id) and dispatches all of them in one cycle', () => {
+  const source = fs.readFileSync(
+    new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8',
+  );
+  const gateIndex = source.indexOf("} else if (readyTodo && !roomInFlight) {");
+  assert.ok(gateIndex > 0, 'expected the single-dispatch gate to still exist');
+  const burstBlock = source.slice(gateIndex, gateIndex + 1800);
+  assert.match(burstBlock, /const burstSiblings = readyTodo\.context\?\.activation_sprint_id/);
+  assert.match(burstBlock, /todo\.status === 'READY'/);
+  assert.match(burstBlock, /todo\.context\?\.activation_sprint_id === readyTodo\.context\.activation_sprint_id/);
+  assert.match(burstBlock, /const todosToDispatchThisCycle = burstSiblings\.length > 1 \? burstSiblings : \[readyTodo\]/);
+  assert.match(burstBlock, /for \(const readyTodo of todosToDispatchThisCycle\) \{/);
+});

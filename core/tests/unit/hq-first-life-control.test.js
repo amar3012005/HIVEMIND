@@ -149,7 +149,14 @@ test('v6 strategy portfolio promotes exactly one Room lifecycle at a time', asyn
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED']);
 });
 
-test('v12 Growth Plan promotes one neutral task and advances one-by-one after verified results', async () => {
+// Design change (2026-08-15, per explicit request): the first-life "wow
+// batch" should start every evidenced proposal from the cohort in parallel,
+// not one recommendation at a time — the founder should see the company
+// move on multiple fronts immediately. Every trigger AFTER that first burst
+// (verified_result, capability_wait_release, verified_monitoring_checkpoint,
+// daily cadence's 'operate' mode, etc.) is unaffected and still promotes one
+// bounded task at a time, exactly as before.
+test('v12 Growth Plan initial_plan_ready promotes the ENTIRE first-life batch in parallel', async () => {
   const rows = [
     todo('growth-1', 'PROPOSED', 1, 'external', true),
     todo('growth-2', 'PROPOSED', 2, 'external'),
@@ -164,13 +171,37 @@ test('v12 Growth Plan promotes one neutral task and advances one-by-one after ve
     delete row.context.room_tag;
   });
   const prisma = prismaFor(rows);
-  const first = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'initial_plan_ready' });
-  assert.deepEqual(first.promoted.map((item) => item.id), ['growth-1']);
+  const result = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'initial_plan_ready' });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['growth-1', 'growth-2', 'growth-3']);
+  assert.deepEqual(rows.map((item) => item.status), ['READY', 'READY', 'READY']);
+});
+
+test('post-burst work still advances strictly one-by-one — the parallel burst is a one-time exception, not the new steady state', async () => {
+  // Simulates cadence-driven daily operation: new proposals arriving AFTER
+  // the first-life burst already ran (different activation_sprint_id / no
+  // burst context at all). A non-initial_plan_ready trigger must still only
+  // ever promote one recommendation at a time.
+  const rows = [
+    todo('daily-1', 'PROPOSED', 1, 'external', true),
+    todo('daily-2', 'PROPOSED', 2, 'external'),
+    todo('daily-3', 'PROPOSED', 3, 'internal'),
+  ];
+  rows.forEach((row) => {
+    row.context.first_life_policy_version = 12;
+    row.context.proposal_origin = 'growth_plan';
+    delete row.context.planned_playbook_id;
+    delete row.context.planned_playbook_version;
+    delete row.context.requested_action;
+    delete row.context.room_tag;
+  });
+  const prisma = prismaFor(rows);
+  const first = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'verified_result' });
+  assert.deepEqual(first.promoted.map((item) => item.id), ['daily-1']);
   assert.deepEqual(rows.map((item) => item.status), ['READY', 'PROPOSED', 'PROPOSED']);
 
   rows[0].status = 'COMPLETED';
   const second = await activateEligibleFirstLifeWork({ prisma, runtime, expansionTrigger: 'verified_result' });
-  assert.deepEqual(second.promoted.map((item) => item.id), ['growth-2']);
+  assert.deepEqual(second.promoted.map((item) => item.id), ['daily-2']);
   assert.deepEqual(rows.map((item) => item.status), ['COMPLETED', 'READY', 'PROPOSED']);
 });
 

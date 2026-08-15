@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildSynthesisFallbackChain,
   chooseSynthesisModel,
+  hasGroundingEvidence,
   isCandidateSynthesisAcceptable,
   normalizeJsonObject,
   parseJsonObjectContent,
@@ -65,6 +66,14 @@ test('candidate synthesis must be fully grounded and cited before it can suppres
   assert.equal(isCandidateSynthesisAcceptable({ grounded: true, response: 'G ROCHER', claims: [{ grounded: true, citation_ids: ['P1-C1'] }] }), true);
   assert.equal(isCandidateSynthesisAcceptable({ grounded: false, response: 'Unavailable', claims: [] }), false);
   assert.equal(isCandidateSynthesisAcceptable({ grounded: true, response: 'G ROCHER', claims: [{ grounded: true, citation_ids: [] }] }), false);
+});
+
+test('grounded candidate validation is required only when the final packet contains evidence', () => {
+  assert.equal(hasGroundingEvidence({ memories: [{ id: 'm1' }] }), true);
+  assert.equal(hasGroundingEvidence({ evidence: [{ segment_id: 's1' }] }), true);
+  assert.equal(hasGroundingEvidence({ recall_packets: [{ facts: [{ id: 'm1' }] }] }), true);
+  assert.equal(hasGroundingEvidence({ recall_packets: [{ sourceSections: [{ segment_id: 's1' }] }] }), true);
+  assert.equal(hasGroundingEvidence({ memories: [], evidence: [], recall_packets: [] }), false);
 });
 
 test('progressive canonical query is rewritten only after first recall has zero coverage', () => {

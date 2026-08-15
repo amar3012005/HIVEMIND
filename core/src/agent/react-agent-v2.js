@@ -34,7 +34,7 @@ import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-syn
 import { deriveAnswerContextStatus, normalizeAnswerCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
-import { buildSynthesisFallbackChain, chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
+import { buildSynthesisFallbackChain, chooseSynthesisModel, hasGroundingEvidence, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildRecallIntentContext, fallbackRecallQueries, normalizeRecallOptimization } from './chat-query-optimizer.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
@@ -3552,8 +3552,12 @@ export async function runReactAgentV2({
         try {
           synthesisPasses += 1;
           const candidateAnswer = await answerStep({ ...input, model: candidateModel });
-          if (validateCandidate && candidateModel !== requestedAnswerModel
-              && candidateModel !== FINAL_FALLBACK_MODEL
+          // Valid JSON can still contradict a packet by claiming that visible
+          // evidence is missing. Apply the grounded/citation gate to every
+          // candidate, including the requested primary, so non-streaming chat
+          // can reach the independent safety model instead of accepting a
+          // false absence response.
+          if (validateCandidate && hasGroundingEvidence(input.evidence)
               && !isCandidateSynthesisAcceptable(candidateAnswer)) {
             lastError = new Error('candidate_synthesis_validation_failed');
             if (streamAnswer) onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'candidate_validation_fallback' });

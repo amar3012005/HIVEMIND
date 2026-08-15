@@ -137,7 +137,15 @@ function _loadFile() {
       const fallbackTokens = (Array.isArray(v.previousTokens) ? v.previousTokens : [])
         .filter((entry) => entry?.token && (!entry.expiresAt || new Date(entry.expiresAt).getTime() > Date.now()))
         .map((entry) => entry.token);
-      _registry.set(org, { url: v.url || '', token: v.token || '', fallbackTokens, pgUrl: v.pgUrl || '', qdrantUrl: v.qdrantUrl || '', kind: v.kind });
+      _registry.set(org, {
+        url: v.url || '',
+        token: v.token || '',
+        fallbackTokens,
+        pgUrl: v.pgUrl || '',
+        qdrantUrl: v.qdrantUrl || '',
+        kind: v.kind,
+        maintenanceQuarantinedUntil: Number(v.maintenanceQuarantinedUntil || 0),
+      });
     }
   } catch { /* malformed file → keep what we have */ }
 }
@@ -158,6 +166,21 @@ export function registerAgent(orgId, url, token) {
   _persist();
 }
 export function unregisterAgent(orgId) { _registry.delete(orgId); _persist(); }
+export function quarantineRemoteAgentMaintenance(orgId, until) {
+  const current = agentFor(orgId);
+  if (!current) return false;
+  _registry.set(orgId, { ...current, maintenanceQuarantinedUntil: Math.max(0, Number(until || 0)) });
+  _persist();
+  return true;
+}
+export function clearRemoteAgentMaintenanceQuarantine(orgId) {
+  const current = agentFor(orgId);
+  if (!current?.maintenanceQuarantinedUntil) return false;
+  const { maintenanceQuarantinedUntil: _ignored, ...active } = current;
+  _registry.set(orgId, active);
+  _persist();
+  return true;
+}
 export function agentFor(orgId) {
   if (!_registry.has(orgId)) _loadFile(); // pick up a fresh enrollment from the shared file
   return _registry.get(orgId) || null;
@@ -168,8 +191,12 @@ export function isRemoteReady(orgId) { return !!agentFor(orgId); }
 export function hasRemoteAgent(orgId) { return !!agentFor(orgId)?.url; }
 export function remoteAgentOrgIds() {
   _loadFile();
+  const now = Date.now();
   return [..._registry.entries()]
-    .filter(([, value]) => value?.url && value.url !== 'local:' && value.kind === 'selfhost')
+    .filter(([, value]) => value?.url
+      && value.url !== 'local:'
+      && value.kind === 'selfhost'
+      && Number(value.maintenanceQuarantinedUntil || 0) <= now)
     .map(([orgId]) => orgId);
 }
 

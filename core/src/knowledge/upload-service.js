@@ -86,6 +86,16 @@ export class KnowledgeUploadService {
         // otherwise turn every normal AMR re-upload into an accidental
         // re-ingest. Explicit force handles remote cleanup in the worker.
         _readyDocLives = true;
+      } else if (job.mediaKind === 'image' && this.prisma?.memory) {
+        // Image ingestion intentionally creates one canonical Memory and no
+        // KnowledgeDocument. Treating documentId as a document lookup therefore
+        // returned false and re-ran vision on every retry, creating duplicate
+        // image memories. For image jobs the durable output id is the memory id.
+        try {
+          _readyDocLives = !!(await this.prisma.memory.findFirst({
+            where: { id: job.documentId, orgId, deletedAt: null }, select: { id: true },
+          }));
+        } catch { _readyDocLives = true; }
       } else if (this.prisma?.knowledgeDocument) {
         try {
           _readyDocLives = !!(await this.prisma.knowledgeDocument.findFirst({

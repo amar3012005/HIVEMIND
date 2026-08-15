@@ -67,6 +67,28 @@ test('remote ready uploads remain duplicates without a central document lookup',
   assert.equal(queued, false);
 });
 
+test('completed image duplicate resolves its canonical memory instead of re-running vision', async () => {
+  const duplicate = {
+    id: ids.job, userId: ids.user, status: 'ready', documentId: '44444444-4444-4444-8444-444444444444',
+    processingVersion: 1, mediaKind: 'image', filename: 'diagram.png',
+  };
+  const deps = dependencies({ duplicate });
+  deps.prisma.knowledgeDocument = { findFirst: async () => null };
+  deps.prisma.memory = { findFirst: async ({ where }) => where.id === duplicate.documentId ? { id: where.id } : null };
+  let queued = false;
+  deps.queue.enqueue = async () => { queued = true; return {}; };
+  const req = request();
+  req.file = {
+    filename: 'diagram.png', contentType: 'image/png',
+    data: Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(64, 1)]),
+  };
+  const result = await new KnowledgeUploadService(deps).admit(req);
+  assert.equal(result.status, 409);
+  assert.equal(result.body.error, 'duplicate_document');
+  assert.equal(result.body.existing_document_id, duplicate.documentId);
+  assert.equal(queued, false);
+});
+
 test('force reprocesses a ready evidence-only job as both without creating another job', async () => {
   const duplicate = {
     id: ids.job, userId: ids.user, status: 'ready', documentId: '44444444-4444-4444-8444-444444444444',

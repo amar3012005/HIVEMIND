@@ -633,3 +633,19 @@ slides that find no unique anchor get a page instead of `null`.
 - Next: same open item — Composio tools are still not merged into the
   `/chat`/HyperAgents tool registry (task 5 from the original integration
   plan).
+
+## 2026-08-15 UTC - Recall transport and recovery hardening started
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/recall-reliability-e2e`
+- Base / commit: `b584f3562199c1b0f8fc9ceb872e70402a2bd29a` -> `pending`
+- Scope: Core recall deadlines and cancellation, Memory Box transport and
+  availability semantics, stale-agent lifecycle, Core/agent capability
+  negotiation, bounded reranker failover, ingestion completeness gates, and
+  read-only `use_tools:false`/`use_tools:true` acceptance.
+- Verification: baseline live Core and Memory Box probes captured; implementation
+  tests pending.
+- Production: not deployed
+- Rollback: not applicable
+- Next: implement and verify request-scoped deadlines with real cancellation.

@@ -10,6 +10,7 @@ import {
   scheduleShadowEvaluation,
   shouldRetryAfterZeroCoverage,
   shouldOptimizeRecallQuery,
+  shouldRunRecallOptimizer,
   summarizeUsage,
 } from '../../src/agent/chat-synthesis-policy.js';
 
@@ -43,6 +44,9 @@ test('JSON synthesis normalizes provider nulls and scalars to an object', () => 
 test('every retrieval-bearing turn receives one query optimization pass', () => {
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color' }), true);
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: '' }), true);
+  assert.equal(shouldRunRecallOptimizer({ operation: 'recall' }), true);
+  assert.equal(shouldRunRecallOptimizer({ operation: 'timeline' }), true);
+  assert.equal(shouldRunRecallOptimizer({ operation: 'connector_read' }), false);
 });
 
 test('shadow evaluation is scheduled without blocking the served response', async () => {

@@ -33,7 +33,7 @@ import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from
 import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
-import { buildSynthesisFallbackChain, chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, summarizeUsage } from './chat-synthesis-policy.js';
+import { buildSynthesisFallbackChain, chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildRecallIntentContext, fallbackRecallQueries, normalizeRecallOptimization } from './chat-query-optimizer.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
@@ -51,6 +51,7 @@ import {
   DEFAULT_CHAT_PLANNER_MODEL,
   resolveChatSynthesisModel,
 } from '../llm/chat-provider.js';
+import { remainingStageMs, runWithStageDeadline } from '../runtime/stage-deadline.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -88,6 +89,10 @@ async function dispatchTool(name, args, ctx, opts = {}) {
     return first;
   }
   const backoff = first._failure_mode === 'RATE_LIMIT' ? 1500 : 400;
+  if (remainingStageMs(Infinity) <= backoff) {
+    logCall(first, null);
+    return first;
+  }
   await new Promise(r => setTimeout(r, backoff));
   const second = await invoke();
   if (second && !second.error) second._retried_after = first._failure_mode;
@@ -444,7 +449,7 @@ async function execRelationBetween(bus, plan, ctx, { beforeDeadline, remaining, 
   };
   try {
     startTool('hivemind_relation_between', relationArgs);
-    const relationResult = await beforeDeadline(dispatchTool('hivemind_relation_between', relationArgs, ctx));
+    const relationResult = await beforeDeadline(() => dispatchTool('hivemind_relation_between', relationArgs, ctx));
     recordTool(
       'hivemind_relation_between', relationArgs,
       `${relationResult?.direct_edges?.length || 0} typed edges + ${relationResult?.shared_paths?.length || 0} shared paths`,
@@ -472,7 +477,7 @@ async function execAggregate(bus, plan, ctx, { beforeDeadline, remaining, startT
   };
   try {
     startTool('hivemind_aggregate_entities', aggregateArgs);
-    const aggregateResult = await beforeDeadline(dispatchTool('hivemind_aggregate_entities', aggregateArgs, ctx));
+    const aggregateResult = await beforeDeadline(() => dispatchTool('hivemind_aggregate_entities', aggregateArgs, ctx));
     // rosemary Root Cause A1: surface the actual entity NAMES to synthesis, not
     // just a count. The tool already returns entities:[{name,aliases}]; the old
     // summary dropped them, so "list all X products" answered "12 distinct
@@ -525,7 +530,7 @@ async function execTimeline(bus, plan, ctx, { beforeDeadline, remaining, startTo
   if (!temporalTool) return;
   try {
     startTool(temporalTool, temporalArgs);
-    const temporalResult = await beforeDeadline(dispatchTool(temporalTool, temporalArgs, ctx));
+    const temporalResult = await beforeDeadline(() => dispatchTool(temporalTool, temporalArgs, ctx));
     // Normalise the varied temporal shapes into memories/evidence for synthesis.
     const tMems = temporalResult?.memories
       || temporalResult?.added || temporalResult?.results || [];
@@ -642,7 +647,7 @@ async function execProfile(bus, plan, ctx, { beforeDeadline, remaining, startToo
   if (!(plan.operation === 'profile' && remaining() > 0)) return;
   try {
     startTool('get_user_profile', {});
-    const profileResult = await beforeDeadline(dispatchTool('get_user_profile', {}, ctx));
+    const profileResult = await beforeDeadline(() => dispatchTool('get_user_profile', {}, ctx));
     const profileContext = profileResult?.context || '';
     // Expose the profile as a citeable packet so the grounded-claim validator
     // (which fail-closes on uncited claims) accepts a profile-only answer.
@@ -668,7 +673,7 @@ async function execConnectorRead(bus, plan, ctx, { beforeDeadline, recordTool, o
   const selectedLiveGroups = Array.isArray(plan.tool_groups) ? plan.tool_groups : [];
   if (!(plan.operation === 'connector_read' && selectedLiveGroups.length > 0 && ctx._readToolkit)) return;
   try {
-    const readResult = await beforeDeadline(runToolkitReadLoop({
+    const readResult = await beforeDeadline(() => runToolkitReadLoop({
       toolkit: ctx._readToolkit,
       message: plan.user_message,
       history: [],
@@ -732,7 +737,12 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
       };
       try {
         startTool('hivemind_recall', args);
-        const r = await beforeDeadline(dispatchTool('hivemind_recall', args, ctx));
+        const r = await beforeDeadline(() => dispatchTool('hivemind_recall', args, ctx));
+        if (r?.error) {
+          const error = new Error(r.error);
+          error.code = r._failure_mode || 'RECALL_FAILED';
+          throw error;
+        }
         const memCount = r?.memories?.length || 0;
         const liveCount = r?.live_count || 0;
         const evCount = r?.evidence_count || 0;
@@ -853,11 +863,13 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   let relationChecked = false;
   let activeDeadlineAt = deadlineAt;
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
-  const beforeDeadline = (promise) => {
+  const beforeDeadline = (task) => {
     const ms = remaining();
-    return ms > 0
-      ? Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('recall deadline exceeded')), ms))])
-      : Promise.reject(new Error('recall deadline exceeded'));
+    return runWithStageDeadline(task, {
+      deadlineAt: activeDeadlineAt,
+      timeoutMs: ms,
+      label: 'chat-recall',
+    });
   };
 
   const recordTool = (tool, args, summary, payload) => {
@@ -967,7 +979,8 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // Derived from the steps ACTUALLY executed, never from intent, so it reports what happened.
   coverage = {
     ...coverage,
-    retrieval_timed_out: steps.some((s) => /recall deadline exceeded/.test(s?.result_summary || '')),
+    retrieval_timed_out: steps.some((s) => /deadline exceeded|timed out/i.test(s?.result_summary || '')),
+    retrieval_unavailable: steps.some((s) => /REMOTE_UNAVAILABLE|memory box unavailable|workspace unavailable/i.test(s?.result_summary || '')),
   };
   if (plan.operation === 'relation_between' && relationChecked) {
     coverage = {
@@ -990,7 +1003,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       escalationCount = 1;
       try {
         startTool('hivemind_recall', { ...recallExtras, ...escalation.args });
-        const expanded = await beforeDeadline(dispatchTool('hivemind_recall', {
+        const expanded = await beforeDeadline(() => dispatchTool('hivemind_recall', {
           ...recallExtras,
           ...escalation.args,
         }, ctx));
@@ -1331,12 +1344,13 @@ function unavailableEvidenceResponse({ message, evidence, language }) {
   // lookup exceeded its budget, and this branch told them nothing was there. Say what happened and
   // invite a retry, which is what actually works. Mirrors sourceUnavailableResponse below, which
   // already distinguishes "could not retrieve" from "not present".
-  if (evidence?.coverage?.retrieval_timed_out) {
+  if (evidence?.coverage?.retrieval_timed_out || evidence?.coverage?.retrieval_unavailable) {
+    const unavailable = evidence?.coverage?.retrieval_unavailable;
     const timeoutResponses = {
-      de: `Die Suche in meinem Gedaechtnis hat zu lange gedauert und wurde abgebrochen — ich habe also NICHT festgestellt, dass es dazu nichts gibt. Frag einfach noch einmal; meistens klappt es beim zweiten Versuch.`,
-      fr: `La recherche dans ma memoire a depasse le temps imparti et a ete interrompue — je n'ai donc PAS etabli qu'il n'y a rien a ce sujet. Repose la question, cela aboutit generalement au second essai.`,
-      es: `La busqueda en mi memoria tardo demasiado y se cancelo — asi que NO he comprobado que no haya nada sobre esto. Preguntame otra vez; normalmente funciona en el segundo intento.`,
-      en: `My memory lookup took too long and was cut off, so I have NOT established that there's nothing on this — I simply didn't get an answer back in time. Ask me again; it usually succeeds on the second attempt.`,
+      de: unavailable ? `Meine Memory Box ist gerade nicht erreichbar. Ich habe deshalb NICHT festgestellt, dass es dazu nichts gibt; ich konnte die Quellen nicht pruefen. Bitte versuche es gleich noch einmal.` : `Die Suche in meinem Gedaechtnis hat zu lange gedauert und wurde abgebrochen — ich habe also NICHT festgestellt, dass es dazu nichts gibt. Frag einfach noch einmal; meistens klappt es beim zweiten Versuch.`,
+      fr: unavailable ? `Ma Memory Box est momentanement indisponible. Je n'ai donc PAS etabli qu'il n'y a rien a ce sujet; je n'ai pas pu verifier les sources. Reessaie dans un instant.` : `La recherche dans ma memoire a depasse le temps imparti et a ete interrompue — je n'ai donc PAS etabli qu'il n'y a rien a ce sujet. Repose la question, cela aboutit generalement au second essai.`,
+      es: unavailable ? `Mi Memory Box no esta disponible en este momento. Por eso NO he comprobado que no haya nada sobre esto; no pude revisar las fuentes. Intentalo de nuevo en un momento.` : `La busqueda en mi memoria tardo demasiado y se cancelo — asi que NO he comprobado que no haya nada sobre esto. Preguntame otra vez; normalmente funciona en el segundo intento.`,
+      en: unavailable ? `My Memory Box is temporarily unavailable, so I have NOT established that there's nothing on this — I couldn't inspect the sources. Please try again in a moment.` : `My memory lookup took too long and was cut off, so I have NOT established that there's nothing on this — I simply didn't get an answer back in time. Ask me again; it usually succeeds on the second attempt.`,
     };
     return timeoutResponses[lang] || timeoutResponses.en;
   }
@@ -3265,17 +3279,15 @@ export async function runReactAgentV2({
       };
     }
 
-    // STEP 2.5 — Optimise the recall queries: search with a short, English,
-    // keyword query instead of the raw conversational prompt. Only on blended
+    // STEP 2.5 — Optimise the recall query into an intent-preserving semantic
+    // expression instead of searching the raw conversational prompt. Only on blended
     // recall turns — dedicated lanes (aggregate/connector_read/relation_between/
     // profile) run no sub_query recall, so optimising is a wasted model call.
     // The answer LLM still receives the user's original message.
-    const _dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read'
-      || plan.operation === 'relation_between' || plan.operation === 'profile';
+    const _dedicatedLane = !shouldRunRecallOptimizer(plan);
     let queryOptimizerRan = false;
     if (!_dedicatedLane
-        && shouldOptimizeRecallQuery({ router: intentDecision._router, canonicalQuery: plan.query_canonical_en })
-        && Array.isArray(plan.sub_queries) && plan.sub_queries.length > 0) {
+        && shouldOptimizeRecallQuery({ router: intentDecision._router, canonicalQuery: plan.query_canonical_en })) {
       const optimizerStartedAt = Date.now();
       try {
         const optimizedResult = await optimizeRecallQueries({

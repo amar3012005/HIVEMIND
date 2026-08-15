@@ -443,3 +443,19 @@ test('R9: deadline already passed → base recall skipped, empty result', async 
   // but beforeDeadline rejects immediately.
   assert.equal(memIds(r).length, 0, 'no memories survive an expired deadline');
 });
+
+test('a Memory Box outage is preserved as unavailable coverage, never empty evidence', async () => {
+  const { ctx } = makeCtx({
+    hivemind_recall: new Error('memory box unavailable for workspace o1 (/v1/recall)'),
+  });
+  const r = await gatherEvidence({
+    plan: basePlan(),
+    ctx,
+    onEvent: undefined,
+    deadlineAt: FAR(),
+  });
+  assert.equal(r.memories.length, 0);
+  assert.equal(r.coverage.retrieval_unavailable, true);
+  assert.equal(r.coverage.complete, false);
+  assert.match(r.steps[0].result_summary, /memory box unavailable/i);
+});

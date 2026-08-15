@@ -46,15 +46,89 @@ test('remote read transport circuit bounds repeated recall timeouts', async (t) 
   const { remoteRecall } = await import(`../../src/vector/mneme/remote-backend.js?circuit=${Date.now()}`);
 
   const firstStarted = Date.now();
-  assert.equal(await remoteRecall('org', [0.1], {}, 5, 0), null);
+  await assert.rejects(remoteRecall('org', [0.1], {}, 5, 0), { code: 'REMOTE_MEMORY_UNAVAILABLE' });
   const firstMs = Date.now() - firstStarted;
   const secondStarted = Date.now();
-  assert.equal(await remoteRecall('org', [0.1], {}, 5, 0), null);
+  await assert.rejects(remoteRecall('org', [0.1], {}, 5, 0), { code: 'REMOTE_MEMORY_UNAVAILABLE' });
   const secondMs = Date.now() - secondStarted;
 
   assert.ok(firstMs >= 40, `first call should observe the transport timeout, got ${firstMs}ms`);
   assert.ok(secondMs < 30, `circuit should fail the repeated hop immediately, got ${secondMs}ms`);
   assert.equal(requests, 1);
+});
+
+test('the per-tenant read bulkhead rejects excess work without affecting healthy calls', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-remote-bulkhead-'));
+  const registry = join(directory, 'agents.json');
+  let requests = 0;
+  const server = http.createServer((_req, res) => {
+    requests += 1;
+    setTimeout(() => {
+      if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
+      if (!res.writableEnded) res.end(JSON.stringify({ results: [] }));
+    }, 80);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  process.env.MNEME_AGENT_REGISTRY_FILE = registry;
+  process.env.MNEME_REMOTE_TIMEOUT_MS = '500';
+  process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG = '2';
+  await writeFile(registry, JSON.stringify({ org: { url: `http://127.0.0.1:${server.address().port}`, token: 'token' } }));
+  const { remoteRecall } = await import(`../../src/vector/mneme/remote-backend.js?bulkhead=${Date.now()}`);
+
+  const first = remoteRecall('org', [0.1], {}, 5, 0);
+  const second = remoteRecall('org', [0.1], {}, 5, 0);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const rejectedAt = Date.now();
+  await assert.rejects(remoteRecall('org', [0.1], {}, 5, 0), (error) => (
+    error.code === 'REMOTE_MEMORY_UNAVAILABLE' && /bulkhead full/.test(error.message)
+  ));
+  assert.ok(Date.now() - rejectedAt < 30, 'excess work should fail immediately');
+  assert.deepEqual(await Promise.all([first, second]), [[], []]);
+  assert.equal(requests, 2);
+});
+
+test('an upstream stage deadline aborts remote IO without poisoning the transport circuit', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-remote-parent-deadline-'));
+  const registry = join(directory, 'agents.json');
+  let requests = 0;
+  let closedRequests = 0;
+  const server = http.createServer((req, res) => {
+    requests += 1;
+    req.on('close', () => { if (!res.writableEnded) closedRequests += 1; });
+    setTimeout(() => {
+      if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
+      if (!res.writableEnded) res.end(JSON.stringify({ results: [] }));
+    }, requests === 1 ? 300 : 5);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  process.env.MNEME_AGENT_REGISTRY_FILE = registry;
+  process.env.MNEME_REMOTE_TIMEOUT_MS = '1000';
+  process.env.MNEME_REMOTE_FAILURE_COOLDOWN_MS = '1000';
+  await writeFile(registry, JSON.stringify({ org: { url: `http://127.0.0.1:${server.address().port}`, token: 'token' } }));
+  const [{ remoteRecall }, { runWithStageDeadline }] = await Promise.all([
+    import(`../../src/vector/mneme/remote-backend.js?parent-deadline=${Date.now()}`),
+    import('../../src/runtime/stage-deadline.js'),
+  ]);
+
+  const bounded = await runWithStageDeadline(
+    () => remoteRecall('org', [0.1], {}, 5, 0),
+    { timeoutMs: 35, fallback: null, label: 'remote-parent-test' },
+  );
+  assert.equal(bounded, null);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(closedRequests, 1, 'the abandoned HTTP request should be actively closed');
+
+  const recovered = await remoteRecall('org', [0.1], {}, 5, 0);
+  assert.deepEqual(recovered, []);
+  assert.equal(requests, 2, 'upstream cancellation must not open the Memory Box circuit');
 });
 
 test('reconciler repairs legacy unsynced memory rows without truncating content', async () => {
@@ -64,6 +138,7 @@ test('reconciler repairs legacy unsynced memory rows without truncating content'
   const result = await reconcileRemoteVectors('org-1', {
     commit: true,
     deps: {
+      remoteCapabilities: async () => null,
       remoteVectorStatus: async () => null,
       remoteVectorPending: async () => null,
       remoteList: async () => ({ memories: [{
@@ -91,6 +166,7 @@ test('reconciler repairs memory and evidence returned by an upgraded agent', asy
   const result = await reconcileRemoteVectors('org-2', {
     commit: true,
     deps: {
+      remoteCapabilities: async () => ({ capabilities: ['vector.status', 'vector.pending', 'vector.repair'] }),
       remoteVectorStatus: async () => ({ ok: true }),
       remoteVectorPending: async (_org, { kind }) => ({ items: kind === 'memory'
         ? [{ id: '22222222-2222-4222-8222-222222222222', content: 'memory', layer: 'memory' }]
@@ -105,4 +181,26 @@ test('reconciler repairs memory and evidence returned by an upgraded agent', asy
   assert.deepEqual(calls, ['memory', 'evidence']);
   assert.equal(result.memory.repaired, 1);
   assert.equal(result.evidence.repaired, 1);
+});
+
+test('a persistently stale box is quarantined from scheduled maintenance without disabling user traffic', async () => {
+  const {
+    recordRemoteMaintenanceFailure,
+    recordRemoteMaintenanceSuccess,
+    remoteMaintenanceStatus,
+  } = await import('../../src/vector/mneme/vector-reconciler.js');
+  const org = `stale-${Date.now()}`;
+  recordRemoteMaintenanceFailure(org, { now: 1_000, threshold: 3, quarantineMs: 10_000 });
+  recordRemoteMaintenanceFailure(org, { now: 2_000, threshold: 3, quarantineMs: 10_000 });
+  assert.equal(remoteMaintenanceStatus(org, 2_500).quarantined, false);
+  const third = recordRemoteMaintenanceFailure(org, { now: 3_000, threshold: 3, quarantineMs: 10_000 });
+  assert.equal(third.quarantined_until, 13_000);
+  assert.equal(remoteMaintenanceStatus(org, 4_000).quarantined, true);
+  assert.equal(remoteMaintenanceStatus(org, 13_001).quarantined, false, 'quarantine must allow a later recovery probe');
+  recordRemoteMaintenanceSuccess(org);
+  assert.deepEqual(remoteMaintenanceStatus(org, 14_000), {
+    failures: 0,
+    quarantined: false,
+    quarantined_until: null,
+  });
 });

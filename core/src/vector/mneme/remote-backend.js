@@ -7,7 +7,26 @@
 
 const TIMEOUT_MS = Number(process.env.MNEME_REMOTE_TIMEOUT_MS || 4000);
 const FAILURE_COOLDOWN_MS = Number(process.env.MNEME_REMOTE_FAILURE_COOLDOWN_MS || 5000);
+const MAX_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG || 4));
 const _failureCircuitUntil = new Map();
+const _inflightByCircuit = new Map();
+const _capabilityCache = new Map();
+
+export class RemoteMemoryUnavailableError extends Error {
+  constructor(orgId, operation, cause = null) {
+    super(`memory box unavailable for workspace ${orgId} (${operation})${cause?.message ? `: ${cause.message}` : ''}`);
+    this.name = 'RemoteMemoryUnavailableError';
+    this.code = 'REMOTE_MEMORY_UNAVAILABLE';
+    this.orgId = orgId;
+    this.operation = operation;
+    this.cause = cause || undefined;
+  }
+}
+
+export function isRemoteMemoryUnavailableError(error) {
+  return error instanceof RemoteMemoryUnavailableError
+    || error?.code === 'REMOTE_MEMORY_UNAVAILABLE';
+}
 
 function _circuitKey(orgId, path) {
   // Keep write durability independent from read availability. A timed-out
@@ -25,6 +44,7 @@ function _circuitKey(orgId, path) {
 //      enrollments without a restart and without the broker touching the core process.
 //   3. MNEME_AGENT_URLS env: "orgId=https://host|token,orgId2=...".
 import { readFileSync, writeFileSync, existsSync, renameSync, statSync } from 'node:fs';
+import { currentStageSignal } from '../../runtime/stage-deadline.js';
 
 const _registry = new Map();
 // Default to a path on the shared core↔control volume. Self-host activates simply by the file existing
@@ -120,14 +140,35 @@ async function _call(orgId, path, body) {
   const circuitKey = _circuitKey(orgId, path);
   const unavailableUntil = _failureCircuitUntil.get(circuitKey) || 0;
   if (unavailableUntil > Date.now()) {
-    throw new Error(`agent ${path} transport circuit open`);
+    throw new RemoteMemoryUnavailableError(orgId, path, new Error('transport circuit open'));
   }
+  const inFlight = _inflightByCircuit.get(circuitKey) || 0;
+  if (inFlight >= MAX_INFLIGHT_PER_ORG) {
+    throw new RemoteMemoryUnavailableError(orgId, path, new Error('tenant transport bulkhead full'));
+  }
+  _inflightByCircuit.set(circuitKey, inFlight + 1);
   const tokens = [a.token, ...(a.fallbackTokens || [])].filter(Boolean);
   let lastStatus = null;
-  for (const token of tokens) {
+  try {
+    for (const token of tokens) {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const parentSignal = currentStageSignal();
+    // The parent deadline has its own AbortSignal. Keep the transport timer at
+    // the transport budget so two same-millisecond timers cannot misclassify a
+    // caller cancellation as a network outage and poison the circuit.
+    const requestTimeoutMs = TIMEOUT_MS;
+    let transportTimeoutFired = false;
+    const abortFromParent = () => {
+      if (!ctrl.signal.aborted) ctrl.abort(parentSignal?.reason);
+    };
+    if (parentSignal?.aborted) abortFromParent();
+    else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+    const t = setTimeout(() => {
+      transportTimeoutFired = true;
+      if (!ctrl.signal.aborted) ctrl.abort(new Error(`agent ${path} transport timeout`));
+    }, requestTimeoutMs);
     try {
+      if (parentSignal?.aborted) throw parentSignal.reason || new Error(`agent ${path} request cancelled`);
       const res = await fetch(`${a.url}${path}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-org-id': orgId },
@@ -153,26 +194,37 @@ async function _call(orgId, path, body) {
       // Only transport failures open the circuit. Authentication, capability
       // 404s and operation-level {ok:false} responses are deterministic and
       // must remain observable/retryable on their own terms.
-      if (error?.name === 'AbortError'
-          || /fetch failed|socket|network|aborted|ECONN|ENOTFOUND|EAI_AGAIN/i.test(String(error?.message || ''))) {
+      const cancelledByParent = Boolean(parentSignal?.aborted) && !transportTimeoutFired;
+      if (!cancelledByParent && (transportTimeoutFired
+          || error?.name === 'AbortError'
+          || /fetch failed|socket|network|aborted|ECONN|ENOTFOUND|EAI_AGAIN/i.test(String(error?.message || '')))) {
         _failureCircuitUntil.set(circuitKey, Date.now() + FAILURE_COOLDOWN_MS);
       }
       throw error;
     } finally {
       clearTimeout(t);
+      parentSignal?.removeEventListener('abort', abortFromParent);
     }
+    }
+    throw new Error(`agent ${path} → ${lastStatus || 'unreachable'}`);
+  } finally {
+    const remaining = (_inflightByCircuit.get(circuitKey) || 1) - 1;
+    if (remaining > 0) _inflightByCircuit.set(circuitKey, remaining);
+    else _inflightByCircuit.delete(circuitKey);
   }
-  throw new Error(`agent ${path} → ${lastStatus || 'unreachable'}`);
 }
 
-// Returns Qdrant-shaped hits [{id, score, payload}] or null on failure (caller falls back).
+// Returns Qdrant-shaped hits [{id, score, payload}]. A sovereign box failure
+// is NOT an empty corpus and must remain distinguishable to every caller.
 export async function remoteRecall(orgId, vector, filter, limit, scoreThreshold) {
   try {
     const out = await _call(orgId, '/v1/recall', { vector, filter, limit, scoreThreshold });
     return Array.isArray(out?.results) ? out.results : null;
   } catch (e) {
     console.warn(`[mneme/remote] recall failed org=${orgId}: ${e.message}`);
-    return null;
+    throw isRemoteMemoryUnavailableError(e)
+      ? e
+      : new RemoteMemoryUnavailableError(orgId, '/v1/recall', e);
   }
 }
 
@@ -245,6 +297,27 @@ export async function remoteStats(orgId, filter = {}) {
 export async function remoteVectorStatus(orgId) {
   try { return await _call(orgId, '/v1/vector-status', {}); }
   catch (e) { console.warn(`[mneme/remote] vector-status unavailable org=${orgId}: ${e.message}`); return null; }
+}
+
+export async function remoteCapabilities(orgId, { maxAgeMs = 300_000 } = {}) {
+  const cached = _capabilityCache.get(orgId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  try {
+    const out = await _call(orgId, '/v1/capabilities', {});
+    const value = {
+      schema_version: out?.schema_version || null,
+      vector_dimension: Number(out?.vector_dimension) || null,
+      capabilities: Array.isArray(out?.capabilities) ? out.capabilities : [],
+    };
+    _capabilityCache.set(orgId, { value, expiresAt: Date.now() + maxAgeMs });
+    return value;
+  } catch (error) {
+    // A 404 means a pre-capability agent. Cache that negotiated legacy mode so
+    // every reconciliation cycle does not rediscover it through error logs.
+    _capabilityCache.set(orgId, { value: null, expiresAt: Date.now() + maxAgeMs });
+    console.warn(`[mneme/remote] capability handshake unavailable org=${orgId}: ${error.message}`);
+    return null;
+  }
 }
 
 export async function remoteVectorPending(orgId, { kind = 'memory', cursor = null, limit = 100 } = {}) {

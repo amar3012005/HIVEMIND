@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { initialMemoryCrossRerank } from '../memory/recall-rerank-policy.js';
+import { runWithStageDeadline } from '../runtime/stage-deadline.js';
+import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 
 export function normalizeRecallLimit(value, fallback = 15) {
   const parsed = Number(value);
@@ -79,32 +81,13 @@ export async function applyProjectScopeFilter(prisma, orgId, result, recallProje
   return result;
 }
 
-function resolveWithinDeadline(promise, timeoutMs, fallback) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        resolve(fallback);
-      }
-    }, timeoutMs);
-    promise.then(
-      (value) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          resolve(value);
-        }
-      },
-      () => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          resolve(fallback);
-        }
-      },
-    );
-  });
+async function resolveWithinDeadline(task, timeoutMs, fallback, label = 'recall-route-stage') {
+  try {
+    return await runWithStageDeadline(task, { timeoutMs, fallback, label });
+  } catch (error) {
+    if (isRemoteMemoryUnavailableError(error)) throw error;
+    return typeof fallback === 'function' ? fallback(error) : fallback;
+  }
 }
 
 export async function handleRecallRoute(ctx = {}) {
@@ -235,8 +218,10 @@ export async function handleRecallRoute(ctx = {}) {
       }
       const remainingMs = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - _recallT0));
       const timeoutResult = { memories: [], evidence: [], live: [], trace: { timeout: true } };
-      const bounded = await resolveWithinDeadline(
-        recallRuntime.recall(query, {
+      let bounded;
+      try {
+        bounded = await resolveWithinDeadline(
+          () => recallRuntime.recall(query, {
           mode: recallPlan.mode,
           explicit_mode: true,
           include_live: body.include_live === true,
@@ -259,15 +244,26 @@ export async function handleRecallRoute(ctx = {}) {
           projectId: recallProjectId,
           accessContext: recallAccessCtx,
         }),
-        remainingMs(),
-        timeoutResult,
-      );
+          remainingMs(),
+          timeoutResult,
+          'recall-route-retrieval',
+        );
+      } catch (error) {
+        if (isRemoteMemoryUnavailableError(error)) {
+          return jsonResponse(res, {
+            error: 'memory_unavailable',
+            message: 'The sovereign Memory Box could not be reached. No absence conclusion was made.',
+            retryable: true,
+          }, 503);
+        }
+        throw error;
+      }
       const effectivePlan = bounded.trace?.recall_plan || recallPlan;
 
       let graphEvidence = [];
       if (effectivePlan.max_graph_hops > 0 && bounded.memories?.length && remainingMs() > 1) {
         const graph = await resolveWithinDeadline(
-          recallRuntime.loadGraph({
+          () => recallRuntime.loadGraph({
             prisma,
             memoryIds: bounded.memories.map((memory) => memory.id).filter(Boolean),
             userId,
@@ -277,6 +273,7 @@ export async function handleRecallRoute(ctx = {}) {
           }),
           Math.min(500, remainingMs()),
           { items: [], reason: 'timeout' },
+          'recall-route-graph',
         );
         graphEvidence = graph.items || [];
       }

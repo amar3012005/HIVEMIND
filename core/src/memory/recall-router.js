@@ -37,6 +37,8 @@ import { scopedMemoryWhere } from './prisma-graph-store.js';
 import { dedupeMemoriesById } from './recall-dedup.js';
 import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
 import { initialMemoryCrossRerank } from './recall-rerank-policy.js';
+import { runWithStageDeadline } from '../runtime/stage-deadline.js';
+import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -468,14 +470,16 @@ export function isLiveExpansionEligible({ includeLive, inspection, liveIntent = 
 
 // ── Utility: with-timeout wrapper ───────────────────────────────────────────
 
-function withTimeout(promise, ms, fallback) {
-  return new Promise((resolve) => {
-    let done = false;
-    const t = setTimeout(() => { if (!done) { done = true; resolve(fallback); } }, ms);
-    promise
-      .then((v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } })
-      .catch(() => { if (!done) { done = true; clearTimeout(t); resolve(fallback); } });
-  });
+async function withTimeout(taskOrPromise, ms, fallback, label = 'recall-router-stage') {
+  try {
+    return await runWithStageDeadline(
+      () => typeof taskOrPromise === 'function' ? taskOrPromise() : taskOrPromise,
+      { timeoutMs: ms, fallback, label },
+    );
+  } catch (error) {
+    if (isRemoteMemoryUnavailableError(error)) throw error;
+    return typeof fallback === 'function' ? fallback(error) : fallback;
+  }
 }
 
 // ── RECALL_HYBRID_DELIVERY_ALWAYS_ON — one relevance authority over memories + evidence ──
@@ -543,15 +547,18 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // The floor is now the inner timeout plus margin, so this wrapper can never kill an
   // attempt the reranker itself would have completed. It stays a real ceiling — a
   // pathological rerank still degrades — but every degrade is now attributed.
-  const _rrInner = Number(process.env.RERANK_TIMEOUT_MS || 2500);
-  const _rrBudget = Math.max(budgetMs || 0, _rrInner + 500);
+  const _rrInner = Number(process.env.RERANK_TOTAL_TIMEOUT_MS || 1200);
+  const _rrBudget = Math.max(budgetMs || 0, _rrInner + 150);
   const _rrStart = Date.now();
+  let rerankMeta = null;
   try {
     const rr = await withTimeout(
-      rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
+      () => rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
       _rrBudget,
       null,
+      'recall-hybrid-rerank',
     );
+    rerankMeta = rr?.rerank_meta || null;
     if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
       ordered = rr.map((x) => {
         const score = Number(x.rerank_score);
@@ -611,6 +618,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
     ranking_mode: usedCrossEncoder ? 'cross_encoder' : 'lane_interleave_fallback',
     rerank_passes: usedCrossEncoder ? 1 : 0,
     rerank_ms: Date.now() - _rrStart,
+    rerank: rerankMeta,
   };
 }
 

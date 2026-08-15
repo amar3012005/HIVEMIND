@@ -448,6 +448,21 @@ const readBody = (req) => new Promise((resolve, reject) => {
 });
 
 const routes = {
+  '/v1/capabilities': async () => ({
+    ok: true,
+    schema_version: SCHEMA_VERSION,
+    vector_dimension: DIM,
+    capabilities: [
+      'memory.recall',
+      'memory.lexical',
+      'memory.hydrate',
+      'evidence.recall',
+      'vector.status',
+      'vector.pending',
+      'vector.repair',
+    ],
+  }),
+
   // Upsert one finished memory: row (idempotent by id) + vector. Atomic-ish: insert row synced=false,
   // upsert vector (wait), then mark synced. If the vector fails the route returns non-ok so the caller retries.
   '/v1/write': async (b) => {

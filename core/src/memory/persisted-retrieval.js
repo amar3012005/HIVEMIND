@@ -11,6 +11,7 @@ import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { rerank as crossEncoderRerank } from './reranker.js';
 import { meterTokens } from '../billing/usage-tracker.js';
 import { isMemoryInDateRange } from './temporal-range.js';
+import { memoryBackend } from '../vector/mneme/driver.js';
 
 // PHASE-B: single canonical ALGORITHMIC reranker, shared with three-tier-retrieval.js.
 // Lazily constructed inside the RECALL_TIERED_VIEW=true branch so the dark-by-default
@@ -677,9 +678,9 @@ async function vectorCandidatesForRecall(store, {
   scope_filter = null,
 }) {
   const qdrantClient = getQdrantClient();
-  const connected = await qdrantClient.isConnected();
-  if (!connected) {
-    return [];
+  if (memoryBackend(org_id) === 'central') {
+    const connected = await qdrantClient.isConnected();
+    if (!connected) return [];
   }
 
   // PHASE-F NOTE: the LIVE /api/recall tuned-param path is

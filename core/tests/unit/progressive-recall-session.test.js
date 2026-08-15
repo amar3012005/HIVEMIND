@@ -91,7 +91,11 @@ test('expands only on an explicit relevant-but-incomplete synthesis decision', (
   const session = createProgressiveRecallSession({ rankedCandidates, memories, evidence, query: 'small detail' });
   assert.equal(shouldExpandProgressiveRecall({ context_status: 'sufficient' }, session), false);
   assert.equal(shouldExpandProgressiveRecall({ context_status: 'query_mismatch' }, session), false);
-  assert.equal(shouldExpandProgressiveRecall({ context_status: 'relevant_but_incomplete' }, session), true);
+  assert.equal(shouldExpandProgressiveRecall({ context_status: 'relevant_but_incomplete' }, session), false);
+  assert.equal(shouldExpandProgressiveRecall({
+    context_status: 'relevant_but_incomplete',
+    claims: [{ text: 'The first page establishes the project.', grounded: true, citation_ids: ['P1-C1'] }],
+  }, session), true);
 });
 
 test('packet restriction prevents citations to unrevealed rows', () => {

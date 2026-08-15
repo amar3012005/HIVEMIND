@@ -343,12 +343,13 @@ function createEvidenceBus() {
   const recallPackets = [];
   const coMentions = [];
   const rankedCandidates = [];
+  const recallTelemetry = [];
   const _evidenceSeen = new Set();
   const _liveSeen = new Set();
 
   return {
     memoriesById, liveItems, evidenceItems, edgesByKey,
-    synthesisChains, recallPackets, coMentions, rankedCandidates,
+    synthesisChains, recallPackets, coMentions, rankedCandidates, recallTelemetry,
     _evidenceSeen, _liveSeen,
 
     // rows: memory rows. opts:
@@ -420,6 +421,14 @@ function createEvidenceBus() {
     addPacket(packet) { if (packet) recallPackets.push(packet); },
     addPackets(list) { for (const p of (list || [])) recallPackets.push(p); },
     addCoMentions(list) { for (const c of (list || [])) coMentions.push(c); },
+    addRecallTelemetry(trace) {
+      if (!trace || typeof trace !== 'object') return;
+      recallTelemetry.push({
+        rerank_passes: Number(trace.rerank_passes) || 0,
+        rerank_ms: Number(trace.rerank_ms) || 0,
+        ranking_mode: trace.hybrid_ranking_mode || null,
+      });
+    },
     mergeRankedCandidates(rows) {
       const seen = new Set(rankedCandidates.map((row) => row.kind === 'memory'
         ? `memory:${row.memory_id}` : `evidence:${row.segment_id}`));
@@ -776,6 +785,7 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
     bus.mergeLive(r?.live, { dedup: true });
     bus.mergeEvidence(r?.evidence, { keyMode: 'withPage' });
     bus.mergeRankedCandidates(r?.ranked_candidates);
+    bus.addRecallTelemetry(r?.trace);
     bus.mergeEdges(r?.relationships, { overwrite: false });
     bus.addPacket(r?.evidence_packet);
     // KB-answer fix: base recall returns evidence[] but NO evidence_packet, so
@@ -1031,6 +1041,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
         bus.mergeMemories(expanded?.memories);
         bus.mergeEvidence(expanded?.evidence, { keyMode: 'withPage' });
         bus.mergeRankedCandidates(expanded?.ranked_candidates);
+        bus.addRecallTelemetry(expanded?.trace);
         bus.mergeEdges(expanded?.relationships, { overwrite: true });
         bus.addPacket(expanded?.evidence_packet);
       } catch (error) {
@@ -1065,6 +1076,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     synthesis_chains: [...synthesisChains.values()],
     recall_packets: recallPackets,
     ranked_candidates: rankedCandidates,
+    recall_telemetry: recallTelemetry,
     profile_context: profileContext,
     aggregate: aggregateResult,
     coverage: {
@@ -3334,6 +3346,7 @@ export async function runReactAgentV2({
       aggregate: plan.aggregate || null,
     });
     _ps = Date.now();
+    let retrievalPasses = 1;
     let evidence = await gatherEvidence({
       plan,
       ctx,
@@ -3364,6 +3377,7 @@ export async function runReactAgentV2({
         const retried = await gatherEvidence({
           plan, ctx, onEvent, deadlineAt: Date.now() + RETRIEVAL_BUDGET_MS,
         });
+        retrievalPasses += 1;
         steps.push(...retried.steps);
         evidence = retried;
       }
@@ -3371,6 +3385,9 @@ export async function runReactAgentV2({
     trace.recall = {
       coverage: evidence.coverage,
       escalation_count: evidence.escalation_count,
+      retrieval_passes: retrievalPasses,
+      rerank_passes: (evidence.recall_telemetry || []).reduce((total, item) => total + item.rerank_passes, 0),
+      rerank_ms: (evidence.recall_telemetry || []).reduce((total, item) => total + item.rerank_ms, 0),
     };
     onEvent?.({ type: 'coverage_assessed', coverage: evidence.coverage });
 
@@ -3414,6 +3431,7 @@ export async function runReactAgentV2({
       requested: requestedAnswerModel,
       finalFallback: FINAL_FALLBACK_MODEL,
     });
+    let synthesisPasses = 0;
     const synthesizeWithFallback = async (input, { validateCandidate = true } = {}) => {
       let lastError = null;
       // Once a model has successfully taken over, progressive expansions start
@@ -3422,6 +3440,7 @@ export async function runReactAgentV2({
       for (let index = 0; index < attemptModels.length; index += 1) {
         const candidateModel = attemptModels[index];
         try {
+          synthesisPasses += 1;
           const candidateAnswer = await answerStep({ ...input, model: candidateModel });
           if (validateCandidate && candidateModel !== requestedAnswerModel
               && candidateModel !== FINAL_FALLBACK_MODEL
@@ -3455,6 +3474,7 @@ export async function runReactAgentV2({
         // fails closed, preserve availability and answer quality with one
         // ordinary JSON synthesis on the final safety model. The caller then
         // emits its validated sentence chunks over the existing SSE channel.
+        synthesisPasses += 1;
         const fallbackAnswer = await answerStep({
           ...input,
           streamValidated: false,
@@ -3527,6 +3547,8 @@ export async function runReactAgentV2({
         recordUsage(attemptIndex === 0 ? stage : `${stage}_expand_${attemptIndex}`, usage);
       }
     }
+    trace.recall.synthesis_passes = synthesisPasses;
+    trace.recall.progressive.expansion_count = progressiveSession.expansion_count;
     onEvent?.({
       type: 'answer_validated',
       grounded: answer.grounded,

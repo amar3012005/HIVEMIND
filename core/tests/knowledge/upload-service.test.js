@@ -8,7 +8,7 @@ const ids = {
   job: '33333333-3333-4333-8333-333333333333',
 };
 
-function dependencies({ storageMode = 'hybrid', ready = true, duplicate = null } = {}) {
+function dependencies({ storageMode = 'hybrid', ready = true, duplicate = null, isRemoteOrg = () => false } = {}) {
   const created = [];
   const updates = [];
   const prisma = {
@@ -26,7 +26,7 @@ function dependencies({ storageMode = 'hybrid', ready = true, duplicate = null }
     isAvailable: async () => true, persistFile: () => '/tmp/file',
     enqueue: async () => ({ queue_job_id: 'queue-1' }),
   };
-  return { prisma, jobStore, queue, created, updates, storageReady: () => ready };
+  return { prisma, jobStore, queue, created, updates, storageReady: () => ready, isRemoteOrg };
 }
 
 function request() {
@@ -53,6 +53,17 @@ test('completed duplicate returns existing identifiers without enqueueing', asyn
   const result = await new KnowledgeUploadService(deps).admit(request());
   assert.equal(result.status, 409);
   assert.equal(result.body.existing_document_id, ids.job);
+  assert.equal(queued, false);
+});
+
+test('remote ready uploads remain duplicates without a central document lookup', async () => {
+  const duplicate = { id: ids.job, userId: ids.user, status: 'ready', documentId: ids.job, processingVersion: 1 };
+  const deps = dependencies({ storageMode: 'byod_amr', duplicate, isRemoteOrg: () => true });
+  let queued = false;
+  deps.queue.enqueue = async () => { queued = true; return {}; };
+  const result = await new KnowledgeUploadService(deps).admit(request());
+  assert.equal(result.status, 409);
+  assert.equal(result.body.error, 'duplicate_document');
   assert.equal(queued, false);
 });
 

@@ -2,14 +2,16 @@ import crypto from 'node:crypto';
 import { authorizeKnowledgeScope } from './upload-authorization.js';
 import { safeUploadFilename, uploadError, validateKnowledgeFile } from './upload-contract.js';
 import { countPages } from './page-count.js';
+import { orgIsRemote } from '../vector/mneme/driver.js';
 
 export class KnowledgeUploadService {
-  constructor({ prisma, queue, jobStore, planEnforcer, storageReady }) {
+  constructor({ prisma, queue, jobStore, planEnforcer, storageReady, isRemoteOrg = orgIsRemote }) {
     this.prisma = prisma;
     this.queue = queue;
     this.jobStore = jobStore;
     this.planEnforcer = planEnforcer;
     this.storageReady = storageReady;
+    this.isRemoteOrg = isRemoteOrg;
   }
 
   async admit({ userId, orgId, file, targetScope, projectIds, primaryTeamId, metadata, force = false }) {
@@ -78,6 +80,12 @@ export class KnowledgeUploadService {
     if (job?.status === 'ready') {
       if (!job.documentId) {
         _readyDocLives = false; // ready with no document to point at — nothing to reuse
+      } else if (this.isRemoteOrg(orgId)) {
+        // A self-hosted document is deliberately absent from central Prisma.
+        // Treat its durable job reference as live here: a central lookup would
+        // otherwise turn every normal AMR re-upload into an accidental
+        // re-ingest. Explicit force handles remote cleanup in the worker.
+        _readyDocLives = true;
       } else if (this.prisma?.knowledgeDocument) {
         try {
           _readyDocLives = !!(await this.prisma.knowledgeDocument.findFirst({

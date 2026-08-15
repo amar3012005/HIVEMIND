@@ -58,6 +58,7 @@ async function runCase(testCase, iteration) {
       use_tools: testCase.use_tools === true,
       ...(testCase.language ? { language: testCase.language } : {}),
       ...(testCase.recall_mode ? { recall_mode: testCase.recall_mode } : {}),
+      ...(testCase.project_id ? { project_id: testCase.project_id } : {}),
     }),
   });
   if (!response.ok) throw new Error(`${testCase.name}: HTTP ${response.status} ${await response.text()}`);

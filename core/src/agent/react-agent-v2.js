@@ -262,8 +262,39 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
     },
   });
   consumeLine(pending);
+  // Some OpenRouter GPT-OSS providers buffer a valid standard synthesis JSON
+  // object even when asked for NDJSON. That is still safe to stream after the
+  // response completes: validate every claim against the same RecallPackets,
+  // then emit only accepted claims. This avoids paying for a second LLM call
+  // merely because the provider chose JSON-object framing over NDJSON framing.
+  if (result.ok && streamedClaims.length === 0 && result.content) {
+    const buffered = parseJsonObjectContent(result.content);
+    const bufferedClaims = Array.isArray(buffered?.claims) ? buffered.claims : [];
+    for (const item of bufferedClaims) {
+      if (typeof item?.text !== 'string') continue;
+      const candidate = {
+        text: item.text.trim(),
+        grounded: true,
+        citation_ids: Array.isArray(item.citation_ids) ? item.citation_ids : [],
+      };
+      const validated = validateChatAnswer({ answer: candidate.text, claims: [candidate] }, recallPackets, { allowGeneralKnowledge });
+      if (!validated.claims.length) {
+        rejectedClaims.push(...(validated.rejected_claims || [candidate]));
+        continue;
+      }
+      const claim = validated.claims[0];
+      streamedClaims.push(claim);
+      if (!started) {
+        onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
+        started = true;
+      }
+      onEvent?.({ type: 'answer_delta', schema_version: 1, delta: `${claim.text}${/\s$/.test(claim.text) ? '' : ' '}`, validated: true, citation_ids: claim.citation_ids });
+    }
+    meta = buffered || meta;
+  }
   if (!result.ok || !streamedClaims.length) {
-    const detail = result.error ? `:${String(result.error).replace(/\s+/g, ' ').slice(0, 180)}` : '';
+    const diagnostic = result.error || result.content || '';
+    const detail = diagnostic ? `:${String(diagnostic).replace(/\s+/g, ' ').slice(0, 180)}` : '';
     throw new Error(`validated_stream_failed:${result.status || 'no_claims'}${detail}`);
   }
   onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });

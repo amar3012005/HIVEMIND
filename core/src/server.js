@@ -26,6 +26,7 @@ import { KnowledgeUploadService } from './knowledge/upload-service.js';
 import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
 import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
+import { projectScopedAnchorFilter } from './knowledge/document-delete-scope.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
 import { warmUpReranker } from './memory/reranker.js';
 import {
@@ -16497,7 +16498,7 @@ exit \$RC
                     // the tenant boundary — never cross-org.
                     const doc = await prisma.knowledgeDocument.findFirst({
                       where: { id: tryDocId, orgId },
-                      select: { id: true, sourceArtifactId: true, title: true },
+                      select: { id: true, sourceArtifactId: true, title: true, tags: true },
                     });
                     if (doc) {
                       // Purge derived memories FIRST. Deleting the document only
@@ -16515,7 +16516,17 @@ exit \$RC
                       if (doc.title) anchorTags.push(`filename:${doc.title}`);
                       const taggedMems = await safeFind('phase1-doc-anchor-tags', () =>
                         prisma.memory.findMany({
-                          where: { orgId, deletedAt: null, tags: { hasSome: anchorTags } },
+                          // A filename is not an identity. The same document can
+                          // legitimately exist in isolated projects (for example
+                          // evidence-only and both-mode acceptance). Require the
+                          // selected document's project scope whenever it has one,
+                          // otherwise deletion can erase a different project's
+                          // memories merely because their filenames match.
+                          where: projectScopedAnchorFilter({
+                            orgId,
+                            documentTags: doc.tags,
+                            anchorTags,
+                          }),
                           select: { id: true },
                         }));
                       const allMems = Array.from(new Set([...linkedMems, ...taggedMems]));

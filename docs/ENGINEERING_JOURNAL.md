@@ -706,3 +706,12 @@ slides that find no unique anchor get a page instead of `null`.
   acceptance remain required before promotion.
 - Production: not deployed
 - Rollback: current immutable `prod-20260815-92c6421e` release.
+
+## 2026-08-15 UTC — strategy trace on operating cycle brief
+
+- State: Committed and accepted release
+- Branch: `feat/hq-strategy-trace-brief`, PR #284, squash-merged to `singulance-main` at `c1ddd4058dc91760659ef3d042a32a4ca8d38f01`
+- Decision: extend the existing `operating_cycle_brief` (not build a new mechanism) to surface `growth_stage_id`/`constraint_id`/`success_measure` already present on `HqTodo.context` since creation — closing the "why was this built" half of the strategy→objective→artifact→metric graph.
+- Explicitly rejected: joining to `RuntimePerformanceMetric` by `stageId` for the "did it move a number" half. Grep across all writers confirmed `stageId` there is always a playbook execution stage id, never a `GrowthStage.id` — a join would silently return empty. No outcome metric exists against a growth stage anywhere in the codebase today. Recorded as an open gap, not built as a hollow feature.
+- Verification: 69/69 mocked-prisma tests pass. Deployed to control-plane, `hm-control` recreated healthy, byte-verified (`projectStrategyTrace` present, 2 matches) in the live container. Four public health checks 200.
+- Accepted release: `prod-20260815-c1ddd4058dc9`.

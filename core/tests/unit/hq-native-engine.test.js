@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait, projectRecentDecisions } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -391,4 +391,31 @@ test('runCycle detects a first-life burst (multiple simultaneously-READY sibling
   assert.match(burstBlock, /todo\.context\?\.activation_sprint_id === readyTodo\.context\.activation_sprint_id/);
   assert.match(burstBlock, /const todosToDispatchThisCycle = burstSiblings\.length > 1 \? burstSiblings : \[readyTodo\]/);
   assert.match(burstBlock, /for \(const readyTodo of todosToDispatchThisCycle\) \{/);
+});
+
+// Journal-recall (2026-08-15): confirmed by direct recon that
+// planner.js never queries growthJournal/hqCycle/hqRuntimeEvent — every
+// growth plan was built from scratch with no memory of prior decisions.
+// projectRecentDecisions is the pure projection feeding recent history
+// through the existing additionalEvidence pass-through.
+test('projectRecentDecisions compacts journal entries to a stable, prompt-safe shape', () => {
+  const journal = [
+    { eventType: 'decision', summary: 'Prioritized X-organic awareness', decision: { chosen: 'x_organic' }, createdAt: '2026-08-10T00:00:00Z' },
+    { event_type: 'decision', summary: 'Snake_case variant', decision: { chosen: 'gmail' }, created_at: '2026-08-11T00:00:00Z' },
+  ];
+  assert.deepEqual(projectRecentDecisions(journal), [
+    { event_type: 'decision', summary: 'Prioritized X-organic awareness', decision: { chosen: 'x_organic' }, created_at: '2026-08-10T00:00:00Z' },
+    { event_type: 'decision', summary: 'Snake_case variant', decision: { chosen: 'gmail' }, created_at: '2026-08-11T00:00:00Z' },
+  ]);
+});
+
+test('projectRecentDecisions never throws on missing/malformed input — a recall failure must not block planning', () => {
+  assert.deepEqual(projectRecentDecisions(), []);
+  assert.deepEqual(projectRecentDecisions(null), []);
+  assert.deepEqual(projectRecentDecisions('not an array'), []);
+  assert.deepEqual(projectRecentDecisions([null, undefined, {}]), [
+    { event_type: null, summary: null, decision: null, created_at: null },
+    { event_type: null, summary: null, decision: null, created_at: null },
+    { event_type: null, summary: null, decision: null, created_at: null },
+  ]);
 });

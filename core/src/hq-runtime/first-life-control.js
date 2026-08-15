@@ -356,19 +356,35 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
         selected.push(todo); internalAvailable -= 1;
       }
     };
-    select(recommended);
-    const initialLimit = Number.isFinite(Number(policy.initial_execution_limit))
-      ? Math.max(1, Number(policy.initial_execution_limit))
-      : 2;
-    if ((['user_start', 'internal_bootstrap'].includes(expansionTrigger) || policy.auto_start_initial_plan === true)
-      && selected.length >= initialLimit) {
-      // V3 starts only the recommendation. Historical policies without this
-      // field preserve their prior companion-work behavior.
-    } else if (recommended && effectClass(recommended) === 'external' && authorityPolicy.internal_autonomy !== false) {
-      select(ordered.find((todo) => effectClass(todo) === 'internal'));
-    } else if (expansionTrigger !== 'user_start') {
-      select(ordered.find((todo) => effectClass(todo) === 'external'));
-      select(ordered.find((todo) => effectClass(todo) === 'internal'));
+    if (expansionTrigger === 'initial_plan_ready') {
+      // The first-life "wow batch" burst: every evidenced proposal from THIS
+      // cohort starts together, in parallel — deliberately bypassing the
+      // external/internal execution-limit capacity checks select() enforces
+      // for ongoing operation. Those limits exist to keep steady-state
+      // Runtime to one bounded task at a time (see roomInFlight in
+      // native-engine.js); the very first activation is the one intentional
+      // exception, so the founder sees the company move on multiple fronts
+      // immediately instead of watching a single recommendation for days.
+      // Every subsequent trigger (verified_result, capability_wait_release,
+      // verified_monitoring_checkpoint, daily cadence's 'operate' mode, etc.)
+      // is unaffected — it still goes through the strict one-at-a-time
+      // selection below.
+      for (const todo of ordered) if (!selected.some((row) => row.id === todo.id)) selected.push(todo);
+    } else {
+      select(recommended);
+      const initialLimit = Number.isFinite(Number(policy.initial_execution_limit))
+        ? Math.max(1, Number(policy.initial_execution_limit))
+        : 2;
+      if ((['user_start', 'internal_bootstrap'].includes(expansionTrigger) || policy.auto_start_initial_plan === true)
+        && selected.length >= initialLimit) {
+        // V3 starts only the recommendation. Historical policies without this
+        // field preserve their prior companion-work behavior.
+      } else if (recommended && effectClass(recommended) === 'external' && authorityPolicy.internal_autonomy !== false) {
+        select(ordered.find((todo) => effectClass(todo) === 'internal'));
+      } else if (expansionTrigger !== 'user_start') {
+        select(ordered.find((todo) => effectClass(todo) === 'external'));
+        select(ordered.find((todo) => effectClass(todo) === 'internal'));
+      }
     }
 
     const promoted = [];

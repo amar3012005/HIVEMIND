@@ -295,18 +295,25 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
       ...todo,
       lifecycleStatus: projectedStatus(todo, runByTodo.get(todo.id) || null),
     })).filter((todo) => ownershipStatuses.has(todo.lifecycleStatus));
-    // Root-caused live (2026-08-15, orgs DIOR and Brdteengal): the sole
-    // promoted first-life task parks WAITING_FOR_CONNECTOR on a missing
-    // capability — a wait on a HUMAN that can take days — and nothing ever
-    // released its execution slot, so the other evidenced, dormant proposals
-    // (a prospect list, a research question — genuinely independent, no
-    // reason to wait) sat PROPOSED indefinitely. capability_wait_release is
-    // the parallel case to verified_monitoring_checkpoint's MONITORING
-    // handling below: a capacity-frozen connector wait releases the slot the
-    // same way a capacity-frozen measurement wait already did.
+    // Root-caused live (2026-08-15, orgs DIOR/Brdteengal, then Singulance
+    // itself): a promoted first-life task parks capacity-frozen — either
+    // WAITING_FOR_CONNECTOR on a missing capability, or MONITORING while a
+    // Room watches for provider replies — and nothing released its execution
+    // slot, so other evidenced, genuinely independent proposals (a prospect
+    // list, a TARA call sequence) sat PROPOSED indefinitely. The existing
+    // verified_monitoring_checkpoint path ALSO covers MONITORING, but only
+    // when the playbook stage itself declares waitingFor.releases_execution_
+    // slot=true — the outreach playbook's observe_responses stage doesn't,
+    // so that path silently never even attempts promotion (see the early
+    // return a few lines up this file, gated on that exact flag), and the
+    // system just sits idle until the run's own far-future scheduled
+    // deadline. capability_wait_release is called unconditionally whenever
+    // nothing is READY (native-engine.js), regardless of which capacity-
+    // frozen state is occupying the slot or whether its playbook opted in —
+    // it does not depend on any per-playbook authoring decision.
     if (['verified_monitoring_checkpoint', 'capability_wait_release'].includes(expansionTrigger)) {
       const releasableStatuses = expansionTrigger === 'capability_wait_release'
-        ? ['WAITING_FOR_CONNECTOR'] : ['MONITORING'];
+        ? ['WAITING_FOR_CONNECTOR', 'MONITORING'] : ['MONITORING'];
       for (const todo of active.filter((row) => effectClass(row) === 'external'
         && releasableStatuses.includes(row.lifecycleStatus)
         && asObject(row.context).execution_slot_released !== true)) {

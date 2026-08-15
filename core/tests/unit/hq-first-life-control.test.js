@@ -430,3 +430,27 @@ test('capability_wait_release does nothing when a todo is already READY — it o
   assert.deepEqual(result.promoted, []);
   assert.equal(result.reason, 'no_eligible_capacity');
 });
+
+// Root-caused live (2026-08-15, Singulance's own org): the same gap as the
+// connector-wait case above, but for MONITORING — an outreach task watching
+// for provider replies never released its slot for the dormant TARA-calls
+// task, because the outreach playbook's observe_responses stage never
+// declares waitingFor.releases_execution_slot, so the EXISTING
+// verified_monitoring_checkpoint path's own gate (native-engine.js, only
+// attempts promotion when that flag is true) never even tried. capability_wait_release
+// must release a MONITORING slot too, unconditionally — it must not depend
+// on any per-playbook authoring decision, unlike verified_monitoring_checkpoint.
+test('capability_wait_release also releases a MONITORING slot, unlike verified_monitoring_checkpoint which depends on the playbook opting in', async () => {
+  const version14 = (row) => { row.context.first_life_policy_version = 14; return row; };
+  const rows = [
+    version14(todo('monitoring-outreach', 'MONITORING', 1, 'external')),
+    version14(todo('tara-calls', 'PROPOSED', 2, 'external', true)),
+  ];
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows, { external_default: 'unconfigured', gate_overrides: {} }),
+    runtime, expansionTrigger: 'capability_wait_release',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['tara-calls']);
+  assert.equal(rows[1].status, 'READY');
+  assert.equal(rows[0].context.execution_slot_released, true);
+});

@@ -3614,6 +3614,13 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       document_date: documentDate,
       event_dates: input.event_dates || [],
       cognitive_layer_role: input.cognitive_layer_role || null,
+      claim_key: input.claim_key || null,
+      claim_subject: input.claim_subject || null,
+      claim_predicate: input.claim_predicate || null,
+      claim_qualifiers: input.claim_qualifiers || null,
+      extraction_confidence: Number.isFinite(input.extraction_confidence)
+        ? input.extraction_confidence
+        : null,
       metadata: input.metadata || {},
       contentFingerprint: null,
       source_metadata: input.source_metadata || {

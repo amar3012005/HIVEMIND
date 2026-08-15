@@ -2,10 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DocumentFirstIngestionService,
+  adaptiveAtomicMemoryBudget,
   normalizeCuratedClaims,
   normalizeUnifiedClaims,
   resolveEvidenceSegment,
 } from '../../src/knowledge/document-first-ingestion.js';
+
+test('atomic memory budget scales by information-bearing source size without page-count explosion', () => {
+  assert.equal(adaptiveAtomicMemoryBudget(2_000, 50), 12);
+  assert.equal(adaptiveAtomicMemoryBudget(20_000, 50), 30);
+  assert.equal(adaptiveAtomicMemoryBudget(100_000, 200), 60);
+  assert.equal(adaptiveAtomicMemoryBudget(100_000, 9), 9);
+});
 
 test('unified promotion validates multilingual exact source spans and durable types', () => {
   const source = 'Der Vorstand beschloss, das Projekt am 15. Juli zu starten. 次の会議は8月3日に東京で開催されます。';
@@ -34,6 +42,31 @@ test('unified promotion validates multilingual exact source spans and durable ty
   for (const claim of claims) {
     assert.equal(source.slice(claim.source_start, claim.source_end), claim.source_quote);
   }
+});
+
+test('unified promotion preserves language-neutral atomic claim structure', () => {
+  const source = 'SolvisPia 13/17 ist eine Luft/Wasser-Wärmepumpe.';
+  const [claim] = normalizeUnifiedClaims([{
+    t: 'SolvisPia 13/17', f: source, memory_type: 'fact', source_quote: source,
+    importance: 0.96, extraction_confidence: 0.98,
+    subject: { n: 'SolvisPia 13/17', k: 'product' },
+    predicate: 'product_category',
+    object: { value: 'Luft/Wasser-Wärmepumpe', type: 'product_category' },
+    qualifiers: { negated: false },
+    entities: [{ n: 'SolvisPia 13/17', k: 'product' }],
+    relationships: [{
+      from: { n: 'SolvisPia 13/17', k: 'product' }, type: 'variant_of',
+      to: { n: 'SolvisPia', k: 'product' },
+    }],
+  }], source, 5, 0.65);
+
+  assert.equal(claim.subject.name, 'SolvisPia 13/17');
+  assert.equal(claim.subject.kind, 'product');
+  assert.equal(claim.predicate, 'product_category');
+  assert.equal(claim.qualifiers.object, 'Luft/Wasser-Wärmepumpe');
+  assert.equal(claim.qualifiers.object_type, 'product_category');
+  assert.equal(claim.qualifiers.relationships[0].type, 'variant_of');
+  assert.equal(claim.extractionConfidence, 0.98);
 });
 
 test('unified promotion keeps ambiguity as evidence and rejects raw update edges', () => {
@@ -170,6 +203,10 @@ test('unified ingestion persists the classified type and exact evidence link', a
     source_start: 10,
     source_end: 40,
     importance: 0.93,
+    extraction_confidence: 0.97,
+    subject: { n: 'Launch', k: 'product' },
+    predicate: 'approved_launch_date',
+    object: { value: '15 July', type: 'date' },
     entities: ['Board'],
     rels: [],
   }];
@@ -181,6 +218,13 @@ test('unified ingestion persists the classified type and exact evidence link', a
 
   assert.equal(result[0].memory_type, 'decision');
   assert.equal(ingested[0].memory_type, 'decision');
+  assert.equal(ingested[0].claim_subject, 'Launch');
+  assert.equal(ingested[0].claim_predicate, 'approved_launch_date');
+  assert.equal(ingested[0].claim_qualifiers.object, '15 July');
+  assert.equal(ingested[0].extraction_confidence, 0.97);
+  assert.match(ingested[0].claim_key, /^[a-f0-9]{64}$/);
+  assert.equal(ingested[0].metadata.claim.subject.name, 'Launch');
+  assert.equal(ingested[0].metadata.claim.object.value, '15 July');
   assert.deepEqual(links[0], {
     memoryId: 'm1', documentId: 'doc-1', segmentId: 'segment-1',
     linkType: 'supports', confidence: 0.93, excerpt: 'approved the launch on 15 July',

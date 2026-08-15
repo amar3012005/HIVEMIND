@@ -521,7 +521,23 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // Ordering is the cross-encoder's alone. The only non-relevance signal kept is
   // supersession, and it FILTERS rather than reweights — truth, not a guess.
   const pool = [
-    ...memories.map((m) => ({ _row: m, _kind: 'memory', _title: m.title || '', _content: typeof m.content === 'string' ? m.content : '' })),
+    ...memories.map((m) => {
+      // Structured claim identity was extracted during ingestion at no chat-time
+      // cost. Expose it to the ONE unified reranker as a compact prefix so exact
+      // product/category/date/role questions can match the durable claim shape,
+      // while the full source passage remains available in the evidence lane.
+      const metadataClaim = m.metadata?.claim || {};
+      const qualifiers = m.claimQualifiers || m.claim_qualifiers || metadataClaim.qualifiers || {};
+      const subject = m.claimSubject || m.claim_subject || metadataClaim.subject?.name || '';
+      const predicate = m.claimPredicate || m.claim_predicate || metadataClaim.predicate || '';
+      const object = qualifiers && typeof qualifiers === 'object' ? (qualifiers.object || '') : '';
+      const claimPrefix = [subject, predicate, object].filter(Boolean).join(' | ');
+      const content = typeof m.content === 'string' ? m.content : '';
+      return {
+        _row: m, _kind: 'memory', _title: m.title || '',
+        _content: claimPrefix ? `[CLAIM ${claimPrefix}] ${content}` : content,
+      };
+    }),
     ...evidence.map((e) => ({ _row: e, _kind: 'evidence', _title: e.document?.title || e.document_title || '', _content: e.content || e.snippet || '' })),
   ].filter((c) => c._content || c._title);
   if (pool.length <= 1) return null;

@@ -6,6 +6,7 @@ import { narrateAwakening } from './awakening-narrator.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 import { projectCurrentActivationSprint } from './activation-sprint.js';
 import { activateEligibleFirstLifeWork, ensureFirstLifeBootstrapProposal, projectFirstLifeOperatingGate } from './first-life-control.js';
+import { revokeAuthoritiesForNewInstruction } from './authority-revocation.js';
 import { resolveAuthorityPreference } from './contracts.js';
 import { publishHqRuntimeTransient } from './event-bus.js';
 import { loadFirstLifePolicy } from '../growth/first-life-policy.js';
@@ -483,6 +484,23 @@ export class NativeHqEngine {
       await event(prisma, runtime, cycle, {
         eventType: 'instruction_received', title: 'I have accepted a new operating instruction',
         summary: applied.instruction.body, details: { instruction_id: applied.instruction.id, interpretation: applied.interpreted },
+      });
+      // Self-correction v1: a genuinely new instruction is the one
+      // unambiguous "something changed" signal available today. Revoke any
+      // still-in-flight authority so a prepared-under-the-old-context draft
+      // cannot fire on stale approval — this never touches a run that's
+      // already COMPLETED/TERMINATED/FAILED (see authority-revocation.js).
+      const revocation = await revokeAuthoritiesForNewInstruction({
+        prisma, runtime, instructionId: applied.instruction.id, instructionBody: applied.instruction.body,
+      }).catch((revokeError) => {
+        this.logger?.warn?.('[hq-runtime] authority revocation check failed (non-fatal):', revokeError?.message || revokeError);
+        return { revoked: [] };
+      });
+      for (const revokedAuthority of revocation.revoked) await event(prisma, runtime, cycle, {
+        eventType: 'blocked',
+        title: `A new instruction invalidated a pending approval: ${revokedAuthority.gate}`,
+        summary: 'The new operating instruction changes the context this approval was granted under. I revoked it — the checkpoint will require a fresh review before it can proceed, so nothing fires on stale context.',
+        details: { authority_id: revokedAuthority.id, run_id: revokedAuthority.runId, playbook_id: revokedAuthority.playbookId, stage_id: revokedAuthority.stageId, instruction_id: applied.instruction.id },
       });
       if (applied.todo) {
         for (const [index, todo] of (applied.todos || [applied.todo]).entries()) await event(prisma, runtime, cycle, {

@@ -41,9 +41,10 @@ test('JSON synthesis normalizes provider nulls and scalars to an object', () => 
   assert.deepEqual(parseJsonObjectContent('not JSON'), {});
 });
 
-test('every retrieval-bearing turn receives one query optimization pass', () => {
-  assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color' }), true);
+test('native recall reuses the planner query while missing/tool-enabled queries retain optimization', () => {
+  assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color' }), false);
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: '' }), true);
+  assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color', useTools: true }), true);
   assert.equal(shouldRunRecallOptimizer({ operation: 'recall' }), true);
   assert.equal(shouldRunRecallOptimizer({ operation: 'timeline' }), true);
   assert.equal(shouldRunRecallOptimizer({ operation: 'connector_read' }), false);

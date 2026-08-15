@@ -90,7 +90,7 @@ async function collectPending(orgId, kind, batchSize, deps) {
   let cursor = null;
   let modern = true;
   do {
-    const page = await deps.remoteVectorPending(orgId, { kind, cursor, limit: batchSize });
+    const page = await deps.remoteVectorPending(orgId, { kind, cursor, limit: batchSize, transportClass: 'maintenance' });
     if (!page) { modern = false; break; }
     pending.push(...page.items);
     cursor = page.cursor;
@@ -102,7 +102,7 @@ async function collectPending(orgId, kind, batchSize, deps) {
   // /v1/vector-pending. Their /v1/list includes vector_synced.
   cursor = null;
   do {
-    const page = await deps.remoteList(orgId, { is_latest: true, layer: 'memory' }, cursor, 500, 0);
+    const page = await deps.remoteList(orgId, { is_latest: true, layer: 'memory' }, cursor, 500, 0, { transportClass: 'maintenance' });
     const rows = page?.memories || [];
     pending.push(...rows.filter((row) => row.vector_synced !== true));
     cursor = page?.cursor || null;
@@ -127,10 +127,10 @@ export async function reconcileRemoteVectors(orgId, options = {}) {
     remoteWrite,
     ...(options.deps || {}),
   };
-  const negotiated = await deps.remoteCapabilities(orgId);
+  const negotiated = await deps.remoteCapabilities(orgId, { transportClass: 'maintenance' });
   const advertised = new Set(negotiated?.capabilities || []);
   const explicitlyLegacy = negotiated && !advertised.has('vector.pending');
-  const before = explicitlyLegacy ? null : await deps.remoteVectorStatus(orgId);
+  const before = explicitlyLegacy ? null : await deps.remoteVectorStatus(orgId, { transportClass: 'maintenance' });
   const modernDeps = explicitlyLegacy
     ? { ...deps, remoteVectorPending: async () => null }
     : deps;
@@ -160,8 +160,8 @@ export async function reconcileRemoteVectors(orgId, options = {}) {
         continue;
       }
       const ok = memories.modern
-        ? await deps.remoteVectorRepair(orgId, { kind: 'memory', id: rows[j].id, vector: vectors[j] })
-        : await deps.remoteWrite(orgId, remoteMemoryRecord(rows[j], orgId), vectors[j], []);
+        ? await deps.remoteVectorRepair(orgId, { kind: 'memory', id: rows[j].id, vector: vectors[j], transportClass: 'maintenance' })
+        : await deps.remoteWrite(orgId, remoteMemoryRecord(rows[j], orgId), vectors[j], [], { transportClass: 'maintenance' });
       if (ok) report.memory.repaired += 1;
       else report.memory.failed.push(rows[j].id);
     }
@@ -174,12 +174,12 @@ export async function reconcileRemoteVectors(orgId, options = {}) {
         report.evidence.failed.push(rows[j].id);
         continue;
       }
-      const ok = await deps.remoteVectorRepair(orgId, { kind: 'evidence', id: rows[j].id, vector: vectors[j] });
+      const ok = await deps.remoteVectorRepair(orgId, { kind: 'evidence', id: rows[j].id, vector: vectors[j], transportClass: 'maintenance' });
       if (ok) report.evidence.repaired += 1;
       else report.evidence.failed.push(rows[j].id);
     }
   }
-  report.after = explicitlyLegacy ? null : await deps.remoteVectorStatus(orgId);
+  report.after = explicitlyLegacy ? null : await deps.remoteVectorStatus(orgId, { transportClass: 'maintenance' });
   return report;
 }
 

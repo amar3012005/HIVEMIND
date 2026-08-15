@@ -1898,6 +1898,8 @@ export class RecallRouter {
     let finalEvidence = evidenceWithLineage;
     let rankedCandidates = [];
     let hybridRankingMode = 'not_applicable';
+    let hybridRerankPasses = 0;
+    let hybridRerankMs = 0;
     if (recallPlan.operation !== 'timeline') {
       const v2 = await deliverHybrid({
         query,
@@ -1913,6 +1915,8 @@ export class RecallRouter {
         finalEvidence = v2.evidence || evidenceWithLineage;
         rankedCandidates = v2.ranked_candidates || [];
         hybridRankingMode = v2.ranking_mode || 'unknown';
+        hybridRerankPasses = Number(v2.rerank_passes) || 0;
+        hybridRerankMs = Number(v2.rerank_ms) || 0;
       }
     }
 
@@ -1942,6 +1946,8 @@ export class RecallRouter {
       trace: {
         recall_plan:     recallPlan,
         hybrid_ranking_mode: hybridRankingMode,
+        rerank_passes: hybridRerankPasses,
+        rerank_ms: hybridRerankMs,
         hop1_count:      memories.length,
         event_range_count: eventRangeCount,
         sparse:          inspection.sparse,

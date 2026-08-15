@@ -7,12 +7,17 @@
 
 const TIMEOUT_MS = Number(process.env.MNEME_REMOTE_TIMEOUT_MS || 4000);
 const FAILURE_COOLDOWN_MS = Number(process.env.MNEME_REMOTE_FAILURE_COOLDOWN_MS || 5000);
-const MAX_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG || 4));
+// Interactive recall is deliberately bounded below the Memory Box's saturation
+// point. Its internal lanes already fan out; a small FIFO queue is faster and
+// more reliable than letting one turn consume every remote socket.
+const MAX_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG || 2));
+const MAX_MAINTENANCE_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_MAINTENANCE_INFLIGHT_PER_ORG || 1));
 const MAX_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_QUEUED_PER_ORG || 32));
 const _failureCircuitUntil = new Map();
 const _inflightByCircuit = new Map();
 const _waitersByCircuit = new Map();
 const _capabilityCache = new Map();
+const _coalescedReads = new Map();
 
 export class RemoteMemoryUnavailableError extends Error {
   constructor(orgId, operation, cause = null) {
@@ -30,13 +35,17 @@ export function isRemoteMemoryUnavailableError(error) {
     || error?.code === 'REMOTE_MEMORY_UNAVAILABLE';
 }
 
-function _circuitKey(orgId, path) {
+function _transportClass(options = {}) {
+  return options?.transportClass === 'maintenance' ? 'maintenance' : 'interactive';
+}
+
+function _circuitKey(orgId, path, options = {}) {
   // Keep write durability independent from read availability. A timed-out
   // recall must not suppress a subsequent write/outbox attempt, while repeated
   // read hops during the same outage should fail fast instead of each spending
   // the full transport timeout.
   const isWrite = /^\/v1\/(write|edge|update|update-tags|delete|kb-doc|kb-segment|kb-table|kb-table-row|vector-repair)/.test(path);
-  return `${orgId}:${isWrite ? 'write' : 'read'}`;
+  return `${orgId}:${isWrite ? 'write' : _transportClass(options)}`;
 }
 
 function _releaseSlot(circuitKey) {
@@ -55,10 +64,13 @@ function _releaseSlot(circuitKey) {
   if (!queue?.length) _waitersByCircuit.delete(circuitKey);
 }
 
-async function _acquireSlot(orgId, path, signal) {
-  const circuitKey = _circuitKey(orgId, path);
+async function _acquireSlot(orgId, path, signal, options = {}) {
+  const circuitKey = _circuitKey(orgId, path, options);
+  const maxInflight = _transportClass(options) === 'maintenance'
+    ? MAX_MAINTENANCE_INFLIGHT_PER_ORG
+    : MAX_INFLIGHT_PER_ORG;
   const current = _inflightByCircuit.get(circuitKey) || 0;
-  if (current < MAX_INFLIGHT_PER_ORG) {
+  if (current < maxInflight) {
     _inflightByCircuit.set(circuitKey, current + 1);
     return circuitKey;
   }
@@ -171,7 +183,7 @@ export function qdrantUrlFor(orgId) {
   return agentFor(orgId)?.qdrantUrl || null;
 }
 
-async function _call(orgId, path, body) {
+async function _call(orgId, path, body, options = {}) {
   const a = agentFor(orgId);
   if (!a) throw new Error(`no hm-agent registered for org ${orgId}`);
   // EMBEDDED agent: registry url 'local:' = this org's .amr storage runs IN-PROCESS on central
@@ -183,13 +195,13 @@ async function _call(orgId, path, body) {
     if (out?.ok === false) throw new Error(`agent ${path} rejected request: ${out.error || 'ok=false'}`);
     return out;
   }
-  const circuitKey = _circuitKey(orgId, path);
+  const circuitKey = _circuitKey(orgId, path, options);
   const unavailableUntil = _failureCircuitUntil.get(circuitKey) || 0;
   if (unavailableUntil > Date.now()) {
     throw new RemoteMemoryUnavailableError(orgId, path, new Error('transport circuit open'));
   }
-  const parentSignal = currentStageSignal();
-  await _acquireSlot(orgId, path, parentSignal);
+  const parentSignal = options.signal === false ? null : (options.signal || currentStageSignal());
+  await _acquireSlot(orgId, path, parentSignal, options);
   const tokens = [a.token, ...(a.fallbackTokens || [])].filter(Boolean);
   let lastStatus = null;
   try {
@@ -254,11 +266,58 @@ async function _call(orgId, path, body) {
   }
 }
 
+function _readKey(orgId, path, body) {
+  // JSON is sufficient here because each caller builds a stable, server-owned
+  // request shape. The key is process-local, short-lived, and never exposed.
+  return `${orgId}:${path}:${JSON.stringify(body)}`;
+}
+
+function _releaseSharedReadConsumer(entry) {
+  entry.consumers = Math.max(0, entry.consumers - 1);
+  if (entry.consumers === 0 && !entry.settled && !entry.controller.signal.aborted) {
+    entry.controller.abort(new Error('all coalesced remote read consumers cancelled'));
+  }
+}
+
+function _awaitSharedRead(entry, signal) {
+  entry.consumers += 1;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', abort);
+      _releaseSharedReadConsumer(entry);
+      fn(value);
+    };
+    const abort = () => finish(reject, signal?.reason || new Error('remote read cancelled'));
+    if (signal?.aborted) return abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    entry.promise.then((value) => finish(resolve, value), (error) => finish(reject, error));
+  });
+}
+
+function _coalescedInteractiveRead(orgId, path, body) {
+  const key = _readKey(orgId, path, body);
+  let entry = _coalescedReads.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    entry = { controller, consumers: 0, settled: false, promise: null };
+    entry.promise = _call(orgId, path, body, { signal: controller.signal, transportClass: 'interactive' })
+      .finally(() => {
+        entry.settled = true;
+        _coalescedReads.delete(key);
+      });
+    _coalescedReads.set(key, entry);
+  }
+  return _awaitSharedRead(entry, currentStageSignal());
+}
+
 // Returns Qdrant-shaped hits [{id, score, payload}]. A sovereign box failure
 // is NOT an empty corpus and must remain distinguishable to every caller.
 export async function remoteRecall(orgId, vector, filter, limit, scoreThreshold) {
   try {
-    const out = await _call(orgId, '/v1/recall', { vector, filter, limit, scoreThreshold });
+    const out = await _coalescedInteractiveRead(orgId, '/v1/recall', { vector, filter, limit, scoreThreshold });
     return Array.isArray(out?.results) ? out.results : null;
   } catch (e) {
     console.warn(`[mneme/remote] recall failed org=${orgId}: ${e.message}`);
@@ -268,8 +327,8 @@ export async function remoteRecall(orgId, vector, filter, limit, scoreThreshold)
   }
 }
 
-export async function remoteWrite(orgId, record, vector, rels = []) {
-  try { await _call(orgId, '/v1/write', { record, vector, rels }); return true; }
+export async function remoteWrite(orgId, record, vector, rels = [], options = {}) {
+  try { await _call(orgId, '/v1/write', { record, vector, rels }, options); return true; }
   catch (e) { console.warn(`[mneme/remote] write failed org=${orgId}: ${e.message}`); return null; }
 }
 
@@ -304,8 +363,8 @@ export async function remoteHydrate(orgId, ids) {
 }
 
 // Filtered enumeration from the agent (listMemories for remote orgs). Returns { memories, cursor }.
-export async function remoteList(orgId, filter, cursor, limit, offset = 0) {
-  try { const out = await _call(orgId, '/v1/list', { filter, cursor, limit, offset }); return { memories: out?.memories || [], cursor: out?.cursor || null }; }
+export async function remoteList(orgId, filter, cursor, limit, offset = 0, options = {}) {
+  try { const out = await _call(orgId, '/v1/list', { filter, cursor, limit, offset }, options); return { memories: out?.memories || [], cursor: out?.cursor || null }; }
   catch (e) {
     // NEVER TURN A FAILED READ INTO AN EMPTY ONE. This returned `{ memories: [] }` on any error, so a
     // transient shard-lock collision rendered a tenant's Memories page EMPTY — visually identical to
@@ -334,16 +393,16 @@ export async function remoteStats(orgId, filter = {}) {
 
 // Durable vector-sync observability for upgraded agents. Older agents return
 // null, allowing callers/backfill scripts to fall back to /v1/list for memories.
-export async function remoteVectorStatus(orgId) {
-  try { return await _call(orgId, '/v1/vector-status', {}); }
+export async function remoteVectorStatus(orgId, options = {}) {
+  try { return await _call(orgId, '/v1/vector-status', {}, options); }
   catch (e) { console.warn(`[mneme/remote] vector-status unavailable org=${orgId}: ${e.message}`); return null; }
 }
 
-export async function remoteCapabilities(orgId, { maxAgeMs = 300_000 } = {}) {
+export async function remoteCapabilities(orgId, { maxAgeMs = 300_000, transportClass = 'interactive' } = {}) {
   const cached = _capabilityCache.get(orgId);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
   try {
-    const out = await _call(orgId, '/v1/capabilities', {});
+    const out = await _call(orgId, '/v1/capabilities', {}, { transportClass });
     const value = {
       schema_version: out?.schema_version || null,
       vector_dimension: Number(out?.vector_dimension) || null,
@@ -360,9 +419,9 @@ export async function remoteCapabilities(orgId, { maxAgeMs = 300_000 } = {}) {
   }
 }
 
-export async function remoteVectorPending(orgId, { kind = 'memory', cursor = null, limit = 100 } = {}) {
+export async function remoteVectorPending(orgId, { kind = 'memory', cursor = null, limit = 100, transportClass = 'interactive' } = {}) {
   try {
-    const out = await _call(orgId, '/v1/vector-pending', { kind, cursor, limit });
+    const out = await _call(orgId, '/v1/vector-pending', { kind, cursor, limit }, { transportClass });
     return { items: Array.isArray(out?.items) ? out.items : [], cursor: out?.cursor || null };
   } catch (e) {
     console.warn(`[mneme/remote] vector-pending unavailable org=${orgId} kind=${kind}: ${e.message}`);
@@ -370,9 +429,9 @@ export async function remoteVectorPending(orgId, { kind = 'memory', cursor = nul
   }
 }
 
-export async function remoteVectorRepair(orgId, { kind = 'memory', id, vector } = {}) {
+export async function remoteVectorRepair(orgId, { kind = 'memory', id, vector, transportClass = 'interactive' } = {}) {
   try {
-    const out = await _call(orgId, '/v1/vector-repair', { kind, id, vector });
+    const out = await _call(orgId, '/v1/vector-repair', { kind, id, vector }, { transportClass });
     return out?.ok === true;
   } catch (e) {
     console.warn(`[mneme/remote] vector-repair failed org=${orgId} kind=${kind} id=${id}: ${e.message}`);

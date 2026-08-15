@@ -80,11 +80,70 @@ test('the per-tenant read bulkhead queues bounded excess work instead of self-re
   const { remoteRecall } = await import(`../../src/vector/mneme/remote-backend.js?bulkhead=${Date.now()}`);
 
   const first = remoteRecall('org', [0.1], {}, 5, 0);
-  const second = remoteRecall('org', [0.1], {}, 5, 0);
+  const second = remoteRecall('org', [0.2], {}, 5, 0);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  const third = remoteRecall('org', [0.1], {}, 5, 0);
+  const third = remoteRecall('org', [0.3], {}, 5, 0);
   assert.deepEqual(await Promise.all([first, second, third]), [[], [], []]);
   assert.equal(requests, 3);
+});
+
+test('identical interactive recall requests share one bounded Memory Box operation', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-remote-coalesce-'));
+  const registry = join(directory, 'agents.json');
+  let requests = 0;
+  const server = http.createServer((_req, res) => {
+    requests += 1;
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ results: [{ id: 'same' }] }));
+    }, 35);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  process.env.MNEME_AGENT_REGISTRY_FILE = registry;
+  process.env.MNEME_REMOTE_TIMEOUT_MS = '500';
+  await writeFile(registry, JSON.stringify({ org: { url: `http://127.0.0.1:${server.address().port}`, token: 'token' } }));
+  const { remoteRecall } = await import(`../../src/vector/mneme/remote-backend.js?coalesce=${Date.now()}`);
+
+  const results = await Promise.all([
+    remoteRecall('org', [0.1, 0.2], { user: 'u' }, 5, 0),
+    remoteRecall('org', [0.1, 0.2], { user: 'u' }, 5, 0),
+    remoteRecall('org', [0.1, 0.2], { user: 'u' }, 5, 0),
+  ]);
+  assert.deepEqual(results, [[{ id: 'same' }], [{ id: 'same' }], [{ id: 'same' }]]);
+  assert.equal(requests, 1);
+});
+
+test('maintenance failures use a separate circuit and cannot open chat recall', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-remote-maintenance-'));
+  const registry = join(directory, 'agents.json');
+  const server = http.createServer((req, res) => {
+    if (req.url === '/v1/vector-status') {
+      setTimeout(() => {
+        if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
+        if (!res.writableEnded) res.end(JSON.stringify({ ok: true }));
+      }, 150);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ results: [{ id: 'interactive' }] }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  process.env.MNEME_AGENT_REGISTRY_FILE = registry;
+  process.env.MNEME_REMOTE_TIMEOUT_MS = '35';
+  process.env.MNEME_REMOTE_FAILURE_COOLDOWN_MS = '1000';
+  await writeFile(registry, JSON.stringify({ org: { url: `http://127.0.0.1:${server.address().port}`, token: 'token' } }));
+  const { remoteRecall, remoteVectorStatus } = await import(`../../src/vector/mneme/remote-backend.js?maintenance=${Date.now()}`);
+
+  assert.equal(await remoteVectorStatus('org', { transportClass: 'maintenance' }), null);
+  assert.deepEqual(await remoteRecall('org', [0.1], {}, 5, 0), [{ id: 'interactive' }]);
 });
 
 test('an upstream stage deadline aborts remote IO without poisoning the transport circuit', async (t) => {

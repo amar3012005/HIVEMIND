@@ -92,7 +92,11 @@ export function restrictRecallPackets(packets = [], { memoryRanks = new Map(), e
 
 export function shouldExpandProgressiveRecall(answer, session) {
   if (!session || session.delivered_until >= session.candidates.length || session.expansion_count >= 2) return false;
-  return answer?.context_status === 'relevant_but_incomplete';
+  // A model may ask for more context when it simply failed to use the first
+  // page. Reveal another ranked page only after it demonstrated that this page
+  // is relevant with at least one grounded, delivered claim.
+  return answer?.context_status === 'relevant_but_incomplete'
+    && (answer?.claims || []).some((claim) => claim?.grounded !== false && (claim?.citation_ids || []).length > 0);
 }
 
 export function collapseNativeOnlyCompoundDecision(decision = {}, fallbackQuery = '') {

@@ -239,7 +239,16 @@ export async function chatCompletionStream(model, options = {}, {
     body: JSON.stringify(body),
   });
   if (!response.ok || !response.body?.getReader) {
-    return { ok: response.ok, status: response.status, content: '', usage: {}, provider: null, model: route.wireModel };
+    const errorText = await response.text().catch(() => '');
+    return {
+      ok: response.ok,
+      status: response.status,
+      content: '',
+      usage: {},
+      provider: null,
+      model: route.wireModel,
+      error: errorText.slice(0, 400),
+    };
   }
 
   const reader = response.body.getReader();

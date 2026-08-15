@@ -277,7 +277,15 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
       ? directProposals
       : proposalOrigin === 'strategy_program' || ['strategy_program_ready', 'verified_preparation_checkpoint'].includes(expansionTrigger)
         ? strategyProposals
-      : ['user_start', 'internal_bootstrap'].includes(expansionTrigger) || autoPlanProposal
+      // capability_wait_release promotes a DORMANT first-life proposal (the
+      // other proposals from the SAME batch as the currently-blocked task) —
+      // it must reach firstLifeProposals the same way autoPlanProposal does,
+      // regardless of policyConfigured. Missing this was the actual reason
+      // the fix silently no-op'd live for org DIOR/Brdteengal: with an
+      // unconfigured authority policy, this fell through to directProposals
+      // only (user_instruction-origin todos), which doesn't include the
+      // growth-plan-originated prospect-list/research proposals at all.
+      : ['user_start', 'internal_bootstrap'].includes(expansionTrigger) || autoPlanProposal || expansionTrigger === 'capability_wait_release'
       ? firstLifeProposals
       : policyConfigured ? [...directProposals, ...firstLifeProposals] : directProposals;
     const ownershipStatuses = new Set([

@@ -324,3 +324,83 @@ test('first-life projection does not call an incompatible terminal outcome compl
   assert.equal(result.items[0].status, 'NEEDS_ATTENTION');
   assert.equal(result.completed_count, 0);
 });
+
+// Root-caused live (2026-08-15, orgs DIOR and Brdteengal): a promoted
+// external task parks WAITING_FOR_CONNECTOR on a missing capability — a wait
+// on a HUMAN that can take days — and nothing ever released its execution
+// slot, so other evidenced, independent proposals sat PROPOSED forever.
+// capability_wait_release is the parallel case to verified_monitoring_checkpoint
+// (test above): only THIS specific new trigger may release a
+// WAITING_FOR_CONNECTOR slot; every other trigger's behavior toward it is
+// unchanged (see "waiting authority and capability retain external ownership"
+// above, still passing with expansionTrigger: 'verified_result').
+test('only capability_wait_release can release a WAITING_FOR_CONNECTOR EXTERNAL slot (internal capacity was never blocked by it)', async () => {
+  const version14 = (row) => { row.context.first_life_policy_version = 14; return row; };
+  // Mirrors "only a verified monitoring checkpoint can release monitoring
+  // capacity" above, exactly, but for WAITING_FOR_CONNECTOR — both candidates
+  // are EXTERNAL so the external_execution_limit (1) is the only thing that
+  // can block 'next'; internal capacity is a separate limit and was never
+  // the real gap (an internal candidate promotes under any allowed trigger
+  // regardless of the external slot's release state — this test isolates
+  // the actual new behavior instead of that pre-existing one).
+  const retained = [
+    version14(todo('waiting', 'WAITING_FOR_CONNECTOR', 1, 'external')),
+    version14(todo('next', 'PROPOSED', 2, 'external', true)),
+  ];
+  assert.deepEqual((await activateEligibleFirstLifeWork({
+    prisma: prismaFor(retained), runtime, expansionTrigger: 'verified_result',
+  })).promoted, [], 'a non-release trigger must not promote while the connector wait is still occupying the external slot');
+  assert.equal(retained[1].status, 'PROPOSED');
+
+  const released = [
+    version14(todo('waiting', 'WAITING_FOR_CONNECTOR', 1, 'external')),
+    version14(todo('next', 'PROPOSED', 2, 'external', true)),
+  ];
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(released), runtime, expansionTrigger: 'capability_wait_release',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['next']);
+  assert.equal(released[1].status, 'READY');
+  // The occupied external todo itself is untouched — only marked internally
+  // as no longer counting against the execution-slot limit.
+  assert.equal(released[0].status, 'WAITING_FOR_CONNECTOR');
+  assert.equal(released[0].context.execution_slot_released, true);
+});
+
+test('capability_wait_release unblocks a dormant INTERNAL proposal too — this is the real-world case (DIOR/Brdteengal): the sole active task is an external connector wait, and independent internal prep work was never re-checked for promotion at all', async () => {
+  const version14 = (row) => { row.context.first_life_policy_version = 14; return row; };
+  const rows = [
+    version14(todo('waiting', 'WAITING_FOR_CONNECTOR', 1, 'external')),
+    version14(todo('prospect-list', 'PROPOSED', 2, 'internal', true)),
+  ];
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows), runtime, expansionTrigger: 'capability_wait_release',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['prospect-list']);
+  assert.equal(rows[1].status, 'READY');
+});
+
+test('capability_wait_release is rejected on an older policy version that never declared it (purely additive to v14, not retroactive)', async () => {
+  // The default todo() helper uses first_life_policy_version: 3 — proves
+  // this trigger was added to v14's fixture specifically, not silently
+  // accepted everywhere regardless of which policy version a todo committed
+  // under.
+  const rows = [todo('waiting', 'WAITING_FOR_CONNECTOR', 1, 'external'), todo('next', 'PROPOSED', 2, 'external', true)];
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows), runtime, expansionTrigger: 'capability_wait_release',
+  });
+  assert.deepEqual(result.promoted, []);
+  assert.equal(result.reason, 'trigger_not_allowed');
+});
+
+test('capability_wait_release does nothing when a todo is already READY — it only unblocks dormant PROPOSED work', async () => {
+  const version14 = (row) => { row.context.first_life_policy_version = 14; return row; };
+  const rows = [
+    version14(todo('waiting', 'WAITING_FOR_CONNECTOR', 1, 'external')),
+  ];
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows), runtime, expansionTrigger: 'capability_wait_release',
+  });
+  assert.deepEqual(result.promoted, []);
+  assert.equal(result.reason, 'no_eligible_capacity');
+});

@@ -75,6 +75,7 @@
     "verified_result",
     "verified_monitoring_checkpoint",
     "user_instruction",
-    "organization_policy"
+    "organization_policy",
+    "capability_wait_release"
   ]
 }

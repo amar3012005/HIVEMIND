@@ -1630,6 +1630,35 @@ export class NativeHqEngine {
     const metrics = [...new Set([...(measurement.primary_metrics || []), ...(measurement.metrics || []), ...Object.keys(measurement.thresholds || {})])].slice(0, 6);
     const waitingDays = dueAt ? Math.max(1, Math.ceil((dueAt.getTime() - Date.now()) / DAY)) : null;
     const openCapability = capabilityState.requests[0];
+    // Root-caused live (2026-08-15, orgs DIOR and Brdteengal): the sole
+    // promoted first-life task parks WAITING_FOR_CONNECTOR on a missing
+    // capability — a wait on a HUMAN that can take days — while other
+    // evidenced, genuinely independent proposals (a prospect list, a
+    // research question) sat PROPOSED forever, because nothing ever
+    // re-triggered promotion. capability_wait_release does that: only when
+    // nothing else is already READY, try once per cycle to promote the next
+    // eligible dormant proposal. Idempotent and cheap — once promoted, a
+    // todo leaves PROPOSED and stops being a candidate, so repeat cycles
+    // (even the now-suppressed noisy connector_changed repeats) just no-op.
+    if (openCapability && !finalReadyTodo) {
+      const capabilityRelease = await activateEligibleFirstLifeWork({
+        prisma, runtime, expansionTrigger: 'capability_wait_release',
+      }).catch(() => ({ promoted: [] }));
+      for (const promoted of capabilityRelease.promoted) await event(prisma, runtime, cycle, {
+        eventType: 'todo_created',
+        title: `Promoted while waiting: ${promoted.title}`,
+        summary: 'Another prepared task is waiting on a human to connect a capability. I am not idle while that happens — this independent, evidenced proposal is ready to start now.',
+        details: { todo_id: promoted.id, effect_class: promoted.effect_class, expansion_trigger: 'capability_wait_release' },
+      });
+      if (capabilityRelease.promoted.length) {
+        await scheduleHqWake({
+          prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
+          idempotencyKey: `capability-wait-release:${runtime.epoch}:${capabilityRelease.promoted.map((row) => row.id).join(':')}`,
+          triggerType: 'queue_advance', dueAt: new Date(),
+          payload: { expansion_trigger: 'capability_wait_release' },
+        });
+      }
+    }
     const [pendingLegacySpecialist, pendingPlaybookRuns] = await Promise.all([
       prisma.hyperWorkOrder.findFirst({
         where: { orgId: runtime.orgId, runtimeEpoch: runtime.epoch, hqCycleId: { not: null }, status: { in: ['queued', 'running', 'processing'] } },

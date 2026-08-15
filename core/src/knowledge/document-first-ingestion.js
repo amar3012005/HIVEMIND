@@ -97,6 +97,18 @@ export const LLM_PROFILES = {
   'v5-claim-structuring-single': { envModel: 'CLAIM_STRUCTURING_MODEL', maxTokens: 2500 },
 };
 
+export function normalizeClaimStructuringRows(parsed, batchLength) {
+  const rawRows = Array.isArray(parsed?.claims) ? parsed.claims : (Array.isArray(parsed) ? parsed : []);
+  const rowsByIndex = new Map();
+  for (const row of rawRows) {
+    const rowIndex = Number(row?.i);
+    if (!Number.isInteger(rowIndex) || rowIndex < 1 || rowIndex > batchLength || rowsByIndex.has(rowIndex)) continue;
+    if (typeof row?.subject !== 'string' && typeof row?.predicate !== 'string') continue;
+    rowsByIndex.set(rowIndex, row);
+  }
+  return [...rowsByIndex.values()];
+}
+
 /**
  * Resolve a feature's model chain and token budget together.
  * @param {string} feature key in LLM_PROFILES
@@ -858,7 +870,11 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
           json_mode: true, feature: 'v5-claim-structuring',
           messages: [{ role: 'system', content: system }, { role: 'user', content: numbered }],
         });
-        const rows = Array.isArray(parsed?.claims) ? parsed.claims : (Array.isArray(parsed) ? parsed : []);
+        // Truncation salvage can expose nested qualifier objects alongside the
+        // top-level claim rows. Accept at most one structurally valid row per
+        // input index; otherwise one memory may be overwritten repeatedly by
+        // unrelated nested objects (observed as "1 memories -> 18 structured").
+        const rows = normalizeClaimStructuringRows(parsed, batch.length);
         let applied = 0;
         const structured = [];
         for (const row of rows) {

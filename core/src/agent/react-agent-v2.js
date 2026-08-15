@@ -51,7 +51,7 @@ import {
   DEFAULT_CHAT_PLANNER_MODEL,
   resolveChatSynthesisModel,
 } from '../llm/chat-provider.js';
-import { remainingStageMs, runWithStageDeadline } from '../runtime/stage-deadline.js';
+import { remainingStageMs, runWithStageDeadline, StageDeadlineError } from '../runtime/stage-deadline.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -865,6 +865,13 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
   const beforeDeadline = (task) => {
     const ms = remaining();
+    // Never start a new retrieval dependency after the parent turn has
+    // already exhausted its budget. A zero-millisecond timer still permits
+    // synchronous work in `task()` to begin before the timer callback runs,
+    // which can leak a late result into an expired turn.
+    if (ms <= 0) {
+      return Promise.reject(new StageDeadlineError('chat-recall', activeDeadlineAt));
+    }
     return runWithStageDeadline(task, {
       deadlineAt: activeDeadlineAt,
       timeoutMs: ms,
@@ -971,6 +978,10 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     relationships: [...edgesByKey.values()],
     co_mentions: coMentions,
   });
+  const retrievalHealth = () => ({
+    retrieval_timed_out: steps.some((s) => /deadline exceeded|timed out/i.test(s?.result_summary || '')),
+    retrieval_unavailable: steps.some((s) => /REMOTE_UNAVAILABLE|memory box unavailable|workspace unavailable/i.test(s?.result_summary || '')),
+  });
   // DID RETRIEVAL ACTUALLY RUN? A hop that dies on the deadline is caught per-hop and contributes
   // nothing, which is indistinguishable downstream from "the workspace holds nothing" — and that is
   // exactly what shipped to a user: a recall timed out and the answer stated the topic "doesn't
@@ -979,8 +990,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // Derived from the steps ACTUALLY executed, never from intent, so it reports what happened.
   coverage = {
     ...coverage,
-    retrieval_timed_out: steps.some((s) => /deadline exceeded|timed out/i.test(s?.result_summary || '')),
-    retrieval_unavailable: steps.some((s) => /REMOTE_UNAVAILABLE|memory box unavailable|workspace unavailable/i.test(s?.result_summary || '')),
+    ...retrievalHealth(),
   };
   if (plan.operation === 'relation_between' && relationChecked) {
     coverage = {
@@ -993,7 +1003,10 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     };
   }
   let escalationCount = 0;
-  if (remaining() > 0 && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
+  if (remaining() > 0
+      && !coverage.retrieval_timed_out
+      && !coverage.retrieval_unavailable
+      && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
     const escalation = chooseRecallEscalation({
       plan,
       coverage,
@@ -1054,6 +1067,10 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     aggregate: aggregateResult,
     coverage: {
       ...coverage,
+      // Escalation recomputes semantic coverage. Reapply transport health from
+      // the full executed step list so that recomputation cannot turn a real
+      // outage into an apparent empty-result answer.
+      ...retrievalHealth(),
       ...(plan.requires_complete_coverage ? {
         aggregate_requested: true,
         aggregate_complete: aggregateResult?.coverage?.complete === true,

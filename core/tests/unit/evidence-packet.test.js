@@ -111,6 +111,35 @@ test('empty selected project does not widen evidence retrieval to the organizati
   assert.deepEqual(result, { items: [], reason: 'project-empty', docIds: [] });
 });
 
+test('evidence hydration re-applies the document allowlist in canonical storage', async () => {
+  let hydrateWhere;
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeSegment: {
+        async findMany({ where }) {
+          hydrateWhere = where;
+          return [];
+        },
+      },
+    },
+    qdrantClient: {
+      async searchMemories() {
+        return [{ score: 0.9, payload: { segment_id: 'segment-candidate' } }];
+      },
+    },
+  });
+
+  await service.retrieveEvidence({
+    query: 'selected project fact', userId: 'user-1', orgId: 'org-1',
+    documentIds: ['document-project-a', 'document-project-b'],
+    depth: 5, deliver: 5,
+  });
+
+  assert.deepEqual(hydrateWhere.documentId, {
+    in: ['document-project-a', 'document-project-b'],
+  });
+});
+
 test('source metadata resolution is tenant-scoped and does not require an LLM filename extraction', async () => {
   let where;
   const service = new EvidenceRetrievalService({

@@ -327,6 +327,11 @@ export class EvidenceRetrievalService {
         where: {
           id: { in: segmentIds },
           orgId,
+          // Qdrant is a candidate index, not the authorization authority.
+          // Re-apply the caller's document allowlist in canonical Postgres so
+          // a stale/malformed payload or unsupported match-any filter cannot
+          // hydrate evidence from another project.
+          ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
           document: docIdSet
             ? { archivedAt: null }
             : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),

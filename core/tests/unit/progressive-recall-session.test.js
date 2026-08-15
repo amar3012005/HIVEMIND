@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   applyProgressiveRecallView,
+  canContinueProgressiveRecall,
   collapseNativeOnlyCompoundDecision,
   createProgressiveRecallSession,
   expandProgressiveRecall,
@@ -96,6 +97,25 @@ test('expands only on an explicit relevant-but-incomplete synthesis decision', (
     context_status: 'relevant_but_incomplete',
     claims: [{ text: 'The first page establishes the project.', grounded: true, citation_ids: ['P1-C1'] }],
   }, session), true);
+});
+
+test('production progression permits one expansion only and preserves turn headroom', () => {
+  const first = createProgressiveRecallSession({ rankedCandidates, memories, evidence, query: 'broad company context' });
+  const answer = {
+    context_status: 'relevant_but_incomplete',
+    claims: [{ text: 'The first page is relevant.', grounded: true, citation_ids: ['P1-C1'] }],
+  };
+  assert.equal(canContinueProgressiveRecall({
+    answer, session: first, maxExpansions: 1, remainingMs: 30_000, minRemainingMs: 12_000,
+  }), true);
+
+  const second = expandProgressiveRecall(first);
+  assert.equal(canContinueProgressiveRecall({
+    answer, session: second, maxExpansions: 1, remainingMs: 30_000, minRemainingMs: 12_000,
+  }), false);
+  assert.equal(canContinueProgressiveRecall({
+    answer, session: first, maxExpansions: 1, remainingMs: 11_999, minRemainingMs: 12_000,
+  }), false);
 });
 
 test('packet restriction prevents citations to unrevealed rows', () => {

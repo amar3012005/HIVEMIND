@@ -40,10 +40,10 @@ import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-ca
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
 import {
   applyProgressiveRecallView,
+  canContinueProgressiveRecall,
   collapseNativeOnlyCompoundDecision,
   createProgressiveRecallSession,
   expandProgressiveRecall,
-  shouldExpandProgressiveRecall,
 } from './progressive-recall-session.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 import {
@@ -110,6 +110,12 @@ const PLAN_MAX_TOKENS    = Number(process.env.HIVEMIND_PLAN_MAX_TOKENS    || 400
 const ANSWER_MAX_TOKENS  = Number(process.env.HIVEMIND_ANSWER_MAX_TOKENS  || 8000);
 const DIRECT_MAX_TOKENS  = Number(process.env.HIVEMIND_DIRECT_MAX_TOKENS  || 2000);
 const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 60_000);
+// Progressive recall reveals more of the already-ranked pool; it must not
+// become a hidden sequence of three complete answer generations. One cited
+// `relevant_but_incomplete` answer may reveal ranks 6-10 and synthesize once
+// more. Ranks 11-15 remain available to a later user turn.
+const PROGRESSIVE_RECALL_MAX_EXPANSIONS = Math.max(0, Number(process.env.HIVEMIND_PROGRESSIVE_RECALL_MAX_EXPANSIONS || 1));
+const PROGRESSIVE_RECALL_MIN_REMAINING_MS = Math.max(1_000, Number(process.env.HIVEMIND_PROGRESSIVE_RECALL_MIN_REMAINING_MS || 12_000));
 // Retrieval budget. 3000ms was BELOW this system's own measured retrieval latency: a cold recall
 // runs to ~2600ms (keep-warm brings the warm floor to ~640ms, which is remote-Qdrant-bound), and
 // evidence retrieval alone measured 258-967ms warm. So a cold turn had ~400ms of headroom for every
@@ -2578,6 +2584,7 @@ export async function runReactAgentV2({
   }
   if (!message) throw new Error('message required');
   const abortCtrl = new AbortController();
+  const turnDeadlineAt = Date.now() + TURN_BUDGET_MS;
   const requestedAnswerModel = resolveAnswerModel(model);
   let answerModel = requestedAnswerModel;
   const budgetTimer = setTimeout(() => abortCtrl.abort(), TURN_BUDGET_MS);
@@ -3495,7 +3502,16 @@ export async function runReactAgentV2({
     };
     let answer = await synthesizeWithFallback(answerInput);
     const progressiveAnswers = [answer];
-    while (progressiveSession.candidates.length > 0 && shouldExpandProgressiveRecall(answer, progressiveSession)) {
+    while (
+      progressiveSession.candidates.length > 0
+      && canContinueProgressiveRecall({
+        answer,
+        session: progressiveSession,
+        maxExpansions: PROGRESSIVE_RECALL_MAX_EXPANSIONS,
+        remainingMs: turnDeadlineAt - Date.now(),
+        minRemainingMs: PROGRESSIVE_RECALL_MIN_REMAINING_MS,
+      })
+    ) {
       const previousUntil = progressiveSession.delivered_until;
       progressiveSession = expandProgressiveRecall(progressiveSession);
       evidence = applyProgressiveRecallView(fullEvidence, progressiveSession);

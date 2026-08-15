@@ -2771,12 +2771,18 @@ Every item must include a non-empty content field and one or more valid support_
       // in-place segment reconciliation API, so atomically clear its old
       // derived rows first; otherwise re-chunking would leave duplicate
       // evidence/vector points beside the new `both` projection.
-      const docId = forceReprocess && metadata.reprocess_document_id
+      let docId = forceReprocess && metadata.reprocess_document_id
         ? metadata.reprocess_document_id
         : crypto.randomUUID();
       if (forceReprocess && metadata.reprocess_document_id) {
         const removed = await amrKbDocDelete(orgId, { documentId: docId });
-        if (!removed?.ok) {
+        // A document can be deleted outside the upload job lifecycle. In that
+        // specific case a forced reprocess is an honest fresh ingest, not an
+        // error; retain the job but allocate a new remote document id. Any
+        // transport/agent failure remains terminal to avoid duplicate evidence.
+        if (removed?.error === 'document not found') {
+          docId = crypto.randomUUID();
+        } else if (!removed?.ok) {
           const err = new Error(`Remote document reprocess cleanup failed for ${docId}: ${removed?.error || 'agent unavailable'}`);
           err.code = 'KB_REPROCESS_CLEANUP_FAILED';
           throw err;

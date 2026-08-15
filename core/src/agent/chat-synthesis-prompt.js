@@ -15,16 +15,10 @@ export function appendGapClarification(response, gaps, language = 'en') {
   if (!text || /[?？؟]\s*$/.test(text) || !Array.isArray(gaps)) return text;
   const question = gaps.find((gap) => typeof gap === 'string' && /[?？؟]\s*$/.test(gap.trim()));
   if (question) return `${text}\n${question.trim()}`;
-  const gap = gaps.find((item) => typeof item === 'string' && item.trim())?.trim();
-  if (!gap) return text;
-  const lang = String(language || 'en').slice(0, 2).toLowerCase();
-  const templates = {
-    de: `Kannst du genauer sagen, wo ich nach „${gap}“ suchen soll — zum Beispiel in welchem Bild, Etikett, Dokument oder in welcher Nachricht?`,
-    es: `¿Puedes precisar dónde debería buscar «${gap}», por ejemplo en qué imagen, etiqueta, documento o mensaje?`,
-    fr: `Peux-tu préciser où je dois chercher « ${gap} », par exemple dans quelle image, étiquette, document ou message ?`,
-    en: `Could you be more specific about “${gap}”—for example, which image, label, document, or message should I check?`,
-  };
-  return `${text}\n${templates[lang] || templates.en}`;
+  // `gaps` is also telemetry. Do not turn an arbitrary model-produced note
+  // about an unrequested facet into a user-visible question. A clarification
+  // is shown only when synthesis deliberately supplied a complete question.
+  return text;
 }
 
 export function buildSynthesisPromptArtifact({

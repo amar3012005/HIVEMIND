@@ -20,6 +20,19 @@ export function legacyInitialCrossRerank(mode = 'auto', requested = null) {
   });
 }
 
+export function buildRecallEnhanceContext({ userId, orgId, projectId = null, accessContext = null, scopeFilter = null }) {
+  return { userId, orgId, projectId, accessContext, scopeFilter };
+}
+
+export function buildMemoryEvidenceLinkWhere(memoryIds, projectId = null) {
+  return {
+    memoryId: { in: memoryIds },
+    ...(projectId ? {
+      document: { tags: { has: `scope-key:project:${projectId}` } },
+    } : {}),
+  };
+}
+
 async function unifiedResultsFor({ memories = [], evidence = [], rankedCandidates = [] }) {
   const { buildUnifiedRecallResults } = await import('../memory/unified-recall-results.js');
   return buildUnifiedRecallResults({ memories, evidence, rankedCandidates });
@@ -489,7 +502,7 @@ export async function handleRecallRoute(ctx = {}) {
         const memIds = memoryHits.map((m) => m.id).filter(Boolean);
         if (memIds.length) {
           const links = await prisma.memoryEvidenceLink.findMany({
-            where: { memoryId: { in: memIds } },
+            where: buildMemoryEvidenceLinkWhere(memIds, recallProjectId),
             select: {
               memoryId: true,
               segmentId: true,
@@ -526,7 +539,13 @@ export async function handleRecallRoute(ctx = {}) {
         const enhanced = await recallEnhance({
           memories: memoryHits,
           query: rawRecallQuery,
-          ctx: { userId, orgId },
+          ctx: buildRecallEnhanceContext({
+            userId,
+            orgId,
+            projectId: recallProjectId,
+            accessContext: recallAccessCtx,
+            scopeFilter: body.scope_filter || null,
+          }),
           evidenceService: evidenceRetrieval,
           prisma,
           includeLive: body.include_live !== false,

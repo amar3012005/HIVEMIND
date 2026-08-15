@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildMemoryEvidenceLinkWhere,
+  buildRecallEnhanceContext,
   handleQuickSearchRoute,
   handleRecallRoute,
   legacyInitialCrossRerank,
@@ -99,6 +101,27 @@ test('legacy recall selects one cross-encoder authority for each response mode',
   assert.equal(legacyInitialCrossRerank('auto', null), false);
   assert.equal(legacyInitialCrossRerank('memory', true), true);
   assert.equal(legacyInitialCrossRerank('memory', null), null);
+});
+
+test('legacy recall forwards the selected project to evidence enhancement', () => {
+  const accessContext = { projectIds: ['project-1'], teamIds: [] };
+  assert.deepEqual(buildRecallEnhanceContext({
+    userId: 'user-1', orgId: 'org-1', projectId: 'project-1',
+    accessContext, scopeFilter: 'project',
+  }), {
+    userId: 'user-1', orgId: 'org-1', projectId: 'project-1',
+    accessContext, scopeFilter: 'project',
+  });
+});
+
+test('linked evidence for shared memories is narrowed to the selected project', () => {
+  assert.deepEqual(buildMemoryEvidenceLinkWhere(['memory-1'], 'project-1'), {
+    memoryId: { in: ['memory-1'] },
+    document: { tags: { has: 'scope-key:project:project-1' } },
+  });
+  assert.deepEqual(buildMemoryEvidenceLinkWhere(['memory-1']), {
+    memoryId: { in: ['memory-1'] },
+  });
 });
 
 test('explicit recall modes use the bounded context service and return a RecallPacket', async () => {

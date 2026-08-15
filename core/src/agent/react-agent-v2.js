@@ -50,6 +50,7 @@ import {
   chatCompletionFetch,
   chatCompletionStream,
   DEFAULT_CHAT_PLANNER_MODEL,
+  DEFAULT_CHAT_SYNTHESIS_MODEL,
   resolveChatSynthesisModel,
 } from '../llm/chat-provider.js';
 import { remainingStageMs, runWithStageDeadline, StageDeadlineError } from '../runtime/stage-deadline.js';
@@ -127,12 +128,16 @@ const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_M
 
 // Model split:
 //   • structured intent planning uses Gemini 2.5 Flash-Lite;
-//   • final user-facing synthesis uses GPT-OSS 120B pinned to Cerebras;
+//   • final user-facing synthesis uses the low-latency Nitro route;
 //   • non-user-facing legacy helpers retain the internal Groq model.
 // Both are env-overridable so we can A/B without code changes.
 const INTERNAL_MODEL = process.env.HIVEMIND_AGENT_INTERNAL_MODEL || 'openai/gpt-oss-20b';
 const QUERY_OPTIMIZER_MODEL = process.env.CHAT_QUERY_OPTIMIZER_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
-const FINAL_FALLBACK_MODEL = process.env.HIVEMIND_AGENT_FINAL_FALLBACK_MODEL || 'openai/gpt-oss-120b';
+// Keep the safety synthesis on the same low-latency Nitro class as the served
+// chat model. The old 120B fallback could consume the entire 60s turn budget
+// after a validated-stream contract miss, turning a recoverable formatting
+// failure into a user-visible abort.
+const FINAL_FALLBACK_MODEL = process.env.HIVEMIND_AGENT_FINAL_FALLBACK_MODEL || DEFAULT_CHAT_SYNTHESIS_MODEL;
 // The caller-selected model is reserved for user-facing synthesis below.
 const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
 

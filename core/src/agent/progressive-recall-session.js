@@ -4,6 +4,10 @@ const candidateKey = (candidate = {}) => candidate.kind === 'memory'
   ? `memory:${candidate.memory_id || candidate.id || ''}`
   : `evidence:${candidate.segment_id || candidate.id || ''}`;
 
+export function evidenceWindowSizeForDepth(depth = 'standard') {
+  return ({ standard: 5, detailed: 10, comprehensive: 15 })[depth] || 5;
+}
+
 export function createProgressiveRecallSession({
   rankedCandidates = [], memories = [], evidence = [], query = '', initialSize = 5, pageSize = 5, maxVisible = 15,
 } = {}) {
@@ -51,21 +55,6 @@ export function createProgressiveRecallSession({
   };
 }
 
-export function revealProgressiveRecall(session, deliveredUntil = session?.delivered_until || 5) {
-  if (!session) return null;
-  const bounded = Math.min(session.candidates.length, session.max_visible, Math.max(1, deliveredUntil));
-  return { ...session, delivered_until: bounded };
-}
-
-export function expandProgressiveRecall(session) {
-  if (!session || session.delivered_until >= session.candidates.length || session.expansion_count >= 2) return session;
-  return {
-    ...session,
-    delivered_until: Math.min(session.candidates.length, session.max_visible, session.delivered_until + session.page_size),
-    expansion_count: session.expansion_count + 1,
-  };
-}
-
 export function applyProgressiveRecallView(evidenceBundle = {}, session) {
   if (!session) return evidenceBundle;
   const visible = session.candidates.slice(0, session.delivered_until);
@@ -88,27 +77,6 @@ export function restrictRecallPackets(packets = [], { memoryRanks = new Map(), e
       || (citation?.segment_id && evidenceRanks.has(citation.segment_id)));
     return { ...packet, facts, sourceSections, citations };
   }).filter((packet) => packet.facts.length || packet.sourceSections.length || packet.citations.length);
-}
-
-export function shouldExpandProgressiveRecall(answer, session) {
-  if (!session || session.delivered_until >= session.candidates.length || session.expansion_count >= 2) return false;
-  // A model may ask for more context when it simply failed to use the first
-  // page. Reveal another ranked page only after it demonstrated that this page
-  // is relevant with at least one grounded, delivered claim.
-  return answer?.context_status === 'relevant_but_incomplete'
-    && (answer?.claims || []).some((claim) => claim?.grounded !== false && (claim?.citation_ids || []).length > 0);
-}
-
-export function canContinueProgressiveRecall({
-  answer,
-  session,
-  maxExpansions = 1,
-  remainingMs = Infinity,
-  minRemainingMs = 0,
-} = {}) {
-  return Number(session?.expansion_count || 0) < Math.max(0, Number(maxExpansions) || 0)
-    && Number(remainingMs) >= Math.max(0, Number(minRemainingMs) || 0)
-    && shouldExpandProgressiveRecall(answer, session);
 }
 
 export function collapseNativeOnlyCompoundDecision(decision = {}, fallbackQuery = '') {

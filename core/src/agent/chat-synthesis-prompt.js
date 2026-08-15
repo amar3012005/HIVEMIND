@@ -27,7 +27,9 @@ export function appendGapClarification(response, gaps, language = 'en') {
   return `${text}\n${templates[lang] || templates.en}`;
 }
 
-export function buildSynthesisPromptArtifact({ language, operation = 'recall', recallMode = 'fact' } = {}) {
+export function buildSynthesisPromptArtifact({
+  language, operation = 'recall', recallMode = 'fact', responseDepth = 'standard', answerObjective = '',
+} = {}) {
   const lang = languageName(language).toUpperCase();
   const modules = [];
   if (operation === 'timeline' || recallMode === 'timeline') {
@@ -53,16 +55,27 @@ export function buildSynthesisPromptArtifact({ language, operation = 'recall', r
   }
   const stable = getStaticPromptArtifact({
     family: 'chat-synthesis',
-    version: 'v6',
+    version: 'v7',
     variant: 'grounded-json',
     build: () => `${ORGANIZATIONAL_BRAIN_PERSONA}
 
 Return strict JSON only: {"response":string,"claims":[{"text":string,"grounded":boolean,"citation_ids":[string]}],"evidence_used":[string],"confidence":number,"gaps":[string],"context_status":"sufficient|relevant_but_incomplete|query_mismatch","coverage":[{"request":string,"status":"supported|unsupported","citation_ids":[string]}]}.
-Use only delivered evidence as factual ground truth. Every factual sentence must be a grounded claim with one or more delivered citation IDs. Speak naturally as someone who knows the user's context: give the directly requested answer, and freely include useful closely related grounded details when they add understanding. Do not suppress a relevant detail merely because it was not explicitly requested. Match the depth to the available evidence and the user's question instead of forcing every answer to be minimal.
-Before drafting, silently decompose the user's request into every independent semantic detail it asks for, including qualifiers, identifiers, dates, constraints, comparisons, and secondary parts. Inspect the complete delivered evidence for each detail. State every supported detail in the answer; a directly supported detail must never disappear merely because another answerable detail is more prominent. Populate "coverage" with one concise entry per requested detail. Use only delivered citation IDs for supported entries. If the visible ranked context is relevant but lacks support for any requested detail and more ranked context may exist, set context_status="relevant_but_incomplete"; if the context is off-topic, set query_mismatch; otherwise set sufficient.
-If coverage is partial, lead with everything useful you did find, then state exactly which requested detail remains uncovered. Whenever the "gaps" array is non-empty, the visible "response" itself must end with one natural, targeted clarification question asking for the person, project, date, document, image, message, or other source detail that would close that specific gap. Never collapse partial knowledge into "I don't know", a blank value, or a blanket absence answer. Preserve exact names, identifiers, relationships, and uncertainty.`,
+Use only delivered evidence as factual ground truth. Every factual sentence must be a grounded claim with one or more delivered citation IDs. Answer the stated ANSWER OBJECTIVE directly and completely before adding context. Keep every section and detail relevant to that objective. Closely related grounded detail is welcome when it improves understanding, but it must never replace, obscure, or distract from what the user actually asked. Match the requested depth naturally; do not force brevity and do not pad an answer merely because more evidence was delivered.
+Before drafting, silently decompose the user's request into every independent semantic detail it asks for, including qualifiers, identifiers, dates, constraints, comparisons, and secondary parts. Inspect the complete delivered evidence for each detail. State every supported detail in the answer; a directly supported detail must never disappear merely because another answerable detail is more prominent. Populate "coverage" with one concise entry per requested detail. Use only delivered citation IDs for supported entries. If the delivered context is relevant but lacks support for a requested detail, set context_status="relevant_but_incomplete"; if the context is off-topic, set query_mismatch; otherwise set sufficient. This status is telemetry, not a request for another retrieval or synthesis pass.
+If coverage of the requested objective is partial, lead with everything useful you did find, then state exactly which requested detail remains uncovered. Put something in "gaps" only when the user explicitly requested that missing detail; do not invent gaps about possible products, releases, sources, dates, or follow-up topics the user did not ask for. A clarification question is appropriate only when user input is genuinely needed to answer the stated objective. Never collapse partial knowledge into "I don't know", a blank value, or a blanket absence answer. Preserve exact names, identifiers, relationships, and uncertainty.`,
   });
-  const dynamic = [`OUTPUT LANGUAGE: ${lang}.`, ...modules].filter(Boolean).join('\n');
+  const depth = ['standard', 'detailed', 'comprehensive'].includes(responseDepth) ? responseDepth : 'standard';
+  const depthGuidance = {
+    standard: 'STANDARD DEPTH: give a focused but sufficiently informative answer. Include all directly requested supported facts; use structure when it improves clarity.',
+    detailed: 'DETAILED DEPTH: explain the requested subject across its relevant supported aspects, using useful structure and concrete detail. Do not drift into unrelated background.',
+    comprehensive: 'COMPREHENSIVE DEPTH: synthesize the full delivered evidence relevant to the objective, reconcile overlaps or conflicts, and organize the answer for completeness without padding.',
+  }[depth];
+  const dynamic = [
+    `OUTPUT LANGUAGE: ${lang}.`,
+    `ANSWER OBJECTIVE: ${String(answerObjective || 'Answer the user request exactly as asked.').slice(0, 1000)}`,
+    depthGuidance,
+    ...modules,
+  ].filter(Boolean).join('\n');
   return {
     prompt: `${stable.value}\n${dynamic}`,
     messages: [

@@ -3,11 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   applyProgressiveRecallView,
-  canContinueProgressiveRecall,
   collapseNativeOnlyCompoundDecision,
   createProgressiveRecallSession,
-  expandProgressiveRecall,
-  shouldExpandProgressiveRecall,
+  evidenceWindowSizeForDepth,
 } from '../../src/agent/progressive-recall-session.js';
 
 const memories = Array.from({ length: 8 }, (_, index) => ({ id: `m${index + 1}`, content: `memory ${index + 1}` }));
@@ -17,18 +15,26 @@ const rankedCandidates = Array.from({ length: 8 }, (_, index) => [
   { kind: 'memory', memory_id: `m${index + 1}` },
 ]).flat();
 
-test('reveals five mixed candidates first and expands the same recall without reranking', () => {
+test('semantic response depth selects one bounded window while retaining top fifteen', () => {
+  assert.equal(evidenceWindowSizeForDepth('standard'), 5);
+  assert.equal(evidenceWindowSizeForDepth('detailed'), 10);
+  assert.equal(evidenceWindowSizeForDepth('comprehensive'), 15);
+  assert.equal(evidenceWindowSizeForDepth('unknown'), 5);
+  const session = createProgressiveRecallSession({
+    rankedCandidates, memories, evidence, query: 'Solvis products',
+    initialSize: evidenceWindowSizeForDepth('detailed'), maxVisible: 15,
+  });
+  assert.equal(session.candidates.length, 15);
+  assert.equal(session.delivered_until, 10);
+  assert.equal(session.expansion_count, 0);
+});
+
+test('reveals one intent-selected mixed window without reranking', () => {
   const session = createProgressiveRecallSession({ rankedCandidates, memories, evidence, query: 'pitch deck', maxVisible: 15 });
   const first = applyProgressiveRecallView({ memories, evidence, recall_packets: [] }, session);
   assert.deepEqual(first.evidence.map((row) => row.segment_id), ['e1', 'e2', 'e3']);
   assert.deepEqual(first.memories.map((row) => row.id), ['m1', 'm2']);
   assert.equal(session.delivered_until, 5);
-
-  const secondSession = expandProgressiveRecall(session);
-  const second = applyProgressiveRecallView({ memories, evidence, recall_packets: [] }, secondSession);
-  assert.equal(second.memories.length + second.evidence.length, 10);
-  assert.equal(secondSession.recall_id, session.recall_id);
-  assert.deepEqual(secondSession.candidates, session.candidates);
 });
 
 test('use_tools native-only compound plans collapse to the identical native recall path', () => {
@@ -86,36 +92,6 @@ test('native memory writes remain on the governed compound path', () => {
     subtasks: [{ authority: 'write', tool_groups: ['hivemind-memory-write'], message: 'save this' }],
   };
   assert.equal(collapseNativeOnlyCompoundDecision(original, 'save this'), original);
-});
-
-test('expands only on an explicit relevant-but-incomplete synthesis decision', () => {
-  const session = createProgressiveRecallSession({ rankedCandidates, memories, evidence, query: 'small detail' });
-  assert.equal(shouldExpandProgressiveRecall({ context_status: 'sufficient' }, session), false);
-  assert.equal(shouldExpandProgressiveRecall({ context_status: 'query_mismatch' }, session), false);
-  assert.equal(shouldExpandProgressiveRecall({ context_status: 'relevant_but_incomplete' }, session), false);
-  assert.equal(shouldExpandProgressiveRecall({
-    context_status: 'relevant_but_incomplete',
-    claims: [{ text: 'The first page establishes the project.', grounded: true, citation_ids: ['P1-C1'] }],
-  }, session), true);
-});
-
-test('production progression permits one expansion only and preserves turn headroom', () => {
-  const first = createProgressiveRecallSession({ rankedCandidates, memories, evidence, query: 'broad company context' });
-  const answer = {
-    context_status: 'relevant_but_incomplete',
-    claims: [{ text: 'The first page is relevant.', grounded: true, citation_ids: ['P1-C1'] }],
-  };
-  assert.equal(canContinueProgressiveRecall({
-    answer, session: first, maxExpansions: 1, remainingMs: 30_000, minRemainingMs: 12_000,
-  }), true);
-
-  const second = expandProgressiveRecall(first);
-  assert.equal(canContinueProgressiveRecall({
-    answer, session: second, maxExpansions: 1, remainingMs: 30_000, minRemainingMs: 12_000,
-  }), false);
-  assert.equal(canContinueProgressiveRecall({
-    answer, session: first, maxExpansions: 1, remainingMs: 11_999, minRemainingMs: 12_000,
-  }), false);
 });
 
 test('packet restriction prevents citations to unrevealed rows', () => {

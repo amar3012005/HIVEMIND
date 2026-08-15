@@ -35,6 +35,8 @@ const base = {
   queries: [],
   named_entities: [],
   recall_mode: 'fact',
+  response_depth: 'standard',
+  answer_objective: 'Answer the request directly.',
   tool_groups: [],
   side_effect_policy: 'read_only',
 };
@@ -59,6 +61,7 @@ test('fast parser receives bounded multilingual history and server capability de
   assert.equal(capture.body.tool_choice.function.name, 'route_chat_turn');
   assert.match(capture.body.messages[0].content, /hivemind-recall/);
   assert.match(capture.body.messages[0].content, /top-K recall answer can never establish completeness/);
+  assert.match(capture.body.messages[0].content, /Choose response_depth semantically/);
   assert.equal(usage.total_tokens, 17);
 });
 
@@ -100,6 +103,8 @@ test('intent plan carries aggregate, time, scope, save and continuation structur
   assert.equal(plan.requires_complete_coverage, true);
   assert.equal(plan.recall_time.known_at, '2026-07-01T00:00:00Z');
   assert.equal(plan.scope_filter, 'project');
+  assert.equal(plan.response_depth, 'standard');
+  assert.equal(plan.answer_objective, 'Answer the request directly.');
 
   const save = normalizeIntentDecision({
     ...base, operation: 'save', tool_groups: [], acknowledgement: 'Gespeichert.', project_prompt: 'Welches Projekt?',
@@ -116,6 +121,8 @@ test('intent tool is a closed schema with a required tool call contract', () => 
   const tool = createChatIntentTool(catalog);
   assert.equal(tool.function.parameters.additionalProperties, false);
   assert.ok(tool.function.parameters.required.includes('operation'));
+  assert.ok(tool.function.parameters.required.includes('response_depth'));
+  assert.ok(tool.function.parameters.required.includes('answer_objective'));
   assert.match(tool.function.parameters.properties.operation.description, /complete, exact count/);
   assert.deepEqual(tool.function.parameters.properties.tool_groups.items.enum, catalog.map((group) => group.name));
 });

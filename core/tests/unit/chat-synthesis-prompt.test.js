@@ -8,19 +8,31 @@ test('fact synthesis loads only the compact grounding and citation contract', ()
   const prompt = buildSynthesisSystemPrompt({ language: 'es', operation: 'recall', recallMode: 'fact' });
   assert.match(prompt, /SPANISH/);
   assert.match(prompt, /citation_ids/);
-  assert.match(prompt, /closely related grounded details/i);
+  assert.match(prompt, /closely related grounded detail/i);
   assert.match(prompt, /living memory/i);
   assert.match(prompt, /thoughtful colleague/i);
   assert.match(prompt, /default to the inside voice/i);
   assert.match(prompt, /Humanity never licenses invention/i);
-  assert.match(prompt, /targeted clarification question/i);
+  assert.match(prompt, /clarification question is appropriate only/i);
   assert.match(prompt, /Never collapse partial knowledge/i);
-  assert.match(prompt, /response.*must end with one natural, targeted clarification question/i);
+  assert.match(prompt, /do not invent gaps/i);
   assert.match(prompt, /every independent semantic detail/i);
   assert.match(prompt, /"coverage"/i);
   assert.match(prompt, /context_status/i);
   assert.doesNotMatch(prompt, /GRAPH EDGES/i);
   assert.doesNotMatch(prompt, /TEMPORAL/i);
+});
+
+test('answer objective and semantic depth shape one synthesis without encouraging drift', () => {
+  const prompt = buildSynthesisSystemPrompt({
+    language: 'en', operation: 'recall', recallMode: 'explain',
+    responseDepth: 'detailed',
+    answerObjective: 'Enumerate and describe the Solvis products supported by the evidence.',
+  });
+  assert.match(prompt, /ANSWER OBJECTIVE: Enumerate and describe the Solvis products/);
+  assert.match(prompt, /DETAILED DEPTH/);
+  assert.match(prompt, /must never replace, obscure, or distract/);
+  assert.match(prompt, /telemetry, not a request for another retrieval or synthesis pass/);
 });
 
 test('timeline synthesis adds temporal handling without making fact prompts temporal', () => {

@@ -29,6 +29,7 @@ const OPERATIONS = new Set([
   'compound',
 ]);
 const RECALL_MODES = new Set(['fact', 'explain', 'full']);
+const RESPONSE_DEPTHS = new Set(['standard', 'detailed', 'comprehensive']);
 const SCOPES = new Set(['personal', 'project', 'team', 'organization']);
 const SIDE_EFFECT_POLICIES = new Set(['read_only', 'approval_required']);
 
@@ -87,6 +88,14 @@ export function createChatIntentTool(groupCatalog = []) {
           query_canonical_en: { type: 'string', description: 'Concise English retrieval formulation. Preserve exact names, filenames, numbers and identifiers.' },
           named_entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
           recall_mode: { type: 'string', enum: [...RECALL_MODES] },
+          response_depth: {
+            type: 'string', enum: [...RESPONSE_DEPTHS],
+            description: 'Semantic answer depth. Use standard for ordinary requests, detailed when the user wants meaningful breadth or several aspects, and comprehensive only when the request clearly calls for a thorough cross-source treatment. This is language-independent and must follow intent, not keywords.',
+          },
+          answer_objective: {
+            type: 'string',
+            description: 'One concise instruction describing exactly what the final answer must deliver, including the requested shape such as direct fact, overview, product list, comparison, timeline, or explanation. Do not answer the question here.',
+          },
           source: {
             type: 'object', additionalProperties: false,
             properties: { document_id: { type: 'string' }, title: { type: 'string' } },
@@ -183,7 +192,7 @@ export function createChatIntentTool(groupCatalog = []) {
           acknowledgement: { type: 'string', description: 'Same-language acknowledgement for a successful save, mutation, or connector write.' },
           failure_response: { type: 'string', description: 'Same-language response if the selected operation or toolkit cannot be executed safely.' },
         },
-        required: ['operation', 'confidence', 'response_language', 'queries', 'named_entities', 'recall_mode', 'tool_groups', 'side_effect_policy'],
+        required: ['operation', 'confidence', 'response_language', 'queries', 'named_entities', 'recall_mode', 'response_depth', 'answer_objective', 'tool_groups', 'side_effect_policy'],
       },
     },
   };
@@ -197,6 +206,7 @@ function safeRecallDecision({ message, language, reason }) {
     direct_response: '', queries: [boundedText(message)], named_entities: [],
     query_original: boundedText(message), query_canonical_en: boundedText(message),
     recall_mode: 'fact', source: null, aggregate: null, tool_groups: ['hivemind-recall'],
+    response_depth: 'standard', answer_objective: boundedText(message),
     connector_provider: null, scope_filter: null, side_effect_policy: 'read_only',
     save: null, update: null, relation: null, delete: null, time: null, continuation: null,
     assistant_name: null, project_prompt: '', acknowledgement: '', failure_response: '',
@@ -246,6 +256,8 @@ export function normalizeIntentDecision(raw, { message, language, allowedGroups 
     recall_mode: raw.recall_mode === 'full'
       ? 'explain'
       : (RECALL_MODES.has(raw.recall_mode) ? raw.recall_mode : 'fact'),
+    response_depth: RESPONSE_DEPTHS.has(raw.response_depth) ? raw.response_depth : 'standard',
+    answer_objective: boundedText(raw.answer_objective, 1000) || boundedText(message, 1000),
     source,
     aggregate,
     tool_groups: toolGroups,
@@ -362,6 +374,7 @@ Use the conversation history to resolve references. Select the minimum tool grou
   Profile WRITE routing: use operation=update_profile when the user states or changes a fact about THEMSELVES — "change my name to Amar Sai", "my role is Head of Product", "I work at Solvis", "meine Firma ist …", "call me …", equivalents in any language. Put the changed field in profile_update.fields (name/role/company/language/location) and any stated preference in profile_update.preferences, plus an acknowledgement. This is DISTINCT from rename_assistant: "call yourself Atlas", "rename the assistant", "your name is …" set the ASSISTANT name (rename_assistant), never the user profile. If a bare "change my name" is ambiguous about whose name, it refers to the USER (update_profile).
   Temporal / timeline routing: use operation=timeline when the user asks how something CHANGED over time, its history/versions, or what was true AT a past date. Set time.valid_at (as-of a single instant, e.g. "as of March 2026", "letztes Jahr", "was it true on 2026-05-01"), OR time.range {start,end} (a span, e.g. "what changed between May and July", "seit 2025"), OR neither for a full version history ("what's the history of X", "how has the launch date changed", "wie hat sich X entwickelt"). Keep the topic in named_entities/query. Examples in any language: "What changed about SolvisPia since 2025?" (range start=2025-01-01), "What was the launch date as of last week?" (valid_at), "Show me the history of the pricing decision" (no time = full timeline). A plain current-fact question is NOT timeline — use recall.
 Always return query_original in the user's wording and query_canonical_en as a concise English retrieval formulation. Preserve exact filenames, people, companies, products, numbers, identifiers and aliases in both.
+Choose response_depth semantically in the user's language. Most ordinary turns are standard. Use detailed when the requested outcome genuinely needs multiple aspects, a useful inventory, comparison, explanation, or broad overview. Use comprehensive only when the user clearly wants a thorough treatment across all relevant retained evidence. Do not promote depth merely because many candidates exist. Write answer_objective as a precise, compact instruction for the final synthesizer: preserve the subject, requested facets, requested answer shape, and any explicit exclusions. For example, an organization overview should cover identity, activity, products/positioning, and notable facts supported by evidence; a product question should enumerate and describe products rather than drift into general company background.
 Return explicit ISO time fields when the request is temporal; do not make downstream code infer dates from words.
 Use save for an explicit save request, OR for any durable fact the user ASSERTS as true — about themselves, their organisation, its products, people, customers, naming or history. A declarative claim is a save even when the user does not ask you to remember it and even when the sentence is about a third party: the user is the authority on their own company, so "Singulance was first known as Davinci AI", "X is our new pricing", "Y replaced Z" are all durable facts to persist. Acknowledging a claim in prose WITHOUT saving it is the exact failure this rule prevents — the next recall then still answers from the stale memories. Do NOT save questions, opinions, transient chit-chat, or anything the user is merely asking about. Put the fully resolved fact in save.content; never return a pronoun or the save instruction itself.
 For implicit durable facts, use save only at confidence >= 0.80. For save/update, choose project_id only from the authorized project catalog below; if no project clearly fits, leave project_id null. Never invent a project id.
@@ -443,6 +456,8 @@ export function intentDecisionToPlan(decision, message) {
     answer_type: decision.answer_type || null,
     query_original: decision.query_original,
     query_canonical_en: decision.query_canonical_en,
+    response_depth: decision.response_depth || 'standard',
+    answer_objective: decision.answer_objective || message,
     recall_mode: decision.source || decision.aggregate ? 'explain' : decision.recall_mode,
     source: decision.relation?.source || decision.source,
     aggregate: decision.aggregate,

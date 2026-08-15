@@ -40,10 +40,9 @@ import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-ca
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
 import {
   applyProgressiveRecallView,
-  canContinueProgressiveRecall,
   collapseNativeOnlyCompoundDecision,
   createProgressiveRecallSession,
-  expandProgressiveRecall,
+  evidenceWindowSizeForDepth,
 } from './progressive-recall-session.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
 import {
@@ -111,12 +110,8 @@ const PLAN_MAX_TOKENS    = Number(process.env.HIVEMIND_PLAN_MAX_TOKENS    || 400
 const ANSWER_MAX_TOKENS  = Number(process.env.HIVEMIND_ANSWER_MAX_TOKENS  || 8000);
 const DIRECT_MAX_TOKENS  = Number(process.env.HIVEMIND_DIRECT_MAX_TOKENS  || 2000);
 const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 60_000);
-// Progressive recall reveals more of the already-ranked pool; it must not
-// become a hidden sequence of three complete answer generations. One cited
-// `relevant_but_incomplete` answer may reveal ranks 6-10 and synthesize once
-// more. Ranks 11-15 remain available to a later user turn.
-const PROGRESSIVE_RECALL_MAX_EXPANSIONS = Math.max(0, Number(process.env.HIVEMIND_PROGRESSIVE_RECALL_MAX_EXPANSIONS || 1));
-const PROGRESSIVE_RECALL_MIN_REMAINING_MS = Math.max(1_000, Number(process.env.HIVEMIND_PROGRESSIVE_RECALL_MIN_REMAINING_MS || 12_000));
+// Recall retains one mixed top-15 pool. Semantic intent chooses one evidence
+// window before synthesis (5/10/15); the turn never expands it afterward.
 // Retrieval budget. 3000ms was BELOW this system's own measured retrieval latency: a cold recall
 // runs to ~2600ms (keep-warm brings the warm floor to ~640ms, which is remote-Qdrant-bound), and
 // evidence retrieval alone measured 258-967ms warm. So a cold turn had ~400ms of headroom for every
@@ -1419,7 +1414,13 @@ function sourceUnavailableResponse({ evidence, language }) {
 }
 
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '', streamValidated = false, onEvent = null }) {
-  const synthesisPrompt = buildSynthesisPromptArtifact({ language, operation: plan.operation, recallMode: plan.recall_mode });
+  const synthesisPrompt = buildSynthesisPromptArtifact({
+    language,
+    operation: plan.operation,
+    recallMode: plan.recall_mode,
+    responseDepth: plan.response_depth,
+    answerObjective: plan.answer_objective || message,
+  });
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
       && Number.isInteger(evidence.aggregate?.count)) {
     const count = evidence.aggregate.count;
@@ -1987,9 +1988,15 @@ ${message}`;
   const answerMode = plan.explicit_recall_mode
     || ({ quick: 'fact', panorama: 'explain', insight: 'explain' }[plan.recall_mode])
     || plan.recall_mode || 'fact';
+  const depthCap = {
+    standard: 3000,
+    detailed: 6000,
+    comprehensive: 8000,
+  }[plan.response_depth || 'standard'] || 3000;
+  const modeCap = answerMode === 'full' ? 8000 : answerMode === 'explain' ? 5000 : 3000;
   const answerCap = process.env.HIVEMIND_ANSWER_MAX_TOKENS
     ? ANSWER_MAX_TOKENS
-    : (answerMode === 'full' ? 8000 : answerMode === 'explain' ? 4000 : 2000);
+    : Math.max(depthCap, modeCap);
   // Grounded synthesis over already-retrieved evidence needs little reasoning;
   // full reconstruction gets 'medium', everything else 'low'. Env-overridable.
   const answerReasoning = process.env.HIVEMIND_ANSWER_REASONING_EFFORT
@@ -2589,7 +2596,6 @@ export async function runReactAgentV2({
   }
   if (!message) throw new Error('message required');
   const abortCtrl = new AbortController();
-  const turnDeadlineAt = Date.now() + TURN_BUDGET_MS;
   const requestedAnswerModel = resolveAnswerModel(model);
   let answerModel = requestedAnswerModel;
   const budgetTimer = setTimeout(() => abortCtrl.abort(), TURN_BUDGET_MS);
@@ -3403,16 +3409,17 @@ export async function runReactAgentV2({
     };
     onEvent?.({ type: 'coverage_assessed', coverage: evidence.coverage });
 
-    // One retrieval, one authoritative mixed ranking, progressively revealed.
-    // The session is turn-local and tenant-scoped by the already-filtered
-    // evidence bundle. Expanding it performs no retrieval and no reranking.
-    const fullEvidence = evidence;
-    let progressiveSession = createProgressiveRecallSession({
+    // Recall always retains one authoritative mixed top-15 ranking. Intent
+    // selects exactly one synthesis window before the model runs: ordinary
+    // turns see five, detailed turns ten, comprehensive turns fifteen. There
+    // is no post-answer reveal, retrieval retry, rerank, or synthesis hop.
+    const evidenceWindowSize = evidenceWindowSizeForDepth(plan.response_depth);
+    const progressiveSession = createProgressiveRecallSession({
       rankedCandidates: evidence.ranked_candidates || [],
       memories: evidence.memories || [],
       evidence: evidence.evidence || [],
       query: plan.query_canonical_en || message,
-      initialSize: 5,
+      initialSize: evidenceWindowSize,
       pageSize: 5,
       maxVisible: 15,
     });
@@ -3423,7 +3430,10 @@ export async function runReactAgentV2({
       recall_id: progressiveSession.recall_id,
       candidate_count: progressiveSession.candidates.length,
       delivered_until: progressiveSession.delivered_until,
+      selected_depth: plan.response_depth || 'standard',
+      selected_window: evidenceWindowSize,
       degraded_order: progressiveSession.degraded_order,
+      expansion_count: 0,
     };
     onEvent?.({
       type: 'recall_window_revealed', recall_id: progressiveSession.recall_id,
@@ -3446,8 +3456,6 @@ export async function runReactAgentV2({
     let synthesisPasses = 0;
     const synthesizeWithFallback = async (input, { validateCandidate = true } = {}) => {
       let lastError = null;
-      // Once a model has successfully taken over, progressive expansions start
-      // there instead of re-paying the failed candidate on every revealed page.
       const attemptModels = [...new Set([answerModel, ...synthesisModels])];
       for (let index = 0; index < attemptModels.length; index += 1) {
         const candidateModel = attemptModels[index];
@@ -3505,33 +3513,7 @@ export async function runReactAgentV2({
       }
       throw lastError || new Error('all_synthesis_models_failed');
     };
-    let answer = await synthesizeWithFallback(answerInput);
-    const progressiveAnswers = [answer];
-    while (
-      progressiveSession.candidates.length > 0
-      && canContinueProgressiveRecall({
-        answer,
-        session: progressiveSession,
-        maxExpansions: PROGRESSIVE_RECALL_MAX_EXPANSIONS,
-        remainingMs: turnDeadlineAt - Date.now(),
-        minRemainingMs: PROGRESSIVE_RECALL_MIN_REMAINING_MS,
-      })
-    ) {
-      const previousUntil = progressiveSession.delivered_until;
-      progressiveSession = expandProgressiveRecall(progressiveSession);
-      evidence = applyProgressiveRecallView(fullEvidence, progressiveSession);
-      answerInput.evidence = evidence;
-      onEvent?.({
-        type: 'recall_window_revealed', recall_id: progressiveSession.recall_id,
-        from_rank: previousUntil + 1, to_rank: progressiveSession.delivered_until,
-        candidate_count: progressiveSession.candidates.length,
-      });
-      const expandedAnswer = await synthesizeWithFallback(answerInput);
-      answer = expandedAnswer;
-      progressiveAnswers.push(expandedAnswer);
-      trace.recall.progressive.delivered_until = progressiveSession.delivered_until;
-      trace.recall.progressive.expansion_count = progressiveSession.expansion_count;
-    }
+    const answer = await synthesizeWithFallback(answerInput);
     if (modelPolicy.shadow) {
       const servedSummary = {
         claim_count: answer.claims?.length || 0,
@@ -3563,13 +3545,10 @@ export async function runReactAgentV2({
       });
     }
     _pt('answer_step_ms', _ps);
-    for (const [attemptIndex, attemptedAnswer] of progressiveAnswers.entries()) {
-      for (const [stage, usage] of Object.entries(attemptedAnswer.usage_stages || { synthesis: attemptedAnswer.usage })) {
-        recordUsage(attemptIndex === 0 ? stage : `${stage}_expand_${attemptIndex}`, usage);
-      }
+    for (const [stage, usage] of Object.entries(answer.usage_stages || { synthesis: answer.usage })) {
+      recordUsage(stage, usage);
     }
     trace.recall.synthesis_passes = synthesisPasses;
-    trace.recall.progressive.expansion_count = progressiveSession.expansion_count;
     onEvent?.({
       type: 'answer_validated',
       grounded: answer.grounded,
@@ -3655,9 +3634,13 @@ export async function runReactAgentV2({
         },
       };
     });
-    const publicSources = evidence.coverage?.source_requested
+    const sourcePool = evidence.coverage?.source_requested
       ? citationSources
-      : [...citationSources, ...memorySources].slice(0, 10);
+      : [...citationSources, ...memorySources];
+    const publicSources = [...new Map(sourcePool.map((source) => [
+      source?.segment_id || source?.id || source?.citation_id,
+      source,
+    ])).values()].slice(0, 10);
     // Distinct scopes the answer's memories were drawn from — the chat renders
     // "(memory found in <scope>)" so the user sees which tier(s) answered
     // (my-space / project:<name> / org-wide). Default ALL recall spans all

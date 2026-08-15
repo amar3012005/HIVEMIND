@@ -30,6 +30,17 @@ export function isCandidateSynthesisAcceptable(answer) {
       && claim.citation_ids.length > 0);
 }
 
+export function hasGroundingEvidence(evidence = {}) {
+  return ['memories', 'evidence', 'live', 'graph_edges', 'synthesis_chains']
+    .some((key) => Array.isArray(evidence?.[key]) && evidence[key].length > 0)
+    || (Array.isArray(evidence?.recall_packets)
+      && evidence.recall_packets.some((packet) => (
+        (Array.isArray(packet?.facts) && packet.facts.length > 0)
+        || (Array.isArray(packet?.sourceSections) && packet.sourceSections.length > 0)
+        || (Array.isArray(packet?.citations) && packet.citations.length > 0)
+      )));
+}
+
 export function buildSynthesisFallbackChain({ served, requested, finalFallback } = {}) {
   return [...new Set([served, requested, finalFallback]
     .map((model) => String(model || '').trim())

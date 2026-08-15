@@ -6,7 +6,7 @@ function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-function effectClass(todo) {
+export function effectClass(todo) {
   const context = asObject(todo.context);
   return context.effect_class === 'external' || context.external_action_requested === true
     ? 'external' : 'internal';

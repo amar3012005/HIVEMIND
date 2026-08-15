@@ -57,6 +57,10 @@ services:
       <<: *common-env
       HOSTNAME: hm-core
       DOCLING_URL: http://docling:5001
+      # Container-to-container traffic must use Nango's listening port (8080).
+      # NANGO_URL in the host .env is the public/host-bound endpoint and is not
+      # reliably reachable from Core through the host firewall/NAT path.
+      NANGO_URL: http://nango:8080
       NANGO_SECRET_KEY: ${NANGO_SECRET_KEY}
       NANGO_ENCRYPTION_KEY: ${NANGO_ENCRYPTION_KEY}
       NANGO_PUBLIC_URL: ${NANGO_PUBLIC_URL:-http://nango:3003}

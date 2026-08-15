@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildEvidencePacket, hop2Evidence, loadTypedGraphEvidence, recallEnhance } from '../../src/memory/recall-router.js';
-import { EvidenceRetrievalService, fuseRemoteEvidenceHits } from '../../src/knowledge/evidence-retrieval.js';
+import { buildLexicalPhrases, EvidenceRetrievalService, fuseRemoteEvidenceHits } from '../../src/knowledge/evidence-retrieval.js';
+
+test('lexical phrase planning is language-independent and preserves query order', () => {
+  assert.deepEqual(buildLexicalPhrases(['alpha', 'beta', 'gamma', 'delta'], { max: 5 }), [
+    'alpha beta gamma', 'beta gamma delta', 'alpha beta', 'beta gamma', 'gamma delta',
+  ]);
+});
 
 test('remote evidence fusion preserves semantic and lexical provenance without flat lexical scores', () => {
   const fused = fuseRemoteEvidenceHits(

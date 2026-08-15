@@ -37,6 +37,23 @@ export function fuseRemoteEvidenceHits(vectorHits = [], lexicalHits = [], { rank
   })).sort((left, right) => right.score - left.score);
 }
 
+export function buildLexicalPhrases(tokens = [], { max = 18 } = {}) {
+  const normalized = tokens.map((token) => String(token || '').trim()).filter(Boolean);
+  const phrases = [];
+  // Trigrams first: they are far less likely to saturate a bounded database
+  // candidate window than generic single tokens. Bigrams provide recall when
+  // punctuation or segmentation splits a longer phrase. This is language- and
+  // domain-independent; it depends only on the user's token order.
+  for (const width of [3, 2]) {
+    for (let index = 0; index + width <= normalized.length; index += 1) {
+      const phrase = normalized.slice(index, index + width).join(' ');
+      if (phrase.replace(/\s/g, '').length >= 8) phrases.push(phrase);
+      if (phrases.length >= max) return [...new Set(phrases)];
+    }
+  }
+  return [...new Set(phrases)];
+}
+
 /**
  * Which SCOPE TIER does a document belong to, for display?
  *
@@ -439,12 +456,29 @@ export class EvidenceRetrievalService {
         const lexTokens = [...new Set([..._baseTokens, ..._collapsed])].slice(0, 16);
         if (lexTokens.length) {
           try {
+            const lexicalPhrases = buildLexicalPhrases(allQueryTokens);
+            const preciseSegments = lexicalPhrases.length
+              ? await this.db.knowledgeSegment.findMany({
+                where: {
+                  orgId,
+                  document: docIdSet
+                    ? { archivedAt: null }
+                    : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
+                  ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
+                  OR: lexicalPhrases.map((phrase) => ({ content: { contains: phrase, mode: 'insensitive' } })),
+                },
+                include: {
+                  document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true } },
+                },
+                take: Math.min(_depth, 100),
+              })
+              : [];
             // Scope the lexical pass to the SAME docs as the vector pass when a
             // doc set is given (HOP2 passes the query's accessible/anchored docs).
             // Going broader leaked cross-doc hits (a competitor named in ANOTHER
             // document surfaced in a project answer). Bounded by userId+orgId
             // always; by docIdSet when the caller scoped to specific docs.
-            const lexSegments = await this.db.knowledgeSegment.findMany({
+            const broadSegments = await this.db.knowledgeSegment.findMany({
               where: {
                 orgId,
                 // same authoritative scope gate as the vector hydrate — one helper,
@@ -460,6 +494,9 @@ export class EvidenceRetrievalService {
               },
               take: Math.min(docIdSet ? _depth * 2 : _depth, 200),
             });
+            const lexSegments = [...new Map(
+              [...preciseSegments, ...broadSegments].map((segment) => [segment.id, segment]),
+            ).values()];
             for (const segment of lexSegments) {
               // Score by DISTINCT query-token overlap: a segment containing more
               // of the query's distinctive tokens (e.g. both "1KOMMA5" AND "Enpal")
@@ -467,10 +504,12 @@ export class EvidenceRetrievalService {
               // and survive the top-N slice. 1 token ≈ 0.6, scaling up to ~0.9.
               const lc = String(segment.content || '').toLowerCase();
               const matched = lexTokens.filter((t) => lc.includes(t.toLowerCase()));
+              const matchedPhrases = lexicalPhrases.filter((phrase) => lc.includes(phrase.toLowerCase()));
               const coverage = matched.length / Math.max(1, lexTokens.length);
               const orderedPairs = lexTokens.slice(0, -1).filter((token, index) =>
                 lc.includes(`${token.toLowerCase()} ${lexTokens[index + 1].toLowerCase()}`)).length;
-              const score = Math.min(0.95, 0.55 + (0.3 * coverage) + (0.08 * orderedPairs));
+              const score = Math.min(0.98,
+                0.55 + (0.3 * coverage) + (0.08 * orderedPairs) + (0.06 * matchedPhrases.length));
               // LEXICAL EVIDENCE IS ADDITIVE — NOT A DUPLICATE TO DISCARD.
               // This used to `continue` when the vector pass had already returned the
               // segment, which made retrieval NON-MONOTONIC IN DEPTH: lexical scores are

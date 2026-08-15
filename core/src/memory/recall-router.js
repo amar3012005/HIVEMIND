@@ -608,13 +608,19 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
       rankedCandidates.push({ kind: 'memory', memory_id: x.id, rank, score: c._rerankScore ?? null });
     }
   }
-  console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> mem=${Math.min(outMem.length, deliverN)} ev=${Math.min(outEv.length, evidenceN)}`);
+  const retainedCandidates = rankedCandidates.slice(0, Math.max(15, deliverN + evidenceN));
+  const retainedMemoryIds = new Set(retainedCandidates.filter((c) => c.kind === 'memory').map((c) => c.memory_id));
+  const retainedEvidenceIds = new Set(retainedCandidates.filter((c) => c.kind === 'evidence').map((c) => c.segment_id));
+  console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> retained=${retainedCandidates.length}`);
   return {
-    memories: outMem.slice(0, deliverN),
-    evidence: outEv.slice(0, evidenceN),
+    // Keep backing rows for every retained mixed candidate. The progressive
+    // view still exposes only ranks 1-5 initially, but can now reveal the true
+    // ranks 6-15 even when one lane dominates the unified ordering.
+    memories: outMem.filter((row) => retainedMemoryIds.has(row.id)),
+    evidence: outEv.filter((row) => retainedEvidenceIds.has(row.segmentId || row.segment_id || row.id)),
     // Preserve the cross-encoder's one authoritative mixed order. Consumers
     // may progressively reveal this list without another retrieval/rerank.
-    ranked_candidates: rankedCandidates.slice(0, Math.max(15, deliverN + evidenceN)),
+    ranked_candidates: retainedCandidates,
     ranking_mode: usedCrossEncoder ? 'cross_encoder' : 'lane_interleave_fallback',
     rerank_passes: usedCrossEncoder ? 1 : 0,
     rerank_ms: Date.now() - _rrStart,
@@ -718,6 +724,12 @@ async function hop1Memory({ store, query, options, ctx }) {
     scope_filter: options.scope_filter || null,
     structured_intent: options.structured_intent === true,
     semantic_recovery: options.semantic_recovery === true,
+    // The progressive planner has already produced the semantic query and
+    // explicit time/entity controls. Avoid spawning additive remote vector
+    // variants that compete for the same tenant transport budget.
+    query_expansion: options.structured_intent === true ? false : null,
+    entity_filter_mode: options.structured_intent === true ? 'off' : null,
+    temporal_filter_mode: options.structured_intent === true ? 'off' : null,
     // The final delivery boundary runs one cross-encoder over the combined
     // memory + evidence pool (or applies chronological ordering for timeline).
     // A memory-only pass here was paid twice and then discarded.
@@ -1864,13 +1876,10 @@ export class RecallRouter {
         + `latency_budget_ms=${recallPlan.latency_budget_ms} for mode=${recallPlan.mode || 'n/a'}, and one `
         + `hop alone is capped at 2300ms, so the final stage can be starved by construction.`);
     }
-    let deliverMemories = _canRerank
-      ? await withTimeout(
-        rerank(query, rankedMemories, { topN: deliverN }),
-        rerankBudget,
-        rankedMemories.slice(0, deliverN),
-      )
-      : rankedMemories.slice(0, deliverN);
+    // Non-timeline delivery is authoritatively reranked once below across the
+    // unified memory + evidence pool. Do not pay for a memory-only pass whose
+    // ordering is immediately discarded.
+    let deliverMemories = rankedMemories.slice(0, deliverN);
     deliverMemories = dedupeMemoriesById(deliverMemories).slice(0, deliverN);
     if (recallPlan.operation === 'timeline') {
       deliverMemories = [...deliverMemories].sort((left, right) => {
@@ -1900,7 +1909,7 @@ export class RecallRouter {
         structuredIntent: options.structured_intent === true,
       }).catch(() => null);
       if (v2 && Array.isArray(v2.memories)) {
-        deliverMemories = dedupeMemoriesById(v2.memories).slice(0, deliverN);
+        deliverMemories = dedupeMemoriesById(v2.memories);
         finalEvidence = v2.evidence || evidenceWithLineage;
         rankedCandidates = v2.ranked_candidates || [];
         hybridRankingMode = v2.ranking_mode || 'unknown';
@@ -1918,7 +1927,7 @@ export class RecallRouter {
       memories: deliverMemories.map((memory) => serializeRecallMemory(memory, {
         includeFullContent: options.include_full_memory_content === true,
       })),
-      evidence: finalEvidence.slice(0, HOP2_DOC_LIMIT).map((e) => ({
+      evidence: finalEvidence.slice(0, options.structured_intent === true ? 15 : HOP2_DOC_LIMIT).map((e) => ({
         segment_id:       e.segmentId,
         document_id:      e.documentId,
         document_title:   e.document?.title || null,

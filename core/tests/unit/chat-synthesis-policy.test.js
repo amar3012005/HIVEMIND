@@ -72,16 +72,24 @@ test('progressive canonical query is rewritten only after first recall has zero 
   assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: true }), false);
 });
 
-test('Nemotron serves only native fact recall and preserves GPT-OSS as fallback', () => {
+test('GPT-OSS Nitro is default and Nemotron requires an explicit canary opt-in', () => {
+  delete process.env.HIVEMIND_NEMOTRON_SYNTHESIS_ENABLED;
   const native = chooseSynthesisModel({
     operation: 'recall', recallMode: 'fact', useTools: false,
     currentModel: 'openai/gpt-oss-20b:nitro', shadowEnabled: true, canaryEnabled: true,
   });
-  assert.equal(native.served, 'nvidia/nemotron-3.5-lightning:nitro');
+  assert.equal(native.served, 'openai/gpt-oss-20b:nitro');
   assert.equal(native.shadow, null);
-  assert.equal(native.eligible, true);
+  assert.equal(native.eligible, false);
   assert.equal(native.fallback, 'openai/gpt-oss-20b:nitro');
-  assert.equal(native.reasoning, 'disabled');
+  assert.equal(native.reasoning, 'provider_default');
+
+  process.env.HIVEMIND_NEMOTRON_SYNTHESIS_ENABLED = 'true';
+  const canary = chooseSynthesisModel({ operation: 'recall', recallMode: 'fact', useTools: false,
+    currentModel: 'openai/gpt-oss-20b:nitro' });
+  assert.equal(canary.served, 'nvidia/nemotron-3.5-lightning:nitro');
+  assert.equal(canary.eligible, true);
+  delete process.env.HIVEMIND_NEMOTRON_SYNTHESIS_ENABLED;
 
   const compound = chooseSynthesisModel({
     operation: 'compound', recallMode: 'fact', useTools: true,

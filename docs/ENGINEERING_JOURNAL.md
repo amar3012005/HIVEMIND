@@ -687,3 +687,22 @@ slides that find no unique anchor get a page instead of `null`.
 - Rollback: not applicable
 - Next: land through PR, deploy the agent capability endpoint before Core, and
   run authenticated upload -> recall -> chat acceptance.
+
+## 2026-08-15 UTC - Progressive chat latency repair started
+
+- State: Implemented, pre-production verification
+- Owner: Codex
+- Branch: `codex/chat-orchestration-fast`
+- Base: `92c6421efbc026de92fd3f6c0e8917ef1a900339`
+- Decision: structured chat performs one compiled remote vector retrieval and
+  one unified memory-plus-evidence rerank. Generic insufficiency reveals the
+  retained ranks 6-15; only true zero coverage may perform one distinct
+  recovery retrieval. Per-tenant transport saturation queues bounded work
+  instead of rejecting the fifth internal read.
+- Model: native final synthesis defaults to `openai/gpt-oss-20b:nitro`;
+  Nemotron is retained only as an explicit canary.
+- Verification: focused synthesis, progressive recall, and remote transport
+  suites pass locally (24/24); Linux/native and authenticated production
+  acceptance remain required before promotion.
+- Production: not deployed
+- Rollback: current immutable `prod-20260815-92c6421e` release.

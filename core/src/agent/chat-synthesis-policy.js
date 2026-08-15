@@ -77,7 +77,9 @@ export function chooseSynthesisModel({
   const candidate = String(
     process.env.HIVEMIND_FACT_SYNTHESIS_MODEL || 'nvidia/nemotron-3.5-lightning:nitro',
   ).trim();
-  const enabled = process.env.HIVEMIND_NEMOTRON_SYNTHESIS_ENABLED !== 'false';
+  // Nemotron remains an explicit experiment. Production fact synthesis uses
+  // the caller's Nitro model unless this canary is deliberately enabled.
+  const enabled = process.env.HIVEMIND_NEMOTRON_SYNTHESIS_ENABLED === 'true';
   const eligible = enabled
     && useTools !== true
     && operation === 'recall'

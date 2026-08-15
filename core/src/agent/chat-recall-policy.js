@@ -101,18 +101,11 @@ export function chooseRecallEscalation({ plan = {}, coverage = {}, query } = {})
       },
     };
   }
-  if (!coverage.evidence_found) {
-    return {
-      reason: 'empty_anchor_coverage',
-      args: {
-        query,
-        mode: 'explain',
-        limit: 12,
-        allow_semantic_source_recovery: true,
-        semantic_recovery: true,
-      },
-    };
-  }
+  // Generic insufficiency is handled by progressive reveal from the already
+  // ranked pool. Re-running the complete retrieval pipeline here doubled
+  // remote fan-out and reranking before the answer model had even inspected
+  // ranks 1-5. A genuinely empty result may still use the single, distinct
+  // recovery rewrite owned by the top-level chat orchestration.
   if (coverage.graph_requested && !coverage.graph_covered) {
     return { reason: 'graph_coverage', args: { query, mode: 'explain', limit: 12 } };
   }

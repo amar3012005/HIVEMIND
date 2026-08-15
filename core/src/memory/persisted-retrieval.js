@@ -1322,6 +1322,7 @@ async function _recallPersistedMemoriesImpl(store, {
                              // wide rerank window before delivery — recovers semantically-best rows
                              // (esp. cross-lingual) the bi-encoder ranks low. null = off.
   query_expansion = null,    // per-call override of RECALL_QUERY_EXPANSION — cross-lingual / sparse
+  temporal_filter_mode = null,
                              // rescue: when the primary recall is THIN, translate/rephrase the query
                              // and merge extra candidates. null = env default.
   exact_source = false,
@@ -1460,7 +1461,7 @@ async function _recallPersistedMemoriesImpl(store, {
   // for non-date queries (normalizeQueryTemporalTokens returns [] → pass skipped)
   // and only ADDS date-matched memories for date-anchored queries — verified
   // byte-identical on non-temporal recall. Set TEMPORAL_FILTER_MODE=off to disable.
-  const TEMPORAL_FILTER_MODE = (process.env.TEMPORAL_FILTER_MODE || 'should').toLowerCase();
+  const TEMPORAL_FILTER_MODE = (temporal_filter_mode || process.env.TEMPORAL_FILTER_MODE || 'should').toLowerCase();
   const _temporalFilterTags = TEMPORAL_FILTER_MODE === 'should'
     ? normalizeQueryTemporalTokens(query_context, Date.now())
     : [];

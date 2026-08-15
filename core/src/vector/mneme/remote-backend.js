@@ -8,8 +8,10 @@
 const TIMEOUT_MS = Number(process.env.MNEME_REMOTE_TIMEOUT_MS || 4000);
 const FAILURE_COOLDOWN_MS = Number(process.env.MNEME_REMOTE_FAILURE_COOLDOWN_MS || 5000);
 const MAX_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG || 4));
+const MAX_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_QUEUED_PER_ORG || 32));
 const _failureCircuitUntil = new Map();
 const _inflightByCircuit = new Map();
+const _waitersByCircuit = new Map();
 const _capabilityCache = new Map();
 
 export class RemoteMemoryUnavailableError extends Error {
@@ -35,6 +37,50 @@ function _circuitKey(orgId, path) {
   // the full transport timeout.
   const isWrite = /^\/v1\/(write|edge|update|update-tags|delete|kb-doc|kb-segment|kb-table|kb-table-row|vector-repair)/.test(path);
   return `${orgId}:${isWrite ? 'write' : 'read'}`;
+}
+
+function _releaseSlot(circuitKey) {
+  const remaining = Math.max(0, (_inflightByCircuit.get(circuitKey) || 1) - 1);
+  if (remaining) _inflightByCircuit.set(circuitKey, remaining);
+  else _inflightByCircuit.delete(circuitKey);
+  const queue = _waitersByCircuit.get(circuitKey);
+  while (queue?.length) {
+    const waiter = queue.shift();
+    if (waiter.signal?.aborted) continue;
+    _inflightByCircuit.set(circuitKey, (_inflightByCircuit.get(circuitKey) || 0) + 1);
+    waiter.cleanup();
+    waiter.resolve();
+    break;
+  }
+  if (!queue?.length) _waitersByCircuit.delete(circuitKey);
+}
+
+async function _acquireSlot(orgId, path, signal) {
+  const circuitKey = _circuitKey(orgId, path);
+  const current = _inflightByCircuit.get(circuitKey) || 0;
+  if (current < MAX_INFLIGHT_PER_ORG) {
+    _inflightByCircuit.set(circuitKey, current + 1);
+    return circuitKey;
+  }
+  const queue = _waitersByCircuit.get(circuitKey) || [];
+  if (queue.length >= MAX_QUEUED_PER_ORG) {
+    throw new RemoteMemoryUnavailableError(orgId, path, new Error('tenant transport queue full'));
+  }
+  await new Promise((resolve, reject) => {
+    const waiter = { resolve, reject, signal, cleanup: () => {} };
+    const abort = () => {
+      const index = queue.indexOf(waiter);
+      if (index >= 0) queue.splice(index, 1);
+      waiter.cleanup();
+      reject(signal.reason || new Error(`agent ${path} request cancelled while queued`));
+    };
+    waiter.cleanup = () => signal?.removeEventListener('abort', abort);
+    if (signal?.aborted) return abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    queue.push(waiter);
+    _waitersByCircuit.set(circuitKey, queue);
+  });
+  return circuitKey;
 }
 
 // orgId → { url, token }. Sources, in order:
@@ -142,17 +188,13 @@ async function _call(orgId, path, body) {
   if (unavailableUntil > Date.now()) {
     throw new RemoteMemoryUnavailableError(orgId, path, new Error('transport circuit open'));
   }
-  const inFlight = _inflightByCircuit.get(circuitKey) || 0;
-  if (inFlight >= MAX_INFLIGHT_PER_ORG) {
-    throw new RemoteMemoryUnavailableError(orgId, path, new Error('tenant transport bulkhead full'));
-  }
-  _inflightByCircuit.set(circuitKey, inFlight + 1);
+  const parentSignal = currentStageSignal();
+  await _acquireSlot(orgId, path, parentSignal);
   const tokens = [a.token, ...(a.fallbackTokens || [])].filter(Boolean);
   let lastStatus = null;
   try {
     for (const token of tokens) {
     const ctrl = new AbortController();
-    const parentSignal = currentStageSignal();
     // The parent deadline has its own AbortSignal. Keep the transport timer at
     // the transport budget so two same-millisecond timers cannot misclassify a
     // caller cancellation as a network outage and poison the circuit.
@@ -208,9 +250,7 @@ async function _call(orgId, path, body) {
     }
     throw new Error(`agent ${path} → ${lastStatus || 'unreachable'}`);
   } finally {
-    const remaining = (_inflightByCircuit.get(circuitKey) || 1) - 1;
-    if (remaining > 0) _inflightByCircuit.set(circuitKey, remaining);
-    else _inflightByCircuit.delete(circuitKey);
+    _releaseSlot(circuitKey);
   }
 }
 

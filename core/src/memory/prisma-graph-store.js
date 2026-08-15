@@ -997,7 +997,7 @@ export class PrismaGraphStore {
     };
   }
 
-  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, valid_at, known_at, source_platform, scope = 'personal', access_context = null }) {
+  async searchMemories({ query, user_id, org_id, project, memory_type, tags, is_latest, n_results = 10, created_after, created_before, valid_at, known_at, source_platform, scope = 'personal', access_context = null, lexical_only = false }) {
     // .amr org: there is no Postgres to run to_tsvector against. The lexical (keyword) leg of hybrid
     // recall runs over the org's .amr records instead — same scope, term-overlap scoring. Without
     // this the lexical leg would $queryRaw-passthrough to central Postgres (PG=0 for this org) and
@@ -1011,11 +1011,6 @@ export class PrismaGraphStore {
     // and vector-search the agent (amrRecall → POST /v1/recall); content rides in the hit payload.
     if (query && orgIsRemote(org_id)) {
       try {
-        const { getEmbedService } = await import('../embeddings/factory.js');
-        const vec = await getEmbedService().embedOne(query).catch(() => null);
-        if (!vec) return [];
-        const filter = { must: [{ key: 'org_id', match: { value: org_id } }] };
-        if (is_latest !== undefined) filter.must.push({ key: 'is_latest', match: { value: is_latest } });
         const scopedProjectIds = Array.isArray(access_context?.projectIds) ? access_context.projectIds : [];
         // HYBRID: vector (semantic) + lexical (exact-term FTS over the agent's Postgres). The lexical
         // leg surfaces buried exact terms that cosine rank misses — without it self-host recall was
@@ -1025,6 +1020,38 @@ export class PrismaGraphStore {
           valid_at,
           known_at,
         };
+        // The persisted-retrieval orchestrator already owns a dedicated semantic
+        // vector lane. Its lexical lane must not embed and repeat that vector
+        // search: doing so multiplied remote calls, delayed the hybrid barrier,
+        // and could exhaust the tenant transport budget. Direct callers retain
+        // the historical hybrid behavior unless they opt into this contract.
+        if (lexical_only) {
+          const lex = await (amrLexicalRemote(org_id, query, lexFilter, n_results * 3) || Promise.resolve([]));
+          return (lex || []).map((h) => {
+            const p = h.payload || {};
+            return {
+              id: p.memory_id || h.id,
+              content: p.content || '', title: p.title || null, tags: p.tags || [],
+              memory_type: p.memory_type || 'fact', project: p.project || null,
+              project_id: Array.isArray(p.project_ids) && p.project_ids.length === 1 ? p.project_ids[0] : null,
+              project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
+              scope: p.scope || null,
+              importance_score: typeof h.score === 'number' ? h.score : 0.5,
+              is_latest: p.is_latest ?? true,
+              created_at: p.created_at || null, updated_at: p.created_at || null,
+              document_date: p.document_date || null,
+              valid_from: p.valid_from || null, valid_to: p.valid_to || null,
+              score: typeof h.score === 'number' ? h.score : 0.5,
+              cognitive_layer_role: p.cognitive_layer_role || null,
+            };
+          }).filter((m) => m.id && (!scopedProjectIds.length
+            || m.project_ids.some((id) => scopedProjectIds.includes(id))));
+        }
+        const { getEmbedService } = await import('../embeddings/factory.js');
+        const vec = await getEmbedService().embedOne(query).catch(() => null);
+        if (!vec) return [];
+        const filter = { must: [{ key: 'org_id', match: { value: org_id } }] };
+        if (is_latest !== undefined) filter.must.push({ key: 'is_latest', match: { value: is_latest } });
         const [hits, lex] = await Promise.all([
           amrRecall(org_id, vec, filter, n_results * 3, 0).then((r) => r || []),
           (amrLexicalRemote(org_id, query, lexFilter, n_results * 3) || Promise.resolve([])).then((r) => r || []),

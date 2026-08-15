@@ -146,6 +146,9 @@ test('candidate generation never exceeds the 150-result ceiling', async () => {
     assert.ok(vectorCalls.length >= 1);
     assert.ok(vectorCalls.every((call) => call.limit <= 150));
     assert.ok(lexicalCalls.every((call) => call.n_results <= 150));
+    assert.ok(lexicalCalls.length >= 1);
+    assert.ok(lexicalCalls.every((call) => call.lexical_only === true),
+      'the orchestrated lexical lane must not repeat semantic vector recall');
   } finally {
     client.isConnected = originalIsConnected;
     client.hybridSearch = originalHybridSearch;

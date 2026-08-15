@@ -3551,7 +3551,16 @@ export async function runReactAgentV2({
         const candidateModel = attemptModels[index];
         try {
           synthesisPasses += 1;
-          const candidateAnswer = await answerStep({ ...input, model: candidateModel });
+          // Only the primary gets the provider's validated streaming attempt.
+          // After that contract fails, run each independent safety model once
+          // in ordinary JSON mode and stream its validated sentence chunks from
+          // the server. This avoids paying for the same fallback model twice
+          // when its provider streams plain prose instead of NDJSON.
+          const candidateAnswer = await answerStep({
+            ...input,
+            model: candidateModel,
+            ...(streamAnswer && index > 0 ? { streamValidated: false } : {}),
+          });
           // Valid JSON can still contradict a packet by claiming that visible
           // evidence is missing. Apply the grounded/citation gate to every
           // candidate, including the requested primary, so non-streaming chat
@@ -3569,6 +3578,7 @@ export async function runReactAgentV2({
               fallback_reason: lastError?.message || 'synthesis_fallback',
               fallback_model: candidateModel,
               fallback_depth: index,
+              ...(streamAnswer ? { fallback_transport: 'validated_json_then_sse' } : {}),
             };
           }
           answerModel = candidateModel;

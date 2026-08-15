@@ -60,7 +60,8 @@ test('fast parser receives bounded multilingual history and server capability de
   assert.equal(capture.body.messages.slice(1, -1).length, 6);
   assert.equal(capture.body.tool_choice.function.name, 'route_chat_turn');
   assert.match(capture.body.messages[0].content, /hivemind-recall/);
-  assert.match(capture.body.messages[0].content, /top-K recall answer can never establish completeness/);
+  assert.match(capture.body.messages[0].content, /top-K recall answer cannot certify completeness/);
+  assert.match(capture.body.messages[0].content, /useful inventory.*response_depth=detailed/);
   assert.match(capture.body.messages[0].content, /Choose response_depth semantically/);
   assert.equal(usage.total_tokens, 17);
 });
@@ -123,6 +124,6 @@ test('intent tool is a closed schema with a required tool call contract', () => 
   assert.ok(tool.function.parameters.required.includes('operation'));
   assert.ok(tool.function.parameters.required.includes('response_depth'));
   assert.ok(tool.function.parameters.required.includes('answer_objective'));
-  assert.match(tool.function.parameters.properties.operation.description, /complete, exact count/);
+  assert.match(tool.function.parameters.properties.operation.description, /certified exact count/);
   assert.deepEqual(tool.function.parameters.properties.tool_groups.items.enum, catalog.map((group) => group.name));
 });

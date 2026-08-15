@@ -52,11 +52,11 @@ const RETRYABLE = /abort|timeout|429|50[0-9]|network|fetch failed|ECONNRESET|ETI
 // German `E3DC Zähler` row. So a single model being unavailable must not cost us the pass.
 //
 // Production evaluation on 2026-08-15: Cohere v4-fast and Voyage both scored
-// 10/10 on the small-detail multilingual/product corpus; v4-fast averaged
-// 204ms vs Voyage 223ms there and 407ms vs 566ms on the 150-document pool.
-// The deployment config therefore promotes v4-fast and keeps Voyage as the
-// first cross-family fallback. The code-level chain below remains a safety net
-// for environments that do not load prod-defaults.conf.
+// Both Voyage and v4-fast scored 10/10 on the small-detail multilingual/product
+// corpus. Production promotes Voyage for reliability: repeated v4-fast aborts
+// consumed its first budget share before Voyage served the same request. The
+// code-level chain below remains a safety net for environments that do not load
+// prod-defaults.conf.
 // NOT in the chain: nvidia/llama-nemotron-rerank-vl-1b-v2:free is free but returned HTTP 404
 // "No endpoints available matching your guardrail restrictions" on this account — a free
 // model that cannot be called is not a fallback.

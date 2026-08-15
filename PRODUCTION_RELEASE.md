@@ -205,3 +205,12 @@
 - **Image:** `hivemind/core-api:prod-20260815-cd806b6f`, digest `sha256:bdb15ed0e27569c3bb2a46d849e3254f1429b5383834ba9b6fa5e9f2d58acb60`; `hm-core` healthy with zero restarts.
 - **Acceptance:** authenticated Solvis chat returned a grounded 0.92-confidence answer with one retrieval, one unified rerank, top-five evidence, one synthesis pass, and no expansion. Four public gates returned 200. A fresh scan of every running container found no fatal, panic, uncaught, OOM, migration, duplicate-key, bulkhead, circuit, timeout, or application error after promotion.
 - **Rollback:** `hivemind/core-api:rollback-20260815-pageindex` points to the prior accepted Core image; the verified PostgreSQL backup is retained.
+
+## prod-20260815-77fb383d — bounded stage deadline listener fan-out
+- **Date:** 2026-08-15
+- **Parent:** `singulance-main` at `77fb383da15b2a343522982b5ec1eef69ee231ca`; frontend unchanged.
+- **Behavior:** each server-owned stage deadline signal has a finite 32-listener budget (minimum 16) for the designed vector, lexical, graph, evidence, and connector fan-out. This removes the false `MaxListenersExceededWarning` at normal recall concurrency without globally disabling leak detection; a runaway above the finite ceiling remains observable.
+- **Tests:** focused stage deadline, intent, PageIndex, and remote recovery suites 21/21; production image build gate 21/21.
+- **Image:** `hivemind/core-api:prod-20260815-77fb383d`, digest `sha256:b5f977824eb62beeffdef95ec715f9c95b16922814ba6a4a7badeeab9cf2dad4`; healthy with zero restarts.
+- **Acceptance:** authenticated Solvis chat returned 200, a grounded 0.95-confidence answer, one retrieval, one unified rerank, top-five evidence, one synthesis, and no expansion. The warning did not recur. Two Control proxy errors occurred only at the exact Core replacement timestamp and did not recur after readiness. Four public gates returned 200.
+- **Rollback:** `hivemind/core-api:rollback-20260815-listeners` points to accepted `prod-20260815-cd806b6f`; the PageIndex database backup remains retained.

@@ -178,13 +178,14 @@ function normalizeTemporalRange(value) {
   return { start: boundedStart, end: boundedEnd, clamped: false };
 }
 
-// Server-owned normalization for the additive recall contract. Legacy modes
-// retain their current behavior; only fact/explain/full opt into the new plan.
+// Server-owned normalization for the additive recall contract. `quick` is the
+// documented low-latency public mode and shares the same parallel hybrid plan
+// as `fact`; old auto/custom modes retain the compatibility branch.
 // This keeps HTTP and MCP callers on the same public endpoint while preventing
 // callers from bypassing bounded retrieval with arbitrary plan fields.
 export function resolveRecallPlan(input = {}) {
   const requested = typeof input.mode === 'string' ? input.mode.toLowerCase() : 'auto';
-  const explicit = requested === 'fact' || requested === 'explain' || requested === 'full';
+  const explicit = requested === 'quick' || requested === 'fact' || requested === 'explain' || requested === 'full';
   const fullAllowed = requested !== 'full' || input.explicit_mode === true;
   // Compound-query auto-routing: a multi-part question ("X and Y", multiple
   // '?', "compare/across/both", several clauses) needs graph/source evidence,
@@ -200,7 +201,8 @@ export function resolveRecallPlan(input = {}) {
   );
   const mode = requested === 'full' && !fullAllowed
     ? 'explain'
-    : explicit ? requested
+    : requested === 'quick' ? 'fact'
+      : explicit ? requested
       : (_compound && process.env.RECALL_COMPOUND_EXPLAIN !== 'false') ? 'explain'
         : 'fact';
   const operation = input.operation === 'timeline' ? 'timeline' : 'recall';
@@ -243,7 +245,9 @@ export function resolveRecallPlan(input = {}) {
       range,
     },
     max_graph_hops: mode === 'fact' ? 0 : 1,
-    max_memories: operation === 'timeline' ? Math.min(Math.max(Number(input.limit) || 20, 1), 50) : 5,
+    max_memories: operation === 'timeline'
+      ? Math.min(Math.max(Number(input.limit) || 20, 1), 50)
+      : Math.min(Math.max(Number(input.limit) || 15, 1), 15),
     context_budget: budget,
     // Evidence is a PARALLEL LANE in its own Qdrant collection — not an expensive
     // serial hop-2, which is what "fact is fast-only" was written for. So `fact` must
@@ -608,7 +612,10 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
       rankedCandidates.push({ kind: 'memory', memory_id: x.id, rank, score: c._rerankScore ?? null });
     }
   }
-  const retainedCandidates = rankedCandidates.slice(0, Math.max(15, deliverN + evidenceN));
+  // The cross-encoder may score a wide pool, but the canonical retained result
+  // is one mixed top-15 — not 15 memories plus 15 evidence rows. Chat then
+  // reveals five or fifteen from this same order without another retrieval.
+  const retainedCandidates = rankedCandidates.slice(0, 15);
   const retainedMemoryIds = new Set(retainedCandidates.filter((c) => c.kind === 'memory').map((c) => c.memory_id));
   const retainedEvidenceIds = new Set(retainedCandidates.filter((c) => c.kind === 'evidence').map((c) => c.segment_id));
   console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> retained=${retainedCandidates.length}`);

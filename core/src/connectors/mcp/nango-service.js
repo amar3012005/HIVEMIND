@@ -127,6 +127,11 @@ export async function fetchBearerFromNango(providerKey, connectionId) {
   return bearer;
 }
 
+export function isPermanentNangoCredentialError(error) {
+  return /refresh limit|invalid_credentials|unknown_account|authentication failed|\b401\b|\b424\b/i
+    .test(String(error?.message || error || ''));
+}
+
 /**
  * Enrich an MCP endpoint config with a live bearer token from Nango.
  * Leaves the endpoint unchanged if it has no `nango_provider`.
@@ -161,7 +166,7 @@ export async function enrichEndpointWithToken(endpoint, { userId, orgId }, { db 
     // Flip it out of 'active' so getConnectionId stops returning it — this
     // path (MCP status/inspect, polled by the Connectors page) was hammering
     // Nango with the same dead gmail/gdocs connections on every poll.
-    if (/refresh limit|invalid_credentials|424/i.test(err.message || '')) {
+    if (isPermanentNangoCredentialError(err)) {
       db?.nangoConnection?.updateMany({
         where: { connectionId, providerKey: endpoint.nango_provider, status: 'active' },
         data: { status: 'error' },

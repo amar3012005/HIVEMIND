@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { fetchBearerFromNango } from '../../mcp/nango-service.js';
+import { fetchBearerFromNango, isPermanentNangoCredentialError } from '../../mcp/nango-service.js';
 import { scheduleHqWake } from '../../../hq-runtime/repository.js';
 import { registerWatch, needsRenewal } from './gmail-watch.js';
 
@@ -339,12 +339,38 @@ export async function handleGmailPushNotification({ prisma, emailAddress, histor
   return { acknowledged: true, handled: true, history_id: historyId, result: await reconcileGmailWatch({ prisma, connection, reason }) };
 }
 
-export async function reconcileAllGmailWatches({ prisma, logger = console }) {
+export async function reconcileAllGmailWatches({ prisma, logger = console, reconcile = reconcileGmailWatch }) {
   const rows = await prisma.nangoConnection.findMany({ where: { providerKey: { in: PROVIDERS }, status: 'active' } });
-  const results = await Promise.allSettled(rows.map((connection) => reconcileGmailWatch({ prisma, connection, reason: 'scheduled' })));
-  const failed = results.filter((result) => result.status === 'rejected');
-  for (const result of failed) logger.warn?.('[gmail-watcher] reconciliation failed:', result.reason?.message || result.reason);
-  return { checked: rows.length, reconciled: results.length - failed.length, failed: failed.length };
+  const results = await Promise.allSettled(rows.map((connection) => reconcile({ prisma, connection, reason: 'scheduled' })));
+  let failed = 0;
+  let disabled = 0;
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    if (result.status !== 'rejected') continue;
+    const connection = rows[index];
+    if (isPermanentNangoCredentialError(result.reason)) {
+      const updated = await prisma.nangoConnection.updateMany({
+        where: { id: connection.id, status: 'active' },
+        data: {
+          status: 'error',
+          metadata: {
+            ...(connection.metadata || {}),
+            gmail_watcher: {
+              ...(connection.metadata?.gmail_watcher || {}),
+              disabled_at: new Date().toISOString(),
+              disabled_reason: 'credentials_invalid_reconnect_required',
+            },
+          },
+        },
+      });
+      if (updated.count) disabled += 1;
+      logger.warn?.(`[gmail-watcher] disabled stale connection ${connection.id}; reconnect required`);
+      continue;
+    }
+    failed += 1;
+    logger.warn?.(`[gmail-watcher] reconciliation failed connection=${connection.id} org=${connection.orgId}:`, result.reason?.message || result.reason);
+  }
+  return { checked: rows.length, reconciled: results.length - failed - disabled, failed, disabled };
 }
 
 export function startGmailWatcherScheduler({ prisma, logger = console, intervalMs = Number(process.env.GMAIL_WATCHER_INTERVAL_MS || 3600000) } = {}) {

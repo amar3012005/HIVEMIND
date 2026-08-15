@@ -99,6 +99,18 @@ export function shouldExpandProgressiveRecall(answer, session) {
     && (answer?.claims || []).some((claim) => claim?.grounded !== false && (claim?.citation_ids || []).length > 0);
 }
 
+export function canContinueProgressiveRecall({
+  answer,
+  session,
+  maxExpansions = 1,
+  remainingMs = Infinity,
+  minRemainingMs = 0,
+} = {}) {
+  return Number(session?.expansion_count || 0) < Math.max(0, Number(maxExpansions) || 0)
+    && Number(remainingMs) >= Math.max(0, Number(minRemainingMs) || 0)
+    && shouldExpandProgressiveRecall(answer, session);
+}
+
 export function collapseNativeOnlyCompoundDecision(decision = {}, fallbackQuery = '') {
   if (decision?.operation !== 'compound' || !Array.isArray(decision.subtasks) || !decision.subtasks.length) return decision;
   // Capability is the authority boundary. Hosted planners occasionally label

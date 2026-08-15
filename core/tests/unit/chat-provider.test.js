@@ -112,6 +112,28 @@ test('OpenRouter streaming accumulates content deltas and final usage', async ()
   }
 });
 
+test('OpenRouter streaming preserves a bounded provider error body for diagnosis', async () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  try {
+    const result = await chatCompletionStream(DEFAULT_CHAT_SYNTHESIS_MODEL, {
+      method: 'POST',
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Answer' }] }),
+    }, {
+      fetchImpl: async () => new Response('{"error":{"message":"unsupported reasoning parameter"}}', {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 400);
+    assert.match(result.error, /unsupported reasoning parameter/);
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
+});
+
 test('a workload-specific DeepSeek provider order overrides sorting without affecting the shared route', async () => {
   const prior = process.env.OPENROUTER_API_KEY;
   process.env.OPENROUTER_API_KEY = 'or-test';

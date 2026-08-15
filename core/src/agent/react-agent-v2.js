@@ -233,6 +233,7 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
     }
     onEvent?.({ type: 'answer_delta', schema_version: 1, delta: `${claim.text}${/\s$/.test(claim.text) ? '' : ' '}`, validated: true, citation_ids: claim.citation_ids });
   };
+  const reasoningDisabled = String(model || '').startsWith('nvidia/nemotron-3.5-lightning');
   const result = await chatCompletionStream(model, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -240,7 +241,14 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
       messages: [{ role: 'system', content: streamInstruction }, ...messages],
       max_completion_tokens: maxTokens,
       temperature: 0,
-      reasoning: { enabled: false },
+      // OpenRouter's GPT-OSS providers accept the OpenAI-compatible
+      // reasoning_effort field. Sending the provider-specific `reasoning`
+      // object together with require_parameters=true made every Nitro stream
+      // fail with HTTP 400, forcing a second non-streamed synthesis. Nemotron
+      // uses the explicit OpenRouter reasoning switch instead.
+      ...(reasoningDisabled
+        ? { reasoning: { enabled: false } }
+        : { reasoning_effort: 'low' }),
       prompt_cache_key: promptCacheKey,
     }),
     signal,
@@ -254,7 +262,10 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
     },
   });
   consumeLine(pending);
-  if (!result.ok || !streamedClaims.length) throw new Error(`validated_stream_failed:${result.status || 'no_claims'}`);
+  if (!result.ok || !streamedClaims.length) {
+    const detail = result.error ? `:${String(result.error).replace(/\s+/g, ' ').slice(0, 180)}` : '';
+    throw new Error(`validated_stream_failed:${result.status || 'no_claims'}${detail}`);
+  }
   onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
   return {
     response: streamedClaims.map((claim) => claim.text).join(' '),

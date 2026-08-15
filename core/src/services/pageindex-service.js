@@ -37,14 +37,10 @@ export class PageIndexService {
    */
   async ensureRootNode(userId, orgId = null) {
     try {
-      const existing = await this.prisma.pageIndexNode.findFirst({
-        where: { userId, path: this.ROOT_PATH, parentId: null },
-      });
-
-      if (existing) return existing;
-
-      return await this.prisma.pageIndexNode.create({
-        data: {
+      return await this.prisma.pageIndexNode.upsert({
+        where: { userId_path: { userId, path: this.ROOT_PATH } },
+        update: {},
+        create: {
           userId,
           orgId,
           label: 'root',
@@ -138,15 +134,10 @@ export class PageIndexService {
         path = `${parent.path}/${this._slugify(label)}`;
       }
 
-      // Check for existing node with same path
-      const existing = await this.prisma.pageIndexNode.findFirst({
-        where: { userId, path },
-      });
-
-      if (existing) return existing;
-
-      return await this.prisma.pageIndexNode.create({
-        data: {
+      return await this.prisma.pageIndexNode.upsert({
+        where: { userId_path: { userId, path } },
+        update: {},
+        create: {
           userId,
           orgId,
           parentId,

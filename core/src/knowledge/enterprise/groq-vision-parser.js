@@ -56,6 +56,58 @@ const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 200);
 const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for the rasteriser
 const execFileAsync = promisify(execFile);
 const OCR_MAX_TOKENS = Number(process.env.HIVEMIND_VISION_OCR_MAX_TOKENS || 2600);
+const RENDER_TIMEOUT_MS = Number(process.env.GROQ_VISION_RENDER_TIMEOUT_MS || 300_000);
+
+// PDF rasterisation is CPU, RAM and temporary-disk heavy. Ingestion admits
+// multiple tenant jobs concurrently, so allowing every vision document to run
+// pdftoppm at once makes healthy jobs starve each other and pushes them into the
+// much heavier ImageMagick fallback. Keep one process-wide rasteriser slot. OCR
+// remains concurrent after rendering, so this bounds resources without
+// serialising the expensive provider calls.
+let renderTail = Promise.resolve();
+let renderQueueDepth = 0;
+export async function withPdfRenderSlot(task) {
+  let release;
+  const previous = renderTail;
+  renderTail = new Promise((resolve) => { release = resolve; });
+  renderQueueDepth += 1;
+  const queuedAt = Date.now();
+  await previous;
+  renderQueueDepth -= 1;
+  const waitMs = Date.now() - queuedAt;
+  if (waitMs >= 100) console.log(`[groq-vision] render slot acquired wait_ms=${waitMs} queued=${renderQueueDepth}`);
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
+
+async function renderPdfPages(pdfPath, workDir) {
+  let rendered = false;
+  try {
+    await execFileAsync('pdftoppm', [
+      '-r', String(PAGE_DENSITY), '-png', '-f', '1', '-l', String(MAX_PAGES),
+      pdfPath, path.join(workDir, 'page'),
+    ], { timeout: RENDER_TIMEOUT_MS, maxBuffer: 1 << 20 });
+    rendered = true;
+  } catch (popplerErr) {
+    console.warn(`[groq-vision] pdftoppm failed (${popplerErr.message}) — falling back to ImageMagick`);
+  }
+  if (!rendered) {
+    try {
+      await execFileAsync('convert', [
+        '-limit', 'memory', '1GiB', '-limit', 'map', '2GiB', '-limit', 'disk', '8GiB',
+        '-density', PAGE_DENSITY, '-quality', '85', '-trim',
+        pdfPath,
+        path.join(workDir, 'page-%03d.png'),
+      ], { timeout: RENDER_TIMEOUT_MS, maxBuffer: 1 << 20 });
+    } catch (renderErr) {
+      return { error: `Render failed: ${renderErr.message}` };
+    }
+  }
+  return { error: null };
+}
 
 const SYSTEM_PROMPT = `You are an OCR + layout extractor. Read the entire page image and output clean Markdown:
 - Use # / ## / ### for headings as in the source
@@ -104,28 +156,8 @@ export async function parsePdfWithGroqVision(pdfPath) {
     // BullMQ's job-lock renewal. Observed together in one upload batch: the render error above and
     // four `[kb-queue] worker error: could not renew lock for job …`. A lost lock means the job is
     // considered stalled and re-run, so a blocking render does not just delay work, it duplicates it.
-    let rendered = false;
-    try {
-      await execFileAsync('pdftoppm', [
-        '-r', String(PAGE_DENSITY), '-png', '-f', '1', '-l', String(MAX_PAGES),
-        pdfPath, path.join(workDir, 'page'),
-      ], { timeout: 180_000, maxBuffer: 1 << 20 });
-      rendered = true;
-    } catch (popplerErr) {
-      console.warn(`[groq-vision] pdftoppm failed (${popplerErr.message}) — falling back to ImageMagick`);
-    }
-    if (!rendered) {
-      try {
-        await execFileAsync('convert', [
-          '-limit', 'memory', '1GiB', '-limit', 'map', '2GiB', '-limit', 'disk', '8GiB',
-          '-density', PAGE_DENSITY, '-quality', '85', '-trim',
-          pdfPath,
-          path.join(workDir, 'page-%03d.png'),
-        ], { timeout: 180_000, maxBuffer: 1 << 20 });
-      } catch (renderErr) {
-        return { text: '', pages: 0, markdown: '', error: `Render failed: ${renderErr.message}` };
-      }
-    }
+    const render = await withPdfRenderSlot(() => renderPdfPages(pdfPath, workDir));
+    if (render.error) return { text: '', pages: 0, markdown: '', error: render.error };
     const pages = fs.readdirSync(workDir)
       .filter(f => f.endsWith('.png'))
       .sort();

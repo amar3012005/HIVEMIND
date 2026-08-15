@@ -633,3 +633,57 @@ slides that find no unique anchor get a page instead of `null`.
 - Next: same open item — Composio tools are still not merged into the
   `/chat`/HyperAgents tool registry (task 5 from the original integration
   plan).
+
+## 2026-08-15 UTC - Recall transport and recovery hardening started
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/recall-reliability-e2e`
+- Base / commit: `b584f3562199c1b0f8fc9ceb872e70402a2bd29a` -> `pending`
+- Scope: Core recall deadlines and cancellation, Memory Box transport and
+  availability semantics, stale-agent lifecycle, Core/agent capability
+  negotiation, bounded reranker failover, ingestion completeness gates, and
+  read-only `use_tools:false`/`use_tools:true` acceptance.
+- Verification: baseline live Core and Memory Box probes captured; implementation
+  tests pending.
+- Production: not deployed
+- Rollback: not applicable
+- Next: implement and verify request-scoped deadlines with real cancellation.
+
+## 2026-08-15 UTC - Recall transport and recovery hardening committed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/recall-reliability-e2e`
+- Base / commit: `b584f3562199c1b0f8fc9ceb872e70402a2bd29a` -> `9b4f7b39`
+- Scope: one inherited cancellation deadline across chat/tool/recall/rerank/
+  Memory Box/Qdrant; per-tenant transport bulkhead; typed unavailable results;
+  maintenance-only stale-box quarantine; agent capability handshake; bounded
+  two-attempt reranking; Cohere v4-fast production default; query optimization
+  on every native retrieval turn.
+- Verification: 34 focused route/policy/transport/reranker/ingestion tests pass
+  locally; Cohere v4-fast and Voyage each score 10/10 on the retrieval corpus,
+  with v4-fast faster on both the small corpus and 150-document benchmark.
+- Production: not deployed
+- Rollback: not applicable
+- Next: run Linux native-AMR suites and real authenticated acceptance before
+  landing on `singulance-main`.
+
+## 2026-08-15 UTC - Recall transport Linux verification completed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/recall-reliability-e2e`
+- Base / commit: `b584f3562199c1b0f8fc9ceb872e70402a2bd29a` -> `8e104bd6`
+- Scope: preserve typed timeout/unavailable coverage after escalation and refuse
+  to start retrieval work after the inherited chat deadline has expired.
+- Verification: 67/69 selected Linux assertions pass. The two failures
+  (`evidence-packet` named-source window predicate and the base quick-recall
+  evidence count characterization) reproduce unchanged on the base SHA and are
+  not regressions from this branch. New expiry and Memory Box outage assertions
+  pass, as do route, model-policy, transport, vector-recovery, reranker-budget,
+  and ingestion-integrity suites.
+- Production: not deployed
+- Rollback: not applicable
+- Next: land through PR, deploy the agent capability endpoint before Core, and
+  run authenticated upload -> recall -> chat acceptance.

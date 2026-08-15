@@ -1,4 +1,5 @@
 import {
+  remoteCapabilities,
   remoteKbSegment,
   remoteList,
   remoteVectorPending,
@@ -8,6 +9,36 @@ import {
 } from './remote-backend.js';
 
 const DEFAULT_BATCH = Math.min(Math.max(Number(process.env.REMOTE_VECTOR_RECONCILE_BATCH || 20), 1), 100);
+const MAINTENANCE_FAILURE_THRESHOLD = Math.max(1, Number(process.env.REMOTE_VECTOR_MAINTENANCE_FAILURE_THRESHOLD || 3));
+const MAINTENANCE_QUARANTINE_MS = Math.max(60_000, Number(process.env.REMOTE_VECTOR_MAINTENANCE_QUARANTINE_MS || 3_600_000));
+const maintenanceState = new Map();
+
+export function recordRemoteMaintenanceSuccess(orgId) {
+  maintenanceState.delete(orgId);
+  return { failures: 0, quarantined_until: null };
+}
+
+export function recordRemoteMaintenanceFailure(orgId, {
+  now = Date.now(),
+  threshold = MAINTENANCE_FAILURE_THRESHOLD,
+  quarantineMs = MAINTENANCE_QUARANTINE_MS,
+} = {}) {
+  const prior = maintenanceState.get(orgId) || { failures: 0, quarantinedUntil: 0 };
+  const failures = prior.failures + 1;
+  const quarantinedUntil = failures >= threshold ? now + quarantineMs : prior.quarantinedUntil;
+  const next = { failures, quarantinedUntil };
+  maintenanceState.set(orgId, next);
+  return { failures, quarantined_until: quarantinedUntil || null };
+}
+
+export function remoteMaintenanceStatus(orgId, now = Date.now()) {
+  const state = maintenanceState.get(orgId) || { failures: 0, quarantinedUntil: 0 };
+  return {
+    failures: state.failures,
+    quarantined: state.quarantinedUntil > now,
+    quarantined_until: state.quarantinedUntil || null,
+  };
+}
 
 export function remoteMemoryRecord(row, orgId) {
   return {
@@ -87,6 +118,7 @@ export async function reconcileRemoteVectors(orgId, options = {}) {
     || (await import('../../embeddings/factory.js')).getEmbedService();
   const deps = {
     embedService,
+    remoteCapabilities,
     remoteKbSegment,
     remoteList,
     remoteVectorPending,
@@ -95,23 +127,38 @@ export async function reconcileRemoteVectors(orgId, options = {}) {
     remoteWrite,
     ...(options.deps || {}),
   };
-  const before = await deps.remoteVectorStatus(orgId);
-  const memories = await collectPending(orgId, 'memory', batchSize, deps);
-  const evidence = await collectPending(orgId, 'evidence', batchSize, deps);
+  const negotiated = await deps.remoteCapabilities(orgId);
+  const advertised = new Set(negotiated?.capabilities || []);
+  const explicitlyLegacy = negotiated && !advertised.has('vector.pending');
+  const before = explicitlyLegacy ? null : await deps.remoteVectorStatus(orgId);
+  const modernDeps = explicitlyLegacy
+    ? { ...deps, remoteVectorPending: async () => null }
+    : deps;
+  const memories = await collectPending(orgId, 'memory', batchSize, modernDeps);
+  const evidence = await collectPending(orgId, 'evidence', batchSize, modernDeps);
   const report = {
     orgId,
     commit,
     before,
+    capabilities: negotiated,
     compatibility_mode: !memories.modern,
     memory: { pending: memories.pending.length, repaired: 0, failed: [] },
     evidence: { pending: evidence.pending.length, repaired: 0, failed: [] },
   };
   if (!commit) return report;
+  const expectedDimension = negotiated?.vector_dimension || null;
+  const vectorIsValid = (vector) => Array.isArray(vector)
+    && vector.every(Number.isFinite)
+    && (!expectedDimension || vector.length === expectedDimension);
 
   for (let i = 0; i < memories.pending.length; i += batchSize) {
     const rows = memories.pending.slice(i, i + batchSize);
     const vectors = await deps.embedService.embed(rows.map((row) => String(row.content || '')));
     for (let j = 0; j < rows.length; j++) {
+      if (!vectorIsValid(vectors[j])) {
+        report.memory.failed.push(rows[j].id);
+        continue;
+      }
       const ok = memories.modern
         ? await deps.remoteVectorRepair(orgId, { kind: 'memory', id: rows[j].id, vector: vectors[j] })
         : await deps.remoteWrite(orgId, remoteMemoryRecord(rows[j], orgId), vectors[j], []);
@@ -123,12 +170,16 @@ export async function reconcileRemoteVectors(orgId, options = {}) {
     const rows = evidence.pending.slice(i, i + batchSize);
     const vectors = await deps.embedService.embed(rows.map((row) => String(row.content || '')));
     for (let j = 0; j < rows.length; j++) {
+      if (!vectorIsValid(vectors[j])) {
+        report.evidence.failed.push(rows[j].id);
+        continue;
+      }
       const ok = await deps.remoteVectorRepair(orgId, { kind: 'evidence', id: rows[j].id, vector: vectors[j] });
       if (ok) report.evidence.repaired += 1;
       else report.evidence.failed.push(rows[j].id);
     }
   }
-  report.after = await deps.remoteVectorStatus(orgId);
+  report.after = explicitlyLegacy ? null : await deps.remoteVectorStatus(orgId);
   return report;
 }
 
@@ -139,8 +190,11 @@ export function startRemoteVectorReconciler() {
   const run = async () => {
     const { remoteAgentOrgIds } = await import('./remote-backend.js');
     for (const orgId of remoteAgentOrgIds()) {
+      const maintenance = remoteMaintenanceStatus(orgId);
+      if (maintenance.quarantined) continue;
       try {
         const report = await reconcileRemoteVectors(orgId, { commit: true, batchSize: DEFAULT_BATCH });
+        recordRemoteMaintenanceSuccess(orgId);
         if (report.memory.pending || report.evidence.pending) {
           console.log('[remote-vector-reconcile]', JSON.stringify({
             orgId,
@@ -150,7 +204,9 @@ export function startRemoteVectorReconciler() {
           }));
         }
       } catch (error) {
-        console.warn(`[remote-vector-reconcile] org=${orgId} failed: ${error.message}`);
+        const state = recordRemoteMaintenanceFailure(orgId);
+        console.warn(`[remote-vector-reconcile] org=${orgId} failed: ${error.message}`
+          + (state.quarantined_until ? `; maintenance quarantined until ${new Date(state.quarantined_until).toISOString()}` : ''));
       }
     }
   };

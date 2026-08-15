@@ -4,7 +4,7 @@ import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
 import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrGraph } from '../vector/mneme/driver.js';
-import { pgUrlFor, remoteHydrate, remoteList } from '../vector/mneme/remote-backend.js';
+import { pgUrlFor, remoteHydrate, remoteList, isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 
 /**
@@ -1067,6 +1067,7 @@ export class PrismaGraphStore {
           .sort((a, b) => (b.score || 0) - (a.score || 0));
       } catch (e) {
         console.warn('[recall] remote agent search failed:', e.message);
+        if (isRemoteMemoryUnavailableError(e)) throw e;
         return [];
       }
     }

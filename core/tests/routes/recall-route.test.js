@@ -226,6 +226,36 @@ test('recall route forwards typed source and time blocks unchanged', async () =>
   assert.deepEqual(forwarded.time, { mode: 'known_at', ...time });
 });
 
+test('a sovereign Memory Box outage returns 503 and never masquerades as zero recall', async () => {
+  const unavailable = Object.assign(new Error('box transport failed'), {
+    code: 'REMOTE_MEMORY_UNAVAILABLE',
+  });
+  const result = await handleRecallRoute({
+    req: {}, res: {}, body: { query_context: 'company details', mode: 'fact' },
+    userId: 'user-1', orgId: 'org-1', prisma: {}, jsonResponse,
+    ensurePersistedMemoryOrFail: () => true, rateLimitAllowOrgRequest: () => true,
+    planEnforcer: null, cognitiveOperator: null, detectQueryIntent: () => 'fact_lookup',
+    computeDynamicWeights: () => ({}), expandTemporalQuery: () => ({}),
+    rewriteQuery: (q) => ({ expanded: q, entities: [], stripped: q }),
+    effectiveContainerTag: null, buildAccessContext: async () => ({ projectIds: [], teamIds: [] }),
+    isUuidLike: () => false, recallPersistedMemories: async () => ({ memories: [] }),
+    persistentMemoryStore: {}, ClusterIndex: class {}, crossClusterEntityBoost: async (m) => m,
+    deduplicateResults: (m) => m, profileStore: null, evidenceRetrieval: null,
+    amrBumpRecall: () => {}, qdrantClient: null, getMemoryTypeBoost: () => 1,
+    recallRuntime: {
+      resolvePlan: () => ({ mode: 'fact', legacy: false, max_graph_hops: 0, latency_budget_ms: 3000 }),
+      recall: async () => { throw unavailable; },
+      loadGraph: async () => ({ items: [] }),
+      buildPacket: () => ({ citations: [] }),
+    },
+  });
+
+  assert.equal(result.statusCode, 503);
+  assert.equal(result.body.error, 'memory_unavailable');
+  assert.equal(result.body.retryable, true);
+  assert.match(result.body.message, /No absence conclusion/);
+});
+
 test('quick search route uses unified recall response shape', async () => {
   const result = await handleQuickSearchRoute({
     res: {},

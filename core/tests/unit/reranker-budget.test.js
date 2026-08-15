@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import test from 'node:test';
+
+test('reranker shares one total budget across primary and fallback and reports the serving model', async (t) => {
+  const attempts = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      attempts.push(body.model);
+      setTimeout(() => {
+        if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
+        if (!res.writableEnded) res.end(JSON.stringify({
+          results: [
+            { index: 1, relevance_score: 0.95 },
+            { index: 0, relevance_score: 0.05 },
+          ],
+        }));
+      }, body.model === 'primary-test' ? 120 : 5);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  process.env.RERANK_ENABLED = 'true';
+  process.env.RERANK_PROVIDER = 'cohere';
+  process.env.RERANK_URL = `http://127.0.0.1:${server.address().port}`;
+  process.env.RERANK_MODEL = 'primary-test';
+  process.env.RERANK_FALLBACK_MODELS = 'fallback-test';
+  process.env.RERANK_TIMEOUT_MS = '1000';
+  process.env.RERANK_TOTAL_TIMEOUT_MS = '180';
+  process.env.RERANK_MAX_ATTEMPTS_TOTAL = '2';
+  process.env.RERANK_RETRIES = '3';
+  const { rerank } = await import(`../../src/memory/reranker.js?budget=${Date.now()}`);
+
+  const startedAt = Date.now();
+  const rows = await rerank('target fact', [
+    { id: 'distractor', content: 'unrelated' },
+    { id: 'target', content: 'target fact' },
+  ], { topN: 2 });
+
+  assert.equal(rows[0].id, 'target');
+  assert.deepEqual(attempts, ['primary-test', 'fallback-test']);
+  assert.equal(rows.rerank_meta.status, 'served');
+  assert.equal(rows.rerank_meta.model, 'fallback-test');
+  assert.equal(rows.rerank_meta.attempts, 2);
+  assert.ok(Date.now() - startedAt < 260, 'the complete provider chain must obey one wall-clock budget');
+});

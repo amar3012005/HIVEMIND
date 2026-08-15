@@ -17,6 +17,7 @@ import { remoteHydrate } from '../vector/mneme/remote-backend.js';
 import { scopedMemoryWhere } from '../memory/prisma-graph-store.js';
 import { applyProjectScopeFilter } from '../routes/recall.js';
 import { loadTypedGraphEvidence } from '../memory/recall-router.js';
+import { isStageDeadlineError, runWithStageDeadline } from '../runtime/stage-deadline.js';
 
 export function findDirectEntityEdges(edges, entities, memoryIdsByEntity) {
   return edges.filter((edge) => {
@@ -2018,16 +2019,17 @@ export async function dispatchTool(name, args, ctx, { timeoutMs } = {}) {
 
   const effectiveTimeout = timeoutMs || TOOL_TIMEOUTS_MS[name] || 15_000;
   try {
-    const result = await Promise.race([
-      handler(validation.args, ctx),
-      new Promise((_, rej) => setTimeout(() => rej(new Error(`${name} timed out after ${effectiveTimeout}ms`)), effectiveTimeout)),
-    ]);
+    const result = await runWithStageDeadline(
+      () => handler(validation.args, ctx),
+      { timeoutMs: effectiveTimeout, label: `tool:${name}` },
+    );
     return result;
   } catch (err) {
     const msg = err.message || String(err);
     // Standardized error-action map for upstream handlers.
     let mode = 'EXEC_ERROR';
-    if (/timed out/.test(msg)) mode = 'TIMEOUT';
+    if (err?.code === 'REMOTE_MEMORY_UNAVAILABLE') mode = 'REMOTE_UNAVAILABLE';
+    else if (isStageDeadlineError(err) || /timed out|deadline exceeded/i.test(msg)) mode = 'TIMEOUT';
     else if (/not found|no such|missing/i.test(msg)) mode = 'NOT_FOUND';
     else if (/unauthorized|forbidden|401|403|invalid token/i.test(msg)) mode = 'AUTH_ERROR';
     else if (/rate limit|429|quota/i.test(msg)) mode = 'RATE_LIMIT';

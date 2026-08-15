@@ -7,6 +7,10 @@ export function shouldOptimizeRecallQuery({ router, canonicalQuery } = {}) {
   return true;
 }
 
+export function shouldRunRecallOptimizer({ operation } = {}) {
+  return !new Set(['aggregate', 'connector_read', 'relation_between', 'profile']).has(operation);
+}
+
 export function shouldRetryAfterZeroCoverage({ router, canonicalQuery, coverage, alreadyOptimized = false } = {}) {
   return router === 'progressive'
     && !!String(canonicalQuery || '').trim()

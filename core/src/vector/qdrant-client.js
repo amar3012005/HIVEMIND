@@ -16,6 +16,7 @@ import { amrRecall, amrWrite, isMnemeOrg, orgIsRemote, memoryBackend } from './m
 import { qdrantUrlFor } from './mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
+import { currentStageSignal } from '../runtime/stage-deadline.js';
 
 // Per-org Qdrant base: the customer's Qdrant (via tunnel) for a self-host-hybrid org, else central.
 const qbase = () => qdrantUrlFor(currentOrg()) || QDRANT_URL;
@@ -139,6 +140,7 @@ export class QdrantClient {
     this.embedService = getEmbedService();
     this.dimension = parseInt(process.env.EMBEDDING_DIMENSION || '1024', 10);
     this.connected = null;
+    this.connectedCheckedAt = 0;
     // Per-process set of collections whose payload indexes have already been
     // ensured. MUST be a Set, not a single value: this is a MULTI-TENANT
     // server that alternates between org_<id>, HIVEMIND_PERSONAL, and other
@@ -159,7 +161,10 @@ export class QdrantClient {
 
     try {
       const resolvedCollectionName = resolveCollectionName(collectionName);
-      const response = await fetch(`${qbase()}/collections/${resolvedCollectionName}`, { headers });
+      const response = await fetch(`${qbase()}/collections/${resolvedCollectionName}`, {
+        headers,
+        signal: currentStageSignal() || undefined,
+      });
       // getQdrantCollections takes positional args (url, apiKey, region) —
       // passing an object made `url` itself an object, blowing up later
       // with `url.startsWith is not a function`.
@@ -184,6 +189,7 @@ export class QdrantClient {
       this.collectionReady.add(collectionName);
       return true;
     } catch (error) {
+      if (currentStageSignal()?.aborted) throw error;
       console.error('Failed to ensure Qdrant collection:', error.message);
       return false;
     }
@@ -194,11 +200,18 @@ export class QdrantClient {
    * @returns {Promise<boolean>} Connection status
    */
   async isConnected() {
-    if (this.connected !== null) {
+    const negativeTtlMs = Math.max(100, Number(process.env.QDRANT_NEGATIVE_HEALTH_TTL_MS || 2_000));
+    if (this.connected === true) {
       return this.connected;
     }
-    this.connected = await this.testConnection();
-    return this.connected;
+    if (this.connected === false && Date.now() - this.connectedCheckedAt < negativeTtlMs) return false;
+    const connected = await this.testConnection();
+    // A request-scoped cancellation is not a Qdrant health verdict. The
+    // cancelled probe throws below and therefore never poisons this process-
+    // wide cache with `false` for every tenant that follows.
+    this.connected = connected;
+    this.connectedCheckedAt = Date.now();
+    return connected;
   }
 
   /**
@@ -454,11 +467,17 @@ export class QdrantClient {
    * @returns {Promise<Array>} Search results
    */
   async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef, layer }) {
-    // Check connection first
-    const connected = await this.isConnected();
-    if (!connected) {
-      console.warn('⚠️  Qdrant unavailable, search returning empty results');
-      return [];
+    const _mnemeOrg = filterMatchValue(filter, 'org_id') || globalThis.__hivemindOrgCtx?.currentOrg?.() || null;
+    const usesSovereignBackend = Boolean(_mnemeOrg && memoryBackend(_mnemeOrg) !== 'central');
+    // A sovereign tenant's search must not depend on central Qdrant readiness.
+    // The prior ordering probed central Qdrant first and returned [] before it
+    // ever called a perfectly healthy Memory Box.
+    if (!usesSovereignBackend) {
+      const connected = await this.isConnected();
+      if (!connected) {
+        console.warn('⚠️  Qdrant unavailable, search returning empty results');
+        return [];
+      }
     }
 
     // Route to the org container (org_<id>) / HIVEMIND_PERSONAL when per-tenant
@@ -489,10 +508,12 @@ export class QdrantClient {
         filter = { ...filter, must_not: [...mn, { key: 'tags', match: { value: 'promoted-from-segment' } }] };
       }
     }
-    const collectionReady = await this.ensureCollection(resolvedCollection);
-    if (!collectionReady) {
-      console.warn('⚠️  Qdrant collection unavailable, search returning empty results');
-      return [];
+    if (!usesSovereignBackend) {
+      const collectionReady = await this.ensureCollection(resolvedCollection);
+      if (!collectionReady) {
+        console.warn('⚠️  Qdrant collection unavailable, search returning empty results');
+        return [];
+      }
     }
 
     // Generate query embedding if not provided
@@ -516,7 +537,6 @@ export class QdrantClient {
     // Resolve the org from the filter OR the request's org context (the filter shape is unreliable —
     // hybridSearch passes org_id as an option and may not surface it in filter.must). The ONE seam,
     // memoryBackend(org), then decides: non-'central' → serve from the agent/.amr via amrRecall.
-    const _mnemeOrg = filterMatchValue(filter, 'org_id') || globalThis.__hivemindOrgCtx?.currentOrg?.() || null;
     if (_mnemeOrg && memoryBackend(_mnemeOrg) !== 'central') {
       try {
         const _out = await amrRecall(_mnemeOrg, searchVector, filter, limit, effectiveScoreThreshold);
@@ -524,7 +544,10 @@ export class QdrantClient {
         console.log('[mneme] recall backend=adapter org=' + _mnemeOrg + ' n=' + _out.length);
         return _out;
         }
-      } catch (e) { console.warn('[mneme] adapter recall failed, fallback to qdrant:', e.message); }
+      } catch (e) {
+        console.warn('[mneme] adapter recall failed:', e.message);
+        if (orgIsRemote(_mnemeOrg)) throw e;
+      }
     }
     if (mnemeOn(_mnemeOrg)) {
       const mres = await mnemeSearch(resolvedCollection, searchVector, limit, {
@@ -571,7 +594,8 @@ export class QdrantClient {
         {
           method: 'POST',
           headers,
-          body: JSON.stringify(searchRequest)
+          body: JSON.stringify(searchRequest),
+          signal: currentStageSignal() || undefined,
         }
       );
 
@@ -583,7 +607,12 @@ export class QdrantClient {
       const result = await response.json();
       return result.result || [];
     } catch (error) {
-      console.error('Failed to search memories:', error.message);
+      if (currentStageSignal()?.aborted) {
+        console.warn('Qdrant search cancelled by the upstream recall deadline');
+        throw error;
+      } else {
+        console.error('Failed to search memories:', error.message);
+      }
       return [];
     }
   }
@@ -826,7 +855,10 @@ export class QdrantClient {
   async testConnection() {
     try {
       console.log('🔍 Testing Qdrant connection...');
-      const response = await fetch(`${qbase()}/`, { headers });
+      const response = await fetch(`${qbase()}/`, {
+        headers,
+        signal: currentStageSignal() || undefined,
+      });
       if (response.ok) {
         console.log('✅ Qdrant connection successful');
         console.log(`   URL: ${qbase()}, Collection: ${this.collectionName}`);
@@ -836,6 +868,7 @@ export class QdrantClient {
         return false;
       }
     } catch (error) {
+      if (currentStageSignal()?.aborted) throw error;
       console.error('❌ Qdrant connection test failed:', error.message);
       return false;
     }

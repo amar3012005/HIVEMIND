@@ -23,6 +23,7 @@
  */
 
 import fetch from 'node-fetch';
+import { currentStageSignal, remainingStageMs } from '../runtime/stage-deadline.js';
 
 const ENABLED   = process.env.RERANK_ENABLED === 'true';
 const PROVIDER  = (process.env.RERANK_PROVIDER || 'tei').toLowerCase();
@@ -35,6 +36,11 @@ const POOL      = Math.min(Number(process.env.RERANK_POOL || 100), 200); // hard
 // silently dropped exactly when load was highest. 2500ms covers spikes while
 // still bounding the answer path.
 const TIMEOUT   = Number(process.env.RERANK_TIMEOUT_MS || 2500);
+// One request receives one wall-clock budget across primary, retry and
+// fallback providers. Previously each combination received a fresh 2.5s,
+// allowing the chain to outlive the recall response by many seconds.
+const TOTAL_TIMEOUT = Math.max(100, Number(process.env.RERANK_TOTAL_TIMEOUT_MS || 1200));
+const MAX_ATTEMPTS_TOTAL = Math.max(1, Number(process.env.RERANK_MAX_ATTEMPTS_TOTAL || 2));
 // One transient retry (abort/timeout/429/5xx) so a single slow attempt doesn't
 // drop the rerank — ensures Cohere is actually used, not just when the network
 // is calm. Non-transient errors degrade immediately (no load amplification).
@@ -45,21 +51,18 @@ const RETRYABLE = /abort|timeout|429|50[0-9]|network|fetch failed|ECONNRESET|ETI
 // deliverHybrid interleaves lanes instead of comparing them, which is what buries the
 // German `E3DC Zähler` row. So a single model being unavailable must not cost us the pass.
 //
-// Order is cheapest-effective first, measured against the live endpoint 2026-08-03
-// (query + 5 docs, all ranked the correct document first):
-//   voyageai/rerank-2.5-lite  $0.02/M tok  32K ctx  829ms cold / ~270ms warm  <- primary
-//   cohere/rerank-v3.5        $0.001/search 4K ctx  204ms                     <- known-good
-//   cohere/rerank-4-fast      $0.002/search 33K ctx 288ms                     <- last resort
-// Voyage is BOTH cheaper and better here: at ~30K tokens for a 150-doc pool, 2.5-lite costs
-// ~$0.0006/search against v3.5's $0.001, and it benchmarks +7.16% retrieval accuracy over
-// v3.5 across 93 datasets. Its 32K context also matters — RERANK_POOL is 150 and v3.5 only
-// has 4K, so long pools were being truncated by the model we were paying for.
+// Production evaluation on 2026-08-15: Cohere v4-fast and Voyage both scored
+// 10/10 on the small-detail multilingual/product corpus; v4-fast averaged
+// 204ms vs Voyage 223ms there and 407ms vs 566ms on the 150-document pool.
+// The deployment config therefore promotes v4-fast and keeps Voyage as the
+// first cross-family fallback. The code-level chain below remains a safety net
+// for environments that do not load prod-defaults.conf.
 // NOT in the chain: nvidia/llama-nemotron-rerank-vl-1b-v2:free is free but returned HTTP 404
 // "No endpoints available matching your guardrail restrictions" on this account — a free
 // model that cannot be called is not a fallback.
 const MODEL_CHAIN = [...new Set([
   MODEL,
-  ...String(process.env.RERANK_FALLBACK_MODELS || 'cohere/rerank-v3.5,cohere/rerank-4-fast')
+  ...String(process.env.RERANK_FALLBACK_MODELS || 'cohere/rerank-4-fast,voyageai/rerank-2.5-lite,cohere/rerank-v3.5')
     .split(',').map((m) => m.trim()).filter(Boolean),
 ])];
 
@@ -148,13 +151,33 @@ export async function rerank(query, candidates, { topN } = {}) {
   const pool = candidates.slice(0, POOL);
   const tail = candidates.slice(POOL); // never reranked, kept after
   const texts = pool.map(textOf);
+  const runStartedAt = Date.now();
+  const runDeadlineAt = runStartedAt + TOTAL_TIMEOUT;
+  let totalAttempts = 0;
+  const finish = (rows, meta) => {
+    const delivered = topN ? rows.slice(0, topN) : rows;
+    Object.defineProperty(delivered, 'rerank_meta', {
+      value: { ...meta, attempts: totalAttempts, latency_ms: Date.now() - runStartedAt },
+      enumerable: false,
+    });
+    return delivered;
+  };
 
   // One attempt with a fresh timeout. Retryable failures (transient) get one
   // more shot before we degrade; anything else degrades immediately.
-  const attempt = async (model) => {
+  const attempt = async (model, attemptBudget) => {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
+    const parentSignal = currentStageSignal();
+    const abortFromParent = () => {
+      if (!ctrl.signal.aborted) ctrl.abort(parentSignal?.reason);
+    };
+    if (parentSignal?.aborted) abortFromParent();
+    else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+    const timer = setTimeout(() => {
+      if (!ctrl.signal.aborted) ctrl.abort(new Error(`rerank timeout after ${attemptBudget}ms`));
+    }, attemptBudget);
     try {
+      if (parentSignal?.aborted) throw parentSignal.reason || new Error('rerank cancelled by upstream deadline');
       const scored = PROVIDER === 'cohere'
         ? await callCohere(query, texts, ctrl.signal, model)
         : await callTei(query, texts, ctrl.signal, model);
@@ -167,6 +190,7 @@ export async function rerank(query, candidates, { topN } = {}) {
       return [...reordered, ...tail];
     } finally {
       clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', abortFromParent);
     }
   };
 
@@ -178,16 +202,36 @@ export async function rerank(query, candidates, { topN } = {}) {
     const model = MODEL_CHAIN[mi];
     let failed = false;
     for (let a = 0; a <= RETRIES; a++) {
+      const attemptsLeft = Math.max(1, MAX_ATTEMPTS_TOTAL - totalAttempts);
+      const fairShare = Math.ceil(Math.max(0, runDeadlineAt - Date.now()) / attemptsLeft);
+      const attemptBudget = Math.max(0, Math.min(
+        TIMEOUT,
+        fairShare,
+        remainingStageMs(TIMEOUT),
+      ));
+      if (attemptBudget <= 0 || totalAttempts >= MAX_ATTEMPTS_TOTAL) {
+        failed = true;
+        break;
+      }
+      totalAttempts += 1;
       try {
-        const out = await attempt(model);
+        const out = await attempt(model, attemptBudget);
         if (mi > 0) {
           console.warn(`[reranker] primary ${MODEL_CHAIN[0]} unavailable — request served by `
             + `fallback #${mi} ${model}. Investigate the primary; the chain is a safety net, not a plan.`);
         }
-        return topN ? out.slice(0, topN) : out;
+        return finish(out, { status: 'served', model, fallback_index: mi });
       } catch (err) {
         lastErr = err;
-        if (a < RETRIES && RETRYABLE.test(String(err?.message || ''))) continue; // transient → retry
+        if (currentStageSignal()?.aborted || remainingStageMs(1) <= 0) {
+          console.warn(`[reranker] cancelled by upstream deadline while serving ${model}; `
+            + 'stopping the fallback chain immediately.');
+          return finish(candidates, { status: 'cancelled', model });
+        }
+        // When a distinct fallback model exists, spend the second bounded
+        // attempt on provider diversity instead of retrying the same failing
+        // route. A single-model deployment may still use its configured retry.
+        if (MODEL_CHAIN.length === 1 && a < RETRIES && RETRYABLE.test(String(err?.message || ''))) continue;
         failed = true;
         break;
       }
@@ -201,7 +245,7 @@ export async function rerank(query, candidates, { topN } = {}) {
   console.warn(`[reranker] DEGRADED to algorithmic order — all ${MODEL_CHAIN.length} model(s) in the chain `
     + `failed (${MODEL_CHAIN.join(' -> ')}); last error: ${lastErr?.message}. The cross-encoder is `
     + `absent for this request, so lanes are interleaved rather than compared.`);
-  return topN ? candidates.slice(0, topN) : candidates;
+  return finish(candidates, { status: 'degraded', model: null, error: lastErr?.message || 'budget exhausted' });
 }
 
 export default rerank;

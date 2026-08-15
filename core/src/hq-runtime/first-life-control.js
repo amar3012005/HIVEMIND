@@ -287,9 +287,20 @@ export async function activateEligibleFirstLifeWork({ prisma, runtime, expansion
       ...todo,
       lifecycleStatus: projectedStatus(todo, runByTodo.get(todo.id) || null),
     })).filter((todo) => ownershipStatuses.has(todo.lifecycleStatus));
-    if (expansionTrigger === 'verified_monitoring_checkpoint') {
+    // Root-caused live (2026-08-15, orgs DIOR and Brdteengal): the sole
+    // promoted first-life task parks WAITING_FOR_CONNECTOR on a missing
+    // capability — a wait on a HUMAN that can take days — and nothing ever
+    // released its execution slot, so the other evidenced, dormant proposals
+    // (a prospect list, a research question — genuinely independent, no
+    // reason to wait) sat PROPOSED indefinitely. capability_wait_release is
+    // the parallel case to verified_monitoring_checkpoint's MONITORING
+    // handling below: a capacity-frozen connector wait releases the slot the
+    // same way a capacity-frozen measurement wait already did.
+    if (['verified_monitoring_checkpoint', 'capability_wait_release'].includes(expansionTrigger)) {
+      const releasableStatuses = expansionTrigger === 'capability_wait_release'
+        ? ['WAITING_FOR_CONNECTOR'] : ['MONITORING'];
       for (const todo of active.filter((row) => effectClass(row) === 'external'
-        && row.lifecycleStatus === 'MONITORING'
+        && releasableStatuses.includes(row.lifecycleStatus)
         && asObject(row.context).execution_slot_released !== true)) {
         const changed = await tx.hqTodo.updateMany({
           where: { id: todo.id, runtimeId: runtime.id, status: { notIn: ['CANCELLED', 'COMPLETED'] } },

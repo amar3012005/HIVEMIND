@@ -31,6 +31,7 @@ import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
 import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
+import { deriveAnswerContextStatus, normalizeAnswerCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
 import { buildSynthesisFallbackChain, chooseSynthesisModel, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
@@ -257,7 +258,8 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
     evidence_used: [],
     confidence: Number.isFinite(meta.confidence) ? Math.max(0, Math.min(1, meta.confidence)) : 0.5,
     gaps: Array.isArray(meta.gaps) ? meta.gaps : [],
-    context_status: ['sufficient', 'relevant_but_incomplete', 'query_mismatch'].includes(meta.context_status) ? meta.context_status : 'sufficient',
+    context_status: deriveAnswerContextStatus(meta),
+    answer_coverage: normalizeAnswerCoverage(meta.coverage),
     recall_packets: recallPackets,
     usage: result.usage,
     usage_stages: { synthesis: result.usage },
@@ -2060,6 +2062,7 @@ ${message}`;
       confidence: 0,
       gaps: ['No citation-valid claim could be produced from the final recall packet.'],
       context_status: answerPayload?.context_status === 'query_mismatch' ? 'query_mismatch' : 'relevant_but_incomplete',
+      answer_coverage: normalizeAnswerCoverage(answerPayload?.coverage),
       recall_packets: evidence.recall_packets || [],
       usage: repairUsage || usage,
       usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
@@ -2077,9 +2080,8 @@ ${message}`;
     evidence_used: Array.isArray(answerPayload.evidence_used) ? answerPayload.evidence_used : [],
     confidence:    Number.isFinite(answerPayload.confidence) ? Math.max(0, Math.min(1, answerPayload.confidence)) : 0.5,
     gaps:          Array.isArray(answerPayload.gaps) ? answerPayload.gaps : [],
-    context_status: ['sufficient', 'relevant_but_incomplete', 'query_mismatch'].includes(answerPayload.context_status)
-      ? answerPayload.context_status
-      : ((Array.isArray(answerPayload.gaps) && answerPayload.gaps.length) ? 'relevant_but_incomplete' : 'sufficient'),
+    context_status: deriveAnswerContextStatus(answerPayload),
+    answer_coverage: normalizeAnswerCoverage(answerPayload.coverage),
     recall_packets: evidence.recall_packets || [],
     usage: repairUsage || usage,
     usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },

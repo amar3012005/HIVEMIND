@@ -16,6 +16,9 @@ test('fact synthesis loads only the compact grounding and citation contract', ()
   assert.match(prompt, /targeted clarification question/i);
   assert.match(prompt, /Never collapse partial knowledge/i);
   assert.match(prompt, /response.*must end with one natural, targeted clarification question/i);
+  assert.match(prompt, /every independent semantic detail/i);
+  assert.match(prompt, /"coverage"/i);
+  assert.match(prompt, /context_status/i);
   assert.doesNotMatch(prompt, /GRAPH EDGES/i);
   assert.doesNotMatch(prompt, /TEMPORAL/i);
 });

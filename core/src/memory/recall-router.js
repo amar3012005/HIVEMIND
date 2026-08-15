@@ -996,6 +996,31 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
 
   let docIds = [...inspection.docIds];
   let reason = 'doc-anchored';
+  // An explicit project is a hard evidence boundary. Memory anchors may come
+  // from the caller's authorized personal/org tiers, but their source documents
+  // do not thereby become members of the selected project. Intersect anchors
+  // with the project's document inventory; if none remain, search that whole
+  // project corpus. This preserves shared memory context without allowing its
+  // document lineage to widen evidence retrieval outside the selected project.
+  if (ctx.projectId) {
+    const projectDocIds = await resolveProjectDocIds({
+      prisma, projectId: ctx.projectId, orgId: ctx.orgId,
+    });
+    if (projectDocIds.length > 0) {
+      const allowed = new Set(projectDocIds);
+      docIds = docIds.filter((id) => allowed.has(id));
+      if (docIds.length === 0) {
+        docIds = projectDocIds;
+        reason = 'project-corpus';
+      }
+    } else {
+      // A selected central project with no documents must not silently widen
+      // to every document in the organization. Remote agents cannot currently
+      // enumerate project documents, so retain their scoped backend behavior.
+      docIds = orgIsRemote(ctx.orgId) ? docIds : [];
+      reason = orgIsRemote(ctx.orgId) ? reason : 'project-empty';
+    }
+  }
   if (docIds.length === 0 && inspection.filenames.length > 0) {
     docIds = await resolveDocIdsFromFilenames({
       prisma, filenames: inspection.filenames, userId: ctx.userId, orgId: ctx.orgId,
@@ -1004,9 +1029,12 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
   }
   // Dig wider: no hop-1 anchors but a project is in scope → search the whole
   // project corpus (keeps evidence project-isolated, not org-wide leakage).
-  if (docIds.length === 0 && ctx.projectId) {
+  if (docIds.length === 0 && ctx.projectId && reason !== 'project-empty') {
     docIds = await resolveProjectDocIds({ prisma, projectId: ctx.projectId, orgId: ctx.orgId });
     if (docIds.length) reason = 'project-corpus';
+  }
+  if (reason === 'project-empty') {
+    return { items: [], reason, docIds: [] };
   }
 
   // EVIDENCE IS A LANE, NOT A RESCUE.

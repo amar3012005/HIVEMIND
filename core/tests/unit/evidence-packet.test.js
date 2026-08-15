@@ -69,6 +69,48 @@ test('source-focused evidence admits only the resolved document id', async () =>
   assert.deepEqual(result.docIds, ['document-active']);
 });
 
+test('project evidence intersects shared-tier memory anchors with project documents', async () => {
+  const calls = [];
+  const result = await hop2Evidence({
+    evidenceService: {
+      async retrieveEvidence(options) {
+        calls.push(options);
+        return [{ segmentId: 'segment-project', documentId: 'document-project' }];
+      },
+    },
+    query: 'What does the selected project say?',
+    ctx: { userId: 'user-1', orgId: 'org-1', projectId: 'project-1' },
+    inspection: { docIds: ['document-personal'], filenames: [], sparse: false },
+    prisma: {
+      knowledgeDocument: {
+        async findMany({ where }) {
+          assert.equal(where.orgId, 'org-1');
+          assert.deepEqual(where.tags, { has: 'scope-key:project:project-1' });
+          return [{ id: 'document-project' }];
+        },
+      },
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].documentIds, ['document-project']);
+  assert.equal(result.reason, 'project-corpus');
+});
+
+test('empty selected project does not widen evidence retrieval to the organization', async () => {
+  let called = false;
+  const result = await hop2Evidence({
+    evidenceService: { async retrieveEvidence() { called = true; return []; } },
+    query: 'Anything?',
+    ctx: { userId: 'user-1', orgId: 'org-1', projectId: 'project-empty' },
+    inspection: { docIds: ['document-personal'], filenames: [], sparse: true },
+    prisma: { knowledgeDocument: { async findMany() { return []; } } },
+  });
+
+  assert.equal(called, false);
+  assert.deepEqual(result, { items: [], reason: 'project-empty', docIds: [] });
+});
+
 test('source metadata resolution is tenant-scoped and does not require an LLM filename extraction', async () => {
   let where;
   const service = new EvidenceRetrievalService({

@@ -385,12 +385,31 @@ test('runCycle detects a first-life burst (multiple simultaneously-READY sibling
   );
   const gateIndex = source.indexOf("} else if (readyTodo && !roomInFlight) {");
   assert.ok(gateIndex > 0, 'expected the single-dispatch gate to still exist');
-  const burstBlock = source.slice(gateIndex, gateIndex + 1800);
+  const burstBlock = source.slice(gateIndex, gateIndex + 3500);
   assert.match(burstBlock, /const burstSiblings = readyTodo\.context\?\.activation_sprint_id/);
   assert.match(burstBlock, /todo\.status === 'READY'/);
   assert.match(burstBlock, /todo\.context\?\.activation_sprint_id === readyTodo\.context\.activation_sprint_id/);
-  assert.match(burstBlock, /const todosToDispatchThisCycle = burstSiblings\.length > 1 \? burstSiblings : \[readyTodo\]/);
+  assert.match(burstBlock, /const todosToDispatchThisCycle = burstSiblings\.length > 1 \? burstSiblings\n\s*: crossLaneCandidate \? \[readyTodo, crossLaneCandidate\] : \[readyTodo\]/);
   assert.match(burstBlock, /for \(const readyTodo of todosToDispatchThisCycle\) \{/);
+});
+
+// Cross-domain parallelism, steady state (2026-08-15): when the room is
+// completely idle (roomInFlight false — reached only inside this branch)
+// and a second, genuinely independent lane (different effectClass) also has
+// ready work, both start together instead of one waiting on the other.
+// Deliberately scoped to "nothing running anywhere" only — making
+// roomInFlight itself lane-aware while something is ALREADY running is a
+// larger, riskier change to logic already the source of several real bugs
+// this session, deferred on purpose.
+test('runCycle also starts a second, genuinely independent lane when nothing is running anywhere (not just the first-life burst)', () => {
+  const source = fs.readFileSync(
+    new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8',
+  );
+  const gateIndex = source.indexOf("} else if (readyTodo && !roomInFlight) {");
+  const burstBlock = source.slice(gateIndex, gateIndex + 3500);
+  assert.match(burstBlock, /const crossLaneCandidate = burstSiblings\.length <= 1/);
+  assert.match(burstBlock, /effectClass\(todo\) !== effectClass\(readyTodo\)/);
+  assert.match(burstBlock, /crossLaneCandidate \? \[readyTodo, crossLaneCandidate\] : \[readyTodo\]/);
 });
 
 // Journal-recall (2026-08-15): confirmed by direct recon that

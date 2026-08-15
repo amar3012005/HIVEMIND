@@ -5,7 +5,7 @@ import { ingestPendingInstructions, reconcileTodoCapabilities } from './instruct
 import { narrateAwakening } from './awakening-narrator.js';
 import { stageAuthorityHash } from '../runtime-playbooks/stage-executor.js';
 import { projectCurrentActivationSprint } from './activation-sprint.js';
-import { activateEligibleFirstLifeWork, ensureFirstLifeBootstrapProposal, projectFirstLifeOperatingGate } from './first-life-control.js';
+import { activateEligibleFirstLifeWork, ensureFirstLifeBootstrapProposal, projectFirstLifeOperatingGate, effectClass } from './first-life-control.js';
 import { revokeAuthoritiesForNewInstruction } from './authority-revocation.js';
 import { resolveAuthorityPreference } from './contracts.js';
 import { publishHqRuntimeTransient } from './event-bus.js';
@@ -1254,10 +1254,30 @@ export class NativeHqEngine {
         ? capabilityState.todos.filter((todo) => todo.status === 'READY'
           && todo.context?.activation_sprint_id === readyTodo.context.activation_sprint_id)
         : [readyTodo];
-      const todosToDispatchThisCycle = burstSiblings.length > 1 ? burstSiblings : [readyTodo];
+      // Cross-domain parallelism, steady state (2026-08-15): reached this
+      // branch ONLY when roomInFlight is false — nothing is running
+      // ANYWHERE right now. That's the one case where starting a second,
+      // genuinely independent lane is risk-free: it can never disturb an
+      // already-in-flight Room, because there isn't one. Deliberately NOT
+      // touched: the harder case (start lane B WHILE lane A is already
+      // running) — that needs roomInFlight itself to become lane-aware
+      // across all 3 of its computation sites in this file, a much larger,
+      // riskier change to logic that's already been the source of several
+      // real bugs fixed this session (capability_wait_release, MONITORING
+      // broadening). Deferred deliberately rather than rushed.
+      const crossLaneCandidate = burstSiblings.length <= 1
+        ? capabilityState.todos.find((todo) => todo.status === 'READY'
+          && todo.id !== readyTodo.id
+          && effectClass(todo) !== effectClass(readyTodo))
+        : null;
+      const todosToDispatchThisCycle = burstSiblings.length > 1 ? burstSiblings
+        : crossLaneCandidate ? [readyTodo, crossLaneCandidate] : [readyTodo];
       if (todosToDispatchThisCycle.length > 1) await event(prisma, runtime, cycle, {
-        eventType: 'decision', title: 'Starting the first-life batch in parallel',
-        summary: `${todosToDispatchThisCycle.length} evidenced proposals from the first operating plan start together: ${todosToDispatchThisCycle.map((todo) => todo.title).join('; ')}. Every task after this one goes back to one bounded step at a time.`,
+        eventType: 'decision',
+        title: burstSiblings.length > 1 ? 'Starting the first-life batch in parallel' : 'Starting two independent lanes together',
+        summary: burstSiblings.length > 1
+          ? `${todosToDispatchThisCycle.length} evidenced proposals from the first operating plan start together: ${todosToDispatchThisCycle.map((todo) => todo.title).join('; ')}. Every task after this one goes back to one bounded step at a time.`
+          : `Nothing is currently running, and these two tasks are genuinely independent (${effectClass(readyTodo)} and ${effectClass(crossLaneCandidate)}): ${todosToDispatchThisCycle.map((todo) => todo.title).join('; ')}. They start together instead of waiting on each other.`,
         details: { todo_ids: todosToDispatchThisCycle.map((todo) => todo.id) },
       });
       for (const readyTodo of todosToDispatchThisCycle) {

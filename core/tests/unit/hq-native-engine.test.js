@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait, projectRecentDecisions } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait, projectRecentDecisions, projectStrategyTrace } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -292,6 +292,35 @@ test('projectOperatingCycleBrief reports zero counts on a genuinely quiet window
   assert.deepEqual(brief.counts, { completed: 0, blocked: 0, waiting: 0, decisions_needed: 0 });
   assert.deepEqual(brief.completed, []);
   assert.deepEqual(brief.blocked, []);
+});
+
+// Strategy→objective→artifact trace (2026-08-15): growth_stage_id/constraint_id/
+// success_measure already live on todo.context at creation (operating-loop.js) —
+// this proves the brief surfaces them for every completed todo, not just status.
+test('projectStrategyTrace reads growth_stage_id/constraint_id/success_measure straight off todo.context', () => {
+  const todo = { context: { growth_stage_id: 'stage-1', constraint_id: 'constraint-1', success_measure: '3 replies within 48h' } };
+  assert.deepEqual(projectStrategyTrace(todo), {
+    growth_stage_id: 'stage-1', constraint_id: 'constraint-1', success_measure: '3 replies within 48h',
+  });
+});
+
+test('projectStrategyTrace defaults to null on a todo with no context, never throws', () => {
+  assert.deepEqual(projectStrategyTrace({}), { growth_stage_id: null, constraint_id: null, success_measure: null });
+  assert.deepEqual(projectStrategyTrace({ context: null }), { growth_stage_id: null, constraint_id: null, success_measure: null });
+});
+
+test('projectOperatingCycleBrief attaches the strategy trace to every completed todo — why it shipped, not just that it did', () => {
+  const periodStartedAt = new Date('2026-08-14T13:00:00.000Z');
+  const periodEndedAt = new Date('2026-08-15T13:00:00.000Z');
+  const todos = [{
+    id: 't-done', title: 'Sent first outreach batch', status: 'COMPLETED', completedAt: '2026-08-15T01:00:00.000Z',
+    context: { growth_stage_id: 'stage-9', constraint_id: 'constraint-9', success_measure: '5 replies in 72h' },
+  }];
+  const brief = projectOperatingCycleBrief({ todos, events: [], periodStartedAt, periodEndedAt });
+  assert.deepEqual(brief.completed, [{
+    todo_id: 't-done', title: 'Sent first outreach batch', completed_at: '2026-08-15T01:00:00.000Z',
+    growth_stage_id: 'stage-9', constraint_id: 'constraint-9', success_measure: '5 replies in 72h',
+  }]);
 });
 
 // Phase 5 — cadence regression suite. buildOperatingCycleBrief is the async

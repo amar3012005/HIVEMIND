@@ -266,10 +266,36 @@ const BRIEF_BLOCKED_STATUSES = ['BLOCKED', 'WAITING_FOR_CONNECTOR', 'WAITING_FOR
 const BRIEF_WAITING_STATUSES = ['READY', 'PROPOSED'];
 const BRIEF_DECISION_EVENT_TYPES = ['approval_required', 'capability_required'];
 
+// Traces each shipped todo back to why it exists: the growth stage and
+// constraint it was proposed to serve, and the success measure the growth
+// plan itself defined for it. All three already live on todo.context at
+// creation (core/src/growth/operating-loop.js) — this is a pure projection,
+// not a new query or schema field. Deliberately NOT joined to
+// RuntimePerformanceMetric: every metric writer (room-director.js,
+// tara/outbound-call-service.js) populates stageId from the PLAYBOOK
+// EXECUTION stage (e.g. 'deliver_outreach'), never from GrowthStage.id — the
+// two are unrelated ID spaces that happen to share a column name. A join on
+// that column would silently match nothing and look wired while reporting
+// empty forever. There is currently no business-outcome metric recorded
+// against a growth stage anywhere in the codebase; only operational metrics
+// (latency, connection counts) exist. That half of the graph needs a real
+// outcome-metric source before it can be built, not a hollow join.
+export function projectStrategyTrace(todo) {
+  const context = todo.context && typeof todo.context === 'object' ? todo.context : {};
+  return {
+    growth_stage_id: context.growth_stage_id || null,
+    constraint_id: context.constraint_id || null,
+    success_measure: context.success_measure || null,
+  };
+}
+
 export function projectOperatingCycleBrief({ todos = [], events = [], periodStartedAt, periodEndedAt }) {
   const completed = todos
     .filter((todo) => todo.status === 'COMPLETED' && todo.completedAt && new Date(todo.completedAt) >= periodStartedAt)
-    .map((todo) => ({ todo_id: todo.id, title: todo.title, completed_at: new Date(todo.completedAt).toISOString() }));
+    .map((todo) => ({
+      todo_id: todo.id, title: todo.title, completed_at: new Date(todo.completedAt).toISOString(),
+      ...projectStrategyTrace(todo),
+    }));
   const blocked = todos
     .filter((todo) => BRIEF_BLOCKED_STATUSES.includes(todo.status))
     .map((todo) => ({ todo_id: todo.id, title: todo.title, status: todo.status, blocked_reason: todo.blockedReason || null }));

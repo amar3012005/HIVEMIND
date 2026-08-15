@@ -1819,7 +1819,13 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const date = rawDate ? new Date(rawDate).toISOString().slice(0, 10) : '?';
     const src = m.source_metadata?.source_platform || m.source_platform || m.memory_type || 'memory';
     const rank = m._progressive_rank || (_projectedMemories.findIndex((item) => item.memory?.id === m.id) + 1);
-    return citationId ? `${synthTag}{citation_id:${citationId}, rank:${rank || '?'} source:${src}, date:${date}}${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}` : '';
+    const metadataClaim = m.metadata?.claim || {};
+    const qualifiers = m.claimQualifiers || m.claim_qualifiers || metadataClaim.qualifiers || {};
+    const claimSubject = m.claimSubject || m.claim_subject || metadataClaim.subject?.name || '';
+    const claimPredicate = m.claimPredicate || m.claim_predicate || metadataClaim.predicate || '';
+    const claimObject = qualifiers && typeof qualifiers === 'object' ? (qualifiers.object || '') : '';
+    const claimShape = [claimSubject, claimPredicate, claimObject].filter(Boolean).join(' | ');
+    return citationId ? `${synthTag}{citation_id:${citationId}, rank:${rank || '?'} source:${src}, date:${date}${claimShape ? `, claim:${JSON.stringify(claimShape)}` : ''}}${conf}${rev}${xClusterBoost} "${title}" — ${content}${tags ? ' :: ' + tags : ''}` : '';
   }).filter(Boolean).join('\n');
 
   // Live Workspace block — Gmail / Drive / Calendar fetched in this turn.
@@ -1838,7 +1844,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // knowledge_segment evidence collection. Lets the agent ground on full
   // pitch decks / catalogs even when only 5-20 chunks made it into the
   // canonical memory layer.
-  const evLines = (evidence.evidence || []).slice(0, 8).map((e, index) => {
+  const evLines = (evidence.evidence || []).slice(0, evidenceTopK).map((e, index) => {
     const doc = (e.document_title || 'unknown.pdf').replace(/\n/g, ' ').slice(0, 80);
     const page = e.page ? ` p.${e.page}` : '';
     // Evidence retrieval produces a query-centred snippet. Prefer it over the
@@ -1928,7 +1934,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
     ? [...new Set(plan.named_entities.filter((e) => typeof e === 'string' && e.trim()))]
     : [];
   if (requestedEntities.length >= 2) {
-    const deliveredText = [...evidence.memories.slice(0, evidenceTopK), ...(evidence.evidence || []).slice(0, 8)]
+    const deliveredText = [...evidence.memories.slice(0, evidenceTopK), ...(evidence.evidence || []).slice(0, evidenceTopK)]
       .map((item) => [item?.title, item?.document_title, item?.content, item?.snippet, ...(Array.isArray(item?.tags) ? item.tags : [])]
         .filter(Boolean).join(' ').toLowerCase())
       .join(' ␟ ');

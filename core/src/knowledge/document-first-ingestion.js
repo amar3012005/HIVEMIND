@@ -42,6 +42,80 @@ import { isStructuredSourceNoise } from '../memory/durable-content.js';
 import { countPages } from './page-count.js';
 
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
+const CLAIM_ENTITY_KINDS = new Set(['person', 'organization', 'product', 'place', 'technology', 'standard']);
+
+function boundedClaimText(value, max = 500) {
+  return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+
+function normalizedClaimEntity(value) {
+  if (typeof value === 'string') return { name: boundedClaimText(value), kind: null };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const name = boundedClaimText(value.name || value.n);
+  const rawKind = boundedClaimText(value.kind || value.k, 64).toLowerCase();
+  return name ? { name, kind: CLAIM_ENTITY_KINDS.has(rawKind) ? rawKind : null } : null;
+}
+
+function normalizedClaimRelationship(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const from = normalizedClaimEntity(value.from);
+  const to = normalizedClaimEntity(value.to);
+  const type = boundedClaimText(value.type, 100).toLowerCase().replace(/[^a-z0-9_:-]/g, '_');
+  if (!from?.name || !to?.name || !type) return null;
+  return { from, type, to };
+}
+
+function normalizeClaimStructure(item, fallback = {}) {
+  const subject = normalizedClaimEntity(item?.subject || item?.claim_subject)
+    || normalizedClaimEntity(fallback?.subject || fallback?.claim_subject)
+    || null;
+  const predicate = boundedClaimText(item?.predicate || item?.claim_predicate
+    || fallback?.predicate || fallback?.claim_predicate, 500).toLowerCase();
+  const rawObject = item?.object ?? item?.claim_object ?? fallback?.object ?? fallback?.claim_object;
+  const object = typeof rawObject === 'string'
+    ? { value: boundedClaimText(rawObject, 1000), type: null }
+    : (rawObject && typeof rawObject === 'object' && !Array.isArray(rawObject)
+      ? { value: boundedClaimText(rawObject.value, 1000), type: boundedClaimText(rawObject.type, 100) || null }
+      : null);
+  const rawQualifiers = item?.qualifiers ?? item?.claim_qualifiers
+    ?? fallback?.qualifiers ?? fallback?.claim_qualifiers;
+  const qualifiers = rawQualifiers && typeof rawQualifiers === 'object' && !Array.isArray(rawQualifiers)
+    ? { ...rawQualifiers }
+    : {};
+  if (object?.value) qualifiers.object = object.value;
+  if (object?.type) qualifiers.object_type = object.type;
+  const relationships = (Array.isArray(item?.relationships) ? item.relationships
+    : (Array.isArray(fallback?.relationships) ? fallback.relationships : []))
+    .map(normalizedClaimRelationship).filter(Boolean).slice(0, 12);
+  if (relationships.length) qualifiers.relationships = relationships;
+  const confidenceValue = Number(item?.extraction_confidence ?? fallback?.extraction_confidence);
+  const extractionConfidence = Number.isFinite(confidenceValue)
+    ? Math.max(0, Math.min(1, confidenceValue))
+    : null;
+  return { subject, predicate, object, qualifiers, relationships, extractionConfidence };
+}
+
+function stableClaimKey({ subject, predicate, object, qualifiers }) {
+  if (!subject?.name || !predicate) return null;
+  const materialQualifiers = Object.fromEntries(Object.entries(qualifiers || {})
+    .filter(([key]) => key !== 'relationships')
+    .sort(([a], [b]) => a.localeCompare(b)));
+  const signature = JSON.stringify({
+    subject: subject.name.toLowerCase(), predicate,
+    object: object?.value || materialQualifiers.object || null,
+    qualifiers: materialQualifiers,
+  });
+  return crypto.createHash('sha256').update(signature).digest('hex').slice(0, 64);
+}
+
+export function adaptiveAtomicMemoryBudget(sourceChars, uniqueCandidateCount = Number.POSITIVE_INFINITY) {
+  const chars = Math.max(0, Number(sourceChars) || 0);
+  const densityCeiling = chars <= 6_000 ? 12 : chars <= 40_000 ? 30 : 60;
+  const candidates = Number.isFinite(Number(uniqueCandidateCount))
+    ? Math.max(0, Number(uniqueCandidateCount))
+    : densityCeiling;
+  return Math.max(3, Math.min(densityCeiling, candidates || 3));
+}
 // BINARY SNIFF — one definition, used by every tier that might be handed bytes it cannot parse.
 // Ratio of NULs and C0 control characters (excluding tab/newline/CR) to total length. A ZIP or PDF
 // container runs far above the threshold; UTF-8 prose sits at zero. Deliberately NOT a mime check:
@@ -454,6 +528,7 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
       source_end: loc.start + loc.quote.length,
       importance: normalizedImportance(Number(item.importance)),
       entities: durableEntities(item.entities),
+      ...normalizeClaimStructure(item),
       rels: (Array.isArray(item.rels) ? item.rels : [])
         .filter((rel) => rel && Number.isInteger(rel.to) && INTRA_WINDOW_REL_TYPES.includes(rel.type)).slice(0, 5),
     });
@@ -558,7 +633,7 @@ export function attachCoverageLedger(curatedOutput, pool) {
 
 export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8) {
   const pool = Array.isArray(candidates) ? candidates : [];
-  const cap = Math.max(1, Math.min(30, Number(maxMemories) || 8));
+  const cap = Math.max(1, Math.min(60, Number(maxMemories) || 8));
   const output = [];
   for (const memory of (Array.isArray(rawMemories) ? rawMemories : []).slice(0, cap)) {
     const indices = [...new Set((memory?.support_indices || []).map(Number))]
@@ -570,6 +645,7 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
     const content = String(memory.content || '').trim();
     if (content.length < 12) continue;
     const importance = Math.max(...supports.map((item) => Number(item.importance || 0.5)));
+    const structured = normalizeClaimStructure(memory, supports.length === 1 ? supports[0] : {});
     output.push({
       t: durableTitle(memory.title || primary.t, content),
       f: content,
@@ -587,6 +663,7 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
         }
         return [...seen.values()].slice(0, 12);
       })(),
+      ...structured,
       rels: [],
       // FORWARD THE HEADING. This explicit field list rebuilt each claim and dropped `heading`,
       // so the «filename : heading» prefix was empty no matter what the extractor or window
@@ -827,6 +904,9 @@ export class DocumentFirstIngestionService {
     if (!store?.updateMemory) return;
     const targets = (Array.isArray(memories) ? memories : [])
       .filter((m) => m?.id && typeof m.content === 'string' && m.content.trim().length >= 12)
+      // Unified ingestion now obtains claim identity in the existing extraction
+      // call. Only legacy/unstructured rows need this asynchronous repair call.
+      .filter((m) => !m.claim_subject || !m.claim_predicate)
       .slice(0, 24);
     if (!targets.length) return;
     const model = process.env.CLAIM_STRUCTURING_MODEL || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
@@ -1450,43 +1530,10 @@ Output the JSON object and nothing else.`;
     // (0.65) + the curator keep the extra candidates from becoming noise.
     const factCap = Math.max(1, Math.min(Number(maxFacts) || 1,
       compact ? 3 : Number(process.env.KB_UNIFIED_WINDOW_MAX_FACTS || 10)));
-    // DETERMINISTIC LANGUAGE PIN. Telling the model to "use the section's language"
-    // does not hold: the surrounding prompt is entirely English and the model reads
-    // that as the target. Measured twice — a German document produced 16 English /
-    // 2 German claims even WITH an explicit final override line, and a German
-    // spreadsheet produced 10 English / 0 German.
-    //
-    // So decide it in code and NAME the language in the instruction. Function words
-    // rather than characters, because diacritics are absent from plenty of real
-    // German text and common in French/Spanish/Portuguese. Fully tenant-neutral —
-    // a generic marker table, no customer terms — and it degrades to the generic
-    // wording when undecided rather than guessing and translating the corpus.
-    const _langProbe = String(content).slice(0, 4000).toLowerCase();
-    const _langHits = (words) => words.reduce((n, w) => {
-      const m = _langProbe.match(new RegExp(`(^|[^\\p{L}])${w}([^\\p{L}]|$)`, 'gu'));
-      return n + (m ? m.length : 0);
-    }, 0);
-    const _LANG_MARKERS = [
-      ['German', ['der', 'die', 'das', 'und', 'nicht', 'mit', 'für', 'ist', 'ein', 'auch', 'werden']],
-      ['French', ['le', 'la', 'les', 'des', 'et', 'pour', 'dans', 'est', 'une', 'avec']],
-      ['Spanish', ['el', 'los', 'las', 'de', 'para', 'con', 'una', 'que', 'por']],
-      ['Italian', ['il', 'lo', 'gli', 'delle', 'per', 'con', 'una', 'che', 'sono']],
-      ['Dutch', ['het', 'een', 'niet', 'voor', 'met', 'zijn', 'wordt']],
-      ['Portuguese', ['os', 'as', 'do', 'da', 'para', 'com', 'uma', 'não']],
-      ['English', ['the', 'and', 'of', 'for', 'with', 'that', 'this', 'are']],
-    ];
-    let _bestLang = null; let _bestScore = 0;
-    for (const [name, markers] of _LANG_MARKERS) {
-      const score = _langHits(markers);
-      if (score > _bestScore) { _bestScore = score; _bestLang = name; }
-    }
-    const _langLine = (_bestLang && _bestScore >= 5)
-      ? `LANGUAGE: the SECTION is written in ${_bestLang}. Write every "t" and "f" in ${_bestLang}. Do NOT translate.`
-      : 'LANGUAGE: write "t" and "f" in the SAME language the SECTION is written in. Do NOT translate.';
     const sys = `Extract only high-value durable workspace memory from the SECTION.
-${_langLine} These instructions are in English for your benefit only — they are NOT a language sample. A tenant must be able to quote their own memories back to their own stakeholders, and same-language recall degrades when claims are silently translated. Only "memory_type" and the JSON keys stay English.
+LANGUAGE: infer the SECTION's language semantically and write every "t" and "f" in that same language. Do not translate. These instructions are not a language sample. For mixed-language sources, preserve the language of each supported claim. Only JSON keys, memory_type and the canonical predicate use English.
 Return ONLY valid JSON:
-{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"source_quote":"exact verbatim substring from SECTION","entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}]}]}
+{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"extraction_confidence":0.0,"source_quote":"exact verbatim substring from SECTION","subject":{"n":"exact canonical subject","k":"person|organization|product|place|technology|standard"},"predicate":"canonical_english_relation","object":{"value":"exact source-language value","type":"semantic category or empty"},"qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}],"relationships":[{"from":{"n":"Canonical Name","k":"allowed kind"},"type":"semantic_relation","to":{"n":"Canonical Name","k":"allowed kind"}}]}]}
 
 SUBJECT RULE — the single most important rule. Every claim must NAME WHAT IT IS ABOUT, inside the claim text, so it still makes sense with the document gone. The memory is stored alone and retrieved by meaning; a reader who never saw this document must be able to tell what it concerns.
 Judge each claim by SHAPE, not by wording — these patterns are abstract and carry no example text:
@@ -1499,7 +1546,7 @@ Rules: up to ${factCap} facts. Capture every distinct durable claim (decision, c
 MERGE LINE ITEMS OF ONE CATEGORY INTO ONE MEMORY, CARRYING EVERY FIGURE. A price list, budget table, cost breakdown, schedule or feature list under one heading is ONE durable fact stating the whole set with all its numbers and labels, not one fact per line. Measured failure to avoid: a 5-page budget produced 30 separate memories averaging 154 characters — "The cost for 1 brand strategy is EUR 8,000.", "The cost for identity development is EUR 24,500.", "The cost for consulting and project management is ...", each a table row stored alone. Correct output is a single memory naming the section and listing every item with its amount, so a reader who retrieves only that memory can answer any question about the breakdown. Splitting it loses the comparison AND wastes the budget above.
 Emit a separate fact only when a claim stands on a DIFFERENT subject or decision, not when it is another row of the same table. Do NOT drop a distinct high-value claim to keep the count low — merge related ones instead. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
-Promote only decisions, commitments, requirements, metrics, named parties, dates, and concrete specifications. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. CAPITALISATION IS NOT EVIDENCE: many languages capitalise every noun, so a capitalised word is not automatically a name. Test it instead: if the word names a GENERIC KIND of thing rather than one specific identifiable thing (a component, a system, a plant, a device, a document, an article), it is NOT an entity, however it is capitalised. Give each entity a "k" from the listed kinds; if none fits, omit the entity rather than guessing. NEVER treat any of the following as an entity: source filenames or document titles (any source filename or document title), file names or extensions (.pdf/.eps/.png/.docx/.jpg), article/part/order numbers (article, part or order numbers in any format), fonts or typefaces (any font or typeface name), colours (any colour name, including brand-prefixed colours), paper/format sizes (any paper or format size code), URLs, or asset/file identifiers. Do not emit an entity that is merely a source or file reference. Do not add relationships; they are derived from verified facts after promotion.
+Promote only decisions, commitments, requirements, metrics, named parties, dates, concrete specifications, products and their exact categories or variants, roles, responsibilities, status changes, risks, constraints, dependencies, policies and durable organization or customer facts. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, repeated descriptions and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Preserve exact names, dates, quantities, units, categorical nouns, negation and uncertainty. Never broaden or guess a category. The subject, predicate and object must express the same complete claim as "f"; prefer one complete claim over fragments. Relationships are structured claim metadata only and must be explicitly supported by the same source_quote; do not invent causal or organizational links. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. CAPITALISATION IS NOT EVIDENCE: a generic kind is not an entity. Give each entity a "k" from the listed kinds; if none fits, omit it. Never emit source filenames, document titles, file extensions, part numbers, fonts, colours, format sizes, URLs or asset identifiers as entities.
 FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.
 "t" and "f" MUST be in the same language as each other: "f" is a verbatim substring of the SECTION, so if "t" is in a different language from its own "f" you have translated, and that is wrong. Keep the SECTION's own names and number formats as written (not 1.240 -> 1,240, not Hannover -> Hanover).`;
 // REVERTED, DO NOT REINTRODUCE: an earlier version of this paragraph also said every "t" must be
@@ -1768,6 +1815,8 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         ...(documentId ? [`doc-id:${documentId}`] : []),
       ]);
       try {
+        const claimStructure = normalizeClaimStructure(fact);
+        const claimKey = stableClaimKey(claimStructure);
         const res = await this.memoryGraphEngine.ingestMemory({
           user_id: userId, org_id: orgId,
           scope: metadata.scope, visibility: metadata.visibility || 'private',
@@ -1775,6 +1824,11 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
           content: fact.f, title: fact.t, memory_type: fact.memory_type, tags,
           importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
+          ...(claimKey ? { claim_key: claimKey } : {}),
+          ...(claimStructure.subject?.name ? { claim_subject: claimStructure.subject.name } : {}),
+          ...(claimStructure.predicate ? { claim_predicate: claimStructure.predicate } : {}),
+          ...(Object.keys(claimStructure.qualifiers || {}).length ? { claim_qualifiers: claimStructure.qualifiers } : {}),
+          extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
           document_date: metadata.document_date || null,
           source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
           metadata: {
@@ -1787,6 +1841,14 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             source_quote: fact.source_quote,
             support_segment_ids: fact.support_segment_ids || [window.segmentId],
             support_quotes: fact.support_quotes || [fact.source_quote],
+            claim: {
+              key: claimKey,
+              subject: claimStructure.subject,
+              predicate: claimStructure.predicate || null,
+              object: claimStructure.object,
+              qualifiers: claimStructure.qualifiers,
+              extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
+            },
             distill_agent: 'kb_unified_v2',
           },
           skip_fact_extraction: true, defer_entity_linking: true,
@@ -1797,7 +1859,18 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         const id = res?.memoryId || res?.id || null;
         if (!id || (res?.operation || '').startsWith('skipped')) continue;
         idByIdx[i] = id;
-        factObjs.push({ id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t, memory_type: fact.memory_type, tags, project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null, support_segment_ids: fact.support_segment_ids, support_quotes: fact.support_quotes });
+        factObjs.push({
+          id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t,
+          memory_type: fact.memory_type, tags,
+          claim_key: claimKey,
+          claim_subject: claimStructure.subject?.name || null,
+          claim_predicate: claimStructure.predicate || null,
+          claim_qualifiers: Object.keys(claimStructure.qualifiers || {}).length ? claimStructure.qualifiers : null,
+          extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
+          project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null,
+          support_segment_ids: fact.support_segment_ids,
+          support_quotes: fact.support_quotes,
+        });
         embedPending.push({ id, fact: fact.f, memory_type: fact.memory_type, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
         // Collected for EVERY storage mode now. These used to be gathered only for central orgs
         // because the tables were central-only and hard-FK'd to hivemind.memories; the .amr agents
@@ -2153,7 +2226,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     }
     if (!pool.length) return [];
 
-    const cap = Math.max(1, Math.min(30, Number(maxMemories) || 6));
+    const cap = Math.max(1, Math.min(60, Number(maxMemories) || 6));
     const fallback = () => [...pool]
       .sort((a, b) => Number(b.importance || 0) - Number(a.importance || 0))
       .slice(0, cap)
@@ -2183,7 +2256,7 @@ Merge compatible candidates into one complete, information-dense memory. Never m
 Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source. Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Merge ONLY genuine duplicates (the same claim restated); never merge or drop two DISTINCT claims to reduce the count.
 
 Return ONLY valid JSON. Do not add prose, markdown, or an explanation before or after the JSON. The complete response must exactly match this shape:
-{"memories":[{"title":"short descriptive title","memory_type":"fact|decision|preference|goal|event|lesson|summary|synthesis","content":"1-3 source-grounded sentences","support_indices":[0,1]}]}
+{"memories":[{"title":"short descriptive title","memory_type":"fact|decision|preference|goal|event|lesson|summary|synthesis","content":"1-3 source-grounded sentences","claim_subject":{"n":"canonical subject","k":"person|organization|product|place|technology|standard"},"claim_predicate":"canonical_english_relation","claim_object":{"value":"exact source-language value","type":"semantic category or empty"},"claim_qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"support_indices":[0,1]}]}
 Every item must include a non-empty content field and one or more valid support_indices from the supplied candidate list.`;
     // Model fallback + headroom (rosemary Bug C): the curator previously used a
     // bare chatCompletion with max_tokens:1400, so a single provider hiccup
@@ -4628,7 +4701,7 @@ Every item must include a non-empty content field and one or more valid support_
         // 550 chars/fact is supermemory's measured density (83 memories from one ~15-page
         // PDF = ~1.8 facts per 1k chars). Env override REMOVED deliberately: a flat number
         // in .env silently defeats the formula — the exact class of bug that hid this.
-        const DOC_CAP = Math.min(400, Math.max(30, Math.ceil(_docChars / 550)));
+        const DOC_CAP = adaptiveAtomicMemoryBudget(_docChars);
         // Re-window LARGER for unified (fewer, context-rich windows → the model dedups within a window
         // and we don't multiply small-window caps into over-extraction). Falls back to `targets`.
         const UWIN = Number(process.env.KB_UNIFIED_WINDOW_CHARS || 1500);
@@ -4783,7 +4856,7 @@ Every item must include a non-empty content field and one or more valid support_
         // judgement, on top of a working extractor. Dedup is deterministic; "which facts
         // matter" is not knowable at ingest time because the question has not been asked.
         // Keep every distinct candidate and let cross-window consolidation dedup.
-        const _dynamicCap = Math.max(8, extractedCandidates.length);
+        const _dynamicCap = adaptiveAtomicMemoryBudget(_docChars, extractedCandidates.length);
         const _tCurate = Date.now();
         // `let`: the duplicate-claim collapse below narrows this list, and every downstream
         // reader (persist pool, 5b relations, counts) must see the narrowed one.

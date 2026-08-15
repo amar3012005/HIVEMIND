@@ -128,11 +128,17 @@ const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_M
 // Both are env-overridable so we can A/B without code changes.
 const INTERNAL_MODEL = process.env.HIVEMIND_AGENT_INTERNAL_MODEL || 'openai/gpt-oss-20b';
 const QUERY_OPTIMIZER_MODEL = process.env.CHAT_QUERY_OPTIMIZER_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
-// Keep the safety synthesis on the same low-latency Nitro class as the served
-// chat model. The old 120B fallback could consume the entire 60s turn budget
-// after a validated-stream contract miss, turning a recoverable formatting
-// failure into a user-visible abort.
-const FINAL_FALLBACK_MODEL = process.env.HIVEMIND_AGENT_FINAL_FALLBACK_MODEL || DEFAULT_CHAT_SYNTHESIS_MODEL;
+// Keep GPT-OSS 20B Nitro as the low-latency primary, but use an independent
+// safety model when its grounded/citation contract fails. Retrying the same
+// model reproduced the same semantic failure even with complete rank-one
+// evidence (for example, returning query_mismatch for an exact table row).
+// Nemotron Lightning passed that identical evidence contract in production in
+// ~4s, while GPT-OSS 120B Nitro still missed the language alias. This fallback
+// never retrieves, reranks, plans, or executes tools; it only synthesizes the
+// already-authorized evidence packet, so connector and approval behavior stay
+// unchanged. Operators can still override it per deployment.
+const FINAL_FALLBACK_MODEL = process.env.HIVEMIND_AGENT_FINAL_FALLBACK_MODEL
+  || 'nvidia/nemotron-3.5-lightning:nitro';
 // The caller-selected model is reserved for user-facing synthesis below.
 const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
 

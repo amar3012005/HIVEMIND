@@ -380,6 +380,32 @@ test('capability_wait_release unblocks a dormant INTERNAL proposal too — this 
   assert.equal(rows[1].status, 'READY');
 });
 
+// This is the exact live-verification miss: every other test in this file uses
+// prismaFor()'s DEFAULT authority policy (external_default: 'manual'), which
+// resolveAuthorityPreference treats as "configured" — so the first attempt at
+// this fix passed every test here yet silently no-op'd in production, because
+// the REAL org's authority_policy.external_default was 'unconfigured' (its
+// actual, common first-life default — confirmed live via the dashboard
+// showing "Not configured" for every gate). With policyConfigured===false,
+// capability_wait_release fell through to directProposals only
+// (user_instruction-origin todos), which never includes growth-plan-
+// originated proposals at all — so it silently promoted nothing. Any future
+// test for a first-life expansion trigger MUST include this unconfigured case.
+test('capability_wait_release still reaches first-life proposals when the org has never configured its authority policy (the real DIOR/Brdteengal state)', async () => {
+  const version14 = (row) => { row.context.first_life_policy_version = 14; return row; };
+  const rows = [
+    version14(todo('waiting', 'WAITING_FOR_CONNECTOR', 1, 'external')),
+    version14(todo('prospect-list', 'PROPOSED', 2, 'internal', true)),
+  ];
+  const result = await activateEligibleFirstLifeWork({
+    prisma: prismaFor(rows, { external_default: 'unconfigured', gate_overrides: {} }),
+    runtime, expansionTrigger: 'capability_wait_release',
+  });
+  assert.deepEqual(result.promoted.map((item) => item.id), ['prospect-list'],
+    'must promote even though policyConfigured is false — this is exactly what silently failed live');
+  assert.equal(rows[1].status, 'READY');
+});
+
 test('capability_wait_release is rejected on an older policy version that never declared it (purely additive to v14, not retroactive)', async () => {
   // The default todo() helper uses first_life_policy_version: 3 — proves
   // this trigger was added to v14's fixture specifically, not silently

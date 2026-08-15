@@ -668,3 +668,22 @@ slides that find no unique anchor get a page instead of `null`.
 - Rollback: not applicable
 - Next: run Linux native-AMR suites and real authenticated acceptance before
   landing on `singulance-main`.
+
+## 2026-08-15 UTC - Recall transport Linux verification completed
+
+- State: Committed
+- Owner: Codex
+- Branch: `codex/recall-reliability-e2e`
+- Base / commit: `b584f3562199c1b0f8fc9ceb872e70402a2bd29a` -> `8e104bd6`
+- Scope: preserve typed timeout/unavailable coverage after escalation and refuse
+  to start retrieval work after the inherited chat deadline has expired.
+- Verification: 67/69 selected Linux assertions pass. The two failures
+  (`evidence-packet` named-source window predicate and the base quick-recall
+  evidence count characterization) reproduce unchanged on the base SHA and are
+  not regressions from this branch. New expiry and Memory Box outage assertions
+  pass, as do route, model-policy, transport, vector-recovery, reranker-budget,
+  and ingestion-integrity suites.
+- Production: not deployed
+- Rollback: not applicable
+- Next: land through PR, deploy the agent capability endpoint before Core, and
+  run authenticated upload -> recall -> chat acceptance.

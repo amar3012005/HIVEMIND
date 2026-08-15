@@ -17,6 +17,7 @@ import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete } from '../vector/mneme/driver.js';
 import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
+import { redactParsedDocument } from './content-secret-redaction.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
 // row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
@@ -2606,7 +2607,7 @@ Every item must include a non-empty content field and one or more valid support_
     // Step 2: Parse document with Docling
     const _tParse = Date.now();
     emit('parsing', 10);
-    const parseResult = await this._parseDocument(fileBuffer, contentType, filename, {
+    const rawParseResult = await this._parseDocument(fileBuffer, contentType, filename, {
       smart: metadata?.smart === true,
       // Image descriptions default ON. This was opt-in via metadata, and the KB
       // upload path never passes it — so every figure, chart and diagram in every
@@ -2617,6 +2618,11 @@ Every item must include a non-empty content field and one or more valid support_
         ? metadata.picture_descriptions === true
         : String(process.env.KB_PICTURE_DESCRIPTIONS ?? 'true').toLowerCase() !== 'false',
     });
+    // SECURITY BOUNDARY: parser output is untrusted document content. Redact
+    // reusable authentication material once, before classification, retained
+    // source text, segments, embeddings, extraction prompts, or memories see it.
+    // Applying this centrally keeps evidence-only and both-mode behavior equal.
+    const parseResult = redactParsedDocument(rawParseResult);
     const documentClassification = metadata.document_type
       ? { type: safeDocumentType(metadata.document_type), confidence: 1 }
       : await classifyKnowledgeDocument(parseResult.text || parseResult.markdown, filename);

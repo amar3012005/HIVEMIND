@@ -3708,7 +3708,7 @@ model PageIndexNode {
   parent           PageIndexNode?  @relation("PageIndexHierarchy", fields: [parentId], references: [id])
   children         PageIndexNode[] @relation("PageIndexHierarchy")
   label            String
-  path             String          @unique
+  path             String
   nodeType         String          @default("topic") @map("node_type")
   depth            Int             @default(1)
   memoryIds        String[]        @default([]) @map("memory_ids")

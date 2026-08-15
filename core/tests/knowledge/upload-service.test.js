@@ -10,6 +10,7 @@ const ids = {
 
 function dependencies({ storageMode = 'hybrid', ready = true, duplicate = null } = {}) {
   const created = [];
+  const updates = [];
   const prisma = {
     userOrganization: { findFirst: async () => ({ role: 'admin', roles: [] }) },
     team: { findFirst: async () => null }, project: { findMany: async () => [] },
@@ -19,13 +20,13 @@ function dependencies({ storageMode = 'hybrid', ready = true, duplicate = null }
     findDuplicate: async () => duplicate,
     findOwned: async () => created.at(-1) || duplicate,
     create: async (data) => { const job = { id: ids.job, ...data, memoryIds: [], createdAt: new Date(), updatedAt: new Date() }; created.push(job); return job; },
-    updateOwned: async () => ({ count: 1 }), fail: async () => {},
+    updateOwned: async (...args) => { updates.push(args); return { count: 1 }; }, fail: async () => {},
   };
   const queue = {
     isAvailable: async () => true, persistFile: () => '/tmp/file',
     enqueue: async () => ({ queue_job_id: 'queue-1' }),
   };
-  return { prisma, jobStore, queue, created, storageReady: () => ready };
+  return { prisma, jobStore, queue, created, updates, storageReady: () => ready };
 }
 
 function request() {
@@ -53,6 +54,29 @@ test('completed duplicate returns existing identifiers without enqueueing', asyn
   assert.equal(result.status, 409);
   assert.equal(result.body.existing_document_id, ids.job);
   assert.equal(queued, false);
+});
+
+test('force reprocesses a ready evidence-only job as both without creating another job', async () => {
+  const duplicate = {
+    id: ids.job, userId: ids.user, status: 'ready', documentId: '44444444-4444-4444-8444-444444444444',
+    processingVersion: 1, metadata: { ingest_mode: 'evidence' }, memoryIds: [],
+  };
+  const deps = dependencies({ duplicate });
+  let queued;
+  deps.queue.enqueue = async (input) => { queued = input; return { queue_job_id: 'queue-1' }; };
+  const req = request();
+  req.metadata = { ingest_mode: 'both' };
+  const result = await new KnowledgeUploadService(deps).admit({ ...req, force: true });
+
+  assert.equal(result.ok, true);
+  assert.equal(deps.created.length, 0);
+  const reset = deps.updates.find(([, , data]) => data?.processingVersion === 2)?.[2];
+  assert.equal(reset.ingestMode, 'both');
+  assert.equal(reset.metadata.force_reprocess, true);
+  assert.equal(reset.metadata.reprocess_document_id, duplicate.documentId);
+  assert.equal(queued.metadata.force_reprocess, true);
+  assert.equal(queued.metadata.reprocess_document_id, duplicate.documentId);
+  assert.equal(queued.metadata.ingest_mode, 'both');
 });
 
 test('accepted upload persists one durable job before enqueue', async () => {

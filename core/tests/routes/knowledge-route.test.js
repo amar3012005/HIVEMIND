@@ -93,3 +93,22 @@ test('canonical upload accepts evidence and rejects unknown ingest modes', async
   assert.equal(rejected.statusCode, 400);
   assert.equal(rejected.body.error, 'invalid_ingest_mode');
 });
+
+test('canonical upload forwards explicit force to the durable reprocess state machine', async () => {
+  let admitted;
+  const result = await handleKnowledgeUploadRoute(context({
+    parseMultipart: () => [
+      { name: 'file', filename: 'report.pdf', contentType: 'application/pdf', data: Buffer.from('valid pdf payload with enough content') },
+      ...multipartWith({ ingestMode: 'both', force: 'true' }),
+    ],
+    knowledgeUploadService: { admit: async (input) => {
+      admitted = input;
+      return { ok: true, job: {
+        id: '33333333-3333-4333-8333-333333333333', status: 'queued', stage: 'queued', progress: 0,
+        ingestMode: 'both', storageMode: 'hybrid', memoryIds: [], createdAt: new Date(), updatedAt: new Date(),
+      } };
+    } },
+  }));
+  assert.equal(result.statusCode, 202);
+  assert.equal(admitted.force, true);
+});

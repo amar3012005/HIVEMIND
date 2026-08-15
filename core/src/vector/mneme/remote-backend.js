@@ -10,7 +10,13 @@ const FAILURE_COOLDOWN_MS = Number(process.env.MNEME_REMOTE_FAILURE_COOLDOWN_MS 
 // Interactive recall is deliberately bounded below the Memory Box's saturation
 // point. Its internal lanes already fan out; a small FIFO queue is faster and
 // more reliable than letting one turn consume every remote socket.
-const MAX_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG || 2));
+// One hybrid recall deliberately overlaps memory semantic + lexical with
+// evidence semantic + lexical. A default of two serialized those four owned
+// lanes behind the queue (observed ~550-680ms in the nominal lexical stage),
+// even after duplicate semantic searches were removed. Four admits exactly
+// that interactive fan-out; bounded excess still queues and maintenance stays
+// isolated on its separate one-slot transport class.
+const MAX_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG || 4));
 const MAX_MAINTENANCE_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_MAINTENANCE_INFLIGHT_PER_ORG || 1));
 const MAX_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_QUEUED_PER_ORG || 32));
 const _failureCircuitUntil = new Map();

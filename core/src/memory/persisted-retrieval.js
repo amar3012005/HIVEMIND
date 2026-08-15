@@ -1611,6 +1611,10 @@ async function _recallPersistedMemoriesImpl(store, {
     user_id, org_id, project, tags: _effectiveTags, is_latest: effectiveIsLatest,
     n_results: candidatePoolSize, created_after: effectiveDateRange?.start,
     created_before: effectiveDateRange?.end, valid_at, known_at, access_context,
+    // This function already starts the semantic vector lane above. Remote
+    // stores historically repeated vector retrieval inside searchMemories(),
+    // turning the nominal lexical lane into a second hybrid search.
+    lexical_only: true,
   };
   const lexicalQueries = [...new Set([query_context, alternate_lexical_query]
     .filter((value) => typeof value === 'string' && value.trim())

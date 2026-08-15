@@ -232,6 +232,26 @@ export function cadenceIdempotencyKey(runtimeId, dueAt) {
   return `daily_cadence:${runtimeId}:${dueAt.toISOString().slice(0, 10)}`;
 }
 
+// Journal-recall (2026-08-15): context.growth.journal is already fetched by
+// buildHqContext (last 12 growth_journal rows) and already reaches the FE
+// dashboard — but until now nothing fed it back into the one place that
+// actually makes strategic decisions. Recon confirmed planner.js never
+// queries growthJournal/hqCycle/hqRuntimeEvent itself, so every growth plan
+// was built from scratch with no memory of what was already decided or why.
+// additionalEvidence is an existing, already-wired pass-through (merges
+// straight into the LLM's prompt context, no schema/validation change) —
+// this projection feeds through that channel rather than adding a new one.
+// Already capped at 12 by buildHqContext; projected to a compact shape so
+// raw artifact/goal UUIDs don't bloat the prompt for no benefit.
+export function projectRecentDecisions(journal = []) {
+  return (Array.isArray(journal) ? journal : []).map((entry) => ({
+    event_type: entry?.eventType || entry?.event_type || null,
+    summary: entry?.summary || null,
+    decision: entry?.decision || null,
+    created_at: entry?.createdAt || entry?.created_at || null,
+  }));
+}
+
 // Phase 4 of the recurring-operating-cycle build (2026-08-15): the
 // operating_cycle_brief. Populated ONLY from persisted state (hq_todos,
 // hq_runtime_events) — never from the model's own recollection of what it
@@ -1516,12 +1536,18 @@ export class NativeHqEngine {
           terminal_states: entry.terminal_states,
           input_contract: entry.input_contract || null,
         })) || [];
+      // Journal-recall (2026-08-15): see projectRecentDecisions above — the
+      // growth-plan LLM previously never saw its own decision history.
+      const recentDecisions = projectRecentDecisions(context.growth?.journal);
       let result;
       try {
         result = await this.toolkits.invoke('growth_plan', 'run', {
           mode: growthPlanMode, objective: [runtime.objective, ...planningRequirements].filter(Boolean).join('\n\nOperating requirement:\n'), hqCycleId: cycle.id,
           model: selectedModel, lifecycleCatalog,
-          additionalEvidence: currentStatus ? { user_current_status: { artifact_id: currentStatus.artifactId, data: currentStatus.data || {}, source_refs: currentStatus.sourceRefs || [] } } : null,
+          additionalEvidence: (currentStatus || recentDecisions.length) ? {
+            ...(currentStatus ? { user_current_status: { artifact_id: currentStatus.artifactId, data: currentStatus.data || {}, source_refs: currentStatus.sourceRefs || [] } } : {}),
+            ...(recentDecisions.length ? { recent_decisions: recentDecisions } : {}),
+          } : null,
           onProgress: async ({ stage, detail }) => event(prisma, runtime, cycle, {
             eventType: 'observation',
             title: stage === 'context' ? 'I loaded the evidence for this decision' : stage === 'planning' ? 'I am comparing the company as a whole' : stage === 'governance' ? 'I am checking whether this plan can actually operate' : 'I am committing the chosen next move',

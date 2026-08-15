@@ -373,8 +373,8 @@ export async function researchCompanyWebsite(websiteUrl, {
   pollDelays = Array(10).fill(2000),
 } = {}) {
   if (!apiKey) return { provider: 'fallback', pages: [], mapped: 0, error: 'not_configured' };
+  const limit = Math.min(6, Math.max(3, Number(maxPages) || 5));
   try {
-    const limit = Math.min(6, Math.max(3, Number(maxPages) || 5));
     onProgress(includeCrawl ? `Crawling up to ${limit} first-party pages with Firecrawl` : 'Reading the official homepage with Firecrawl');
     const homepagePromise = firecrawlRequest('/scrape', {
       url: websiteUrl,
@@ -486,6 +486,39 @@ export async function researchCompanyWebsite(websiteUrl, {
       error: null,
     };
   } catch (error) {
+    // Firecrawl failing does not mean the site is unreachable — verified live
+    // 2026-08-10: singulancelabs.com renders 23 pages with full content via
+    // hm-playwright in seconds when Firecrawl returned nothing usable. A real
+    // browser render is a genuinely different path (its own fetch, its own
+    // rendering), not a retry of the same failure — worth attempting before
+    // recording the whole website as unobserved.
+    try {
+      const runtime = new PlaywrightServiceRuntime({ timeoutMs: 30_000, settleMs: 700 });
+      const rendered = await runtime.crawl({ urls: [websiteUrl], depth: includeCrawl ? 1 : 0, pageLimit: limit, captureScreenshot: false });
+      const pages = (rendered.pages || [])
+        .filter((page) => page?.content && isFirstPartyUrl(page.url, websiteUrl))
+        .map((page) => ({
+          url: page.url,
+          title: cleanString(page.title, 300),
+          description: cleanString(page.seo?.description, 500),
+          content: compactText(page.content, 9000),
+          links: Array.isArray(page.links) ? page.links.slice(0, 300).map((l) => l.href || l) : [],
+          purpose: 'company',
+          provider: 'playwright-service',
+        }));
+      if (pages.length) {
+        onProgress(`Firecrawl failed (${error.message}); rendered ${pages.length} first-party page(s) with a real browser instead`);
+        return {
+          provider: 'playwright-service', pages, mapped: pages.length,
+          social_profiles: verifiedSocialProfiles(pages),
+          contacts: extractCompanyContacts(pages),
+          screenshot: null, credits_used: 0,
+          error: null, firecrawl_error: error.message,
+        };
+      }
+    } catch (fallbackError) {
+      return { provider: 'fallback', pages: [], mapped: 0, error: `${error.message}; playwright fallback: ${fallbackError.message}` };
+    }
     return { provider: 'fallback', pages: [], mapped: 0, error: error.message };
   }
 }

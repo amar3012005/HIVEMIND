@@ -41,6 +41,11 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
     }
     const admitted = await knowledgeUploadService.admit({
       userId, orgId, file, targetScope, projectIds, primaryTeamId,
+      // `force` is an explicit request to reprocess an already-known source
+      // (for example evidence-only -> both). It must reach the durable job
+      // state machine; otherwise the client receives a misleading "existing"
+      // result and no promotion can ever run.
+      force: field(parts, 'force').toLowerCase() === 'true',
       metadata: {
         tags, ingest_mode: ingestMode.value,
         smart: field(parts, 'smart').toLowerCase() === 'true',

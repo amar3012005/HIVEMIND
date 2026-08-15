@@ -12,7 +12,7 @@ export class KnowledgeUploadService {
     this.storageReady = storageReady;
   }
 
-  async admit({ userId, orgId, file, targetScope, projectIds, primaryTeamId, metadata }) {
+  async admit({ userId, orgId, file, targetScope, projectIds, primaryTeamId, metadata, force = false }) {
     const filename = safeUploadFilename(file.filename);
     const validation = validateKnowledgeFile({
       filename, contentType: file.contentType, bytes: file.data?.length, buffer: file.data,
@@ -88,7 +88,7 @@ export class KnowledgeUploadService {
         _readyDocLives = true;
       }
     }
-    if (job?.status === 'ready' && _readyDocLives) return { ok: false, status: 409, body: {
+    if (job?.status === 'ready' && _readyDocLives && !force) return { ok: false, status: 409, body: {
       error: 'duplicate_document',
       duplicate: true,
       message: 'Already in your knowledge base — this exact file was ingested before.',
@@ -109,7 +109,7 @@ export class KnowledgeUploadService {
     // `_reingestDeleted` must bypass this guard too: 'ready' is not terminal, so
     // without it a ready-but-deleted job returns existing:true here and the
     // re-ingest never happens — the branch above would be dead code.
-    if (job && !_reingestDeleted && !['failed', 'dead', 'cancelled'].includes(job.status)) {
+    if (job && !force && !_reingestDeleted && !['failed', 'dead', 'cancelled'].includes(job.status)) {
       return { ok: true, existing: true, job };
     }
 
@@ -117,9 +117,23 @@ export class KnowledgeUploadService {
     // A ready-but-deleted job is reset exactly like a failed one, so both paths
     // share one state machine (see /api/knowledge/jobs/retry).
     if (job) {
+      // Reprocessing preserves the canonical document identity. Central stores
+      // reuse its idempotent document/segment rows; self-hosted stores receive
+      // the same document id and replace its derived rows before regeneration.
+      // This turns evidence-only uploads into `both` without duplicate docs.
+      const reprocessMetadata = {
+        ...(job.metadata && typeof job.metadata === 'object' ? job.metadata : {}),
+        ...metadata,
+        project_ids: projectIds,
+        primary_team_id: primaryTeamId,
+        force_reprocess: !!force,
+        ...(force && job.documentId ? { reprocess_document_id: job.documentId } : {}),
+      };
       await this.jobStore.updateOwned(job.id, orgId, {
         status: 'queued', stage: 'queued', progress: 0, processingVersion,
         attempt: 0, errorCode: null, errorMessage: null, completedAt: null,
+        ingestMode,
+        metadata: reprocessMetadata,
       });
       job = await this.jobStore.findOwned(job.id, { orgId, userId });
     } else {
@@ -139,6 +153,8 @@ export class KnowledgeUploadService {
       metadata: {
         ...metadata, media_kind: validation.kind, scope_type: scope.scopeType,
         scope_id: scope.scopeId, project_ids: projectIds, primary_team_id: primaryTeamId,
+        force_reprocess: !!force,
+        ...(force && job.documentId ? { reprocess_document_id: job.documentId } : {}),
       },
     });
     if (queued.backpressure) {

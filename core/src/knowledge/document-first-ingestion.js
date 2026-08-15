@@ -15,7 +15,7 @@ import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
-import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete } from '../vector/mneme/driver.js';
 import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
@@ -2565,6 +2565,7 @@ Every item must include a non-empty content field and one or more valid support_
     if (!orgIsRemote(opts?.orgId)) assertKbAllowedForOrg(opts?.orgId);
     const { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
     const ingestMode = metadata.ingest_mode === 'evidence' ? 'evidence' : 'both';
+    const forceReprocess = metadata.force_reprocess === true;
     const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
     // TRUE unit count, read straight from the container (slides / sheets / PDF
@@ -2711,7 +2712,7 @@ Every item must include a non-empty content field and one or more valid support_
     // windows, no consolidation, no entity linking). Re-uploading the same file used to re-run the
     // FULL pipeline (observed: same PDF uploaded twice → 2×675s + 2× the LLM spend).
     // Disable with KB_SKIP_UNCHANGED=0.
-    if (String(process.env.KB_SKIP_UNCHANGED ?? '1') !== '0') {
+    if (!forceReprocess && String(process.env.KB_SKIP_UNCHANGED ?? '1') !== '0') {
       try {
         if (!orgIsRemote(orgId)) {
           // Central orgs: exact scoped-sourceId match on the central KB tables.
@@ -2766,8 +2767,21 @@ Every item must include a non-empty content field and one or more valid support_
     // Step 3: Create knowledge document — route to agent for remote orgs.
     let knowledgeDoc;
     if (orgIsRemote(orgId)) {
-      // Pre-generate a stable doc id so segments can reference it on both sides.
-      const docId = crypto.randomUUID();
+      // A forced reprocess retains document identity. The remote agent has no
+      // in-place segment reconciliation API, so atomically clear its old
+      // derived rows first; otherwise re-chunking would leave duplicate
+      // evidence/vector points beside the new `both` projection.
+      const docId = forceReprocess && metadata.reprocess_document_id
+        ? metadata.reprocess_document_id
+        : crypto.randomUUID();
+      if (forceReprocess && metadata.reprocess_document_id) {
+        const removed = await amrKbDocDelete(orgId, { documentId: docId });
+        if (!removed?.ok) {
+          const err = new Error(`Remote document reprocess cleanup failed for ${docId}: ${removed?.error || 'agent unavailable'}`);
+          err.code = 'KB_REPROCESS_CLEANUP_FAILED';
+          throw err;
+        }
+      }
       const docPayload = {
         id: docId,
         userId,

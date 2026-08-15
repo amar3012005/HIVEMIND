@@ -174,3 +174,14 @@
 - **Tests:** Linux production-runtime checks passed: 4/4 projector tests, 4/4 toolkit validation/security tests, initial-recall contract, and progressive semantic-fallback contract. Local macOS aggregate remains blocked by the existing missing `singulance-amr` darwin-arm64 binary.
 - **Live acceptance:** tenant-scoped `/api/chat` answered the same buried rank-1 memory detail in English and German as `G ROCHER`, and a separate Spanish small-detail query as dark brown; all were grounded and cited memory `b021510a-c979-47c7-8621-7e3991c9154f`. Projector-timeout runs still answered correctly. Observed prompt tokens: 6,476-7,102; global fallback stays bounded rather than silently removing rank-1 detail.
 - **Deployment proof:** canonical release gate passed; `hm-core` healthy on revision `d9f497b9`; manifest `/root/releases/d9f497b/RELEASE_MANIFEST.20260808T115026Z.json`.
+
+## prod-20260815-fac0a34a2e4b — interactive recall isolation and pass telemetry
+- **Date:** 2026-08-15
+- **Parent:** `singulance-main` at `fac0a34a2e4bd81c9c72784ba86577bdbbe92232`; frontend unchanged (`4d3dcabb2da8a66560171240db5c5fc9a3ccbdb4`).
+- **Behavior:** native interactive recall uses a bounded FIFO transport class (default 2 concurrent requests per org), coalesces identical in-flight Memory Box recalls, and keeps vector reconciliation/repair on a separate one-concurrent maintenance circuit. A maintenance timeout can no longer open the interactive chat circuit.
+- **Ranking and progression:** one mixed memory/evidence rerank remains authoritative. Chat traces report `retrieval_passes`, `rerank_passes`, `rerank_ms`, `synthesis_passes`, and progressive expansion count. Ranks 6–15 are revealed only after a grounded cited claim marks the first page relevant but incomplete; no retrieval or rerank occurs during expansion.
+- **Safety:** Composio, approval, draft, and connector execution paths were unchanged. No migrations or external provider writes.
+- **Tests:** remote vector recovery 9/9; progressive/chat architecture 11/11; rerank/evidence-contract 6/6. The production Docker build gate initially caught an unbound telemetry accumulator; it was fixed in `b94e6646` and the corrected clean build passed before promotion.
+- **Image:** `hivemind/core-api:prod-20260815-fac0a34a2e4b`, digest `sha256:1c4a7889ffaac94e525d17615cad5c4af66aaf5ceb2237b4a24deb9248d1c01a`; `hm-core` healthy.
+- **Acceptance:** public homepage, HIVE-MIND app, API health, and Core health returned 200. Authenticated native chat: one retrieval, one rerank (397 ms), one synthesis, no transport failure. Authenticated `use_tools:true` native recall: one retrieval, one rerank (324 ms), no draft or external execution.
+- **Rollback:** `hivemind/core-api:rollback-20260815-083924` → `sha256:37ea868921623210bfcef0d8280d5cddc0c6f74d5b485330c9694c09830819f3`.

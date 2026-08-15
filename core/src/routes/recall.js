@@ -229,7 +229,14 @@ export async function handleRecallRoute(ctx = {}) {
       if (!query || typeof query !== 'string') {
         return jsonResponse(res, { error: 'query_context is required' }, 400);
       }
-      const remainingMs = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - _recallT0));
+      // RecallRouter owns the retrieval budget and deliberately permits one
+      // bounded rerank reserve after its retrieval lanes finish. The HTTP
+      // wrapper used the smaller retrieval budget as a hard outer deadline,
+      // aborting a completed top-15 at ~1.5s and replacing it with an empty
+      // timeout packet. Keep the wrapper strictly outside the router's own
+      // ceiling so it can return either its ranked result or explicit fallback.
+      const routeReserveMs = Number(process.env.RECALL_ROUTE_COMPLETION_RESERVE_MS || 900);
+      const remainingMs = () => Math.max(1, recallPlan.latency_budget_ms + routeReserveMs - (Date.now() - _recallT0));
       const timeoutResult = { memories: [], evidence: [], live: [], trace: { timeout: true } };
       let bounded;
       try {
@@ -325,7 +332,7 @@ export async function handleRecallRoute(ctx = {}) {
         memories: _boundedScoped.memories,
         evidence: bounded.evidence || [],
         live: bounded.live || [],
-        mode_used: effectivePlan.requested_mode === 'quick' ? 'quick' : effectivePlan.mode,
+        mode_used: String(body.mode || '').toLowerCase() === 'quick' ? 'quick' : effectivePlan.mode,
         search_method: 'hybrid',
         recall_plan: effectivePlan,
         evidence_packet: packet,

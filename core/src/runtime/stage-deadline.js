@@ -1,6 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { setMaxListeners } from 'node:events';
 
 const stageContext = new AsyncLocalStorage();
+const configuredStageListeners = Number(process.env.STAGE_SIGNAL_MAX_LISTENERS || 32);
+const STAGE_SIGNAL_MAX_LISTENERS = Number.isFinite(configuredStageListeners)
+  ? Math.max(16, Math.floor(configuredStageListeners))
+  : 32;
 
 export class StageDeadlineError extends Error {
   constructor(label = 'stage', deadlineAt = null) {
@@ -70,6 +75,11 @@ export async function runWithStageDeadline(task, {
     : null;
   const effectiveDeadline = earliestDeadline(deadlineAt, timeoutDeadline, parent?.deadlineAt);
   const controller = new AbortController();
+  // A recall stage deliberately fans one deadline into several bounded lanes
+  // (vector, lexical, graph, evidence and connector reads). Keep a finite
+  // per-stage ceiling high enough for that designed fan-out; this is scoped to
+  // the owned signal and still warns if an actual runaway exceeds the ceiling.
+  setMaxListeners(STAGE_SIGNAL_MAX_LISTENERS, controller.signal);
   let timer = null;
   let parentAbort = null;
   let deadlineFired = false;

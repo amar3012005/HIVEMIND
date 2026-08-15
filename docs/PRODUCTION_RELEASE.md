@@ -470,6 +470,15 @@ confirmed.
 - Rollback: Core `hivemind/core-api:rollback-20260814-200511` / `prod-20260814-f6b9d130c1f7`; agent `hivemind/hm-agent:rollback-20260815-pre-dc67f659`. Known limitation: the successful old job deleted its temporary source file, and no retained source/blob path exists in document metadata. The already-discarded first page cannot be reconstructed honestly; the user must re-upload the original PDF once. Future uploads take the corrected path.
 - External side effects: none. Acceptance used read-only recall/chat and parser probes; no connector/provider action or new user memory was created.
 
+## prod-20260815-95abdf565936 — Memories visible scope and AMR reprocessing correctness
+
+- Parent SHA: `95abdf56593665fc32e0534247ec296a7dc99587` (PRs #226–#228) on `singulance-main`; frontend SHA: `4d3dcabb2da8a66560171240db5c5fc9a3ccbdb4`. Migration: none.
+- Fixes: the Memories "All" view no longer inherits the TeamSwitcher project id, so personal uploads remain visible; the parent duplicate list request was removed. `force=true` now reaches the durable upload state machine and can convert an evidence-only job to `both` without duplicate remote evidence. Remote ready jobs are no longer checked against central Prisma and therefore return a real duplicate unless force was explicitly chosen.
+- Tests: frontend visible-scope behavior test 3/3 and production build passed; Core knowledge upload route/service tests 13/13 passed.
+- Acceptance: authenticated managed-memory request for user `d64537f0…` returned 24 rows of 233 total in the exact All-memory request shape. AMR evidence-only upload completed with one segment and zero memories; forced `both` completed with one segment and six memories. Exact evidence chat returned the persisted marker and review checkpoint; normal re-upload returned `409 duplicate_document`.
+- Runtime: Core `hivemind/core-api:sha-95abdf56`, Control `hivemind/control-plane:sha-95abdf56`, Employees `hivemind/employees:sha-95abdf56`, and frontend `hivemind/fe:sha-95abdf56`; Core/Control/Employees healthy and frontend running. Rollback image set: `sha-69214368` recorded in `/root/releases/manifests/95abdf56/`.
+- External side effects: test uploads were made only to the supplied AMR test tenant; no connector or external-provider write occurred.
+
 ## prod-20260814-4777183fe335 — single-authority hybrid rerank and provider keep-warm
 
 - Canonical Core SHAs: `cee9687a1654a7fcf69bd535be0313ba608a72bf` (PR #216) and `4777183fe335c37e5e8795dac5c6526ad8b37a97` (PR #217) on `singulance-main`. Frontend unchanged. Migration: none.

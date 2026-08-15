@@ -193,3 +193,15 @@
 - **Scope:** frontend only; no Core, recall, model, connector, approval, or data-path behavior changed.
 - **Build and acceptance:** clean production Docker build completed; `hivemind-next-frontend-1` runs `hivemind/fe:prod-20260815-895d336ed311-single`, public homepage, HIVE-MIND app, API health, and Core health returned 200.
 - **Rollback:** `hivemind/fe:rollback-20260815-090747-single` retained.
+
+## prod-20260815-cd806b6f — production error recovery and tenant-safe PageIndex
+- **Date:** 2026-08-15
+- **Parent:** `singulance-main` at `cd806b6fd80f4085234df221e7935f3c28d78894`; frontend unchanged and running `hivemind/fe:prod-20260815-5c9cc1359b1a-single`.
+- **Memory Box isolation:** scheduled vector maintenance quarantine is persisted in the remote-agent registry and survives Core restarts. The stale box remains registered for interactive/recovery use but is excluded from scheduled maintenance until its quarantine expires; the active tenant remains scheduled.
+- **Connector recovery:** Core reaches Nango over `http://nango:8080`. Permanent legacy Gmail credential failures now disable only the affected watcher rows with `credentials_invalid_reconnect_required`; transient watcher failures remain active and observable. Live reconciliation disabled the two stale rows once and the next pass checked zero rows with zero failures.
+- **PageIndex correctness:** removed the erroneous global `PageIndexNode.path` unique index while retaining `(user_id, path)` uniqueness, and changed root/child creation to tenant-scoped atomic upserts. This fixes the repeated `PageIndexNode_path_key` errors and permits every user to own the canonical `/hivemind` root.
+- **Migration:** PostgreSQL backup `/root/backups/hivemind-before-pageindex-20260815T110541Z.dump` (117 MB, SHA-256 `f357e64aae7b3b4f74c8520de5b26bb0447529c295b35373d4aec055c91399fd`). Production was never Prisma-baselined and correctly rejected `migrate deploy` with P3005, so the reviewed migration SQL was applied transactionally: drop only `hivemind."PageIndexNode_path_key"`. The tenant composite index remains. Two real users then created/resolved distinct `/hivemind` roots successfully.
+- **Tests:** 15/15 focused PageIndex, Nango routing, Gmail reconciliation, and remote vector recovery tests; production image build gate 21/21. Prisma schema valid and `git diff --check` clean.
+- **Image:** `hivemind/core-api:prod-20260815-cd806b6f`, digest `sha256:bdb15ed0e27569c3bb2a46d849e3254f1429b5383834ba9b6fa5e9f2d58acb60`; `hm-core` healthy with zero restarts.
+- **Acceptance:** authenticated Solvis chat returned a grounded 0.92-confidence answer with one retrieval, one unified rerank, top-five evidence, one synthesis pass, and no expansion. Four public gates returned 200. A fresh scan of every running container found no fatal, panic, uncaught, OOM, migration, duplicate-key, bulkhead, circuit, timeout, or application error after promotion.
+- **Rollback:** `hivemind/core-api:rollback-20260815-pageindex` points to the prior accepted Core image; the verified PostgreSQL backup is retained.

@@ -1,10 +1,11 @@
-export function shouldOptimizeRecallQuery({ router, canonicalQuery } = {}) {
-  // Every retrieval-bearing chat turn gets one compact semantic rewrite.
-  // Router output remains a useful seed, but it is not assumed to be the best
-  // retrieval representation across languages, shorthand, or follow-ups.
-  // The caller invokes this only on recall lanes, so greetings/direct answers
-  // still pay no optimizer cost.
-  return true;
+export function shouldOptimizeRecallQuery({ canonicalQuery, useTools = false } = {}) {
+  // Native chat planning already returns an intent-preserving canonical
+  // retrieval query in the same structured call. Rewriting it again before
+  // recall paid for a second LLM call (~1.2-1.7s) and could erase exact names.
+  // Keep the optimizer only as a compatibility path for missing planner output
+  // or tool-enabled turns; zero-coverage recovery remains independently bounded.
+  if (useTools === true) return true;
+  return !String(canonicalQuery || '').trim();
 }
 
 export function shouldRunRecallOptimizer({ operation } = {}) {

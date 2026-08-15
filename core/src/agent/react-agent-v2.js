@@ -3410,7 +3410,11 @@ export async function runReactAgentV2({
     const _dedicatedLane = !shouldRunRecallOptimizer(plan);
     let queryOptimizerRan = false;
     if (!_dedicatedLane
-        && shouldOptimizeRecallQuery({ router: intentDecision._router, canonicalQuery: plan.query_canonical_en })) {
+        && shouldOptimizeRecallQuery({
+          router: intentDecision._router,
+          canonicalQuery: plan.query_canonical_en,
+          useTools,
+        })) {
       const optimizerStartedAt = Date.now();
       try {
         const optimizedResult = await optimizeRecallQueries({

@@ -1630,20 +1630,28 @@ export class NativeHqEngine {
     const metrics = [...new Set([...(measurement.primary_metrics || []), ...(measurement.metrics || []), ...Object.keys(measurement.thresholds || {})])].slice(0, 6);
     const waitingDays = dueAt ? Math.max(1, Math.ceil((dueAt.getTime() - Date.now()) / DAY)) : null;
     const openCapability = capabilityState.requests[0];
-    // Root-caused live (2026-08-15, orgs DIOR and Brdteengal): the sole
-    // promoted first-life task parks WAITING_FOR_CONNECTOR on a missing
-    // capability — a wait on a HUMAN that can take days — while other
-    // evidenced, genuinely independent proposals (a prospect list, a
-    // research question) sat PROPOSED forever, because nothing ever
-    // re-triggered promotion. capability_wait_release does that: only when
-    // nothing else is already READY, try once per cycle to promote the next
-    // eligible dormant proposal. Idempotent and cheap — once promoted, a
-    // todo leaves PROPOSED and stops being a candidate, so repeat cycles
-    // (even the now-suppressed noisy connector_changed repeats) just no-op.
-    if (openCapability && !finalReadyTodo) {
+    // Root-caused live (2026-08-15, orgs DIOR/Brdteengal, then Singulance
+    // itself): the sole promoted first-life task goes capacity-frozen —
+    // WAITING_FOR_CONNECTOR on a missing capability, or MONITORING while a
+    // Room watches for provider replies — and nothing ever re-triggered
+    // promotion of the other evidenced, genuinely independent proposals (a
+    // prospect list, a research question, a TARA call sequence). Originally
+    // scoped to just the connector-wait case (openCapability); broadened
+    // after finding the SAME gap for MONITORING: the existing
+    // verified_monitoring_checkpoint path only attempts promotion when the
+    // playbook stage itself declares waitingFor.releases_execution_slot —
+    // the outreach playbook's observe_responses stage doesn't, so it never
+    // even tried. This now fires whenever nothing is READY at all,
+    // regardless of WHY the active task is frozen or whether its playbook
+    // opted in. Idempotent and cheap — once promoted, a todo leaves PROPOSED
+    // and stops being a candidate, so repeat cycles just no-op.
+    if (!finalReadyTodo) {
       const capabilityRelease = await activateEligibleFirstLifeWork({
         prisma, runtime, expansionTrigger: 'capability_wait_release',
-      }).catch(() => ({ promoted: [] }));
+      }).catch((releaseError) => {
+        this.logger?.warn?.('[hq-runtime] capability_wait_release check failed (non-fatal):', releaseError?.message || releaseError);
+        return { promoted: [] };
+      });
       for (const promoted of capabilityRelease.promoted) await event(prisma, runtime, cycle, {
         eventType: 'todo_created',
         title: `Promoted while waiting: ${promoted.title}`,

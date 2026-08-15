@@ -47,6 +47,10 @@ export function _salvageArrayObjects(text = '') {
   return out;
 }
 
+export function shouldSalvageTruncatedJson(finishReason) {
+  return finishReason === 'length';
+}
+
 // Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
 // LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
 // Routing logic:
@@ -110,6 +114,10 @@ function pickRoute(model) {
   return { base: LITELLM_BASE_URL, key: LITELLM_API_KEY, provider: 'litellm' };
 }
 const TIMEOUT_MS = 60_000;
+// Learned provider capability, scoped to this process. If a provider says a
+// model requires reasoning, do not pay for the same guaranteed 400 on every
+// extraction window. This remains provider-driven rather than a model allowlist.
+const reasoningDisableRejected = new Set();
 
 /**
  * Send a chat completion request to the LiteLLM proxy.
@@ -186,7 +194,9 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   // tokens on deepseek and qwen respectively. Only `enabled: false` zeroes it.
   // Providers that MANDATE reasoning reject the field (gpt-oss-120b on google-vertex returns
   // HTTP 400 "Reasoning is mandatory for this endpoint"), so this is opt-out via env.
-  if (route.provider === 'openrouter' && process.env.LLM_DISABLE_REASONING !== 'false') {
+  if (route.provider === 'openrouter'
+      && process.env.LLM_DISABLE_REASONING !== 'false'
+      && !reasoningDisableRejected.has(model)) {
     body.reasoning = { enabled: false };
   }
 
@@ -226,6 +236,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
     // Retry ONCE without the field rather than maintaining a hardcoded allow-list of models that
     // support it: the provider tells us, and that answer stays correct as providers change.
     if (res.status === 400 && body.reasoning && /reasoning/i.test(text)) {
+      reasoningDisableRejected.add(model);
       console.warn(`[enterprise-extract] ${model} rejects reasoning:{enabled:false} — retrying without it`);
       const { reasoning: _dropped, ...bodyNoReasoning } = body;
       const ctrl2 = new AbortController();
@@ -280,7 +291,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
       try { return JSON.parse(s); } catch { return null; }
     };
     let parsed = tryParse(content);
-    if (parsed === null) {
+    if (parsed === null && shouldSalvageTruncatedJson(json.choices?.[0]?.finish_reason)) {
       // Strip ```json ... ``` fences if present
       const fenced = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
       parsed = tryParse(fenced);
@@ -301,7 +312,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
         // Rebuild the shape the caller expects: {"facts":[…]} if the payload
         // was a facts array, else the bare array.
         parsed = /"facts"\s*:/.test(content) ? { facts: salvaged } : salvaged;
-        console.warn(`[enterprise-extract] truncation-salvaged ${salvaged.length} objects (finish=${json.choices?.[0]?.finish_reason || 'unknown'})`);
+        console.warn(`[enterprise-extract] truncation-salvaged ${salvaged.length} objects (finish=length)`);
       }
     }
     if (parsed !== null) return parsed;

@@ -57,7 +57,7 @@ test('remote read transport circuit bounds repeated recall timeouts', async (t) 
   assert.equal(requests, 1);
 });
 
-test('the per-tenant read bulkhead rejects excess work without affecting healthy calls', async (t) => {
+test('the per-tenant read bulkhead queues bounded excess work instead of self-rejecting', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hm-remote-bulkhead-'));
   const registry = join(directory, 'agents.json');
   let requests = 0;
@@ -82,13 +82,9 @@ test('the per-tenant read bulkhead rejects excess work without affecting healthy
   const first = remoteRecall('org', [0.1], {}, 5, 0);
   const second = remoteRecall('org', [0.1], {}, 5, 0);
   await new Promise((resolve) => setTimeout(resolve, 10));
-  const rejectedAt = Date.now();
-  await assert.rejects(remoteRecall('org', [0.1], {}, 5, 0), (error) => (
-    error.code === 'REMOTE_MEMORY_UNAVAILABLE' && /bulkhead full/.test(error.message)
-  ));
-  assert.ok(Date.now() - rejectedAt < 30, 'excess work should fail immediately');
-  assert.deepEqual(await Promise.all([first, second]), [[], []]);
-  assert.equal(requests, 2);
+  const third = remoteRecall('org', [0.1], {}, 5, 0);
+  assert.deepEqual(await Promise.all([first, second, third]), [[], [], []]);
+  assert.equal(requests, 3);
 });
 
 test('an upstream stage deadline aborts remote IO without poisoning the transport circuit', async (t) => {

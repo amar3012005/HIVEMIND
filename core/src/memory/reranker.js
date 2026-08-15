@@ -198,6 +198,7 @@ export async function rerank(query, candidates, { topN } = {}) {
   // serving the request is logged, so a silently-degraded primary cannot hide behind a
   // working chain — "it worked" and "it worked on the third choice" are different facts.
   let lastErr = null;
+  const attemptedModels = [];
   for (let mi = 0; mi < MODEL_CHAIN.length; mi += 1) {
     const model = MODEL_CHAIN[mi];
     let failed = false;
@@ -214,6 +215,7 @@ export async function rerank(query, candidates, { topN } = {}) {
         break;
       }
       totalAttempts += 1;
+      if (!attemptedModels.includes(model)) attemptedModels.push(model);
       try {
         const out = await attempt(model, attemptBudget);
         if (mi > 0) {
@@ -236,14 +238,17 @@ export async function rerank(query, candidates, { topN } = {}) {
         break;
       }
     }
-    if (failed && mi < MODEL_CHAIN.length - 1) {
+    if (failed && mi < MODEL_CHAIN.length - 1
+        && totalAttempts < MAX_ATTEMPTS_TOTAL
+        && Math.max(0, runDeadlineAt - Date.now()) > 0
+        && remainingStageMs(1) > 0) {
       console.warn(`[reranker] ${model} failed (${lastErr?.message}) — falling back to ${MODEL_CHAIN[mi + 1]}`);
     }
   }
   // Graceful degrade — keep algorithmic order (correctness preserved by the
   // upstream tiered reranker + stable tie-break; we just lose the cross-encoder).
-  console.warn(`[reranker] DEGRADED to algorithmic order — all ${MODEL_CHAIN.length} model(s) in the chain `
-    + `failed (${MODEL_CHAIN.join(' -> ')}); last error: ${lastErr?.message}. The cross-encoder is `
+  console.warn(`[reranker] DEGRADED to algorithmic order — attempted ${attemptedModels.length}/${MODEL_CHAIN.length} model(s) `
+    + `(${attemptedModels.join(' -> ') || 'none'}); last error: ${lastErr?.message}. The cross-encoder is `
     + `absent for this request, so lanes are interleaved rather than compared.`);
   return finish(candidates, { status: 'degraded', model: null, error: lastErr?.message || 'budget exhausted' });
 }

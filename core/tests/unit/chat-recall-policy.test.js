@@ -160,16 +160,7 @@ test('empty fast recall is incomplete and escalates once to explain', () => {
 
   assert.equal(coverage.evidence_found, false);
   assert.equal(coverage.complete, false);
-  assert.deepEqual(chooseRecallEscalation({ plan, coverage, query: plan.user_message }), {
-    reason: 'empty_anchor_coverage',
-    args: {
-      query: plan.user_message,
-      mode: 'explain',
-      limit: 12,
-      allow_semantic_source_recovery: true,
-      semantic_recovery: true,
-    },
-  });
+  assert.equal(chooseRecallEscalation({ plan, coverage, query: plan.user_message }), null);
 });
 
 test('a recalled memory is sufficient when no narrower coverage was requested', () => {

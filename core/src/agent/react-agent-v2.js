@@ -206,6 +206,32 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
   let meta = {};
   let pending = '';
   let started = false;
+  const consumeConcatenatedJson = (raw) => {
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < raw.length; index += 1) {
+      const char = raw[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') { inString = true; continue; }
+      if (char === '{') {
+        if (depth === 0) start = index;
+        depth += 1;
+      } else if (char === '}' && depth > 0) {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          consumeLine(raw.slice(start, index + 1));
+          start = -1;
+        }
+      }
+    }
+  };
   const consumeLine = (rawLine) => {
     const line = String(rawLine || '').trim().replace(/^```(?:json)?\s*|\s*```$/g, '');
     if (!line) return;
@@ -262,6 +288,12 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
     },
   });
   consumeLine(pending);
+  if (result.ok && streamedClaims.length === 0 && result.content) {
+    // Several Nitro providers emit valid NDJSON objects back-to-back without
+    // newline delimiters. Parse framing by balanced JSON objects; semantics and
+    // citation validation remain identical.
+    consumeConcatenatedJson(result.content);
+  }
   // Some OpenRouter GPT-OSS providers buffer a valid standard synthesis JSON
   // object even when asked for NDJSON. That is still safe to stream after the
   // response completes: validate every claim against the same RecallPackets,

@@ -744,6 +744,12 @@ async function hop1Memory({ store, query, options, ctx }) {
       laterAuthoritativeOrdering: true,
       requested: options.semantic_recovery === true ? true : null,
     }),
+    // RecallRouter builds its own evidence packet and never consumes the
+    // legacy injectionText. Avoid waiting for observation/profile assembly on
+    // this path. Fact/quick also has no graph hop, so relationship expansion
+    // cannot affect its candidate set or final unified cross-encoder order.
+    include_injection_context: false,
+    graph_expansion_depth: options.mode === 'fact' ? 0 : 2,
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride

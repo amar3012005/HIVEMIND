@@ -1329,6 +1329,7 @@ async function _recallPersistedMemoriesImpl(store, {
   canonical_entities = [],
   alternate_lexical_query = null,
   semantic_recovery = false,
+  include_injection_context = true,
 }) {
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
@@ -1507,7 +1508,9 @@ async function _recallPersistedMemoriesImpl(store, {
   // All are ADDITIVE / order-independent (folded into the same MAX-dedup merge)
   // and read-only, so output is unchanged — only the wall-clock collapses from
   // sum-of-lanes to max-of-lanes. Consumed at the Promise.all further down.
-  const _relationshipsPromise = store.listRelationships({ user_id, org_id, project, limit: 1000 });
+  const _relationshipsPromise = graph_expansion_depth > 0
+    ? store.listRelationships({ user_id, org_id, project, limit: 1000 })
+    : Promise.resolve([]);
   _relationshipsPromise.catch(() => {});
 
   const _temporalCandidatesPromise = (TEMPORAL_FILTER_MODE === 'should' && _temporalFilterTags.length)
@@ -1574,24 +1577,24 @@ async function _recallPersistedMemoriesImpl(store, {
   // DB scan, so on a large org it's a few hundred ms of dead serial time. Kick
   // it off here so it overlaps the entire recall pipeline; consumed right before
   // delivery. Identical output (same prefix), wall-clock only.
-  const _observationPrefixPromise = (async () => {
+  const _observationPrefixPromise = include_injection_context ? (async () => {
     try {
       if (!store) return { prefix: '', observationCount: 0 };
       const { CognitiveOperator } = await import('./operator-layer.js');
       return await new CognitiveOperator({ store }).assembleObservationPrefix(user_id, org_id, { project, maxTokens: 4000 });
     } catch { return { prefix: '', observationCount: 0 }; }
-  })();
+  })() : Promise.resolve({ prefix: '', observationCount: 0 });
   _observationPrefixPromise.catch(() => {});
 
   // User-profile injection (static facts) also depends only on (user, org) and
   // was awaited serially in the tail — hoist it to overlap the pipeline too.
-  const _userProfilePromise = (async () => {
+  const _userProfilePromise = include_injection_context ? (async () => {
     try {
       if (!store) return { profile: '' };
       const { UserProfile } = await import('./user-profile.js');
       return await new UserProfile(store).getProfile(user_id, org_id);
     } catch { return { profile: '' }; }
-  })();
+  })() : Promise.resolve({ profile: '' });
   _userProfilePromise.catch(() => {});
 
   const lexicalArgs = {

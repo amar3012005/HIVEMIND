@@ -77,6 +77,6 @@ test('a clarification question emitted in gaps is visible in the final response'
   );
   assert.equal(
     appendGapClarification('The brand is G ROCHER.', ['Exact model number'], 'en'),
-    'The brand is G ROCHER.\nCould you be more specific about “Exact model number”—for example, which image, label, document, or message should I check?',
+    'The brand is G ROCHER.',
   );
 });

@@ -120,6 +120,11 @@ const TURN_BUDGET_MS     = Number(process.env.HIVEMIND_AGENT_TURN_BUDGET_MS || 6
 // A slow answer is recoverable; a confident false negative is not, and the turn budget (60s) bounds
 // the worst case anyway. Tune down only with a measurement, not a guess.
 const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_MS || 12_000);
+// A remote synthesis provider must never consume the whole turn budget. The
+// independent fallback exists precisely so one queued route can be abandoned.
+// Keep this above measured normal fact synthesis (roughly 1-5s) while bounding
+// the observed 53s provider tail.
+const SYNTHESIS_ATTEMPT_TIMEOUT_MS = Number(process.env.HIVEMIND_SYNTHESIS_ATTEMPT_TIMEOUT_MS || 12_000);
 
 // Model split:
 //   • structured intent planning uses Gemini 2.5 Flash-Lite;
@@ -3551,6 +3556,10 @@ export async function runReactAgentV2({
         const candidateModel = attemptModels[index];
         try {
           synthesisPasses += 1;
+          const attemptSignal = AbortSignal.any([
+            input.signal,
+            AbortSignal.timeout(Math.max(1_000, SYNTHESIS_ATTEMPT_TIMEOUT_MS)),
+          ].filter(Boolean));
           // Only the primary gets the provider's validated streaming attempt.
           // After that contract fails, run each independent safety model once
           // in ordinary JSON mode and stream its validated sentence chunks from
@@ -3558,6 +3567,7 @@ export async function runReactAgentV2({
           // when its provider streams plain prose instead of NDJSON.
           const candidateAnswer = await answerStep({
             ...input,
+            signal: attemptSignal,
             model: candidateModel,
             ...(streamAnswer && index > 0 ? { streamValidated: false } : {}),
           });
@@ -3592,29 +3602,12 @@ export async function runReactAgentV2({
           }
         }
       }
-      if (streamAnswer) {
-        // Some OpenRouter models support transport streaming but do not obey
-        // the NDJSON claim contract. After every validated stream candidate
-        // fails closed, preserve availability and answer quality with one
-        // ordinary JSON synthesis on the final safety model. The caller then
-        // emits its validated sentence chunks over the existing SSE channel.
-        synthesisPasses += 1;
-        const fallbackAnswer = await answerStep({
-          ...input,
-          streamValidated: false,
-          model: FINAL_FALLBACK_MODEL,
-        });
-        trace.model_policy = {
-          ...modelPolicy,
-          fallback_reason: lastError?.message || 'validated_stream_exhausted',
-          fallback_model: FINAL_FALLBACK_MODEL,
-          fallback_transport: 'validated_json_then_sse',
-        };
-        trace.warnings.push('validated_stream_exhausted:used_json_synthesis_fallback');
-        answerModel = FINAL_FALLBACK_MODEL;
-        trace.models.synthesis = FINAL_FALLBACK_MODEL;
-        return fallbackAnswer;
-      }
+      // `attemptModels` already contains FINAL_FALLBACK_MODEL and each fallback
+      // is forced into ordinary JSON mode above. Retrying the same final model
+      // here paid for an identical third synthesis and allowed one queued
+      // provider to hold the turn for nearly a minute. Exhaustion is an honest,
+      // bounded failure; the SSE route emits its terminal error and the current
+      // frontend now renders it safely.
       throw lastError || new Error('all_synthesis_models_failed');
     };
     const answer = await synthesizeWithFallback(answerInput);

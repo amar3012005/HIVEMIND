@@ -185,3 +185,11 @@
 - **Image:** `hivemind/core-api:prod-20260815-fac0a34a2e4b`, digest `sha256:1c4a7889ffaac94e525d17615cad5c4af66aaf5ceb2237b4a24deb9248d1c01a`; `hm-core` healthy.
 - **Acceptance:** public homepage, HIVE-MIND app, API health, and Core health returned 200. Authenticated native chat: one retrieval, one rerank (397 ms), one synthesis, no transport failure. Authenticated `use_tools:true` native recall: one retrieval, one rerank (324 ms), no draft or external execution.
 - **Rollback:** `hivemind/core-api:rollback-20260815-083924` → `sha256:37ea868921623210bfcef0d8280d5cddc0c6f74d5b485330c9694c09830819f3`.
+
+## prod-20260815-895d336ed311 — terminal chat-stream error handling
+- **Date:** 2026-08-15
+- **Parent:** `singulance-main` at `895d336ed311ca95aecc8ad13f7e183fb6bcb65a`; frontend `72ce0b6d2df3c22bd486f946fbca1b12d92e0d8f`.
+- **Behavior:** desktop Overview and Talk-to-HIVE Mobile accept LF and CRLF SSE framing, treat Core's terminal `error` event as a terminal result, and show its actual message. A stream that closes before any terminal event now renders a clear retryable error instead of dereferencing `null.response`.
+- **Scope:** frontend only; no Core, recall, model, connector, approval, or data-path behavior changed.
+- **Build and acceptance:** clean production Docker build completed; `hivemind-next-frontend-1` runs `hivemind/fe:prod-20260815-895d336ed311-single`, public homepage, HIVE-MIND app, API health, and Core health returned 200.
+- **Rollback:** `hivemind/fe:rollback-20260815-090747-single` retained.

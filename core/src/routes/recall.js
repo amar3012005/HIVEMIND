@@ -258,6 +258,7 @@ export async function handleRecallRoute(ctx = {}) {
           // org's synthesis delivery window (commonly five).
           limit: normalizeRecallLimit(body.limit),
           include_superseded: recallPlan.operation === 'timeline' || body.include_superseded === true,
+          trace_stages: body.debug_timing === true,
         }, {
           userId,
           orgId,
@@ -340,6 +341,7 @@ export async function handleRecallRoute(ctx = {}) {
         project_scope_applied: _boundedScoped.project_scope_applied,
         latency_ms: routeLatencyMs,
         timing_ms: routeLatencyMs,
+        ...(body.debug_timing === true ? { stage_breakdown: bounded.trace?.stage_breakdown || null } : {}),
       });
     }
 

@@ -466,7 +466,7 @@ export class QdrantClient {
    * @param {number} options.score_threshold - Minimum similarity score
    * @returns {Promise<Array>} Search results
    */
-  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef, layer }) {
+  async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef, layer, timing }) {
     const _mnemeOrg = filterMatchValue(filter, 'org_id') || globalThis.__hivemindOrgCtx?.currentOrg?.() || null;
     const usesSovereignBackend = Boolean(_mnemeOrg && memoryBackend(_mnemeOrg) !== 'central');
     // A sovereign tenant's search must not depend on central Qdrant readiness.
@@ -519,7 +519,9 @@ export class QdrantClient {
     // Generate query embedding if not provided
     let searchVector = vector;
     if (!searchVector && query) {
+      const embeddingStartedAt = timing ? Date.now() : 0;
       searchVector = await this.generateEmbedding(query);
+      if (timing) timing.embedding_ms = (timing.embedding_ms || 0) + (Date.now() - embeddingStartedAt);
     }
 
     if (!searchVector) {
@@ -539,7 +541,9 @@ export class QdrantClient {
     // memoryBackend(org), then decides: non-'central' → serve from the agent/.amr via amrRecall.
     if (_mnemeOrg && memoryBackend(_mnemeOrg) !== 'central') {
       try {
+        const vectorStartedAt = timing ? Date.now() : 0;
         const _out = await amrRecall(_mnemeOrg, searchVector, filter, limit, effectiveScoreThreshold);
+        if (timing) timing.vector_search_ms = (timing.vector_search_ms || 0) + (Date.now() - vectorStartedAt);
         if (_out) {
         console.log('[mneme] recall backend=adapter org=' + _mnemeOrg + ' n=' + _out.length);
         return _out;
@@ -550,10 +554,12 @@ export class QdrantClient {
       }
     }
     if (mnemeOn(_mnemeOrg)) {
+      const vectorStartedAt = timing ? Date.now() : 0;
       const mres = await mnemeSearch(resolvedCollection, searchVector, limit, {
         isLatest: true,
         scoreThreshold: effectiveScoreThreshold
       });
+      if (timing) timing.vector_search_ms = (timing.vector_search_ms || 0) + (Date.now() - vectorStartedAt);
       if (mres) {
         console.log(`[mneme] recall backend=mneme org=${_mnemeOrg} coll=${resolvedCollection} n=${mres.length}`);
         return mres;
@@ -589,6 +595,7 @@ export class QdrantClient {
     }
 
     try {
+      const vectorStartedAt = timing ? Date.now() : 0;
       const response = await fetch(
         `${qbase()}/collections/${resolvedCollection}/points/search`,
         {
@@ -605,6 +612,7 @@ export class QdrantClient {
       }
 
       const result = await response.json();
+      if (timing) timing.vector_search_ms = (timing.vector_search_ms || 0) + (Date.now() - vectorStartedAt);
       return result.result || [];
     } catch (error) {
       if (currentStageSignal()?.aborted) {
@@ -632,7 +640,8 @@ export class QdrantClient {
       limit: filters.limit || 10,
       score_threshold: filters.score_threshold || 0.5,
       hnsw_ef: filters.hnsw_ef, // PHASE-F: thread per-org ef_search; inert when undefined (searchMemories → EF_SEARCH_DEFAULT). Dark-safe for all other hybridSearch callers.
-      collectionName: filters.collectionName
+      collectionName: filters.collectionName,
+      timing: filters.timing,
     });
   }
 

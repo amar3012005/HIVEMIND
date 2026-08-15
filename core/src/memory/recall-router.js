@@ -750,11 +750,16 @@ async function hop1Memory({ store, query, options, ctx }) {
     // cannot affect its candidate set or final unified cross-encoder order.
     include_injection_context: false,
     graph_expansion_depth: options.mode === 'fact' ? 0 : 2,
+    trace_stages: options.trace_stages === true,
+    timing: options.timing || null,
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
     ? { memories: [] }
     : await recallPersistedMemories(store, recallArgs);
+  if (options.timing && result?.timing_breakdown) {
+    options.timing.pipeline = result.timing_breakdown;
+  }
 
   // Tag-anchored recency override. When the query carries a recency cue
   // (last/latest/recent/today/…) AND we inferred a connector tag, FTS-
@@ -1464,6 +1469,7 @@ export class RecallRouter {
 
     const traceLatency = {};
     const startedAt = Date.now();
+    const stageTiming = options.trace_stages === true ? {} : null;
     let recallPlan = resolveRecallPlan(options);
     // Chat arrives with a structured planner that is responsible for declaring
     // a source read. Do not turn an entity-only question such as "Solvis" into
@@ -1487,6 +1493,7 @@ export class RecallRouter {
         [],
       ),
     ]);
+    if (stageTiming) stageTiming.entity_resolution_ms = Date.now() - startedAt;
     if (implicitSource) {
       recallPlan = resolveRecallPlan({
         ...options,
@@ -1604,6 +1611,7 @@ export class RecallRouter {
     // Source ingestion is immediately recallable. For explicit explain/full,
     // start the tenant-scoped evidence lane alongside memory recall instead of
     // waiting for asynchronous fact promotion to provide an anchor.
+    const evidenceStartedAt = Date.now();
     const sourceFirstEvidence = recallPlan.expand_evidence
       ? (explicitSourceRequested && explicitSourceDocuments.length === 0
         ? Promise.resolve({ items: [], reason: 'source-not-found', docIds: [] })
@@ -1621,11 +1629,21 @@ export class RecallRouter {
         { items: [], reason: 'timeout' },
       ))
       : null;
+    const measuredSourceFirstEvidence = sourceFirstEvidence && stageTiming
+      ? sourceFirstEvidence.then((value) => {
+          stageTiming.evidence_lane_ms = Date.now() - evidenceStartedAt;
+          return value;
+        })
+      : sourceFirstEvidence;
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
     let memories = await withTimeout(
-      hop1Memory({ store: this.store, query, options, ctx }),
+      hop1Memory({ store: this.store, query, options: {
+        ...options,
+        trace_stages: options.trace_stages === true,
+        timing: stageTiming ? (stageTiming.memory_detail = {}) : null,
+      }, ctx }),
       Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
       [],
     );
@@ -1720,7 +1738,7 @@ export class RecallRouter {
     const [hop2, hop3] = await Promise.all([
       !recallPlan.expand_evidence
         ? Promise.resolve({ items: [], reason: 'disabled' })
-        : sourceFirstEvidence || withTimeout(
+        : measuredSourceFirstEvidence || withTimeout(
         hop2Evidence({
           evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
         }),
@@ -2008,6 +2026,12 @@ export class RecallRouter {
         tiers_fired:      tiersFired,
         cutoff_reason:    cutoffReason,
         latency_ms:       { ...traceLatency, total: Date.now() - startedAt },
+        ...(stageTiming ? { stage_breakdown: {
+          ...stageTiming,
+          evidence_wait_ms: traceLatency.evidence,
+          unified_rerank_ms: hybridRerankMs,
+          router_total_ms: Date.now() - startedAt,
+        } } : {}),
       },
     };
   }

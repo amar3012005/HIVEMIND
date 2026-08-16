@@ -51,7 +51,7 @@ function usageNumbers(usage = {}) {
   return { prompt, completion, cached, reasoning };
 }
 
-export async function recordAiUsage({ usage, requestedModel, servedModel, provider, useCase = 'general', status = 'completed', gatewayRequestId = null, traceId = null, idempotencyKey = null }) {
+export async function recordAiUsage({ usage, requestedModel, servedModel, provider, useCase = 'general', status = 'completed', gatewayRequestId = null, traceId = null, idempotencyKey = null, requestCount = 1 }) {
   if (!prisma) return;
   const n = usageNumbers(usage);
   if (!(n.prompt + n.completion + n.cached + n.reasoning > 0)) return;
@@ -76,13 +76,13 @@ export async function recordAiUsage({ usage, requestedModel, servedModel, provid
     const total = reportedCost ?? (inputCost + outputCost + cacheCost);
     await prisma.$executeRawUnsafe(
       `INSERT INTO hivemind.ai_usage_events
-       (idempotency_key, org_id, user_id, api_key_id, trace_id, use_case, requested_model, served_model, provider,
+       (idempotency_key, org_id, user_id, api_key_id, trace_id, use_case, requested_model, served_model, provider, request_count,
         prompt_tokens, completion_tokens, cached_prompt_tokens, reasoning_tokens, input_cost_micros, output_cost_micros,
         cache_cost_micros, provider_reported_cost_micros, total_cost_micros, pricing_source, applied_pricing, status, gateway_request_id)
-       VALUES ($1,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21,$22)
+       VALUES ($1,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22,$23)
        ON CONFLICT (idempotency_key) DO NOTHING`,
       String(idempotencyKey || crypto.randomUUID()).slice(0, 180), currentOrg(), currentUser(), currentApiKey(), traceId,
-      String(useCase).slice(0, 80), String(requestedModel || model).slice(0, 160), model, host,
+      String(useCase).slice(0, 80), String(requestedModel || model).slice(0, 160), model, host, Math.max(1, Number(requestCount) || 1),
       n.prompt, n.completion, n.cached, n.reasoning, inputCost, outputCost, cacheCost, reportedCost, total,
       reportedCost != null ? 'provider_reported' : (priceRows[0] ? 'catalog' : 'unpriced'), JSON.stringify({ input_micros_per_million: inputRate.toString(), output_micros_per_million: outputRate.toString(), cache_read_micros_per_million: cacheRate.toString() }),
       String(status).slice(0, 24), gatewayRequestId,
@@ -135,7 +135,7 @@ export async function replaceModelPrice({ model, provider = '*', inputMicros, ou
 
 export async function userCostSummary({ limit = 200, query = '' } = {}) {
   return prisma.$queryRawUnsafe(
-    `SELECT u.id, u.email, u.display_name, COUNT(e.id)::text AS calls,
+    `SELECT u.id, u.email, u.display_name, COALESCE(SUM(e.request_count),0)::text AS calls,
       COALESCE(SUM(e.prompt_tokens),0)::text AS prompt_tokens, COALESCE(SUM(e.completion_tokens),0)::text AS completion_tokens,
       COALESCE(SUM(e.cached_prompt_tokens),0)::text AS cached_prompt_tokens, COALESCE(SUM(e.total_cost_micros),0)::text AS total_cost_micros,
       MAX(e.occurred_at) AS last_call_at
@@ -148,6 +148,6 @@ export async function userCostSummary({ limit = 200, query = '' } = {}) {
 export async function totalAiCost() {
   const rows = await prisma.$queryRawUnsafe(`SELECT COALESCE(SUM(total_cost_micros),0)::text AS total_cost_micros,
     COALESCE(SUM(total_cost_micros) FILTER (WHERE user_id IS NULL),0)::text AS unattributed_cost_micros,
-    COUNT(*) FILTER (WHERE user_id IS NULL)::text AS unattributed_calls FROM hivemind.ai_usage_events`);
+    COALESCE(SUM(request_count) FILTER (WHERE user_id IS NULL),0)::text AS unattributed_calls FROM hivemind.ai_usage_events`);
   return rows[0] || { total_cost_micros: '0', unattributed_cost_micros: '0', unattributed_calls: '0' };
 }

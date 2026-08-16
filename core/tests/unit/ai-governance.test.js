@@ -20,9 +20,9 @@ test('usage ledger prefers provider-reported cost over catalog estimation', asyn
   });
   await recordAiUsage({ usage: { prompt_tokens: 1000, completion_tokens: 500, cost: 0.0042 }, requestedModel: 'openai/test', servedModel: 'openai/test', provider: 'fast-provider', useCase: 'chat_synthesis', idempotencyKey: 'usage-test' });
   assert.ok(inserted);
-  assert.equal(inserted[17], 4200n);
   assert.equal(inserted[18], 4200n);
-  assert.equal(inserted[19], 'provider_reported');
+  assert.equal(inserted[19], 4200n);
+  assert.equal(inserted[20], 'provider_reported');
   configureAiGovernance(null);
 });
 

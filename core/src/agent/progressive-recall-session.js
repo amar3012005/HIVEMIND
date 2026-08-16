@@ -5,7 +5,7 @@ const candidateKey = (candidate = {}) => candidate.kind === 'memory'
   : `evidence:${candidate.segment_id || candidate.id || ''}`;
 
 export function evidenceWindowSizeForDepth(depth = 'standard') {
-  return ({ standard: 5, detailed: 10, comprehensive: 15 })[depth] || 5;
+  return ({ standard: 5, detailed: 15, comprehensive: 15 })[depth] || 5;
 }
 
 export function evidenceRenderLimit({ progressiveRecall = null, eventWindowHits = 0, recallMode = 'quick' } = {}) {

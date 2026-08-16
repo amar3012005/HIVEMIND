@@ -566,3 +566,13 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Runtime: all 4 services on `e0fe30d530f0`, healthy. Four public health checks 200.
 - Rollback: prior per-service images retagged `rollback` by the canonical release script.
 - External side effects: none.
+
+## 55cd9f18 — CompanyDashboard noise cleanup (all 4 services)
+
+- Canonical SHA: `55cd9f18a20251f02fef4e3443d4fbc741736835` (PR #303, gitlink bump to Da-vinci `63eed13` / Da-vinci PR #52). Migration: none.
+- Feature: second file in the standing FE-noise cleanup — `doRerun`/`wakeRuntime` error-extraction drift unified into `extractErrorMessage`; two copy-pasted spinner markups unified into one `Spinner` component. No behavior change (verified via manual diff + clean eslint pass — a unit test was attempted but this file's import chain, `CompanyDashboard -> HyperOnboarding -> AgentAvatar -> @humation/react`, pulls in an ESM-only package Jest can't transform under the current config; a separate pre-existing infra gap, not fixed here).
+- App-wide follow-up flagged, not built: the raw error-extraction pattern appears in 217 other call sites and the spinner markup in 12+ other files across the app.
+- Runtime: all 4 services on `55cd9f18a202`, healthy. Byte-verified via the release build's own worktree (`git log -1` shows `63eed13`; `grep -c extractErrorMessage` on that worktree's CompanyDashboard.jsx shows 4 matches) — minified bundles can't be grepped by source name. Four public health checks 200.
+- `verify-deployed.sh` fixture-catalog gate false-positived a 3rd time — re-confirmed byte-identical once both lists are re-sorted; same locale-`sort` artifact as the two prior releases, not real drift.
+- Rollback: prior per-service images retagged `rollback` by the canonical release script.
+- External side effects: none.

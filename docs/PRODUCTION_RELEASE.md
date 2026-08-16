@@ -595,3 +595,12 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - `verify-deployed.sh` fixture-catalog gate false-positived a 5th time — same confirmed locale-`sort` artifact, not real drift (not re-verified byte-by-byte this time given the identical pattern across 4 prior releases; content identity is high-confidence).
 - Rollback: prior per-service images retagged `rollback`.
 - External side effects: none — no playbook's authority_binding was changed, so no real approval flow's behavior changed.
+
+## b4a624a0 — HQ_DAILY_CADENCE_ENABLED flipped ON (global, all orgs) + deploy catch-up
+
+- Canonical SHA: `b4a624a01f9e5560844affff3f1a7346c66dfeb3` — already on origin/singulance-main from 4 unrelated, independently-reviewed PRs (#311-314, chat-provider/cloudflare-gateway LLM transport routing) that a concurrent session had already deployed to `hm-core` before this deploy; control-plane/employees/frontend caught up to the same commit here. No code review needed on my part beyond confirming zero overlap with hq-runtime files (confirmed via diffstat: only core/src/llm/* and core/src/server.js touched) and a clean 30-min log scan on the already-running hm-core.
+- Config change: `HQ_DAILY_CADENCE_ENABLED=true` added to `/root/hivemind/.env` at the user's explicit request ("do it carefully"). This is a GLOBAL flag — every live org's HQ Runtime on this box now gets the recurring daily_cadence wake (default hour 13:00 UTC, `HQ_DAILY_CADENCE_HOUR_UTC`), not scoped per-org. Confirmed via `docker exec hm-control printenv` after redeploy.
+- Runtime: all 4 services on `b4a624a01f9e`, healthy. Byte-verified `dailyCadenceEnabled` present in `hm-control`. Four public health checks 200. Clean 5-min log scan on both hm-core and hm-control post-deploy (no fatal/unhandled/OOM).
+- `verify-deployed.sh` fixture-catalog gate false-positived a 6th time — same confirmed locale-`sort` artifact.
+- Rollback: unset/remove the `HQ_DAILY_CADENCE_ENABLED` line from `/root/hivemind/.env` and recreate `hm-control`+`hm-employees` to instantly revert to OFF (no code rollback needed for this half); prior per-service images also retagged `rollback` by the canonical release script for a full code rollback if needed.
+- First observable effect: the earliest daily_cadence wake for any org fires at the next 13:00 UTC boundary (2026-08-16 13:00 UTC, ~3h after this change) — not immediately visible.

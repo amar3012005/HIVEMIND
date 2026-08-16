@@ -59,6 +59,14 @@ export function gatewayProviderUrl(provider, upstreamUrl) {
   return `${base}/v1/${encodeURIComponent(config.accountId)}/${encodeURIComponent(config.gatewayId)}/${encodeURIComponent(name)}${path}${upstream.search}`;
 }
 
+/** OpenAI-compatible endpoint used by Cloudflare Dynamic Routes. */
+export function gatewayCompatUrl(path = '/chat/completions') {
+  const config = cloudflareGatewayConfig();
+  if (!config.enabled) return null;
+  const base = stripSlash(process.env.CLOUDFLARE_AI_GATEWAY_BASE_URL || 'https://gateway.ai.cloudflare.com');
+  return `${base}/v1/${encodeURIComponent(config.accountId)}/${encodeURIComponent(config.gatewayId)}/compat${path}`;
+}
+
 export function gatewayHeaders(provider) {
   const { enabled, token } = cloudflareGatewayConfig();
   if (!enabled) return {};
@@ -87,19 +95,12 @@ function gatewayInit(init, provider) {
   return { ...(init || {}), headers };
 }
 
-/** Gateway first, exactly one direct retry on Gateway failure. */
+/** Gateway only while enabled; the feature flag is the explicit direct-mode kill switch. */
 export async function gatewayFirstFetch(input, init, { fetchImpl = globalThis.fetch } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('gateway_fetch_unavailable');
   const rawUrl = typeof input === 'string' || input instanceof URL ? String(input) : input?.url;
   const provider = gatewayProviderForUrl(rawUrl);
   if (!provider || !cloudflareGatewayEnabled() || isGatewayUrl(rawUrl) || !hasReplayableBody(input, init)) return fetchImpl(input, init);
   const gatewayUrl = gatewayProviderUrl(provider, rawUrl);
-  try {
-    const response = await fetchImpl(gatewayUrl, gatewayInit(init, provider));
-    if (response.ok) return response;
-    console.warn(`[ai-gateway] ${provider} gateway returned ${response.status}; retrying direct provider`);
-  } catch (error) {
-    console.warn(`[ai-gateway] ${provider} gateway failed; retrying direct provider: ${error?.message || 'unknown error'}`);
-  }
-  return fetchImpl(input, init);
+  return fetchImpl(gatewayUrl, gatewayInit(init, provider));
 }

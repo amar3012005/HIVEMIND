@@ -1,6 +1,7 @@
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CEREBRAS_CHAT_URL = 'https://api.cerebras.ai/v1/chat/completions';
 const OPENROUTER_CHAT_URL = `${(process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '')}/chat/completions`;
+import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayHeaders } from './cloudflare-gateway.js';
 
 export const DEFAULT_CHAT_PLANNER_MODEL = 'google/gemini-2.5-flash-lite';
 export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'openai/gpt-oss-20b:nitro';
@@ -27,6 +28,10 @@ export function resolveChatSynthesisModel(selectedModel) {
 export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
   const requested = String(model || '').trim();
   if (!requested) throw new Error('chat_model_required');
+  const dynamicRoute = String(process.env.CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE || '').trim();
+  if (cloudflareGatewayEnabled() && dynamicRoute) {
+    return { provider: 'cloudflare-dynamic', url: gatewayCompatUrl(), apiKey: '', wireModel: `dynamic/${dynamicRoute}`, providerPolicy: null };
+  }
 
   if (requested.startsWith('cerebras/')) {
     const wireModel = requested.slice('cerebras/'.length);
@@ -182,7 +187,8 @@ export async function chatCompletionFetch(model, options = {}, { fallbackApiKey,
     headers: {
       ...(options.headers || {}),
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${route.apiKey}`,
+      ...(route.apiKey ? { Authorization: `Bearer ${route.apiKey}` } : {}),
+      ...(route.provider === 'cloudflare-dynamic' ? gatewayHeaders() : {}),
       ...(route.provider.startsWith('openrouter:') ? {
         'HTTP-Referer': 'https://singulancelabs.com',
         'X-Title': 'SINGULANCE HIVEMIND',
@@ -230,7 +236,8 @@ export async function chatCompletionStream(model, options = {}, {
     headers: {
       ...(options.headers || {}),
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${route.apiKey}`,
+      ...(route.apiKey ? { Authorization: `Bearer ${route.apiKey}` } : {}),
+      ...(route.provider === 'cloudflare-dynamic' ? gatewayHeaders() : {}),
       ...(route.provider.startsWith('openrouter:') ? {
         'HTTP-Referer': 'https://singulancelabs.com',
         'X-Title': 'SINGULANCE HIVEMIND',

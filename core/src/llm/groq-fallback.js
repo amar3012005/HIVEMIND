@@ -24,7 +24,7 @@ import nodeFetch, { Response as NodeResponse } from 'node-fetch';
 import { currentOrg, currentApiKey } from '../db/prisma.js';
 import { meterTokens } from '../billing/usage-tracker.js';
 import { activeProviders, CANONICAL_MODEL, REASONING_EFFORT } from './llm-config.js';
-import { gatewayFirstFetch } from './cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayFirstFetch, gatewayHeaders } from './cloudflare-gateway.js';
 
 // ── Metering (unchanged): turn the funnel into a per-key spend chokepoint. ──
 function _meterUsage(usage, model, feature) {
@@ -149,6 +149,17 @@ export async function groqFetch(url, options = {}, cfg = {}) {
   let reqBody = null;
   try { reqBody = options?.body ? JSON.parse(options.body) : null; } catch { reqBody = null; }
   if (!reqBody) return _fetch(url, options); // can't canonicalize an opaque body
+
+  // Gateway Dynamic Routes are the canonical text authority. This intercepts
+  // historical hardcoded Groq chat calls before any legacy provider selection.
+  const dynamicRoute = String(process.env.CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE || '').trim();
+  if (cloudflareGatewayEnabled() && dynamicRoute) {
+    return nativeFetch(gatewayCompatUrl(), {
+      ...options,
+      headers: { ...(options.headers || {}), 'Content-Type': 'application/json', ...gatewayHeaders() },
+      body: JSON.stringify({ ...reqBody, model: `dynamic/${dynamicRoute}` }),
+    });
+  }
 
   // Non-text models (audio/vision/websearch/...) → leave on their original path.
   if (reqBody.model && NO_FALLBACK.test(reqBody.model)) return _fetch(url, options);

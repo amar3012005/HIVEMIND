@@ -86,6 +86,28 @@ test('base quick recall: single recall, dedup by id, step + event sequence', asy
   assert.deepEqual(names, ['tool_selected', 'tool_started', 'tool_call', 'tool_completed', 'tool_result']);
 });
 
+test('base recall preserves distinct adapter evidence rows with identical prefixes', async () => {
+  const sharedPrefix = 'The same document boilerplate starts every chunk before its distinct product detail.';
+  const { ctx } = makeCtx({
+    hivemind_recall: {
+      memories: [],
+      evidence: [
+        { segment_id: 'segment-snake', document_title: 'Catalog', content: `${sharedPrefix} SolvisTim` },
+        { segmentId: 'segment-camel', document_title: 'Catalog', content: `${sharedPrefix} SolvisTom` },
+      ],
+      ranked_candidates: [
+        { kind: 'evidence', segment_id: 'segment-snake' },
+        { kind: 'evidence', segment_id: 'segment-camel' },
+      ],
+      evidence_count: 2,
+    },
+  });
+  const result = await gatherEvidence({ plan: basePlan(), ctx, deadlineAt: FAR() });
+  assert.equal(result.evidence.length, 2);
+  assert.deepEqual(result.evidence.map((row) => row.segment_id || row.segmentId), ['segment-snake', 'segment-camel']);
+  assert.equal(result.ranked_candidates.length, 2);
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // R2 — the flag-collision case: base adds X unflagged, temporal re-adds X with
 // _superseded_predecessor. The flag MUST WIN on the existing entry.

@@ -471,9 +471,10 @@ function createEvidenceBus() {
     // 'noPage' omits page (temporal). The exact key string per mode is preserved.
     mergeEvidence(rows, { keyMode = 'withPage' } = {}) {
       for (const ev of (rows || [])) {
+        const stableId = ev?.id || ev?.segment_id || ev?.segmentId;
         const k = keyMode === 'noPage'
-          ? (ev?.id || `${ev?.document_title || '?'}|${(ev?.content || ev?.snippet || '').slice(0, 40)}`)
-          : (ev?.id || `${ev?.document_title || '?'}|${ev?.page || ''}|${String(ev?.content || ev?.snippet || '').slice(0, 40)}`);
+          ? (stableId || `${ev?.document_title || '?'}|${(ev?.content || ev?.snippet || '').slice(0, 40)}`)
+          : (stableId || `${ev?.document_title || '?'}|${ev?.page || ''}|${String(ev?.content || ev?.snippet || '').slice(0, 40)}`);
         if (_evidenceSeen.has(k)) continue;
         _evidenceSeen.add(k);
         evidenceItems.push(ev);

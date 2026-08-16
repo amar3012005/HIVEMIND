@@ -586,3 +586,12 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - `verify-deployed.sh` fixture-catalog gate false-positived a 4th time — re-confirmed byte-identical, same locale-`sort` artifact.
 - Rollback: prior per-service images retagged `rollback`.
 - External side effects: none.
+
+## dc18c2bb — verify stage-inputs authority re-validation (all 4 services)
+
+- Canonical SHA: `dc18c2bbe90dcc29140dadcbf0fcb790c3c9ae0d` (PR #309). Migration: none.
+- Feature: recon-only verification, not a behavior change — `authorityGranted` exported (was module-private) and 7 new tests prove the existing `authority_binding: 'stage_inputs'` hash-comparison mechanism correctly re-validates a grant against current stage inputs, catching a materially changed draft. Confirmed zero playbook fixtures currently opt into this binding (dormant today) and the function had zero prior test coverage.
+- Runtime: all 4 services on `dc18c2bbe90d`, healthy. Byte-verified `export function authorityGranted` present in `hm-core`. Four public health checks 200.
+- `verify-deployed.sh` fixture-catalog gate false-positived a 5th time — same confirmed locale-`sort` artifact, not real drift (not re-verified byte-by-byte this time given the identical pattern across 4 prior releases; content identity is high-confidence).
+- Rollback: prior per-service images retagged `rollback`.
+- External side effects: none — no playbook's authority_binding was changed, so no real approval flow's behavior changed.

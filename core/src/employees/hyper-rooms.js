@@ -15,6 +15,7 @@
 
 import crypto from 'node:crypto';
 import { publishTurnEvent, publishTurnSeal } from '../realtime/hyper-turn-events.js';
+import { appendHqEvent } from '../hq-runtime/repository.js';
 
 // CSI role lanes. Maps from existing DigitalEmployee.roleArchetype
 // (which may already be set) into one of these canonical lanes.
@@ -248,15 +249,61 @@ export async function reconcileHyperTurnEventOutbox(prisma, { limit = 100 } = {}
  * regenerates model work and therefore cannot duplicate tools or overwrite a
  * useful answer with a second whole-turn attempt.
  */
+// Ops visibility (2026-08-16): a stranded/dead Work Room turn used to be
+// silent by design outside a devops console — the founder's own HQ terminal
+// never learned their task hit either reconciler. HyperTurn.runtime_playbook_run_id
+// already links an HQ-dispatched turn straight back to its RuntimePlaybookRun
+// (orgId + trigger.todo_id), which resolves to the owning HqTodo/HqRuntime —
+// no new schema, just following a linkage that already exists. Reuses the
+// SAME durable event log (hq_runtime_events via appendHqEvent) every other
+// HQ narration this session writes into, rather than inventing a parallel
+// ops-dashboard mechanism. A turn with no runtime_playbook_run_id (a manual/
+// direct-chat room) is simply not HQ-owned work — correctly not narrated.
+// Fails silently and never blocks the reconciler itself: losing a narration
+// is far cheaper than losing the turn recovery/failure it describes.
+export async function notifyOwningHqRuntime(prisma, {
+  runtimePlaybookRunId, turnId, outcome, detail = {},
+} = {}, { appendEvent = appendHqEvent } = {}) {
+  if (!prisma || !runtimePlaybookRunId) return false;
+  try {
+    const run = await prisma.runtimePlaybookRun.findUnique({
+      where: { id: runtimePlaybookRunId },
+      select: { orgId: true, trigger: true },
+    });
+    const todoId = String(run?.trigger?.todo_id || '');
+    if (!run || !todoId) return false;
+    const todo = await prisma.hqTodo.findFirst({
+      where: { id: todoId, orgId: run.orgId },
+      select: { id: true, runtimeId: true, title: true },
+    });
+    if (!todo) return false;
+    await appendEvent({
+      prisma, runtimeId: todo.runtimeId, orgId: run.orgId,
+      eventType: outcome === 'failed' ? 'blocked' : 'observation',
+      title: outcome === 'failed'
+        ? `A specialist Room turn stopped making progress: ${todo.title}`
+        : `A specialist Room turn recovered from its last durable checkpoint: ${todo.title}`,
+      summary: outcome === 'failed'
+        ? 'The Work Room process restarted mid-turn and produced no recoverable answer. I marked the turn failed rather than leaving it silently spinning; the todo remains executable and another independent priority can proceed.'
+        : 'The Work Room process restarted mid-turn, but a durable candidate answer already existed. I sealed the turn from that checkpoint instead of rerunning the work.',
+      details: { turn_id: turnId, runtime_playbook_run_id: runtimePlaybookRunId, ...detail },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function reconcileStrandedWorkRoomTurns(prisma, {
   // A normal verifier + one bounded repair may consume three 90-second model
   // windows. Ten minutes avoids racing healthy work while still bounding stalls.
   staleBefore = new Date(Date.now() - 10 * 60 * 1000), limit = 50,
+  notify = notifyOwningHqRuntime,
 } = {}) {
   let rows = [];
   try {
     rows = await prisma.$queryRawUnsafe(
-      `SELECT t.id, t.candidate_output, t.verification_verdict, t.cost_tokens
+      `SELECT t.id, t.candidate_output, t.verification_verdict, t.cost_tokens, t.runtime_playbook_run_id
          FROM "hivemind"."hyper_turns" t
          JOIN "hivemind"."hyper_rooms" r ON r.id = t.room_id
         WHERE t.status = 'live' AND t.sealed_at IS NULL AND r.room_mode = 'work'
@@ -294,6 +341,7 @@ export async function reconcileStrandedWorkRoomTurns(prisma, {
           WHERE id = $1::uuid`, row.id,
       );
       recovered += 1;
+      await notify(prisma, { runtimePlaybookRunId: row.runtime_playbook_run_id, turnId: row.id, outcome: 'recovered' });
     } catch {
       // Idempotent events and seal make a later retry safe.
     }
@@ -323,11 +371,12 @@ export async function failDeadTurns(prisma, {
   // turn neither of those could recover, so it only fires once both have had
   // a real chance to.
   staleBefore = new Date(Date.now() - 15 * 60 * 1000), limit = 50,
+  notify = notifyOwningHqRuntime,
 } = {}) {
   let rows = [];
   try {
     rows = await prisma.$queryRawUnsafe(
-      `SELECT t.id
+      `SELECT t.id, t.runtime_playbook_run_id
          FROM "hivemind"."hyper_turns" t
         WHERE t.status = 'live' AND t.sealed_at IS NULL
           AND t.last_progress_at < $1
@@ -358,6 +407,7 @@ export async function failDeadTurns(prisma, {
           WHERE id = $1::uuid`, row.id,
       );
       failed += 1;
+      await notify(prisma, { runtimePlaybookRunId: row.runtime_playbook_run_id, turnId: row.id, outcome: 'failed' });
     } catch {
       // Idempotent seal + write; a later retry of this reconciler is safe.
     }

@@ -51,7 +51,7 @@ export function stageAuthorityHash(run, stage) {
   return crypto.createHash('sha256').update(JSON.stringify(canonical(resolveInputs(run, stage)))).digest('hex');
 }
 
-function authorityGranted(run, stage) {
+export function authorityGranted(run, stage) {
   if (!stage.authority_gate) return true;
   const grant = (run.authorityRecords || []).find((record) => record.gate === stage.authority_gate);
   if (!grant) return stage.authority_binding !== 'stage_inputs' && (run.authorityGates || []).includes(stage.authority_gate);

@@ -88,7 +88,6 @@ import { renderTemplate, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitati
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
-import { gatewayFirstFetch } from './llm/cloudflare-gateway.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
 import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
@@ -13385,7 +13384,7 @@ Write the persona now.`;
       return jsonResponse(res, { error: 'Cartesia not configured (CARTESIA_API_KEY / CARTESIA_AGENT_ID)' }, 503);
     }
     try {
-      const r = await gatewayFirstFetch('https://api.cartesia.ai/access-token', {
+      const r = await fetch('https://api.cartesia.ai/access-token', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,

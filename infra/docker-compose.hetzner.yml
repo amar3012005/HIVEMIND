@@ -30,7 +30,8 @@ x-common-env: &common-env
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-  # Opt-in Cloudflare AI Gateway. Direct provider calls remain the fallback.
+  # Opt-in Cloudflare AI Gateway for text chat. Disable the flag to roll back
+  # to direct providers; enabled Gateway requests do not silently double-call.
   CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
   CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
   CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}

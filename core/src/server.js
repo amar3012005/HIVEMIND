@@ -102,17 +102,19 @@ async function ensureTaraMemoryProject(orgId, userId) {
   } catch (e) { console.warn('[tara/mem] ensure project failed:', e.message); return null; }
 }
 
-// Global resilience: route EVERY Groq chat call (incl. the ~25 hardcoded api.groq.com sites) through
-// groqFetch, which honors LLM_PRIMARY=openrouter and falls back to OpenRouter on Groq outage/billing
-// blocks. groqFetch uses a captured original fetch internally, so this wrap does not recurse. Non-Groq
-// fetches are untouched. One seam → the whole engine survives a Groq provider failure.
+// Route legacy text-chat calls through the same provider boundary as V2 chat.
+// Do not intercept embeddings, audio, images or provider control APIs: the
+// chat Gateway feature has no authority over those workloads.
 if (!globalThis.__hmProviderFetchWrapped) {
   globalThis.__hmProviderFetchWrapped = true;
   const _nativeFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = (input, init) => {
     const u = typeof input === 'string' ? input : (input && input.url) || '';
     if (u.includes('api.groq.com') && u.includes('/chat/completions')) return groqFetch(input, init);
-    return gatewayFirstFetch(input, init, { fetchImpl: _nativeFetch });
+    if ((u.includes('openrouter.ai') || u.includes('api.cerebras.ai')) && u.includes('/chat/completions')) {
+      return gatewayFirstFetch(input, init, { fetchImpl: _nativeFetch });
+    }
+    return _nativeFetch(input, init);
   };
 }
 

@@ -8,7 +8,6 @@
  */
 
 import fetch from 'node-fetch';
-import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
 
 const BATCH_SIZE = 20;
 
@@ -33,7 +32,7 @@ export class LiteLLMEmbedService {
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     let res;
     try {
-      res = await gatewayFirstFetch(`${this.baseUrl}/embeddings`, {
+      res = await fetch(`${this.baseUrl}/embeddings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -41,7 +40,7 @@ export class LiteLLMEmbedService {
         },
         body: JSON.stringify({ model: this.model, input: texts }),
         signal: ctrl.signal,
-      }, { fetchImpl: fetch });
+      });
     } catch (err) {
       throw new Error(err.name === 'AbortError'
         ? `LiteLLM embedding timeout after ${this.timeoutMs}ms`

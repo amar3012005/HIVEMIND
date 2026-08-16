@@ -18,6 +18,26 @@ test('recall delivery keeps its bounded default and supports internal full-conte
   assert.equal(full.score, 0.912);
 });
 
+test('evidence delivery preserves IDs and provenance across adapter naming conventions', async () => {
+  const router = await import('../../src/memory/recall-router.js');
+  const snake = router.serializeRecallEvidence({
+    segment_id: 'snake-segment', document_id: 'snake-document', document_title: 'Snake source',
+    content: 'snake content', page: 7,
+  });
+  const camel = router.serializeRecallEvidence({
+    segmentId: 'camel-segment', documentId: 'camel-document', document: { title: 'Camel source' },
+    content: 'camel content', metadata: { startPage: 4 },
+  });
+  assert.deepEqual(
+    [snake.segment_id, snake.document_id, snake.document_title, snake.page],
+    ['snake-segment', 'snake-document', 'Snake source', 7],
+  );
+  assert.deepEqual(
+    [camel.segment_id, camel.document_id, camel.document_title, camel.page],
+    ['camel-segment', 'camel-document', 'Camel source', 4],
+  );
+});
+
 test('structured recall permits semantic source resolution only on the bounded recovery attempt', async () => {
   const router = await import('../../src/memory/recall-router.js');
   assert.equal(typeof router.requireFilenameForImplicitSource, 'function');

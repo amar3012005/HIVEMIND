@@ -442,6 +442,19 @@ export function serializeRecallMemory(m, { includeFullContent = false } = {}) {
   };
 }
 
+export function serializeRecallEvidence(e = {}) {
+  return {
+    segment_id:       e.segmentId || e.segment_id || e.id || null,
+    document_id:      e.documentId || e.document_id || null,
+    document_title:   e.document?.title || e.document_title || null,
+    content:          (e.content || '').slice(0, 600),
+    snippet:          e.snippet,
+    score:            typeof e.score === 'number' ? Number(e.score.toFixed(3)) : null,
+    page:             e.metadata?.startPage || e.page || null,
+    linked_memory_id: e.linked_memory_id,
+  };
+}
+
 // Legacy KB promotions can receive a strong retrieval score even when their
 // ingestion importance was below today's durable-memory admission threshold.
 // Keep those rows out of normal memory recall without hiding source evidence,
@@ -2006,16 +2019,7 @@ export class RecallRouter {
       memories: deliverMemories.map((memory) => serializeRecallMemory(memory, {
         includeFullContent: options.include_full_memory_content === true,
       })),
-      evidence: finalEvidence.slice(0, options.structured_intent === true ? 15 : HOP2_DOC_LIMIT).map((e) => ({
-        segment_id:       e.segmentId,
-        document_id:      e.documentId,
-        document_title:   e.document?.title || null,
-        content:          (e.content || '').slice(0, 600),
-        snippet:          e.snippet,
-        score:            typeof e.score === 'number' ? Number(e.score.toFixed(3)) : null,
-        page:             e.metadata?.startPage || null,
-        linked_memory_id: e.linked_memory_id,
-      })),
+      evidence: finalEvidence.slice(0, options.structured_intent === true ? 15 : HOP2_DOC_LIMIT).map(serializeRecallEvidence),
       ranked_candidates: rankedCandidates,
       live: hop3.items,
       trace: {

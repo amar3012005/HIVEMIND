@@ -6,6 +6,7 @@ import {
   chooseSynthesisModel,
   hasGroundingEvidence,
   isCandidateSynthesisAcceptable,
+  isFailClosedSynthesisResponse,
   normalizeJsonObject,
   parseJsonObjectContent,
   scheduleShadowEvaluation,
@@ -66,6 +67,17 @@ test('candidate synthesis must be fully grounded and cited before it can suppres
   assert.equal(isCandidateSynthesisAcceptable({ grounded: true, response: 'G ROCHER', claims: [{ grounded: true, citation_ids: ['P1-C1'] }] }), true);
   assert.equal(isCandidateSynthesisAcceptable({ grounded: false, response: 'Unavailable', claims: [] }), false);
   assert.equal(isCandidateSynthesisAcceptable({ grounded: true, response: 'G ROCHER', claims: [{ grounded: true, citation_ids: [] }] }), false);
+});
+
+test('a server-owned fail-closed response is distinguishable from malformed model output', () => {
+  assert.equal(isFailClosedSynthesisResponse({
+    grounded: false,
+    response: 'I found relevant context, but could not produce a citation-valid answer.',
+    claims: [],
+    gaps: ['No citation-valid claim could be produced from the final recall packet.'],
+  }), true);
+  assert.equal(isFailClosedSynthesisResponse({ grounded: false, response: 'opaque', claims: [], gaps: [] }), false);
+  assert.equal(isFailClosedSynthesisResponse(null), false);
 });
 
 test('grounded candidate validation is required only when the final packet contains evidence', () => {

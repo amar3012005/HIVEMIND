@@ -39,6 +39,7 @@ import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
 import { initialMemoryCrossRerank } from './recall-rerank-policy.js';
 import { runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
+import { dedupeAuthorizedEvidenceCandidates } from './recall-evidence-dedup.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -520,6 +521,7 @@ const V2_RRF_K = 60;
 // The parked A/B ran with a 24 pool while evidence arrived capped at 8 — it never saw
 // depth, which is the variable that moved small-detail answerability 3/5 -> 5/5.
 const V2_POOL  = Number(process.env.RECALL_UNIFIED_POOL || 150);
+
 export async function deliverHybrid({ query, memories = [], evidence = [], deliverN, evidenceN, budgetMs }) {
   // THE recall pipeline. Two lanes retrieved in parallel, fused into ONE pool, ranked by
   // ONE cross-encoder pass, split back out. No RRF, no amplitude boosts, no flag.
@@ -563,7 +565,8 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // — that spends the context budget twice on one fact. linked_memory_id is computed
   // upstream from source_metadata.document_id, so this is a set lookup, not a query.
   const memIds = new Set(memories.map(recallMemoryRowId).filter(Boolean));
-  const deduped = pool.filter((c) => !(c._kind === 'evidence' && c._row?.linked_memory_id && memIds.has(c._row.linked_memory_id)));
+  const deduped = dedupeAuthorizedEvidenceCandidates(pool)
+    .filter((c) => !(c._kind === 'evidence' && c._row?.linked_memory_id && memIds.has(c._row.linked_memory_id)));
 
   let ordered = deduped;
   let usedCrossEncoder = false;

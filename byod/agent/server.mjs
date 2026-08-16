@@ -1363,9 +1363,9 @@ const routes = {
     const r=b.result||{};
     if (!r.id||!r.user_id||!['ready','error','failed'].includes(r.status)) return {ok:false,error:'invalid settlement'};
     await pg.query(
-      `UPDATE meeting_sessions SET status=$1,finalized_meeting_id=$2,failure_code=$3,failure_detail=$4,
+      `UPDATE meeting_sessions SET status=$1::varchar(24),finalized_meeting_id=$2,failure_code=$3,failure_detail=$4,
               finalization_next_attempt_at=$5,finalization_lease_expires_at=NULL,
-              finalized_at=CASE WHEN $1='ready' THEN now() ELSE finalized_at END,updated_at=now()
+              finalized_at=CASE WHEN $1::text='ready' THEN now() ELSE finalized_at END,updated_at=now()
         WHERE id=$6 AND org_id=$7 AND user_id=$8`,
       [r.status,r.meeting_id||null,r.failure_code||null,r.failure_detail?String(r.failure_detail).slice(0,1000):null,r.next_attempt_at||null,r.id,ORG,r.user_id]);
     return {ok:true};

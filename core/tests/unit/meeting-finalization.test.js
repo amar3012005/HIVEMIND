@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { __test as insightTest } from '../../src/knowledge/meeting-insights.js';
 import {
   __test as finalizationTest,
@@ -94,4 +95,13 @@ test('terminal transcription failure settles the session instead of hanging in t
   assert.equal(updates.length, 1);
   assert.equal(updates[0][1], 'failed');
   assert.equal(updates[0][3], 'transcription_failed');
+});
+
+test('tenant-agent settlement casts the shared status parameter consistently', () => {
+  const byod = fs.readFileSync(new URL('../../../byod/agent/server.mjs', import.meta.url), 'utf8');
+  const embedded = fs.readFileSync(new URL('../../src/vector/mneme/embedded-agent.mjs', import.meta.url), 'utf8');
+  for (const source of [byod, embedded]) {
+    assert.match(source, /status=\$1::varchar\(24\)/);
+    assert.match(source, /CASE WHEN \$1::text='ready'/);
+  }
 });

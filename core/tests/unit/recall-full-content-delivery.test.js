@@ -18,6 +18,19 @@ test('recall delivery keeps its bounded default and supports internal full-conte
   assert.equal(full.score, 0.912);
 });
 
+test('recall delivery preserves wrapped memory IDs from reranker candidates', async () => {
+  const router = await import('../../src/memory/recall-router.js');
+  const wrapped = {
+    memory: { id: 'wrapped-memory', title: 'Wrapped title', content: 'wrapped content', memory_type: 'fact', tags: ['product'] },
+    score: 0.91,
+  };
+  assert.equal(router.recallMemoryRowId(wrapped), 'wrapped-memory');
+  assert.deepEqual(router.serializeRecallMemory(wrapped, { includeFullContent: true }), {
+    id: 'wrapped-memory', title: 'Wrapped title', content: 'wrapped content', memory_type: 'fact', tags: ['product'],
+    score: 0.91, created_at: undefined, valid_at: undefined,
+  });
+});
+
 test('evidence delivery preserves IDs and provenance across adapter naming conventions', async () => {
   const router = await import('../../src/memory/recall-router.js');
   const snake = router.serializeRecallEvidence({

@@ -413,15 +413,19 @@ const DREAM_RANK_MULT          = Number(process.env.RECALL_DREAM_MULT || 1.6);
 const MAX_DREAMS_IN_TOPN       = Number(process.env.RECALL_MAX_DREAMS_IN_TOPN || 2);
 const KB_DURABLE_MIN_IMPORTANCE = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0.65);
 
+export function recallMemoryRowId(memory = {}) {
+  return memory.id || memory.memory?.id || null;
+}
+
 export function serializeRecallMemory(m, { includeFullContent = false } = {}) {
+  const stored = m.memory || {};
+  const content = typeof m.content === 'string' ? m.content : (typeof stored.content === 'string' ? stored.content : '');
   return {
-    id: m.id,
-    title: m.title,
-    content: typeof m.content === 'string'
-      ? (includeFullContent ? m.content : m.content.slice(0, 400))
-      : '',
-    memory_type: m.memory_type,
-    tags: m.tags,
+    id: recallMemoryRowId(m),
+    title: m.title || stored.title,
+    content: includeFullContent ? content : content.slice(0, 400),
+    memory_type: m.memory_type || stored.memory_type,
+    tags: m.tags || stored.tags,
     score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
     created_at: m.created_at,
     valid_at: m.valid_at,
@@ -558,7 +562,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // A memory and the segment it was DERIVED FROM must not both occupy the delivered set
   // — that spends the context budget twice on one fact. linked_memory_id is computed
   // upstream from source_metadata.document_id, so this is a set lookup, not a query.
-  const memIds = new Set(memories.map((m) => m.id).filter(Boolean));
+  const memIds = new Set(memories.map(recallMemoryRowId).filter(Boolean));
   const deduped = pool.filter((c) => !(c._kind === 'evidence' && c._row?.linked_memory_id && memIds.has(c._row.linked_memory_id)));
 
   let ordered = deduped;
@@ -638,7 +642,9 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
       rankedCandidates.push({ kind: 'evidence', segment_id: x.segmentId || x.segment_id || x.id, rank, score: c._rerankScore ?? null });
     } else {
       outMem.push(x);
-      rankedCandidates.push({ kind: 'memory', memory_id: x.id, rank, score: c._rerankScore ?? null });
+      const memoryId = recallMemoryRowId(x);
+      if (!memoryId) continue;
+      rankedCandidates.push({ kind: 'memory', memory_id: memoryId, rank, score: c._rerankScore ?? null });
     }
   }
   // The cross-encoder may score a wide pool, but the canonical retained result
@@ -652,7 +658,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
     // Keep backing rows for every retained mixed candidate. The progressive
     // view still exposes only ranks 1-5 initially, but can now reveal the true
     // ranks 6-15 even when one lane dominates the unified ordering.
-    memories: outMem.filter((row) => retainedMemoryIds.has(row.id)),
+    memories: outMem.filter((row) => retainedMemoryIds.has(recallMemoryRowId(row))),
     evidence: outEv.filter((row) => retainedEvidenceIds.has(row.segmentId || row.segment_id || row.id)),
     // Preserve the cross-encoder's one authoritative mixed order. Consumers
     // may progressively reveal this list without another retrieval/rerank.

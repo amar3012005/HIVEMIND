@@ -1,3 +1,5 @@
+import { gatewayFirstFetch } from '../src/llm/cloudflare-gateway.js';
+
 /**
  * Groq Cloud API Configuration
  * Ultra-low latency embeddings and inference for HIVE-MIND
@@ -313,7 +315,7 @@ export class GroqClient {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
 
-        const response = await fetch(`https://api.groq.com/openai/v1${endpoint}`, {
+        const response = await gatewayFirstFetch(`https://api.groq.com/openai/v1${endpoint}`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${this.config.apiKey}`,

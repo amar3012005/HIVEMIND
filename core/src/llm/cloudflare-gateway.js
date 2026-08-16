@@ -86,18 +86,14 @@ export function gatewayHeaders(provider) {
 
 export function gatewayRequestHeaders(inputHeaders = {}, provider) {
   const headers = new Headers(inputHeaders || {});
-  // A caller may have prepared a direct-provider Authorization header before
-  // routing was resolved. Never forward that secret to Cloudflare.
-  headers.delete('authorization');
+  // Stored BYOK keys are preferred. When an account has not migrated a
+  // provider key yet, Cloudflare's documented provider-passthrough contract
+  // accepts that provider Authorization header alongside cf-aig-authorization.
+  // This still keeps AI Gateway primary without breaking provider-specific
+  // workloads during key migration.
+  if (!provider || byokAlias(provider)) headers.delete('authorization');
   for (const [key, value] of Object.entries(gatewayHeaders(provider))) headers.set(key, value);
   return headers;
-}
-
-function hasReplayableBody(input, init) {
-  const body = init?.body ?? (input instanceof Request ? input.body : null);
-  // A network/stream/FormData body cannot safely be submitted twice. Preserve
-  // direct behaviour until that caller supplies a body factory for retry.
-  return !(body && (typeof body.getReader === 'function' || (typeof FormData !== 'undefined' && body instanceof FormData)));
 }
 
 function gatewayInit(init, provider) {
@@ -109,7 +105,7 @@ export async function gatewayFirstFetch(input, init, { fetchImpl = globalThis.fe
   if (typeof fetchImpl !== 'function') throw new Error('gateway_fetch_unavailable');
   const rawUrl = typeof input === 'string' || input instanceof URL ? String(input) : input?.url;
   const provider = gatewayProviderForUrl(rawUrl);
-  if (!provider || !cloudflareGatewayEnabled() || isGatewayUrl(rawUrl) || !hasReplayableBody(input, init)) return fetchImpl(input, init);
+  if (!provider || !cloudflareGatewayEnabled() || isGatewayUrl(rawUrl)) return fetchImpl(input, init);
   const gatewayUrl = gatewayProviderUrl(provider, rawUrl);
   return fetchImpl(gatewayUrl, gatewayInit(init, provider));
 }

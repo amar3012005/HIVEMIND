@@ -8,6 +8,7 @@
  */
 
 import fetch from 'node-fetch';
+import { gatewayFirstFetch } from '../../llm/cloudflare-gateway.js';
 import { meterTokens } from '../../billing/usage-tracker.js';
 import { currentOrg, currentApiKey } from '../../db/prisma.js';
 
@@ -205,7 +206,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
 
   let res;
   try {
-    res = await fetch(`${route.base}/chat/completions`, {
+    res = await gatewayFirstFetch(`${route.base}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -213,7 +214,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
       },
       body: JSON.stringify(body),
       signal: controller.signal,
-    });
+    }, { fetchImpl: fetch });
   } catch (err) {
     clearTimeout(timer);
     if (err.name === 'AbortError') {
@@ -245,7 +246,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
         // Same target and headers as the original call — they are built inline above, so they are
         // repeated here rather than referenced. (`url`/`headers` do not exist as variables; assuming
         // they did would have been a runtime ReferenceError that `node --check` cannot see.)
-        const res2 = await fetch(`${route.base}/chat/completions`, {
+        const res2 = await gatewayFirstFetch(`${route.base}/chat/completions`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -253,7 +254,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
           },
           body: JSON.stringify(bodyNoReasoning),
           signal: ctrl2.signal,
-        });
+        }, { fetchImpl: fetch });
         if (res2.ok) { res = res2; } else {
           const t2 = await res2.text();
           throw new Error(`[enterprise-extract] LiteLLM chat error ${res2.status} (after reasoning retry): ${t2}`);

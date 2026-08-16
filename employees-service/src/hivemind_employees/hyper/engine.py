@@ -32,6 +32,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ..ai_gateway import post as gateway_post
+
 from ..config import get_settings
 from ..db import (
     create_hyper_work_order,
@@ -368,7 +370,7 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     _t0 = time.time()
     try:
         async with httpx.AsyncClient(timeout=timeout) as c:
-            r = await c.post(
+            r = await gateway_post(c,
                 _OPENROUTER_URL,
                 headers={
                     "Authorization": f"Bearer {or_key}",
@@ -450,7 +452,7 @@ async def _cerebras_chat(body: Dict[str, Any], *, timeout: httpx.Timeout,
     _t0 = time.time()
     try:
         async with httpx.AsyncClient(timeout=timeout) as c:
-            r = await c.post(_CEREBRAS_URL, headers={"Authorization": f"Bearer {key}"}, json=cb)
+            r = await gateway_post(c, _CEREBRAS_URL, headers={"Authorization": f"Bearer {key}"}, json=cb)
         if r.status_code != 200:
             log.warning("[hyper-engine] Cerebras-direct %s: %s", r.status_code, (r.text or "")[:200])
             return None
@@ -937,7 +939,7 @@ async def run_mention_reply(messages: List[Dict[str, Any]], *, model: Optional[s
             for attempt in range(2):
                 try:
                     async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0)) as c:
-                        r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+                        r = await gateway_post(c, GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
                     if r.status_code == 200:
                         j = r.json()
                         break
@@ -976,7 +978,7 @@ async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Optio
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as c:
-                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+                r = await gateway_post(c, GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
             if r.status_code == 200:
                 return (r.json()["choices"][0]["message"].get("content") or "").strip()
             if r.status_code in (429, 500, 502, 503) and attempt < 2:
@@ -1777,7 +1779,7 @@ class Director:
         for attempt in range(max_attempts):
             try:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(max(45.0, _to), connect=5.0)) as c:
-                    r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+                    r = await gateway_post(c, GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
                 if r.status_code == 400 and _BILLING_RE.search(r.text or ""):
                     # Groq billing block: mark dead (gpt-oss routes direct to OpenRouter
                     # from now) and break straight to the OpenRouter failover below — no
@@ -2054,7 +2056,7 @@ class Director:
                     "tools": [{"type": "browser_search"}], "tool_choice": "required",
                     "temperature": 1, "top_p": 1, "max_completion_tokens": 4096, "reasoning_effort": "low"}
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0)) as c:
-                r = await c.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+                r = await gateway_post(c, GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body)
             if r.status_code != 200:
                 return ""
             j = r.json()

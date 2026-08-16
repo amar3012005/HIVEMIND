@@ -41,6 +41,7 @@ from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import httpx
+from .ai_gateway import post as gateway_post
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from fastapi import APIRouter, Header, HTTPException
@@ -1792,7 +1793,7 @@ async def _run_groq_compound_web_intel(
         "Groq-Model-Version": groq_version,
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
-        resp = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
+        resp = await gateway_post(client, "https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
         resp.raise_for_status()
         data = resp.json()
     choice = (data.get("choices") or [{}])[0]

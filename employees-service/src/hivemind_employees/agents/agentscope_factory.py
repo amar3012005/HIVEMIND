@@ -31,6 +31,8 @@ from agentscope.formatter import (
 from agentscope.memory import InMemoryMemory
 from agentscope.model import AnthropicChatModel, ChatModelBase, OpenAIChatModel
 
+from ..ai_gateway import sdk_target
+
 from .agentscope_tools import build_hivemind_toolkit, register_experience_tool
 
 log = logging.getLogger(__name__)
@@ -304,6 +306,7 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
         llm_api_key=llm_api_key,
         has_tools=_has_tools,
     )
+    base_url, api_key, gateway_default_headers = sdk_target(base_url, api_key)
     # max_retries gives the OpenAI SDK its built-in exponential backoff with
     # jitter on 429 (Groq rate limits) and 5xx — without it a single 429
     # silently drops a swarm speaker. timeout bounds each call.
@@ -315,7 +318,8 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
         model_name=routed_model,
         api_key=api_key,
         stream=False,
-        client_kwargs={"base_url": base_url, "max_retries": 3, "timeout": 60.0},
+        client_kwargs={"base_url": base_url, "default_headers": gateway_default_headers,
+                       "max_retries": 3, "timeout": 60.0},
     )
     # reasoning_effort is a REASONING-model param: gpt-oss supports it (and "low"
     # cuts Groq latency sharply). llama-3.x (8b-instant / 70b) and other models

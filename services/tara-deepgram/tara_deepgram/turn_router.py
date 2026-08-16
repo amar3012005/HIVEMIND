@@ -26,6 +26,7 @@ import time
 from typing import Any, Dict, List
 
 import httpx
+from .ai_gateway import request as gateway_request, route as gateway_route
 
 from . import config
 
@@ -146,8 +147,7 @@ async def route(*, persona_name: str, goal: str,
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=8) as c:
-            r = await c.post(
-                f"{config.OPENROUTER_BASE_URL}/chat/completions",
+            r = await gateway_request(c, "POST", f"{config.OPENROUTER_BASE_URL}/chat/completions",
                 headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
                          "Content-Type": "application/json"},
                 json={
@@ -280,8 +280,7 @@ async def plan_opening(*, persona_prompt: str, goal: str, company: str,
     )
     try:
         async with httpx.AsyncClient(timeout=8) as c:
-            r = await c.post(
-                f"{config.OPENROUTER_BASE_URL}/chat/completions",
+            r = await gateway_request(c, "POST", f"{config.OPENROUTER_BASE_URL}/chat/completions",
                 headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
                          "Content-Type": "application/json"},
                 json={
@@ -368,11 +367,15 @@ async def answer_direct(*, persona_prompt: str, language: str, directive: str,
     # gpt-oss models accept reasoning effort — low cuts pre-answer reasoning tokens.
     if "gpt-oss" in config.DIRECT_MODEL and config.DIRECT_REASONING_EFFORT:
         payload["reasoning"] = {"effort": config.DIRECT_REASONING_EFFORT}
+    direct_url = f"{config.OPENROUTER_BASE_URL}/chat/completions"
+    routed_url, routed_headers = gateway_route(
+        direct_url,
+        {"Authorization": f"Bearer {config.OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+    )
     async with httpx.AsyncClient(timeout=30) as c:
         async with c.stream(
-            "POST", f"{config.OPENROUTER_BASE_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
-                     "Content-Type": "application/json"},
+            "POST", routed_url,
+            headers=routed_headers,
             json=payload,
         ) as resp:
             if resp.status_code != 200:

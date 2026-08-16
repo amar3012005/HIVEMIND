@@ -172,6 +172,7 @@ test('Dynamic chat streaming uses Gateway and emits content without a direct cre
 test('Gateway mode never leaks provider authorization or retries the direct provider', async () => withEnv({
   CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
   CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: 'cerebras-alias',
 }, async () => {
   const calls = [];
   const fetchImpl = async (url, init) => {
@@ -185,4 +186,39 @@ test('Gateway mode never leaks provider authorization or retries the direct prov
   assert.match(calls[0].url, /gateway\.ai\.cloudflare\.com/);
   assert.equal(calls[0].headers.get('authorization'), null);
   assert.equal(calls.length, 1);
+}));
+
+test('Gateway routes multipart inference bodies once instead of bypassing', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: 'cerebras-alias',
+}, async () => {
+  const body = new FormData();
+  body.append('file', new Blob(['audio']), 'audio.wav');
+  let received;
+  await gatewayFirstFetch('https://api.cerebras.ai/v1/audio/transcriptions', {
+    method: 'POST', headers: { Authorization: 'Bearer direct-secret' }, body,
+  }, { fetchImpl: async (url, init) => {
+    received = { url: String(url), headers: new Headers(init.headers), body: init.body };
+    return new Response('{}', { status: 200 });
+  } });
+  assert.match(received.url, /gateway\.ai\.cloudflare\.com/);
+  assert.equal(received.headers.get('authorization'), null);
+  assert.equal(received.body, body);
+}));
+
+test('Gateway uses documented provider credential passthrough when BYOK is not configured', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: '',
+}, async () => {
+  let received;
+  await gatewayFirstFetch('https://api.cerebras.ai/v1/chat/completions', {
+    method: 'POST', headers: { Authorization: 'Bearer provider-key' },
+  }, { fetchImpl: async (_url, init) => {
+    received = new Headers(init.headers);
+    return new Response('{}');
+  } });
+  assert.equal(received.get('authorization'), 'Bearer provider-key');
+  assert.equal(received.get('cf-aig-authorization'), 'Bearer gateway-token');
 }));

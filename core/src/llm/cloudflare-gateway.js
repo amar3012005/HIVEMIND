@@ -2,7 +2,9 @@
  * Cloudflare AI Gateway transport helpers.
  *
  * This module only changes the HTTP transport. Model selection, provider
- * ordering, and direct-provider fallback remain owned by the existing callers.
+ * ordering remain owned by the existing callers. While Gateway is enabled it
+ * is the only transport; disabling the feature flag is the explicit direct
+ * provider rollback.
  */
 
 const stripSlash = (value) => String(value || '').replace(/\/+$/, '');
@@ -80,6 +82,15 @@ export function gatewayHeaders(provider) {
   };
 }
 
+export function gatewayRequestHeaders(inputHeaders = {}, provider) {
+  const headers = new Headers(inputHeaders || {});
+  // A caller may have prepared a direct-provider Authorization header before
+  // routing was resolved. Never forward that secret to Cloudflare.
+  headers.delete('authorization');
+  for (const [key, value] of Object.entries(gatewayHeaders(provider))) headers.set(key, value);
+  return headers;
+}
+
 function hasReplayableBody(input, init) {
   const body = init?.body ?? (input instanceof Request ? input.body : null);
   // A network/stream/FormData body cannot safely be submitted twice. Preserve
@@ -88,11 +99,7 @@ function hasReplayableBody(input, init) {
 }
 
 function gatewayInit(init, provider) {
-  const headers = new Headers(init?.headers || {});
-  // Direct credential must never be sent to a Gateway BYOK route.
-  headers.delete('authorization');
-  for (const [key, value] of Object.entries(gatewayHeaders(provider))) headers.set(key, value);
-  return { ...(init || {}), headers };
+  return { ...(init || {}), headers: gatewayRequestHeaders(init?.headers, provider) };
 }
 
 /** Gateway only while enabled; the feature flag is the explicit direct-mode kill switch. */

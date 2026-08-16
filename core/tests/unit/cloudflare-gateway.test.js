@@ -4,6 +4,7 @@ import {
   cloudflareGatewayConfig,
   gatewayFirstFetch,
   gatewayHeaders,
+  gatewayRequestHeaders,
   gatewayProviderForUrl,
   gatewayProviderUrl,
 } from '../../src/llm/cloudflare-gateway.js';
@@ -57,6 +58,64 @@ test('Gateway maps only known provider hosts and uses provider-native paths', ()
   assert.deepEqual(gatewayHeaders('cerebras'), {
     'cf-aig-authorization': 'Bearer token', 'cf-aig-skip-cache': 'true', 'cf-aig-byok-alias': 'first',
   });
+}));
+
+test('Gateway request headers strip a prepared direct-provider credential', () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+}, () => {
+  const headers = gatewayRequestHeaders({ Authorization: 'Bearer direct-secret', 'X-Trace': 'trace-1' });
+  assert.equal(headers.get('authorization'), null);
+  assert.equal(headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+  assert.equal(headers.get('x-trace'), 'trace-1');
+}));
+
+test('Dynamic chat route strips caller authorization for fetch', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE: 'core-text',
+}, async () => {
+  const { chatCompletionFetch } = await import('../../src/llm/chat-provider.js');
+  let received;
+  await chatCompletionFetch('openai/gpt-oss-20b:nitro', {
+    method: 'POST', headers: { Authorization: 'Bearer direct-secret' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }] }),
+  }, { fetchImpl: async (_url, init) => {
+    received = new Headers(init.headers);
+    return new Response(JSON.stringify({ choices: [] }), { status: 200 });
+  } });
+  assert.equal(received.get('authorization'), null);
+  assert.equal(received.get('cf-aig-authorization'), 'Bearer gateway-token');
+}));
+
+test('Dynamic chat streaming uses Gateway and emits content without a direct credential', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE: 'core-text',
+}, async () => {
+  const { chatCompletionStream } = await import('../../src/llm/chat-provider.js');
+  let received;
+  const chunks = [];
+  const result = await chatCompletionStream('openai/gpt-oss-20b:nitro', {
+    method: 'POST', headers: { Authorization: 'Bearer direct-secret' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }] }),
+  }, {
+    onContent: (delta) => chunks.push(delta),
+    fetchImpl: async (url, init) => {
+      received = { url: String(url), headers: new Headers(init.headers), body: JSON.parse(init.body) };
+      return new Response('data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\ndata: [DONE]\n\n', {
+        status: 200, headers: { 'Content-Type': 'text/event-stream' },
+      });
+    },
+  });
+  assert.match(received.url, /gateway\.ai\.cloudflare\.com\/v1\/account\/gateway\/compat\/chat\/completions/);
+  assert.equal(received.headers.get('authorization'), null);
+  assert.equal(received.headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+  assert.equal(received.body.model, 'dynamic/core-text');
+  assert.equal(received.body.stream, true);
+  assert.deepEqual(chunks, ['Hello']);
+  assert.equal(result.content, 'Hello');
+  assert.equal(result.usage.prompt_tokens, 3);
 }));
 
 test('Gateway mode never leaks provider authorization or retries the direct provider', async () => withEnv({

@@ -24,7 +24,7 @@ import nodeFetch, { Response as NodeResponse } from 'node-fetch';
 import { currentOrg, currentApiKey } from '../db/prisma.js';
 import { meterTokens } from '../billing/usage-tracker.js';
 import { activeProviders, CANONICAL_MODEL, REASONING_EFFORT } from './llm-config.js';
-import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayFirstFetch, gatewayHeaders } from './cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayFirstFetch, gatewayRequestHeaders } from './cloudflare-gateway.js';
 
 // ── Metering (unchanged): turn the funnel into a per-key spend chokepoint. ──
 function _meterUsage(usage, model, feature) {
@@ -156,7 +156,7 @@ export async function groqFetch(url, options = {}, cfg = {}) {
   if (cloudflareGatewayEnabled() && dynamicRoute) {
     return nativeFetch(gatewayCompatUrl(), {
       ...options,
-      headers: { ...(options.headers || {}), 'Content-Type': 'application/json', ...gatewayHeaders() },
+      headers: gatewayRequestHeaders({ ...(options.headers || {}), 'Content-Type': 'application/json' }),
       body: JSON.stringify({ ...reqBody, model: `dynamic/${dynamicRoute}` }),
     });
   }

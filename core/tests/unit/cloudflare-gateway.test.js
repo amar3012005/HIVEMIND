@@ -13,6 +13,7 @@ const KEYS = [
   'CLOUDFLARE_AI_GATEWAY_ENABLED', 'CLOUDFLARE_ACCOUNT_ID',
   'CLOUDFLARE_AI_GATEWAY_ID', 'CLOUDFLARE_AI_GATEWAY_TOKEN',
   'CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS',
+  'CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS',
   'CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE',
 ];
 
@@ -68,6 +69,31 @@ test('Gateway request headers strip a prepared direct-provider credential', () =
   assert.equal(headers.get('authorization'), null);
   assert.equal(headers.get('cf-aig-authorization'), 'Bearer gateway-token');
   assert.equal(headers.get('x-trace'), 'trace-1');
+}));
+
+test('Gateway skips Cerebras without its BYOK alias and uses OpenRouter immediately', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE: '',
+  CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: '',
+  CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: 'openrouter-alias',
+}, async () => {
+  const previousCerebras = process.env.CEREBRAS_API_KEY;
+  const previousOpenRouter = process.env.OPENROUTER_API_KEY;
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras-key';
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    const { resolveChatCompletionRoute } = await import('../../src/llm/chat-provider.js');
+    const route = resolveChatCompletionRoute('cerebras/gpt-oss-120b');
+    assert.equal(route.provider, 'openrouter:gpt-oss');
+    assert.equal(route.wireModel, 'openai/gpt-oss-120b');
+    assert.equal(route.apiKey, '');
+  } finally {
+    if (previousCerebras == null) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = previousCerebras;
+    if (previousOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previousOpenRouter;
+  }
 }));
 
 test('Dynamic chat route strips caller authorization for fetch', async () => withEnv({

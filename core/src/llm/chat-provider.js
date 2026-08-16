@@ -1,7 +1,7 @@
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CEREBRAS_CHAT_URL = 'https://api.cerebras.ai/v1/chat/completions';
 const OPENROUTER_CHAT_URL = `${(process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '')}/chat/completions`;
-import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayRequestHeaders } from './cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayByokAlias, gatewayCompatUrl, gatewayRequestHeaders } from './cloudflare-gateway.js';
 
 export const DEFAULT_CHAT_PLANNER_MODEL = 'google/gemini-2.5-flash-lite';
 export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'openai/gpt-oss-20b:nitro';
@@ -28,6 +28,9 @@ export function resolveChatSynthesisModel(selectedModel) {
 export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
   const requested = String(model || '').trim();
   if (!requested) throw new Error('chat_model_required');
+  const gatewayOpenRouter = cloudflareGatewayEnabled() && gatewayByokAlias('openrouter');
+  const openRouterApiKey = gatewayOpenRouter ? '' : process.env.OPENROUTER_API_KEY;
+  const openRouterUsable = Boolean(gatewayOpenRouter || openRouterApiKey);
   const dynamicRoute = String(process.env.CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE || '').trim();
   if (cloudflareGatewayEnabled() && dynamicRoute) {
     return { provider: 'cloudflare-dynamic', url: gatewayCompatUrl(), apiKey: '', wireModel: `dynamic/${dynamicRoute}`, providerPolicy: null };
@@ -35,7 +38,13 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
 
   if (requested.startsWith('cerebras/')) {
     const wireModel = requested.slice('cerebras/'.length);
-    if (process.env.CEREBRAS_API_KEY) {
+    // In Gateway mode, a direct Cerebras key is intentionally stripped. Only
+    // select Cerebras when its Gateway BYOK alias exists; otherwise use the
+    // configured OpenRouter BYOK path immediately instead of paying for a
+    // guaranteed 400 followed by replay.
+    const cerebrasUsable = process.env.CEREBRAS_API_KEY
+      && (!cloudflareGatewayEnabled() || gatewayByokAlias('cerebras'));
+    if (cerebrasUsable) {
       return {
         provider: 'cerebras',
         url: process.env.CEREBRAS_BASE_URL
@@ -46,11 +55,11 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
         providerPolicy: null,
       };
     }
-    if (process.env.OPENROUTER_API_KEY) {
+    if (openRouterUsable) {
       return {
         provider: 'openrouter:gpt-oss',
         url: OPENROUTER_CHAT_URL,
-        apiKey: process.env.OPENROUTER_API_KEY,
+        apiKey: openRouterApiKey,
         wireModel: wireModel === 'gpt-oss-120b' ? 'openai/gpt-oss-120b' : wireModel,
         providerPolicy: {
           // sort:'throughput' makes OpenRouter pick the FASTEST backend for
@@ -71,11 +80,11 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
   }
 
   if (requested.startsWith('google/')) {
-    if (!process.env.OPENROUTER_API_KEY) throw new Error('chat_provider_not_configured:openrouter');
+    if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
     return {
       provider: 'openrouter:google',
       url: OPENROUTER_CHAT_URL,
-      apiKey: process.env.OPENROUTER_API_KEY,
+      apiKey: openRouterApiKey,
       wireModel: requested,
       providerPolicy: {
         // Same throughput routing for the Gemini planner — its default
@@ -89,11 +98,11 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
   }
 
   if (requested.startsWith('deepseek/')) {
-    if (!process.env.OPENROUTER_API_KEY) throw new Error('chat_provider_not_configured:openrouter');
+    if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
     return {
       provider: 'openrouter:deepseek',
       url: OPENROUTER_CHAT_URL,
-      apiKey: process.env.OPENROUTER_API_KEY,
+      apiKey: openRouterApiKey,
       wireModel: requested,
       providerPolicy: {
         sort: process.env.OPENROUTER_DEEPSEEK_SORT || 'throughput',
@@ -105,11 +114,11 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
   }
 
   if (requested.startsWith('nvidia/')) {
-    if (!process.env.OPENROUTER_API_KEY) throw new Error('chat_provider_not_configured:openrouter');
+    if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
     return {
       provider: 'openrouter:nvidia',
       url: OPENROUTER_CHAT_URL,
-      apiKey: process.env.OPENROUTER_API_KEY,
+      apiKey: openRouterApiKey,
       wireModel: requested,
       providerPolicy: {
         // Nemotron Lightning currently has a very small provider pool. Keep
@@ -124,11 +133,11 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
   }
 
   if (requested.startsWith('openai/')) {
-    if (!process.env.OPENROUTER_API_KEY) throw new Error('chat_provider_not_configured:openrouter');
+    if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
     return {
       provider: 'openrouter:openai',
       url: OPENROUTER_CHAT_URL,
-      apiKey: process.env.OPENROUTER_API_KEY,
+      apiKey: openRouterApiKey,
       wireModel: requested,
       // The :nitro model variant owns fastest-provider selection. Do not add
       // a manual provider order/sort here: that would override the variant's

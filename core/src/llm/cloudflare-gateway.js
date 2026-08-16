@@ -26,6 +26,8 @@ function byokAlias(provider) {
   return name ? String(process.env[`CLOUDFLARE_AI_GATEWAY_${name}_BYOK_ALIAS`] || '').trim() : '';
 }
 
+export function gatewayByokAlias(provider) { return byokAlias(provider); }
+
 export function gatewayProviderForUrl(value) {
   let url;
   try { url = new URL(typeof value === 'string' || value instanceof URL ? String(value) : value?.url); } catch { return null; }

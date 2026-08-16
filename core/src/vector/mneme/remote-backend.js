@@ -636,6 +636,27 @@ export async function remoteMeetingSegmentList(orgId, filter) {
   catch (e) { console.warn(`[mneme/remote] meeting-segment-list failed org=${orgId}: ${e.message}`); return null; }
 }
 
+export async function remoteMeetingSessionWrite(orgId, session) {
+  try { return await _call(orgId, '/v1/meeting-session-write', { session }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-session-write failed org=${orgId}: ${e.message}`); return null; }
+}
+export async function remoteMeetingSessionStatus(orgId, filter) {
+  try { return await _call(orgId, '/v1/meeting-session-status', { filter }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-session-status failed org=${orgId}: ${e.message}`); return null; }
+}
+export async function remoteMeetingSessionPending(orgId, limit = 5) {
+  try { const out = await _call(orgId, '/v1/meeting-session-pending', { limit }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); return out?.sessions || []; }
+  catch (e) { console.warn(`[mneme/remote] meeting-session-pending failed org=${orgId}: ${e.message}`); return []; }
+}
+export async function remoteMeetingSessionClaim(orgId, filter) {
+  try { return await _call(orgId, '/v1/meeting-session-claim', { filter }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-session-claim failed org=${orgId}: ${e.message}`); return null; }
+}
+export async function remoteMeetingSessionSettle(orgId, result) {
+  try { return await _call(orgId, '/v1/meeting-session-settle', { result }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  catch (e) { console.warn(`[mneme/remote] meeting-session-settle failed org=${orgId}: ${e.message}`); return null; }
+}
+
 // The agent owns raw bytes; Core merely claims one bounded chunk into memory to
 // run the shared Singulance transcription engine, then settles the tenant row.
 const MEETING_AUDIO_TIMEOUT_MS = Number(process.env.MEETING_REMOTE_AUDIO_TIMEOUT_MS || 300_000);

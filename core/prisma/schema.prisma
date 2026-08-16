@@ -4287,11 +4287,16 @@ model MeetingSession {
   finalizedMeetingId String?  @map("finalized_meeting_id") @db.Uuid
   failureCode       String?   @map("failure_code") @db.VarChar(80)
   failureDetail     String?   @map("failure_detail")
+  finalizationPayload Json?   @map("finalization_payload")
+  finalizationAttempts Int    @default(0) @map("finalization_attempts")
+  finalizationNextAttemptAt DateTime? @map("finalization_next_attempt_at") @db.Timestamptz(6)
+  finalizationLeaseExpiresAt DateTime? @map("finalization_lease_expires_at") @db.Timestamptz(6)
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   finalizedAt       DateTime? @map("finalized_at") @db.Timestamptz(6)
 
   @@index([orgId, userId, status, updatedAt(sort: Desc)], map: "meeting_sessions_org_user_status_idx")
+  @@index([status, finalizationNextAttemptAt, updatedAt], map: "meeting_sessions_finalization_retry_idx")
   @@index([finalizedMeetingId], map: "meeting_sessions_finalized_meeting_idx")
   @@map("meeting_sessions")
 }

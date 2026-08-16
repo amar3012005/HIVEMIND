@@ -12,6 +12,14 @@ test('use_tools false never discloses connected or compound capabilities', () =>
   assert.equal(names.includes('compound_plan'), false);
 });
 
+test('native planner requests a semantic retrieval expression instead of a copied query', () => {
+  const context = getProgressiveTools({ useTools: false })
+    .find((tool) => tool.function.name === 'hivemind_context');
+  const description = context.function.parameters.properties.query_canonical_en.description;
+  assert.match(description, /intent-preserving English retrieval expression/);
+  assert.match(description, /names\/models\/variants\/categories/);
+});
+
 test('use_tools true discloses connected and compound capabilities', () => {
   const tools = getProgressiveTools({ useTools: true });
   const names = tools.map((tool) => tool.function.name);

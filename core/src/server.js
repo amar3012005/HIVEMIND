@@ -18,6 +18,7 @@ import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
+import { gatewayFirstFetch } from './llm/cloudflare-gateway.js';
 import { transcribeAudio } from './llm/stt-route.js';
 import { OAuthStateStore } from './oauth/oauth-state-store.js';
 import { buildChatRecallContext } from './routes/chat.js';
@@ -105,13 +106,13 @@ async function ensureTaraMemoryProject(orgId, userId) {
 // groqFetch, which honors LLM_PRIMARY=openrouter and falls back to OpenRouter on Groq outage/billing
 // blocks. groqFetch uses a captured original fetch internally, so this wrap does not recurse. Non-Groq
 // fetches are untouched. One seam → the whole engine survives a Groq provider failure.
-if (!globalThis.__hmGroqFetchWrapped) {
-  globalThis.__hmGroqFetchWrapped = true;
+if (!globalThis.__hmProviderFetchWrapped) {
+  globalThis.__hmProviderFetchWrapped = true;
   const _nativeFetch = globalThis.fetch.bind(globalThis);
   globalThis.fetch = (input, init) => {
     const u = typeof input === 'string' ? input : (input && input.url) || '';
     if (u.includes('api.groq.com') && u.includes('/chat/completions')) return groqFetch(input, init);
-    return _nativeFetch(input, init);
+    return gatewayFirstFetch(input, init, { fetchImpl: _nativeFetch });
   };
 }
 

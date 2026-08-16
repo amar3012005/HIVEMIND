@@ -24,6 +24,7 @@ import nodeFetch, { Response as NodeResponse } from 'node-fetch';
 import { currentOrg, currentApiKey } from '../db/prisma.js';
 import { meterTokens } from '../billing/usage-tracker.js';
 import { activeProviders, CANONICAL_MODEL, REASONING_EFFORT } from './llm-config.js';
+import { gatewayFirstFetch } from './cloudflare-gateway.js';
 
 // ── Metering (unchanged): turn the funnel into a per-key spend chokepoint. ──
 function _meterUsage(usage, model, feature) {
@@ -48,9 +49,8 @@ function _meterResponse(res, model, feature) {
 
 // Prefer the runtime's global fetch/Response (undici on Node 20); fall back to
 // node-fetch on older runtimes. Keeps groqFetch a true drop-in for both call styles.
-const _fetch = (...args) => (
-  typeof globalThis !== 'undefined' && globalThis.fetch ? globalThis.fetch(...args) : nodeFetch(...args)
-);
+const nativeFetch = typeof globalThis !== 'undefined' && globalThis.fetch ? globalThis.fetch.bind(globalThis) : nodeFetch;
+const _fetch = (...args) => gatewayFirstFetch(args[0], args[1], { fetchImpl: nativeFetch });
 const _Response = (typeof globalThis !== 'undefined' && globalThis.Response) ? globalThis.Response : NodeResponse;
 
 const FALLBACK_TIMEOUT_MS = parseInt(process.env.OPENROUTER_FALLBACK_TIMEOUT_MS || '60000', 10);

@@ -5,6 +5,7 @@ import {
   applyProgressiveRecallView,
   collapseNativeOnlyCompoundDecision,
   createProgressiveRecallSession,
+  evidenceRenderLimit,
   evidenceWindowSizeForDepth,
 } from '../../src/agent/progressive-recall-session.js';
 
@@ -29,12 +30,38 @@ test('semantic response depth selects one bounded window while retaining top fif
   assert.equal(session.expansion_count, 0);
 });
 
+test('answer rendering keeps the already selected unified evidence window', () => {
+  assert.equal(evidenceRenderLimit({ progressiveRecall: { delivered_until: 10 }, recallMode: 'quick' }), 10);
+  assert.equal(evidenceRenderLimit({ progressiveRecall: { delivered_until: 15 }, recallMode: 'quick' }), 15);
+  assert.equal(evidenceRenderLimit({ recallMode: 'quick' }), 6, 'legacy callers retain their bounded fallback');
+});
+
 test('reveals one intent-selected mixed window without reranking', () => {
   const session = createProgressiveRecallSession({ rankedCandidates, memories, evidence, query: 'pitch deck', maxVisible: 15 });
   const first = applyProgressiveRecallView({ memories, evidence, recall_packets: [] }, session);
   assert.deepEqual(first.evidence.map((row) => row.segment_id), ['e1', 'e2', 'e3']);
   assert.deepEqual(first.memories.map((row) => row.id), ['m1', 'm2']);
   assert.equal(session.delivered_until, 5);
+});
+
+test('retains camelCase evidence IDs from remote and central recall adapters', () => {
+  const camelEvidence = Array.from({ length: 14 }, (_, index) => ({
+    segmentId: `remote-e${index + 1}`,
+    content: `remote evidence ${index + 1}`,
+  }));
+  const candidates = camelEvidence.map((row) => ({ kind: 'evidence', segment_id: row.segmentId }));
+  const session = createProgressiveRecallSession({
+    rankedCandidates: candidates,
+    memories: [],
+    evidence: camelEvidence,
+    query: 'multilingual product inventory',
+    initialSize: evidenceWindowSizeForDepth('detailed'),
+    maxVisible: 15,
+  });
+  assert.equal(session.candidates.length, 14);
+  assert.equal(session.delivered_until, 10);
+  const view = applyProgressiveRecallView({ memories: [], evidence: camelEvidence, recall_packets: [] }, session);
+  assert.deepEqual(view.evidence.map((row) => row.segmentId), candidates.slice(0, 10).map((row) => row.segment_id));
 });
 
 test('use_tools native-only compound plans collapse to the identical native recall path', () => {

@@ -206,6 +206,18 @@ export function remoteAgentOrgIds() {
     .map(([orgId]) => orgId);
 }
 
+// Meeting finalization is a user-data recovery lifecycle, not vector
+// maintenance. It must scan both external self-host agents and the managed
+// `local:` embedded .amr shards. Keeping this separate from
+// remoteAgentOrgIds() preserves maintenance quarantine semantics while making
+// queued meeting reports survive a Core restart for every Memory Box mode.
+export function meetingAgentOrgIds() {
+  _loadFile();
+  return [..._registry.entries()]
+    .filter(([, value]) => value?.url)
+    .map(([orgId]) => orgId);
+}
+
 // Full-residency self-host: the customer's Postgres connection string (via their tunnel), recorded at
 // enrollment. null → that org's relational data is NOT on a customer box (managed / vectors-only).
 export function pgUrlFor(orgId) {

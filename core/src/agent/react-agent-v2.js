@@ -42,6 +42,7 @@ import {
   applyProgressiveRecallView,
   collapseNativeOnlyCompoundDecision,
   createProgressiveRecallSession,
+  evidenceRenderLimit,
   evidenceWindowSizeForDepth,
 } from './progressive-recall-session.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
@@ -1695,9 +1696,16 @@ export async function answerStep({ message, history, evidence, plan, language, a
   }
 
   const recallMode = plan?.recall_mode || 'quick';
-  const evidenceTopK = _eventWindowHits > 0
-    ? _eventWindowHits
-    : (recallMode === 'insight' ? 10 : (recallMode === 'panorama' ? 12 : 6));
+  // Intent has already selected one unified window before answerStep. Do not
+  // apply a second, smaller lane-local cap here: doing so silently discarded
+  // ranks from detailed/comprehensive evidence-heavy answers after the one
+  // authoritative mixed rerank. The fallback remains for non-progressive
+  // callers such as legacy temporal/source paths.
+  const evidenceTopK = evidenceRenderLimit({
+    progressiveRecall: evidence.progressive_recall,
+    eventWindowHits: _eventWindowHits,
+    recallMode,
+  });
   // Superseded predecessors / diff-removed rows are appended LAST by the
   // Updates-edge walk (execTimeline), so a plain top-K slice can drop them —
   // which is exactly the "changed over time" answer losing the prior value.

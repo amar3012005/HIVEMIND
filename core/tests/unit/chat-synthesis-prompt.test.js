@@ -31,6 +31,8 @@ test('answer objective and semantic depth shape one synthesis without encouragin
   });
   assert.match(prompt, /ANSWER OBJECTIVE: Enumerate and describe the Solvis products/);
   assert.match(prompt, /DETAILED DEPTH/);
+  assert.match(prompt, /Inspect every delivered evidence item/);
+  assert.match(prompt, /collect and deduplicate every distinct supported item/);
   assert.match(prompt, /must never replace, obscure, or distract/);
   assert.match(prompt, /telemetry, not a request for another retrieval or synthesis pass/);
 });

@@ -46,6 +46,7 @@ import {
   evidenceWindowSizeForDepth,
 } from './progressive-recall-session.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
+import { buildStructuredRecallQuery } from './structured-recall-query.js';
 import {
   chatCompletionFetch,
   chatCompletionStream,
@@ -1059,7 +1060,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // MEDIUM: no precedence rule) and can be mistaken for authoritative profile.
   const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between' || plan.operation === 'profile';
   const recallQueries = !dedicatedLane && plannedQueries.length > 0
-    ? [plannedQueries.join('\nRelated focus: ')]
+    ? [buildStructuredRecallQuery(plannedQueries, plan.answer_objective)]
     : [];
   await execBaseRecall(bus, plan, ctx, helpers, { recallQueries, recallMode, recallLimit, recallExtras });
 

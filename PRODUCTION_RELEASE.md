@@ -238,3 +238,14 @@
 - **Acceptance:** central 30-segment restart canary finalized after Core restart with 128,739 transcript characters, no gaps, and first/last markers present. AMR canary finalized three tenant-owned segments with no gaps and first/last markers present. Exact canary rows were removed afterward.
 - **Images:** Core, Control Plane, Employees, and frontend run revision `a9e4a970`; BYOD agent runs `hivemind/hm-agent:sha-a9e4a970`. Manifest `/root/releases/manifests/a9e4a970/20260816T045504Z/RELEASE_MANIFEST.json`.
 - **Rollback:** per-service `rollback` aliases and `hivemind/hm-agent:rollback-settle` retained; verified database backup retained.
+
+## prod-20260816-4fd255f5 — Gateway-first inference and production log hygiene
+- **Date:** 2026-08-16
+- **Parent:** `singulance-main` at `4fd255f5ba564eb52e95846ca36c843dc74fcb31`; frontend unchanged.
+- **Gateway coverage:** server-owned text, embeddings, external reranking, image generation, HTTP speech inference, and supported Deepgram/Cartesia realtime WebSockets route through authenticated Cloudflare AI Gateway. Provider/model policy is unchanged and Gateway failure is not replayed directly upstream.
+- **Log hygiene:** reranker attempts collapse into one final degradation warning; repeated Memory Box circuit/list errors are tenant/operation/error-class rate-limited; Turing source internals are debug-only; unchanged zero-state Employees reconciliation is silent. First failures, state changes, non-zero work and errors remain visible.
+- **Tests:** 16 Node Gateway/reranker tests, 3 Employees Gateway tests, 3 TARA Deepgram Gateway tests, 1 TARA AAAS Gateway test, Python compileall, Node syntax and graph review.
+- **Acceptance:** Core, Employees and TARA Deepgram are healthy at revision `4fd255f5`, zero restarts. OpenRouter embedding through Gateway returned HTTP 200 in 756 ms with 1,024 dimensions. Cloudflare logs show successful chat and rerank calls, including GPT-OSS 20B/120B, Nemotron and Cohere rerank, with no direct-provider replay. Deepgram realtime route resolves to the authenticated Gateway WebSocket endpoint.
+- **Known independent issue:** broad Solvis chat synthesis remains intermittently unstable (`candidate_synthesis_validation_failed` / synthesis timeout) even though Gateway requests return HTTP 200; this is a grounded-synthesis/model-contract issue, not a Gateway transport failure, and is not hidden by this release.
+- **Manifest:** `/root/releases/manifests/4fd255f5/20260816T214510Z/RELEASE_MANIFEST.json`.
+- **Rollback:** canonical release aliases for Core, Employees and TARA Deepgram retain the previously accepted `3a87f0a3` images.

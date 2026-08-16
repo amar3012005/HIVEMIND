@@ -326,7 +326,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
         // chatCompletionFetch sets Authorization from the resolved route; no header here.
         body: JSON.stringify(requestBody),
         signal,
-      }, { fallbackApiKey: apiKey });
+      }, { fallbackApiKey: apiKey, useCase: 'chat_planner' });
       if (!resp.ok) throw new Error(`progressive router ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
       data = await resp.json();
       call = data.choices?.[0]?.message?.tool_calls?.[0] || null;

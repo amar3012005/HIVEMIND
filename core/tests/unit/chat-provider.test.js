@@ -11,6 +11,7 @@ import {
   DEFAULT_HQ_DISPATCH_MODEL,
   resolveChatCompletionRoute,
 } from '../../src/llm/chat-provider.js';
+import { configureAiGovernance, invalidateAiModelPolicyCache } from '../../src/llm/ai-governance.js';
 
 test('chat model policy uses Gemini Flash-Lite planning and GPT-OSS-20B Nitro synthesis', () => {
   assert.equal(DEFAULT_CHAT_PLANNER_MODEL, 'google/gemini-2.5-flash-lite');
@@ -208,6 +209,38 @@ test('Gemini planner request uses OpenRouter and preserves required tool paramet
   } finally {
     if (prior == null) delete process.env.OPENROUTER_API_KEY;
     else process.env.OPENROUTER_API_KEY = prior;
+  }
+});
+
+test('admin model policy uses Cloudflare concrete provider route and secondary fallback', async () => {
+  const prior = { enabled: process.env.CLOUDFLARE_AI_GATEWAY_ENABLED, account: process.env.CLOUDFLARE_ACCOUNT_ID,
+    gateway: process.env.CLOUDFLARE_AI_GATEWAY_ID, token: process.env.CLOUDFLARE_AI_GATEWAY_TOKEN,
+    alias: process.env.CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS, route: process.env.CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE };
+  Object.assign(process.env, { CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_AI_GATEWAY_ID: 'gw',
+    CLOUDFLARE_AI_GATEWAY_TOKEN: 'token', CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: 'openrouter-key', CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE: 'legacy-route' });
+  configureAiGovernance({ $queryRawUnsafe: async (sql) => sql.includes('ai_model_policies')
+    ? [{ use_case: 'chat_planner', primary_model: 'google/gemini-2.5-flash-lite', secondary_model: 'openai/gpt-oss-20b:nitro', enabled: true, revision: 4 }]
+    : [] });
+  invalidateAiModelPolicyCache();
+  const calls = [];
+  try {
+    const response = await chatCompletionFetch(DEFAULT_CHAT_PLANNER_MODEL, { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'plan' }] }) }, {
+      useCase: 'chat_planner', fetchImpl: async (url, options) => {
+        calls.push({ url, body: JSON.parse(options.body), headers: options.headers });
+        return new Response(calls.length === 1 ? '{"error":"busy"}' : '{"usage":{"prompt_tokens":2,"completion_tokens":1}}',
+          { status: calls.length === 1 ? 503 : 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].url, /\/openrouter\/chat\/completions$/);
+    assert.equal(calls[0].body.model, 'google/gemini-2.5-flash-lite');
+    assert.equal(calls[1].body.model, 'openai/gpt-oss-20b:nitro');
+    assert.equal(calls[0].headers.get('cf-aig-authorization'), 'Bearer token');
+    assert.equal(calls[0].headers.get('authorization'), null);
+  } finally {
+    configureAiGovernance(null); invalidateAiModelPolicyCache();
+    for (const [key, value] of Object.entries(prior)) { const env = ({ enabled:'CLOUDFLARE_AI_GATEWAY_ENABLED',account:'CLOUDFLARE_ACCOUNT_ID',gateway:'CLOUDFLARE_AI_GATEWAY_ID',token:'CLOUDFLARE_AI_GATEWAY_TOKEN',alias:'CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS',route:'CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE' })[key]; if (value == null) delete process.env[env]; else process.env[env] = value; }
   }
 });
 

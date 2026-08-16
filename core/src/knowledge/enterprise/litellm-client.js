@@ -11,6 +11,7 @@ import fetch from 'node-fetch';
 import { gatewayFirstFetch } from '../../llm/cloudflare-gateway.js';
 import { meterTokens } from '../../billing/usage-tracker.js';
 import { currentOrg, currentApiKey } from '../../db/prisma.js';
+import { recordAiUsage, resolveAiModelPolicy } from '../../llm/ai-governance.js';
 
 // Recover every COMPLETE top-level JSON object from a (possibly truncated)
 // array-bearing string. Brace-counted and string/escape aware so braces or
@@ -133,6 +134,9 @@ const reasoningDisableRejected = new Set();
  */
 export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, feature = 'enterprise-extract' }) {
   model = model || DEFAULT_MODEL;
+  const useCase = /entity|relationship/i.test(feature) ? 'entity_linking' : 'ingestion_extraction';
+  const modelPolicy = await resolveAiModelPolicy(useCase, model);
+  model = modelPolicy.primary;
 
   // Org-context gate: every LLM call should be attributable to an org (and, on the request path, its
   // HIVEMIND API key). Legitimate system/boot calls run with NO org context, so the default is to LOG,
@@ -285,6 +289,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
       completionTokens: Number(usage?.completion_tokens || 0),
     });
   } catch { /* never let metering break a completion */ }
+  void recordAiUsage({ usage, requestedModel: model, servedModel: json.model || model, provider: json.provider || route.provider, useCase });
 
   if (json_mode) {
     // Robust parse: try direct, then strip code fences, then salvage first {...}/[...]

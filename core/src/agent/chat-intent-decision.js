@@ -417,7 +417,7 @@ Authorized projects:\n${JSON.stringify((projectCatalog || []).slice(0, 24))}\nAv
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...body, model: candidateModel }), signal: parserController.signal,
-      }, { fallbackApiKey: apiKey, fetchImpl });
+      }, { fallbackApiKey: apiKey, fetchImpl, useCase: 'chat_planner' });
       if (!response.ok) throw new Error(`intent_parser_http_${response.status}`);
       const data = await response.json();
       const call = data?.choices?.[0]?.message?.tool_calls?.find((item) => item.function?.name === 'route_chat_turn');

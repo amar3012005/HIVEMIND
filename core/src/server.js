@@ -381,6 +381,8 @@ installConsoleCapture('core');
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
+const { configureAiGovernance } = await import('./llm/ai-governance.js');
+configureAiGovernance(prisma);
 // Production Web Intelligence must use durable tenant-scoped state. The
 // constructor retains a file fallback only for local development with no DB.
 const webJobStore = new WebJobStore({ prisma, filePath: WEB_JOBS_FILE });

@@ -408,7 +408,7 @@ async function selectToolCard({ rawTools, message, canonicalOperation, requiredA
         temperature: 0, max_tokens: 120,
       }),
       signal,
-    }, { fallbackApiKey: apiKey });
+    }, { fallbackApiKey: apiKey, useCase: 'compound_subtask' });
     if (!resp.ok) throw new Error(`tool-card selector ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
     const data = await resp.json();
     const modelMessage = data?.choices?.[0]?.message || {};
@@ -840,7 +840,7 @@ async function defaultSelectTool({ tools, message, apiKey, signal }) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({ model: SUBTASK_MODEL, messages, tools, tool_choice: 'auto', temperature: 0, max_tokens: 700 }),
       signal,
-    }, { fallbackApiKey: apiKey });
+    }, { fallbackApiKey: apiKey, useCase: 'compound_subtask' });
     if (!resp.ok) {
       throw new Error(`subtask model ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
     }
@@ -881,7 +881,7 @@ async function generateGroundedWriteFallback({ message, args, schema, priorOutpu
       max_tokens: 1200,
     }),
     signal,
-  }, { fallbackApiKey: apiKey });
+  }, { fallbackApiKey: apiKey, useCase: 'compound_subtask' });
   if (!resp.ok) throw new Error(`grounded argument fallback ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
   const data = await resp.json();
   const parsed = JSON.parse(data?.choices?.[0]?.message?.content || '{}');
@@ -910,7 +910,7 @@ async function rewriteCompoundRecallQuery({ message, canonicalOperation, origina
         max_tokens: 100,
       }),
       signal,
-    }, { fallbackApiKey: apiKey });
+    }, { fallbackApiKey: apiKey, useCase: 'compound_subtask' });
     if (!resp.ok) return structuralFallback;
     const data = await resp.json();
     const content = data?.choices?.[0]?.message?.content || '';

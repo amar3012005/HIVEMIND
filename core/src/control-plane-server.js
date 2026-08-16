@@ -215,6 +215,8 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
+const { configureAiGovernance, listModelGovernance, listModelPrices, replaceModelPrice, totalAiCost, upsertModelPolicy, userCostSummary } = await import('./llm/ai-governance.js');
+configureAiGovernance(prisma);
 const signupWelcome = createSignupWelcomeDispatcher({ prisma, sendEmail: sendSystemEmail });
 async function taraProviderFor(orgId) {
   const runtime = await prisma.taraRuntimeConfig.findUnique({ where: { orgId }, select: { defaultProvider: true, revision: true, grokConfig: true } }).catch(() => null);
@@ -2966,6 +2968,48 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/admin/api/platform/metrics' && req.method === 'GET') {
     if (!hasPlatformAdminCookie(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
     return jsonResponse(res, await getPlatformCapacityMetrics());
+  }
+
+  if (pathname === '/admin/api/platform/models' && (req.method === 'GET' || req.method === 'PUT')) {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    if (req.method === 'GET') return jsonResponse(res, { policies: await listModelGovernance(), prices: await listModelPrices() });
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const policy = await upsertModelPolicy({ useCase: body.use_case, primaryModel: body.primary_model,
+        secondaryModel: body.secondary_model || null, operator: operator.operator });
+      await audit({ eventType: 'platform.model_policy_updated', eventCategory: 'ai_governance', action: 'update',
+        resourceType: 'ai_model_policy', resourceId: policy.use_case,
+        metadata: { operator: operator.operator, primary_model: policy.primary_model, secondary_model: policy.secondary_model, revision: policy.revision },
+        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { policy });
+    } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+  }
+
+  if (pathname === '/admin/api/platform/model-prices' && req.method === 'PUT') {
+    const operator = getPlatformAdminSession(req);
+    if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      const price = await replaceModelPrice({ model: body.model, provider: body.provider || '*',
+        inputMicros: body.input_micros_per_million, outputMicros: body.output_micros_per_million,
+        cacheMicros: body.cache_read_micros_per_million, operator: operator.operator });
+      await audit({ eventType: 'platform.model_price_updated', eventCategory: 'ai_governance', action: 'update',
+        resourceType: 'ai_model_price', resourceId: price.id,
+        metadata: { operator: operator.operator, model: price.model, provider: price.provider },
+        ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      return jsonResponse(res, { price });
+    } catch (error) { return jsonResponse(res, { error: error.message }, 400); }
+  }
+
+  if (pathname === '/admin/api/platform/ai-costs' && req.method === 'GET') {
+    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const users = await userCostSummary({ query: url.searchParams.get('q') || '', limit: url.searchParams.get('limit') || 200 });
+    const total = await totalAiCost();
+    return jsonResponse(res, { currency: 'USD', ...total, users });
   }
 
   if (pathname === '/admin/api/platform/logs' && req.method === 'GET') {

@@ -7014,6 +7014,19 @@ exit \$RC
             Number.isFinite(body.start_ms) ? body.start_ms : null,
             Number.isFinite(body.end_ms) ? body.end_ms : null,
           );
+          await prisma.$executeRawUnsafe(
+            `UPDATE hivemind.meeting_sessions s
+                SET status='queued', finalization_attempts=0,
+                    finalization_next_attempt_at=NULL, finalization_lease_expires_at=NULL,
+                    failure_code=NULL, failure_detail=NULL, updated_at=now()
+              WHERE s.id=$1::uuid AND s.org_id=$2::uuid AND s.user_id=$3::uuid
+                AND s.status='failed' AND s.failure_code='missing_segments'
+                AND s.expected_segments IS NOT NULL
+                AND (SELECT COUNT(DISTINCT g.idx) FROM hivemind.meeting_segments g
+                      WHERE g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id)
+                    >= s.expected_segments`,
+            sid, mOrg, mUser,
+          );
           // Stage-1 extraction is now a durable claim/retry lifecycle. The
           // request path starts it for low latency; the maintenance worker
           // replays pending/error rows after provider or process failure.

@@ -4273,6 +4273,34 @@ model Meeting {
   @@map("meetings")
 }
 
+/// Durable lifecycle owner for an in-progress recorder session. A meeting row
+/// only exists after finalization; this record is the source of truth while
+/// audio/transcript segments are still arriving or being retried.
+model MeetingSession {
+  id                String    @id @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  status            String    @default("recording") @db.VarChar(24)
+  consentRecorded   Boolean   @default(false) @map("consent_recorded")
+  expectedSegmentMs Int       @default(600000) @map("expected_segment_ms")
+  expectedSegments  Int?      @map("expected_segments")
+  finalizedMeetingId String?  @map("finalized_meeting_id") @db.Uuid
+  failureCode       String?   @map("failure_code") @db.VarChar(80)
+  failureDetail     String?   @map("failure_detail")
+  finalizationPayload Json?   @map("finalization_payload")
+  finalizationAttempts Int    @default(0) @map("finalization_attempts")
+  finalizationNextAttemptAt DateTime? @map("finalization_next_attempt_at") @db.Timestamptz(6)
+  finalizationLeaseExpiresAt DateTime? @map("finalization_lease_expires_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  finalizedAt       DateTime? @map("finalized_at") @db.Timestamptz(6)
+
+  @@index([orgId, userId, status, updatedAt(sort: Desc)], map: "meeting_sessions_org_user_status_idx")
+  @@index([status, finalizationNextAttemptAt, updatedAt], map: "meeting_sessions_finalization_retry_idx")
+  @@index([finalizedMeetingId], map: "meeting_sessions_finalized_meeting_idx")
+  @@map("meeting_sessions")
+}
+
 /// P1 — progressive durable transcript. Each 10-min recording segment is persisted
 /// here AS IT TRANSCRIBES (keyed by a client-generated session_id), so a long
 /// meeting survives a tab crash and the transcript is recoverable. At save the
@@ -4295,12 +4323,46 @@ model MeetingSegment {
   // computed async during the meeting so Stop only reduces, never extracts.
   extraction       Json?   @map("extraction")
   extractionStatus String  @default("pending") @map("extraction_status") @db.VarChar(16)
+  extractionAttempts Int   @default(0) @map("extraction_attempts")
+  extractionNextAttemptAt DateTime? @map("extraction_next_attempt_at") @db.Timestamptz(6)
+  extractionLeaseExpiresAt DateTime? @map("extraction_lease_expires_at") @db.Timestamptz(6)
+  extractionLastError String? @map("extraction_last_error")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@unique([sessionId, idx], map: "meeting_segments_session_idx_key")
   @@index([meetingId], map: "meeting_segments_meeting_idx")
   @@index([orgId, userId], map: "meeting_segments_org_user_idx")
   @@map("meeting_segments")
+}
+
+/// Raw recorder chunks are stored outside Postgres; this row is the durable,
+/// tenant-scoped control plane for upload, transcription, retries and cleanup.
+/// A browser may discard its IndexedDB copy only after this row is committed and
+/// the referenced object has been atomically written to durable storage.
+model MeetingAudioSegment {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId      String    @map("session_id") @db.Uuid
+  orgId          String    @map("org_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  idx            Int       @map("idx")
+  storageKey     String    @map("storage_key")
+  checksum       String    @db.VarChar(64)
+  contentType    String    @map("content_type") @db.VarChar(160)
+  byteSize       Int       @map("byte_size")
+  startMs        Int?      @map("start_ms")
+  endMs          Int?      @map("end_ms")
+  status         String    @default("queued") @db.VarChar(16)
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime? @map("next_attempt_at") @db.Timestamptz(6)
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  lastError      String?   @map("last_error")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([sessionId, idx], map: "meeting_audio_segments_session_idx_key")
+  @@index([status, nextAttemptAt, createdAt], map: "meeting_audio_segments_retry_idx")
+  @@index([orgId, userId, sessionId], map: "meeting_audio_segments_owner_idx")
+  @@map("meeting_audio_segments")
 }
 
 /// Durable outbox for engine→agent pushes (Phase 4 — remote/self-host orgs only).

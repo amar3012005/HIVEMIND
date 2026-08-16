@@ -289,6 +289,18 @@ async function ensureSchema() {
       deleted_at timestamptz
     );
     CREATE INDEX IF NOT EXISTS meetings_org_idx ON meetings(org_id) WHERE deleted_at IS NULL;
+    CREATE TABLE IF NOT EXISTS meeting_sessions (
+      id uuid PRIMARY KEY,org_id uuid NOT NULL,user_id uuid NOT NULL,status varchar(24) NOT NULL DEFAULT 'recording',
+      consent_recorded boolean NOT NULL DEFAULT false,expected_segment_ms int NOT NULL DEFAULT 600000,expected_segments int,
+      finalized_meeting_id uuid,failure_code varchar(80),failure_detail text,finalization_payload jsonb,
+      finalization_attempts int NOT NULL DEFAULT 0,finalization_next_attempt_at timestamptz,finalization_lease_expires_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now(),finalized_at timestamptz);
+    ALTER TABLE meeting_sessions
+      ADD COLUMN IF NOT EXISTS finalization_payload jsonb,
+      ADD COLUMN IF NOT EXISTS finalization_attempts int NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS finalization_next_attempt_at timestamptz,
+      ADD COLUMN IF NOT EXISTS finalization_lease_expires_at timestamptz;
+    CREATE INDEX IF NOT EXISTS meeting_sessions_retry_idx ON meeting_sessions(status,finalization_next_attempt_at,updated_at);
     CREATE TABLE IF NOT EXISTS meeting_segments (
       session_id uuid NOT NULL,
       org_id uuid NOT NULL,
@@ -303,6 +315,14 @@ async function ensureSchema() {
       PRIMARY KEY (session_id, idx)
     );
     CREATE INDEX IF NOT EXISTS meeting_segments_owner_idx ON meeting_segments(org_id, user_id, session_id);
+    CREATE TABLE IF NOT EXISTS meeting_audio_segments (
+      session_id uuid NOT NULL, org_id uuid NOT NULL, user_id uuid NOT NULL, idx int NOT NULL,
+      checksum varchar(64) NOT NULL, content_type varchar(160) NOT NULL, audio bytea NOT NULL,
+      start_ms int, end_ms int, status varchar(16) NOT NULL DEFAULT 'queued', attempts int NOT NULL DEFAULT 0,
+      next_attempt_at timestamptz, lease_expires_at timestamptz, last_error text,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (session_id, idx)
+    );
+    CREATE INDEX IF NOT EXISTS meeting_audio_segments_retry_idx ON meeting_audio_segments(status, next_attempt_at, created_at);
     CREATE TABLE IF NOT EXISTS tara_calls (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       org_id uuid NOT NULL,
@@ -1263,6 +1283,9 @@ function routesFor(ctx) {
       await db().query('DELETE FROM relationships WHERE org_id=$1', [org]).catch(() => {});
       await db().query('DELETE FROM knowledge_segments WHERE org_id=$1', [org]).catch(() => {});
       await db().query('DELETE FROM knowledge_documents WHERE org_id=$1', [org]).catch(() => {});
+      await db().query('DELETE FROM meeting_audio_segments WHERE org_id=$1', [org]).catch(() => {});
+      await db().query('DELETE FROM meeting_segments WHERE org_id=$1', [org]).catch(() => {});
+      await db().query('DELETE FROM meeting_sessions WHERE org_id=$1', [org]).catch(() => {});
       await db().query('DELETE FROM meetings WHERE org_id=$1', [org]).catch(() => {});
       await db().query('DELETE FROM tara_turns WHERE org_id=$1', [org]).catch(() => {});
       await db().query('DELETE FROM tara_calls WHERE org_id=$1', [org]).catch(() => {});
@@ -2025,6 +2048,46 @@ function routesFor(ctx) {
       const { rows } = await db().query(
         'SELECT idx,text,speakers,start_ms,end_ms,meeting_id FROM meeting_segments WHERE session_id=$1 AND org_id=$2 AND user_id=$3 ORDER BY idx',
         [f.session_id, org, f.user_id]);
+      return { segments: rows };
+    },
+    '/v1/meeting-session-write': async (b) => {
+      const s=b.session||{}; if(!s.id||!s.user_id||!['create','finalize'].includes(s.action)) return {ok:false,error:'invalid meeting session'};
+      if(s.action==='create') await db().query(`INSERT INTO meeting_sessions(id,org_id,user_id,status,consent_recorded,expected_segment_ms) VALUES($1,$2,$3,'recording',$4,$5) ON CONFLICT(id) DO UPDATE SET updated_at=now() WHERE meeting_sessions.org_id=EXCLUDED.org_id AND meeting_sessions.user_id=EXCLUDED.user_id`,[s.id,org,s.user_id,s.consent===true,Math.min(1800000,Math.max(60000,Number(s.expected_segment_ms)||600000))]);
+      else await db().query(`UPDATE meeting_sessions SET status=CASE WHEN status='ready' THEN status ELSE 'queued' END,expected_segments=COALESCE($4,expected_segments),finalization_payload=$5::jsonb,finalization_next_attempt_at=NULL,finalization_lease_expires_at=NULL,failure_code=NULL,failure_detail=NULL,updated_at=now() WHERE id=$1 AND org_id=$2 AND user_id=$3`,[s.id,org,s.user_id,Number.isInteger(Number(s.expected_segments))?Math.min(1000,Number(s.expected_segments)):null,JSON.stringify(s.payload||{})]);
+      const {rows}=await db().query('SELECT id,status,finalized_meeting_id,expected_segments FROM meeting_sessions WHERE id=$1 AND org_id=$2 AND user_id=$3',[s.id,org,s.user_id]); return rows[0]?{ok:true,session:rows[0]}:{ok:false,error:'not_found'};
+    },
+    '/v1/meeting-session-status': async (b) => {
+      const f=b.filter||{}; if(!f.user_id)return{sessions:[]}; const args=f.id?[f.id,org,f.user_id]:[org,f.user_id]; const where=f.id?'s.id=$1 AND s.org_id=$2 AND s.user_id=$3':'s.org_id=$1 AND s.user_id=$2';
+      const {rows}=await db().query(`SELECT s.id,s.status,s.expected_segments,s.finalized_meeting_id,s.failure_code,s.failure_detail,s.finalization_attempts,s.finalization_next_attempt_at,s.finalization_lease_expires_at,s.updated_at,s.finalized_at,COUNT(DISTINCT g.idx)::int segment_count,ARRAY_REMOVE(ARRAY_AGG(DISTINCT g.idx ORDER BY g.idx),NULL) segment_indexes,COUNT(DISTINCT a.idx)::int audio_count,COUNT(DISTINCT a.idx) FILTER(WHERE a.status='transcribed')::int audio_transcribed_count,COUNT(DISTINCT a.idx) FILTER(WHERE a.status='error' AND a.attempts>=3)::int audio_error_count FROM meeting_sessions s LEFT JOIN meeting_segments g ON g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id LEFT JOIN meeting_audio_segments a ON a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id WHERE ${where} GROUP BY s.id ORDER BY s.updated_at DESC LIMIT 25`,args); return f.id?{session:rows[0]||null}:{sessions:rows};
+    },
+    '/v1/meeting-session-pending': async (b) => { const {rows}=await db().query(`SELECT s.id,s.user_id FROM meeting_sessions s WHERE (s.status IN('queued','error') OR(s.status='analyzing' AND s.finalization_lease_expires_at<now())) AND s.finalization_attempts<3 AND(s.finalization_next_attempt_at IS NULL OR s.finalization_next_attempt_at<=now()) AND NOT EXISTS(SELECT 1 FROM meeting_audio_segments a WHERE a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id AND a.status<>'transcribed' AND NOT(a.status='error' AND a.attempts>=3)) ORDER BY s.updated_at LIMIT $1`,[Math.min(20,Math.max(1,Number(b.limit)||5))]); return{sessions:rows}; },
+    '/v1/meeting-session-claim': async (b) => { const f=b.filter||{}; const {rows}=await db().query(`UPDATE meeting_sessions SET status='analyzing',finalization_attempts=finalization_attempts+1,finalization_next_attempt_at=NULL,finalization_lease_expires_at=now()+interval '10 minutes',failure_code=NULL,failure_detail=NULL,updated_at=now() WHERE id=$1 AND org_id=$2 AND user_id=$3 AND finalization_attempts<3 AND(status IN('queued','error') OR(status='analyzing' AND finalization_lease_expires_at<now())) AND(finalization_next_attempt_at IS NULL OR finalization_next_attempt_at<=now()) RETURNING id,user_id,expected_segments,finalization_payload,finalization_attempts`,[f.id,org,f.user_id]); return{ok:true,session:rows[0]||null}; },
+    '/v1/meeting-session-settle': async (b) => { const r=b.result||{}; if(!r.id||!r.user_id||!['ready','error','failed'].includes(r.status))return{ok:false,error:'invalid settlement'}; await db().query(`UPDATE meeting_sessions SET status=$1,finalized_meeting_id=$2,failure_code=$3,failure_detail=$4,finalization_next_attempt_at=$5,finalization_lease_expires_at=NULL,finalized_at=CASE WHEN $1='ready' THEN now() ELSE finalized_at END,updated_at=now() WHERE id=$6 AND org_id=$7 AND user_id=$8`,[r.status,r.meeting_id||null,r.failure_code||null,r.failure_detail?String(r.failure_detail).slice(0,1000):null,r.next_attempt_at||null,r.id,org,r.user_id]); return{ok:true}; },
+
+    '/v1/meeting-audio-write': async (b) => {
+      const s = b.segment || {};
+      if (!s.session_id || !s.user_id || !Number.isInteger(s.idx) || !/^[a-f0-9]{64}$/i.test(String(s.checksum || '')) || !String(s.audio_base64 || '')) return { ok: false, error: 'invalid audio segment' };
+      const bytes = Buffer.from(String(s.audio_base64), 'base64');
+      if (!bytes.length || bytes.length > 24 * 1024 * 1024) return { ok: false, error: 'invalid audio bytes' };
+      await db().query(`INSERT INTO meeting_audio_segments (session_id,org_id,user_id,idx,checksum,content_type,audio,start_ms,end_ms,status) VALUES ($1,$2,$3,$4,$5,$6,decode($7,'base64'),$8,$9,'queued') ON CONFLICT (session_id,idx) DO UPDATE SET updated_at=now() WHERE meeting_audio_segments.checksum=EXCLUDED.checksum`, [s.session_id, org, s.user_id, s.idx, s.checksum, String(s.content_type || 'audio/webm').slice(0,160), String(s.audio_base64), s.start_ms ?? null, s.end_ms ?? null]);
+      const existing = await db().query('SELECT checksum,status FROM meeting_audio_segments WHERE session_id=$1 AND idx=$2 AND org_id=$3 AND user_id=$4', [s.session_id, s.idx, org, s.user_id]);
+      if (existing.rows[0]?.checksum !== s.checksum) return { ok: false, error: 'audio_segment_conflict' };
+      return { ok: true, status: existing.rows[0]?.status || 'queued' };
+    },
+    '/v1/meeting-audio-claim': async (b) => {
+      const f = b.filter || {};
+      if (!f.session_id || !f.user_id || !Number.isInteger(f.idx)) return { ok: false, error: 'invalid audio claim' };
+      const { rows } = await db().query(`WITH candidate AS (SELECT session_id,idx FROM meeting_audio_segments WHERE session_id=$1 AND idx=$2 AND org_id=$3 AND user_id=$4 AND (status IN ('queued','error') OR (status='processing' AND lease_expires_at < now())) AND attempts < 3 AND (next_attempt_at IS NULL OR next_attempt_at <= now()) FOR UPDATE SKIP LOCKED) UPDATE meeting_audio_segments a SET status='processing',attempts=a.attempts+1,next_attempt_at=NULL,lease_expires_at=now()+interval '10 minutes',last_error=NULL,updated_at=now() FROM candidate c WHERE a.session_id=c.session_id AND a.idx=c.idx RETURNING a.session_id,a.idx,a.user_id,a.content_type,encode(a.audio,'base64') AS audio_base64,a.start_ms,a.end_ms,a.attempts`, [f.session_id,f.idx,org,f.user_id]);
+      return { ok: true, segment: rows[0] || null };
+    },
+    '/v1/meeting-audio-settle': async (b) => {
+      const r = b.result || {};
+      if (!r.session_id || !r.user_id || !Number.isInteger(r.idx) || !['transcribed','error'].includes(r.status)) return { ok: false, error: 'invalid audio settlement' };
+      await db().query('UPDATE meeting_audio_segments SET status=$1,lease_expires_at=NULL,next_attempt_at=$2,last_error=$3,updated_at=now() WHERE session_id=$4 AND idx=$5 AND org_id=$6 AND user_id=$7', [r.status,r.next_attempt_at || null,r.last_error ? String(r.last_error).slice(0,500) : null,r.session_id,r.idx,org,r.user_id]);
+      return { ok:true };
+    },
+    '/v1/meeting-audio-pending': async (b) => {
+      const { rows } = await db().query(`SELECT session_id,idx,user_id FROM meeting_audio_segments WHERE (status IN ('queued','error') OR (status='processing' AND lease_expires_at < now())) AND attempts < 3 AND (next_attempt_at IS NULL OR next_attempt_at <= now()) ORDER BY created_at ASC LIMIT $1`, [Math.min(Math.max(Number(b.limit)||10,1),50)]);
       return { segments: rows };
     },
 

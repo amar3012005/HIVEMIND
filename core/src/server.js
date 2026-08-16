@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -23,6 +23,14 @@ import { OAuthStateStore } from './oauth/oauth-state-store.js';
 import { buildChatRecallContext } from './routes/chat.js';
 import { handleKnowledgeUploadRoute } from './routes/knowledge.js';
 import { KnowledgeUploadService } from './knowledge/upload-service.js';
+import { deriveMeetingSessionIntegrity } from './knowledge/meeting-session-contract.js';
+import { processMeetingSegmentExtraction, reconcileMeetingSegmentExtractions } from './knowledge/meeting-segment-extractor.js';
+import { persistMeetingAudio, meetingAudioStoreIsDurable } from './knowledge/meeting-audio-store.js';
+import { processMeetingAudioSegment, reconcileMeetingAudioSegments, pruneFinalizedMeetingAudio } from './knowledge/meeting-audio-worker.js';
+import { processRemoteMeetingAudioSegment, reconcileRemoteMeetingAudio } from './knowledge/meeting-remote-audio-worker.js';
+import { processRemoteMeetingFinalization, reconcileRemoteMeetingFinalizations } from './knowledge/meeting-remote-finalization-worker.js';
+import { generateMeetingInsights } from './knowledge/meeting-insights.js';
+import { queueMeetingFinalization, processMeetingFinalization, reconcileMeetingFinalizations } from './knowledge/meeting-finalization-worker.js';
 import { KnowledgeUploadJobStore } from './knowledge/upload-job-store.js';
 import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
@@ -540,6 +548,44 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     singleton: false,
     run: async () => { await processDueCampaignActions({ prisma, limit: 20 }); },
   });
+  scheduleRecurringMaintenanceJob({ enabled: true, prisma, jobName: 'meeting-remote-audio-transcription', initialDelayMs: 15_000, intervalMs: Math.max(15_000, Number(process.env.MEETING_REMOTE_AUDIO_RECONCILE_INTERVAL_MS || 30_000)), run: async () => { await reconcileRemoteMeetingAudio({ limitPerOrg: Number(process.env.MEETING_REMOTE_AUDIO_RECONCILE_LIMIT || 10) }); } });
+  scheduleRecurringMaintenanceJob({ enabled: true, prisma, jobName: 'meeting-remote-finalization', initialDelayMs: 25_000, intervalMs: Math.max(15_000, Number(process.env.MEETING_FINALIZATION_RECONCILE_INTERVAL_MS || 30_000)), run: async () => { await reconcileRemoteMeetingFinalizations({ limitPerOrg: Number(process.env.MEETING_FINALIZATION_RECONCILE_LIMIT || 5) }); } });
+  scheduleRecurringMaintenanceJob({
+    enabled: meetingAudioStoreIsDurable(),
+    prisma,
+    jobName: 'meeting-audio-retention',
+    initialDelayMs: 10 * 60 * 1000,
+    intervalMs: 24 * 60 * 60 * 1000,
+    run: async () => {
+      const result = await pruneFinalizedMeetingAudio(prisma, {
+        limit: Number(process.env.MEETING_AUDIO_RETENTION_SWEEP_LIMIT || 50),
+        retentionDays: Number(process.env.MEETING_AUDIO_RETENTION_DAYS || 30),
+      });
+      if (result.removed) console.info('[meeting-audio-retention]', result);
+    },
+  });
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'meeting-audio-transcription',
+    initialDelayMs: 10_000,
+    intervalMs: Math.max(15_000, Number(process.env.MEETING_AUDIO_RECONCILE_INTERVAL_MS || 30_000)),
+    run: async () => {
+      const result = await reconcileMeetingAudioSegments(prisma, { limit: Number(process.env.MEETING_AUDIO_RECONCILE_LIMIT || 10) });
+      if (result.scanned) console.info('[meeting-audio-reconciler]', result);
+    },
+  });
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'meeting-finalization',
+    initialDelayMs: 20_000,
+    intervalMs: Math.max(15_000, Number(process.env.MEETING_FINALIZATION_RECONCILE_INTERVAL_MS || 30_000)),
+    run: async () => {
+      const result = await reconcileMeetingFinalizations(prisma, { limit: Number(process.env.MEETING_FINALIZATION_RECONCILE_LIMIT || 5) });
+      if (result.scanned) console.info('[meeting-finalization-reconciler]', result);
+    },
+  });
   scheduleRecurringMaintenanceJob({
     enabled: true,
     prisma,
@@ -548,6 +594,17 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     intervalMs: 15_000,
     singleton: false,
     run: async () => { await processQueuedCampaignAssets({ prisma, limit: 2 }); },
+  });
+  scheduleRecurringMaintenanceJob({
+    enabled: true,
+    prisma,
+    jobName: 'meeting-segment-extraction',
+    initialDelayMs: 20_000,
+    intervalMs: Math.max(15_000, Number(process.env.MEETING_SEGMENT_RECONCILE_INTERVAL_MS || 60_000)),
+    run: async () => {
+      const result = await reconcileMeetingSegmentExtractions(prisma, { limit: Number(process.env.MEETING_SEGMENT_RECONCILE_LIMIT || 25) });
+      if (result.scanned) console.info('[meeting-segment-reconciler]', result);
+    },
   });
 }
 // Periodic signed audit checkpoints (H5 tail-truncation defense). First run
@@ -6374,6 +6431,32 @@ exit \$RC
         });
       }
 
+      if (pathname === '/api/meetings/sessions' && req.method === 'GET') {
+        if (orgIsRemote(_mOrgId)) {
+          const remote = await amrMeetingSessionStatus(_mOrgId, { user_id: _mUserId });
+          if (!remote) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+          return jsonResponse(res, { sessions: remote.sessions || [], durability: 'amr_persisted' });
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `SELECT s.id, s.status, s.updated_at, s.expected_segments,
+                    COUNT(DISTINCT a.id)::int AS audio_count,
+                    COUNT(DISTINCT a.id) FILTER (WHERE a.status='transcribed')::int AS audio_transcribed_count,
+                    COUNT(DISTINCT a.id) FILTER (WHERE a.status='error')::int AS audio_error_count,
+                    COUNT(DISTINCT g.id)::int AS transcript_count
+               FROM hivemind.meeting_sessions s
+               LEFT JOIN hivemind.meeting_audio_segments a ON a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id
+               LEFT JOIN hivemind.meeting_segments g ON g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id
+              WHERE s.org_id=$1::uuid AND s.user_id=$2::uuid AND s.status <> 'ready'
+              GROUP BY s.id ORDER BY s.updated_at DESC LIMIT 25`, _mOrgId, _mUserId,
+          );
+          return jsonResponse(res, { sessions: rows || [], durability: 'server_persisted' });
+        } catch (error) {
+          return jsonResponse(res, { error: 'meeting_sessions_list_error' }, 500);
+        }
+      }
+
       if (pathname === '/api/meetings/sessions' && req.method === 'POST') {
         if (body?.consent !== true) {
           return jsonResponse(res, {
@@ -6403,11 +6486,110 @@ exit \$RC
             plan: usage.plan, reason: 'Meeting notes monthly allowance reached.',
           }, 'meetingMinutes'), 402);
         }
-        return jsonResponse(res, {
-          session_id: crypto.randomUUID(),
-          remaining_seconds: remainingSeconds,
-          consent_recorded: true,
-        }, 201);
+        const requestedSessionId = typeof body?.session_id === 'string' && /^[0-9a-fA-F-]{36}$/.test(body.session_id)
+          ? body.session_id
+          : null;
+        const sessionId = requestedSessionId || crypto.randomUUID();
+        const expectedSegmentMs = Math.min(30 * 60 * 1000, Math.max(60 * 1000, Number(body?.expected_segment_ms) || 10 * 60 * 1000));
+
+        // Remote sessions must be persisted by the remote agent. Do not quietly
+        // create a central row: that would violate residency and falsely claim
+        // that a crash is recoverable from the tenant's selected storage.
+        if (orgIsRemote(_mOrgId)) {
+          const stored = await amrMeetingSessionWrite(_mOrgId, {
+            action: 'create', id: sessionId, user_id: _mUserId, consent: true, expected_segment_ms: expectedSegmentMs,
+          });
+          if (!stored?.ok) return jsonResponse(res, { error: stored?.error || 'storage_unavailable' }, 503);
+          return jsonResponse(res, { session_id: sessionId, remaining_seconds: remainingSeconds, consent_recorded: true, expected_segment_ms: expectedSegmentMs, status: stored.session?.status || 'recording', durability: 'amr_persisted' }, 201);
+        }
+        if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+        try {
+          const rows = await prisma.$queryRawUnsafe(
+            `INSERT INTO hivemind.meeting_sessions
+               (id, org_id, user_id, status, consent_recorded, expected_segment_ms)
+             VALUES ($1::uuid,$2::uuid,$3::uuid,'recording',true,$4)
+             ON CONFLICT (id) DO UPDATE
+               SET updated_at=now()
+             WHERE hivemind.meeting_sessions.org_id=EXCLUDED.org_id
+               AND hivemind.meeting_sessions.user_id=EXCLUDED.user_id
+             RETURNING id, status, consent_recorded, expected_segment_ms, created_at`,
+            sessionId, _mOrgId, _mUserId, expectedSegmentMs,
+          );
+          if (!rows?.[0]) return jsonResponse(res, { error: 'session_id_conflict' }, 409);
+          return jsonResponse(res, {
+            session_id: rows[0].id,
+            remaining_seconds: remainingSeconds,
+            consent_recorded: rows[0].consent_recorded,
+            expected_segment_ms: rows[0].expected_segment_ms,
+            status: rows[0].status,
+            durability: 'server_persisted',
+          }, 201);
+        } catch (e) {
+          console.error('[meetings] session create failed', { org_id: _mOrgId, user_id: _mUserId, error: e?.message || String(e) });
+          return jsonResponse(res, { error: 'meeting_session_create_error' }, 500);
+        }
+      }
+
+      // POST /api/meetings/sessions/:sid/audio/:idx — the recorder's durable
+      // boundary. Bytes are atomically committed to the configured persistent
+      // meeting-audio volume before the browser may delete its IndexedDB copy;
+      // a background worker owns STT retries after the HTTP response returns.
+      {
+        const audioMatch = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})\/audio\/(\d+)$/);
+        if (audioMatch && req.method === 'POST') {
+          const mOrg = _mOrgId, mUser = _mUserId, sid = audioMatch[1], idx = Number(audioMatch[2]);
+          if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!orgIsRemote(mOrg) && !meetingAudioStoreIsDurable()) return jsonResponse(res, { error: 'meeting_audio_store_not_durable' }, 503);
+          if (!_ct.startsWith('audio/')) return jsonResponse(res, { error: 'audio_unsupported' }, 415);
+          const maxMb = Number(process.env.MEETING_STT_MAX_MB || process.env.GROQ_WHISPER_MAX_MB || 24);
+          const maxBytes = maxMb * 1024 * 1024;
+          const chunks = []; let received = 0;
+          for await (const chunk of req) {
+            received += chunk.length;
+            if (received > maxBytes) return jsonResponse(res, { error: 'audio_too_large', max_mb: maxMb }, 413);
+            chunks.push(chunk);
+          }
+          const audio = Buffer.concat(chunks);
+          if (!audio.length) return jsonResponse(res, { error: 'empty_audio' }, 400);
+          try {
+            const startMs = Number(url.searchParams.get('start_ms'));
+            const endMs = Number(url.searchParams.get('end_ms'));
+            const checksum = crypto.createHash('sha256').update(audio).digest('hex');
+            if (orgIsRemote(mOrg)) {
+              const stored = await amrMeetingAudioWrite(mOrg, { session_id: sid, user_id: mUser, idx, checksum, content_type: _ct, audio_base64: audio.toString('base64'), start_ms: Number.isFinite(startMs) ? startMs : null, end_ms: Number.isFinite(endMs) ? endMs : null });
+              if (!stored?.ok) return jsonResponse(res, { error: stored?.error || 'storage_unavailable' }, stored?.error === 'audio_segment_conflict' ? 409 : 503);
+              void processRemoteMeetingAudioSegment({ orgId: mOrg, sessionId: sid, idx, userId: mUser }).catch((error) => console.warn('[meeting-remote-audio] start failed:', error?.message || error));
+              return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, status: stored.status || 'queued', durability: 'amr_persisted' }, 202);
+            }
+            const session = await prisma.$queryRawUnsafe(
+              `SELECT id FROM hivemind.meeting_sessions WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid`, sid, mOrg, mUser,
+            );
+            if (!session?.[0]) return jsonResponse(res, { error: 'not_found' }, 404);
+            const existing = await prisma.$queryRawUnsafe(
+              `SELECT checksum, status FROM hivemind.meeting_audio_segments WHERE session_id=$1::uuid AND idx=$2 AND org_id=$3::uuid AND user_id=$4::uuid`,
+              sid, idx, mOrg, mUser,
+            );
+            if (existing?.[0] && existing[0].checksum !== checksum) {
+              return jsonResponse(res, { error: 'audio_segment_conflict', session_id: sid, segment_index: idx }, 409);
+            }
+            const stored = await persistMeetingAudio({ orgId: mOrg, sessionId: sid, idx, contentType: _ct, bytes: audio });
+            await prisma.$executeRawUnsafe(
+              `INSERT INTO hivemind.meeting_audio_segments
+                 (session_id,org_id,user_id,idx,storage_key,checksum,content_type,byte_size,start_ms,end_ms,status)
+               VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,'queued')
+               ON CONFLICT (session_id,idx) DO UPDATE SET updated_at=now()
+               WHERE hivemind.meeting_audio_segments.checksum=EXCLUDED.checksum`,
+              sid, mOrg, mUser, idx, stored.storageKey, stored.checksum, _ct.slice(0, 160), stored.byteSize,
+              Number.isFinite(startMs) ? startMs : null, Number.isFinite(endMs) ? endMs : null,
+            );
+            void processMeetingAudioSegment(prisma, { sessionId: sid, idx, orgId: mOrg, userId: mUser })
+              .catch((error) => console.warn('[meeting-audio] start failed:', error?.message || error));
+            return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, status: existing?.[0]?.status === 'transcribed' ? 'transcribed' : 'queued', durability: 'server_persisted' }, 202);
+          } catch (error) {
+            console.error('[meetings] audio persist failed', { session_id: sid, org_id: mOrg, user_id: mUser, error: error?.message || String(error) });
+            return jsonResponse(res, { error: 'meeting_audio_save_error' }, 500);
+          }
+        }
       }
 
       // POST /api/meetings/transcribe — raw audio body → Groq Whisper → transcript.
@@ -6513,140 +6695,37 @@ exit \$RC
         }
       }
 
-      // POST /api/meetings/insights — { transcript, notes? } → LLM → structured insights.
+      // POST /api/meetings/insights — compatibility endpoint backed by the same
+      // shared generator as durable finalization. New clients should queue a
+      // session finalization so the work survives tab and Core restarts.
       if (pathname === '/api/meetings/insights' && req.method === 'POST') {
-        // Prefer the speaker-attributed transcript (from /transcribe speakerTranscript)
-        // when the caller sends it → action items/quotes get attributed to speakers;
-        // falls back to the plain transcript. Both carry SPEAKER_xx labels the prompt maps.
         const transcript = (body.speakerTranscript || body.transcript || '').toString().trim();
         if (!transcript) return jsonResponse(res, { error: 'no_transcript' }, 400);
         const notes = (body.notes || '').toString().slice(0, 4000);
-        // Participants captured at meeting start — names feed speaker_names
-        // reconciliation (map SPEAKER_xx → real participant).
         const participantNames = Array.isArray(body.participants)
-          ? body.participants.map((p) => (typeof p === 'string' ? p : (p?.name || ''))).map((s) => String(s).trim()).filter(Boolean).slice(0, 30)
+          ? body.participants
+            .map((participant) => (typeof participant === 'string' ? participant : (participant?.name || '')))
+            .map((name) => String(name).trim())
+            .filter(Boolean)
+            .slice(0, 30)
           : [];
-        const participantsBlock = participantNames.length
-          ? `PARTICIPANTS (real names of attendees — use these to map SPEAKER_xx diarization labels to real people in speaker_names):\n${participantNames.join(', ')}\n\n`
-          : '';
-        const sys = 'You are an expert meeting analyst. From the transcript (and optional user notes) produce STRICT JSON: {"title": string, "summary": string (3-6 sentences), "key_points": string[], "action_items": [{"task": string, "owner": string|null, "due": string|null}], "decisions": string[], "questions": string[], "topics": string[], "sentiment": string, "quotes": [{"quote": string, "speaker": string|null}] (up to 5 short verbatim notable quotes, in the transcript original language), "risks": string[] (risks, blockers, warnings or red flags raised), "next_steps": string[] (concrete follow-ups beyond action items, e.g. upcoming events or dates mentioned), "entities": {"people": string[], "organizations": string[], "dates": string[]}, "speaker_names": object}. speaker_names maps diarization labels to real participant names (e.g. {"SPEAKER_00": "Matthias"}) ONLY when the transcript contains SPEAKER_xx labels AND the user notes/context name the participants — infer who is who from how they speak; use {} when unsure. Be faithful — never invent facts. Use empty arrays/objects when none.';
-        // P3 — entity canonicalization. Feed the org's existing global entities so
-        // the model maps STT variants/misspellings ("Amar"/"Amer" → "Amar Sai Gadde")
-        // to the canonical name in entities/owners/speakers. Central only (remote
-        // org entities live on the agent; skip rather than transit central).
-        const mOrg = _mOrgId;
-        let _canonEnts = [];
         try {
-          if (!orgIsRemote(mOrg) && prisma) {
-            const erows = await prisma.$queryRawUnsafe(
-              `SELECT tag, count(*) c FROM (
-                 SELECT unnest(tags) tag FROM hivemind.memories
-                  WHERE org_id=$1::uuid AND deleted_at IS NULL AND is_latest=true
-               ) t WHERE tag LIKE 'entity:%' OR tag LIKE 'person:%'
-               GROUP BY tag ORDER BY c DESC LIMIT 80`,
-              mOrg,
-            );
-            const seen = new Set();
-            for (const r of (erows || [])) {
-              // Humanize the slug tag → proper canonical: "borealis-freight" →
-              // "Borealis Freight", "nadia_khan" → "Nadia Khan". Hyphens AND
-              // underscores → spaces, then Title Case (was only stripping _ →
-              // the LLM echoed the ugly hyphenated slug + didn't map first-names).
-              const name = String(r.tag).replace(/^(entity|person):/, '').replace(/[-_]+/g, ' ').trim()
-                .replace(/\b\w/g, (c) => c.toUpperCase());
-              const k = name.toLowerCase();
-              if (name.length > 1 && !seen.has(k)) { seen.add(k); _canonEnts.push(name); }
-              if (_canonEnts.length >= 50) break;
-            }
-          }
-        } catch (ee) { console.warn('[meeting-insights] canon-entities fetch failed:', ee.message); }
-        const entHint = _canonEnts.length
-          ? `\n\nKNOWN ORGANIZATION ENTITIES (canonical): ${_canonEnts.join('; ')}.\nWhen the transcript clearly refers to a variant, abbreviation, first-name-only, or transcription-misspelling of one of these, NORMALIZE it to the canonical name in entities, action_items.owner, quotes.speaker and speaker_names. Only normalize a confident match — do NOT force unrelated names onto this list.`
-          : '';
-        const sysEnt = sys + entHint;
-        const MODEL = process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b';
-        const GROQ = `${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`;
-        const callLLM = async (messages, ms = 120_000) => {
-          const resp = await groqFetch(GROQ, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages }),
-            signal: AbortSignal.timeout(ms),
+          const result = await generateMeetingInsights({
+            prisma: orgIsRemote(_mOrgId) ? null : prisma,
+            orgId: _mOrgId,
+            transcript,
+            notes,
+            participants: participantNames,
           });
-          if (!resp.ok) throw new Error(`llm ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
-          const j = await resp.json();
-          try { return JSON.parse(j.choices[0].message.content); }
-          catch { return { summary: '', raw: j.choices?.[0]?.message?.content || '' }; }
-        };
-        // Long meetings (1-2 hr ≈ 120k+ chars) exceed a single context window, so
-        // the old slice(0,60000) silently dropped the back half of the meeting.
-        // Map-reduce: split into windows, extract each in PARALLEL, then merge
-        // arrays (deduped) and re-summarize the per-window summaries into one.
-        const WINDOW = 48000;
-        try {
-          if (transcript.length <= WINDOW) {
-            const usr = participantsBlock + (notes ? `USER NOTES:\n${notes}\n\n` : '') + `TRANSCRIPT:\n${transcript}`;
-            const insights = await callLLM([{ role: 'system', content: sysEnt }, { role: 'user', content: usr }]);
-            return jsonResponse(res, { insights });
-          }
-          // Split on paragraph/sentence boundaries near each window edge.
-          const windows = [];
-          for (let i = 0; i < transcript.length; i += WINDOW) {
-            let end = Math.min(i + WINDOW, transcript.length);
-            if (end < transcript.length) {
-              const nl = transcript.lastIndexOf('\n', end);
-              if (nl > i + WINDOW * 0.6) end = nl;
-            }
-            windows.push(transcript.slice(i, end));
-            i = end - WINDOW; // align next start to the (possibly shifted) boundary
-          }
-          const parts = await Promise.all(windows.map((w, idx) => callLLM([
-            { role: 'system', content: sysEnt },
-            { role: 'user', content: `${participantsBlock}${notes ? `USER NOTES:\n${notes}\n\n` : ''}TRANSCRIPT (part ${idx + 1}/${windows.length}):\n${w}` },
-          ]).catch(() => null)));
-          const ok = parts.filter(Boolean);
-          if (!ok.length) return jsonResponse(res, { error: 'insights_failed' }, 502);
-          // Merge: union + dedup arrays; keep last non-empty scalars.
-          const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 90);
-          const mergeArr = (key, getText) => {
-            const seen = new Set(); const out = [];
-            for (const p of ok) for (const it of (Array.isArray(p[key]) ? p[key] : [])) {
-              const k = norm(getText(it)); if (k.length < 4 || seen.has(k)) continue; seen.add(k); out.push(it);
-            }
-            return out;
-          };
-          const merged = {
-            title: ok.find((p) => p.title)?.title || 'Meeting',
-            key_points: mergeArr('key_points', (x) => x).slice(0, 24),
-            action_items: mergeArr('action_items', (x) => (typeof x === 'string' ? x : x?.task)).slice(0, 24),
-            decisions: mergeArr('decisions', (x) => x).slice(0, 16),
-            questions: mergeArr('questions', (x) => (typeof x === 'string' ? x : x?.question || x?.text)).slice(0, 16),
-            risks: mergeArr('risks', (x) => x).slice(0, 16),
-            next_steps: mergeArr('next_steps', (x) => x).slice(0, 16),
-            quotes: mergeArr('quotes', (x) => (typeof x === 'string' ? x : x?.quote)).slice(0, 6),
-            topics: Array.from(new Set(ok.flatMap((p) => Array.isArray(p.topics) ? p.topics : []))).slice(0, 20),
-            sentiment: ok.find((p) => p.sentiment)?.sentiment || null,
-            entities: {
-              people: Array.from(new Set(ok.flatMap((p) => p.entities?.people || []))).slice(0, 30),
-              organizations: Array.from(new Set(ok.flatMap((p) => p.entities?.organizations || []))).slice(0, 20),
-              dates: Array.from(new Set(ok.flatMap((p) => p.entities?.dates || []))).slice(0, 20),
-            },
-            speaker_names: Object.assign({}, ...ok.map((p) => (p.speaker_names && typeof p.speaker_names === 'object') ? p.speaker_names : {})),
-          };
-          // Reduce the per-window summaries into one coherent meeting summary.
-          try {
-            const sumsJoined = ok.map((p, i) => `Part ${i + 1}: ${p.summary || ''}`).join('\n');
-            const red = await callLLM([
-              { role: 'system', content: 'Merge these sequential meeting-part summaries into ONE coherent meeting summary. STRICT JSON {"summary": string (4-7 sentences)}.' },
-              { role: 'user', content: sumsJoined },
-            ], 60_000);
-            merged.summary = red.summary || ok.map((p) => p.summary).filter(Boolean).join(' ');
-          } catch { merged.summary = ok.map((p) => p.summary).filter(Boolean).join(' '); }
-          return jsonResponse(res, { insights: merged, windows: windows.length });
-        } catch (e) {
-          return jsonResponse(res, { error: 'insights_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+          return jsonResponse(res, result);
+        } catch (error) {
+          return jsonResponse(res, {
+            error: error?.message === 'no_transcript' ? 'no_transcript' : 'insights_error',
+            message: process.env.NODE_ENV === 'production' ? undefined : error?.message,
+          }, error?.message === 'no_transcript' ? 400 : 500);
         }
       }
+
 
       // ── Persistent org-level meetings (Postgres `meetings` table) ──────────
       // Raw SQL so it works without a Prisma client regen on the running image.
@@ -6863,6 +6942,20 @@ exit \$RC
                 WHERE session_id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid AND meeting_id IS NULL`,
               _newId, body.session_id, mOrg, mUser,
             ).catch((e) => console.warn('[meetings] segment link failed:', e.message));
+            // The meeting row is the terminal durable result for this session.
+            // Mark this only after the row and its segment links exist, so a
+            // lost HTTP response can safely retry without producing a duplicate.
+            await prisma.$executeRawUnsafe(
+              `UPDATE hivemind.meeting_sessions
+                  SET status='ready', finalized_meeting_id=$1::uuid,
+                      expected_segments=COALESCE($5::int, (SELECT COUNT(*)::int FROM hivemind.meeting_segments WHERE session_id=$2::uuid)),
+                      finalized_at=now(), updated_at=now(), failure_code=NULL, failure_detail=NULL
+                WHERE id=$2::uuid AND org_id=$3::uuid AND user_id=$4::uuid`,
+              _newId, body.session_id, mOrg, mUser,
+              Number.isInteger(Number(body.expected_segment_count)) && Number(body.expected_segment_count) >= 0
+                ? Math.min(1000, Number(body.expected_segment_count))
+                : null,
+            ).catch((e) => console.warn('[meetings] session finalize mark failed:', e.message));
           }
           if (_newId) { runMeetingIntelligence(_newId, mUser, mOrg).catch(() => {}); }
           return jsonResponse(res, { ok: true, id: rows?.[0]?.id, created_at: rows?.[0]?.created_at }, 201);
@@ -6902,6 +6995,15 @@ exit \$RC
         }
         if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
         try {
+          // Pre-session clients are still accepted, but their recovery mode is
+          // visible: this creates an authenticated legacy session rather than
+          // silently relying only on browser memory.
+          await prisma.$executeRawUnsafe(
+            `INSERT INTO hivemind.meeting_sessions (id, org_id, user_id, status, consent_recorded)
+             VALUES ($1::uuid,$2::uuid,$3::uuid,'recording',false)
+             ON CONFLICT (id) DO NOTHING`,
+            sid, mOrg, mUser,
+          );
           await prisma.$executeRawUnsafe(
             `INSERT INTO hivemind.meeting_segments (session_id, org_id, user_id, idx, text, speakers, start_ms, end_ms)
                VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6::jsonb,$7,$8)
@@ -6912,30 +7014,160 @@ exit \$RC
             Number.isFinite(body.start_ms) ? body.start_ms : null,
             Number.isFinite(body.end_ms) ? body.end_ms : null,
           );
-          // P2: fire-and-forget Stage-1 extraction — runs DURING the meeting so
-          // Stop only reduces, never extracts. fetch→groqFetch openrouter failover.
-          (async () => {
-            try {
-              const sys = 'Extract from this meeting transcript SEGMENT. STRICT JSON {"entities":{"people":string[],"organizations":string[]},"decisions":string[],"actions":[{"task":string,"owner":string|null}],"topics":string[]}. Faithful — never invent. Empty arrays when none.';
-              const r = await fetch(`${process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1'}/chat/completions`, {
-                method: 'POST',
-                headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: process.env.MEETING_EXTRACT_MODEL || process.env.MEETING_INSIGHTS_MODEL || 'openai/gpt-oss-120b', temperature: 0.1, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: sys }, { role: 'user', content: text.slice(0, 20000) }] }),
-                signal: AbortSignal.timeout(60_000),
-              });
-              if (!r.ok) throw new Error(`llm ${r.status}`);
-              const ex = JSON.parse((await r.json()).choices[0].message.content);
-              await prisma.$executeRawUnsafe(
-                `UPDATE hivemind.meeting_segments SET extraction=$1::jsonb, extraction_status='done' WHERE session_id=$2::uuid AND idx=$3`,
-                JSON.stringify(ex), sid, idx,
-              );
-            } catch (_e) {
-              await prisma.$executeRawUnsafe(`UPDATE hivemind.meeting_segments SET extraction_status='error' WHERE session_id=$1::uuid AND idx=$2`, sid, idx).catch(() => {});
-            }
-          })();
-          return jsonResponse(res, { ok: true });
+          // Stage-1 extraction is now a durable claim/retry lifecycle. The
+          // request path starts it for low latency; the maintenance worker
+          // replays pending/error rows after provider or process failure.
+          void processMeetingSegmentExtraction(prisma, { sessionId: sid, idx, orgId: mOrg, userId: mUser })
+            .catch((error) => console.warn('[meeting-segment-extraction] start failed:', error?.message || error));
+          return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, durability: 'server_persisted' });
         } catch (e) {
           return jsonResponse(res, { error: 'segment_save_error', message: process.env.NODE_ENV === 'production' ? undefined : e.message }, 500);
+        }
+      }
+
+      // POST /api/meetings/sessions/:sid/finalize — durable hand-off. The
+      // browser supplies presentation metadata only; the worker rebuilds the
+      // transcript from acknowledged segments, generates insights and commits
+      // the final meeting even after the request or browser disappears.
+      {
+        const finalizeSession = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})\/finalize$/);
+        if (finalizeSession && req.method === 'POST') {
+          const sid = finalizeSession[1]; const mOrg = _mOrgId; const mUser = _mUserId;
+          if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          const requestedScope = String(body.scope || '').toLowerCase();
+          if (requestedScope === 'project') {
+            const access = body.project_id ? await prisma.projectMember.findFirst({
+              where: { projectId: body.project_id, userId: mUser, project: { orgId: mOrg, archivedAt: null } },
+              select: { projectId: true },
+            }).catch(() => null) : null;
+            if (!access) return jsonResponse(res, { error: 'not_found' }, 404);
+          }
+          const payload = {
+            title: String(body.title || '').slice(0, 300) || null,
+            notes: String(body.notes || '').slice(0, 8000) || null,
+            participants: Array.isArray(body.participants) ? body.participants.slice(0, 50) : [],
+            language: body.language || null,
+            duration_sec: Number.isFinite(body.duration_sec) ? body.duration_sec : null,
+            speaker_count: Number.isFinite(body.speaker_count) ? body.speaker_count : null,
+            segments: Array.isArray(body.segments) ? body.segments : null,
+            scope: requestedScope || null,
+            project_id: requestedScope === 'project' ? body.project_id : null,
+          };
+          try {
+            if (orgIsRemote(mOrg)) {
+              const queued = await amrMeetingSessionWrite(mOrg, { action: 'finalize', id: sid, user_id: mUser, expected_segments: body.expected_segment_count, payload });
+              if (!queued?.ok) return jsonResponse(res, { error: queued?.error || 'storage_unavailable' }, 503);
+              if (queued.session?.status === 'ready' && queued.session.finalized_meeting_id) return jsonResponse(res, { ok: true, status: 'ready', meeting_id: queued.session.finalized_meeting_id, session_id: sid }, 200);
+              void processRemoteMeetingFinalization({ orgId: mOrg, sessionId: sid, userId: mUser }).catch((error) => console.warn('[meeting-remote-finalization] start failed:', error?.message || error));
+              return jsonResponse(res, { ok: true, status: 'queued', session_id: sid, durable: true, durability: 'amr_persisted' }, 202);
+            }
+            const queued = await queueMeetingFinalization(prisma, {
+              sessionId: sid, orgId: mOrg, userId: mUser,
+              expectedSegments: body.expected_segment_count, payload,
+            });
+            if (!queued) return jsonResponse(res, { error: 'not_found' }, 404);
+            if (queued.status === 'ready' && queued.finalized_meeting_id) {
+              return jsonResponse(res, { ok: true, status: 'ready', meeting_id: queued.finalized_meeting_id, session_id: sid }, 200);
+            }
+            void processMeetingFinalization(prisma, { sessionId: sid, orgId: mOrg, userId: mUser })
+              .catch((error) => console.warn('[meeting-finalization] start failed:', error?.message || error));
+            return jsonResponse(res, { ok: true, status: 'queued', session_id: sid, durable: true }, 202);
+          } catch (error) {
+            console.error('[meeting-finalization] queue failed', { session_id: sid, org_id: mOrg, user_id: mUser, error: error?.message || String(error) });
+            return jsonResponse(res, { error: 'meeting_finalization_queue_error', recoverable: true, session_id: sid }, 500);
+          }
+        }
+      }
+
+      // GET /api/meetings/sessions/:sid — authoritative recovery/status view.
+      // It intentionally reports gaps and failed extraction rather than treating
+      // missing transcript segments as empty text or a successful meeting.
+      {
+        const mSession = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})$/);
+        if (mSession && req.method === 'GET') {
+          const mOrg = _mOrgId, mUser = _mUserId, sid = mSession[1];
+          if (orgIsRemote(mOrg)) {
+            const remote = await amrMeetingSessionStatus(mOrg, { id: sid, user_id: mUser });
+            if (!remote) return jsonResponse(res, { error: 'storage_unavailable' }, 503);
+            if (!remote.session) return jsonResponse(res, { error: 'not_found' }, 404);
+            const session = remote.session;
+            const expected = session.expected_segments == null ? null : Number(session.expected_segments);
+            const indexes = (session.segment_indexes || []).map(Number).sort((a, b) => a - b);
+            const missing = expected == null ? [] : Array.from({ length: expected }, (_, index) => index).filter((index) => !indexes.includes(index));
+            return jsonResponse(res, {
+              session,
+              segments: { count: Number(session.segment_count || 0), indexes, missing_indexes: missing, audio_uploaded: Number(session.audio_count || 0), audio_transcribed: Number(session.audio_transcribed_count || 0), audio_errors: Number(session.audio_error_count || 0) },
+              complete: session.status === 'ready' && missing.length === 0 && (expected == null || indexes.length === expected),
+              durability: 'amr_persisted',
+            });
+          }
+          if (!prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          try {
+            const rows = await prisma.$queryRawUnsafe(
+              `SELECT s.id, s.status, s.consent_recorded, s.expected_segment_ms, s.expected_segments,
+                      s.finalized_meeting_id, s.failure_code, s.failure_detail,
+                      s.finalization_attempts, s.finalization_next_attempt_at, s.finalization_lease_expires_at,
+                      s.created_at, s.updated_at, s.finalized_at,
+                      COUNT(DISTINCT g.id)::int AS segment_count,
+                      COALESCE(MAX(g.idx), -1)::int AS max_segment_index,
+                      COUNT(DISTINCT g.id) FILTER (WHERE g.extraction_status='done')::int AS extracted_count,
+                      COUNT(DISTINCT g.id) FILTER (WHERE g.extraction_status='error')::int AS extraction_error_count,
+                      COUNT(DISTINCT a.id)::int AS audio_count,
+                      COUNT(DISTINCT a.id) FILTER (WHERE a.status='transcribed')::int AS audio_transcribed_count,
+                      COUNT(DISTINCT a.id) FILTER (WHERE a.status='error')::int AS audio_error_count,
+                      ARRAY_REMOVE(ARRAY_AGG(DISTINCT g.idx ORDER BY g.idx), NULL) AS segment_indexes
+                 FROM hivemind.meeting_sessions s
+                 LEFT JOIN hivemind.meeting_segments g ON g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id
+                 LEFT JOIN hivemind.meeting_audio_segments a ON a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id
+                WHERE s.id=$1::uuid AND s.org_id=$2::uuid AND s.user_id=$3::uuid
+                GROUP BY s.id`,
+              sid, mOrg, mUser,
+            );
+            const session = rows?.[0];
+            if (!session) return jsonResponse(res, { error: 'not_found' }, 404);
+            const expected = session.expected_segments == null ? null : Number(session.expected_segments);
+            const segmentCount = Number(session.segment_count || 0);
+            const integrity = deriveMeetingSessionIntegrity({
+              status: session.status,
+              expectedSegments: expected,
+              segmentCount,
+              maxSegmentIndex: session.max_segment_index,
+              segmentIndexes: session.segment_indexes,
+            });
+            return jsonResponse(res, {
+              session: {
+                id: session.id,
+                status: session.status,
+                consent_recorded: session.consent_recorded,
+                expected_segment_ms: Number(session.expected_segment_ms),
+                expected_segments: expected,
+                finalized_meeting_id: session.finalized_meeting_id,
+                failure_code: session.failure_code,
+                failure_detail: session.failure_detail,
+                finalization_attempts: Number(session.finalization_attempts || 0),
+                finalization_next_attempt_at: session.finalization_next_attempt_at,
+                finalization_lease_expires_at: session.finalization_lease_expires_at,
+                created_at: session.created_at,
+                updated_at: session.updated_at,
+                finalized_at: session.finalized_at,
+              },
+              segments: {
+                count: segmentCount,
+                indexes: integrity.indexes,
+                missing_indexes: integrity.missingIndexes,
+                extraction_done: Number(session.extracted_count || 0),
+                extraction_errors: Number(session.extraction_error_count || 0),
+                audio_uploaded: Number(session.audio_count || 0),
+                audio_transcribed: Number(session.audio_transcribed_count || 0),
+                audio_errors: Number(session.audio_error_count || 0),
+              },
+              complete: integrity.complete,
+              durability: 'server_persisted',
+            });
+          } catch (e) {
+            console.error('[meetings] session status failed', { org_id: mOrg, user_id: mUser, session_id: sid, error: e?.message || String(e) });
+            return jsonResponse(res, { error: 'meeting_session_status_error' }, 500);
+          }
         }
       }
 

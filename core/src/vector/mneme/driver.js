@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteFindByTags, remoteClearMemories, remotePurge, remoteKbProvenance, remoteMemoryEvidence, remoteKbTables } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteAgentOrgIds, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteMeetingAudioWrite, remoteMeetingAudioClaim, remoteMeetingAudioSettle, remoteMeetingAudioPending, remoteMeetingSessionWrite, remoteMeetingSessionStatus, remoteMeetingSessionPending, remoteMeetingSessionClaim, remoteMeetingSessionSettle, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteFindByTags, remoteClearMemories, remotePurge, remoteKbProvenance, remoteMemoryEvidence, remoteKbTables } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -305,6 +305,16 @@ export function amrMeetingDelete(orgId, id, hard) { return orgIsRemote(orgId) ? 
 export function amrMeetingPatch(orgId, id, fields) { return orgIsRemote(orgId) ? remoteMeetingPatch(orgId, id, fields) : null; }
 export function amrMeetingSegmentWrite(orgId, segment) { return orgIsRemote(orgId) ? remoteMeetingSegmentWrite(orgId, segment) : null; }
 export function amrMeetingSegmentList(orgId, filter) { return orgIsRemote(orgId) ? remoteMeetingSegmentList(orgId, filter) : null; }
+export function amrMeetingAudioWrite(orgId, segment) { return orgIsRemote(orgId) ? remoteMeetingAudioWrite(orgId, segment) : null; }
+export function amrMeetingAudioClaim(orgId, filter) { return orgIsRemote(orgId) ? remoteMeetingAudioClaim(orgId, filter) : null; }
+export function amrMeetingAudioSettle(orgId, result) { return orgIsRemote(orgId) ? remoteMeetingAudioSettle(orgId, result) : null; }
+export function amrMeetingAudioPending(orgId, limit) { return orgIsRemote(orgId) ? remoteMeetingAudioPending(orgId, limit) : null; }
+export function amrMeetingSessionWrite(orgId, session) { return orgIsRemote(orgId) ? remoteMeetingSessionWrite(orgId, session) : null; }
+export function amrMeetingSessionStatus(orgId, filter) { return orgIsRemote(orgId) ? remoteMeetingSessionStatus(orgId, filter) : null; }
+export function amrMeetingSessionPending(orgId, limit) { return orgIsRemote(orgId) ? remoteMeetingSessionPending(orgId, limit) : null; }
+export function amrMeetingSessionClaim(orgId, filter) { return orgIsRemote(orgId) ? remoteMeetingSessionClaim(orgId, filter) : null; }
+export function amrMeetingSessionSettle(orgId, result) { return orgIsRemote(orgId) ? remoteMeetingSessionSettle(orgId, result) : null; }
+export function amrRemoteOrgIds() { return remoteAgentOrgIds(); }
 
 // TARA call ledger (self-host): route call ledger ops to the agent for remote orgs.
 // Returns null for non-remote (caller uses the central Prisma path). Async.

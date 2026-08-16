@@ -50,8 +50,11 @@ rollback. Gateway mode does not silently retry a failed request directly.
   wired directly to the same helper.
 - Employees has a Python transport shared by the HyperAgent engine, Hyper Rooms
   web-intelligence synthesis and AgentScope OpenAI-compatible clients.
-- TARA Deepgram has a Python transport for router, opening planner and streamed
-  direct-answer inference.
+- TARA Deepgram and TARA AAAS share Gateway transports for planning, streamed
+  answers, HTTP speech inference and supported realtime voice WebSockets.
+- OpenAI, Mistral and LiteLLM embeddings and Cohere/OpenRouter reranking use the
+  same provider-native Gateway boundary. Retrieval quality/model selection is
+  unchanged; only the network transport moved.
 
 ## Security and isolation
 
@@ -72,11 +75,12 @@ rollback. Gateway mode does not silently retry a failed request directly.
   model inference and do not go through AI Gateway.
 - User-connected Gemini is a connector tool executed with user authorization,
   not a HIVE-MIND-owned model call.
-- TARA realtime media WebSockets remain on their realtime provider protocol.
-  Ordinary TARA HTTP planning/synthesis is Gateway-primary.
-- Embedding and external cross-encoder reranking are retrieval infrastructure,
-  not chat-generation calls. They keep their existing endpoints until a
-  separately benchmarked migration proves vector identity and ranking parity.
+- Deepgram and Cartesia realtime WebSockets use Cloudflare's documented native
+  realtime routes. The legacy xAI realtime socket remains an explicit exception
+  because Cloudflare does not list xAI among its realtime WebSocket providers;
+  it must not be silently rewritten to an incompatible protocol.
+- Voyage-native reranking requires a configured Cloudflare custom-provider slug.
+  Production's OpenRouter-hosted Voyage route is already Gateway-primary.
 - Provider catalog, connection-management and billing-control endpoints remain
   direct because Gateway proxies inference, not provider control planes.
 
@@ -111,3 +115,13 @@ persistent service environment was repaired and the immutable release image was
 restored. `release-canonical.sh` now materializes Compose from the same canonical
 SHA as the images, preventing a future deploy or service recreation from silently
 using stale Compose defaults.
+
+## Log hygiene extension
+
+- reranking records provider attempts in structured metadata and emits one
+  final degradation warning instead of a warning per failed attempt;
+- repeated Memory Box circuit/list failures are rate-limited per tenant,
+  operation and error class while the first actionable failure remains visible;
+- Turing source-resolution internals are debug-only;
+- an unchanged zero-employee reconciliation state is no longer logged every
+  interval. State changes, non-zero operation and failures remain visible.

@@ -66,14 +66,14 @@ async def _reconcile_once():
             await state.gateway.reconcile()
         # Also keep counters in sync (even if gateway start failed)
         rows = await list_running_employees()
+        previous = (state.employee_count, state.workspace_count)
         state.employee_count = len(rows)
         state.workspace_count = len({r["slack_team_id"] for r in rows if r["slack_team_id"]})
         from datetime import datetime, timezone
         state.last_reconcile_at = datetime.now(timezone.utc).isoformat()
-        log.info(
-            "reconcile: %d employees, %d workspaces",
-            state.employee_count, state.workspace_count,
-        )
+        current = (state.employee_count, state.workspace_count)
+        if current != previous or current != (0, 0):
+            log.info("reconcile: %d employees, %d workspaces", *current)
     except Exception as e:
         log.warning("reconcile failed: %s", e)
 

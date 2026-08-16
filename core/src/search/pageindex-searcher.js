@@ -9,6 +9,8 @@
  * Never fails — gracefully degrades to direct hybrid if PageIndex unavailable.
  */
 
+import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
+
 export class PageIndexSearcher {
   constructor({ prisma, vectorDB, logger = console }) {
     this.prisma = prisma;
@@ -297,7 +299,7 @@ export class PageIndexSearcher {
     try {
       // If using OpenAI
       if (process.env.OPENAI_API_KEY) {
-        const resp = await fetch('https://api.openai.com/v1/embeddings', {
+        const resp = await gatewayFirstFetch('https://api.openai.com/v1/embeddings', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -317,7 +319,7 @@ export class PageIndexSearcher {
 
       // If using Mistral
       if (process.env.MISTRAL_API_KEY) {
-        const resp = await fetch('https://api.mistral.ai/v1/embeddings', {
+        const resp = await gatewayFirstFetch('https://api.mistral.ai/v1/embeddings', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${process.env.MISTRAL_API_KEY}`,

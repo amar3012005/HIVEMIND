@@ -12,6 +12,7 @@ import re
 import wave
 from typing import Optional, Dict, Any, List
 import httpx
+from ..ai_gateway import request as gateway_request
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,7 @@ class GroqWhisperClient:
             ),
             language=language,
         )
-        response = await client.post(
+        response = await gateway_request(client, "POST",
             self.config.transcription_url,
             headers=headers,
             data=retry_data,
@@ -289,7 +290,7 @@ class GroqWhisperClient:
             try:
                 client = await self._ensure_client()
                 
-                response = await client.post(
+                response = await gateway_request(client, "POST",
                     self.config.transcription_url,
                     headers=headers,
                     data=data,
@@ -354,7 +355,7 @@ class GroqWhisperClient:
         b64 = base64.b64encode(wav_bytes).decode("utf-8")
         try:
             client = await self._ensure_client()
-            resp = await client.post(
+            resp = await gateway_request(client, "POST",
                 self.config.openrouter_url,
                 headers={
                     "Authorization": f"Bearer {self.config.openrouter_api_key}",

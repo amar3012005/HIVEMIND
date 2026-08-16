@@ -12,6 +12,8 @@
 // Configuration
 // ==========================================
 
+import { gatewayFirstFetch } from '../../llm/cloudflare-gateway.js';
+
 const CONFIG = {
   // Mistral API configuration
   api: {
@@ -519,7 +521,7 @@ export class MistralEmbedService {
       input: input
     };
 
-    const response = await fetch(`${this.config.endpoint}/embeddings`, {
+    const response = await gatewayFirstFetch(`${this.config.endpoint}/embeddings`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

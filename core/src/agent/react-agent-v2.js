@@ -1060,7 +1060,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // MEDIUM: no precedence rule) and can be mistaken for authoritative profile.
   const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between' || plan.operation === 'profile';
   const recallQueries = !dedicatedLane && plannedQueries.length > 0
-    ? [buildStructuredRecallQuery(plannedQueries, plan.answer_objective)]
+    ? [buildStructuredRecallQuery(plannedQueries, plan.answer_objective, plan.retrieval_shape)]
     : [];
   await execBaseRecall(bus, plan, ctx, helpers, { recallQueries, recallMode, recallLimit, recallExtras });
 

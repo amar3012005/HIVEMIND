@@ -715,3 +715,14 @@ slides that find no unique anchor get a page instead of `null`.
 - Explicitly rejected: joining to `RuntimePerformanceMetric` by `stageId` for the "did it move a number" half. Grep across all writers confirmed `stageId` there is always a playbook execution stage id, never a `GrowthStage.id` — a join would silently return empty. No outcome metric exists against a growth stage anywhere in the codebase today. Recorded as an open gap, not built as a hollow feature.
 - Verification: 69/69 mocked-prisma tests pass. Deployed to control-plane, `hm-control` recreated healthy, byte-verified (`projectStrategyTrace` present, 2 matches) in the live container. Four public health checks 200.
 - Accepted release: `prod-20260815-c1ddd4058dc9`.
+
+## 2026-08-16 UTC — cross-lane parallelism (in-flight case) + deploy-path process correction
+
+- State: Committed and accepted release
+- Branch: `feat/hq-cross-lane-parallelism-in-flight`, PR #287, squash-merged to `singulance-main` at `8e7e21c1f7b1d546559925c8d175e957495c91a3`
+- Decision: extend the idle-only cross-domain parallelism (PR #281) to admit a genuinely free lane while another Room is already running, via `freeLaneReadyTodo`/`occupiedLaneEffectClasses` — fail-safe on unattributable occupancy. Reused the existing burst-dispatch loop by merging the gate condition rather than duplicating the ~230-line dispatch body.
+- Incident during deploy: an ad-hoc `scripts/release-singulance.sh` run from `/root/hivemind-main` reported success and byte-verified clean, but `docker inspect hm-control` afterward showed a DIFFERENT image than the one just built — a concurrent session's canonical release of an older, unrelated PR (#286, meetings fix) had landed on the box in the same second and silently won. Root cause: this session used the wrong deploy entrypoint all along. The repo's own governor (`DEPLOY_GOVERNOR.md`) mandates `/root/quick-deploy.sh singulance-main` exclusively; `release-singulance.sh` from `/root/hivemind-main` is a different, non-canonical path with no shared lock against the real one.
+- Corrected and redeployed via `/root/quick-deploy.sh singulance-main` (→ `scripts/release-canonical.sh` at the exact SHA). All 4 services (core, control-plane, employees, frontend) recreated, healthy, revision label `8e7e21c1` confirmed on every one.
+- One gate false-positived (`playbook fixture catalog mismatch`) — investigated live rather than dismissed: every fixture file hash matched byte-for-byte; only the aggregate list order differed due to a `sort -z` locale-collation difference between host and container shells. Recorded as a pre-existing verify-script bug, not a real drift.
+- Verification: 165/165 unit tests. Byte-verified `freeLaneReadyTodo` and the merged gate condition live inside `hm-control`. Four public health checks 200.
+- Accepted release: all 4 services on `8e7e21c1f7b1d5`.

@@ -381,7 +381,7 @@ installConsoleCapture('core');
 // Initialize memory engine with SQLite
 const engine = new MemoryEngine('./hivemind.db');
 const prisma = getPrismaClient();
-const { configureAiGovernance } = await import('./llm/ai-governance.js');
+const { configureAiGovernance, recordAiUsage } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 // Production Web Intelligence must use durable tenant-scoped state. The
 // constructor retains a file fallback only for local development with no DB.
@@ -9439,6 +9439,17 @@ exit \$RC
               requestCount: Number(entry.requests || 1),
               idempotencyKey: reportKey ? `${reportKey}:${index}` : undefined,
               metadata: { usage_report: 'room-turn.v2' },
+            });
+            void recordAiUsage({
+              usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens,
+                prompt_tokens_details: { cached_tokens: Number(entry.cached_tokens || 0) },
+                ...(entry.cost != null ? { cost: Number(entry.cost) } : {}) },
+              requestedModel: String(entry.model || body?.model || 'hyperagents-director').slice(0, 160),
+              servedModel: String(entry.model || body?.model || 'hyperagents-director').slice(0, 160),
+              provider: String(entry.provider || body?.provider || 'employees-service').slice(0, 80),
+              useCase: String(entry.feature || body?.feature || 'hyperagents-room').slice(0, 80),
+              requestCount: Number(entry.requests || 1),
+              idempotencyKey: reportKey ? `ai:${reportKey}:${index}` : undefined,
             });
             recorded += total;
           }

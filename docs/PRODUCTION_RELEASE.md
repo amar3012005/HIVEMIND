@@ -576,3 +576,13 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - `verify-deployed.sh` fixture-catalog gate false-positived a 3rd time — re-confirmed byte-identical once both lists are re-sorted; same locale-`sort` artifact as the two prior releases, not real drift.
 - Rollback: prior per-service images retagged `rollback` by the canonical release script.
 - External side effects: none.
+
+## d315694b — CampaignPanel noise cleanup (all 4 services)
+
+- Canonical SHA: `d315694be9e36c735d1ed5ab56cb06b600f98282` (PR #305, gitlink bump to Da-vinci `99220ff` / Da-vinci PR #53). Migration: none.
+- Feature: third file in the standing FE-noise cleanup series — 4 identical error-extraction call sites unified into `extractErr`; 3 identical spinner markups unified into `Spinner`; a dead `disabled` prop on `TargetRow` (always `false` at its only call site) removed entirely. No behavior change.
+- Unlike CompanyDashboard.jsx, this file has no `@humation/react` import-chain blocker — 4/4 new unit tests pass directly.
+- Runtime: all 4 services on `d315694be9e3`, healthy. Byte-verified via the release build's own worktree (`git log -1` shows `99220ff`; `grep -c` on that worktree's CampaignPanel.jsx shows 6 matches). Four public health checks 200.
+- `verify-deployed.sh` fixture-catalog gate false-positived a 4th time — re-confirmed byte-identical, same locale-`sort` artifact.
+- Rollback: prior per-service images retagged `rollback`.
+- External side effects: none.

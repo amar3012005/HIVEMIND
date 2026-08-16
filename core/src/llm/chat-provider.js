@@ -178,6 +178,28 @@ export function resolveGatewayLegacyTextProvider(model) {
   };
 }
 
+function prepareOpenRouterBody(body, route) {
+  if (body.max_completion_tokens != null) {
+    if (body.max_tokens == null) body.max_tokens = body.max_completion_tokens;
+    delete body.max_completion_tokens;
+  }
+  // OpenRouter's GPT-OSS tool routes reject parallel_tool_calls under
+  // require_parameters, even when the value is false. Omitting it preserves
+  // the requested sequential behavior and keeps Nitro provider selection valid.
+  delete body.parallel_tool_calls;
+  if (Array.isArray(body.tools) && body.tools.length
+      && /^openai\/gpt-oss-/i.test(route.wireModel)
+      && body.reasoning_effort == null) {
+    body.reasoning_effort = 'low';
+  }
+  const callerProviderPolicy = body.provider || {};
+  body.provider = { ...(route.providerPolicy || {}), ...callerProviderPolicy };
+  if (Array.isArray(callerProviderPolicy.order) && callerProviderPolicy.order.length) {
+    delete body.provider.sort;
+  }
+  return body;
+}
+
 export async function chatCompletionFetch(model, options = {}, { fallbackApiKey, fetchImpl = globalThis.fetch } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('chat_fetch_unavailable');
   const route = resolveChatCompletionRoute(model, { fallbackApiKey });
@@ -189,18 +211,10 @@ export async function chatCompletionFetch(model, options = {}, { fallbackApiKey,
   }
   body.model = route.wireModel;
   if (route.provider.startsWith('openrouter:')) {
-    if (body.max_completion_tokens != null) {
-      if (body.max_tokens == null) body.max_tokens = body.max_completion_tokens;
-      delete body.max_completion_tokens;
-    }
     // Internal callers may narrow a model to workload-specific providers.
     // Merge instead of replacing so final synthesis can use its benchmarked
     // order without changing other DeepSeek workloads such as HQ dispatch.
-    const callerProviderPolicy = body.provider || {};
-    body.provider = { ...(route.providerPolicy || {}), ...callerProviderPolicy };
-    if (Array.isArray(callerProviderPolicy.order) && callerProviderPolicy.order.length) {
-      delete body.provider.sort;
-    }
+    prepareOpenRouterBody(body, route);
   } else {
     // Cerebras prompt caching is automatic exact-prefix matching. Its API does
     // not require (or document) OpenRouter's sticky-routing cache key.
@@ -251,11 +265,7 @@ export async function chatCompletionStream(model, options = {}, {
   body.stream = true;
   body.stream_options = { ...(body.stream_options || {}), include_usage: true };
   if (route.provider.startsWith('openrouter:')) {
-    if (body.max_completion_tokens != null) {
-      if (body.max_tokens == null) body.max_tokens = body.max_completion_tokens;
-      delete body.max_completion_tokens;
-    }
-    body.provider = route.providerPolicy;
+    prepareOpenRouterBody(body, route);
   }
 
   const requestHeaders = {

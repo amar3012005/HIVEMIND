@@ -211,6 +211,37 @@ test('Gemini planner request uses OpenRouter and preserves required tool paramet
   }
 });
 
+test('GPT-OSS Nitro tool request omits unsupported parallel flag and uses low reasoning', async () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  let captured;
+  try {
+    await chatCompletionFetch('openai/gpt-oss-20b:nitro', {
+      method: 'POST',
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'route this' }],
+        tools: [{ type: 'function', function: { name: 'hivemind_context', parameters: { type: 'object' } } }],
+        tool_choice: 'required',
+        parallel_tool_calls: false,
+        max_tokens: 900,
+      }),
+    }, {
+      fetchImpl: async (_url, options) => {
+        captured = JSON.parse(options.body);
+        return new Response('{}', { status: 200 });
+      },
+    });
+    assert.equal(captured.model, 'openai/gpt-oss-20b:nitro');
+    assert.equal(captured.parallel_tool_calls, undefined);
+    assert.equal(captured.reasoning_effort, 'low');
+    assert.equal(captured.tool_choice, 'required');
+    assert.equal(captured.provider.require_parameters, true);
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
+});
+
 test('OpenRouter preserves prompt cache keys while Cerebras relies on automatic prefix caching', async () => {
   const priorOpenRouter = process.env.OPENROUTER_API_KEY;
   const priorCerebras = process.env.CEREBRAS_API_KEY;

@@ -162,6 +162,22 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
   };
 }
 
+export function resolveGatewayLegacyTextProvider(model) {
+  if (!cloudflareGatewayEnabled()) return null;
+  const route = resolveChatCompletionRoute(`cerebras/${String(model || '').replace(/^.*\//, '')}`);
+  const openRouter = route.provider.startsWith('openrouter:');
+  return {
+    name: openRouter ? 'openrouter' : 'cerebras',
+    url: route.url,
+    key: route.apiKey,
+    model: route.wireModel,
+    supportsProviderPrefs: openRouter,
+    headers: openRouter
+      ? { 'HTTP-Referer': 'https://singulancelabs.com', 'X-Title': 'SINGULANCE HIVEMIND' }
+      : {},
+  };
+}
+
 export async function chatCompletionFetch(model, options = {}, { fallbackApiKey, fetchImpl = globalThis.fetch } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('chat_fetch_unavailable');
   const route = resolveChatCompletionRoute(model, { fallbackApiKey });

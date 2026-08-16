@@ -25,6 +25,7 @@ import { currentOrg, currentApiKey } from '../db/prisma.js';
 import { meterTokens } from '../billing/usage-tracker.js';
 import { activeProviders, CANONICAL_MODEL, REASONING_EFFORT } from './llm-config.js';
 import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayFirstFetch, gatewayRequestHeaders } from './cloudflare-gateway.js';
+import { resolveGatewayLegacyTextProvider } from './chat-provider.js';
 
 // ── Metering (unchanged): turn the funnel into a per-key spend chokepoint. ──
 function _meterUsage(usage, model, feature) {
@@ -164,7 +165,8 @@ export async function groqFetch(url, options = {}, cfg = {}) {
   // Non-text models (audio/vision/websearch/...) → leave on their original path.
   if (reqBody.model && NO_FALLBACK.test(reqBody.model)) return _fetch(url, options);
 
-  const providers = activeProviders();
+  const gatewayProvider = resolveGatewayLegacyTextProvider(CANONICAL_MODEL);
+  const providers = gatewayProvider ? [gatewayProvider] : activeProviders();
   if (!providers.length) return _fetch(url, options); // nothing configured → original path
 
   const timeoutMs = cfg.timeoutMs || FALLBACK_TIMEOUT_MS;

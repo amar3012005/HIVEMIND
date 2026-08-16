@@ -96,6 +96,31 @@ test('Gateway skips Cerebras without its BYOK alias and uses OpenRouter immediat
   }
 }));
 
+test('Legacy text router uses one Gateway-backed provider without replay', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE: '',
+  CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: '',
+  CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: 'openrouter-alias',
+}, async () => {
+  const previousCerebras = process.env.CEREBRAS_API_KEY;
+  const previousOpenRouter = process.env.OPENROUTER_API_KEY;
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras-key';
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    const { resolveGatewayLegacyTextProvider } = await import('../../src/llm/chat-provider.js');
+    const provider = resolveGatewayLegacyTextProvider('gpt-oss-120b');
+    assert.equal(provider.name, 'openrouter');
+    assert.equal(provider.model, 'openai/gpt-oss-120b');
+    assert.equal(provider.key, '');
+  } finally {
+    if (previousCerebras == null) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = previousCerebras;
+    if (previousOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previousOpenRouter;
+  }
+}));
+
 test('Dynamic chat route strips caller authorization for fetch', async () => withEnv({
   CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
   CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',

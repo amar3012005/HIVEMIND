@@ -78,4 +78,3 @@ Evidence is delivered as one citation-bearing object per passage. Do not duplica
 7. Reranker timeout uses lane interleave and reports degradation.
 8. Standard/detailed/comprehensive views are exact prefixes of the same top 15.
 9. No truncation removes a requested qualifier from an otherwise selected passage.
-

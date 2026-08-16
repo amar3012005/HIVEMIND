@@ -71,4 +71,3 @@ Complete rank-one content is preferred when it fits. Lower-ranked rows use bound
 ## Trace contract
 
 Expose retrieval backend, lane counts, dedup counts, scope/source resolution, latency per lane, candidate pool size, rerank model/status/time, ranking degradation, retained mixed ranks and total time. For chat, also report retrieval, rerank and synthesis pass counts separately.
-

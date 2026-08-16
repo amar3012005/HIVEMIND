@@ -34,7 +34,7 @@ import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-syn
 import { deriveAnswerContextStatus, normalizeAnswerCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
-import { buildSynthesisFallbackChain, chooseSynthesisModel, hasGroundingEvidence, isCandidateSynthesisAcceptable, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
+import { buildSynthesisFallbackChain, chooseSynthesisModel, hasGroundingEvidence, isCandidateSynthesisAcceptable, isFailClosedSynthesisResponse, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildRecallIntentContext, fallbackRecallQueries, normalizeRecallOptimization } from './chat-query-optimizer.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
@@ -2030,7 +2030,7 @@ ${groundedEvidence}`;
 
   const assistantContext = `\n\nASSISTANT CONTEXT: You are ${assistantName || 'HIVE'}, serving ${orgName || 'this HIVEMIND workspace'}.`;
   const progressiveNote = evidence.progressive_recall
-    ? `\n\nRECALL WINDOW: showing unified ranks 1-${evidence.progressive_recall.delivered_until} of ${evidence.progressive_recall.candidates.length} from recall ${evidence.progressive_recall.recall_id}. If these ranks are relevant but do not contain enough detail to answer, set context_status="relevant_but_incomplete" so the server can reveal the next already-ranked page. If they are off-topic because retrieval misunderstood the request, set context_status="query_mismatch". Otherwise set "sufficient".`
+    ? `\n\nRECALL WINDOW: showing the one intent-selected unified window, ranks 1-${evidence.progressive_recall.delivered_until} of ${evidence.progressive_recall.candidates.length}, from recall ${evidence.progressive_recall.recall_id}. No later retrieval or reveal will run. If the window is relevant but cannot fully answer the stated objective, use everything useful it does support, identify only the requested missing detail, and set context_status="relevant_but_incomplete". If it is off-topic because retrieval misunderstood the request, set context_status="query_mismatch". Otherwise set "sufficient".`
     : '';
   const userBlock = `${evidenceBlock}${progressiveNote}${assistantContext}${capabilityHint}${windowNote}${personaNote}${coverageNote}
 
@@ -3589,6 +3589,17 @@ export async function runReactAgentV2({
           if (validateCandidate && hasGroundingEvidence(input.evidence)
               && !isCandidateSynthesisAcceptable(candidateAnswer)) {
             lastError = new Error('candidate_synthesis_validation_failed');
+            // answerStep already ran the fail-closed citation validator and its
+            // one bounded repair. If the final independent model still cannot
+            // produce a citation-valid claim, preserve the server-owned honest
+            // response instead of converting a controlled grounding failure
+            // into an opaque HTTP 502. Earlier models still get the chance to
+            // fall through to the independent safety model.
+            if (index === attemptModels.length - 1
+                && isFailClosedSynthesisResponse(candidateAnswer)) {
+              trace.warnings.push('synthesis_degraded:no_citation_valid_claim');
+              return candidateAnswer;
+            }
             if (streamAnswer) onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'candidate_validation_fallback' });
             continue;
           }

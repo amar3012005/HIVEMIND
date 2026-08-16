@@ -30,6 +30,16 @@ export function isCandidateSynthesisAcceptable(answer) {
       && claim.citation_ids.length > 0);
 }
 
+export function isFailClosedSynthesisResponse(answer) {
+  return answer?.grounded === false
+    && Array.isArray(answer?.claims)
+    && answer.claims.length === 0
+    && typeof answer?.response === 'string'
+    && answer.response.trim().length > 0
+    && Array.isArray(answer?.gaps)
+    && answer.gaps.length > 0;
+}
+
 export function hasGroundingEvidence(evidence = {}) {
   return ['memories', 'evidence', 'live', 'graph_edges', 'synthesis_chains']
     .some((key) => Array.isArray(evidence?.[key]) && evidence[key].length > 0)

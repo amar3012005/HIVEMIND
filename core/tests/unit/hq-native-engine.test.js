@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait, projectRecentDecisions, projectStrategyTrace } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait, projectRecentDecisions, projectStrategyTrace, occupiedLaneEffectClasses, freeLaneReadyTodo } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -412,13 +412,13 @@ test('runCycle detects a first-life burst (multiple simultaneously-READY sibling
   const source = fs.readFileSync(
     new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8',
   );
-  const gateIndex = source.indexOf("} else if (readyTodo && !roomInFlight) {");
-  assert.ok(gateIndex > 0, 'expected the single-dispatch gate to still exist');
-  const burstBlock = source.slice(gateIndex, gateIndex + 3500);
-  assert.match(burstBlock, /const burstSiblings = readyTodo\.context\?\.activation_sprint_id/);
+  const gateIndex = source.indexOf("} else if (readyTodo && (!roomInFlight || freeLaneTodo)) {");
+  assert.ok(gateIndex > 0, 'expected the dispatch gate (idle burst OR a free lane) to still exist');
+  const burstBlock = source.slice(gateIndex, gateIndex + 3800);
+  assert.match(burstBlock, /const burstSiblings = !roomInFlight && readyTodo\.context\?\.activation_sprint_id/);
   assert.match(burstBlock, /todo\.status === 'READY'/);
   assert.match(burstBlock, /todo\.context\?\.activation_sprint_id === readyTodo\.context\.activation_sprint_id/);
-  assert.match(burstBlock, /const todosToDispatchThisCycle = burstSiblings\.length > 1 \? burstSiblings\n\s*: crossLaneCandidate \? \[readyTodo, crossLaneCandidate\] : \[readyTodo\]/);
+  assert.match(burstBlock, /const todosToDispatchThisCycle = burstSiblings\.length > 1 \? burstSiblings\n\s*: crossLaneCandidate \? \[readyTodo, crossLaneCandidate\]\n\s*: freeLaneTodo \? \[freeLaneTodo\] : \[readyTodo\]/);
   assert.match(burstBlock, /for \(const readyTodo of todosToDispatchThisCycle\) \{/);
 });
 
@@ -426,19 +426,30 @@ test('runCycle detects a first-life burst (multiple simultaneously-READY sibling
 // completely idle (roomInFlight false — reached only inside this branch)
 // and a second, genuinely independent lane (different effectClass) also has
 // ready work, both start together instead of one waiting on the other.
-// Deliberately scoped to "nothing running anywhere" only — making
-// roomInFlight itself lane-aware while something is ALREADY running is a
-// larger, riskier change to logic already the source of several real bugs
-// this session, deferred on purpose.
 test('runCycle also starts a second, genuinely independent lane when nothing is running anywhere (not just the first-life burst)', () => {
   const source = fs.readFileSync(
     new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8',
   );
-  const gateIndex = source.indexOf("} else if (readyTodo && !roomInFlight) {");
-  const burstBlock = source.slice(gateIndex, gateIndex + 3500);
-  assert.match(burstBlock, /const crossLaneCandidate = burstSiblings\.length <= 1/);
+  const gateIndex = source.indexOf("} else if (readyTodo && (!roomInFlight || freeLaneTodo)) {");
+  const burstBlock = source.slice(gateIndex, gateIndex + 3800);
+  assert.match(burstBlock, /const crossLaneCandidate = !roomInFlight && burstSiblings\.length <= 1/);
   assert.match(burstBlock, /effectClass\(todo\) !== effectClass\(readyTodo\)/);
-  assert.match(burstBlock, /crossLaneCandidate \? \[readyTodo, crossLaneCandidate\] : \[readyTodo\]/);
+  assert.match(burstBlock, /crossLaneCandidate \? \[readyTodo, crossLaneCandidate\]\n\s*: freeLaneTodo \? \[freeLaneTodo\] : \[readyTodo\]/);
+});
+
+// Cross-domain parallelism, steady state (shipped 2026-08-16): the harder
+// case deferred above — starting lane B while lane A is already running.
+// freeLaneTodo is computed once right after roomInFlight and gates BOTH the
+// dispatch branch (admits the free lane alongside in-flight work) and the
+// wait branch (falls through here only when no free lane exists) — source-
+// guarded so a future edit can't silently decouple the two conditions.
+test('runCycle admits a genuinely free lane alongside in-flight work, and the wait branch only fires without one', () => {
+  const source = fs.readFileSync(
+    new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8',
+  );
+  assert.match(source, /const freeLaneTodo = roomInFlight\s*\n\s*\? freeLaneReadyTodo\(\{ readyTodo, todos: capabilityState\.todos, capacityOwningRuns \}\)\s*\n\s*: null;/);
+  assert.match(source, /\} else if \(readyTodo && \(!roomInFlight \|\| freeLaneTodo\)\) \{/);
+  assert.match(source, /\} else if \(readyTodo && roomInFlight\) \{/);
 });
 
 // Journal-recall (2026-08-15): confirmed by direct recon that
@@ -466,4 +477,63 @@ test('projectRecentDecisions never throws on missing/malformed input — a recal
     { event_type: null, summary: null, decision: null, created_at: null },
     { event_type: null, summary: null, decision: null, created_at: null },
   ]);
+});
+
+// Cross-domain parallelism, steady state (2026-08-16): the harder case
+// deferred when the idle-only version shipped. occupiedLaneEffectClasses /
+// freeLaneReadyTodo are the pure attribution logic — no DB, fully testable.
+function runningTodo(id, { effectClass: cls = 'internal' } = {}) {
+  return { id, status: 'RUNNING', context: { effect_class: cls } };
+}
+function readyTodoOf(id, { effectClass: cls = 'internal' } = {}) {
+  return { id, status: 'READY', context: { effect_class: cls } };
+}
+function capacityRun({ status = 'ACTIVE', waitingFor = null, todoId = 'running-1' } = {}) {
+  return { id: `run-${todoId}`, status, waitingFor, trigger: { todo_id: todoId } };
+}
+
+test('occupiedLaneEffectClasses reads the lane straight off a RUNNING todo', () => {
+  const todos = [runningTodo('t1', { effectClass: 'internal' })];
+  assert.deepEqual(occupiedLaneEffectClasses({ todos, capacityOwningRuns: [] }), new Set(['internal']));
+});
+
+test('occupiedLaneEffectClasses resolves a WAITING_AUTHORITY run back to its owning todo via trigger.todo_id', () => {
+  const todos = [{ id: 'running-1', status: 'WAITING_FOR_AUTHORITY', context: { effect_class: 'external' } }];
+  const capacityOwningRuns = [capacityRun({ status: 'WAITING_AUTHORITY', todoId: 'running-1' })];
+  assert.deepEqual(occupiedLaneEffectClasses({ todos, capacityOwningRuns }), new Set(['external']));
+});
+
+test('occupiedLaneEffectClasses ignores a WAITING_EVENT run parked on a missing connector — it never occupies a lane', () => {
+  const todos = [{ id: 'running-1', status: 'WAITING_FOR_CONNECTOR', context: { effect_class: 'external' } }];
+  const capacityOwningRuns = [capacityRun({
+    status: 'WAITING_EVENT', waitingFor: { types: ['capability.connected'] }, todoId: 'running-1',
+  })];
+  assert.deepEqual(occupiedLaneEffectClasses({ todos, capacityOwningRuns }), new Set());
+});
+
+test('occupiedLaneEffectClasses fails SAFE (both lanes occupied) when a capacity-owning run cannot be attributed to a todo', () => {
+  const capacityOwningRuns = [capacityRun({ status: 'ACTIVE', todoId: 'todo-not-in-fetched-set' })];
+  assert.deepEqual(occupiedLaneEffectClasses({ todos: [], capacityOwningRuns }), new Set(['internal', 'external']));
+});
+
+test('freeLaneReadyTodo admits a READY todo in the other lane while one lane is occupied', () => {
+  const todos = [runningTodo('running-1', { effectClass: 'internal' })];
+  const readyTodo = readyTodoOf('ready-1', { effectClass: 'external' });
+  assert.equal(freeLaneReadyTodo({ readyTodo, todos, capacityOwningRuns: [] }), readyTodo);
+});
+
+test('freeLaneReadyTodo refuses a READY todo in the SAME lane as the in-flight work', () => {
+  const todos = [runningTodo('running-1', { effectClass: 'internal' })];
+  const readyTodo = readyTodoOf('ready-1', { effectClass: 'internal' });
+  assert.equal(freeLaneReadyTodo({ readyTodo, todos, capacityOwningRuns: [] }), null);
+});
+
+test('freeLaneReadyTodo refuses when occupancy cannot be attributed — fail safe, never risk a same-lane collision', () => {
+  const capacityOwningRuns = [capacityRun({ status: 'ACTIVE', todoId: 'unresolvable' })];
+  const readyTodo = readyTodoOf('ready-1', { effectClass: 'external' });
+  assert.equal(freeLaneReadyTodo({ readyTodo, todos: [], capacityOwningRuns }), null);
+});
+
+test('freeLaneReadyTodo returns null when readyTodo is absent', () => {
+  assert.equal(freeLaneReadyTodo({ readyTodo: null, todos: [], capacityOwningRuns: [] }), null);
 });

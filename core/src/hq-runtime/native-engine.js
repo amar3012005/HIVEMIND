@@ -87,6 +87,46 @@ export function playbookRunOwnsCapacity(run) {
   return run.waitingFor?.releases_execution_slot !== true;
 }
 
+// Cross-domain parallelism, steady state (2026-08-16): the harder case
+// deliberately deferred when the idle-only version shipped (see
+// [hq_wake_trigger_dedup_audit] / runtime_envisioned_end_state.md item 8) —
+// starting lane B while lane A is already running. A lane is "occupied" by
+// whichever effectClass (internal/external) the currently in-flight work
+// belongs to: a RUNNING todo, or a capacity-owning RuntimePlaybookRun
+// resolved back to its owning todo via run.trigger.todo_id (the same
+// linkage `runtime_playbook_result` reconciliation already uses at the top
+// of this file). If a capacity-owning run's todo can't be resolved (missing
+// from the fetched todo set, or trigger.todo_id absent), this fails SAFE —
+// both lanes are reported occupied — rather than risking two same-effect-
+// class Rooms running at once, which the original one-at-a-time invariant
+// exists to prevent.
+export function occupiedLaneEffectClasses({ todos = [], capacityOwningRuns = [] }) {
+  const byId = new Map(todos.map((todo) => [todo.id, todo]));
+  const classes = new Set();
+  let hasUnresolvedOwner = false;
+  for (const todo of todos) if (todo.status === 'RUNNING') classes.add(effectClass(todo));
+  for (const run of capacityOwningRuns) {
+    if (!playbookRunOwnsCapacity(run)) continue;
+    const todoId = String(run.trigger?.todo_id || '');
+    const linkedTodo = todoId ? byId.get(todoId) : null;
+    if (linkedTodo) classes.add(effectClass(linkedTodo));
+    else hasUnresolvedOwner = true;
+  }
+  return hasUnresolvedOwner ? new Set(['internal', 'external']) : classes;
+}
+
+// Returns readyTodo itself only when its lane is genuinely free — a Room is
+// in flight, but in the OTHER effectClass entirely. Returns null when
+// nothing is in flight at all (that's the idle-burst case above, already
+// handled), when the lane is occupied, or when occupancy can't be
+// attributed (fail-safe, see occupiedLaneEffectClasses).
+export function freeLaneReadyTodo({ readyTodo, todos = [], capacityOwningRuns = [] }) {
+  if (!readyTodo) return null;
+  const occupied = occupiedLaneEffectClasses({ todos, capacityOwningRuns });
+  if (occupied.size === 0) return null;
+  return occupied.has(effectClass(readyTodo)) ? null : readyTodo;
+}
+
 // The first-life browser check-in is OPTIONAL: it may briefly hold planning
 // while an administrator adds current context, but it must never freeze the
 // company. A run still in progress waits; a run that exhausted verification
@@ -1156,12 +1196,19 @@ export class NativeHqEngine {
     const capacityOwningRuns = this.runtimePlaybooks
       ? await prisma.runtimePlaybookRun.findMany({
         where: { orgId: runtime.orgId, status: { in: ['ACTIVE', 'WAITING_EVENT', 'WAITING_AUTHORITY'] } },
-        select: { id: true, status: true, waitingFor: true },
+        select: { id: true, status: true, waitingFor: true, trigger: true },
       }).catch(() => [])
       : [];
     roomInFlight = capabilityState.todos.some((todo) => todo.status === 'RUNNING')
       || reconciledLifecycleOwnsCapacity
       || capacityOwningRuns.some(playbookRunOwnsCapacity);
+    // Cross-domain parallelism, steady state: computed once, read by both the
+    // dispatch branch (to admit a genuinely free lane alongside in-flight
+    // work) and the wait branch (to fall through here only when no free lane
+    // exists). See freeLaneReadyTodo above for the fail-safe attribution rule.
+    const freeLaneTodo = roomInFlight
+      ? freeLaneReadyTodo({ readyTodo, todos: capabilityState.todos, capacityOwningRuns })
+      : null;
     if (trigger.type === 'work_result') {
       const workOrderId = String(trigger.payload?.work_order_id || '');
       const order = workOrderId ? await prisma.hyperWorkOrder.findFirst({
@@ -1264,7 +1311,7 @@ export class NativeHqEngine {
         summary: 'HQ accepted the specialist contribution and will compare stage outcomes at the next measurement checkpoint.',
         workOrderId: order.id,
       });
-    } else if (readyTodo && !roomInFlight) {
+    } else if (readyTodo && (!roomInFlight || freeLaneTodo)) {
       // The first-life "wow batch" burst: first-life-control.js's
       // initial_plan_ready promotion now marks EVERY cohort proposal READY
       // at once (not just the recommendation), specifically so the founder
@@ -1276,33 +1323,38 @@ export class NativeHqEngine {
       // these moves to RUNNING, it no longer matches `status === 'READY'`,
       // so a later cycle's burstSiblings collapses back to a single todo
       // and roomInFlight naturally blocks further dispatch until it clears.
-      const burstSiblings = readyTodo.context?.activation_sprint_id
+      // Burst/idle-crosslane are both scoped to the genuinely-idle case —
+      // when a Room is already in flight, freeLaneTodo (computed once above)
+      // is the only other admission path, and it is exactly one todo.
+      const burstSiblings = !roomInFlight && readyTodo.context?.activation_sprint_id
         ? capabilityState.todos.filter((todo) => todo.status === 'READY'
           && todo.context?.activation_sprint_id === readyTodo.context.activation_sprint_id)
         : [readyTodo];
-      // Cross-domain parallelism, steady state (2026-08-15): reached this
-      // branch ONLY when roomInFlight is false — nothing is running
-      // ANYWHERE right now. That's the one case where starting a second,
-      // genuinely independent lane is risk-free: it can never disturb an
-      // already-in-flight Room, because there isn't one. Deliberately NOT
-      // touched: the harder case (start lane B WHILE lane A is already
-      // running) — that needs roomInFlight itself to become lane-aware
-      // across all 3 of its computation sites in this file, a much larger,
-      // riskier change to logic that's already been the source of several
-      // real bugs fixed this session (capability_wait_release, MONITORING
-      // broadening). Deferred deliberately rather than rushed.
-      const crossLaneCandidate = burstSiblings.length <= 1
+      // Cross-domain parallelism, idle case (shipped 2026-08-15): when
+      // nothing is running ANYWHERE, starting a second genuinely independent
+      // lane is risk-free — it can never disturb an already-in-flight Room,
+      // because there isn't one.
+      const crossLaneCandidate = !roomInFlight && burstSiblings.length <= 1
         ? capabilityState.todos.find((todo) => todo.status === 'READY'
           && todo.id !== readyTodo.id
           && effectClass(todo) !== effectClass(readyTodo))
         : null;
+      // Cross-domain parallelism, steady state (shipped 2026-08-16): the
+      // harder case — starting lane B while lane A is already running — see
+      // freeLaneReadyTodo above. Only reachable when roomInFlight is true,
+      // so it never competes with the idle-only burst/crossLane paths.
       const todosToDispatchThisCycle = burstSiblings.length > 1 ? burstSiblings
-        : crossLaneCandidate ? [readyTodo, crossLaneCandidate] : [readyTodo];
-      if (todosToDispatchThisCycle.length > 1) await event(prisma, runtime, cycle, {
+        : crossLaneCandidate ? [readyTodo, crossLaneCandidate]
+        : freeLaneTodo ? [freeLaneTodo] : [readyTodo];
+      if (todosToDispatchThisCycle.length > 1 || freeLaneTodo) await event(prisma, runtime, cycle, {
         eventType: 'decision',
-        title: burstSiblings.length > 1 ? 'Starting the first-life batch in parallel' : 'Starting two independent lanes together',
+        title: burstSiblings.length > 1 ? 'Starting the first-life batch in parallel'
+          : freeLaneTodo ? 'Starting an independent lane alongside in-flight work'
+          : 'Starting two independent lanes together',
         summary: burstSiblings.length > 1
           ? `${todosToDispatchThisCycle.length} evidenced proposals from the first operating plan start together: ${todosToDispatchThisCycle.map((todo) => todo.title).join('; ')}. Every task after this one goes back to one bounded step at a time.`
+          : freeLaneTodo
+          ? `A specialist Room is already working, but ${freeLaneTodo.title} is a genuinely independent ${effectClass(freeLaneTodo)} task with no shared lane. Starting it now instead of waiting behind unrelated in-flight work.`
           : `Nothing is currently running, and these two tasks are genuinely independent (${effectClass(readyTodo)} and ${effectClass(crossLaneCandidate)}): ${todosToDispatchThisCycle.map((todo) => todo.title).join('; ')}. They start together instead of waiting on each other.`,
         details: { todo_ids: todosToDispatchThisCycle.map((todo) => todo.id) },
       });
@@ -1537,8 +1589,11 @@ export class NativeHqEngine {
       }
       }
     } else if (readyTodo && roomInFlight) {
-      // A Room is already working. Do NOT dispatch the next todo and do NOT re-plan —
-      // one steady step at a time. The in-flight Room's result will wake us to continue.
+      // A Room is already working, and the next todo is NOT a genuinely free
+      // lane (freeLaneTodo above was null: same effectClass as the in-flight
+      // work, or occupancy couldn't be attributed). Do NOT dispatch and do
+      // NOT re-plan — one steady step at a time within a lane. The in-flight
+      // Room's result will wake us to continue.
       // isNoisyRepeatCycle: skip re-narrating "still working" every single minute for
       // a connector_changed repeat where nothing changed — the Room's own real
       // work_result wake still narrates normally when it actually returns.

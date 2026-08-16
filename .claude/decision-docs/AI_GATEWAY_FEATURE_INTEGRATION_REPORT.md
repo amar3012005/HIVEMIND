@@ -91,3 +91,23 @@ rollback. Gateway mode does not silently retry a failed request directly.
 4. Fresh logs must contain no direct-provider fallback, missing alias, malformed
    stream, duplicate execution or tenant-scope errors.
 5. The immutable image SHA and rollback image are recorded in the release ledger.
+
+## Production acceptance
+
+Release `3a87f0a3` deployed Core, Control Plane, Employees and TARA Deepgram.
+All four containers reported the exact full revision label, healthy state and
+zero restarts. Acceptance calls observed:
+
+- grounded non-tool chat: HTTP 200, four sources, grounded response;
+- chat SSE: first event at 127 ms, 25 events, no error event;
+- TARA opening planner: successful Gateway response in 534 ms;
+- Employees synthesis: successful Gateway response in 693 ms;
+- Cloudflare logs: HTTP 200 requests for GPT-OSS 20B and 120B across the Core,
+  Employees and TARA canary window, with cache disabled.
+
+The release also exposed a deployment-config drift: the mutable runtime Compose
+checkout did not contain TARA's new Gateway environment contract. TARA's
+persistent service environment was repaired and the immutable release image was
+restored. `release-canonical.sh` now materializes Compose from the same canonical
+SHA as the images, preventing a future deploy or service recreation from silently
+using stale Compose defaults.

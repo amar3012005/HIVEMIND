@@ -34,7 +34,6 @@ esac; done
 
 CANON=/root/hivemind-main
 HDIR=/root/hivemind
-HETZNER="$HDIR/infra/docker-compose.hetzner.yml"
 ENVF="$HDIR/.env"
 NEXT_REPO=/root/hivemind-next
 NEXT="$NEXT_REPO/infra/docker-compose.next.yml"
@@ -131,14 +130,23 @@ fi
 echo "[worktree] $REL @ $(git -C "$REL" rev-parse --short HEAD)"
 
 # ── compose validation ─────────────────────────────────────────────────────
-docker compose -f "$HETZNER" --env-file "$ENVF" config -q && echo "[compose] hetzner valid"
-
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 IMAGE_LABELS=(--label "org.opencontainers.image.revision=$SHA" --label "org.opencontainers.image.created=$TS")
 STATE_ROOT="${RELEASE_STATE_ROOT:-/root/releases/manifests/$SHORT/$TS}"
 mkdir -p "$STATE_ROOT"
 MANIFEST="$STATE_ROOT/RELEASE_MANIFEST.json"
 OVERRIDE="$STATE_ROOT/deploy-override.yml"
+# Deploy configuration must come from the same immutable SHA as the images.
+# The mutable /root/hivemind checkout can legitimately contain operator work
+# and may lag canonical; using its Compose file silently drops new environment
+# contracts or selects stale image defaults on a later service recreation.
+# Materialize the canonical Compose file outside the worktree so it stays clean,
+# make the shared env_file absolute, and preserve canonical relative contexts via
+# --project-directory. No secret value is copied into this artifact.
+HETZNER="$STATE_ROOT/docker-compose.hetzner.yml"
+sed "s#env_file: \[../.env\]#env_file: [$ENVF]#g" "$REL/infra/docker-compose.hetzner.yml" > "$HETZNER"
+docker compose --project-directory "$REL/infra" -f "$HETZNER" --env-file "$ENVF" config -q \
+  && echo "[compose] canonical hetzner valid"
 declare -A ROLLBACK=()
 
 if [ "$DRY" = 1 ]; then
@@ -168,7 +176,8 @@ for s in "${SVCS[@]}"; do
   [ "$s" = frontend ] && continue
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
-  ( cd "$HDIR" && docker compose -f "$HETZNER" -f "$OVERRIDE" --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null )
+  docker compose --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
+    --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
 done
 
 # ── frontend (separate compose/project) ────────────────────────────────────

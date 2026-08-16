@@ -6,6 +6,7 @@ Status: identified work only. This file deliberately does not implement or autho
 
 - Cloudflare AI Gateway code can be enabled only after confirming the account ID, Gateway ID, Dynamic Route name, exact custom-provider slugs, BYOK aliases and a scoped token.
 - A route canary must verify planner, query rewrite, synthesis, streaming and failure behavior without exposing credentials.
+- Gateway response metadata (`cf-aig-model` and `cf-aig-provider`) must be copied into sanitized chat telemetry so production can prove which route branch actually served each stage.
 - Source SHA, immutable image, running container and authenticated route must be proven as one release tuple.
 
 ## P1 — source-read completeness
@@ -53,4 +54,3 @@ Status: identified work only. This file deliberately does not implement or autho
 - No second reranker or automatic 5-to-10-to-15 answer loop.
 - No connector writes during model shadowing, canaries or recall tests.
 - No tenant-bearing Gateway caching until isolation and revision invalidation are proven.
-

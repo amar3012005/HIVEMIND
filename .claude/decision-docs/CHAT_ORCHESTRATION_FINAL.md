@@ -91,9 +91,10 @@ Every text-model call participating in chat—planner, compatibility query rewri
 - Gateway cache remains disabled for tenant-bearing chat until a separately reviewed tenant/scope/revision cache key exists.
 - If Gateway is not completely configured, the current direct provider route remains unchanged.
 
+Cloudflare references: [Dynamic Route usage](https://developers.cloudflare.com/ai-gateway/features/dynamic-routing/usage/), [Gateway authentication](https://developers.cloudflare.com/ai-gateway/configuration/authentication/), and [BYOK aliases](https://developers.cloudflare.com/ai-gateway/configuration/bring-your-own-keys/).
+
 ## Observability and acceptance
 
 Every turn trace must identify planner, optional optimizer, retrieval, rerank, synthesis and repair usage; the selected evidence depth; retrieval/rerank/synthesis pass counts; provider/Gateway route; time to first SSE answer token; and compound receipts without secrets.
 
 Release acceptance covers at least: native recall, evidence-only answer, temporal query, native save, connector read, connector draft, approval execution, recall-to-document-to-message dependencies, missing-input continuation, malformed model output, Gateway failure, and no external side effect when `use_tools` is false.
-

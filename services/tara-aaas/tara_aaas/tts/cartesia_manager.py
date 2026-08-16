@@ -106,6 +106,8 @@ class CartesiaConnection:
                     "Authorization": f"Bearer {self.config.api_key}",
                     "User-Agent": "CartesiaPythonClient/1.0"
                 }
+                from ..ai_gateway import cartesia_websocket_route
+                ws_url, extra_headers = cartesia_websocket_route(ws_url, extra_headers)
 
                 logger.debug(f"[{self.connection_id}] Connecting to {self.config.websocket_url}...")
 

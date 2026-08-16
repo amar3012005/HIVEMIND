@@ -55,10 +55,37 @@ test('Gateway maps only known provider hosts and uses provider-native paths', ()
   CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: 'first',
 }, () => {
   assert.equal(gatewayProviderForUrl('https://untrusted.example/v1/chat'), null);
+  assert.equal(gatewayProviderForUrl('https://api.openai.com/v1/embeddings'), 'openai');
+  assert.equal(gatewayProviderForUrl('https://api.mistral.ai/v1/embeddings'), 'mistral');
+  assert.equal(gatewayProviderForUrl('https://api.cohere.com/v2/rerank'), 'cohere');
+  assert.equal(gatewayProviderForUrl('https://api.cohere.ai/v2/rerank'), 'cohere');
+  assert.equal(gatewayProviderForUrl('https://api.anthropic.com/v1/messages'), 'anthropic');
+  assert.equal(gatewayProviderForUrl('https://api.together.xyz/v1/chat/completions'), 'together-ai');
   assert.equal(gatewayProviderUrl('openrouter', 'https://openrouter.ai/api/v1/chat/completions'), 'https://gateway.ai.cloudflare.com/v1/account/gateway/openrouter/chat/completions');
   assert.deepEqual(gatewayHeaders('cerebras'), {
     'cf-aig-authorization': 'Bearer token', 'cf-aig-skip-cache': 'true', 'cf-aig-byok-alias': 'first',
   });
+}));
+
+test('Gateway routes embeddings and reranking without replaying upstream', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+}, async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), headers: new Headers(init.headers) });
+    return new Response('{}');
+  };
+  await gatewayFirstFetch('https://api.mistral.ai/v1/embeddings', {
+    method: 'POST', headers: { Authorization: 'Bearer mistral-key' },
+  }, { fetchImpl });
+  await gatewayFirstFetch('https://api.cohere.com/v2/rerank', {
+    method: 'POST', headers: { Authorization: 'Bearer cohere-key' },
+  }, { fetchImpl });
+  assert.match(calls[0].url, /\/gateway\/mistral\/v1\/embeddings$/);
+  assert.match(calls[1].url, /\/gateway\/cohere\/v2\/rerank$/);
+  assert.equal(calls[0].headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+  assert.equal(calls.length, 2);
 }));
 
 test('Gateway request headers strip a prepared direct-provider credential', () => withEnv({

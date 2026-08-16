@@ -196,7 +196,8 @@ async def voice_preview(voice_id: str, text: str | None = None, language: str = 
     sample = (text or "Hi, this is how I sound. How can I help you today?")[:200]
     try:
         async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.post(
+            from .ai_gateway import request as gateway_request
+            r = await gateway_request(c, "POST",
                 "https://api.cartesia.ai/tts/bytes",
                 headers={"X-API-Key": CARTESIA_KEY, "Cartesia-Version": CARTESIA_VER, "Content-Type": "application/json"},
                 json={

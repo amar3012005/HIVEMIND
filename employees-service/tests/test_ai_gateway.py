@@ -33,3 +33,10 @@ def test_missing_alias_uses_provider_passthrough(monkeypatch):
     )
     assert headers["Authorization"] == "Bearer provider"
     assert headers["cf-aig-authorization"] == "Bearer gateway-token"
+
+
+def test_embedding_and_voice_providers_are_gateway_native():
+    assert ai_gateway.provider("https://api.mistral.ai/v1/embeddings") == "mistral"
+    assert ai_gateway.provider("https://api.cohere.com/v2/rerank") == "cohere"
+    assert ai_gateway.provider("https://api.deepgram.com/v1/speak") == "deepgram"
+    assert ai_gateway.provider("https://api.cartesia.ai/tts/bytes") == "cartesia"

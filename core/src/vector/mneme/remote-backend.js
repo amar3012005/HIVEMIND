@@ -24,6 +24,20 @@ const _inflightByCircuit = new Map();
 const _waitersByCircuit = new Map();
 const _capabilityCache = new Map();
 const _coalescedReads = new Map();
+const _lastRemoteLogAt = new Map();
+const REMOTE_LOG_DEDUPE_MS = Math.max(1000, Number(process.env.MNEME_REMOTE_LOG_DEDUPE_MS || 30000));
+
+function _logRemoteOnce(level, operation, orgId, error, suffix = '') {
+  const message = String(error?.message || error || 'unknown');
+  const errorClass = /circuit open/i.test(message) ? 'circuit_open'
+    : /timeout|aborted/i.test(message) ? 'timeout'
+      : message.slice(0, 80);
+  const key = `${level}:${operation}:${orgId}:${errorClass}`;
+  const now = Date.now();
+  if (now - (_lastRemoteLogAt.get(key) || 0) < REMOTE_LOG_DEDUPE_MS) return;
+  _lastRemoteLogAt.set(key, now);
+  console[level](`[mneme/remote] ${operation} failed org=${orgId}: ${message}${suffix}`);
+}
 
 export class RemoteMemoryUnavailableError extends Error {
   constructor(orgId, operation, cause = null) {
@@ -365,7 +379,7 @@ export async function remoteRecall(orgId, vector, filter, limit, scoreThreshold)
     const out = await _coalescedInteractiveRead(orgId, '/v1/recall', { vector, filter, limit, scoreThreshold });
     return Array.isArray(out?.results) ? out.results : null;
   } catch (e) {
-    console.warn(`[mneme/remote] recall failed org=${orgId}: ${e.message}`);
+    _logRemoteOnce('warn', 'recall', orgId, e);
     throw isRemoteMemoryUnavailableError(e)
       ? e
       : new RemoteMemoryUnavailableError(orgId, '/v1/recall', e);
@@ -418,7 +432,7 @@ export async function remoteList(orgId, filter, cursor, limit, offset = 0, optio
     // the caller cannot distinguish "nothing here" from "I could not look".
     // Throw, so the route answers an error and the UI can say so. A caller that genuinely wants a
     // best-effort empty list must opt into that by catching this itself.
-    console.error(`[mneme/remote] list FAILED org=${orgId}: ${e.message} — surfacing as an error, not an empty list`);
+    _logRemoteOnce('error', 'list', orgId, e, ' — surfacing as an error, not an empty list');
     throw new Error(`memory list unavailable for this workspace: ${e.message}`);
   }
 }

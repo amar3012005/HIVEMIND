@@ -9,7 +9,7 @@
  * @module src/embeddings/mistral
  */
 
-import fetch from 'node-fetch';
+import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
 import https from 'https';
 import crypto from 'node:crypto';
 
@@ -169,7 +169,7 @@ export class MistralEmbedService {
       const _timer = setTimeout(() => _ctrl.abort(), _timeoutMs);
       let response;
       try {
-        response = await fetch(this.baseUrl, {
+        response = await gatewayFirstFetch(this.baseUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

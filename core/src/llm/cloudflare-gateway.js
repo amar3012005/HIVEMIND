@@ -37,11 +37,17 @@ export function gatewayProviderForUrl(value) {
   if (host === 'api.groq.com') return 'groq';
   if (host === 'api.deepgram.com') return 'deepgram';
   if (host === 'api.cartesia.ai') return 'cartesia';
+  if (host === 'api.openai.com') return 'openai';
+  if (host === 'api.mistral.ai') return 'mistral';
+  if (host === 'api.cohere.com' || host === 'api.cohere.ai') return 'cohere';
+  if (host === 'api.anthropic.com') return 'anthropic';
+  if (host === 'api.together.xyz') return 'together-ai';
   // These are custom-provider routes in some accounts. They are opt-in because
   // Cloudflare requires the exact `custom-{slug}` configured in that account.
   if (host === 'api.x.ai') return String(process.env.CLOUDFLARE_AI_GATEWAY_XAI_PROVIDER || '').trim() || null;
   if (host === 'api.blaiq.ai') return String(process.env.CLOUDFLARE_AI_GATEWAY_BLAIQ_PROVIDER || '').trim() || null;
   if (host === 'api.lemonfox.ai') return String(process.env.CLOUDFLARE_AI_GATEWAY_LEMONFOX_PROVIDER || '').trim() || null;
+  if (host === 'api.voyageai.com') return String(process.env.CLOUDFLARE_AI_GATEWAY_VOYAGE_PROVIDER || '').trim() || null;
   return null;
 }
 

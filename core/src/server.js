@@ -110,7 +110,7 @@ if (!globalThis.__hmProviderFetchWrapped) {
   globalThis.fetch = (input, init) => {
     const u = typeof input === 'string' ? input : (input && input.url) || '';
     if (u.includes('api.groq.com') && u.includes('/chat/completions')) return groqFetch(input, init);
-    const inferencePath = /\/(chat\/completions|responses|embeddings|audio\/transcriptions|images(?:\/generations)?)(?:\?|$)/.test(u);
+    const inferencePath = /\/(chat\/completions|responses|embeddings|rerank|audio\/(?:transcriptions|speech)|tts(?:\/bytes)?|speak|images(?:\/generations)?)(?:\?|$)/.test(u);
     if (gatewayProviderForUrl(u) && inferencePath) {
       return gatewayFirstFetch(input, init, { fetchImpl: _nativeFetch });
     }

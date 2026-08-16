@@ -155,9 +155,13 @@ async def handle_browser_voice(ws: WebSocket, *, session_id: str,
 
     closed = asyncio.Event()
     try:
+        from .ai_gateway import websocket_route
+        dg_url, dg_headers = websocket_route(
+            config.DEEPGRAM_AGENT_URL, {"Authorization": f"Token {config.DEEPGRAM_API_KEY}"}
+        )
         async with websockets.connect(
-            config.DEEPGRAM_AGENT_URL,
-            additional_headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}"},
+            dg_url,
+            additional_headers=dg_headers,
         ) as dg:
             await dg.send(json.dumps(settings))
 

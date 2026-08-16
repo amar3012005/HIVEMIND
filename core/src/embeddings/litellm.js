@@ -7,7 +7,7 @@
  * @module src/embeddings/litellm
  */
 
-import fetch from 'node-fetch';
+import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
 
 const BATCH_SIZE = 20;
 
@@ -32,7 +32,7 @@ export class LiteLLMEmbedService {
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     let res;
     try {
-      res = await fetch(`${this.baseUrl}/embeddings`, {
+      res = await gatewayFirstFetch(`${this.baseUrl}/embeddings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -193,7 +193,8 @@ async def voice_preview(voice_id: str, text: str | None = None, language: str = 
     if re.match(r"^[0-9a-f-]{36}$", voice_id, re.I) and config.CARTESIA_API_KEY:
         try:
             async with httpx.AsyncClient(timeout=20) as c:
-                r = await c.post(config.CARTESIA_TTS_URL,
+                from .ai_gateway import request as gateway_request
+                r = await gateway_request(c, "POST", config.CARTESIA_TTS_URL,
                     headers={"Authorization": f"Bearer {config.CARTESIA_API_KEY}",
                              "Cartesia-Version": "2025-04-16",
                              "Content-Type": "application/json"},
@@ -211,7 +212,8 @@ async def voice_preview(voice_id: str, text: str | None = None, language: str = 
         return JSONResponse({"error": "tts_unavailable"}, status_code=503)
     try:
         async with httpx.AsyncClient(timeout=20) as c:
-            r = await c.post(
+            from .ai_gateway import request as gateway_request
+            r = await gateway_request(c, "POST",
                 f"https://api.deepgram.com/v1/speak?model={voice_id}",
                 headers={"Authorization": f"Token {config.DEEPGRAM_API_KEY}",
                          "Content-Type": "application/json"},

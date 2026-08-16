@@ -26,6 +26,14 @@ def provider(url: str) -> str | None:
         "openrouter.ai": "openrouter",
         "api.groq.com": "groq",
         "api.cerebras.ai": "cerebras",
+        "api.openai.com": "openai",
+        "api.mistral.ai": "mistral",
+        "api.cohere.com": "cohere",
+        "api.cohere.ai": "cohere",
+        "api.anthropic.com": "anthropic",
+        "api.together.xyz": "together-ai",
+        "api.deepgram.com": "deepgram",
+        "api.cartesia.ai": "cartesia",
     }.get(host.lower())
 
 

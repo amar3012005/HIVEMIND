@@ -329,7 +329,9 @@ export class ResidentRunManager {
     this.runs.set(run.run_id, run);
 
     const source = await this._resolveTuringSource(payload, run);
-    this.logger?.log?.(`[turing] Resolved source: hypotheses=${source?.hypotheses?.length || 0}, run=${source?.run?.run_id || 'none'}`);
+    if (process.env.HIVEMIND_DEBUG_TURING === 'true') {
+      this.logger?.debug?.(`[turing] Resolved source: hypotheses=${source?.hypotheses?.length || 0}, run=${source?.run?.run_id || 'none'}`);
+    }
     if (!source) {
       run.status = 'failed';
       run.error = 'No completed Feynman run was available for Turing to verify.';

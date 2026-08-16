@@ -22,7 +22,7 @@
  * @module memory/reranker
  */
 
-import fetch from 'node-fetch';
+import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
 import { currentStageSignal, remainingStageMs } from '../runtime/stage-deadline.js';
 
 const ENABLED   = process.env.RERANK_ENABLED === 'true';
@@ -113,7 +113,7 @@ function textOf(c) {
 
 async function callTei(query, texts, signal, model = MODEL) {
   // HuggingFace TEI reranker: { query, texts } → [{ index, score }]
-  const r = await fetch(`${URL}/rerank`, {
+  const r = await gatewayFirstFetch(`${URL}/rerank`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}) },
     body: JSON.stringify({ query, texts, model }),
@@ -126,7 +126,7 @@ async function callTei(query, texts, signal, model = MODEL) {
 
 async function callCohere(query, texts, signal, model = MODEL) {
   // Cohere Rerank: { model, query, documents } → { results:[{ index, relevance_score }] }
-  const r = await fetch(`${URL}`, {
+  const r = await gatewayFirstFetch(`${URL}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
     body: JSON.stringify({ model, query, documents: texts, top_n: texts.length }),
@@ -239,8 +239,6 @@ export async function rerank(query, candidates, { topN } = {}) {
       } catch (err) {
         lastErr = err;
         if (currentStageSignal()?.aborted || remainingStageMs(1) <= 0) {
-          console.warn(`[reranker] cancelled by upstream deadline while serving ${model}; `
-            + 'stopping the fallback chain immediately.');
           return finish(candidates, { status: 'cancelled', model });
         }
         // When a distinct fallback model exists, spend the second bounded
@@ -255,7 +253,8 @@ export async function rerank(query, candidates, { topN } = {}) {
         && totalAttempts < MAX_ATTEMPTS_TOTAL
         && Math.max(0, runDeadlineAt - Date.now()) > 0
         && remainingStageMs(1) > 0) {
-      console.warn(`[reranker] ${model} failed (${lastErr?.message}) — falling back to ${MODEL_CHAIN[mi + 1]}`);
+      // Attempt detail is retained in rerank_meta. Emit only the final
+      // degraded outcome so one request produces one actionable warning.
     }
   }
   // Graceful degrade — keep algorithmic order (correctness preserved by the

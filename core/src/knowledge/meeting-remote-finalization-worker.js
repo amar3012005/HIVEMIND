@@ -1,6 +1,6 @@
 import {
   amrMeetingSegmentList, amrMeetingSessionClaim, amrMeetingSessionPending,
-  amrMeetingSessionSettle, amrMeetingWrite, amrRemoteOrgIds,
+  amrMeetingSessionSettle, amrMeetingWrite, amrMeetingOrgIds,
 } from '../vector/mneme/driver.js';
 import { generateMeetingInsights } from './meeting-insights.js';
 import { finalizationRetryDelayMs } from './meeting-finalization-worker.js';
@@ -56,7 +56,7 @@ export async function processRemoteMeetingFinalization({ orgId, sessionId, userI
 
 export async function reconcileRemoteMeetingFinalizations({ limitPerOrg = 5 } = {}) {
   let scanned = 0; let completed = 0; let failed = 0;
-  for (const orgId of amrRemoteOrgIds()) {
+  for (const orgId of amrMeetingOrgIds()) {
     const sessions = await amrMeetingSessionPending(orgId, limitPerOrg);
     for (const session of sessions || []) {
       scanned += 1;

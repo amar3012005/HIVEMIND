@@ -8,12 +8,23 @@ export function evidenceWindowSizeForDepth(depth = 'standard') {
   return ({ standard: 5, detailed: 10, comprehensive: 15 })[depth] || 5;
 }
 
+export function evidenceRenderLimit({ progressiveRecall = null, eventWindowHits = 0, recallMode = 'quick' } = {}) {
+  return progressiveRecall?.delivered_until
+    || (eventWindowHits > 0
+      ? eventWindowHits
+      : (recallMode === 'insight' ? 10 : (recallMode === 'panorama' ? 12 : 6)));
+}
+
+export function evidenceRowId(row = {}) {
+  return row.segment_id || row.segmentId || row.id || null;
+}
+
 export function createProgressiveRecallSession({
   rankedCandidates = [], memories = [], evidence = [], query = '', initialSize = 5, pageSize = 5, maxVisible = 15,
 } = {}) {
   const memoryById = new Map((memories || []).filter((row) => row?.id).map((row) => [row.id, row]));
-  const evidenceById = new Map((evidence || []).filter((row) => row?.segment_id || row?.id)
-    .map((row) => [row.segment_id || row.id, row]));
+  const evidenceById = new Map((evidence || []).filter((row) => evidenceRowId(row))
+    .map((row) => [evidenceRowId(row), row]));
   const ordered = [];
   const seen = new Set();
 
@@ -35,7 +46,7 @@ export function createProgressiveRecallSession({
   // Explicit degradation path for older recall providers. Interleave lanes;
   // never compare their incomparable score scales.
   for (let index = 0; ordered.length < maxVisible && index < Math.max(memories.length, evidence.length); index += 1) {
-    if (evidence[index]) add({ kind: 'evidence', segment_id: evidence[index].segment_id || evidence[index].id });
+    if (evidence[index]) add({ kind: 'evidence', segment_id: evidenceRowId(evidence[index]) });
     if (memories[index]) add({ kind: 'memory', memory_id: memories[index].id });
   }
 
@@ -62,8 +73,8 @@ export function applyProgressiveRecallView(evidenceBundle = {}, session) {
   const evidenceRanks = new Map(visible.filter((row) => row.kind === 'evidence').map((row) => [row.segment_id, row.rank]));
   const memories = (evidenceBundle.memories || []).filter((row) => memoryRanks.has(row.id))
     .map((row) => ({ ...row, _progressive_rank: memoryRanks.get(row.id) }));
-  const evidence = (evidenceBundle.evidence || []).filter((row) => evidenceRanks.has(row.segment_id || row.id))
-    .map((row) => ({ ...row, _progressive_rank: evidenceRanks.get(row.segment_id || row.id) }));
+  const evidence = (evidenceBundle.evidence || []).filter((row) => evidenceRanks.has(evidenceRowId(row)))
+    .map((row) => ({ ...row, _progressive_rank: evidenceRanks.get(evidenceRowId(row)) }));
   const recallPackets = restrictRecallPackets(evidenceBundle.recall_packets || [], { memoryRanks, evidenceRanks });
   return { ...evidenceBundle, memories, evidence, recall_packets: recallPackets, progressive_recall: session };
 }

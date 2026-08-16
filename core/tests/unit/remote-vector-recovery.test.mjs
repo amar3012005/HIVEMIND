@@ -279,3 +279,17 @@ test('maintenance quarantine is persisted in the agent registry and survives mod
   assert.equal(second.clearRemoteAgentMaintenanceQuarantine('org'), true);
   assert.deepEqual(second.remoteAgentOrgIds(), ['org']);
 });
+
+test('meeting recovery enumerates embedded and self-host agents independently of vector-maintenance quarantine', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-meeting-agent-enumeration-'));
+  const registry = join(directory, 'agents.json');
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  process.env.MNEME_AGENT_REGISTRY_FILE = registry;
+  await writeFile(registry, JSON.stringify({
+    embedded: { url: 'local:', kind: 'amr-central' },
+    external: { url: 'http://100.64.0.2:8787', token: 'token', kind: 'selfhost', maintenanceQuarantinedUntil: Date.now() + 60_000 },
+  }));
+  const backend = await import(`../../src/vector/mneme/remote-backend.js?meeting-orgs=${Date.now()}`);
+  assert.deepEqual(backend.remoteAgentOrgIds(), []);
+  assert.deepEqual(backend.meetingAgentOrgIds().sort(), ['embedded', 'external']);
+});

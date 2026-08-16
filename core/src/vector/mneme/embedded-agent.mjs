@@ -2039,6 +2039,11 @@ function routesFor(ctx) {
          VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
          ON CONFLICT (session_id,idx) DO UPDATE SET text=EXCLUDED.text,speakers=EXCLUDED.speakers,start_ms=EXCLUDED.start_ms,end_ms=EXCLUDED.end_ms`,
         [s.session_id, org, s.user_id, s.idx, String(s.text).slice(0, 200000), s.speakers ? JSON.stringify(s.speakers) : null, s.start_ms ?? null, s.end_ms ?? null]);
+      await db().query(
+        `UPDATE meeting_sessions ms SET status='queued',finalization_attempts=0,finalization_next_attempt_at=NULL,finalization_lease_expires_at=NULL,failure_code=NULL,failure_detail=NULL,updated_at=now()
+          WHERE ms.id=$1 AND ms.org_id=$2 AND ms.user_id=$3 AND ms.status='failed' AND ms.failure_code='missing_segments' AND ms.expected_segments IS NOT NULL
+            AND(SELECT COUNT(DISTINCT g.idx) FROM meeting_segments g WHERE g.session_id=ms.id AND g.org_id=ms.org_id AND g.user_id=ms.user_id)>=ms.expected_segments`,
+        [s.session_id,org,s.user_id]);
       return { ok: true };
     },
 

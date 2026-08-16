@@ -555,3 +555,14 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Tests: 183/183 across hq-runtime + work-room-reconciler suites.
 - Runtime: `hm-control`, `hm-core`, `hm-employees` all confirmed on revision `41eed9d9`, healthy. Byte-verified `notifyOwningHqRuntime` present (3 matches) inside both `hm-control` and `hm-core` (the file is baked into both images). Four public health checks 200.
 - Process note: this is the FIRST deploy this session where the canonical lock correctly rejected a concurrent attempt (`BUSY`) instead of silently racing — confirms the lock works when the correct entrypoint (`/root/quick-deploy.sh`) is used consistently, unlike the earlier ad-hoc-script incident.
+
+## e0fe30d5 — HQ Runtime Console noise cleanup (all 4 services)
+
+- Canonical SHA: `e0fe30d530f0317d4906240eecb4835197ee8455` (PR #300, gitlink bump to Da-vinci `d2c636b` / Da-vinci PR #51). Migration: none.
+- Feature: dedup/noise cleanup in `HqRuntimeConsole.jsx` per the user's standing complaint about duplicate/hardcoded FE text — 12 hand-copied error-extraction catches unified into one `extractErrorMessage` helper, header/loader state-label fallback unified onto one `STATE_LABEL_DEFAULT`, a self-defeating ternary collapsed, a dead `adminCallPermission` constant removed. No behavior change for any state real production traffic sets (verified every `move()` call in native-engine.js).
+- Deploy note: `frontend`-only release was correctly rejected by the contract-coupled-services gate (`core` was behind target) — deployed all 4 services together instead of using `--allow-divergence` for a routine, non-incident change.
+- Byte verification: minified JS bundles can't be grepped for source-level names (terser renames them), so verified via the release build's own worktree instead — `git log -1` inside `/root/releases/builds/e0fe30d5/frontend/Da-vinci` shows commit `d2c636b`, and `grep -c extractErrorMessage` on that worktree's source shows all 12 sites — combined with the running container's matching revision label, this is solid proof of what shipped.
+- `verify-deployed.sh`'s fixture-catalog gate false-positived again (same confirmed locale-`sort` artifact as the previous release, re-verified byte-identical once both lists are re-sorted before comparing).
+- Runtime: all 4 services on `e0fe30d530f0`, healthy. Four public health checks 200.
+- Rollback: prior per-service images retagged `rollback` by the canonical release script.
+- External side effects: none.

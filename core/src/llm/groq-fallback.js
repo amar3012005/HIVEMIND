@@ -26,9 +26,10 @@ import { meterTokens } from '../billing/usage-tracker.js';
 import { activeProviders, CANONICAL_MODEL, REASONING_EFFORT } from './llm-config.js';
 import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayFirstFetch, gatewayRequestHeaders } from './cloudflare-gateway.js';
 import { resolveGatewayLegacyTextProvider } from './chat-provider.js';
+import { recordAiUsage } from './ai-governance.js';
 
 // ── Metering (unchanged): turn the funnel into a per-key spend chokepoint. ──
-function _meterUsage(usage, model, feature) {
+function _meterUsage(usage, model, feature, provider = 'unknown') {
   try {
     const org = currentOrg();
     const total = Number(usage?.total_tokens || 0);
@@ -37,12 +38,13 @@ function _meterUsage(usage, model, feature) {
       promptTokens: Number(usage?.prompt_tokens || 0),
       completionTokens: Number(usage?.completion_tokens || 0),
     });
+    void recordAiUsage({ usage, requestedModel: model, servedModel: model, provider, useCase: feature || 'general' });
   } catch { /* metering never breaks the call */ }
 }
 function _meterResponse(res, model, feature) {
   try {
     if (res && res.ok && typeof res.clone === 'function' && currentOrg()) {
-      res.clone().json().then((j) => _meterUsage(j?.usage, model || j?.model, feature)).catch(() => {});
+      res.clone().json().then((j) => _meterUsage(j?.usage, model || j?.model, feature, j?.provider || res.headers?.get?.('cf-aig-provider') || 'unknown')).catch(() => {});
     }
   } catch { /* never throw into the caller path */ }
   return res;

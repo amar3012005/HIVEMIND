@@ -1,7 +1,8 @@
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const CEREBRAS_CHAT_URL = 'https://api.cerebras.ai/v1/chat/completions';
 const OPENROUTER_CHAT_URL = `${(process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '')}/chat/completions`;
-import { cloudflareGatewayEnabled, gatewayByokAlias, gatewayCompatUrl, gatewayRequestHeaders } from './cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayByokAlias, gatewayCompatUrl, gatewayProviderUrl, gatewayRequestHeaders, isGatewayUrl } from './cloudflare-gateway.js';
+import { recordAiUsage, resolveAiModelPolicy } from './ai-governance.js';
 
 export const DEFAULT_CHAT_PLANNER_MODEL = 'google/gemini-2.5-flash-lite';
 export const DEFAULT_CHAT_SYNTHESIS_MODEL = 'openai/gpt-oss-20b:nitro';
@@ -25,14 +26,14 @@ export function resolveChatSynthesisModel(selectedModel) {
   return requested;
 }
 
-export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
+export function resolveChatCompletionRoute(model, { fallbackApiKey, concreteGatewayModel = false } = {}) {
   const requested = String(model || '').trim();
   if (!requested) throw new Error('chat_model_required');
   const gatewayOpenRouter = cloudflareGatewayEnabled() && gatewayByokAlias('openrouter');
   const openRouterApiKey = gatewayOpenRouter ? '' : process.env.OPENROUTER_API_KEY;
   const openRouterUsable = Boolean(gatewayOpenRouter || openRouterApiKey);
   const dynamicRoute = String(process.env.CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE || '').trim();
-  if (cloudflareGatewayEnabled() && dynamicRoute) {
+  if (cloudflareGatewayEnabled() && dynamicRoute && !concreteGatewayModel) {
     return { provider: 'cloudflare-dynamic', url: gatewayCompatUrl(), apiKey: '', wireModel: `dynamic/${dynamicRoute}`, providerPolicy: null };
   }
 
@@ -58,7 +59,7 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
     if (openRouterUsable) {
       return {
         provider: 'openrouter:gpt-oss',
-        url: OPENROUTER_CHAT_URL,
+        url: gatewayOpenRouter ? gatewayProviderUrl('openrouter', OPENROUTER_CHAT_URL) : OPENROUTER_CHAT_URL,
         apiKey: openRouterApiKey,
         wireModel: wireModel === 'gpt-oss-120b' ? 'openai/gpt-oss-120b' : wireModel,
         providerPolicy: {
@@ -83,7 +84,7 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
     if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
     return {
       provider: 'openrouter:google',
-      url: OPENROUTER_CHAT_URL,
+      url: gatewayOpenRouter ? gatewayProviderUrl('openrouter', OPENROUTER_CHAT_URL) : OPENROUTER_CHAT_URL,
       apiKey: openRouterApiKey,
       wireModel: requested,
       providerPolicy: {
@@ -101,7 +102,7 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
     if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
     return {
       provider: 'openrouter:deepseek',
-      url: OPENROUTER_CHAT_URL,
+      url: gatewayOpenRouter ? gatewayProviderUrl('openrouter', OPENROUTER_CHAT_URL) : OPENROUTER_CHAT_URL,
       apiKey: openRouterApiKey,
       wireModel: requested,
       providerPolicy: {
@@ -117,7 +118,7 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
     if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
     return {
       provider: 'openrouter:nvidia',
-      url: OPENROUTER_CHAT_URL,
+      url: gatewayOpenRouter ? gatewayProviderUrl('openrouter', OPENROUTER_CHAT_URL) : OPENROUTER_CHAT_URL,
       apiKey: openRouterApiKey,
       wireModel: requested,
       providerPolicy: {
@@ -136,7 +137,7 @@ export function resolveChatCompletionRoute(model, { fallbackApiKey } = {}) {
     if (!openRouterUsable) throw new Error('chat_provider_not_configured:openrouter');
     return {
       provider: 'openrouter:openai',
-      url: OPENROUTER_CHAT_URL,
+      url: gatewayOpenRouter ? gatewayProviderUrl('openrouter', OPENROUTER_CHAT_URL) : OPENROUTER_CHAT_URL,
       apiKey: openRouterApiKey,
       wireModel: requested,
       // The :nitro model variant owns fastest-provider selection. Do not add
@@ -200,9 +201,27 @@ function prepareOpenRouterBody(body, route) {
   return body;
 }
 
-export async function chatCompletionFetch(model, options = {}, { fallbackApiKey, fetchImpl = globalThis.fetch } = {}) {
+function inferUseCase(model, explicit) {
+  if (explicit) return explicit;
+  if (model === DEFAULT_CHAT_PLANNER_MODEL) return 'chat_planner';
+  if (model === DEFAULT_CHAT_SYNTHESIS_MODEL || model === DEFAULT_CHAT_CANDIDATE_SYNTHESIS_MODEL) return 'chat_synthesis';
+  if (model === DEFAULT_HQ_DISPATCH_MODEL || model === DEFAULT_HQ_AWAKENING_MODEL) return 'hq_dispatch';
+  return 'general';
+}
+
+async function meterCompletionResponse(response, context) {
+  try {
+    const json = await response.clone().json();
+    await recordAiUsage({ ...context, usage: json?.usage || {}, servedModel: json?.model || context.requestedModel,
+      provider: json?.provider || response.headers.get('cf-aig-provider') || 'unknown',
+      gatewayRequestId: response.headers.get('cf-aig-log-id') || response.headers.get('cf-ray'), status: response.ok ? 'completed' : 'failed' });
+  } catch { /* metering must never affect inference */ }
+}
+
+export async function chatCompletionFetch(model, options = {}, { fallbackApiKey, fetchImpl = globalThis.fetch, useCase = null, traceId = null } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('chat_fetch_unavailable');
-  const route = resolveChatCompletionRoute(model, { fallbackApiKey });
+  const policy = await resolveAiModelPolicy(inferUseCase(model, useCase), model);
+  const route = resolveChatCompletionRoute(policy.primary, { fallbackApiKey, concreteGatewayModel: policy.source === 'admin' });
   let body;
   try {
     body = options.body ? JSON.parse(options.body) : {};
@@ -230,13 +249,31 @@ export async function chatCompletionFetch(model, options = {}, { fallbackApiKey,
       'X-Title': 'SINGULANCE HIVEMIND',
     } : {}),
   };
-  return fetchImpl(route.url, {
+  let response = await fetchImpl(route.url, {
     ...options,
-    headers: route.provider === 'cloudflare-dynamic'
-      ? gatewayRequestHeaders(requestHeaders)
+    headers: route.provider === 'cloudflare-dynamic' || isGatewayUrl(route.url)
+      ? gatewayRequestHeaders(requestHeaders, route.provider.startsWith('openrouter:') ? 'openrouter' : undefined)
       : requestHeaders,
     body: JSON.stringify(body),
   });
+  void meterCompletionResponse(response, { requestedModel: policy.primary, useCase: policy.useCase, traceId });
+  if (!response.ok && policy.source === 'admin' && policy.secondary && [408, 429, 500, 502, 503, 504].includes(response.status) && !options.signal?.aborted) {
+    const fallbackRoute = resolveChatCompletionRoute(policy.secondary, { fallbackApiKey, concreteGatewayModel: policy.source === 'admin' });
+    let fallbackBody = options.body ? JSON.parse(options.body) : {};
+    fallbackBody.model = fallbackRoute.wireModel;
+    if (fallbackRoute.provider.startsWith('openrouter:')) prepareOpenRouterBody(fallbackBody, fallbackRoute);
+    const fallbackHeaders = {
+      ...(options.headers || {}), 'Content-Type': 'application/json',
+      ...(fallbackRoute.apiKey ? { Authorization: `Bearer ${fallbackRoute.apiKey}` } : {}),
+      ...(fallbackRoute.provider.startsWith('openrouter:') ? { 'HTTP-Referer': 'https://singulancelabs.com', 'X-Title': 'SINGULANCE HIVEMIND' } : {}),
+    };
+    response = await fetchImpl(fallbackRoute.url, { ...options,
+      headers: fallbackRoute.provider === 'cloudflare-dynamic' || isGatewayUrl(fallbackRoute.url)
+        ? gatewayRequestHeaders(fallbackHeaders, fallbackRoute.provider.startsWith('openrouter:') ? 'openrouter' : undefined) : fallbackHeaders,
+      body: JSON.stringify(fallbackBody) });
+    void meterCompletionResponse(response, { requestedModel: policy.secondary, useCase: policy.useCase, traceId });
+  }
+  return response;
 }
 
 function parseSseFrame(frame) {
@@ -252,9 +289,12 @@ export async function chatCompletionStream(model, options = {}, {
   fallbackApiKey,
   fetchImpl = globalThis.fetch,
   onContent = null,
+  useCase = null,
+  traceId = null,
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('chat_fetch_unavailable');
-  const route = resolveChatCompletionRoute(model, { fallbackApiKey });
+  const policy = await resolveAiModelPolicy(inferUseCase(model, useCase), model);
+  const route = resolveChatCompletionRoute(policy.primary, { fallbackApiKey, concreteGatewayModel: policy.source === 'admin' });
   let body;
   try {
     body = options.body ? JSON.parse(options.body) : {};
@@ -279,8 +319,8 @@ export async function chatCompletionStream(model, options = {}, {
   };
   const response = await fetchImpl(route.url, {
     ...options,
-    headers: route.provider === 'cloudflare-dynamic'
-      ? gatewayRequestHeaders(requestHeaders)
+    headers: route.provider === 'cloudflare-dynamic' || isGatewayUrl(route.url)
+      ? gatewayRequestHeaders(requestHeaders, route.provider.startsWith('openrouter:') ? 'openrouter' : undefined)
       : requestHeaders,
     body: JSON.stringify(body),
   });
@@ -326,5 +366,8 @@ export async function chatCompletionStream(model, options = {}, {
     if (done) break;
   }
   if (buffer.trim()) await consume(buffer);
+  void recordAiUsage({ usage, requestedModel: policy.primary, servedModel: route.wireModel,
+    provider: provider || response.headers.get('cf-aig-provider') || 'unknown', useCase: policy.useCase, traceId,
+    gatewayRequestId: response.headers.get('cf-aig-log-id') || response.headers.get('cf-ray') });
   return { ok: true, status: response.status, content, usage, provider, model: route.wireModel, finish_reason: finishReason };
 }

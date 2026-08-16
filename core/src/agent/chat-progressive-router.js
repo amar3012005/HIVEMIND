@@ -38,6 +38,7 @@ export const HIGH_TOOLS = [
       query_original: { type: 'string' }, query_canonical_en: { type: 'string', description: 'An intent-preserving English retrieval expression, not a punctuation-stripped copy. Include the requested subject, item/category type, and semantic facets needed to retrieve the answer. For broad inventories, include names/models/variants/categories or equivalent corpus vocabulary while preserving exact entities.' }, response_language: { type: 'string' },
       mode: { type: 'string', enum: ['fact', 'explain', 'full'] }, entities: { type: 'array', items: { type: 'string' } },
       response_depth: { type: 'string', enum: ['standard', 'detailed', 'comprehensive'], description: 'Semantic answer depth in any language. Standard is the default for ordinary requests; detailed is for meaningful breadth or multiple requested aspects; comprehensive is only for a clearly thorough cross-source request.' },
+      retrieval_shape: { type: 'string', enum: ['fact', 'inventory', 'overview', 'comparison'], description: 'Language-independent retrieval shape. inventory means a useful list of known members/items; overview means multiple facets of one subject; comparison means explicit dimensions across subjects; fact is a bounded lookup.' },
       answer_objective: { type: 'string', description: 'Concise instruction describing exactly what the final answer must deliver and its requested shape. Do not answer the request here.' },
       source_title: nullable('string'), valid_at: nullable('string'), known_at: nullable('string'),
       range_start: nullable('string'), range_end: nullable('string'), aggregate_kind: nullable('string'),
@@ -152,6 +153,7 @@ Use hivemind_projects for project listing/resolution. Use web_research only for 
 ALWAYS classify answer_type on every hivemind_context call, by MEANING in the user's language: decisions/agreements/choices => decision; goals/targets/action items/next steps => goal; likes/preferences => preference; learnings/takeaways => lesson; things that happened, meetings, quotes => event; how entities relate => relationship; plain attribute lookups => fact or null. Asking WHAT WAS DECIDED is answer_type=decision even when the topic is pricing, dates, or vendors.
 For every hivemind_context call, choose response_depth by semantic intent in the user's language. Most ordinary requests are standard. Use detailed when the answer genuinely needs several aspects, an informative inventory, comparison, explanation, or broad overview. Use comprehensive only when the user clearly wants a thorough treatment across all relevant retained evidence. Do not choose a larger depth merely because many memories exist. Set answer_objective to exactly what the final response must deliver. An organization overview should synthesize identity, activity, products or positioning, and notable supported facts; a product request should enumerate and describe products rather than drift into general company background.
 query_canonical_en must be a real semantic retrieval expression, not the user's sentence with punctuation removed. Preserve the exact subject and expand only the requested answer facets. For an inventory, include the category plus retrieval concepts such as names, models, variants and categories; for a comparison include the compared entities and dimensions; for a direct fact keep it narrow. This applies in every input language and must not add facts or entity names the user did not supply.
+Set retrieval_shape from the semantic answer shape in every language: inventory for a useful list of known members/items, overview for a multi-facet subject overview, comparison for explicit comparison, otherwise fact.
 Use operation=aggregate only when the user explicitly requires a certified exact count or exhaustive registry-complete enumeration. A request for a useful inventory of products, people, projects, or other known items from remembered context is operation=recall with response_depth=detailed; do not convert it to aggregate merely because its natural phrasing asks broadly what items exist.
 Use use_connector whenever Gmail, email, Google Drive, Google Docs, Google Sheets, Google Calendar, Google Tasks, connected Gemini, Slack, Notion, GitHub or Linear is explicitly named. Connector writes are approval-gated drafts, so select them when requested but never claim they already executed.
 For every connector read, classify ordering structurally in any language: a requested next future event/task means result_order=soonest_upcoming; last/latest/most recent means newest; earliest historical means oldest; otherwise provider_default. Ordering words are not content filters. Set has_explicit_filter=true only for an actual sender, entity, date, label, or content constraint, and set result_limit to the number of records requested (1 for one item).
@@ -372,6 +374,7 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
     named_entities: Array.isArray(args?.entities) ? args.entities.filter(Boolean) : [],
     recall_mode: 'fact', source: null, aggregate: null, relation: null,
     response_depth: ['standard', 'detailed', 'comprehensive'].includes(args?.response_depth) ? args.response_depth : 'standard',
+    retrieval_shape: ['fact', 'inventory', 'overview', 'comparison'].includes(args?.retrieval_shape) ? args.retrieval_shape : 'fact',
     answer_objective: s(args?.answer_objective, 1000) || message,
     save: null, update: null, delete: null, time: null, connector_provider: null,
     scope_filter: null, tool_groups: [], continuation: null, assistant_name: null,
@@ -659,6 +662,7 @@ export async function parseChatIntentProgressive({ message, history, language, a
       named_entities: [], query_original: message, query_canonical_en: message,
       recall_mode: 'fact', source: null, aggregate: null, relation: null, time: null,
       response_depth: 'standard', answer_objective: message,
+      retrieval_shape: 'fact',
       tool_groups: ['hivemind-recall'], _router: 'progressive', _router_error: err.message,
     }, usage: null };
   }

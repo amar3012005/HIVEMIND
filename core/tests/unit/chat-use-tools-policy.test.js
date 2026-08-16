@@ -18,6 +18,10 @@ test('native planner requests a semantic retrieval expression instead of a copie
   const description = context.function.parameters.properties.query_canonical_en.description;
   assert.match(description, /intent-preserving English retrieval expression/);
   assert.match(description, /names\/models\/variants\/categories/);
+  assert.deepEqual(
+    context.function.parameters.properties.retrieval_shape.enum,
+    ['fact', 'inventory', 'overview', 'comparison'],
+  );
 });
 
 test('use_tools true discloses connected and compound capabilities', () => {

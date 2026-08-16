@@ -225,3 +225,16 @@
 - **Operational cleanup:** removed the dead zero-user self-host registry entry for org `b30ead1b-288f-4e79-8399-b3fef63b7cb8`; recoverable backup `/app/data/byod-agents.json.quarantine-20260815-b30ead1b` retained. Running Core env and image were verified after recreation: `RERANK_MODEL=voyageai/rerank-2.5-lite`, `hivemind/core-api:sha-effe8a0f`, healthy.
 - **Tests and logs:** evidence/project suites 23/23, evidence phrase suite 22/22, recall route/scope 12/12, rerank policy 3/3. Post-release Core, Control, Employees, and Docling scans contain no application errors, reranker aborts, bulkhead/circuit failures, or ingestion failures.
 - **Rollback:** prior immutable Core manifests remain under `/root/releases/`; reranker env backup `/root/hivemind/.env.backup-voyage-primary-20260815` and quarantined registry backup are retained.
+
+## prod-20260816-a9e4a970 — durable AI Meeting Notes finalization and AMR parity
+- **Date:** 2026-08-16
+- **Parent:** `singulance-main` at `a9e4a970387913e0bf2dbee6f9f2d8099a06a0ac`; frontend submodule `40986e8f`.
+- **Durability:** recording sessions, raw audio, transcript segments, extraction state, finalization payload, retry attempts, retry time, lease expiry, and finalized meeting ID are persisted. Insights/report generation is server-owned and resumes after browser or Core interruption.
+- **Shared analysis:** the compatibility insights route and durable worker use one multilingual map/reduce generator. Thirty synthetic ten-minute windows retained every transcript character and bounded provider concurrency to two windows.
+- **AMR:** self-host sessions expose create/list/status/finalize parity; raw audio and final meeting rows stay in tenant PostgreSQL. Agent settlement uses explicit PostgreSQL parameter casts after a production canary exposed and fixed ambiguous status typing in PR #286.
+- **Recovery UX:** desktop and global recorder clients poll authoritative session state, automatically resume queued/analyzing/error work, and clear browser recovery data only after the final meeting row is durable.
+- **Migration and storage:** verified backup `/root/backups/meeting-finalization-20260816T043352Z.dump` (127 MB plus SHA-256 sidecar). Four additive meeting migrations applied. `MEETING_AUDIO_STORE_DIR=/app/data/meeting-audio` and `MEETING_AUDIO_STORE_DURABLE=true` use the persistent Core data volume.
+- **Tests:** 22 focused meeting lifecycle/intelligence tests plus the AMR settlement regression; Prisma validation; Core/BYOD/embedded syntax; frontend production build.
+- **Acceptance:** central 30-segment restart canary finalized after Core restart with 128,739 transcript characters, no gaps, and first/last markers present. AMR canary finalized three tenant-owned segments with no gaps and first/last markers present. Exact canary rows were removed afterward.
+- **Images:** Core, Control Plane, Employees, and frontend run revision `a9e4a970`; BYOD agent runs `hivemind/hm-agent:sha-a9e4a970`. Manifest `/root/releases/manifests/a9e4a970/20260816T045504Z/RELEASE_MANIFEST.json`.
+- **Rollback:** per-service `rollback` aliases and `hivemind/hm-agent:rollback-settle` retained; verified database backup retained.

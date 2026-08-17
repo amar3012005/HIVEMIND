@@ -26,6 +26,11 @@
 #   scripts/runtime-probe.sh --restart          # DESTRUCTIVE full reset — requires --yes
 #   scripts/runtime-probe.sh --status           # one-shot status dump (runtime + tasks + brief)
 #   scripts/runtime-probe.sh --watch            # stream live events until Ctrl-C, one line per event
+#   scripts/runtime-probe.sh --e2e [minutes]    # autonomous run: start, auto-approve every popup
+#                                                # it can (approval_required / decision_required),
+#                                                # SKIP capability_required (needs real OAuth, never
+#                                                # faked), until idle or the time budget (default 20m)
+#                                                # runs out. See runtime-probe-e2e.py for the loop.
 #   scripts/runtime-probe.sh --instruct "text"  # send a new operating instruction
 #   scripts/runtime-probe.sh --session          # print the minted Bearer token and exit (for manual curl)
 #
@@ -193,6 +198,24 @@ cmd_watch() {
       done
 }
 
+cmd_e2e() {
+  local minutes="${1:-20}"
+  local session; session="$(_mint_session)"
+  local script_dir; script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  echo "=== e2e run as ${EMAIL} — auto-approving every approvable popup, max ${minutes}m ($(_utc_now) UTC) ===" >&2
+  # Capture the cursor BEFORE starting — otherwise the wake/resume's own
+  # first events (activation_received, wake_received, ...) would already be
+  # past the cursor python captures on its own first read and get silently
+  # skipped.
+  local start_seq; start_seq="$(_curl GET /v1/hq/runtime | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("runtime") or {}).get("eventSequence","0"))' 2>/dev/null || echo "0")"
+  # Ensure the runtime is actually running — an e2e pass against a PAUSED
+  # runtime would just idle out immediately with nothing to observe.
+  cmd_start >&2
+  RUNTIME_PROBE_BASE="$BASE" RUNTIME_PROBE_SESSION="$session" RUNTIME_PROBE_E2E_MINUTES="$minutes" \
+    RUNTIME_PROBE_E2E_START_SEQ="$start_seq" \
+    python3 "${script_dir}/runtime-probe-e2e.py"
+}
+
 usage() {
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
 }
@@ -205,6 +228,7 @@ main() {
     --restart) shift; cmd_restart "$@" ;;
     --status) shift; cmd_status "$@" ;;
     --watch) shift; cmd_watch "$@" ;;
+    --e2e) shift; cmd_e2e "${1:-}" ;;
     --instruct) shift; cmd_instruct "${1:-}" ;;
     --session) shift; cmd_session "$@" ;;
     -h|--help|"") usage ;;

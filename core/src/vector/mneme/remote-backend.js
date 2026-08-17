@@ -674,15 +674,15 @@ export async function remoteMeetingSessionStatus(orgId, filter) {
   catch (e) { console.warn(`[mneme/remote] meeting-session-status failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteMeetingSessionPending(orgId, limit = 5) {
-  try { const out = await _call(orgId, '/v1/meeting-session-pending', { limit }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); return out?.sessions || []; }
+  try { const out = await _call(orgId, '/v1/meeting-session-pending', { limit }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS, transportClass: 'maintenance' }); return out?.sessions || []; }
   catch (e) { console.warn(`[mneme/remote] meeting-session-pending failed org=${orgId}: ${e.message}`); return []; }
 }
 export async function remoteMeetingSessionClaim(orgId, filter) {
-  try { return await _call(orgId, '/v1/meeting-session-claim', { filter }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  try { return await _call(orgId, '/v1/meeting-session-claim', { filter }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS, transportClass: 'maintenance' }); }
   catch (e) { console.warn(`[mneme/remote] meeting-session-claim failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteMeetingSessionSettle(orgId, result) {
-  try { return await _call(orgId, '/v1/meeting-session-settle', { result }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  try { return await _call(orgId, '/v1/meeting-session-settle', { result }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS, transportClass: 'maintenance' }); }
   catch (e) { console.warn(`[mneme/remote] meeting-session-settle failed org=${orgId}: ${e.message}`); return null; }
 }
 
@@ -694,15 +694,15 @@ export async function remoteMeetingAudioWrite(orgId, segment) {
   catch (e) { console.warn(`[mneme/remote] meeting-audio-write failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteMeetingAudioClaim(orgId, filter) {
-  try { return await _call(orgId, '/v1/meeting-audio-claim', { filter }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  try { return await _call(orgId, '/v1/meeting-audio-claim', { filter }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS, transportClass: 'maintenance' }); }
   catch (e) { console.warn(`[mneme/remote] meeting-audio-claim failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteMeetingAudioSettle(orgId, result) {
-  try { return await _call(orgId, '/v1/meeting-audio-settle', { result }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); }
+  try { return await _call(orgId, '/v1/meeting-audio-settle', { result }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS, transportClass: 'maintenance' }); }
   catch (e) { console.warn(`[mneme/remote] meeting-audio-settle failed org=${orgId}: ${e.message}`); return null; }
 }
 export async function remoteMeetingAudioPending(orgId, limit = 10) {
-  try { const out = await _call(orgId, '/v1/meeting-audio-pending', { limit }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS }); return out?.segments || []; }
+  try { const out = await _call(orgId, '/v1/meeting-audio-pending', { limit }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS, transportClass: 'maintenance' }); return out?.segments || []; }
   catch (e) { console.warn(`[mneme/remote] meeting-audio-pending failed org=${orgId}: ${e.message}`); return []; }
 }
 

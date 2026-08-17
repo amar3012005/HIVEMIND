@@ -166,6 +166,18 @@ function tryLoadIORedis() {
 }
 
 // ─── enqueuePush ─────────────────────────────────────────────────────────────
+export async function lockOutboxRecord(tx, recordId) {
+  // pg_advisory_xact_lock returns PostgreSQL `void`. Prisma's queryRaw attempts
+  // to deserialize that pseudo-type and emits an error even though the lock was
+  // acquired. executeRaw is the established lock primitive used elsewhere in
+  // Core and preserves the transaction-scoped serialization contract without
+  // decoding a result row.
+  await tx.$executeRawUnsafe(
+    'SELECT pg_advisory_xact_lock(hashtext($1::text))',
+    recordId,
+  );
+}
+
 /**
  * Insert a pending outbox row and enqueue a BullMQ job.
  *
@@ -182,7 +194,7 @@ export async function enqueuePush(orgId, op, recordId, payload) {
   // concurrent update operations can receive the same sequence and violate the
   // FIFO contract even though both inserts succeed.
   const row = await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${recordId}::text))`;
+    await lockOutboxRecord(tx, recordId);
     const seqResult = await tx.$queryRaw`
       SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
       FROM memory_outbox

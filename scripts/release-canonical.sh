@@ -171,6 +171,20 @@ for s in "${SVCS[@]}"; do
 done
 mv "$OVERRIDE.tmp" "$OVERRIDE"
 
+# Database migrations are a pre-deploy gate for Core, not an implicit startup
+# side effect. Run the guarded migrator from the newly built immutable image
+# before replacing the healthy container. If it fails, set -e aborts here and
+# production remains on the previous Core image.
+if [ -n "${REQUESTED[core]:-}" ]; then
+  CORE_TAG="hivemind/${IMG[core]}:sha-$SHORT"
+  echo "[migrate] guarded Prisma deploy via $CORE_TAG"
+  "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase migrating:core
+  docker run --rm \
+    --network hivemind_default \
+    --env-file "$ENVF" \
+    "$CORE_TAG" node scripts/prisma-migrate-deploy.mjs
+fi
+
 # ── deploy named hetzner services (--no-deps, override pins the sha image) ──
 for s in "${SVCS[@]}"; do
   [ "$s" = frontend ] && continue

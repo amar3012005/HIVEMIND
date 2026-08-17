@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-// Destructive, self-cleaning production acceptance canary for a self-hosted
-// Memory Box organization. It proves the public Core lifecycle rather than
-// probing the agent directly:
+// Destructive, self-cleaning production acceptance canary for managed,
+// embedded .amr, or self-hosted Memory Box organizations. It proves the public
+// Core lifecycle rather than treating a direct storage probe as sufficient:
 //   evidence-only upload -> durable remote segment -> public recall ->
 //   zero central content -> delete -> no longer recallable.
 //
@@ -16,6 +16,8 @@ import {
   amrKbHydrate,
   amrKbLexicalRemote,
 } from '../src/vector/mneme/driver.js';
+import { orgIsRemote } from '../src/vector/mneme/driver.js';
+import { agentFor } from '../src/vector/mneme/remote-backend.js';
 
 const orgId = String(process.env.STORAGE_CANARY_ORG_ID || '').trim();
 const userId = String(process.env.STORAGE_CANARY_USER_ID || '').trim();
@@ -94,15 +96,53 @@ try {
   if (status?.status !== 'ready') throw new Error(`ingestion_not_ready:${JSON.stringify(status)}`);
   documentId = status.document_id;
 
+  const remote = orgIsRemote(orgId);
+  const embedded = remote && agentFor(orgId)?.url === 'local:';
   const access = { userId, projectId: null, accessContext: { projectIds: [], teamIds: [] }, scopeFilter: null };
-  const [detail, lexical] = await Promise.all([
-    amrKbDocDetail(orgId, documentId, access),
-    amrKbLexicalRemote(orgId, marker, { limit: 15, access }),
-  ]);
-  const ids = (lexical || []).map((row) => row.segment_id).filter(Boolean);
-  const hydrated = ids.length ? await amrKbHydrate(orgId, ids, access) : [];
-  if (!detail?.segments?.length || !lexical?.length || !hydrated?.length) {
-    throw new Error(`remote_lane_miss:${JSON.stringify({ detail: detail?.segments?.length || 0, lexical: lexical?.length || 0, hydrated: hydrated?.length || 0 })}`);
+  let storedSegmentCount = 0;
+  let lexicalCount = 0;
+  let hydratedCount = 0;
+  if (remote && !embedded) {
+    const [detail, lexical] = await Promise.all([
+      amrKbDocDetail(orgId, documentId, access),
+      amrKbLexicalRemote(orgId, marker, { limit: 15, access }),
+    ]);
+    const ids = (lexical || []).map((row) => row.segment_id).filter(Boolean);
+    const hydrated = ids.length ? await amrKbHydrate(orgId, ids, access) : [];
+    storedSegmentCount = detail?.segments?.length || 0;
+    lexicalCount = lexical?.length || 0;
+    hydratedCount = hydrated?.length || 0;
+  } else if (embedded) {
+    const stored = await prisma.$queryRawUnsafe(
+      `SELECT count(*)::int AS n FROM hm.knowledge_segments
+        WHERE org_id=$1::uuid AND document_id=$2::uuid`,
+      orgId, documentId,
+    );
+    const lexical = await prisma.$queryRawUnsafe(
+      `SELECT count(*)::int AS n FROM hm.knowledge_segments
+        WHERE org_id=$1::uuid AND document_id=$2::uuid AND content LIKE $3`,
+      orgId, documentId, `%${marker}%`,
+    );
+    storedSegmentCount = Number(stored?.[0]?.n || 0);
+    lexicalCount = Number(lexical?.[0]?.n || 0);
+    hydratedCount = lexicalCount;
+  } else {
+    storedSegmentCount = await prisma.knowledgeSegment.count({ where: { orgId, documentId } });
+    lexicalCount = await prisma.knowledgeSegment.count({ where: { orgId, documentId, content: { contains: marker } } });
+    hydratedCount = lexicalCount;
+  }
+  if (!storedSegmentCount || !lexicalCount || !hydratedCount) {
+    throw new Error(`storage_lane_miss:${JSON.stringify({ storedSegmentCount, lexicalCount, hydratedCount })}`);
+  }
+
+  const directEvidence = await responseJson(await fetch(`${baseUrl}/api/evidence/search`, {
+    method: 'POST',
+    headers: { ...headers, 'content-type': 'application/json' },
+    body: JSON.stringify({ query: marker, limit: 15 }),
+  }));
+  const directEvidenceRows = directEvidence.results || directEvidence.evidence || [];
+  if (!directEvidenceRows.some((row) => String(row.snippet || row.content || '').includes(marker))) {
+    throw new Error(`direct_evidence_miss:${JSON.stringify({ returned: directEvidenceRows.length })}`);
   }
 
   const recalled = await recall();
@@ -116,8 +156,11 @@ try {
     segments: await prisma.knowledgeSegment.count({ where: { orgId, documentId } }),
     memories: await prisma.memory.count({ where: { orgId, content: { contains: marker } } }),
   };
-  if (central.documents || central.segments || central.memories) {
+  if (remote && (central.documents || central.segments || central.memories)) {
     throw new Error(`residency_violation:${JSON.stringify(central)}`);
+  }
+  if (!remote && (central.documents !== 1 || central.segments < 1 || central.memories !== 0)) {
+    throw new Error(`managed_persistence_violation:${JSON.stringify(central)}`);
   }
 
   const removed = await deleteDocument();
@@ -130,13 +173,14 @@ try {
 
   console.log(JSON.stringify({
     ok: true,
-    storage_mode: 'byod',
+    storage_mode: embedded ? 'amr_embedded' : remote ? 'byod' : 'managed',
     ingest_mode: 'evidence',
     status: status.status,
-    segment_count: detail.segments.length,
-    lexical_hits: lexical.length,
-    hydrated_hits: hydrated.length,
+    segment_count: storedSegmentCount,
+    lexical_hits: lexicalCount,
+    hydrated_hits: hydratedCount,
     recalled_evidence: evidence.length,
+    direct_evidence: directEvidenceRows.length,
     central,
     deleted: true,
     duration_ms: Date.now() - startedAt,

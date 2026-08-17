@@ -282,6 +282,12 @@ export function legacyPayloadToEnvelope(payload, overrides = {}) {
     metadata: {
       ...(payload.metadata || {}),
       memory_type: memoryType,
+      ...(payload.valid_from || payload.validFrom
+        ? { valid_from: payload.valid_from || payload.validFrom }
+        : {}),
+      ...(payload.valid_to || payload.validTo
+        ? { valid_to: payload.valid_to || payload.validTo }
+        : {}),
       // Structured save intents already extracted these entities. Preserve
       // them across the legacy compatibility boundary so entity materialization
       // does not depend on a second LLM returning valid JSON.

@@ -3717,6 +3717,8 @@ Every item must include a non-empty content field and one or more valid support_
       source_platform: prov.sourcePlatform,
       source_metadata: prov.sourceMetadata,
       document_date: prov.documentDate || undefined,
+      valid_from: envelope.metadata?.valid_from || prov.documentDate || undefined,
+      valid_to: envelope.metadata?.valid_to || undefined,
       scope: scope || undefined,
       primary_team_id: primaryTeamId || undefined,
       visibility: envelope.metadata?.visibility || undefined,

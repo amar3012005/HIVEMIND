@@ -3612,6 +3612,8 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       created_at: timestamp,
       updated_at: timestamp,
       document_date: documentDate,
+      valid_from: input.valid_from || input.validFrom || documentDate,
+      valid_to: input.valid_to || input.validTo || null,
       event_dates: input.event_dates || [],
       cognitive_layer_role: input.cognitive_layer_role || null,
       claim_key: input.claim_key || null,

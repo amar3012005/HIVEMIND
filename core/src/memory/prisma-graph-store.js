@@ -483,6 +483,7 @@ export class PrismaGraphStore {
         // Default to document_date (KB facts carry it 100%) so time-travel
         // (valid_at) has a real inception instead of a dead NULL column.
         validFrom: memory.valid_from ? new Date(memory.valid_from) : (memory.document_date ? new Date(memory.document_date) : null),
+        validTo: memory.valid_to ? new Date(memory.valid_to) : null,
         eventDates: (memory.event_dates || []).map(value => new Date(value)),
         memoryType: memory.memory_type || 'fact',
         title,

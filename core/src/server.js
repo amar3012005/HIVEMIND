@@ -18834,9 +18834,13 @@ exit \$RC
                 tags: validation.data.tags,
                 memory_type: validation.data.memory_type,
                 title: validation.data.title,
-                document_date: validation.data.document_date,
+                document_date: validation.data.document_date || validation.data.valid_from,
                 event_dates: validation.data.event_dates,
-                metadata: validation.data.metadata,
+                metadata: {
+                  ...validation.data.metadata,
+                  valid_from: validation.data.valid_from || null,
+                  valid_to: validation.data.valid_to || null,
+                },
                 source_metadata: {
                   source_type: 'webapp',
                   source_id: validation.data.source_message_id || validation.data.source_session_id || null,
@@ -19769,7 +19773,7 @@ exit \$RC
                 // visibility=private and never surfaced org-wide in recall).
                 visibility: validation.data.visibility || undefined,
                 title: validation.data.title,
-                document_date: validation.data.document_date,
+                document_date: validation.data.document_date || validation.data.valid_from,
                 event_dates: validation.data.event_dates,
                 relationship,
                 skipPredictCalibrate: body.skipPredictCalibrate === true,
@@ -19789,6 +19793,8 @@ exit \$RC
                 defer_entity_linking: body.defer_entity_linking === true,
                 metadata: {
                   ...validation.data.metadata,
+                  valid_from: validation.data.valid_from || null,
+                  valid_to: validation.data.valid_to || null,
                   source_platform: validation.data.source_platform || null,
                   source_session_id: validation.data.source_session_id || null,
                   source_message_id: validation.data.source_message_id || null,

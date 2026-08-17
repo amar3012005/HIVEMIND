@@ -24,7 +24,7 @@ import nodeFetch, { Response as NodeResponse } from 'node-fetch';
 import { currentOrg, currentApiKey } from '../db/prisma.js';
 import { meterTokens } from '../billing/usage-tracker.js';
 import { activeProviders, CANONICAL_MODEL, REASONING_EFFORT } from './llm-config.js';
-import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayFirstFetch, gatewayRequestHeaders } from './cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayCompatUrl, gatewayFirstFetch, gatewayRequestHeaders, isGatewayUrl } from './cloudflare-gateway.js';
 import { resolveGatewayLegacyTextProvider } from './chat-provider.js';
 import { recordAiUsage } from './ai-governance.js';
 
@@ -123,15 +123,22 @@ async function callProvider(provider, body, baseOptions, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const providerHeaders = {
+      ...(baseOptions.headers || {}),
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${provider.key}`,
+      ...provider.headers,
+    };
     return await _fetch(provider.url, {
       ...baseOptions,
       method: 'POST',
-      headers: {
-        ...(baseOptions.headers || {}),
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${provider.key}`,
-        ...provider.headers,
-      },
+      // gatewayFirstFetch intentionally no-ops for an already-Gateway URL.
+      // Attach the Gateway credential here for provider URLs resolved upstream
+      // by resolveGatewayLegacyTextProvider; BYOK also strips the empty/direct
+      // provider Authorization header before the request leaves Core.
+      headers: isGatewayUrl(provider.url)
+        ? gatewayRequestHeaders(providerHeaders, provider.name)
+        : providerHeaders,
       body: JSON.stringify(body),
       signal: baseOptions.signal || controller.signal,
     });

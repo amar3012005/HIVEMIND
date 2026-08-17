@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildEvidencePacket, hop2Evidence, loadTypedGraphEvidence, recallEnhance } from '../../src/memory/recall-router.js';
+import { buildEvidencePacket, hop2Evidence, loadTypedGraphEvidence, projectInventoryAbsentIsAuthoritative, recallEnhance } from '../../src/memory/recall-router.js';
 import { buildLexicalPhrases, EvidenceRetrievalService, fuseRemoteEvidenceHits } from '../../src/knowledge/evidence-retrieval.js';
 
 test('lexical phrase planning is language-independent and preserves query order', () => {
@@ -115,6 +115,12 @@ test('empty selected project does not widen evidence retrieval to the organizati
 
   assert.equal(called, false);
   assert.deepEqual(result, { items: [], reason: 'project-empty', docIds: [] });
+});
+
+test('only central storage treats a missing central project inventory as authoritative', () => {
+  assert.equal(projectInventoryAbsentIsAuthoritative('central'), true);
+  assert.equal(projectInventoryAbsentIsAuthoritative('amr-local'), false);
+  assert.equal(projectInventoryAbsentIsAuthoritative('agent'), false);
 });
 
 test('evidence hydration re-applies the document allowlist in canonical storage', async () => {

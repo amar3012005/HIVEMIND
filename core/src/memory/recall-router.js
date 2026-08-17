@@ -32,7 +32,7 @@ import { buildEvidencePacket } from './recall-packet.js';
 import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { isMemoryInDateRange } from './temporal-range.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
-import { orgIsRemote, amrKbDocs } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDocs, memoryBackend } from '../vector/mneme/driver.js';
 import { scopedMemoryWhere } from './prisma-graph-store.js';
 import { dedupeMemoriesById } from './recall-dedup.js';
 import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
@@ -1070,11 +1070,15 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
         reason = 'project-corpus';
       }
     } else {
-      // A selected central project with no documents must not silently widen
-      // to every document in the organization. Remote agents cannot currently
-      // enumerate project documents, so retain their scoped backend behavior.
-      docIds = orgIsRemote(ctx.orgId) ? docIds : [];
-      reason = orgIsRemote(ctx.orgId) ? reason : 'project-empty';
+      // A selected CENTRAL project with no documents must not silently widen
+      // to every document in the organization. For both remote-agent and local
+      // embedded .amr backends, however, central Prisma is not authoritative
+      // for the tenant's document inventory. Marking those projects empty here
+      // suppresses a healthy shard evidence lane. Let the backend enforce the
+      // project boundary during retrieveEvidence instead.
+      const inventoryAbsentIsAuthoritative = projectInventoryAbsentIsAuthoritative(memoryBackend(ctx.orgId));
+      docIds = inventoryAbsentIsAuthoritative ? [] : docIds;
+      reason = inventoryAbsentIsAuthoritative ? 'project-empty' : reason;
     }
   }
   if (docIds.length === 0 && inspection.filenames.length > 0) {
@@ -1123,6 +1127,10 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
     reason: docIds.length > 0 ? reason : (inspection.sparse ? 'sparse' : 'always-on'),
     ...(docIds.length > 0 ? { docIds } : {}),
   };
+}
+
+export function projectInventoryAbsentIsAuthoritative(backend) {
+  return backend === 'central';
 }
 
 // ── Hop 3 — Live workspace ─────────────────────────────────────────────────

@@ -77,3 +77,27 @@ test('AMR doctor copies a verified snapshot and opens only the isolated restore'
   assert.equal(result.slots[0].live_count, 3);
   assert.equal(fs.existsSync(openedPath), false);
 });
+
+test('AMR doctor accepts a verified empty slot and reports it explicitly', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-amr-doctor-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dataRoot = path.join(root, 'mneme');
+  const backupRoot = path.join(root, 'backups');
+  const shard = path.join(dataRoot, 'new-tenant');
+  fs.mkdirSync(shard, { recursive: true });
+  fs.writeFileSync(path.join(shard, 'shard.amr'), 'empty-but-valid-fixture');
+  snapshotShardsOnce({ dataRoot, backupRoot, logger: {} });
+
+  class EmptyStore { liveCount() { return 0; } }
+  const result = await runAmrDoctor({
+    dataRoot,
+    backupRoot,
+    maxAgeHours: 1,
+    dim: 1024,
+    verifyOpen: true,
+    StoreClass: EmptyStore,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.slots[0].empty, true);
+  assert.equal(result.slots[0].error, undefined);
+});

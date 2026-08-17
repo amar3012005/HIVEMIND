@@ -11,6 +11,7 @@ import { signReleaseManifest, verifyReleaseManifest } from '../../../byod/releas
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const UPGRADE = path.resolve(TEST_DIR, '../../../byod/upgrade.sh');
+const ROLLBACK = path.resolve(TEST_DIR, '../../../byod/rollback.sh');
 
 test('BYOD release accepts only a valid signature over an immutable digest image', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-byod-release-'));
@@ -51,4 +52,15 @@ test('BYOD release rejects mutable image tags even when signed', () => {
     image: 'hivemind/hm-agent:latest',
     created_at: '2026-08-17T12:00:00Z',
   }, privateKey), /sha256 digest/);
+});
+
+test('BYOD upgrade and rollback can target an isolated disposable box', () => {
+  for (const script of [UPGRADE, ROLLBACK]) {
+    const source = fs.readFileSync(script, 'utf8');
+    assert.match(source, /BYOD_COMPOSE_FILE/);
+    assert.match(source, /BYOD_COMPOSE_PROJECT_NAME/);
+    assert.match(source, /BYOD_AGENT_CONTAINER/);
+    assert.match(source, /BYOD_RELEASE_STATE_DIR/);
+    assert.doesNotMatch(source, /docker (?:inspect|exec) hm-byod-agent/);
+  }
 });

@@ -34,7 +34,7 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 | Cross-store consistency | `PASS` — 2026-08-17 full production comparison checked 1,304 active memories: 1,304/1,304 actual Qdrant points recorded `synced`, zero missing/failed; all 5,540 evidence rows report `vector_stored=true` | Pending vectors repaired; no false `synced` rows |
 | Tenant isolation | `PASS` — immutable Core `sha-6681586d`; storage-boundary canary returned 20/20 correctly scoped org hits and 20/20 correctly scoped project hits, while an Org A context attempting an Org B filter was rejected before Qdrant | Cross-tenant/project negative tests for memory and evidence |
 | Graph/provenance recovery | `PASS` — isolated managed restore on 2026-08-17 recovered 2,134 relationships, 1,286 memory-evidence links, 3,204 memory-entity links, and 1,834 canonical entities | Links and citations survive restore |
-| Encryption/key recovery | `NOT_PROVEN` | Restore operator can decrypt; application credentials cannot manage keys |
+| Encryption/key recovery | `PASS` — 2026-08-17 operator drill encrypted the real 331,724,940-byte managed recovery unit, authenticated and decrypted it into isolation, reverified all 3 manifest artifacts, and removed the probe; the 32-byte key is root-only outside Compose and absent from Core | Restore operator can decrypt; application credentials cannot manage keys |
 | Failure isolation | `NOT_PROVEN` | One tenant outage does not exhaust another tenant's interactive budget |
 
 ## Self-hosted BYOD

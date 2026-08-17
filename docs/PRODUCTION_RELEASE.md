@@ -626,3 +626,15 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - `verify-deployed.sh` fixture-catalog gate false-positived an 8th time — same confirmed locale-`sort` artifact.
 - Rollback: prior per-service images retagged `rollback`.
 - External side effects: none.
+
+## 689350eb — persona email thread + one-click approval links (all 4 services)
+
+- Canonical SHA: `689350ebddbb2aeacb5a3116df1b2e08fa4e7c0e` (PR #374, gitlink to Da-vinci `07e2df12`). Two additive migrations (`hq_runtime_email_thread`, `hq_approval_tokens`).
+- Feature: Runtime narrates activation, its first growth plan, and every decision-required moment as one continuous, real-threaded persona email (Cloudflare Email Sending, already configured). Approval-required emails include a real Approve button — clicking it opens a public, no-login page; a real RFC 5322 threading + single-use token-gated approval (mirrors OrgInvite's `/v1/join/:token` pattern).
+- **Migration note**: `prisma migrate deploy` from `hm-core` failed with `P3005` — investigated live, found a pre-existing, unrelated infra mismatch: `_prisma_migrations` physically lives in schema `legacy_public`, not `hivemind` (where the container's Prisma client looks). Not something to fix mid-deploy for this feature. Took a fresh encrypted backup (`hivemind-20260817-125051.sql.gz.enc`), then applied both migration `.sql` files directly via `psql` — both are pure additive/idempotent (`ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`), matching the governor's bar for a safe manual apply. Verified via `information_schema` query afterward, not just trusted the psql output.
+- Tests: 208/208 across hq-runtime + email-service suites (11 new for approval-links.js, 4 new for persona-narrator's button wiring, plus the persona-email tests).
+- Runtime: all 4 services on `689350ebddbb`, healthy. Byte-verified inside `hm-control`: `notifyOwnerByEmail` (3 matches), `createAuthorityApprovalToken` (2 matches), `approval-links.js` present, `Message-ID` threading present in `email-service.js` (5 matches). Four public health checks 200.
+- Live-verify: confirmed the schema is live and queryable (`email_updates_enabled`/`email_thread_*` columns on `hq_runtimes`, `hq_approval_tokens` table, both empty as expected — no trigger event has fired since deploy yet). Confirmed the daily_cadence wake fired correctly at 13:00:01 UTC immediately after this deploy (a genuine `operating_cycle_brief` event), with zero fatal/unhandled errors in a fresh 10-minute log scan. The actual persona-email SEND path has not yet been exercised by a real trigger event since deploy — reported honestly, not fabricated as verified.
+- `verify-deployed.sh` fixture-catalog gate false-positived a 9th time — same confirmed locale-`sort` artifact.
+- Rollback: prior per-service images retagged `rollback`; DB rollback via the fresh encrypted backup if ever needed (migrations are additive-only, so a code rollback alone is safe without a schema rollback).
+- External side effects: none beyond the schema change (no real email sent yet, no real approval granted yet).

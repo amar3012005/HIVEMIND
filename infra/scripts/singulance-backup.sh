@@ -21,8 +21,17 @@ docker exec hm-postgres sh -lc 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --
 test -s "$DEST/postgres.dump"
 docker exec -i hm-postgres sh -lc 'pg_restore --list >/dev/null' < "$DEST/postgres.dump"
 
-# Qdrant snapshot API is consistent; copy it out through the running container.
-SNAPSHOT="$(docker exec hm-qdrant sh -lc 'wget -qO- --post-data="{}" --header="Content-Type: application/json" http://localhost:6333/snapshots' | sed -n 's/.*"name":"\([^"]*\)".*/\1/p' | head -1)"
+# Qdrant's production image intentionally contains no wget/curl. Use the Core
+# container's Node runtime on the same private network to request the snapshot,
+# then copy the acknowledged file out of Qdrant. Credentials remain inside the
+# container environment and are never printed.
+SNAPSHOT="$(docker exec hm-core node -e '
+const base=String(process.env.QDRANT_URL||"http://qdrant:6333").replace(/\/+$/,"");
+const key=process.env.QDRANT_API_KEY||"";
+fetch(`${base}/snapshots`,{method:"POST",headers:{"content-type":"application/json",...(key?{"api-key":key}:{})},body:"{}"})
+ .then(async r=>{const j=await r.json();if(!r.ok)throw new Error(`qdrant ${r.status}`);const n=j?.result?.name||j?.name;if(!n)throw new Error("snapshot name missing");process.stdout.write(n)})
+ .catch(e=>{console.error(e.message);process.exit(1)});
+')"
 test -n "$SNAPSHOT"
 docker exec hm-qdrant sh -lc "cat /qdrant/snapshots/$SNAPSHOT" > "$DEST/qdrant.snapshot"
 test -s "$DEST/qdrant.snapshot"

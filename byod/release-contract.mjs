@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 
-const DIGEST_IMAGE = /^[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/;
+// OCI/Docker image reference pinned by digest. A private registry may use an
+// explicit numeric port (for example registry.customer.example:5000).
+const DIGEST_IMAGE = /^[a-z0-9._-]+(?::[0-9]+)?(?:\/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$/;
 const RELEASE = /^[a-zA-Z0-9._-]{7,80}$/;
 
 export function validateReleaseManifest(manifest) {

@@ -10,6 +10,7 @@
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
+import { settleEvidenceLaneWithin } from './evidence-lane-deadline.js';
 
 export function fuseRemoteEvidenceHits(vectorHits = [], lexicalHits = [], { rankConstant = 60 } = {}) {
   const byId = new Map();
@@ -256,11 +257,19 @@ export class EvidenceRetrievalService {
         // Exact terms and embeddings are complementary. Start the lexical lane
         // immediately so a part number still returns when embedding is unavailable.
         const lexicalPromise = amrKbLexicalRemote(orgId, query, { filter, limit: _depth, access });
-        const queryVector = await this.qdrantClient.generateEmbedding(query);
-        const vectorPromise = queryVector
-          ? amrKbRecall(orgId, queryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold, access })
-          : Promise.resolve([]);
-        const [vectorHits, lexicalHits] = await Promise.all([vectorPromise, lexicalPromise]);
+        const vectorPromise = Promise.resolve(this.qdrantClient.generateEmbedding(query))
+          .then((queryVector) => queryVector
+            ? amrKbRecall(orgId, queryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold, access })
+            : []);
+        // A Memory Box evidence hop has a 1.5s outer budget. Previously a
+        // completed lexical result was discarded whenever cold embedding kept
+        // Promise.all pending until that outer deadline. Bound each lane so a
+        // slow semantic provider degrades independently instead of erasing an
+        // exact/phrase match that is already available.
+        const [vectorHits, lexicalHits] = await Promise.all([
+          settleEvidenceLaneWithin(vectorPromise, Number(process.env.REMOTE_EVIDENCE_VECTOR_BUDGET_MS || 1100), null),
+          settleEvidenceLaneWithin(lexicalPromise, Number(process.env.REMOTE_EVIDENCE_LEXICAL_BUDGET_MS || 1250), null),
+        ]);
         // null (not []) means the lane FAILED rather than matched nothing — see
         // remote-backend.js. Say which lane is missing, because a half-working remote agent
         // returns plausible answers with a whole retrieval mode silently absent, and that is

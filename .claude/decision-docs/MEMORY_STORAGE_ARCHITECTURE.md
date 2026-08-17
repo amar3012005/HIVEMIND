@@ -111,6 +111,7 @@ PostgreSQL owns content, metadata, provenance, graph, lifecycle state, and autho
 - PostgreSQL point-in-time recovery or equivalent continuous log archive, plus portable dumps.
 - Qdrant snapshots coupled to a manifest that records collection, dimension, embedding model/version, and PostgreSQL recovery boundary.
 - Encryption in transit and at rest, with tested key rotation and recovery access separated from application credentials.
+- Managed backup artifacts are packaged only after manifest verification and encrypted as an authenticated `.hmstorage` bundle. The backup key lives in a root-only operator file outside the Compose environment; upload commands receive ciphertext and its checksum, never the key or plaintext directory.
 - Per-tenant failure isolation for queues, circuits, quotas, and maintenance so one tenant cannot starve interactive recall for another.
 - Restore drills into a non-production namespace; validate counts, tenant isolation, vector dimension, graph links, evidence hydration, and exact recall canaries.
 

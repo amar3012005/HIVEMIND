@@ -52,12 +52,26 @@ node "$REPO_ROOT/scripts/storage-manifest.mjs" verify "$DEST" >/dev/null
 rm -rf "$FINAL_DEST"
 mv "$DEST" "$FINAL_DEST"
 
+# Encrypt the verified recovery unit with a host-operator key that is never
+# loaded into Core or any application container. The upload command receives
+# only authenticated ciphertext plus its checksum.
+BACKUP_KEY_FILE="${MANAGED_BACKUP_KEY_FILE:-/root/.config/hivemind-backup.env}"
+[[ -f "$BACKUP_KEY_FILE" ]] || { echo "Managed backup key file missing: $BACKUP_KEY_FILE" >&2; exit 2; }
+# shellcheck disable=SC1090
+source "$BACKUP_KEY_FILE"
+[[ -n "${STORAGE_BACKUP_ENCRYPTION_KEY:-}" ]] || { echo "STORAGE_BACKUP_ENCRYPTION_KEY missing" >&2; exit 2; }
+ENCRYPTED_BUNDLE="$BACKUP_DIR/$STAMP.hmstorage"
+node "$REPO_ROOT/scripts/storage-bundle-crypto.mjs" encrypt "$FINAL_DEST" "$ENCRYPTED_BUNDLE" >/dev/null
+unset STORAGE_BACKUP_ENCRYPTION_KEY
+BACKUP_SHA256="$(sha256sum "$ENCRYPTED_BUNDLE" | awk '{print $1}')"
+
 if [[ -z "${BACKUP_UPLOAD_COMMAND:-}" ]]; then
   echo "Backup created and verified at $FINAL_DEST but NOT off-host. Set BACKUP_UPLOAD_COMMAND to activate DR." >&2
   exit 2
 fi
 
-export BACKUP_PATH="$FINAL_DEST"
+export BACKUP_PATH="$ENCRYPTED_BUNDLE" BACKUP_SHA256
 eval "$BACKUP_UPLOAD_COMMAND"
 find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +"$RETENTION_DAYS" -exec rm -rf {} +
+find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.hmstorage' -mtime +"$RETENTION_DAYS" -delete
 echo "Backup uploaded and retained: $FINAL_DEST"

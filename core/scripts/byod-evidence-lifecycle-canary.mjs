@@ -50,7 +50,7 @@ async function recall() {
   return responseJson(await fetch(`${baseUrl}/api/recall`, {
     method: 'POST',
     headers: { ...headers, 'content-type': 'application/json' },
-    body: JSON.stringify({ query: marker, mode: 'quick', limit: 15 }),
+    body: JSON.stringify({ query: marker, mode: 'quick', limit: 15, debug_timing: true }),
   }));
 }
 
@@ -135,6 +135,30 @@ try {
     throw new Error(`storage_lane_miss:${JSON.stringify({ storedSegmentCount, lexicalCount, hydratedCount })}`);
   }
 
+  // Public recall runs FIRST. A direct evidence call would warm the embedding
+  // path and hide the cold-start regression this canary is meant to catch.
+  const recalled = await recall();
+  const evidence = Array.isArray(recalled.evidence) ? recalled.evidence : [];
+  if (!evidence.some((row) => String(row.snippet || row.content || '').includes(marker))) {
+    const diagnosticDirect = await responseJson(await fetch(`${baseUrl}/api/evidence/search`, {
+      method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ query: marker, limit: 15 }),
+    }));
+    const diagnosticSecond = await recall();
+    throw new Error(`public_recall_miss:${JSON.stringify({
+      memories: recalled.memories?.length || 0,
+      evidence: evidence.length,
+      mode_used: recalled.mode_used || null,
+      search_method: recalled.search_method || null,
+      trace: recalled.trace || recalled.recall_trace || null,
+      timing_ms: recalled.timing_ms || recalled.recall_timing_ms || null,
+      stage_breakdown: recalled.stage_breakdown || null,
+      direct_after_miss: (diagnosticDirect.results || diagnosticDirect.evidence || []).length,
+      second_recall_evidence: diagnosticSecond.evidence?.length || 0,
+      second_timing_ms: diagnosticSecond.timing_ms || null,
+    })}`);
+  }
+
   const directEvidence = await responseJson(await fetch(`${baseUrl}/api/evidence/search`, {
     method: 'POST',
     headers: { ...headers, 'content-type': 'application/json' },
@@ -143,12 +167,6 @@ try {
   const directEvidenceRows = directEvidence.results || directEvidence.evidence || [];
   if (!directEvidenceRows.some((row) => String(row.snippet || row.content || '').includes(marker))) {
     throw new Error(`direct_evidence_miss:${JSON.stringify({ returned: directEvidenceRows.length })}`);
-  }
-
-  const recalled = await recall();
-  const evidence = Array.isArray(recalled.evidence) ? recalled.evidence : [];
-  if (!evidence.some((row) => String(row.snippet || row.content || '').includes(marker))) {
-    throw new Error(`public_recall_miss:${JSON.stringify({ memories: recalled.memories?.length || 0, evidence: evidence.length })}`);
   }
 
   const central = {

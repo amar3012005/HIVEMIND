@@ -1465,6 +1465,15 @@ model HqRuntime {
   activatedAt     DateTime? @map("activated_at") @db.Timestamptz(6)
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  // Persona email thread (2026-08-17): one continuous email thread per
+  // runtime narrating activation, the first growth plan, and every
+  // decision-required moment — additive, nullable, no backfill needed.
+  emailUpdatesEnabled Boolean   @default(true) @map("email_updates_enabled")
+  emailThreadTo       String?  @map("email_thread_to") @db.VarChar(320)
+  emailThreadSubject  String?  @map("email_thread_subject") @db.VarChar(512)
+  emailThreadMessageId String? @map("email_thread_message_id") @db.VarChar(998)
+  emailThreadSentCount Int     @default(0) @map("email_thread_sent_count")
+  emailThreadLastSentAt DateTime? @map("email_thread_last_sent_at") @db.Timestamptz(6)
 
   @@index([state, nextWakeAt])
   @@index([orgId, epoch], map: "hq_runtimes_org_epoch_idx")

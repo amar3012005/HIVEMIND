@@ -57,8 +57,21 @@ export function summarizeGrowthPlanResult(result = {}) {
   };
 }
 
+// Popup email hook (2026-08-17): the SAME eventTypes the Runtime terminal's
+// own POPUP=true classification uses (see runtime-probe-e2e.py, kept in
+// sync deliberately) also trigger a persona-voice email into the owner's
+// standing thread — best-effort, fire-and-forget, must never affect the
+// cycle's own outcome or block on email delivery.
+const POPUP_EVENT_TYPES = new Set(['approval_required', 'capability_required', 'decision_required']);
+
 async function event(prisma, runtime, cycle, input) {
-  return appendHqEvent({ prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch, cycleId: cycle.id, ...input });
+  const appended = await appendHqEvent({ prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch, cycleId: cycle.id, ...input });
+  if (POPUP_EVENT_TYPES.has(input.eventType)) {
+    import('./persona-narrator.js')
+      .then(({ notifyOwnerByEmail }) => notifyOwnerByEmail({ prisma, runtime, kind: 'popup', title: input.title, summary: input.summary }))
+      .catch(() => {});
+  }
+  return appended;
 }
 
 export function resolveWorkResultTodo({ order, result }) {
@@ -479,6 +492,11 @@ export class NativeHqEngine {
     if (!isNoisyRepeatCycle) await event(prisma, runtime, cycle, { eventType: 'wake', title: firstAwakening ? 'I am here' : 'I am awake', summary: firstAwakening
       ? awakening.narration
       : `I am awake. ${String(trigger.type || 'An event').replaceAll('_', ' ')} moved, so I am reading the company before I touch anything.`, details: firstAwakening ? { stream_id: awakeningStreamId, model_streamed: !awakening.fallback, narration_model: awakening.model, narration_provider: awakening.provider, narration_fallback: awakening.fallback, usage: awakening.usage } : {} });
+    // Day-0 persona email — one continuous thread starts here, best-effort,
+    // never blocks the activation cycle it's narrating.
+    if (firstAwakening) import('./persona-narrator.js')
+      .then(({ notifyOwnerByEmail }) => notifyOwnerByEmail({ prisma, runtime, kind: 'activation' }))
+      .catch(() => {});
     // NARRATION GATE. A lifecycle walking its stages produces many internal wakes
     // (runtime_playbook_result / queue_advance). Re-emitting the full "company in view /
     // checked instructions / re-ranked queue" block on each one produced the duplicated
@@ -1693,14 +1711,21 @@ export class NativeHqEngine {
       const acknowledged = summarizeGrowthPlanResult(result);
       const requiresInitialStart = firstLifePolicy.require_initial_start_decision === true
         || firstLifePolicy.require_initial_policy_choice === true;
+      const growthPlanSummary = `${acknowledged.summary} The persisted proposals are now the source of truth. ${requiresInitialStart
+        ? 'I will not delegate them until you start the recommendation.'
+        : 'I will promote one recommendation, select its lifecycle, and prepare it now; external effects remain governed at their exact gates.'}`;
       await event(prisma, runtime, cycle, {
         eventType: 'tool_result', title: 'I read and committed the Growth Operating Plan',
-        summary: `${acknowledged.summary} The persisted proposals are now the source of truth. ${requiresInitialStart
-          ? 'I will not delegate them until you start the recommendation.'
-          : 'I will promote one recommendation, select its lifecycle, and prepare it now; external effects remain governed at their exact gates.'}`,
+        summary: growthPlanSummary,
         toolRef: 'growth_plan_run', evidenceRefs: [result.artifact_id],
         details: { toolkit: growthToolkit.id, model: result.model, usage: result.usage || {}, ...acknowledged.details },
       });
+      // First-growth-plan persona email — only the very first plan (matches
+      // "growth plan for the 1st time"); every plan after this narrates only
+      // through the popup hook in event(), not a dedicated email each time.
+      if (growthPlanMode === 'initial_full') import('./persona-narrator.js')
+        .then(({ notifyOwnerByEmail }) => notifyOwnerByEmail({ prisma, runtime, kind: 'growth_plan', summary: growthPlanSummary }))
+        .catch(() => {});
       await move('DELEGATING', { activeGoalId: result.committed.goal_id, activeStageId: result.committed.stage_id });
       await event(prisma, runtime, cycle, {
         eventType: 'decision', title: 'I selected the first bounded Growth Stage',

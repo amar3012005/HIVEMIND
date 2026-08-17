@@ -43,14 +43,43 @@ test('Cloudflare is the primary transactional provider and reports queued delive
   };
 
   const result = await sendSystemEmail({ templateId: 'enterprise_invitation', to: 'owner@example.com', vars: { companyName: 'Example', activationUrl: 'https://example.test', recoveryCode: 'CODE', supportEmail: 'support@singulancelabs.com' } });
-  assert.deepEqual(result, { ok: true, provider: 'cloudflare', deliveryStatus: 'queued' });
+  assert.equal(result.ok, true);
+  assert.equal(result.provider, 'cloudflare');
+  assert.equal(result.deliveryStatus, 'queued');
+  // A fresh RFC 5322 Message-ID is always minted (needed for real thread
+  // continuity — see persona-narrator.js) — extracted from a bare domain,
+  // not the raw "Name <email>" From header (that bug produced a trailing '>').
+  assert.match(result.messageId, /^<[0-9a-f-]{36}@singulancelabs\.com>$/);
   assert.equal(request.url, 'https://api.cloudflare.com/client/v4/accounts/unit-account/email/sending/send');
   assert.equal(request.init.headers.Authorization, 'Bearer unit-token');
   const body = JSON.parse(request.init.body);
   assert.equal(body.from, 'Singulance Support <support@singulancelabs.com>');
+  assert.equal(body.headers['Message-ID'], result.messageId);
   assert.equal(body.to, 'owner@example.com');
   assert.match(body.html, /background:#117dff/);
   assert.match(body.html, /HIVEMIND/);
+});
+
+test('a thread\'s inReplyTo becomes real In-Reply-To/References headers on the request, via Cloudflare\'s documented headers passthrough', async () => {
+  setEnv({
+    CLOUDFLARE_EMAIL_API_TOKEN: 'unit-token',
+    CLOUDFLARE_ACCOUNT_ID: 'unit-account',
+    CLOUDFLARE_EMAIL_FROM: 'Runtime <runtime@singulancelabs.com>',
+  });
+  let request;
+  global.fetch = async (url, init) => {
+    request = { url, init };
+    return new Response(JSON.stringify({ success: true, result: { delivered: [], queued: ['owner@example.com'], permanent_bounces: [] } }), { status: 200 });
+  };
+  await sendSystemEmail({
+    templateId: 'announcement', to: 'owner@example.com',
+    vars: { subject: 'x', heading: 'x', body: 'x' },
+    thread: { inReplyTo: '<root-message-id@singulancelabs.com>' },
+  });
+  const body = JSON.parse(request.init.body);
+  assert.equal(body.headers['In-Reply-To'], '<root-message-id@singulancelabs.com>');
+  assert.equal(body.headers.References, '<root-message-id@singulancelabs.com>');
+  assert.notEqual(body.headers['Message-ID'], '<root-message-id@singulancelabs.com>', 'this send must mint its OWN Message-ID, not reuse the root\'s');
 });
 
 test('a Cloudflare permanent bounce is not retried through another provider', async () => {

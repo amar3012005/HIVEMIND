@@ -7019,6 +7019,15 @@ exit \$RC
             Number.isFinite(body.start_ms) ? body.start_ms : null,
             Number.isFinite(body.end_ms) ? body.end_ms : null,
           );
+          // The session timestamp is the durable recorder heartbeat. A stale
+          // recording is finalized from its acknowledged transcript segments
+          // after MEETING_ABANDONED_AFTER_MS, even if the browser or Core dies
+          // before it can submit the explicit finalize request.
+          await prisma.$executeRawUnsafe(
+            `UPDATE hivemind.meeting_sessions SET updated_at=now()
+              WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid AND status='recording'`,
+            sid, mOrg, mUser,
+          );
           await prisma.$executeRawUnsafe(
             `UPDATE hivemind.meeting_sessions s
                 SET status='queued', finalization_attempts=0,

@@ -28,6 +28,14 @@ export async function processRemoteMeetingFinalization({ orgId, sessionId, userI
       ? segments.flatMap((segment) => segment.speakers || []).map((item) => `${item.speaker || 'Speaker'}: ${item.text || ''}`).join('\n')
       : transcript;
     const { insights } = await generateMeetingInsights({ orgId, transcript: speakerTranscript, notes: payload.notes || '', participants: payload.participants || [] });
+    if (payload.recovered_partial === true) {
+      insights.recovery = {
+        partial: true,
+        reason: payload.recovery_reason || 'recording_inactive',
+        recovered_at: payload.recovered_at || null,
+        transcript_segments: segments.length,
+      };
+    }
     const meeting = await amrMeetingWrite(orgId, {
       user_id: userId, session_id: sessionId, project_id: payload.project_id || null,
       title: String(payload.title || insights.title || 'Meeting').slice(0, 300), summary: insights.summary || null,

@@ -2,9 +2,46 @@ import { generateMeetingInsights } from './meeting-insights.js';
 
 const MAX_ATTEMPTS = Math.max(1, Number(process.env.MEETING_FINALIZATION_MAX_ATTEMPTS || 3));
 const LEASE_MS = Math.max(60_000, Number(process.env.MEETING_FINALIZATION_LEASE_MS || 10 * 60 * 1000));
+const ABANDONED_AFTER_MS = Math.max(5 * 60_000, Number(process.env.MEETING_ABANDONED_AFTER_MS || 30 * 60_000));
 
 export function finalizationRetryDelayMs(attempt) {
   return Math.min(60 * 60 * 1000, 30_000 * (2 ** Math.max(0, Number(attempt) - 1)));
+}
+
+export async function queueAbandonedMeetingSessions(prisma, { limit = 5, now = new Date() } = {}) {
+  const rows = await prisma.$queryRawUnsafe(
+    `WITH candidates AS (
+       SELECT s.id,s.org_id,s.user_id
+         FROM hivemind.meeting_sessions s
+        WHERE s.status='recording'
+          AND s.consent_recorded=true
+          AND s.updated_at <= $1::timestamptz - ($2::bigint * interval '1 millisecond')
+          AND EXISTS (
+            SELECT 1 FROM hivemind.meeting_segments g
+             WHERE g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM hivemind.meeting_audio_segments a
+             WHERE a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id
+               AND a.status NOT IN ('transcribed','expired')
+               AND NOT (a.status='error' AND a.attempts >= 3)
+          )
+        ORDER BY s.updated_at ASC
+        LIMIT $3
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE hivemind.meeting_sessions s
+        SET status='queued', expected_segments=NULL,
+            finalization_payload=COALESCE(s.finalization_payload,'{}'::jsonb) ||
+              jsonb_build_object('recovered_partial',true,'recovery_reason','recording_inactive','recovered_at',$1::timestamptz),
+            finalization_next_attempt_at=NULL, finalization_lease_expires_at=NULL,
+            failure_code=NULL, failure_detail=NULL, updated_at=now()
+       FROM candidates c
+      WHERE s.id=c.id AND s.org_id=c.org_id AND s.user_id=c.user_id
+      RETURNING s.id,s.org_id,s.user_id`,
+    now, ABANDONED_AFTER_MS, Math.max(1, Math.min(20, Number(limit) || 5)),
+  );
+  return rows || [];
 }
 
 export async function queueMeetingFinalization(prisma, { sessionId, orgId, userId, expectedSegments, payload }) {
@@ -121,6 +158,14 @@ export async function processMeetingFinalization(prisma, identity) {
       prisma, orgId: identity.orgId, transcript: speakerTranscript,
       notes: payload.notes || '', participants: payload.participants || [],
     });
+    if (payload.recovered_partial === true) {
+      insights.recovery = {
+        partial: true,
+        reason: payload.recovery_reason || 'recording_inactive',
+        recovered_at: payload.recovered_at || null,
+        transcript_segments: segments.length,
+      };
+    }
     const scopes = new Set(['personal','project','team','organization']);
     const scope = scopes.has(String(payload.scope || '').toLowerCase()) ? String(payload.scope).toLowerCase() : null;
     const title = String(payload.title || insights.title || `Meeting ${new Date().toISOString().slice(0, 16)}`).slice(0, 300);
@@ -165,6 +210,7 @@ export async function processMeetingFinalization(prisma, identity) {
 }
 
 export async function reconcileMeetingFinalizations(prisma, { limit = 5 } = {}) {
+  const recovered = await queueAbandonedMeetingSessions(prisma, { limit });
   const rows = await prisma.$queryRawUnsafe(
     `SELECT s.id,s.org_id,s.user_id FROM hivemind.meeting_sessions s
       WHERE (s.status IN ('queued','error') OR (s.status='analyzing' AND s.finalization_lease_expires_at < now()))
@@ -180,7 +226,7 @@ export async function reconcileMeetingFinalizations(prisma, { limit = 5 } = {}) 
   );
   const results = [];
   for (const row of rows || []) results.push(await processMeetingFinalization(prisma, { sessionId: row.id, orgId: row.org_id, userId: row.user_id }));
-  return { scanned: rows?.length || 0, completed: results.filter((result) => result.ok).length, failed: results.filter((result) => result.claimed && !result.ok).length };
+  return { recovered: recovered.length, scanned: rows?.length || 0, completed: results.filter((result) => result.ok).length, failed: results.filter((result) => result.claimed && !result.ok).length };
 }
 
-export const __test = { readiness };
+export const __test = { readiness, abandonedAfterMs: ABANDONED_AFTER_MS };

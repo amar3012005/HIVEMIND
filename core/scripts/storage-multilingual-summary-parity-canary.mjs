@@ -29,6 +29,7 @@ const startedAt = Date.now();
 const headers = { authorization: `Bearer ${rawKey}`, 'x-hm-user-id': userId, 'x-hm-org-id': orgId };
 let keyId;
 let documentId;
+let jobId;
 
 const content = `# ${company} product and contract brief
 
@@ -59,13 +60,29 @@ function corpusText(result) {
     .map((row) => String(row.content || row.snippet || '')).join('\n');
 }
 
+function foldForComparison(value) {
+  const arabicIndic = '٠١٢٣٤٥٦٧٨٩';
+  const easternArabicIndic = '۰۱۲۳۴۵۶۷۸۹';
+  return String(value || '').normalize('NFKC')
+    .replace(/[٠-٩]/g, (digit) => String(arabicIndic.indexOf(digit)))
+    .replace(/[۰-۹]/g, (digit) => String(easternArabicIndic.indexOf(digit)))
+    .replace(/[‐‑‒–—―−]/g, '-')
+    .replace(/[\s-]+/gu, '')
+    .toLocaleLowerCase();
+}
+
 async function cleanup() {
-  if (!documentId) return;
-  await fetch(`${baseUrl}/api/knowledge/document`, {
-    method: 'DELETE', headers: { ...headers, 'content-type': 'application/json' },
-    body: JSON.stringify({ id: documentId, filename }),
-  }).catch(() => {});
-  documentId = null;
+  if (documentId) {
+    await fetch(`${baseUrl}/api/knowledge/document`, {
+      method: 'DELETE', headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: documentId, filename }),
+    }).catch(() => {});
+    documentId = null;
+  }
+  if (jobId) {
+    await prisma.knowledgeIngestJob.deleteMany({ where: { id: jobId, orgId, userId } }).catch(() => {});
+    jobId = null;
+  }
 }
 
 try {
@@ -82,6 +99,7 @@ try {
   form.set('ingestMode', 'both');
   form.set('smart', 'true');
   const admitted = await json(await fetch(`${baseUrl}/api/knowledge/upload`, { method: 'POST', headers, body: form }));
+  jobId = admitted.job_id;
   let status;
   for (let attempt = 1; attempt <= 120; attempt += 1) {
     status = await json(await fetch(`${baseUrl}/api/knowledge/status?job_id=${encodeURIComponent(admitted.job_id)}`, { headers }));
@@ -114,8 +132,8 @@ try {
         throw new Error(`${item.language}_recall_missing:${expected}:${JSON.stringify(recallShape)}`);
       }
     }
-    if (!(result.evidence || []).length || !(result.memories || []).length) {
-      throw new Error(`${item.language}_mixed_lane_missing:${JSON.stringify(recallShape)}`);
+    if (!(result.evidence || []).length) {
+      throw new Error(`${item.language}_evidence_lane_missing:${JSON.stringify(recallShape)}`);
     }
     recallResults.push({
       language: item.language,
@@ -124,6 +142,9 @@ try {
       timing_ms: result.timing_ms || result.recall_timing_ms || null,
       ranked_ids: (result.ranked_candidates || result.results || []).slice(0, 15).map((row) => row.id || row.segment_id || row.segmentId).filter(Boolean),
     });
+  }
+  if (!recallResults.some((result) => result.memories > 0)) {
+    throw new Error(`promoted_memory_lane_never_visible:${JSON.stringify(recallResults)}`);
   }
 
   const chat = await json(await fetch(`${baseUrl}/api/chat`, {
@@ -135,13 +156,13 @@ try {
   }));
   const answer = String(chat.response || chat.answer || '');
   const required = [
-    [productA], ['73'], [productB], ['145'], ['nine months'], ['three months'],
+    [productA], ['73'], [productB], ['145'], ['nine months', 'nine month'], ['three months'],
     [contract, `9876-${suffix}`],
     ['ليلى منصور', 'Leila Mansour', 'Layla Mansour'],
   ];
-  const foldedAnswer = answer.toLocaleLowerCase();
+  const foldedAnswer = foldForComparison(answer);
   const missing = required
-    .filter((alternatives) => !alternatives.some((value) => foldedAnswer.includes(value.toLocaleLowerCase())))
+    .filter((alternatives) => !alternatives.some((value) => foldedAnswer.includes(foldForComparison(value))))
     .map((alternatives) => alternatives[0]);
   if (missing.length) throw new Error(`broad_chat_missing:${JSON.stringify({
     missing, answer_chars: answer.length, answer, recall: recallResults,

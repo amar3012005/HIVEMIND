@@ -6,8 +6,8 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Field | Evidence |
 |---|---|
-| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; AMR doctor through `dc01be0d1f5ccc00ef38595370dee24018e2da21` |
-| Immutable images | `PASS` — Core `sha-6681586d`; Memory Box agent `sha-7b403436` |
+| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; portable/off-host AMR recovery through `562c4da8bc86941289985c699c7e17218de284c3`; encrypted BYOD replay through `dc51d2a3e48626238605126df7028c4192d70d9c` |
+| Immutable images | `PASS` — Core `sha-dc51d2a3`; Memory Box agent `sha-7b403436` |
 | Migration IDs | `NOT_PROVEN` |
 | Rollback targets | `PASS` — Core canonical release rollback manifest; Memory Box agent `sha-7a8298a8` retained as rollback image |
 
@@ -46,9 +46,9 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 | Backup create/verify | `PASS` — customer bundle `88f0e8ec`; production PG/Qdrant manifest verifies with exact image IDs | Customer-owned PG/Qdrant artifacts and manifest verify |
 | Box-loss restore | `PASS` — isolated restore recovered 47 memories, 3 evidence segments, one Qdrant collection and 25 points | Fresh box restores and recalls scoped memory plus evidence |
 | Vector repair | `PASS` for forced failure/idempotent repair tests; full post-restore recall canary remains part of cross-mode gate | Forced Qdrant failure remains pending, repairs idempotently |
-| Offline/reconnect | `NOT_PROVEN` | Durable pending work resumes without content overwrite |
+| Offline/reconnect | `PASS` — 2026-08-17 production drill persisted an authenticated encrypted write during forced `ECONNREFUSED`, survived a Core recreation, delivered the exact record/vector after reconnect, transitioned to `acked`, and redacted the payload | Durable pending work resumes without content overwrite |
 | Upgrade/rollback | `NOT_PROVEN` | Signed immutable agent upgrade and previous-image rollback |
-| Residency | `NOT_PROVEN` | Raw content absent from central persistence and logs |
+| Residency | `PASS` for Core storage/log boundary — active self-host registry contained one org with 0 central memories, 0 central documents, and 0 central segments; 19,138 acknowledged outbox rows were redacted, 116 dead rows were encrypted, 0 payloads remained plaintext/unclassified, and the reconnect canary had 0 Core log matches | Raw content absent from central persistence and logs |
 
 ## Cross-mode parity
 

@@ -107,6 +107,22 @@ test('degraded projection preserves a buried detail in the complete top-ranked m
   assert.equal(projected[0].projection, 'rank-preserving-fallback');
 });
 
+test('degraded projection uses remaining global budget to keep short lower-ranked records complete', async () => {
+  const projector = await import('../../src/agent/memory-evidence-projector.js');
+  const lateDetail = 'Late qualifier: retention is nine months; manager is ليلى منصور.';
+  const tailContent = `${'context '.repeat(42)}${lateDetail}`;
+  const projected = projector.projectRankedMemoryFallback([
+    { id: 'top', content: 'Top product fact.' },
+    { id: 'tail-a', content: tailContent },
+    { id: 'tail-b', content: 'Another compact supporting fact.' },
+  ], { totalBudget: 1200, lowerRankBudget: 120 });
+
+  assert.equal(projected[1].excerpt, tailContent);
+  assert.match(projected[1].excerpt, /nine months/);
+  assert.match(projected[1].excerpt, /ليلى منصور/);
+  assert.ok(projected.reduce((sum, item) => sum + item.excerpt.length, 0) <= 1200);
+});
+
 test('adaptive projection gives the complete fitting rank-one record to synthesis', async () => {
   const projector = await import('../../src/agent/memory-evidence-projector.js');
   const topContent = `${'Context. '.repeat(90)}Late decisive detail: G ROCHER.`;

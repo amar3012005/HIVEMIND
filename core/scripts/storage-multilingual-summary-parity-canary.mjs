@@ -100,14 +100,22 @@ try {
   const recallResults = [];
   for (const item of cases) {
     const result = await recall(item.query);
+    const recallShape = {
+      memories: result.memories?.length || 0,
+      evidence: result.evidence?.length || 0,
+      results: result.results?.length || 0,
+      cutoff_reason: result.cutoff_reason || null,
+      latency_ms: result.latency_ms || result.timing_ms || null,
+      stage_breakdown: result.stage_breakdown || null,
+    };
     const text = corpusText(result).toLocaleLowerCase();
     for (const expected of item.expected) {
       if (!text.includes(expected.toLocaleLowerCase())) {
-        throw new Error(`${item.language}_recall_missing:${expected}:${JSON.stringify({ memories: result.memories?.length || 0, evidence: result.evidence?.length || 0 })}`);
+        throw new Error(`${item.language}_recall_missing:${expected}:${JSON.stringify(recallShape)}`);
       }
     }
     if (!(result.evidence || []).length || !(result.memories || []).length) {
-      throw new Error(`${item.language}_mixed_lane_missing:${JSON.stringify({ memories: result.memories?.length || 0, evidence: result.evidence?.length || 0 })}`);
+      throw new Error(`${item.language}_mixed_lane_missing:${JSON.stringify(recallShape)}`);
     }
     recallResults.push({
       language: item.language,

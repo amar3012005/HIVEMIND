@@ -90,6 +90,16 @@ cutover fails. A verified local bundle is not an off-host backup: operators must
 still copy it to independently durable storage and verify it there before
 enabling compaction or destructive maintenance.
 
+For scheduled operation, set `MNEME_OFFSITE_UPLOAD_ENABLED=true`, provide
+`AMR_EXPORT_PASSPHRASE` from the secret manager, and configure
+`AMR_OFFSITE_UPLOAD_COMMAND`. The command receives `BACKUP_PATH` (the encrypted
+bundle), `BUNDLE_SHA256`, and `SNAPSHOT_MANIFEST_SHA256`; it must return zero
+only after the remote object is durable and checksum-verified. The maintenance
+worker writes and revalidates `OFFSITE_RECEIPT.json` afterward. Even when
+`MNEME_COMPACT_ENABLED=true`, only shards with a receipt bound to the exact
+same-pass snapshot are eligible for compaction. Missing upload configuration,
+upload failure, or a mismatched receipt therefore skips compaction safely.
+
 ## Managed enterprise
 
 ### Current shape

@@ -11,6 +11,7 @@ export async function queueMeetingFinalization(prisma, { sessionId, orgId, userI
   const rows = await prisma.$queryRawUnsafe(
     `UPDATE hivemind.meeting_sessions
         SET status=CASE WHEN status='ready' THEN status ELSE 'queued' END,
+            finalization_attempts=CASE WHEN status='failed' THEN 0 ELSE finalization_attempts END,
             expected_segments=COALESCE($4::int, expected_segments),
             finalization_payload=$5::jsonb,
             finalization_next_attempt_at=NULL,

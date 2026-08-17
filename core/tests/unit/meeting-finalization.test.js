@@ -105,3 +105,26 @@ test('tenant-agent settlement casts the shared status parameter consistently', (
     assert.match(source, /CASE WHEN \$1::text='ready'/);
   }
 });
+
+test('an explicit finalize retry reopens a terminal failure in central and tenant storage', async () => {
+  const centralQueries = [];
+  const prisma = {
+    $queryRawUnsafe: async (query) => {
+      centralQueries.push(query);
+      return [{ id: 'session', status: 'queued', finalized_meeting_id: null, expected_segments: 1 }];
+    },
+  };
+  const { queueMeetingFinalization } = await import('../../src/knowledge/meeting-finalization-worker.js');
+  await queueMeetingFinalization(prisma, {
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    userId: '33333333-3333-4333-8333-333333333333', expectedSegments: 1, payload: {},
+  });
+  assert.match(centralQueries[0], /finalization_attempts=CASE WHEN status='failed' THEN 0 ELSE finalization_attempts END/);
+
+  const byod = fs.readFileSync(new URL('../../../byod/agent/server.mjs', import.meta.url), 'utf8');
+  const embedded = fs.readFileSync(new URL('../../src/vector/mneme/embedded-agent.mjs', import.meta.url), 'utf8');
+  for (const source of [byod, embedded]) {
+    assert.match(source, /finalization_attempts=CASE WHEN status='failed' THEN 0 ELSE finalization_attempts END/);
+  }
+});

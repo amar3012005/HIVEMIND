@@ -1326,6 +1326,7 @@ const routes = {
     } else {
       await pg.query(
         `UPDATE meeting_sessions SET status=CASE WHEN status='ready' THEN status ELSE 'queued' END,
+                finalization_attempts=CASE WHEN status='failed' THEN 0 ELSE finalization_attempts END,
                 expected_segments=COALESCE($4,expected_segments),finalization_payload=$5::jsonb,
                 finalization_next_attempt_at=NULL,finalization_lease_expires_at=NULL,
                 failure_code=NULL,failure_detail=NULL,updated_at=now()

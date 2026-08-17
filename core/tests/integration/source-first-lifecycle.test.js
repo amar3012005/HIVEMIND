@@ -80,6 +80,15 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
       }];
     });
   };
+  // Storage parity must not depend on a live curator deciding to merge/drop one
+  // of the fixed multilingual fixtures. Preserve each already-grounded atomic
+  // claim and exercise the persistence/retrieval contract deterministically.
+  service._curateDocumentClaims = async (candidates) => candidates.map((candidate) => ({
+    ...candidate,
+    support_segment_ids: [candidate.segmentId],
+    support_quotes: [candidate.source_quote],
+    rels: [],
+  }));
 
   const content = Buffer.from([
     '# Records Policy',

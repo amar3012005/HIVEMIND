@@ -615,3 +615,14 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - `verify-deployed.sh` fixture-catalog gate false-positived a 7th time — same confirmed locale-`sort` artifact.
 - Rollback: prior per-service images retagged `rollback`.
 - External side effects: none — no external write, campaign was already committed before the crash.
+
+## 7b403436 — campaign visuals inline in Runtime terminal + Da-vinci main/singulance-main reconciliation (all 4 services)
+
+- Canonical SHA: `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4` (PR #335, gitlink to Da-vinci `d9c7581`). Migration: none.
+- Feature: user-reported regression — generated campaign visuals used to render inline in the Runtime terminal as they finished, then stopped. Root cause: the backend event already carried everything needed (campaign_id, asset_id); NarrativeEvent simply never special-cased the event type, falling through to plain text. Fixed by reusing the existing CampaignAssetImage component + apiClient.getCampaign — no new endpoint.
+- Deploy-time finding: Da-vinci's `main` and `singulance-main` had diverged since their last reconciliation (2026-08-12) — main gained an admin cost-dashboard + a meeting-durability fix that singulance-main lacked; singulance-main gained several dedup fixes (this session) + this campaign-visual fix that main lacked. Bumping the gitlink to either tip alone would have silently dropped the other side's work. Reconciled via a real merge (not cherry-pick) — verified both sides' code survived (grepped for markers from each) before pushing.
+- Tests: 12/12 on HqRuntimeConsole.test.jsx. eslint clean on every touched/merged file.
+- Runtime: all 4 services on `7b4034368fc9`, healthy. Byte-verified via the release build's own worktree: `git log -1` shows the merge commit `d9c7581`; `CampaignVisualMarker` present (2 matches); `main`'s admin-cost-dashboard text also present (1 match) — confirming the reconciliation genuinely kept both sides. Four public health checks 200.
+- `verify-deployed.sh` fixture-catalog gate false-positived an 8th time — same confirmed locale-`sort` artifact.
+- Rollback: prior per-service images retagged `rollback`.
+- External side effects: none.

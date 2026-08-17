@@ -65,25 +65,28 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
     logger: { info() {}, warn() {} },
   });
   service._extractUnifiedReliable = async (window) => {
-    const quote = 'The retention policy requires customer records to be kept for seven years.';
-    if (!window.content.includes(quote)) return [];
-    return [{
-      t: 'Customer record retention',
-      f: 'Customer records must be retained for seven years.',
-      memory_type: 'fact',
-      source_quote: quote,
-      source_start: window.content.indexOf(quote),
-      source_end: window.content.indexOf(quote) + quote.length,
-      importance: 0.92,
-      entities: ['Customer Records'],
-      rels: [],
-    }];
+    const claims = [
+      ['Customer record retention', 'Customer records must be retained for seven years.', 'The retention policy requires customer records to be kept for seven years.', ['Customer Records']],
+      ['Periodo de retención', 'El periodo de retención es de siete años.', 'El periodo de retención de los registros es de siete años.', ['Registros de clientes']],
+      ['رمز العقد', 'رمز العقد هو ٩٨٧٦.', 'رمز العقد الخاص بالعميل هو ٩٨٧٦.', ['عقد العميل']],
+    ];
+    return claims.flatMap(([title, fact, quote, entities]) => {
+      const start = window.content.indexOf(quote);
+      if (start < 0) return [];
+      return [{
+        t: title, f: fact, memory_type: 'fact', source_quote: quote,
+        source_start: start, source_end: start + quote.length,
+        importance: 0.92, entities, rels: [],
+      }];
+    });
   };
 
   const content = Buffer.from([
     '# Records Policy',
     'This policy governs the handling of customer records throughout the organization.',
     'The retention policy requires customer records to be kept for seven years.',
+    'El periodo de retención de los registros es de siete años.',
+    'رمز العقد الخاص بالعميل هو ٩٨٧٦.',
     'After that period, authorized staff must review the records before secure disposal.',
     'The requirement applies to every managed customer workspace and remains auditable.',
   ].join('\n\n'));
@@ -94,13 +97,13 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
       contentType: 'text/markdown', metadata: { scope: 'organization', document_type: 'policy', tags: ['policy'] },
     });
     assert.ok(ingested.segmentCount >= 1);
-    assert.equal(ingested.promotedCount, 2); // one curated claim plus its document-summary parent
+    assert.equal(ingested.promotedCount, 4); // three curated claims plus the document-summary parent
     assert.equal(evidenceWrites.length, ingested.segmentCount);
-    assert.equal(vectorWrites.length, 1);
+    assert.equal(vectorWrites.length, 3);
 
     const document = await prisma.knowledgeDocument.findUnique({ where: { id: ingested.documentId } });
     const segments = await prisma.knowledgeSegment.findMany({ where: { documentId: ingested.documentId }, orderBy: { segmentIndex: 'asc' } });
-    const promoted = await prisma.memory.findFirst({ where: { userId, orgId, tags: { has: 'distilled-from-kb' } } });
+    const promoted = await prisma.memory.findFirst({ where: { userId, orgId, title: 'Customer record retention', tags: { has: 'distilled-from-kb' } } });
     const links = await prisma.memoryEvidenceLink.findMany({ where: { memoryId: promoted.id } });
     assert.equal(document.parseStatus, 'parsed');
     assert.match(segments[0].content, /kept for seven years/);
@@ -114,6 +117,16 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
       max_memories: 5, access_context: { orgId, userId },
     });
     assert.ok(recalled.memories.some((memory) => memory.id === promoted.id));
+    const spanish = await recallPersistedMemories(store, {
+      query_context: '¿Cuál es el periodo de retención?', user_id: userId, org_id: orgId,
+      max_memories: 5, access_context: { orgId, userId },
+    });
+    assert.ok(spanish.memories.some((memory) => /siete años/.test(memory.content)));
+    const arabic = await recallPersistedMemories(store, {
+      query_context: 'ما هو رمز العقد ٩٨٧٦؟', user_id: userId, org_id: orgId,
+      max_memories: 5, access_context: { orgId, userId },
+    });
+    assert.ok(arabic.memories.some((memory) => /٩٨٧٦/.test(memory.content)));
 
     const packet = buildRecallPacket({
       facts: recalled.memories,
@@ -170,7 +183,7 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
     assert.equal(await prisma.knowledgeDocument.count({ where: { userId, orgId } }), concurrentBefore + 1);
     const concurrentDocumentId = concurrentResults[0].documentId;
     assert.equal(await prisma.knowledgeSegment.count({ where: { documentId: concurrentDocumentId } }), 1);
-    assert.equal(await prisma.memoryEvidenceLink.count({ where: { documentId: concurrentDocumentId } }), 1);
+    assert.equal(await prisma.memoryEvidenceLink.count({ where: { documentId: concurrentDocumentId } }), 3);
 
     await prisma.memoryEvidenceLink.deleteMany({ where: { documentId: document.id } });
     await prisma.memoryDerivation.deleteMany({ where: { memoryId: promoted.id } });

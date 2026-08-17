@@ -43,9 +43,15 @@ processing must also remain entirely on the customer network.
 ## Operate
 ```bash
 docker compose -f docker-compose.byod.yml logs -f agent     # agent logs
+./backup.sh                                                  # verified PG + Qdrant recovery set
 docker compose -f docker-compose.byod.yml down              # stop
 ./setup.sh                                                  # reconnect (idempotent)
 ```
+
+`backup.sh` publishes a backup directory only after PostgreSQL and Qdrant artifacts exist and
+their SHA-256 manifest verifies. Copy the completed directory off the Memory Box. A local copy
+does not protect against loss of the machine. The manifest contains a pseudonymous tenant
+reference and never records database URLs, access tokens, or raw content.
 
 ## Updating
 This bundle is a self-contained branch; `git pull` to get a newer agent, then `./setup.sh`.

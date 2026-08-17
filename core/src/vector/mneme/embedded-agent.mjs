@@ -1250,7 +1250,11 @@ function routesFor(ctx) {
     '/v1/delete': async (b) => {
       if (!b.id) return { ok: false, error: 'id required' };
       const deleted = amr.remove(b.id) ? 1 : 0;
-      await db().query('UPDATE memories SET deleted_at=now() WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.id, org]).catch(() => {});
+      if (b.hard) {
+        await db().query('DELETE FROM memories WHERE id=$1 AND org_id=$2', [b.id, org]);
+      } else {
+        await db().query('UPDATE memories SET deleted_at=now() WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL', [b.id, org]);
+      }
       // Edges and provenance must go with the memory. The external agent already did this; the
       // embedded one did not, which was harmless only while edges were shard-only. Now that they
       // are mirrored to SQL, skipping it leaves ORPHAN relationships and provenance behind on every

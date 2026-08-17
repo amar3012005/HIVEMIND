@@ -9,6 +9,7 @@ MANIFEST_TOOL="$HERE/storage-manifest.mjs"
 BACKUP_ROOT="${BYOD_BACKUP_DIR:-$HERE/backups}"
 MAX_BACKUP_AGE_HOURS="${BYOD_BACKUP_MAX_AGE_HOURS:-26}"
 MIN_FREE_GIB="${BYOD_MIN_FREE_GIB:-5}"
+REQUIRE_OFFSITE="${BYOD_REQUIRE_OFFSITE:-false}"
 FAILURES=0
 
 fail() { echo "FAIL  $*" >&2; FAILURES=$((FAILURES + 1)); }
@@ -75,6 +76,13 @@ else
     fail "latest verified backup is ${AGE_HOURS}h old (max ${MAX_BACKUP_AGE_HOURS}h)"
   else
     pass "latest backup verified (${AGE_HOURS}h old): $LATEST"
+    if [[ -f "$LATEST/OFFSITE_RECEIPT.json" ]]; then
+      pass "latest backup has an off-host upload receipt"
+    elif [[ "$REQUIRE_OFFSITE" == true ]]; then
+      fail "latest backup has no off-host upload receipt"
+    else
+      warn "latest backup is local-only (set BYOD_REQUIRE_OFFSITE=true to enforce disaster recovery)"
+    fi
   fi
 fi
 

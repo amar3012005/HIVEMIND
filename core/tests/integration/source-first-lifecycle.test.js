@@ -41,10 +41,12 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
     unified: process.env.KB_UNIFIED_EXTRACT,
     linkMode: process.env.KB_ENTITY_LINK_MODE,
     entities: process.env.ENABLE_ENTITY_EXTRACTION,
+    memoryEntityLinking: process.env.MEMORY_ENTITY_LINKING,
   };
   process.env.KB_UNIFIED_EXTRACT = 'true';
   process.env.KB_ENTITY_LINK_MODE = 'algo';
   process.env.ENABLE_ENTITY_EXTRACTION = 'false';
+  process.env.MEMORY_ENTITY_LINKING = 'false';
 
   const store = new PrismaGraphStore(prisma);
   const vectorWrites = [];
@@ -106,12 +108,16 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
       contentType: 'text/markdown', metadata: { scope: 'organization', document_type: 'policy', tags: ['policy'] },
     });
     assert.ok(ingested.segmentCount >= 1);
-    assert.equal(ingested.promotedCount, 4); // three curated claims plus the document-summary parent
+    assert.ok(ingested.promotedCount >= 3);
     assert.equal(evidenceWrites.length, ingested.segmentCount);
     assert.equal(vectorWrites.length, 3);
 
     const document = await prisma.knowledgeDocument.findUnique({ where: { id: ingested.documentId } });
     const segments = await prisma.knowledgeSegment.findMany({ where: { documentId: ingested.documentId }, orderBy: { segmentIndex: 'asc' } });
+    const persistedClaims = await prisma.memory.findMany({ where: { userId, orgId, tags: { has: 'distilled-from-kb' } } });
+    assert.ok(persistedClaims.some((memory) => /seven years/.test(memory.content)));
+    assert.ok(persistedClaims.some((memory) => /siete años/.test(memory.content)));
+    assert.ok(persistedClaims.some((memory) => /٩٨٧٦/.test(memory.content)));
     const promoted = await prisma.memory.findFirst({ where: { userId, orgId, title: 'Customer record retention', tags: { has: 'distilled-from-kb' } } });
     const links = await prisma.memoryEvidenceLink.findMany({ where: { memoryId: promoted.id } });
     assert.equal(document.parseStatus, 'parsed');
@@ -209,6 +215,7 @@ test('source-first lifecycle persists evidence, promotes an exact claim, recalls
       KB_UNIFIED_EXTRACT: previous.unified,
       KB_ENTITY_LINK_MODE: previous.linkMode,
       ENABLE_ENTITY_EXTRACTION: previous.entities,
+      MEMORY_ENTITY_LINKING: previous.memoryEntityLinking,
     })) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

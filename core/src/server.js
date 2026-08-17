@@ -16497,6 +16497,15 @@ exit \$RC
                   prisma.memoryVersion.deleteMany({ where: { memoryId: { in: ids } } }));
                 await cascade('relationships', () =>
                   prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: ids } }, { toId: { in: ids } }] } }));
+                await cascade('memory_derivations', () =>
+                  prisma.memoryDerivation.deleteMany({ where: { memoryId: { in: ids } } }));
+                await cascade('derivation_jobs', () =>
+                  prisma.derivationJob.deleteMany({ where: { OR: [
+                    { sourceMemoryId: { in: ids } },
+                    { targetMemoryId: { in: ids } },
+                  ] } }));
+                await cascade('vector_embeddings', () =>
+                  prisma.vectorEmbedding.deleteMany({ where: { memoryId: { in: ids } } }));
                 // Audit records are append-only compliance evidence. Keep their
                 // historical resource IDs rather than mutating them during an
                 // erasure; the production schema intentionally has no FK here.
@@ -16509,8 +16518,6 @@ exit \$RC
                 for (const [label, sql] of [
                   ['memory_evidence_links', `DELETE FROM hivemind.memory_evidence_links WHERE memory_id = ANY(${idArr})`],
                   ['memory_projects', `DELETE FROM hivemind.memory_projects WHERE memory_id = ANY(${idArr})`],
-                  ['derivations', `DELETE FROM hivemind.derivations WHERE source_memory_id = ANY(${idArr}) OR target_memory_id = ANY(${idArr})`],
-                  ['memory_vector_embeddings', `DELETE FROM hivemind.memory_vector_embeddings WHERE memory_id = ANY(${idArr})`],
                 ]) {
                   try { await prisma.$executeRawUnsafe(sql); } catch (rawErr) {
                     // Table may not exist in this deployment — only warn on real failures.
@@ -19014,13 +19021,17 @@ exit \$RC
                 await prisma.memoryVersion.updateMany({ where: { relatedMemoryId: { in: memoryIds } }, data: { relatedMemoryId: null } });
                 await prisma.memoryVersion.deleteMany({ where: { memoryId: { in: memoryIds } } });
                 await prisma.relationship.deleteMany({ where: { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] } });
+                await prisma.memoryDerivation.deleteMany({ where: { memoryId: { in: memoryIds } } });
+                await prisma.derivationJob.deleteMany({ where: { OR: [
+                  { sourceMemoryId: { in: memoryIds } },
+                  { targetMemoryId: { in: memoryIds } },
+                ] } });
+                await prisma.vectorEmbedding.deleteMany({ where: { memoryId: { in: memoryIds } } });
                 // The audit trail is append-only. There is no live FK in the
                 // production schema, so historical resource IDs remain intact.
                 for (const sql of [
                   `DELETE FROM hivemind.memory_evidence_links WHERE memory_id = ANY(${idArr})`,
                   `DELETE FROM hivemind.memory_projects WHERE memory_id = ANY(${idArr})`,
-                  `DELETE FROM hivemind.memory_derivations WHERE memory_id = ANY(${idArr})`,
-                  `DELETE FROM hivemind.memory_vector_embeddings WHERE memory_id = ANY(${idArr})`,
                   `DELETE FROM hivemind.memory_entity_links WHERE memory_id = ANY(${idArr})`,
                   `DELETE FROM hivemind.memory_outbox WHERE record_id = ANY(${idArr})`,
                 ]) {

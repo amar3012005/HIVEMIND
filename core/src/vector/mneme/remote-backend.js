@@ -463,7 +463,10 @@ export async function remoteCapabilities(orgId, { maxAgeMs = 300_000, transportC
   try {
     const out = await _call(orgId, '/v1/capabilities', {}, { transportClass });
     const value = {
+      protocol_version: out?.protocol_version || null,
       schema_version: out?.schema_version || null,
+      agent_release: out?.agent_release || null,
+      storage_mode: out?.storage_mode || null,
       vector_dimension: Number(out?.vector_dimension) || null,
       capabilities: Array.isArray(out?.capabilities) ? out.capabilities : [],
     };

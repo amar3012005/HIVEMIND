@@ -1032,11 +1032,15 @@ export class PrismaGraphStore {
             const p = h.payload || {};
             return {
               id: p.memory_id || h.id,
+              user_id: p.user_id || null,
+              org_id: p.org_id || org_id,
               content: p.content || '', title: p.title || null, tags: p.tags || [],
               memory_type: p.memory_type || 'fact', project: p.project || null,
               project_id: Array.isArray(p.project_ids) && p.project_ids.length === 1 ? p.project_ids[0] : null,
               project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
               scope: p.scope || null,
+              visibility: p.visibility || 'private',
+              primary_team_id: p.primary_team_id || p.team_id || null,
               importance_score: typeof h.score === 'number' ? h.score : 0.5,
               is_latest: p.is_latest ?? true,
               created_at: p.created_at || null, updated_at: p.created_at || null,
@@ -1066,11 +1070,14 @@ export class PrismaGraphStore {
           const existing = byId.get(id);
           if (existing && existing.score >= score) continue;
           byId.set(id, {
-            id, content: p.content || '', title: p.title || null, tags: p.tags || [],
+            id, user_id: p.user_id || null, org_id: p.org_id || org_id,
+            content: p.content || '', title: p.title || null, tags: p.tags || [],
             memory_type: p.memory_type || 'fact', project: p.project || null,
             project_id: Array.isArray(p.project_ids) && p.project_ids.length === 1 ? p.project_ids[0] : null,
             project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
             scope: p.scope || null,
+            visibility: p.visibility || 'private',
+            primary_team_id: p.primary_team_id || p.team_id || null,
             importance_score: score, is_latest: p.is_latest ?? true,
             created_at: p.created_at || null, updated_at: p.created_at || null,
             document_date: p.document_date || null,

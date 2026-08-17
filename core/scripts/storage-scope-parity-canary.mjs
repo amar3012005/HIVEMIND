@@ -19,8 +19,12 @@ if (!orgId || !userId || process.env.STORAGE_CANARY_CONFIRM !== 'DELETE_CANARY_D
 
 const prisma = getPrismaClient();
 const nonce = `${Date.now()}-${crypto.randomBytes(5).toString('hex')}`;
-const marker = (scope) => `SCOPE-${scope.toUpperCase()}-${nonce}`;
-const ids = { memories: [], keys: [], team: null, project: null, outsider: null };
+// Keep the retrieval marker as one natural lexical token. Hyphenated UUID-like
+// markers are split differently by the embedded FTS and query normalizer,
+// which makes a storage-isolation canary accidentally test tokenization.
+const markerSeed = crypto.randomBytes(8).toString('hex');
+const marker = (scope) => `storage${scope}${markerSeed}`;
+const ids = { memories: [], keys: [], team: null, project: null, actor: null, outsider: null };
 const startedAt = Date.now();
 
 function keyMaterial() {
@@ -56,10 +60,10 @@ async function decode(response) {
   return { status: response.status, payload };
 }
 
-async function createMemory(raw, scope, extra = {}) {
+async function createMemory(raw, actorUserId, scope, extra = {}) {
   const response = await decode(await fetch(`${baseUrl}/api/memories?sync=true`, {
     method: 'POST',
-    headers: headers(raw, userId),
+    headers: headers(raw, actorUserId),
     body: JSON.stringify({
       title: `Storage ${scope} scope canary`,
       content: `The exact ${scope} scope marker is ${marker(scope)}.`,
@@ -107,9 +111,9 @@ async function awaitVisible(raw, user, scope, projectId = null) {
   throw new Error(`${scope}_not_visible:${last?.status}:${JSON.stringify(last?.payload || {})}`);
 }
 
-async function deleteMemory(raw, memoryId) {
+async function deleteMemory(raw, actorUserId, memoryId) {
   const result = await decode(await fetch(`${baseUrl}/api/memories/${encodeURIComponent(memoryId)}?hard=true`, {
-    method: 'DELETE', headers: headers(raw, userId),
+    method: 'DELETE', headers: headers(raw, actorUserId),
   }));
   if (result.status >= 300 || (result.payload.ok !== true && result.payload.success !== true)) {
     throw new Error(`memory_delete_failed:${memoryId}:${result.status}:${JSON.stringify(result.payload)}`);
@@ -118,7 +122,19 @@ async function deleteMemory(raw, memoryId) {
 
 let ownerKey = null;
 try {
-  ownerKey = await createKey(userId, 'storage-scope-owner-canary');
+  // Use fresh identities so the first Core access-context lookup happens only
+  // after memberships exist. This makes the canary independent of the normal
+  // 60-second access cache warmed by real user traffic.
+  const actor = await prisma.user.create({ data: {
+    zitadelUserId: `storage-scope-actor-${nonce}`,
+    email: `storage-scope-actor-${nonce}@invalid.example`,
+    displayName: 'Storage Scope Canary Actor',
+  } });
+  ids.actor = actor.id;
+  await prisma.userOrganization.create({ data: {
+    userId: actor.id, orgId, role: 'member', roles: ['member'], isActive: true, joinedAt: new Date(),
+  } });
+  ownerKey = await createKey(actor.id, 'storage-scope-owner-canary');
   const outsider = await prisma.user.create({ data: {
     zitadelUserId: `storage-scope-${nonce}`,
     email: `storage-scope-${nonce}@invalid.example`,
@@ -132,26 +148,26 @@ try {
 
   const team = await prisma.team.create({ data: {
     orgId, name: `Storage Scope Team ${nonce}`, slug: `storage-scope-team-${nonce}`.slice(0, 120), createdBy: userId,
-    members: { create: { userId, role: 'lead', addedById: userId } },
+    members: { create: { userId: actor.id, role: 'lead', addedById: userId } },
   } });
   ids.team = team.id;
   const project = await prisma.project.create({ data: {
     orgId, teamId: team.id, name: `Storage Scope Project ${nonce}`,
     slug: `storage-scope-project-${nonce}`.slice(0, 120), policy: 'private', createdBy: userId,
-    members: { create: { userId, role: 'owner', addedById: userId } },
+    members: { create: { userId: actor.id, role: 'owner', addedById: userId } },
   } });
   ids.project = project.id;
 
-  await createMemory(ownerKey, 'personal');
-  await createMemory(ownerKey, 'organization');
-  await createMemory(ownerKey, 'team', { primary_team_id: team.id });
-  await createMemory(ownerKey, 'project', { project_ids: [project.id] });
+  await createMemory(ownerKey, actor.id, 'personal');
+  await createMemory(ownerKey, actor.id, 'organization');
+  await createMemory(ownerKey, actor.id, 'team', { primary_team_id: team.id });
+  await createMemory(ownerKey, actor.id, 'project', { project_ids: [project.id] });
 
   const visibilityAttempts = {
-    personal: await awaitVisible(ownerKey, userId, 'personal'),
-    organization: await awaitVisible(ownerKey, userId, 'organization'),
-    team: await awaitVisible(ownerKey, userId, 'team'),
-    project: await awaitVisible(ownerKey, userId, 'project', project.id),
+    personal: await awaitVisible(ownerKey, actor.id, 'personal'),
+    organization: await awaitVisible(ownerKey, actor.id, 'organization'),
+    team: await awaitVisible(ownerKey, actor.id, 'team'),
+    project: await awaitVisible(ownerKey, actor.id, 'project', project.id),
   };
 
   const outsiderOrg = await awaitVisible(outsiderKey, outsider.id, 'organization');
@@ -170,7 +186,7 @@ try {
   if (remote && central !== 0) throw new Error(`scope_residency_violation:${central}`);
   if (!remote && central !== 4) throw new Error(`managed_scope_memory_count:${central}`);
 
-  for (const memoryId of [...ids.memories]) await deleteMemory(ownerKey, memoryId);
+  for (const memoryId of [...ids.memories]) await deleteMemory(ownerKey, actor.id, memoryId);
   ids.memories.length = 0;
 
   console.log(JSON.stringify({
@@ -186,11 +202,12 @@ try {
   }));
 } finally {
   if (ownerKey) {
-    for (const memoryId of [...ids.memories]) await deleteMemory(ownerKey, memoryId).catch(() => {});
+    for (const memoryId of [...ids.memories]) await deleteMemory(ownerKey, ids.actor, memoryId).catch(() => {});
   }
   if (ids.project) await prisma.project.delete({ where: { id: ids.project } }).catch(() => {});
   if (ids.team) await prisma.team.delete({ where: { id: ids.team } }).catch(() => {});
   for (const keyId of ids.keys) await prisma.apiKey.delete({ where: { id: keyId } }).catch(() => {});
   if (ids.outsider) await prisma.user.delete({ where: { id: ids.outsider } }).catch(() => {});
+  if (ids.actor) await prisma.user.delete({ where: { id: ids.actor } }).catch(() => {});
   await prisma.$disconnect();
 }

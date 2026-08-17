@@ -164,6 +164,63 @@ test('evidence hydration re-applies the document allowlist in canonical storage'
   });
 });
 
+test('central evidence returns tenant-scoped lexical results when vector search hangs', async () => {
+  const previousVectorBudget = process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS;
+  const previousLexicalBudget = process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS;
+  process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS = '20';
+  process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS = '20';
+  const calls = [];
+  const segment = {
+    id: 'segment-lexical',
+    documentId: 'document-allowed',
+    content: 'LumenCore is the exact product identifier requested by the user.',
+    segmentType: 'paragraph',
+    segmentIndex: 0,
+    wordCount: 10,
+    startPage: 1,
+    endPage: 1,
+    metadata: {},
+    document: {
+      id: 'document-allowed', title: 'Product brief', documentType: 'markdown',
+      sourcePlatform: 'upload', sourceUrl: null, documentDate: null,
+      tags: ['scope-key:org:org-1'],
+    },
+  };
+  const service = new EvidenceRetrievalService({
+    db: {
+      knowledgeSegment: {
+        async findMany(args) {
+          calls.push(args);
+          if (args.where?.id?.in) return [];
+          return [segment];
+        },
+      },
+    },
+    qdrantClient: {
+      searchMemories() { return new Promise(() => {}); },
+    },
+  });
+
+  try {
+    const started = Date.now();
+    const results = await service.retrieveEvidence({
+      query: 'Welche Kapazitat hat LumenCore?',
+      userId: 'user-1', orgId: 'org-1', documentIds: ['document-allowed'],
+      depth: 5, deliver: 5,
+    });
+    assert.ok(Date.now() - started < 250);
+    assert.equal(results[0].segmentId, 'segment-lexical');
+    assert.equal(results[0]._lexical, true);
+    assert.ok(calls.some(({ where }) => where.orgId === 'org-1'
+      && where.documentId?.in?.includes('document-allowed')));
+  } finally {
+    if (previousVectorBudget === undefined) delete process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS;
+    else process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS = previousVectorBudget;
+    if (previousLexicalBudget === undefined) delete process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS;
+    else process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS = previousLexicalBudget;
+  }
+});
+
 test('source metadata resolution is tenant-scoped and does not require an LLM filename extraction', async () => {
   let where;
   const service = new EvidenceRetrievalService({

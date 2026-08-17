@@ -347,7 +347,67 @@ export class EvidenceRetrievalService {
         return [{ key: 'document_id', match: { any: docIdSet } }];
       })();
 
-      const vectorResults = await this.qdrantClient.searchMemories({
+      // Compile ONE language-independent lexical lane and start it BEFORE query
+      // embedding/Qdrant. The old central path awaited vector search and then
+      // issued two sequential lexical queries. A cold embedding could consume
+      // RecallRouter's entire evidence deadline before exact Postgres evidence
+      // even started. Central and embedded storage now match the remote Memory
+      // Box contract: semantic and lexical retrieve wide in parallel, then the
+      // shared delivery reranker narrows the combined pool once.
+      const allQueryTokens = [...new Set(
+        String(query || '').split(/[^\p{L}\p{N}§°]+/u)
+          .map((token) => token.trim()).filter((token) => token.length >= 3)
+      )];
+      const lexicalPhrases = buildLexicalPhrases(allQueryTokens);
+      const baseTokens = docIdSet
+        ? allQueryTokens
+        : allQueryTokens.filter((token) => token.length >= 4
+          && (/[0-9§°]/.test(token) || /^\p{Lu}/u.test(token)));
+      const collapsedTokens = [];
+      if (process.env.HYBRID_LEXICAL_RECALL === 'true') {
+        const normalized = allQueryTokens.map((token) => token.toLocaleLowerCase());
+        for (let index = 0; index + 1 < normalized.length; index += 1) {
+          const joined = normalized[index] + normalized[index + 1];
+          if (joined.length >= 6) collapsedTokens.push(joined);
+        }
+      }
+      const lexTokens = [...new Set([...baseTokens, ...collapsedTokens])].slice(0, 16);
+      const lexicalWhere = {
+        orgId,
+        document: docIdSet
+          ? { archivedAt: null }
+          : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
+        ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
+      };
+      const lexicalInclude = {
+        document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true } },
+      };
+      const lexicalPromise = (lexTokens.length || lexicalPhrases.length)
+        ? Promise.all([
+          lexicalPhrases.length ? this.db.knowledgeSegment.findMany({
+            where: {
+              ...lexicalWhere,
+              OR: lexicalPhrases.map((phrase) => ({ content: { contains: phrase, mode: 'insensitive' } })),
+            },
+            include: lexicalInclude,
+            take: Math.min(_depth, 100),
+          }) : Promise.resolve([]),
+          lexTokens.length ? this.db.knowledgeSegment.findMany({
+            where: {
+              ...lexicalWhere,
+              OR: lexTokens.map((token) => ({ content: { contains: token, mode: 'insensitive' } })),
+            },
+            include: lexicalInclude,
+            take: Math.min(docIdSet ? _depth * 2 : _depth, 200),
+          }) : Promise.resolve([]),
+        ]).then(([precise, broad]) => [...new Map(
+          [...precise, ...broad].map((segment) => [segment.id, segment]),
+        ).values()]).catch((error) => {
+          console.warn('[EvidenceRetrieval] lexical lane failed:', error.message);
+          return [];
+        })
+        : Promise.resolve([]);
+      const vectorPromise = this.qdrantClient.searchMemories({
         collectionName,
         query,
         filter: {
@@ -366,6 +426,22 @@ export class EvidenceRetrievalService {
         // Per-tenant: constrain to evidence layer within the shared org container.
         layer: PER_TENANT ? 'evidence' : undefined,
       });
+      const [boundedVectorResults, lexicalSegments] = await Promise.all([
+        settleEvidenceLaneWithin(
+          vectorPromise,
+          Number(process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS || 1100),
+          null,
+        ),
+        settleEvidenceLaneWithin(
+          lexicalPromise,
+          Number(process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS || 900),
+          [],
+        ),
+      ]);
+      if (boundedVectorResults === null) {
+        console.warn(`[EvidenceRetrieval] CENTRAL VECTOR LANE TIMEOUT org=${orgId}; delivering bounded lexical evidence`);
+      }
+      const vectorResults = boundedVectorResults || [];
 
       // Step 2: Hydrate segments from DB
       const segmentIds = vectorResults.map(r => r.payload.segment_id).filter(Boolean);
@@ -448,121 +524,27 @@ export class EvidenceRetrievalService {
         .filter(Boolean);
       const haveIds = new Set(results.map(r => r.segmentId));
 
-      // LEXICAL FALLBACK — vector recall scores a segment by its DOMINANT topic,
-      // so a literal term buried mid-segment (a proper name / model code in a
-      // footnote or dense paragraph — e.g. "1KOMMA5", "Enpal", "§14a") never
-      // surfaces when the segment is semantically about something else. When the
-      // vector pass is sparse, run an additive keyword pass over the segment text
-      // for the query's DISTINCTIVE tokens (capitalized words, codes, numbers —
-      // not generic lowercase fillers). Tenant-/language-agnostic: no hardcoded
-      // terms. This guarantees exact-string hits the embedding cannot rank.
-      // ALWAYS additive (not only when vector is sparse): the buried term lives
-      // in a segment whose dominant topic differs, so vector recall happily fills
-      // its slots with OTHER segments — the count is fine, the right segment is
-      // just missing. Lexical hits merge in, get re-ranked, and slice keeps top-N.
-      {
-        const allQueryTokens = [...new Set(
-          String(query || '')
-            .split(/[^\p{L}\p{N}§°]+/u)
-            .map(t => t.trim())
-            .filter(t => t.length >= 3)
-        )];
-        // A hard document filter makes a bounded lexical pass safe and cheap.
-        // Use every query token there so lowercase details work in any language;
-        // retain the narrower legacy lane for an unscoped corpus search.
-        const _baseTokens = (docIdSet
-          ? allQueryTokens
-          : allQueryTokens.filter(t => t.length >= 4 && (/[0-9§°]/.test(t) || /^\p{Lu}/u.test(t))));
-        // Hybrid lexical (flag-gated, parallel with vector): add collapsed
-        // adjacent-token forms so concatenated product names ("solvis tim" →
-        // "solvistim") match as a WHOLE substring in evidence too — the same
-        // wide-retrieve lane the memory path uses. Coverage scoring below is the
-        // narrow score. Default off → token set unchanged.
-        const _collapsed = [];
-        if (process.env.HYBRID_LEXICAL_RECALL === 'true') {
-          const t = allQueryTokens.map(x => x.toLowerCase());
-          for (let i = 0; i + 1 < t.length; i += 1) { const j = t[i] + t[i + 1]; if (j.length >= 6) _collapsed.push(j); }
-        }
-        const lexTokens = [...new Set([..._baseTokens, ..._collapsed])].slice(0, 16);
-        if (lexTokens.length) {
-          try {
-            const lexicalPhrases = buildLexicalPhrases(allQueryTokens);
-            const preciseSegments = lexicalPhrases.length
-              ? await this.db.knowledgeSegment.findMany({
-                where: {
-                  orgId,
-                  document: docIdSet
-                    ? { archivedAt: null }
-                    : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
-                  ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
-                  OR: lexicalPhrases.map((phrase) => ({ content: { contains: phrase, mode: 'insensitive' } })),
-                },
-                include: {
-                  document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true } },
-                },
-                take: Math.min(_depth, 100),
-              })
-              : [];
-            // Scope the lexical pass to the SAME docs as the vector pass when a
-            // doc set is given (HOP2 passes the query's accessible/anchored docs).
-            // Going broader leaked cross-doc hits (a competitor named in ANOTHER
-            // document surfaced in a project answer). Bounded by userId+orgId
-            // always; by docIdSet when the caller scoped to specific docs.
-            const broadSegments = await this.db.knowledgeSegment.findMany({
-              where: {
-                orgId,
-                // same authoritative scope gate as the vector hydrate — one helper,
-                // not a second implementation that can drift from it
-                document: docIdSet
-                  ? { archivedAt: null }
-                  : this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
-                ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
-                OR: lexTokens.map(t => ({ content: { contains: t, mode: 'insensitive' } })),
-              },
-              include: {
-                document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true } },
-              },
-              take: Math.min(docIdSet ? _depth * 2 : _depth, 200),
-            });
-            const lexSegments = [...new Map(
-              [...preciseSegments, ...broadSegments].map((segment) => [segment.id, segment]),
-            ).values()];
-            for (const segment of lexSegments) {
-              // Score by DISTINCT query-token overlap: a segment containing more
-              // of the query's distinctive tokens (e.g. both "1KOMMA5" AND "Enpal")
-              // is a stronger literal match → must outrank doc-scoped vector hits
-              // and survive the top-N slice. 1 token ≈ 0.6, scaling up to ~0.9.
-              const lc = String(segment.content || '').toLowerCase();
-              const matched = lexTokens.filter((t) => lc.includes(t.toLowerCase()));
-              const matchedPhrases = lexicalPhrases.filter((phrase) => lc.includes(phrase.toLowerCase()));
-              const coverage = matched.length / Math.max(1, lexTokens.length);
-              const orderedPairs = lexTokens.slice(0, -1).filter((token, index) =>
-                lc.includes(`${token.toLowerCase()} ${lexTokens[index + 1].toLowerCase()}`)).length;
-              const score = Math.min(0.98,
-                0.55 + (0.3 * coverage) + (0.08 * orderedPairs) + (0.06 * matchedPhrases.length));
-              // LEXICAL EVIDENCE IS ADDITIVE — NOT A DUPLICATE TO DISCARD.
-              // This used to `continue` when the vector pass had already returned the
-              // segment, which made retrieval NON-MONOTONIC IN DEPTH: lexical scores are
-              // synthetic (0.55-0.95) while cosine is real and often <0.15, so a DEEPER
-              // vector pass pulled the segment into haveIds, suppressed its boost, and
-              // dropped it below the final slice. Measured on query "SPiNE": _lexical rows
-              // 9 -> 8 -> 1 and true hits 24 -> 24 -> 17 as depth went 60 -> 150 -> 300.
-              // Increasing depth was silently deleting the only signal that finds exact
-              // part numbers. Merge the stronger signal instead.
-              const already = haveIds.has(segment.id)
-                ? results.find((r) => r.segmentId === segment.id)
-                : null;
-              if (already) {
-                if (score > (Number(already.score) || 0)) already.score = score;
-                already._lexical = true;
-                continue;
-              }
-              results.push(fmt(segment, score, true));
-              haveIds.add(segment.id);
-            }
-          } catch (lexErr) {
-            console.warn('[EvidenceRetrieval] lexical fallback failed:', lexErr.message);
-          }
+      // Merge the completed lexical lane. This is candidate generation, not a
+      // second ranking authority; the shared memory+evidence delivery reranker
+      // remains the single external relevance pass.
+      for (const segment of lexicalSegments || []) {
+        const lc = String(segment.content || '').toLocaleLowerCase();
+        const matched = lexTokens.filter((token) => lc.includes(token.toLocaleLowerCase()));
+        const matchedPhrases = lexicalPhrases.filter((phrase) => lc.includes(phrase.toLocaleLowerCase()));
+        const coverage = matched.length / Math.max(1, lexTokens.length);
+        const orderedPairs = lexTokens.slice(0, -1).filter((token, index) =>
+          lc.includes(`${token.toLocaleLowerCase()} ${lexTokens[index + 1].toLocaleLowerCase()}`)).length;
+        const score = Math.min(0.98,
+          0.55 + (0.3 * coverage) + (0.08 * orderedPairs) + (0.06 * matchedPhrases.length));
+        const existing = haveIds.has(segment.id)
+          ? results.find((row) => row.segmentId === segment.id)
+          : null;
+        if (existing) {
+          if (score > (Number(existing.score) || 0)) existing.score = score;
+          existing._lexical = true;
+        } else {
+          results.push(fmt(segment, score, true));
+          haveIds.add(segment.id);
         }
       }
 

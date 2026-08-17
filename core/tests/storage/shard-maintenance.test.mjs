@@ -5,11 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import {
   offsiteEligibleOrgs, runShardMaintenanceOnce, snapshotShardsOnce, uploadSnapshotsOffsite,
   verifyOffsiteReceipt, verifyShardSnapshot,
 } from '../../src/vector/mneme/shard-maintenance.js';
+
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const OFFSITE_SCRIPT = path.resolve(TEST_DIR, '../../scripts/amr-offsite-upload.sh');
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-shard-backup-'));
@@ -101,8 +105,7 @@ cp "$BACKUP_PATH" "$REMOTE_PATH"
 printf '%s  %s\\n' "$BUNDLE_SHA256" "$REMOTE_PATH" | sha256sum -c - >/dev/null
 `);
   fs.chmodSync(helper, 0o700);
-  execFileSync('bash', [path.resolve('core/scripts/amr-offsite-upload.sh'), snapshot], {
-    cwd: path.resolve('.'),
+  execFileSync('bash', [OFFSITE_SCRIPT, snapshot], {
     env: {
       ...process.env,
       AMR_EXPORT_PASSPHRASE: 'test-passphrase-at-least-sixteen',

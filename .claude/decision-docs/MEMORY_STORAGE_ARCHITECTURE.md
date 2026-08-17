@@ -60,6 +60,36 @@ The native shard contains record, vector, text, and edge files. Embedded-agent r
 - Import/restore into an isolated directory first; validate and recall a canary before atomically switching the active shard.
 - Multi-device use requires one writer lease or an explicit conflict protocol. File synchronization tools are not a concurrency protocol.
 
+### Portable encrypted recovery procedure
+
+`core/scripts/amr-portable.mjs` is the operator interface for moving a personal
+shard between hosts. It never exports a live shard directly: `export` first
+verifies a completed snapshot, packages only its declared artifacts, then
+encrypts the package with authenticated AES-256-GCM. The passphrase is supplied
+only through `AMR_EXPORT_PASSPHRASE` and must not be written to a command line,
+log, manifest, or receipt.
+
+```text
+AMR_EXPORT_PASSPHRASE=... node core/scripts/amr-portable.mjs export \
+  --snapshot <verified-snapshot-directory> --out <bundle.hmamr>
+
+AMR_EXPORT_PASSPHRASE=... node core/scripts/amr-portable.mjs import \
+  --bundle <bundle.hmamr> --destination <empty-isolated-directory>
+
+node core/scripts/amr-portable.mjs activate \
+  --imported <verified-import-directory> --live <offline-live-shard-directory>
+```
+
+Import authenticates the bundle before extraction, rejects unsafe or unexpected
+archive entries, verifies every snapshot hash, opens the restored shard in
+isolation, and writes a receipt bound to both bundle and manifest hashes.
+Activation is deliberately separate. The shard service must be offline;
+activation refuses an active writer lock, requires a same-filesystem atomic
+rename, retains the previous live directory as rollback, and restores it if the
+cutover fails. A verified local bundle is not an off-host backup: operators must
+still copy it to independently durable storage and verify it there before
+enabling compaction or destructive maintenance.
+
 ## Managed enterprise
 
 ### Current shape
@@ -131,4 +161,3 @@ The gate is measured tenant-safe parity on real embeddings and real evidence, no
 ## Production release rule
 
 Storage changes are released from a clean worktree at a merged `singulance-main` SHA. Build and deploy only affected services with immutable tags. Before and after deployment record the active image, database migration, backup manifest, canary tenant, restore result, and rollback target.
-

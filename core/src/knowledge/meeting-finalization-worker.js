@@ -23,6 +23,22 @@ export async function queueMeetingFinalization(prisma, { sessionId, orgId, userI
     Number.isInteger(Number(expectedSegments)) && Number(expectedSegments) >= 0 ? Math.min(1000, Number(expectedSegments)) : null,
     JSON.stringify(payload || {}),
   );
+  // An explicit retry is also the recovery signal for segment enrichment that
+  // exhausted its budget during the same provider outage. Finalization does not
+  // depend on this projection, so failure to reset it must not strand the saved
+  // meeting; the regular extraction reconciler owns the renewed bounded work.
+  if (rows?.[0] && typeof prisma.$executeRawUnsafe === 'function') {
+    await prisma.$executeRawUnsafe(
+      `UPDATE hivemind.meeting_segments
+          SET extraction_status='pending', extraction_attempts=0,
+              extraction_next_attempt_at=NULL, extraction_lease_expires_at=NULL,
+              extraction_last_error=NULL
+        WHERE session_id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid
+          AND extraction_status='error' AND extraction_attempts >= 3
+          AND extraction IS NULL`,
+      sessionId, orgId, userId,
+    ).catch((error) => console.warn('[meeting-finalization] segment extraction requeue failed:', error?.message || error));
+  }
   return rows?.[0] || null;
 }
 

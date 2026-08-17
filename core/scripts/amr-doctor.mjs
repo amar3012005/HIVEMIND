@@ -47,8 +47,9 @@ function newestVerifiedSnapshot(backupRoot, org) {
     const dir = path.join(orgRoot, name);
     const result = verifyShardSnapshot(dir);
     if (result.ok) {
+      const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'MANIFEST.json'), 'utf8'));
       const mtimeMs = fs.statSync(path.join(dir, 'MANIFEST.json')).mtimeMs;
-      return { ok: true, dir, mtimeMs, manifest: result };
+      return { ok: true, dir, mtimeMs, files: manifest.files };
     }
     firstError ||= result.error;
   }
@@ -70,7 +71,10 @@ export async function runAmrDoctor(options) {
   const results = [];
   let Store = null;
   try {
-    if (options.verifyOpen) ({ AmrMemoryStore: Store } = await import('../src/vector/mneme/amr-store.mjs'));
+    if (options.verifyOpen) {
+      if (options.StoreClass) Store = options.StoreClass;
+      else ({ AmrMemoryStore: Store } = await import('../src/vector/mneme/amr-store.mjs'));
+    }
     for (const org of orgs.sort()) {
       const row = { tenant_ref: tenantRef(org), verified: false, fresh: false, opened: !options.verifyOpen, live_count: null };
       const snapshot = newestVerifiedSnapshot(options.backupRoot, org);
@@ -87,7 +91,7 @@ export async function runAmrDoctor(options) {
         const isolatedOrg = `restore_${row.tenant_ref}`;
         const isolated = path.join(temp, isolatedOrg);
         fs.mkdirSync(isolated, { recursive: true, mode: 0o700 });
-        for (const file of snapshot.manifest.files) fs.copyFileSync(path.join(snapshot.dir, file), path.join(isolated, file));
+        for (const file of snapshot.files) fs.copyFileSync(path.join(snapshot.dir, file), path.join(isolated, file));
         try {
           const store = new Store({ dataRoot: temp, org: isolatedOrg, dim: options.dim });
           row.live_count = store.liveCount();
@@ -132,4 +136,3 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exitCode = 2;
   }
 }
-

@@ -40,3 +40,40 @@ test('AMR doctor fails closed when no verified backup exists', async (t) => {
   assert.equal(result.ok, false);
   assert.equal(result.slots[0].error, 'backup_missing');
 });
+
+test('AMR doctor copies a verified snapshot and opens only the isolated restore', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-amr-doctor-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dataRoot = path.join(root, 'mneme');
+  const backupRoot = path.join(root, 'backups');
+  const org = 'tenant-open-check';
+  const shard = path.join(dataRoot, org);
+  fs.mkdirSync(shard, { recursive: true });
+  fs.writeFileSync(path.join(shard, 'shard.amr'), 'records');
+  fs.writeFileSync(path.join(shard, 'shard.vec'), 'vectors');
+  snapshotShardsOnce({ dataRoot, backupRoot, logger: {} });
+
+  let openedPath = null;
+  class FakeStore {
+    constructor({ dataRoot: isolatedRoot, org: isolatedOrg }) {
+      openedPath = path.join(isolatedRoot, isolatedOrg);
+      assert.notEqual(openedPath, shard);
+      assert.equal(fs.readFileSync(path.join(openedPath, 'shard.amr'), 'utf8'), 'records');
+    }
+
+    liveCount() { return 3; }
+  }
+
+  const result = await runAmrDoctor({
+    dataRoot,
+    backupRoot,
+    maxAgeHours: 1,
+    dim: 1024,
+    verifyOpen: true,
+    StoreClass: FakeStore,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.slots[0].opened, true);
+  assert.equal(result.slots[0].live_count, 3);
+  assert.equal(fs.existsSync(openedPath), false);
+});

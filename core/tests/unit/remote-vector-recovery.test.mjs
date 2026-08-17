@@ -146,6 +146,41 @@ test('maintenance failures use a separate circuit and cannot open chat recall', 
   assert.deepEqual(await remoteRecall('org', [0.1], {}, 5, 0), [{ id: 'interactive' }]);
 });
 
+test('meeting recovery polling cannot consume the interactive recall slot', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-remote-meeting-maintenance-'));
+  const registry = join(directory, 'agents.json');
+  const server = http.createServer((req, res) => {
+    if (req.url === '/v1/meeting-session-pending') {
+      setTimeout(() => {
+        if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
+        if (!res.writableEnded) res.end(JSON.stringify({ sessions: [] }));
+      }, 120);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ results: [{ id: 'interactive' }] }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  process.env.MNEME_AGENT_REGISTRY_FILE = registry;
+  process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG = '1';
+  process.env.MNEME_REMOTE_MAX_MAINTENANCE_INFLIGHT_PER_ORG = '1';
+  await writeFile(registry, JSON.stringify({ org: { url: `http://127.0.0.1:${server.address().port}`, token: 'token' } }));
+  const { remoteMeetingSessionPending, remoteRecall } = await import(
+    `../../src/vector/mneme/remote-backend.js?meeting-maintenance=${Date.now()}`
+  );
+
+  const pending = remoteMeetingSessionPending('org', 5);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const startedAt = Date.now();
+  assert.deepEqual(await remoteRecall('org', [0.1], {}, 5, 0), [{ id: 'interactive' }]);
+  assert.ok(Date.now() - startedAt < 80, 'interactive recall must not queue behind meeting recovery');
+  assert.deepEqual(await pending, []);
+});
+
 test('an upstream stage deadline aborts remote IO without poisoning the transport circuit', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hm-remote-parent-deadline-'));
   const registry = join(directory, 'agents.json');

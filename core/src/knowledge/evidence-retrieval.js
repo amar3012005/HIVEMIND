@@ -429,17 +429,23 @@ export class EvidenceRetrievalService {
       const [boundedVectorResults, lexicalSegments] = await Promise.all([
         settleEvidenceLaneWithin(
           vectorPromise,
-          Number(process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS || 1100),
+          // RecallRouter's evidence hop is 1500ms end-to-end. Reserve time for
+          // canonical hydration and shaping instead of letting embedding alone
+          // consume almost the entire parent budget.
+          Number(process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS || 700),
           null,
         ),
         settleEvidenceLaneWithin(
           lexicalPromise,
-          Number(process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS || 900),
-          [],
+          Number(process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS || 700),
+          null,
         ),
       ]);
       if (boundedVectorResults === null) {
         console.warn(`[EvidenceRetrieval] CENTRAL VECTOR LANE TIMEOUT org=${orgId}; delivering bounded lexical evidence`);
+      }
+      if (lexicalSegments === null) {
+        console.warn(`[EvidenceRetrieval] CENTRAL LEXICAL LANE TIMEOUT org=${orgId}; delivering bounded semantic evidence`);
       }
       const vectorResults = boundedVectorResults || [];
 

@@ -59,12 +59,17 @@ export function projectRankedMemoryFallback(memories = [], { totalBudget = 12000
   let remaining = budget;
   return memories.map((memory, index) => {
     const content = String(memory?.content || '');
-    // On projector degradation, completeness of rank 1 is more valuable than
-    // equal prefix slices across weaker rows. Memory rows are ingestion-bounded;
-    // the global guard prevents an abnormal record from exploding the prompt.
+    // On projector degradation, rank 1 remains complete when it fits. For the
+    // tail, spend the REMAINING GLOBAL budget fairly rather than imposing the
+    // old fixed 300-char prefix on every row. That fixed prefix left thousands
+    // of budgeted characters unused while clipping short complete records and
+    // hiding late qualifiers/identifiers. The fair share is recomputed after
+    // every row, so short rows return unused capacity to later ranks.
+    const rowsLeft = Math.max(1, memories.length - index);
+    const fairShare = Math.floor(remaining / rowsLeft);
     const allowance = index === 0
       ? remaining
-      : Math.min(remaining, Math.max(120, Number(lowerRankBudget) || 320));
+      : Math.min(remaining, Math.max(120, Number(lowerRankBudget) || 320, fairShare));
     const excerpt = content.slice(0, allowance);
     remaining = Math.max(0, remaining - excerpt.length);
     return {

@@ -12,6 +12,7 @@ import { signReleaseManifest, verifyReleaseManifest } from '../../../byod/releas
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const UPGRADE = path.resolve(TEST_DIR, '../../../byod/upgrade.sh');
 const ROLLBACK = path.resolve(TEST_DIR, '../../../byod/rollback.sh');
+const RELEASE_DRILL = path.resolve(TEST_DIR, '../../../byod/signed-release-restore-drill.sh');
 
 test('BYOD release accepts only a valid signature over an immutable digest image', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-byod-release-'));
@@ -75,4 +76,18 @@ test('BYOD upgrade and rollback can target an isolated disposable box', () => {
     assert.match(source, /BYOD_RELEASE_STATE_DIR/);
     assert.doesNotMatch(source, /docker (?:inspect|exec) hm-byod-agent/);
   }
+});
+
+test('signed release restore drill is isolated and proves recall parity', () => {
+  const source = fs.readFileSync(RELEASE_DRILL, 'utf8');
+  assert.match(source, /mktemp -d/);
+  assert.match(source, /docker network create/);
+  assert.match(source, /upgrade\.sh/);
+  assert.match(source, /rollback\.sh/);
+  assert.match(source, /BASE_HITS.*UPGRADE_HITS/);
+  assert.match(source, /BASE_HITS.*ROLLBACK_HITS/);
+  assert.match(source, /backup_manifest_sha256/);
+  assert.match(source, /release_manifest_sha256/);
+  assert.match(source, /upgraded agent is not the signed image/);
+  assert.match(source, /rollback did not restore the original image/);
 });

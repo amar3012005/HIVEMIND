@@ -414,12 +414,40 @@ test('runCycle detects a first-life burst (multiple simultaneously-READY sibling
   );
   const gateIndex = source.indexOf("} else if (readyTodo && (!roomInFlight || freeLaneTodo)) {");
   assert.ok(gateIndex > 0, 'expected the dispatch gate (idle burst OR a free lane) to still exist');
-  const burstBlock = source.slice(gateIndex, gateIndex + 3800);
+  const burstBlock = source.slice(gateIndex, gateIndex + 4800);
   assert.match(burstBlock, /const burstSiblings = !roomInFlight && readyTodo\.context\?\.activation_sprint_id/);
   assert.match(burstBlock, /todo\.status === 'READY'/);
   assert.match(burstBlock, /todo\.context\?\.activation_sprint_id === readyTodo\.context\.activation_sprint_id/);
   assert.match(burstBlock, /const todosToDispatchThisCycle = burstSiblings\.length > 1 \? burstSiblings\n\s*: crossLaneCandidate \? \[readyTodo, crossLaneCandidate\]\n\s*: freeLaneTodo \? \[freeLaneTodo\] : \[readyTodo\]/);
   assert.match(burstBlock, /for \(const readyTodo of todosToDispatchThisCycle\) \{/);
+});
+
+// Live incident (2026-08-17, org Singulance): the burst-dispatch for-loop
+// called move('DIAGNOSING') then move('DELEGATING') INSIDE the per-todo loop.
+// move() tracks one shared in-memory `state` for the whole cycle, so the
+// SECOND todo's move('DIAGNOSING') attempted DELEGATING->DIAGNOSING, an
+// invalid transition (see contracts.js HQ_TRANSITIONS: DELEGATING only
+// allows WAITING/BLOCKED/PAUSED) — it threw, the scheduler's outer safety
+// wrapper caught it ("HQ cycle failed safely"), and the whole cycle aborted
+// before todos 3-5 were ever touched. Only 1 of 5 first-life burst todos
+// actually dispatched, while the burst's own "N tasks start together"
+// narration had already fired — the exact mismatch the founder saw live.
+// Fix: the state transition happens ONCE before the loop, not once per todo.
+test('runCycle moves DIAGNOSING->DELEGATING exactly once for the whole burst, not once per todo', () => {
+  const source = fs.readFileSync(
+    new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8',
+  );
+  const gateIndex = source.indexOf("} else if (readyTodo && (!roomInFlight || freeLaneTodo)) {");
+  const dispatchIndex = source.indexOf('for (const readyTodo of todosToDispatchThisCycle) {', gateIndex);
+  assert.ok(dispatchIndex > gateIndex, 'expected the dispatch loop to still exist in this branch');
+  const beforeLoop = source.slice(gateIndex, dispatchIndex);
+  assert.match(beforeLoop, /await move\('DIAGNOSING'\);\s*\n\s*await move\('DELEGATING'\);/,
+    'the state transition must happen BEFORE the loop, once for the whole dispatch');
+  // The closing brace of the branch is the next "} else if (readyTodo && roomInFlight) {".
+  const waitBranchIndex = source.indexOf('} else if (readyTodo && roomInFlight) {', dispatchIndex);
+  const loopBody = source.slice(dispatchIndex, waitBranchIndex);
+  assert.doesNotMatch(loopBody, /await move\('DIAGNOSING'\)/,
+    "move('DIAGNOSING') must not be called again inside the per-todo loop — it would throw on the 2nd todo");
 });
 
 // Cross-domain parallelism, steady state (2026-08-15): when the room is
@@ -431,7 +459,7 @@ test('runCycle also starts a second, genuinely independent lane when nothing is 
     new URL('../../src/hq-runtime/native-engine.js', import.meta.url), 'utf8',
   );
   const gateIndex = source.indexOf("} else if (readyTodo && (!roomInFlight || freeLaneTodo)) {");
-  const burstBlock = source.slice(gateIndex, gateIndex + 3800);
+  const burstBlock = source.slice(gateIndex, gateIndex + 4800);
   assert.match(burstBlock, /const crossLaneCandidate = !roomInFlight && burstSiblings\.length <= 1/);
   assert.match(burstBlock, /effectClass\(todo\) !== effectClass\(readyTodo\)/);
   assert.match(burstBlock, /crossLaneCandidate \? \[readyTodo, crossLaneCandidate\]\n\s*: freeLaneTodo \? \[freeLaneTodo\] : \[readyTodo\]/);

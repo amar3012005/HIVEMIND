@@ -1358,9 +1358,21 @@ export class NativeHqEngine {
           : `Nothing is currently running, and these two tasks are genuinely independent (${effectClass(readyTodo)} and ${effectClass(crossLaneCandidate)}): ${todosToDispatchThisCycle.map((todo) => todo.title).join('; ')}. They start together instead of waiting on each other.`,
         details: { todo_ids: todosToDispatchThisCycle.map((todo) => todo.id) },
       });
-      for (const readyTodo of todosToDispatchThisCycle) {
+      // Runtime-level state transitions happen ONCE for the whole burst/free-
+      // lane dispatch, not once per todo — move() tracks a single shared
+      // in-memory `state` for this cycle, and a SECOND todo's attempt to
+      // re-enter DIAGNOSING from DELEGATING is not a valid transition. Live
+      // incident (2026-08-17, org Singulance): calling move() inside the loop
+      // meant only the FIRST of 5 first-life burst todos ever dispatched — the
+      // second iteration's move('DIAGNOSING') threw
+      // hq_runtime_invalid_transition:DELEGATING:DIAGNOSING, caught by the
+      // scheduler's outer safety wrapper ("HQ cycle failed safely"), aborting
+      // the cycle before todos 3-5 were ever touched — while the burst's own
+      // "N tasks start together" narration had already fired moments earlier,
+      // so the founder saw a claim that didn't match what actually ran.
       await move('DIAGNOSING');
       await move('DELEGATING');
+      for (const readyTodo of todosToDispatchThisCycle) {
       const skillId = 'specialist-delegation';
       const selectedSkill = this.skills.load(skillId);
       await event(prisma, runtime, cycle, { eventType: 'skill_loaded', title: `I am taking the next item: ${readyTodo.title}`, summary: selectedSkill.description, skillRef: skillId, details: { todo_id: readyTodo.id } });

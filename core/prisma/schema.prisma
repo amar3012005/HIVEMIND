@@ -129,6 +129,7 @@ model Organization {
   zernioExecutionProfile       ZernioOrgProfile? @relation("OrgZernioExecutionProfile")
   zernioWebhookEvents          ZernioWebhookEvent[]
   enterpriseInvitation         EnterpriseInvitation? @relation("RedeemedEnterpriseInvitation")
+  retrievalConfig              RetrievalConfig?
 
   @@map("organizations")
 }
@@ -1099,6 +1100,7 @@ model Memory {
   provenance                                                  Json?                @map("provenance")
   isLatest                                                    Boolean?             @default(true) @map("is_latest")
   supersedesId                                                String?              @map("supersedes_id") @db.Uuid
+  supersededAt                                                DateTime?            @map("superseded_at") @db.Timestamptz(6)
   strength                                                    Float?               @default(1.0) @db.Real
   recallCount                                                 Int?                 @default(0) @map("recall_count")
   importanceScore                                             Float?               @default(0.5) @map("importance_score") @db.Real
@@ -3899,6 +3901,7 @@ model CanonicalEntity {
   organizationId String   @map("organization_id") @db.Uuid
   canonicalName  String   @map("canonical_name")
   normalizedName String   @map("normalized_name")
+  identityKey    String?  @map("identity_key") @db.VarChar(500)
   entityKind     String   @map("entity_kind") @db.VarChar(40)
   aliases        String[] @default([])
   primaryEmail   String?  @map("primary_email") @db.VarChar(255)
@@ -4459,4 +4462,97 @@ model OrgOntology {
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt            DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   @@map("org_ontologies")
+}
+
+// Durable retrieval tuning and outcome ledger. These tables were originally
+// operated through raw SQL; modeling them prevents destructive drift plans.
+model RetrievalConfig {
+  orgId            String    @id @map("org_id") @db.Uuid
+  deliverLimit     Int?      @default(5) @map("deliver_limit")
+  scoreThreshold   Float?    @default(0.15) @map("score_threshold") @db.Real
+  hnswEf           Int?      @default(128) @map("hnsw_ef")
+  similarityWeight Float?    @default(0.45) @map("similarity_weight") @db.Real
+  recencyWeight    Float?    @default(0.15) @map("recency_weight") @db.Real
+  vectorWeight     Float?    @default(0.20) @map("vector_weight") @db.Real
+  importanceWeight Float?    @default(0.10) @map("importance_weight") @db.Real
+  graphWeight      Float?    @default(0.05) @map("graph_weight") @db.Real
+  revision         Int?      @default(1)
+  updatedBy        String?   @default("default") @map("updated_by") @db.VarChar(40)
+  updatedAt        DateTime? @default(now()) @map("updated_at") @db.Timestamptz(6)
+  organization     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@map("retrieval_config")
+}
+
+model TaskOutcome {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId     String?   @map("org_id") @db.Uuid
+  userId    String?   @map("user_id") @db.Uuid
+  query     String?
+  returnedN Int?      @default(0) @map("returned_n")
+  topScore  Float?    @map("top_score") @db.Real
+  outcome   String?   @default("retrieved") @db.VarChar(20)
+  createdAt DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, createdAt(sort: Desc)], map: "idx_task_outcome_org_time")
+  @@map("task_outcome")
+}
+
+model RetrievalEvolution {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId         String?   @map("org_id") @db.Uuid
+  batchId       String?   @map("batch_id") @db.Uuid
+  diagnosis     String?
+  proposedDelta Json?     @map("proposed_delta") @db.JsonB
+  deltaHash     String?   @map("delta_hash") @db.VarChar(64)
+  recallBefore  Float?    @map("recall_before") @db.Real
+  recallAfter   Float?    @map("recall_after") @db.Real
+  p95Before     Int?      @map("p95_before")
+  p95After      Int?      @map("p95_after")
+  decision      String?   @db.VarChar(20)
+  createdAt     DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, createdAt(sort: Desc)], map: "idx_retrieval_evolution_org_time")
+  @@index([orgId, deltaHash], map: "idx_retrieval_evolution_delta")
+  @@map("retrieval_evolution")
+}
+
+model MemorySignature {
+  memoryId    String   @id @map("memory_id") @db.Uuid
+  orgId       String?  @map("org_id") @db.Uuid
+  alg         String   @default("ML-DSA-65") @db.VarChar(32)
+  payloadHash String   @map("payload_hash") @db.VarChar(64)
+  signature   String
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId], map: "memory_signatures_org_idx")
+  @@map("memory_signatures")
+}
+
+model AuditSignature {
+  auditId   String   @id @map("audit_id") @db.Uuid
+  orgId     String?  @map("org_id") @db.Uuid
+  alg       String   @default("SLH-DSA-SHA2-128s") @db.VarChar(40)
+  prevHash  String   @default("") @map("prev_hash") @db.VarChar(64)
+  entryHash String   @map("entry_hash") @db.VarChar(64)
+  signature String
+  seq       BigInt   @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, seq(sort: Desc)], map: "audit_signatures_org_seq_idx")
+  @@map("audit_signatures")
+}
+
+model AuditCheckpoint {
+  id            BigInt   @id @default(autoincrement())
+  orgId         String?  @map("org_id") @db.Uuid
+  maxSeq        BigInt   @map("max_seq")
+  headEntryHash String   @map("head_entry_hash") @db.VarChar(64)
+  rowCount      BigInt   @default(0) @map("row_count")
+  alg           String   @default("SLH-DSA-SHA2-128s") @db.VarChar(40)
+  signature     String
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId, id(sort: Desc)], map: "audit_checkpoints_org_idx")
+  @@map("audit_checkpoints")
 }

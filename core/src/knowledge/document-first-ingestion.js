@@ -18,6 +18,7 @@ import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete } from '../vector/mneme/driver.js';
 import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
 import { redactParsedDocument } from './content-secret-redaction.js';
+import { applyClaimPatchIfLive } from './claim-structuring-write.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
 // row on the CENTRAL store (this.db). For a self-host (remote/agent) org that is a residency LEAK:
@@ -974,7 +975,12 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
           if (quals && Object.keys(quals).length) patch.claimQualifiers = quals;
           if (!Object.keys(patch).length) continue;
           // Per-memory isolation preserved: one bad row must not abort the rest of the batch.
-          try { await store.updateMemory(m.id, patch); applied += 1; structured.push(m.id); } catch { /* enrichment only */ }
+          try {
+            if (await applyClaimPatchIfLive(store, m.id, patch)) {
+              applied += 1;
+              structured.push(m.id);
+            }
+          } catch { /* enrichment only */ }
         }
         // VERIFY THE BATCH, THEN BACKFILL WHAT IT MISSED. Batching trades one risk for another: a
         // capped or truncated response returns FEWER claims than memories, and without a check those
@@ -1013,7 +1019,7 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
                 if (subj) patch.claimSubject = subj;
                 if (pred) patch.claimPredicate = pred;
                 if (q && Object.keys(q).length) patch.claimQualifiers = q;
-                if (Object.keys(patch).length) { await store.updateMemory(m.id, patch); applied += 1; }
+                if (Object.keys(patch).length && await applyClaimPatchIfLive(store, m.id, patch)) applied += 1;
               } catch (e) {
                 this.logger.warn?.(`[v5-claim-structuring] single ${String(m.id).slice(0, 8)}: ${e.message}`);
               }
@@ -1053,7 +1059,7 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
               if (subj) patch.claimSubject = subj;
               if (pred) patch.claimPredicate = pred;
               if (q && Object.keys(q).length) patch.claimQualifiers = q;
-              if (Object.keys(patch).length) await store.updateMemory(m.id, patch);
+              if (Object.keys(patch).length) await applyClaimPatchIfLive(store, m.id, patch);
             } catch { /* per-memory isolation */ }
           }
         });

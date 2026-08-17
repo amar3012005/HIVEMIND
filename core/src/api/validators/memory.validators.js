@@ -173,6 +173,18 @@ export const createMemorySchema = z.object({
     .datetime()
     .optional()
     .nullable(),
+
+  // Bi-temporal validity. document_date remains the event/source timestamp;
+  // valid_from/valid_to define the interval in which the fact was true.
+  valid_from: z.string()
+    .datetime()
+    .optional()
+    .nullable(),
+
+  valid_to: z.string()
+    .datetime()
+    .optional()
+    .nullable(),
   
   event_dates: z.array(z.string().datetime())
     .optional()

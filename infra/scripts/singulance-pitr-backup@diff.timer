@@ -1,0 +1,10 @@
+[Unit]
+Description=Run a differential encrypted HIVE-MIND PostgreSQL backup daily
+
+[Timer]
+OnCalendar=Mon..Sat *-*-* 01:30:00 UTC
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target

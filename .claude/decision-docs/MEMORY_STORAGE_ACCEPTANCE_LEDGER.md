@@ -6,8 +6,8 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Field | Evidence |
 |---|---|
-| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; portable/off-host AMR recovery through `562c4da8bc86941289985c699c7e17218de284c3`; encrypted BYOD replay through `dc51d2a3e48626238605126df7028c4192d70d9c`; managed tenant admission through `b3c2382e24997e17b5f38a676c4fe969fdbe18bc`; managed PITR through `71363e50d58b9927e49542b40dd616b0e63f4bc6`; signed BYOD upgrade/rollback drill through `e55880cc4ebacbe369e4a04690984046dba47899` |
-| Immutable images | `PASS` — Core `sha-b3c2382e`; PostgreSQL `sha-71363e50`; Memory Box agent `sha-7b403436` |
+| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; portable/off-host AMR recovery through `562c4da8bc86941289985c699c7e17218de284c3`; encrypted BYOD replay through `dc51d2a3e48626238605126df7028c4192d70d9c`; managed tenant admission through `b3c2382e24997e17b5f38a676c4fe969fdbe18bc`; managed PITR through `71363e50d58b9927e49542b40dd616b0e63f4bc6`; signed BYOD upgrade/rollback drill through `e55880cc4ebacbe369e4a04690984046dba47899`; Unicode `.amr` lexical through `5975a2791784e29e32e03762c2c2e68b91681c96`; managed Unicode lexical through `04a434059843e5e654282f8700668c8b09375c65` |
+| Immutable images | `PASS` — Core `sha-04a43405`; PostgreSQL `sha-71363e50`; Memory Box agent `sha-7b403436` |
 | Migration IDs | `NOT_PROVEN` |
 | Rollback targets | `PASS` — Core canonical release rollback manifest; Memory Box agent `sha-7a8298a8` retained as rollback image |
 
@@ -62,6 +62,16 @@ Run the same corpus and identities in all modes. Required cases:
 - backup corruption, process kill, dependency timeout, and network partition.
 
 For every case record: full request identity (without secrets), ranked IDs, citations, storage mode, retrieval/rerank latency, authoritative counts, and fresh logs.
+
+### Proven cross-mode cases (2026-08-17)
+
+| Case | Personal `.amr` | Managed enterprise | Self-hosted BYOD |
+|---|---|---|---|
+| Unicode lexical recall | `PASS` — native Linux shard recalled Arabic contract identifier `٩٨٧٦` and Spanish retention text after restart at Core `5975a279` | `PASS` — production-container source-first lifecycle at Core `04a43405` persisted and recalled a distinct Spanish nine-month review fact and Arabic contract identifier `٩٨٧٦`; isolated tenant returned zero results; test cleaned up its temporary tenants | `PASS` — disposable agent PostgreSQL/Qdrant fixture recalled Spanish memory content and Arabic evidence content, then repeated the same authenticated, tenant-isolated result after agent restart at canonical `6aa4029b` |
+| Compaction / restart preservation | `PASS` — 40 writes, 20 tombstones, exact ranked-ID parity after receipt-gated compaction | `NOT_PROVEN` as a cross-mode corpus case; PostgreSQL PITR and Qdrant snapshot rows above are independently proven | `PASS` — fixture write/read parity survived agent restart; signed restored-data upgrade/rollback preserved 5 memory and 3 evidence hits at every stage |
+| Scope isolation in the parity fixture | Native org/shard isolation suites `PASS`; full personal/team/project matrix remains `NOT_PROVEN` here | `PASS` for the temporary cross-org negative assertion; team/project/denied-project parity remains `NOT_PROVEN` here | `PASS` for wrong-token and wrong-org rejection; team/project/denied-project parity remains `NOT_PROVEN` here |
+
+The entire cross-mode gate remains `NOT_PROVEN`: broad summaries, temporal queries, full evidence-only/memory-only/mixed ranking, team/project/denied-project parity, update/deletion/retry/duplicate delivery, and the complete failure-injection matrix still require one shared corpus with ranked-ID, citation, latency, count, and fresh-log receipts.
 
 ## Completion rule
 

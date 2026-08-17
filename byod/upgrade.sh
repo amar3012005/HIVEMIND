@@ -46,15 +46,19 @@ rollback() {
 }
 trap rollback ERR
 "${COMPOSE[@]}" -f "$OVERRIDE" up -d --no-deps --force-recreate agent >/dev/null
+HEALTH=""
+OBSERVED=""
 for _ in $(seq 1 45); do
   HEALTH="$(docker inspect "$AGENT_CONTAINER" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
-  [[ "$HEALTH" == healthy || "$HEALTH" == running ]] && break
+  if [[ "$HEALTH" == healthy || "$HEALTH" == running ]]; then
+    OBSERVED="$(docker exec "$AGENT_CONTAINER" node -e '
+const h={authorization:`Bearer ${process.env.AGENT_TOKEN}`,"content-type":"application/json","x-org-id":process.env.ORG_ID};
+fetch("http://127.0.0.1:8787/v1/capabilities",{method:"POST",headers:h,body:"{}"}).then(async r=>{if(!r.ok)process.exit(1);const j=await r.json();process.stdout.write(String(j.agent_release||""))}).catch(()=>process.exit(1));' 2>/dev/null || true)"
+    [[ "$OBSERVED" == "$RELEASE" ]] && break
+  fi
   sleep 2
 done
 [[ "$HEALTH" == healthy || "$HEALTH" == running ]]
-OBSERVED="$(docker exec "$AGENT_CONTAINER" node -e '
-const h={authorization:`Bearer ${process.env.AGENT_TOKEN}`,"content-type":"application/json","x-org-id":process.env.ORG_ID};
-fetch("http://127.0.0.1:8787/v1/capabilities",{method:"POST",headers:h,body:"{}"}).then(r=>r.json()).then(j=>process.stdout.write(String(j.agent_release||""))).catch(()=>process.exit(1));')"
 [[ "$OBSERVED" == "$RELEASE" ]]
 
 MANIFEST_SHA="$(sha256sum "$MANIFEST" | awk '{print $1}')"

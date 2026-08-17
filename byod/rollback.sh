@@ -17,14 +17,18 @@ docker image inspect "$ROLLBACK_IMAGE" >/dev/null
 OVERRIDE="$STATE_DIR/manual-rollback-$(date -u +%Y%m%dT%H%M%SZ).yml"
 printf 'services:\n  agent:\n    image: %s\n    environment:\n      AGENT_RELEASE: %s\n' "$ROLLBACK_IMAGE" "$PREVIOUS_RELEASE" > "$OVERRIDE"
 "${COMPOSE[@]}" -f "$OVERRIDE" up -d --no-deps --force-recreate agent >/dev/null
+STATE=""
+OBSERVED=""
 for _ in $(seq 1 45); do
   STATE="$(docker inspect "$AGENT_CONTAINER" --format '{{.State.Status}}' 2>/dev/null || true)"
-  [[ "$STATE" == running ]] && break
+  if [[ "$STATE" == running ]]; then
+    OBSERVED="$(docker exec "$AGENT_CONTAINER" node -e '
+const h={authorization:`Bearer ${process.env.AGENT_TOKEN}`,"content-type":"application/json","x-org-id":process.env.ORG_ID};
+fetch("http://127.0.0.1:8787/v1/capabilities",{method:"POST",headers:h,body:"{}"}).then(async r=>{if(!r.ok)process.exit(1);const j=await r.json();process.stdout.write(String(j.agent_release||""))}).catch(()=>process.exit(1));' 2>/dev/null || true)"
+    [[ "$OBSERVED" == "$PREVIOUS_RELEASE" ]] && break
+  fi
   sleep 2
 done
 [[ "$STATE" == running ]]
-OBSERVED="$(docker exec "$AGENT_CONTAINER" node -e '
-const h={authorization:`Bearer ${process.env.AGENT_TOKEN}`,"content-type":"application/json","x-org-id":process.env.ORG_ID};
-fetch("http://127.0.0.1:8787/v1/capabilities",{method:"POST",headers:h,body:"{}"}).then(r=>r.json()).then(j=>process.stdout.write(String(j.agent_release||""))).catch(()=>process.exit(1));')"
 [[ "$OBSERVED" == "$PREVIOUS_RELEASE" ]]
 echo "Memory Box agent rolled back to $PREVIOUS_RELEASE"

@@ -1279,11 +1279,22 @@ const routes = {
   '/v1/meeting-segment-write': async (b) => {
     const s = b.segment || {};
     if (!s.session_id || !s.user_id || !Number.isInteger(s.idx) || !String(s.text || '').trim()) return { ok: false, error: 'invalid segment' };
+    // Older recorder clients mint a session id locally. Match managed storage:
+    // create the tenant-local parent before acknowledging the transcript.
+    await pg.query(
+      `INSERT INTO meeting_sessions (id,org_id,user_id,status,consent_recorded)
+       VALUES ($1,$2,$3,'recording',false)
+       ON CONFLICT (id) DO NOTHING`,
+      [s.session_id, ORG, s.user_id]);
     await pg.query(
       `INSERT INTO meeting_segments (session_id,org_id,user_id,idx,text,speakers,start_ms,end_ms)
        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
        ON CONFLICT (session_id,idx) DO UPDATE SET text=EXCLUDED.text,speakers=EXCLUDED.speakers,start_ms=EXCLUDED.start_ms,end_ms=EXCLUDED.end_ms`,
       [s.session_id, ORG, s.user_id, s.idx, String(s.text).slice(0, 200000), s.speakers ? JSON.stringify(s.speakers) : null, s.start_ms ?? null, s.end_ms ?? null]);
+    await pg.query(
+      `UPDATE meeting_sessions SET updated_at=now()
+        WHERE id=$1 AND org_id=$2 AND user_id=$3 AND status='recording'`,
+      [s.session_id, ORG, s.user_id]);
     // A finalize request can arrive before the browser's last acknowledged
     // transcript segment. Missing coverage is terminal until new data exists,
     // but the late durable segment is precisely the recovery signal: once all
@@ -1356,6 +1367,18 @@ const routes = {
   },
 
   '/v1/meeting-session-pending': async (b) => {
+    const abandonedAfterMs=Math.max(300000,Number(process.env.MEETING_ABANDONED_AFTER_MS)||1800000);
+    await pg.query(
+      `UPDATE meeting_sessions s
+          SET status='queued',expected_segments=NULL,
+              finalization_payload=COALESCE(s.finalization_payload,'{}'::jsonb)||jsonb_build_object('recovered_partial',true,'recovery_reason','recording_inactive','recovered_at',now()),
+              finalization_next_attempt_at=NULL,finalization_lease_expires_at=NULL,
+              failure_code=NULL,failure_detail=NULL,updated_at=now()
+        WHERE s.org_id=$1 AND s.status='recording' AND s.consent_recorded=true
+          AND s.updated_at<=now()-($2::bigint*interval '1 millisecond')
+          AND EXISTS(SELECT 1 FROM meeting_segments g WHERE g.session_id=s.id AND g.org_id=s.org_id AND g.user_id=s.user_id)
+          AND NOT EXISTS(SELECT 1 FROM meeting_audio_segments a WHERE a.session_id=s.id AND a.org_id=s.org_id AND a.user_id=s.user_id AND a.status NOT IN('transcribed','expired') AND NOT(a.status='error' AND a.attempts>=3))`,
+      [ORG,abandonedAfterMs]);
     const { rows }=await pg.query(
       `SELECT s.id,s.user_id FROM meeting_sessions s
         WHERE (s.status IN ('queued','error') OR (s.status='analyzing' AND s.finalization_lease_expires_at<now()))

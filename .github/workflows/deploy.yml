@@ -448,7 +448,7 @@ jobs:
           kubectl run db-migration --rm -it --image=ghcr.io/${{ github.repository }}/core:${{ github.sha }} \
             --namespace=hivemind \
             --env="DATABASE_URL=${{ secrets.DATABASE_URL_PRODUCTION }}" \
-            --command -- npx prisma migrate deploy || true
+            --command -- node scripts/prisma-migrate-deploy.mjs
 
       - name: Notify Slack (production)
         uses: slackapi/slack-github-action@v1.25.0

@@ -211,7 +211,7 @@ start_core() {
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
     -e "WORKSPACE_MCP_URL=http://workspace-mcp:8000" \
     node:20 \
-    sh -c "command -v gs >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq --no-install-recommends ghostscript >/dev/null 2>&1; }; sed -i 's#rights=\"none\" pattern=\"PDF\"#rights=\"read|write\" pattern=\"PDF\"#' /etc/ImageMagick-6/policy.xml 2>/dev/null || true; npx prisma generate 2>/dev/null && npx prisma migrate deploy && node src/server.js"
+    sh -c "command -v gs >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq --no-install-recommends ghostscript >/dev/null 2>&1; }; sed -i 's#rights=\"none\" pattern=\"PDF\"#rights=\"read|write\" pattern=\"PDF\"#' /etc/ImageMagick-6/policy.xml 2>/dev/null || true; npx prisma generate 2>/dev/null && node scripts/prisma-migrate-deploy.mjs && node src/server.js"
 
   log "Waiting for health..."
   for i in $(seq 1 30); do
@@ -397,7 +397,7 @@ start_core_benchmark() {
     -e "HIVEMIND_ALLOWED_ORIGINS=https://hivemind.davinciai.eu,https://www.davinciai.eu,https://davinciai.eu" \
     -e "WORKSPACE_MCP_URL=http://workspace-mcp:8000" \
     node:20 \
-    sh -c "command -v gs >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq --no-install-recommends ghostscript >/dev/null 2>&1; }; sed -i 's#rights=\"none\" pattern=\"PDF\"#rights=\"read|write\" pattern=\"PDF\"#' /etc/ImageMagick-6/policy.xml 2>/dev/null || true; npx prisma generate 2>/dev/null && npx prisma migrate deploy && node src/server.js"
+    sh -c "command -v gs >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq --no-install-recommends ghostscript >/dev/null 2>&1; }; sed -i 's#rights=\"none\" pattern=\"PDF\"#rights=\"read|write\" pattern=\"PDF\"#' /etc/ImageMagick-6/policy.xml 2>/dev/null || true; npx prisma generate 2>/dev/null && node scripts/prisma-migrate-deploy.mjs && node src/server.js"
 
   log "Waiting for health..."
   for i in $(seq 1 30); do

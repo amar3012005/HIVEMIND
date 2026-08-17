@@ -4,6 +4,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST_TOOL="$HERE/storage-manifest.mjs"
+[[ -f "$MANIFEST_TOOL" ]] || MANIFEST_TOOL="$HERE/../scripts/storage-manifest.mjs"
+[[ -f "$MANIFEST_TOOL" ]] || { echo "storage-manifest.mjs is missing; reinstall the Memory Box bundle" >&2; exit 1; }
 DEST_ROOT="${BYOD_BACKUP_DIR:-$HERE/backups}"
 KEEP="${BYOD_BACKUP_KEEP:-14}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -38,8 +41,8 @@ QDRANT_IMAGE="$(docker inspect hm-byod-qdrant --format '{{.Config.Image}}')"
 POSTGRES_IMAGE="$(docker inspect hm-byod-postgres --format '{{.Config.Image}}')"
 export STORAGE_MANIFEST_METADATA_JSON="$(QDRANT_IMAGE="$QDRANT_IMAGE" POSTGRES_IMAGE="$POSTGRES_IMAGE" node -e \
   'process.stdout.write(JSON.stringify({qdrant_image:process.env.QDRANT_IMAGE,postgres_image:process.env.POSTGRES_IMAGE}))')"
-node "$HERE/../scripts/storage-manifest.mjs" create "$STAGING" byod "$TENANT_REF" >/dev/null
-node "$HERE/../scripts/storage-manifest.mjs" verify "$STAGING" >/dev/null
+node "$MANIFEST_TOOL" create "$STAGING" byod "$TENANT_REF" >/dev/null
+node "$MANIFEST_TOOL" verify "$STAGING" >/dev/null
 rm -rf "$FINAL"
 mv "$STAGING" "$FINAL"
 

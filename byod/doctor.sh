@@ -3,6 +3,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST_TOOL="$HERE/storage-manifest.mjs"
+[[ -f "$MANIFEST_TOOL" ]] || MANIFEST_TOOL="$HERE/../scripts/storage-manifest.mjs"
+[[ -f "$MANIFEST_TOOL" ]] || { echo "storage-manifest.mjs is missing; reinstall the Memory Box bundle" >&2; exit 1; }
 BACKUP_ROOT="${BYOD_BACKUP_DIR:-$HERE/backups}"
 MAX_BACKUP_AGE_HOURS="${BYOD_BACKUP_MAX_AGE_HOURS:-26}"
 MIN_FREE_GIB="${BYOD_MIN_FREE_GIB:-5}"
@@ -62,7 +65,7 @@ fi
 LATEST="$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name '.*.partial' -print 2>/dev/null | sort | tail -1)"
 if [[ -z "$LATEST" ]]; then
   fail "no completed Memory Box backup found under $BACKUP_ROOT"
-elif ! node "$HERE/../scripts/storage-manifest.mjs" verify "$LATEST" >/dev/null; then
+elif ! node "$MANIFEST_TOOL" verify "$LATEST" >/dev/null; then
   fail "latest backup manifest failed verification: $LATEST"
 else
   NOW="$(date +%s)"
@@ -80,4 +83,3 @@ if [[ "$FAILURES" -gt 0 ]]; then
   exit 1
 fi
 echo "Memory Box doctor: ready"
-

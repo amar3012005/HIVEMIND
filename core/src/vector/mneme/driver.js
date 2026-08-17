@@ -323,9 +323,17 @@ export function amrTaraCall(orgId, params) { return orgIsRemote(orgId) ? remoteT
 
 // Generic partial update (tags / is_latest / memory_type) routed to the agent for remote orgs.
 // REMOTE ORGS: durable outbox (was a direct call, now ordered + retried).
-export function amrUpdate(orgId, id, patch) {
+export function amrUpdate(orgId, id, patch, { requireAck = false } = {}) {
   if (!orgId || !id || !patch) return undefined;
   if (orgIsRemote(orgId)) {
+    if (requireAck) {
+      return remoteUpdate(orgId, id, patch).then(async (ok) => {
+        if (ok) return true;
+        const enqueue = await _getEnqueuePush().catch(() => null);
+        if (enqueue) await enqueue(orgId, 'update', id, { id, patch });
+        return false;
+      });
+    }
     return _getEnqueuePush().then((enqueue) => {
       if (enqueue) return enqueue(orgId, 'update', id, { id, patch });
       return remoteUpdate(orgId, id, patch);

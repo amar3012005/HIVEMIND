@@ -576,7 +576,10 @@ export class PrismaGraphStore {
       if (patch.metadata !== undefined) remotePatch.metadata = patch.metadata;
       const rValidTo = patch.validTo ?? patch.valid_to;
       if (rValidTo !== undefined) remotePatch.valid_to = rValidTo;
-      if (Object.keys(remotePatch).length) await amrUpdate(_remoteUpdOrg, id, remotePatch);
+      if (Object.keys(remotePatch).length) {
+        const acknowledged = await amrUpdate(_remoteUpdOrg, id, remotePatch, { requireAck: true });
+        if (!acknowledged) throw new Error('Remote memory update was queued for retry but not yet applied');
+      }
       return this.getMemory(id);
     }
     const data = {};

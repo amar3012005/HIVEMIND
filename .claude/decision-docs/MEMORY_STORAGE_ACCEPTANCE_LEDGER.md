@@ -19,7 +19,8 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 | Artifact integrity | `PASS` — 7/7 production v2 snapshots verified; corruption regression test passes | Byte/hash verification detects mutation |
 | Off-host copy | `NOT_PROVEN` | Object exists outside the device and verifies |
 | Restore open | `PASS` — production doctor cryptographically verified and opened isolated copies of all 7/7 shards; six non-empty shards contained 447 live records and one valid new/empty slot was identified | Restored shard opens without repair |
-| Restore recall | `NOT_PROVEN` | Known memory and evidence return with exact scope |
+| Portable encrypted recovery | `PASS` — Linux candidate `3e53c9d3` authenticated an AES-256-GCM export/import, rejected wrong keys and unsafe/truncated bundles, opened the isolated shard, and proved atomic activation rollback | Bundle and receipt bind the verified snapshot; activation refuses a live writer |
+| Restore recall | `PASS` — Linux native-engine test exported a real dimension-8 shard, imported it in isolation, and recalled the exact known record/vector; production snapshot probe remains required after canonical deployment | Known memory and evidence return with exact scope |
 | Compaction safety | `NOT_PROVEN` | Only same-pass verified shards compact; recall parity retained |
 | Crash during write | `PASS` — native commit-last recovery test discards an uncommitted 37-record tail while retaining and recalling all 100 acknowledged records; phantom-slot and reopen suites pass | Last acknowledged write survives or is durably retryable |
 | Multi-device writer safety | `PASS` for a shared filesystem — native non-blocking exclusive `flock` rejects a second writer; cross-device/cloud-file synchronization remains explicitly unsupported | Conflicting writers cannot silently corrupt the shard |

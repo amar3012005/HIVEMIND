@@ -17,6 +17,20 @@ test('managed backup manifest verifies all artifacts', (t) => {
   });
 });
 
+test('manifest records recovery compatibility metadata but rejects secret-shaped keys', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-storage-manifest-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'qdrant.snapshot'), 'qdrant');
+  const manifest = createStorageManifest(root, {
+    storageMode: 'managed',
+    metadata: { qdrant_image: 'qdrant/qdrant:v1.12.4', vector_dimension: 1024 },
+  });
+  assert.equal(manifest.metadata.vector_dimension, 1024);
+  assert.throws(() => createStorageManifest(root, {
+    storageMode: 'managed', metadata: { database_url: 'must-not-leak' },
+  }), /forbidden manifest metadata key/);
+});
+
 test('manifest verifier detects corrupted artifact', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-storage-manifest-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -25,4 +39,3 @@ test('manifest verifier detects corrupted artifact', (t) => {
   fs.writeFileSync(path.join(root, 'postgres.dump'), 'changed');
   assert.match(verifyStorageManifest(root).error, /size_mismatch|checksum_mismatch/);
 });
-

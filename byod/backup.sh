@@ -34,6 +34,10 @@ docker cp "hm-byod-qdrant:/qdrant/snapshots/$SNAPSHOT" "$STAGING/qdrant.snapshot
 test -s "$STAGING/qdrant.snapshot"
 
 TENANT_REF="$(printf '%s' "${HIVEMIND_ORG_ID:-unknown}" | sha256sum | cut -c1-16)"
+QDRANT_IMAGE="$(docker inspect hm-byod-qdrant --format '{{.Config.Image}}')"
+POSTGRES_IMAGE="$(docker inspect hm-byod-postgres --format '{{.Config.Image}}')"
+export STORAGE_MANIFEST_METADATA_JSON="$(QDRANT_IMAGE="$QDRANT_IMAGE" POSTGRES_IMAGE="$POSTGRES_IMAGE" node -e \
+  'process.stdout.write(JSON.stringify({qdrant_image:process.env.QDRANT_IMAGE,postgres_image:process.env.POSTGRES_IMAGE}))')"
 node "$HERE/../scripts/storage-manifest.mjs" create "$STAGING" byod "$TENANT_REF" >/dev/null
 node "$HERE/../scripts/storage-manifest.mjs" verify "$STAGING" >/dev/null
 rm -rf "$FINAL"

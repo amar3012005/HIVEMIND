@@ -48,8 +48,24 @@ node "$MANIFEST_TOOL" verify "$STAGING" >/dev/null
 rm -rf "$FINAL"
 mv "$STAGING" "$FINAL"
 
+# The customer-owned command must return zero only after the remote object is
+# durable and its checksum/ETag has been verified. HIVE-MIND never receives the
+# destination credential; it exposes only BACKUP_PATH to the local command.
+if [[ -n "${BYOD_BACKUP_UPLOAD_COMMAND:-}" ]]; then
+  export BACKUP_PATH="$FINAL"
+  eval "$BYOD_BACKUP_UPLOAD_COMMAND"
+  UPLOADED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    TARGET_LABEL="${BYOD_BACKUP_TARGET_LABEL:-customer_offsite}" \
+    node -e 'process.stdout.write(JSON.stringify({uploaded_at:process.env.UPLOADED_AT,target:process.env.TARGET_LABEL})+"\n")' \
+    > "$FINAL/OFFSITE_RECEIPT.json"
+fi
+
 find "$DEST_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name '.*.partial' -print0 \
   | xargs -0 ls -1dt 2>/dev/null | tail -n +"$((KEEP + 1))" | xargs -r rm -rf
 
 echo "Memory Box backup verified: $FINAL"
-echo "Keep a copy off this machine; local backup alone does not protect against box loss."
+if [[ -f "$FINAL/OFFSITE_RECEIPT.json" ]]; then
+  echo "Memory Box backup uploaded off-host and acknowledged: $FINAL"
+else
+  echo "Keep a copy off this machine; local backup alone does not protect against box loss."
+fi

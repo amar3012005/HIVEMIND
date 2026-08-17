@@ -54,6 +54,18 @@ test('BYOD release rejects mutable image tags even when signed', () => {
   }, privateKey), /sha256 digest/);
 });
 
+test('BYOD release accepts digest-pinned images from a private registry port', () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const manifest = signReleaseManifest({
+    version: 1,
+    release: 'agent-private123',
+    protocol_version: 'memory-box.v1',
+    image: `registry.customer.example:5000/singulance/hm-agent@sha256:${'b'.repeat(64)}`,
+    created_at: '2026-08-17T12:00:00Z',
+  }, privateKey);
+  assert.ok(manifest.signature.length > 0);
+});
+
 test('BYOD upgrade and rollback can target an isolated disposable box', () => {
   for (const script of [UPGRADE, ROLLBACK]) {
     const source = fs.readFileSync(script, 'utf8');

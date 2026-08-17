@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildEvidencePacket, hop2Evidence, loadTypedGraphEvidence, projectInventoryAbsentIsAuthoritative, recallEnhance } from '../../src/memory/recall-router.js';
+import { buildEvidencePacket, deliverHybrid, hop2Evidence, loadTypedGraphEvidence, projectInventoryAbsentIsAuthoritative, recallEnhance } from '../../src/memory/recall-router.js';
 import { buildLexicalPhrases, EvidenceRetrievalService, fuseRemoteEvidenceHits, matchSourceDocuments } from '../../src/knowledge/evidence-retrieval.js';
 
 test('lexical phrase planning is language-independent and preserves query order', () => {
@@ -20,6 +20,24 @@ test('remote evidence fusion preserves semantic and lexical provenance without f
   assert.equal(fused[0].semantic_score, 0.82);
   assert.equal(fused[0].lexical_score, 4.2);
   assert.ok(fused.every((row) => row.score !== 0.7));
+});
+
+test('unified delivery returns ranked lane fallback instead of overrunning an exhausted parent deadline', async () => {
+  const started = Date.now();
+  const delivered = await deliverHybrid({
+    query: 'deadline-safe mixed recall',
+    memories: [{ id: 'memory-1', content: 'memory fact' }],
+    evidence: [{ segmentId: 'segment-1', content: 'source passage' }],
+    deliverN: 5,
+    evidenceN: 5,
+    budgetMs: 1,
+  });
+  assert.ok(Date.now() - started < 100);
+  assert.equal(delivered.ranking_mode, 'lane_interleave_fallback');
+  assert.equal(delivered.rerank_passes, 0);
+  assert.equal(delivered.ranked_candidates.length, 2);
+  assert.equal(delivered.evidence.length, 1);
+  assert.equal(delivered.memories.length, 1);
 });
 
 test('remote explicit source validation accepts only the requested listed document', () => {

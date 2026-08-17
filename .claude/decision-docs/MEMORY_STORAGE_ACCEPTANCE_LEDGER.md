@@ -6,19 +6,19 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Field | Evidence |
 |---|---|
-| Canonical merged SHA | `NOT_PROVEN` |
-| Immutable images | `NOT_PROVEN` |
+| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; recovery tooling through `584b45646b2d22df8a6ddcec77882334745ff2c5` |
+| Immutable images | `PASS` — Core and Memory Box agent `sha-7b403436` |
 | Migration IDs | `NOT_PROVEN` |
-| Rollback targets | `NOT_PROVEN` |
+| Rollback targets | `PASS` — Core canonical release rollback manifest; Memory Box agent `sha-7a8298a8` retained as rollback image |
 
 ## Personal `.amr`
 
 | Gate | Status | Required evidence |
 |---|---|---|
-| Atomic snapshot publication | `NOT_PROVEN` | Killed copy leaves no complete restore point |
-| Artifact integrity | `NOT_PROVEN` | Byte/hash verification detects mutation |
+| Atomic snapshot publication | `PASS` — v2 staging + verify + rename; 7/7 live shards published on 2026-08-17 | Killed copy leaves no complete restore point |
+| Artifact integrity | `PASS` — 7/7 production v2 snapshots verified; corruption regression test passes | Byte/hash verification detects mutation |
 | Off-host copy | `NOT_PROVEN` | Object exists outside the device and verifies |
-| Restore open | `NOT_PROVEN` | Restored shard opens without repair |
+| Restore open | `PASS` — extracted production archive opened in isolated Linux container; canary shard reported 288 live records | Restored shard opens without repair |
 | Restore recall | `NOT_PROVEN` | Known memory and evidence return with exact scope |
 | Compaction safety | `NOT_PROVEN` | Only same-pass verified shards compact; recall parity retained |
 | Crash during write | `NOT_PROVEN` | Last acknowledged write survives or is durably retryable |
@@ -28,8 +28,8 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Gate | Status | Required evidence |
 |---|---|---|
-| PostgreSQL recovery point | `NOT_PROVEN` | Timestamp/LSN and successful isolated restore |
-| Qdrant recovery | `NOT_PROVEN` | Snapshot restores expected collections/dimension/counts |
+| PostgreSQL recovery point | `PASS` for portable dump restore; PITR remains `NOT_PROVEN` — isolated restore contained 813 tables | Timestamp/LSN and successful isolated restore |
+| Qdrant recovery | `PASS` — exact v1.12.4 full snapshot restored 21 collections; canary collection contained 2 points | Snapshot restores expected collections/dimension/counts |
 | Cross-store consistency | `NOT_PROVEN` | Pending vectors repaired; no false `synced` rows |
 | Tenant isolation | `NOT_PROVEN` | Cross-tenant/project negative tests for memory and evidence |
 | Graph/provenance recovery | `NOT_PROVEN` | Links and citations survive restore |
@@ -40,11 +40,11 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Gate | Status | Required evidence |
 |---|---|---|
-| Capability negotiation | `NOT_PROVEN` | New and legacy agents select compatible operations |
-| Acknowledgement semantics | `NOT_PROVEN` | HTTP 200 plus `ok:false` is failed/retryable, never success |
-| Backup create/verify | `NOT_PROVEN` | Customer-owned PG/Qdrant artifacts and manifest verify |
-| Box-loss restore | `NOT_PROVEN` | Fresh box restores and recalls scoped memory plus evidence |
-| Vector repair | `NOT_PROVEN` | Forced Qdrant failure remains pending, repairs idempotently |
+| Capability negotiation | `PASS` — live agent reports `memory-box.v1`, release `7b403436`, storage `byod_postgres_qdrant`, dimension 1024 | New and legacy agents select compatible operations |
+| Acknowledgement semantics | `PASS` — regression test rejects HTTP 200 with `ok:false`; live vector backlog is zero | HTTP 200 plus `ok:false` is failed/retryable, never success |
+| Backup create/verify | `PASS` — customer bundle `88f0e8ec`; production PG/Qdrant manifest verifies with exact image IDs | Customer-owned PG/Qdrant artifacts and manifest verify |
+| Box-loss restore | `PASS` — isolated restore recovered 47 memories, 3 evidence segments, one Qdrant collection and 25 points | Fresh box restores and recalls scoped memory plus evidence |
+| Vector repair | `PASS` for forced failure/idempotent repair tests; full post-restore recall canary remains part of cross-mode gate | Forced Qdrant failure remains pending, repairs idempotently |
 | Offline/reconnect | `NOT_PROVEN` | Durable pending work resumes without content overwrite |
 | Upgrade/rollback | `NOT_PROVEN` | Signed immutable agent upgrade and previous-image rollback |
 | Residency | `NOT_PROVEN` | Raw content absent from central persistence and logs |
@@ -65,4 +65,3 @@ For every case record: full request identity (without secrets), ranked IDs, cita
 ## Completion rule
 
 The program is complete only when every applicable row is `PASS` with a dated artifact or command result. Unsupported gates must be explicitly documented and accepted; they are not silently removed.
-

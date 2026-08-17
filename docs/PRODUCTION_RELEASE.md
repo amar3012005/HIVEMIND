@@ -604,3 +604,14 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - `verify-deployed.sh` fixture-catalog gate false-positived a 6th time — same confirmed locale-`sort` artifact.
 - Rollback: unset/remove the `HQ_DAILY_CADENCE_ENABLED` line from `/root/hivemind/.env` and recreate `hm-control`+`hm-employees` to instantly revert to OFF (no code rollback needed for this half); prior per-service images also retagged `rollback` by the canonical release script for a full code rollback if needed.
 - First observable effect: the earliest daily_cadence wake for any org fires at the next 13:00 UTC boundary (2026-08-16 13:00 UTC, ~3h after this change) — not immediately visible.
+
+## d3fae61a — burst-dispatch single state-transition fix (all 4 services)
+
+- Canonical SHA: `d3fae61a3555403673b4d19e33a9dde367a4e80c` (PR #330). Migration: none.
+- Live incident, org Singulance: first-life burst claimed "5 proposals start together" but only 1 dispatched, root-caused via the durable event itself: `hq_runtime_invalid_transition:DELEGATING:DIAGNOSING`. `move('DIAGNOSING'); move('DELEGATING');` was called inside the per-todo dispatch for-loop; the 2nd todo's re-entry into DIAGNOSING from DELEGATING is not a valid transition (contracts.js HQ_TRANSITIONS), threw, and the scheduler's safety wrapper aborted the whole cycle before todos 3-5 ran.
+- Fix: transition moved outside the loop, fires once per burst/dispatch cycle.
+- Tests: 166/166 (43/43 in hq-native-engine.test.js, including a new source-guard test proving the transition is outside the loop and never repeated inside it).
+- Runtime: all 4 services on `d3fae61a3555`, healthy. Byte-verified inside `hm-control`: `move('DIAGNOSING')`/`move('DELEGATING')` immediately precede the `for` loop, not inside it. Four public health checks 200.
+- `verify-deployed.sh` fixture-catalog gate false-positived a 7th time — same confirmed locale-`sort` artifact.
+- Rollback: prior per-service images retagged `rollback`.
+- External side effects: none — no external write, campaign was already committed before the crash.

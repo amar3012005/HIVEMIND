@@ -21,6 +21,8 @@
  */
 import { runWithOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
+import { backfillSyncedVectors } from '../vector/managed-vector-ledger.js';
+import { isMnemeOrg, orgIsRemote } from '../vector/mneme/driver.js';
 
 // resolveCollectionForOrg is ASYNC and plan-aware (enterprise → org_<id>, else the
 // shared personal pool) — must be awaited, and it mirrors exactly what recall reads.
@@ -45,7 +47,8 @@ async function embedWithRetry(qdrantClient, memShape, logger, attempts = 3) {
   let lastErr = null;
   for (let i = 0; i < attempts; i++) {
     try {
-      await qdrantClient.storeMemory(memShape, {}); // routeCollection picks per-tenant collection
+      const stored = await qdrantClient.storeMemory(memShape, {}); // routeCollection picks per-tenant collection
+      if (!stored) throw new Error('vector_store_not_acknowledged');
       return true;
     } catch (e) {
       lastErr = e;
@@ -94,6 +97,10 @@ export async function reconcileEmbeddingsOnce({
       const present = await presentIds(collection, ids, { qUrl, qKey });
       if (present === null) continue; // couldn't check → skip this batch, retry next cycle
       stats.checked += ids.length;
+      const presentRows = slice.filter((r) => present.has(r.id));
+      if (!isMnemeOrg(org) && !orgIsRemote(org)) {
+        await backfillSyncedVectors(presentRows, collection, { prisma });
+      }
       const missing = slice.filter((r) => !present.has(r.id));
       stats.missing += missing.length;
       for (const m of missing) {

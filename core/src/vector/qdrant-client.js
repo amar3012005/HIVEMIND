@@ -17,6 +17,12 @@ import { qdrantUrlFor } from './mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 import { currentStageSignal } from '../runtime/stage-deadline.js';
+import {
+  isTrackableManagedMemory,
+  markVectorFailed,
+  markVectorPending,
+  markVectorSynced,
+} from './managed-vector-ledger.js';
 
 // Per-org Qdrant base: the customer's Qdrant (via tunnel) for a self-host-hybrid org, else central.
 const qbase = () => qdrantUrlFor(currentOrg()) || QDRANT_URL;
@@ -255,18 +261,28 @@ export class QdrantClient {
    * @returns {Promise<string>} Memory ID
    */
   async storeMemory(memory, options = {}) {
+    const collectionName = await routeCollection({ explicit: options.collectionName, orgId: memory.org_id });
+    const layer = options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory');
+    const trackManaged = isTrackableManagedMemory(memory, {
+      layer,
+      remote: orgIsRemote(memory.org_id),
+      personal: isMnemeOrg(memory.org_id),
+    });
+    const ledgerPending = trackManaged ? await markVectorPending(memory, collectionName) : false;
+
     // Check connection first
     const connected = await this.isConnected();
     if (!connected) {
-      console.warn('⚠️  Qdrant unavailable, storing in-memory only');
-      return memory.id;
+      console.warn('⚠️  Qdrant unavailable; authoritative row remains pending for reconciliation');
+      if (trackManaged) await markVectorFailed(memory.id, 'qdrant_unavailable');
+      return null;
     }
 
-    const collectionName = await routeCollection({ explicit: options.collectionName, orgId: memory.org_id });
     const collectionReady = await this.ensureCollection(collectionName);
     if (!collectionReady) {
-      console.warn('⚠️  Qdrant collection unavailable, storing in-memory only');
-      return memory.id;
+      console.warn('⚠️  Qdrant collection unavailable; authoritative row remains pending for reconciliation');
+      if (trackManaged) await markVectorFailed(memory.id, 'qdrant_collection_unavailable');
+      return null;
     }
 
     // Reuse precomputed embedding when supplied (knowledge upload pipeline
@@ -303,6 +319,7 @@ export class QdrantClient {
       // polluting recall. Skip the upsert + log LOUD; the reconciler (or the next
       // save) will retry this id once embedding is available again.
       console.error(`⚠️ [qdrant] LOUD: embedding unavailable for memory ${memory.id} (org ${memory.org_id || memory.orgId || 'n/a'}) — SKIPPING upsert; embed-reconciler will retry`);
+      if (trackManaged) await markVectorFailed(memory.id, 'embedding_unavailable');
       return null;
     }
 
@@ -347,7 +364,7 @@ export class QdrantClient {
         decay_factor: memory.decay_factor,
         // Layer discriminator — org containers hold memory + evidence in one
         // collection. Default 'memory'; evidence ingest passes options.layer.
-        layer: options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory'),
+        layer,
         metadata: memory.metadata || {}
       }
     };
@@ -399,6 +416,14 @@ export class QdrantClient {
         throw new Error(`Qdrant upsert failed: ${JSON.stringify(error)}`);
       }
 
+      if (trackManaged) {
+        // Retry pending here because legacy callers can invoke storeMemory just
+        // before the authoritative memory transaction becomes visible.
+        if (!ledgerPending) await markVectorPending(memory, collectionName);
+        const recorded = await markVectorSynced(memory.id);
+        if (!recorded) console.error(`[qdrant] vector ${memory.id} stored but managed sync ledger is unavailable`);
+      }
+
       // mneme dual-write (best-effort): mirror this point into the org's .amr shard so reads can
       // be served from mneme for enabled orgs. Qdrant above remains the source of truth.
       if (mnemeOn(memory.org_id)) {
@@ -426,8 +451,10 @@ export class QdrantClient {
       return memory.id;
     } catch (error) {
       console.error('Failed to store memory in Qdrant:', error.message);
-      // Don't throw - allow in-memory storage to succeed
-      return memory.id;
+      if (trackManaged) await markVectorFailed(memory.id, error);
+      // The authoritative PostgreSQL row can still succeed, but callers and the
+      // reconciler must see that semantic indexing did not.
+      return null;
     }
   }
 

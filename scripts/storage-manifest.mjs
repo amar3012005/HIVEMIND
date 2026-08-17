@@ -32,6 +32,7 @@ export function createStorageManifest(root, {
   release = process.env.HIVEMIND_RELEASE_SHA || 'unknown',
   consistency = 'warm',
   createdAt = new Date().toISOString(),
+  metadata = {},
 } = {}) {
   if (!['personal_amr', 'managed', 'byod'].includes(storageMode)) {
     throw new Error('storageMode must be personal_amr, managed, or byod');
@@ -42,6 +43,17 @@ export function createStorageManifest(root, {
     const stat = fs.statSync(path.join(root, name));
     return [name, { bytes: stat.size, sha256: sha256File(path.join(root, name)) }];
   }));
+  const safeMetadata = {};
+  for (const [key, value] of Object.entries(metadata || {})) {
+    if (/secret|token|password|credential|database.?url|api.?key/i.test(key)) {
+      throw new Error(`forbidden manifest metadata key: ${key}`);
+    }
+    if (!/^[a-z][a-z0-9_]{0,63}$/i.test(key)
+        || !['string', 'number', 'boolean'].includes(typeof value)) {
+      throw new Error(`invalid manifest metadata: ${key}`);
+    }
+    safeMetadata[key] = value;
+  }
   const manifest = {
     version: 1,
     storage_mode: storageMode,
@@ -49,6 +61,7 @@ export function createStorageManifest(root, {
     created_at: createdAt,
     release,
     consistency,
+    metadata: safeMetadata,
     artifacts,
     complete: true,
   };
@@ -87,8 +100,12 @@ export function verifyStorageManifest(root) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [command, root, storageMode, tenant] = process.argv.slice(2);
   try {
+    let metadata = {};
+    if (process.env.STORAGE_MANIFEST_METADATA_JSON) {
+      metadata = JSON.parse(process.env.STORAGE_MANIFEST_METADATA_JSON);
+    }
     const result = command === 'create'
-      ? createStorageManifest(root, { storageMode, tenant })
+      ? createStorageManifest(root, { storageMode, tenant, metadata })
       : command === 'verify'
         ? verifyStorageManifest(root)
         : { ok: false, error: 'usage: storage-manifest.mjs create|verify <backup-dir> [storage-mode] [tenant]' };
@@ -99,4 +116,3 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exitCode = 1;
   }
 }
-

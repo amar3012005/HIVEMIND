@@ -39,7 +39,7 @@ import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
 import { initialMemoryCrossRerank } from './recall-rerank-policy.js';
 import { runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
-import { dedupeAuthorizedEvidenceCandidates } from './recall-evidence-dedup.js';
+import { prepareUnifiedRecallCandidates } from './recall-evidence-dedup.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -567,7 +567,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // neighbouring facts, tables, or the exact phrase the user asked for which the atomic
   // memory deliberately omits. The shared reranker is the relevance authority over both
   // layers and can retain either or both when they contribute distinct context.
-  const deduped = dedupeAuthorizedEvidenceCandidates(pool);
+  const deduped = prepareUnifiedRecallCandidates(pool);
 
   let ordered = deduped;
   let usedCrossEncoder = false;

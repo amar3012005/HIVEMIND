@@ -23,9 +23,10 @@ test('manifest records recovery compatibility metadata but rejects secret-shaped
   fs.writeFileSync(path.join(root, 'qdrant.snapshot'), 'qdrant');
   const manifest = createStorageManifest(root, {
     storageMode: 'managed',
-    metadata: { qdrant_image: 'qdrant/qdrant:v1.12.4', vector_dimension: 1024 },
+    metadata: { qdrant_image: 'qdrant/qdrant:v1.12.4', qdrant_image_id: 'sha256:abc', vector_dimension: 1024 },
   });
   assert.equal(manifest.metadata.vector_dimension, 1024);
+  assert.equal(manifest.metadata.qdrant_image_id, 'sha256:abc');
   assert.throws(() => createStorageManifest(root, {
     storageMode: 'managed', metadata: { database_url: 'must-not-leak' },
   }), /forbidden manifest metadata key/);

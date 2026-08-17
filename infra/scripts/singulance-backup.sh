@@ -43,8 +43,10 @@ gzip -t "$DEST/amr-data.tar.gz"
 
 QDRANT_IMAGE="$(docker inspect hm-qdrant --format '{{.Config.Image}}')"
 POSTGRES_IMAGE="$(docker inspect hm-postgres --format '{{.Config.Image}}')"
-export STORAGE_MANIFEST_METADATA_JSON="$(QDRANT_IMAGE="$QDRANT_IMAGE" POSTGRES_IMAGE="$POSTGRES_IMAGE" node -e \
-  'process.stdout.write(JSON.stringify({qdrant_image:process.env.QDRANT_IMAGE,postgres_image:process.env.POSTGRES_IMAGE}))')"
+QDRANT_IMAGE_ID="$(docker inspect hm-qdrant --format '{{.Image}}')"
+POSTGRES_IMAGE_ID="$(docker inspect hm-postgres --format '{{.Image}}')"
+export STORAGE_MANIFEST_METADATA_JSON="$(QDRANT_IMAGE="$QDRANT_IMAGE" POSTGRES_IMAGE="$POSTGRES_IMAGE" QDRANT_IMAGE_ID="$QDRANT_IMAGE_ID" POSTGRES_IMAGE_ID="$POSTGRES_IMAGE_ID" node -e \
+  'process.stdout.write(JSON.stringify({qdrant_image:process.env.QDRANT_IMAGE,postgres_image:process.env.POSTGRES_IMAGE,qdrant_image_id:process.env.QDRANT_IMAGE_ID,postgres_image_id:process.env.POSTGRES_IMAGE_ID}))')"
 node "$REPO_ROOT/scripts/storage-manifest.mjs" create "$DEST" managed platform >/dev/null
 node "$REPO_ROOT/scripts/storage-manifest.mjs" verify "$DEST" >/dev/null
 rm -rf "$FINAL_DEST"

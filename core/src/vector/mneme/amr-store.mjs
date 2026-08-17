@@ -604,6 +604,10 @@ export class AmrMemoryStore {
       if (patch.is_latest !== undefined) rec.is_latest = !!patch.is_latest;
       if (patch.memory_type !== undefined) rec.memory_type = patch.memory_type;
       if (patch.valid_to !== undefined) rec.valid_to = patch.valid_to;
+      if (patch.content !== undefined) rec.content = patch.content;
+      if (patch.title !== undefined) rec.title = patch.title;
+      if (patch.importance_score !== undefined) rec.confidence = patch.importance_score;
+      if (patch.metadata !== undefined) rec.metadata = patch.metadata || {};
     });
     if (ok) this.store.flush();
     return ok;

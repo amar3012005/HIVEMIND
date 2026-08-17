@@ -105,6 +105,55 @@ test('a failed send still never throws out of notifyOwnerByEmail', async () => {
   assert.equal(result.error, 'network down');
 });
 
+test('an approval_required popup with run_id/gate mints an approval token and uses the WITH-BUTTON template', async () => {
+  const runtimeRows = [baseRuntime()];
+  let sentTemplateId = null; let sentVars = null;
+  const sendEmail = async (args) => { sentTemplateId = args.templateId; sentVars = args.vars; return { ok: true, messageId: '<m@x>' }; };
+  const mintApprovalToken = async ({ runId, gate }) => (runId === 'run-1' && gate === 'outbound_messages' ? 'minted-token-abc' : null);
+  await notifyOwnerByEmail(
+    {
+      prisma: prismaWith({ runtimeRows }), runtime: runtimeRows[0], kind: 'popup',
+      title: 'Approval required: Qualify outreach prospects', summary: 'Needs a decision.',
+      details: { run_id: 'run-1', gate: 'outbound_messages' },
+    },
+    { sendEmail, mintApprovalToken },
+  );
+  assert.equal(sentTemplateId, 'runtime_persona_approval_update');
+  assert.equal(sentVars.approveUrl, 'https://next.singulancelabs.com/hivemind/approve/minted-token-abc');
+});
+
+test('a popup with no run_id/gate (capability_required, decision_required) never gets a button — falls back to the plain template', async () => {
+  let sentTemplateId = null; let sentVars = null;
+  const sendEmail = async (args) => { sentTemplateId = args.templateId; sentVars = args.vars; return { ok: true, messageId: '<m@x>' }; };
+  const mintApprovalToken = async () => { throw new Error('must never be called without run_id/gate'); };
+  await notifyOwnerByEmail(
+    { prisma: prismaWith(), runtime: baseRuntime(), kind: 'popup', title: 'x', summary: 'y', details: { provider: 'x' } },
+    { sendEmail, mintApprovalToken },
+  );
+  assert.equal(sentTemplateId, 'runtime_persona_update');
+  assert.equal(sentVars.approveUrl, undefined);
+});
+
+test('a failed token mint falls back to the plain template rather than sending a dead button', async () => {
+  let sentTemplateId = null;
+  const sendEmail = async (args) => { sentTemplateId = args.templateId; return { ok: true, messageId: '<m@x>' }; };
+  const mintApprovalToken = async () => null;
+  await notifyOwnerByEmail(
+    { prisma: prismaWith(), runtime: baseRuntime(), kind: 'popup', title: 'x', summary: 'y', details: { run_id: 'run-1', gate: 'outbound_messages' } },
+    { sendEmail, mintApprovalToken },
+  );
+  assert.equal(sentTemplateId, 'runtime_persona_update');
+});
+
+test('activation and growth_plan kinds never attempt to mint an approval token, even if details were somehow passed', async () => {
+  const mintApprovalToken = async () => { throw new Error('must never be called for a non-popup kind'); };
+  const sendEmail = async () => ({ ok: true, messageId: '<m@x>' });
+  await notifyOwnerByEmail(
+    { prisma: prismaWith(), runtime: baseRuntime(), kind: 'activation', details: { run_id: 'run-1', gate: 'outbound_messages' } },
+    { sendEmail, mintApprovalToken },
+  );
+});
+
 test('missing prisma/runtime never throws', async () => {
   assert.deepEqual((await notifyOwnerByEmail({ prisma: null, runtime: null, kind: 'activation' })), { ok: false, skipped: true, error: 'missing_args' });
 });

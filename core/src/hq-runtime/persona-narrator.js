@@ -15,8 +15,10 @@
  * break a real Runtime cycle.
  */
 import { sendSystemEmail } from '../email/email-service.js';
+import { createAuthorityApprovalToken } from './approval-links.js';
 
 const APP_URL = process.env.HIVEMIND_APP_URL || 'https://next.singulancelabs.com/hivemind/app';
+const APPROVAL_BASE_URL = process.env.HQ_RUNTIME_APPROVAL_BASE_URL || 'https://next.singulancelabs.com/hivemind/approve';
 const PERSONA_NAME = process.env.HQ_RUNTIME_PERSONA_NAME || 'Runtime';
 
 function personaCopy(kind, { orgName, title, summary }) {
@@ -50,8 +52,15 @@ function personaCopy(kind, { orgName, title, summary }) {
  * @param {'activation'|'growth_plan'|'popup'} args.kind
  * @param {string} [args.title]
  * @param {string} [args.summary]
+ * @param {object} [args.details]  the raw hq_runtime_event.details — for an
+ *   approval_required event this carries run_id/gate, which is enough to
+ *   mint a one-click approval link (see approval-links.js). Any other
+ *   popup shape (capability_required, decision_required) narrates without
+ *   a button — there's nothing a link can safely approve for those yet.
  */
-export async function notifyOwnerByEmail({ prisma, runtime, kind, title, summary }, { sendEmail = sendSystemEmail } = {}) {
+export async function notifyOwnerByEmail({ prisma, runtime, kind, title, summary, details }, {
+  sendEmail = sendSystemEmail, mintApprovalToken = createAuthorityApprovalToken,
+} = {}) {
   if (!prisma || !runtime) return { ok: false, skipped: true, error: 'missing_args' };
   if (runtime.emailUpdatesEnabled === false) return { ok: false, skipped: true, error: 'updates_disabled' };
 
@@ -73,8 +82,16 @@ export async function notifyOwnerByEmail({ prisma, runtime, kind, title, summary
     // References/In-Reply-To headers.
     const subject = runtime.emailThreadSubject || copy.subject;
 
+    let approveUrl = null;
+    if (kind === 'popup' && details?.run_id && details?.gate) {
+      const token = await mintApprovalToken({
+        prisma, runtime, orgName, runId: details.run_id, gate: details.gate, title, summary,
+      });
+      if (token) approveUrl = `${APPROVAL_BASE_URL}/${token}`;
+    }
+
     const result = await sendEmail({
-      templateId: 'runtime_persona_update',
+      templateId: approveUrl ? 'runtime_persona_approval_update' : 'runtime_persona_update',
       to,
       vars: {
         subject,
@@ -83,6 +100,7 @@ export async function notifyOwnerByEmail({ prisma, runtime, kind, title, summary
         personaName: PERSONA_NAME,
         orgName: orgName || 'your company',
         appUrl: APP_URL,
+        ...(approveUrl ? { approveUrl } : {}),
       },
       thread: runtime.emailThreadMessageId ? { inReplyTo: runtime.emailThreadMessageId } : undefined,
     });

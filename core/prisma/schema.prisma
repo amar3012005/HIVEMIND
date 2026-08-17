@@ -1480,6 +1480,31 @@ model HqRuntime {
   @@map("hq_runtimes")
 }
 
+/// One-click approval link embedded in a persona email (2026-08-17). GET
+/// preview + POST approve are BOTH public/token-gated (no session) — same
+/// established pattern as OrgInvite's `/v1/join/:token` preview+decline —
+/// so the owner can approve from a phone without a desktop login. The GET
+/// preview must never mutate anything; only the POST /approve call does.
+model HqApprovalToken {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  token              String    @unique @db.VarChar(128)
+  orgId              String    @map("org_id") @db.Uuid
+  runtimeId          String    @map("runtime_id") @db.Uuid
+  kind               String    @db.VarChar(24) // 'authority' (only kind wired in v1)
+  runId              String?   @map("run_id") @db.Uuid
+  gate               String?   @db.VarChar(120)
+  title              String    @db.VarChar(500)
+  summary            String
+  orgName            String?   @map("org_name") @db.VarChar(255)
+  usedAt             DateTime? @map("used_at") @db.Timestamptz(6)
+  expiresAt          DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId])
+  @@index([expiresAt])
+  @@map("hq_approval_tokens")
+}
+
 /// HqCycle — one leased, resumable wake execution.
 model HqCycle {
   id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid

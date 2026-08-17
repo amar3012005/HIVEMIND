@@ -68,7 +68,7 @@ async function event(prisma, runtime, cycle, input) {
   const appended = await appendHqEvent({ prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch, cycleId: cycle.id, ...input });
   if (POPUP_EVENT_TYPES.has(input.eventType)) {
     import('./persona-narrator.js')
-      .then(({ notifyOwnerByEmail }) => notifyOwnerByEmail({ prisma, runtime, kind: 'popup', title: input.title, summary: input.summary }))
+      .then(({ notifyOwnerByEmail }) => notifyOwnerByEmail({ prisma, runtime, kind: 'popup', title: input.title, summary: input.summary, details: input.details }))
       .catch(() => {});
   }
   return appended;

@@ -21194,6 +21194,21 @@ exit \$RC
 
         case '/api/recall':
           if (req.method === 'POST') {
+            try {
+              const { acquireTenantRequestSlot } = await import('./memory/tenant-gate.js');
+              await acquireTenantRequestSlot(req, res, orgId || userId || 'anon', '/api/recall', {
+                maxInflight: Number(process.env.RECALL_MAX_INFLIGHT_PER_ORG || 4),
+                queueTimeoutMs: Number(process.env.RECALL_ADMISSION_WAIT_MS || 5000),
+                requestTimeoutMs: Number(process.env.RECALL_ADMISSION_LEASE_MS || 30000),
+              });
+            } catch {
+              if (res.destroyed || res.writableEnded) return;
+              return jsonResponse(res, {
+                error: 'tenant_recall_busy',
+                message: 'This workspace already has several recalls in progress. Retry shortly.',
+                retry_after_seconds: 1,
+              }, 429);
+            }
             return handleRecallRoute({
               req,
               res,
@@ -21525,7 +21540,7 @@ exit \$RC
               // spawning N parallel expensive graph builds and starving others.
               const { acquireTenantSlot } = await import('./memory/tenant-gate.js');
               try {
-                releaseSlot = await acquireTenantSlot(userId || orgId || 'anon', '/api/graph');
+                releaseSlot = await acquireTenantSlot(orgId || userId || 'anon', '/api/graph');
               } catch (gateErr) {
                 return jsonResponse(res, {
                   error: 'Too many concurrent graph queries',
@@ -23444,6 +23459,21 @@ exit \$RC
         // ==========================================
         case '/api/chat':
           if (req.method === 'POST') {
+            try {
+              const { acquireTenantRequestSlot } = await import('./memory/tenant-gate.js');
+              await acquireTenantRequestSlot(req, res, orgId || userId || 'anon', '/api/chat', {
+                maxInflight: Number(process.env.CHAT_MAX_INFLIGHT_PER_ORG || 2),
+                queueTimeoutMs: Number(process.env.CHAT_ADMISSION_WAIT_MS || 8000),
+                requestTimeoutMs: Number(process.env.CHAT_ADMISSION_LEASE_MS || 180000),
+              });
+            } catch {
+              if (res.destroyed || res.writableEnded) return;
+              return jsonResponse(res, {
+                error: 'tenant_chat_busy',
+                message: 'This workspace already has several chats in progress. Retry shortly.',
+                retry_after_seconds: 2,
+              }, 429);
+            }
             // Per-org rate limit. Chat is more expensive than recall so we
             // share the same bucket — protects token spend at the door.
             if (orgId && !rateLimitAllowOrgRequest(orgId)) {

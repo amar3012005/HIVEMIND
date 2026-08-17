@@ -22,9 +22,11 @@ import { agentFor } from '../src/vector/mneme/remote-backend.js';
 const orgId = String(process.env.STORAGE_CANARY_ORG_ID || '').trim();
 const userId = String(process.env.STORAGE_CANARY_USER_ID || '').trim();
 const baseUrl = String(process.env.STORAGE_CANARY_CORE_URL || 'http://127.0.0.1:3000').replace(/\/$/, '');
+const ingestMode = String(process.env.STORAGE_CANARY_INGEST_MODE || 'evidence').trim().toLowerCase();
 if (!orgId || !userId || process.env.STORAGE_CANARY_CONFIRM !== 'DELETE_CANARY_DATA') {
   throw new Error('Set STORAGE_CANARY_ORG_ID, STORAGE_CANARY_USER_ID, and STORAGE_CANARY_CONFIRM=DELETE_CANARY_DATA');
 }
+if (!['evidence', 'both'].includes(ingestMode)) throw new Error('STORAGE_CANARY_INGEST_MODE must be evidence or both');
 
 const prisma = getPrismaClient();
 const marker = `BYOD-EVIDENCE-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
@@ -75,11 +77,13 @@ try {
 
   const form = new FormData();
   form.set('file', new Blob([
-    `# Remote evidence acceptance\n\nThe exact recovery marker is ${marker}.\n\nThis evidence belongs only on the customer Memory Box.`,
+    ingestMode === 'both'
+      ? `# Cross-mode mixed acceptance\n\nThe exact recovery marker is ${marker}.\n\nProject Lumen launches on 17 November 2031. Its owner is Samira Vale. Its approved capacity is 73 megawatts. These are durable atomic facts and their source evidence must remain linked.`
+      : `# Remote evidence acceptance\n\nThe exact recovery marker is ${marker}.\n\nThis evidence belongs only on the customer Memory Box.`,
   ], { type: 'text/markdown' }), filename);
   form.set('targetScope', 'organization');
-  form.set('ingestMode', 'evidence');
-  form.set('smart', 'false');
+  form.set('ingestMode', ingestMode);
+  form.set('smart', ingestMode === 'both' ? 'true' : 'false');
   const admitted = await responseJson(await fetch(`${baseUrl}/api/knowledge/upload`, {
     method: 'POST', headers, body: form,
   }));
@@ -95,6 +99,10 @@ try {
   }
   if (status?.status !== 'ready') throw new Error(`ingestion_not_ready:${JSON.stringify(status)}`);
   documentId = status.document_id;
+  const promotedMemoryIds = Array.isArray(status.memory_ids) ? status.memory_ids.filter(Boolean) : [];
+  if (ingestMode === 'both' && promotedMemoryIds.length === 0) {
+    throw new Error(`both_mode_promoted_no_memories:${JSON.stringify(status)}`);
+  }
 
   const remote = orgIsRemote(orgId);
   const embedded = remote && agentFor(orgId)?.url === 'local:';
@@ -137,7 +145,18 @@ try {
 
   // Public recall runs FIRST. A direct evidence call would warm the embedding
   // path and hide the cold-start regression this canary is meant to catch.
-  const recalled = await recall();
+  let recalled = await recall();
+  let recalledMemories = Array.isArray(recalled.memories) ? recalled.memories : [];
+  let recallAttempts = 1;
+  if (ingestMode === 'both' && !recalledMemories.length) {
+    for (let attempt = 2; attempt <= 6; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      recalled = await recall();
+      recalledMemories = Array.isArray(recalled.memories) ? recalled.memories : [];
+      recallAttempts = attempt;
+      if (recalledMemories.length) break;
+    }
+  }
   const evidence = Array.isArray(recalled.evidence) ? recalled.evidence : [];
   if (!evidence.some((row) => String(row.snippet || row.content || '').includes(marker))) {
     const diagnosticDirect = await responseJson(await fetch(`${baseUrl}/api/evidence/search`, {
@@ -162,6 +181,13 @@ try {
       second_timing_ms: diagnosticSecond.timing_ms || null,
     })}`);
   }
+  if (ingestMode === 'both' && !recalledMemories.length) {
+    throw new Error(`mixed_public_recall_missing_memory_lane:${JSON.stringify({
+      promoted: promotedMemoryIds.length,
+      evidence: evidence.length,
+      ranked_candidates: recalled.ranked_candidates?.length || recalled.results?.length || 0,
+    })}`);
+  }
 
   const directEvidence = await responseJson(await fetch(`${baseUrl}/api/evidence/search`, {
     method: 'POST',
@@ -176,12 +202,19 @@ try {
   const central = {
     documents: await prisma.knowledgeDocument.count({ where: { orgId, id: documentId } }),
     segments: await prisma.knowledgeSegment.count({ where: { orgId, documentId } }),
-    memories: await prisma.memory.count({ where: { orgId, content: { contains: marker } } }),
+    memories: await prisma.memory.count({ where: {
+      orgId,
+      OR: [
+        { content: { contains: marker } },
+        ...(promotedMemoryIds.length ? [{ id: { in: promotedMemoryIds } }] : []),
+      ],
+    } }),
   };
   if (remote && (central.documents || central.segments || central.memories)) {
     throw new Error(`residency_violation:${JSON.stringify(central)}`);
   }
-  if (!remote && (central.documents !== 1 || central.segments < 1 || central.memories !== 0)) {
+  if (!remote && (central.documents !== 1 || central.segments < 1
+      || (ingestMode === 'evidence' ? central.memories !== 0 : central.memories < 1))) {
     throw new Error(`managed_persistence_violation:${JSON.stringify(central)}`);
   }
 
@@ -189,19 +222,23 @@ try {
   if (!removed.success) throw new Error(`delete_failed:${JSON.stringify(removed)}`);
   documentId = null;
   const after = await recall();
-  if ((after.evidence || []).some((row) => String(row.snippet || row.content || '').includes(marker))) {
-    throw new Error('deleted_remote_evidence_remains_recallable');
+  if ((after.evidence || []).some((row) => String(row.snippet || row.content || '').includes(marker))
+      || (after.memories || []).some((row) => String(row.snippet || row.content || '').includes(marker))) {
+    throw new Error('deleted_document_content_remains_recallable');
   }
 
   console.log(JSON.stringify({
     ok: true,
     storage_mode: embedded ? 'amr_embedded' : remote ? 'byod' : 'managed',
-    ingest_mode: 'evidence',
+    ingest_mode: ingestMode,
     status: status.status,
     segment_count: storedSegmentCount,
     lexical_hits: lexicalCount,
     hydrated_hits: hydratedCount,
     recalled_evidence: evidence.length,
+    recalled_memories: recalledMemories.length,
+    recall_attempts: recallAttempts,
+    promoted_memories: promotedMemoryIds.length,
     direct_evidence: directEvidenceRows.length,
     central,
     deleted: true,

@@ -73,3 +73,12 @@ export function dedupeAuthorizedEvidenceCandidates(pool = []) {
   }
   return output;
 }
+
+/**
+ * Apply the complete pre-rerank deduplication policy for the unified recall
+ * pool. Lineage is provenance, not content identity: a source segment remains
+ * eligible beside an atomic memory promoted from the same document.
+ */
+export function prepareUnifiedRecallCandidates(pool = []) {
+  return dedupeAuthorizedEvidenceCandidates(pool);
+}

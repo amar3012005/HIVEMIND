@@ -39,7 +39,7 @@ import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
 import { initialMemoryCrossRerank } from './recall-rerank-policy.js';
 import { runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
-import { dedupeAuthorizedEvidenceCandidates } from './recall-evidence-dedup.js';
+import { prepareUnifiedRecallCandidates } from './recall-evidence-dedup.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -561,12 +561,13 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   ].filter((c) => c._content || c._title);
   if (pool.length <= 1) return null;
 
-  // A memory and the segment it was DERIVED FROM must not both occupy the delivered set
-  // — that spends the context budget twice on one fact. linked_memory_id is computed
-  // upstream from source_metadata.document_id, so this is a set lookup, not a query.
-  const memIds = new Set(memories.map(recallMemoryRowId).filter(Boolean));
-  const deduped = dedupeAuthorizedEvidenceCandidates(pool)
-    .filter((c) => !(c._kind === 'evidence' && c._row?.linked_memory_id && memIds.has(c._row.linked_memory_id)));
+  // Deduplicate identical EVIDENCE passages, never an entire source segment merely
+  // because one atomic memory was promoted from the same document. A document-level
+  // lineage marker does not mean content equivalence: the segment may carry qualifiers,
+  // neighbouring facts, tables, or the exact phrase the user asked for which the atomic
+  // memory deliberately omits. The shared reranker is the relevance authority over both
+  // layers and can retain either or both when they contribute distinct context.
+  const deduped = prepareUnifiedRecallCandidates(pool);
 
   let ordered = deduped;
   let usedCrossEncoder = false;

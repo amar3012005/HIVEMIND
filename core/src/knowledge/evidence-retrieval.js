@@ -55,6 +55,27 @@ export function buildLexicalPhrases(tokens = [], { max = 18 } = {}) {
   return [...new Set(phrases)];
 }
 
+export function matchSourceDocuments(documents = [], { documentId = null, title = null, limit = 3 } = {}) {
+  const wantedId = String(documentId || '').trim();
+  const wantedTitle = String(title || '').trim().toLocaleLowerCase();
+  return documents
+    .filter((document) => {
+      const id = String(document.id || document.document_id || '').trim();
+      if (wantedId) return id === wantedId;
+      if (!wantedTitle) return false;
+      const candidates = [document.title, document.filename, document.sourceId, document.source_id]
+        .filter(Boolean)
+        .map((value) => String(value).normalize('NFKC').toLocaleLowerCase());
+      return candidates.some((value) => value.includes(wantedTitle));
+    })
+    .slice(0, Math.max(1, Math.min(Number(limit) || 3, 10)))
+    .map((document) => ({
+      ...document,
+      id: document.id || document.document_id,
+      title: document.title || document.filename || null,
+    }));
+}
+
 /**
  * Which SCOPE TIER does a document belong to, for display?
  *
@@ -589,7 +610,20 @@ export class EvidenceRetrievalService {
 
   /** Resolve an explicitly requested source without trusting a model-supplied id. */
   async resolveSourceDocuments({ userId, orgId, projectId = null, documentId = null, title = null, limit = 3 }) {
-    if (orgIsRemote(orgId)) return [];
+    if (orgIsRemote(orgId)) {
+      // The remote list endpoint is the authoritative tenant-scoped document
+      // inventory. Validate both inferred and caller-supplied source IDs against
+      // it instead of declaring every valid Memory Box source nonexistent.
+      // Project tags are not exposed by the current agent list contract, so a
+      // project-scoped request remains fail-closed until that contract exists.
+      if (projectId) return [];
+      const listed = await amrKbDocs(orgId, {
+        limit: 200,
+        offset: 0,
+        access: { userId, projectId },
+      });
+      return matchSourceDocuments(listed?.documents || [], { documentId, title, limit });
+    }
     if (!this.db?.knowledgeDocument || (!documentId && !title)) return [];
 
     return this.db.knowledgeDocument.findMany({

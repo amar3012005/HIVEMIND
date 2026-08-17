@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildEvidencePacket, hop2Evidence, loadTypedGraphEvidence, projectInventoryAbsentIsAuthoritative, recallEnhance } from '../../src/memory/recall-router.js';
-import { buildLexicalPhrases, EvidenceRetrievalService, fuseRemoteEvidenceHits } from '../../src/knowledge/evidence-retrieval.js';
+import { buildLexicalPhrases, EvidenceRetrievalService, fuseRemoteEvidenceHits, matchSourceDocuments } from '../../src/knowledge/evidence-retrieval.js';
 
 test('lexical phrase planning is language-independent and preserves query order', () => {
   assert.deepEqual(buildLexicalPhrases(['alpha', 'beta', 'gamma', 'delta'], { max: 5 }), [
@@ -20,6 +20,18 @@ test('remote evidence fusion preserves semantic and lexical provenance without f
   assert.equal(fused[0].semantic_score, 0.82);
   assert.equal(fused[0].lexical_score, 4.2);
   assert.ok(fused.every((row) => row.score !== 0.7));
+});
+
+test('remote explicit source validation accepts only the requested listed document', () => {
+  const documents = [
+    { document_id: 'doc-a', filename: 'Alpha Notes.pdf' },
+    { id: 'doc-b', title: 'Beta Notes.pdf' },
+  ];
+  assert.deepEqual(matchSourceDocuments(documents, { documentId: 'doc-a' }), [{
+    document_id: 'doc-a', filename: 'Alpha Notes.pdf', id: 'doc-a', title: 'Alpha Notes.pdf',
+  }]);
+  assert.equal(matchSourceDocuments(documents, { documentId: 'doc-missing' }).length, 0);
+  assert.equal(matchSourceDocuments(documents, { title: 'beta notes' })[0].id, 'doc-b');
 });
 
 test('full evidence packet preserves a bounded raw source window', () => {

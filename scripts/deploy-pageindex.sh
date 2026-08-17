@@ -33,7 +33,7 @@ echo "✓ Prisma client generated"
 # Step 3: Run migration
 echo ""
 echo "Step 3: Running PageIndex migration..."
-npx prisma migrate deploy --name add_pageindex_nodes
+node scripts/prisma-migrate-deploy.mjs
 echo "✓ Migration completed"
 
 # Step 4: Run backfill (optional)

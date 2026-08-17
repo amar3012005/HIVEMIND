@@ -19,6 +19,41 @@ function run(command, args, options = {}) {
   process.exit(result.status ?? 1);
 }
 
+export function assertMigrationLedgerSafe({ applicationRelations, currentLedger, archivedLedger }) {
+  if (Number(applicationRelations || 0) === 0 || currentLedger) return true;
+  const archive = archivedLedger ? ' An archived legacy ledger exists.' : '';
+  const error = new Error(
+    `Refusing prisma migrate deploy: the application schema contains ${applicationRelations} relations `
+    + `but its _prisma_migrations ledger is missing.${archive} Baseline/reconcile the production `
+    + 'schema explicitly before applying another migration.',
+  );
+  error.code = 'MIGRATION_LEDGER_UNSAFE';
+  throw error;
+}
+
+async function verifyMigrationLedger() {
+  const { PrismaClient } = await import('@prisma/client');
+  const prisma = new PrismaClient();
+  try {
+    const rows = await prisma.$queryRawUnsafe(`
+      SELECT
+        (SELECT count(*)::int
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = current_schema() AND c.relkind IN ('r','p','v','m','S')) AS application_relations,
+        to_regclass(format('%I._prisma_migrations', current_schema())) IS NOT NULL AS current_ledger,
+        to_regclass('legacy_public._prisma_migrations') IS NOT NULL AS archived_ledger
+    `);
+    const state = rows?.[0] || {};
+    return assertMigrationLedgerSafe({
+      applicationRelations: state.application_relations,
+      currentLedger: state.current_ledger,
+      archivedLedger: state.archived_ledger,
+    });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 async function canResolveHost(hostname) {
   try {
     await dns.lookup(hostname);
@@ -62,6 +97,7 @@ function readDatabaseUrlFromEnvFile() {
 }
 
 async function main() {
+  await verifyMigrationLedger();
   const databaseHost = getDatabaseHost();
   const runningInsideContainer = fs.existsSync('/.dockerenv');
 
@@ -81,7 +117,9 @@ async function main() {
   ]);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}

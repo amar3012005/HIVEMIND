@@ -199,7 +199,7 @@ run_migrations() {
     sleep 5
     
     # Run migrations
-    if docker-compose -f "$COMPOSE_FILE" exec -T app npx prisma migrate deploy; then
+    if docker-compose -f "$COMPOSE_FILE" exec -T app node scripts/prisma-migrate-deploy.mjs; then
         log_success "Database migrations completed"
     else
         log_error "Database migrations failed"

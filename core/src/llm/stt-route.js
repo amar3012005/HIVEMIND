@@ -22,6 +22,8 @@
  *
  * @module src/llm/stt-route
  */
+import { gatewayFirstFetch } from './cloudflare-gateway.js';
+
 const GROQ_STT_DEFAULT = 'whisper-large-v3';
 const OPENROUTER_STT_DEFAULT = 'nvidia/parakeet-tdt-0.6b-v3';
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
@@ -100,7 +102,7 @@ async function _post(route, opts, timeoutMs) {
         + 'product terms precisely. Start a new line when the speaker clearly changes. Output ONLY the '
         + 'raw transcript text — no preamble, no timestamps, no commentary.'
         + (prompt ? ` Names/terms that may appear: ${String(prompt).slice(0, 500)}` : '');
-      return fetch(route.url, {
+      return gatewayFirstFetch(route.url, {
         method: 'POST', headers: _OR_HEADERS(route.key), signal,
         body: JSON.stringify({
           model: route.model,
@@ -116,7 +118,7 @@ async function _post(route, opts, timeoutMs) {
       });
     }
     // Whisper-style OpenRouter STT (parakeet).
-    return fetch(route.url, {
+    return gatewayFirstFetch(route.url, {
       method: 'POST', headers: _OR_HEADERS(route.key), signal,
       body: JSON.stringify({ model: route.model, input_audio: { data: b64, format: fmt } }),
     });
@@ -130,7 +132,7 @@ async function _post(route, opts, timeoutMs) {
   fd.append('response_format', response_format || 'verbose_json');
   if (temperature !== undefined && temperature !== null) fd.append('temperature', String(temperature));
   if (prompt) fd.append('prompt', String(prompt));
-  return fetch(route.url, { method: 'POST', headers: { Authorization: `Bearer ${route.key}` }, body: fd, signal });
+  return gatewayFirstFetch(route.url, { method: 'POST', headers: { Authorization: `Bearer ${route.key}` }, body: fd, signal });
 }
 
 async function _run(route, opts, maxAttempts, timeoutMs) {

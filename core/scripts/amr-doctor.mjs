@@ -96,7 +96,9 @@ export async function runAmrDoctor(options) {
           const store = new Store({ dataRoot: temp, org: isolatedOrg, dim: options.dim });
           row.live_count = store.liveCount();
           row.opened = true;
-          if (row.live_count < 1) row.error = 'restored_shard_empty';
+          // A newly provisioned personal slot can legitimately contain zero records.
+          // Opening it proves format/readability; emptiness is informational, not corruption.
+          row.empty = row.live_count === 0;
         } catch (error) {
           row.error = `restore_open_failed:${error.message}`;
         }

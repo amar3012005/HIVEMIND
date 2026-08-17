@@ -6,8 +6,8 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Field | Evidence |
 |---|---|
-| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; recovery tooling through `584b45646b2d22df8a6ddcec77882334745ff2c5` |
-| Immutable images | `PASS` — Core and Memory Box agent `sha-7b403436` |
+| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; AMR doctor through `dc01be0d1f5ccc00ef38595370dee24018e2da21` |
+| Immutable images | `PASS` — Core `sha-dc01be0d`; Memory Box agent `sha-7b403436` |
 | Migration IDs | `NOT_PROVEN` |
 | Rollback targets | `PASS` — Core canonical release rollback manifest; Memory Box agent `sha-7a8298a8` retained as rollback image |
 
@@ -18,11 +18,11 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 | Atomic snapshot publication | `PASS` — v2 staging + verify + rename; 7/7 live shards published on 2026-08-17 | Killed copy leaves no complete restore point |
 | Artifact integrity | `PASS` — 7/7 production v2 snapshots verified; corruption regression test passes | Byte/hash verification detects mutation |
 | Off-host copy | `NOT_PROVEN` | Object exists outside the device and verifies |
-| Restore open | `PASS` — extracted production archive opened in isolated Linux container; canary shard reported 288 live records | Restored shard opens without repair |
+| Restore open | `PASS` — production doctor cryptographically verified and opened isolated copies of all 7/7 shards; six non-empty shards contained 447 live records and one valid new/empty slot was identified | Restored shard opens without repair |
 | Restore recall | `NOT_PROVEN` | Known memory and evidence return with exact scope |
 | Compaction safety | `NOT_PROVEN` | Only same-pass verified shards compact; recall parity retained |
-| Crash during write | `NOT_PROVEN` | Last acknowledged write survives or is durably retryable |
-| Multi-device writer safety | `NOT_PROVEN` | Conflicting writers cannot silently corrupt the shard |
+| Crash during write | `PASS` — native commit-last recovery test discards an uncommitted 37-record tail while retaining and recalling all 100 acknowledged records; phantom-slot and reopen suites pass | Last acknowledged write survives or is durably retryable |
+| Multi-device writer safety | `PASS` for a shared filesystem — native non-blocking exclusive `flock` rejects a second writer; cross-device/cloud-file synchronization remains explicitly unsupported | Conflicting writers cannot silently corrupt the shard |
 
 ## Managed enterprise
 

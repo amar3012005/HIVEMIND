@@ -19,8 +19,22 @@ function run(command, args, options = {}) {
   process.exit(result.status ?? 1);
 }
 
-export function assertMigrationLedgerSafe({ applicationRelations, currentLedger, archivedLedger }) {
-  if (Number(applicationRelations || 0) === 0 || currentLedger) return true;
+export function assertMigrationLedgerSafe({ applicationRelations, currentLedger, archivedLedger, appliedMigrations = 0 }) {
+  const relationCount = Number(applicationRelations || 0);
+  if (relationCount === 0) return true;
+  // Production was explicitly baselined at 160 migrations on 2026-08-17.
+  // Refuse a partially-created/replaced ledger: otherwise Prisma interprets
+  // historical migrations as pending and can replay them against live tables.
+  const baselineFloor = Number(process.env.PRISMA_MIGRATION_BASELINE_FLOOR || 160);
+  if (currentLedger && Number(appliedMigrations || 0) >= baselineFloor) return true;
+  if (currentLedger) {
+    const partial = new Error(
+      `Refusing prisma migrate deploy: the application schema has ${relationCount} relations but only `
+      + `${Number(appliedMigrations || 0)} applied migration records; the safety floor is ${baselineFloor}.`,
+    );
+    partial.code = 'MIGRATION_LEDGER_PARTIAL';
+    throw partial;
+  }
   const archive = archivedLedger ? ' An archived legacy ledger exists.' : '';
   const error = new Error(
     `Refusing prisma migrate deploy: the application schema contains ${applicationRelations} relations `
@@ -44,10 +58,15 @@ async function verifyMigrationLedger() {
         to_regclass('legacy_public._prisma_migrations') IS NOT NULL AS archived_ledger
     `);
     const state = rows?.[0] || {};
+    const applied = state.current_ledger
+      ? await prisma.$queryRawUnsafe(`SELECT count(*)::int AS n FROM hivemind._prisma_migrations
+          WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`)
+      : [{ n: 0 }];
     return assertMigrationLedgerSafe({
       applicationRelations: state.application_relations,
       currentLedger: state.current_ledger,
       archivedLedger: state.archived_ledger,
+      appliedMigrations: applied?.[0]?.n || 0,
     });
   } finally {
     await prisma.$disconnect();

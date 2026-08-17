@@ -68,6 +68,9 @@ model Organization {
   // Commercial profile is explicit. Hosting/storage remain the data-plane
   // settings; promotions may only select compatible combinations.
   accountType                  String             @default("personal") @map("account_type") @db.VarChar(32)
+  commercialTerms             Json?              @map("commercial_terms") @db.JsonB
+  companyProfile              Json?              @map("company_profile") @db.JsonB
+  promotionCodeId             String?            @map("promotion_code_id") @db.Uuid
   // Memory plane is independent from billing plan: personal managed workspaces use embedded .amr,
   // enterprise stays on the relational/vector hybrid unless explicitly migrated.
   memoryStorageMode            String             @default("hybrid") @map("memory_storage_mode") @db.VarChar(32)
@@ -3119,6 +3122,10 @@ model HyperRoom {
   /// Additional Population-Sim toggle: 'on' runs an extra many-voice social simulation that
   /// produces a popup report folded into the synthesis; 'off' (default) leaves the main flow untouched.
   simMode            String       @default("off") @map("sim_mode") @db.VarChar(16)
+  /// Evolution mode for room runtime behavior. Kept nullable for compatibility with existing rooms.
+  evoMode            String?      @default("off") @map("evo_mode")
+  /// Optional room-specific orchestration playbook persisted by the control plane.
+  roomPlaybook       Json?        @map("room_playbook") @db.JsonB
   /// Population-Sim cast size (FE slider, 10-100). Default 24.
   simAgents          Int          @default(24) @map("sim_agents")
   /// Bounded episodic summaries of completed Room runs. This is continuity memory,

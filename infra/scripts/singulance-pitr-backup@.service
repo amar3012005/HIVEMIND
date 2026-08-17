@@ -1,0 +1,8 @@
+[Unit]
+Description=HIVEMIND managed PostgreSQL pgBackRest %i backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/hivemind-storage/infra/scripts/singulance-pitr.sh %i

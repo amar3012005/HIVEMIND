@@ -170,8 +170,18 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-hivemind_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-hivemind}
+    command:
+      - postgres
+      - -c
+      - archive_mode=${POSTGRES_ARCHIVE_MODE:-off}
+      - -c
+      - archive_timeout=${POSTGRES_ARCHIVE_TIMEOUT:-300s}
+      - -c
+      - archive_command=hivemind-pgbackrest --stanza=hivemind archive-push %p
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - postgres-pitr-repo:/var/lib/pgbackrest
+      - postgres-pitr-secrets:/run/secrets/hivemind-pitr:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hivemind_user} -d ${POSTGRES_DB:-hivemind}"]
       interval: 10s
@@ -397,6 +407,8 @@ volumes:
   hivemind-data:     # .amr files + uploads — SOLE COPY for .amr orgs; back up
   hivemind-logs:
   postgres-data:
+  postgres-pitr-repo:    # encrypted pgBackRest base backups + continuous WAL archive
+  postgres-pitr-secrets: # repository cipher pass; mounted only into PostgreSQL
   qdrant-data:
   redis-data:
   docling-models:

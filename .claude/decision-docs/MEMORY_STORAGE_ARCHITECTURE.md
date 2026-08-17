@@ -109,6 +109,7 @@ PostgreSQL owns content, metadata, provenance, graph, lifecycle state, and autho
 ### Required safety controls
 
 - PostgreSQL point-in-time recovery or equivalent continuous log archive, plus portable dumps.
+- Managed PITR uses an opt-in pgBackRest repository (`POSTGRES_ARCHIVE_MODE=on` only after stanza initialization). Base backups and WAL are encrypted before entering the repository; the repository cipher pass is stored in a PostgreSQL-only Docker volume and is not mounted into Core. Weekly full and daily differential backups bound restore-chain length, while continuous `archive-push` owns the recovery-point objective. Activation is accepted only after the named-restore-point drill restores into a disposable volume and proves a committed pre-target marker exists while a post-target marker does not.
 - Qdrant snapshots coupled to a manifest that records collection, dimension, embedding model/version, and PostgreSQL recovery boundary.
 - Encryption in transit and at rest, with tested key rotation and recovery access separated from application credentials.
 - Managed backup artifacts are packaged only after manifest verification and encrypted as an authenticated `.hmstorage` bundle. The backup key lives in a root-only operator file outside the Compose environment; upload commands receive ciphertext and its checksum, never the key or plaintext directory.

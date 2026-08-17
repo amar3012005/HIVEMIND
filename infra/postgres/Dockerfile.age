@@ -32,7 +32,8 @@ RUN apk add --no-cache --virtual .build-deps \
     && apk add --no-cache \
     ca-certificates \
     tzdata \
-    icu-libs
+    icu-libs \
+    pgbackrest
 
 # Build and install Apache AGE
 RUN git clone --depth 1 --branch PG15 https://github.com/apache/age.git /tmp/age \
@@ -67,12 +68,16 @@ COPY ./init-age.sql /docker-entrypoint-initdb.d/01-install-age.sql
 
 # Copy postgresql.conf
 COPY ./postgresql.conf /etc/postgresql/postgresql.conf
+COPY ./pgbackrest.conf /etc/pgbackrest/pgbackrest.conf
+COPY ./hivemind-pgbackrest.sh /usr/local/bin/hivemind-pgbackrest
 
 # Set proper permissions for init scripts
 RUN chown -R postgres:postgres /docker-entrypoint-initdb.d \
     && chmod 644 /docker-entrypoint-initdb.d/*.sql \
     && chown postgres:postgres /etc/postgresql/postgresql.conf \
-    && chmod 644 /etc/postgresql/postgresql.conf
+    && chmod 644 /etc/postgresql/postgresql.conf \
+    && chown -R postgres:postgres /etc/pgbackrest \
+    && chmod 755 /usr/local/bin/hivemind-pgbackrest
 
 # Health check
 HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=5 \

@@ -33,3 +33,25 @@ test('distinct or contradictory evidence remains independently rankable', () => 
   ]);
   assert.equal(result.length, 2);
 });
+
+test('document lineage does not erase a distinct source passage beside its atomic memory', () => {
+  const result = dedupeAuthorizedEvidenceCandidates([
+    {
+      _kind: 'memory',
+      _content: 'Project Lumen launches on 17 November 2031.',
+      _row: { id: 'memory-lumen' },
+    },
+    {
+      _kind: 'evidence',
+      _content: 'The recovery marker is ZX-91. Project Lumen launches on 17 November 2031. Its owner is Samira Vale.',
+      _row: {
+        segment_id: 'segment-lumen',
+        document_id: 'document-lumen',
+        linked_memory_id: 'memory-lumen',
+      },
+    },
+  ]);
+
+  assert.deepEqual(result.map((candidate) => candidate._kind), ['memory', 'evidence']);
+  assert.equal(result[1]._row.linked_memory_id, 'memory-lumen');
+});

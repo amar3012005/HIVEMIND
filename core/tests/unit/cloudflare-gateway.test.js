@@ -148,6 +148,47 @@ test('Legacy text router uses one Gateway-backed provider without replay', async
   }
 }));
 
+test('Legacy text completion attaches Gateway authorization to an already-Gateway provider URL', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+  CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE: '',
+  CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: '',
+  CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: 'openrouter-alias',
+}, async () => {
+  const previousCerebras = process.env.CEREBRAS_API_KEY;
+  const previousOpenRouter = process.env.OPENROUTER_API_KEY;
+  const originalFetch = globalThis.fetch;
+  let captured = null;
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras-key';
+  delete process.env.OPENROUTER_API_KEY;
+  globalThis.fetch = async (url, options) => {
+    captured = { url: String(url), options };
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }], usage: {} }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    });
+  };
+  try {
+    const moduleUrl = new URL(`../../src/llm/groq-fallback.js?gateway-auth=${Date.now()}`, import.meta.url);
+    const { groqFetch } = await import(moduleUrl);
+    const response = await groqFetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST', headers: { Authorization: 'Bearer direct-key-must-not-leak', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'openai/gpt-oss-120b', messages: [{ role: 'user', content: 'test' }] }),
+    });
+    assert.equal(response.ok, true);
+    assert.equal(captured.url, 'https://gateway.ai.cloudflare.com/v1/account/gateway/openrouter/chat/completions');
+    const headers = new Headers(captured.options.headers);
+    assert.equal(headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+    assert.equal(headers.get('cf-aig-byok-alias'), 'openrouter-alias');
+    assert.equal(headers.get('authorization'), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousCerebras == null) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = previousCerebras;
+    if (previousOpenRouter == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = previousOpenRouter;
+  }
+}));
+
 test('Dynamic chat route strips caller authorization for fetch', async () => withEnv({
   CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
   CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',

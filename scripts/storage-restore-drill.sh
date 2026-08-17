@@ -77,6 +77,14 @@ docker exec -i "$PG" pg_restore -U hivemind -d restore_drill \
 PG_TABLES="$(docker exec "$PG" psql -U hivemind -d restore_drill -Atc \
   "select count(*) from pg_catalog.pg_tables where schemaname not in ('pg_catalog','information_schema')")"
 [[ "$PG_TABLES" -gt 0 ]] || { echo "PostgreSQL restore contains no application tables" >&2; exit 1; }
+PG_RELATIONSHIPS="$(docker exec "$PG" psql -U hivemind -d restore_drill -Atc \
+  "select count(*) from hivemind.relationships")"
+PG_EVIDENCE_LINKS="$(docker exec "$PG" psql -U hivemind -d restore_drill -Atc \
+  "select count(*) from hivemind.memory_evidence_links")"
+PG_ENTITY_LINKS="$(docker exec "$PG" psql -U hivemind -d restore_drill -Atc \
+  "select count(*) from hivemind.memory_entity_links")"
+PG_CANONICAL_ENTITIES="$(docker exec "$PG" psql -U hivemind -d restore_drill -Atc \
+  "select count(*) from hivemind.canonical_entities")"
 
 docker run -d --name "$QD" --network "$NET" --network-alias qdrant \
   --ulimit nofile=65535:65535 \
@@ -146,6 +154,6 @@ const post=(url,body,auth=false)=>fetch(url,{method:"POST",headers:auth?h:{"cont
   EVIDENCE_HITS="$(HITS="$HITS" node -e 'process.stdout.write(String(JSON.parse(process.env.HITS).evidence))')"
 fi
 
-printf '{"ok":true,"mode":"%s","postgres_tables":%s,"qdrant_collections":%s,"amr_live_count":"%s","memory_hits":"%s","evidence_hits":"%s"}\n' \
-  "$MODE" "$PG_TABLES" "$QD_COLLECTIONS" "$AMR_COUNT" "$MEMORY_HITS" "$EVIDENCE_HITS"
-
+printf '{"ok":true,"mode":"%s","postgres_tables":%s,"relationships":%s,"evidence_links":%s,"entity_links":%s,"canonical_entities":%s,"qdrant_collections":%s,"amr_live_count":"%s","memory_hits":"%s","evidence_hits":"%s"}\n' \
+  "$MODE" "$PG_TABLES" "$PG_RELATIONSHIPS" "$PG_EVIDENCE_LINKS" "$PG_ENTITY_LINKS" \
+  "$PG_CANONICAL_ENTITIES" "$QD_COLLECTIONS" "$AMR_COUNT" "$MEMORY_HITS" "$EVIDENCE_HITS"

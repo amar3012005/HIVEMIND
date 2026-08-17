@@ -7,7 +7,7 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 | Field | Evidence |
 |---|---|
 | Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; AMR doctor through `dc01be0d1f5ccc00ef38595370dee24018e2da21` |
-| Immutable images | `PASS` — Core `sha-dc01be0d`; Memory Box agent `sha-7b403436` |
+| Immutable images | `PASS` — Core `sha-6681586d`; Memory Box agent `sha-7b403436` |
 | Migration IDs | `NOT_PROVEN` |
 | Rollback targets | `PASS` — Core canonical release rollback manifest; Memory Box agent `sha-7a8298a8` retained as rollback image |
 
@@ -30,9 +30,9 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 |---|---|---|
 | PostgreSQL recovery point | `PASS` for portable dump restore; PITR remains `NOT_PROVEN` — isolated restore contained 813 tables | Timestamp/LSN and successful isolated restore |
 | Qdrant recovery | `PASS` — exact v1.12.4 full snapshot restored 21 collections; canary collection contained 2 points | Snapshot restores expected collections/dimension/counts |
-| Cross-store consistency | `NOT_PROVEN` | Pending vectors repaired; no false `synced` rows |
-| Tenant isolation | `NOT_PROVEN` | Cross-tenant/project negative tests for memory and evidence |
-| Graph/provenance recovery | `NOT_PROVEN` | Links and citations survive restore |
+| Cross-store consistency | `PASS` — 2026-08-17 full production comparison checked 1,304 active memories: 1,304/1,304 actual Qdrant points recorded `synced`, zero missing/failed; all 5,540 evidence rows report `vector_stored=true` | Pending vectors repaired; no false `synced` rows |
+| Tenant isolation | `PASS` — immutable Core `sha-6681586d`; storage-boundary canary returned 20/20 correctly scoped org hits and 20/20 correctly scoped project hits, while an Org A context attempting an Org B filter was rejected before Qdrant | Cross-tenant/project negative tests for memory and evidence |
+| Graph/provenance recovery | `PASS` — isolated managed restore on 2026-08-17 recovered 2,134 relationships, 1,286 memory-evidence links, 3,204 memory-entity links, and 1,834 canonical entities | Links and citations survive restore |
 | Encryption/key recovery | `NOT_PROVEN` | Restore operator can decrypt; application credentials cannot manage keys |
 | Failure isolation | `NOT_PROVEN` | One tenant outage does not exhaust another tenant's interactive budget |
 

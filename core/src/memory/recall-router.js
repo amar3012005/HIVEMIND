@@ -592,14 +592,21 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // recall look non-deterministic: 3 degradations in 40 minutes and a canary flapping
   // 4/5 -> 5/5 on the one cross-lingual question, with nothing in the log to explain it.
   //
-  // The floor is now the inner timeout plus margin, so this wrapper can never kill an
-  // attempt the reranker itself would have completed. It stays a real ceiling — a
-  // pathological rerank still degrades — but every degrade is now attributed.
+  // The parent deadline is authoritative. A previous "inner timeout + margin"
+  // floor expanded a 900ms remaining budget to 1350ms; /api/recall returned an
+  // EMPTY outer-timeout packet while this function completed moments later.
+  // If there is too little time for a measured warm call, skip external rerank
+  // and return the deterministic lane interleave immediately. Accuracy is
+  // explicitly marked degraded, but available recall is never replaced by [].
   const _rrInner = Number(process.env.RERANK_TOTAL_TIMEOUT_MS || 1200);
-  const _rrBudget = Math.max(budgetMs || 0, _rrInner + 150);
+  const _rrBudget = Math.max(0, Number(budgetMs) || 0);
+  const _rrMin = Number(process.env.RERANK_MIN_BUDGET_MS || 400);
   const _rrStart = Date.now();
   let rerankMeta = null;
-  try {
+  if (_rrBudget < _rrMin) {
+    console.warn(`[recall-hybrid] SKIPPING cross-encoder: ${_rrBudget}ms remain `
+      + `(needs >=${_rrMin}ms; pool=${deduped.length}) — returning lane interleave within parent deadline.`);
+  } else try {
     const rr = await withTimeout(
       () => rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
       _rrBudget,
@@ -2020,7 +2027,7 @@ export class RecallRouter {
         evidence: evidenceWithLineage,
         deliverN,
         evidenceN: HOP2_DOC_LIMIT,
-        budgetMs: Math.max(remainingBudget(), RERANK_RESERVE_MS),
+        budgetMs: remainingBudget(),
         structuredIntent: options.structured_intent === true,
       }).catch(() => null);
       if (v2 && Array.isArray(v2.memories)) {

@@ -6,8 +6,8 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Field | Evidence |
 |---|---|
-| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; portable/off-host AMR recovery through `562c4da8bc86941289985c699c7e17218de284c3`; encrypted BYOD replay through `dc51d2a3e48626238605126df7028c4192d70d9c`; managed tenant admission through `b3c2382e24997e17b5f38a676c4fe969fdbe18bc` |
-| Immutable images | `PASS` — Core `sha-b3c2382e`; Memory Box agent `sha-7b403436` |
+| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; portable/off-host AMR recovery through `562c4da8bc86941289985c699c7e17218de284c3`; encrypted BYOD replay through `dc51d2a3e48626238605126df7028c4192d70d9c`; managed tenant admission through `b3c2382e24997e17b5f38a676c4fe969fdbe18bc`; managed PITR through `71363e50d58b9927e49542b40dd616b0e63f4bc6` |
+| Immutable images | `PASS` — Core `sha-b3c2382e`; PostgreSQL `sha-71363e50`; Memory Box agent `sha-7b403436` |
 | Migration IDs | `NOT_PROVEN` |
 | Rollback targets | `PASS` — Core canonical release rollback manifest; Memory Box agent `sha-7a8298a8` retained as rollback image |
 
@@ -29,7 +29,7 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Gate | Status | Required evidence |
 |---|---|---|
-| PostgreSQL recovery point | `PASS` for portable dump restore; PITR remains `NOT_PROVEN` — isolated restore contained 813 tables, and the installed weekly systemd drill completed successfully on 2026-08-17 with an atomic content-free receipt bound to the encrypted bundle hash | Timestamp/LSN and successful isolated restore |
+| PostgreSQL recovery point | `PASS` for portable dump and encrypted local PITR; independent off-host PITR copy remains `NOT_PROVEN` — production pgBackRest archived WAL `00000001000000010000000D`, completed encrypted full backup `20260817-121416F` (414,914,469 logical bytes), and restored to a named point in a disposable volume with baseline row 1 and post-target row 0. Receipt: `/var/lib/hivemind/pitr-drills/20260817T121414Z.json`; weekly-full and daily-differential timers are active | Timestamp/LSN and successful isolated restore |
 | Qdrant recovery | `PASS` — exact v1.12.4 full snapshot restored 21 collections; canary collection contained 2 points | Snapshot restores expected collections/dimension/counts |
 | Cross-store consistency | `PASS` — 2026-08-17 full production comparison checked 1,304 active memories: 1,304/1,304 actual Qdrant points recorded `synced`, zero missing/failed; all 5,540 evidence rows report `vector_stored=true` | Pending vectors repaired; no false `synced` rows |
 | Tenant isolation | `PASS` — immutable Core `sha-6681586d`; storage-boundary canary returned 20/20 correctly scoped org hits and 20/20 correctly scoped project hits, while an Org A context attempting an Org B filter was rejected before Qdrant | Cross-tenant/project negative tests for memory and evidence |

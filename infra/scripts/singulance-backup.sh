@@ -60,6 +60,7 @@ BACKUP_KEY_FILE="${MANAGED_BACKUP_KEY_FILE:-/root/.config/hivemind-backup.env}"
 # shellcheck disable=SC1090
 source "$BACKUP_KEY_FILE"
 [[ -n "${STORAGE_BACKUP_ENCRYPTION_KEY:-}" ]] || { echo "STORAGE_BACKUP_ENCRYPTION_KEY missing" >&2; exit 2; }
+export STORAGE_BACKUP_ENCRYPTION_KEY
 ENCRYPTED_BUNDLE="$BACKUP_DIR/$STAMP.hmstorage"
 node "$REPO_ROOT/scripts/storage-bundle-crypto.mjs" encrypt "$FINAL_DEST" "$ENCRYPTED_BUNDLE" >/dev/null
 unset STORAGE_BACKUP_ENCRYPTION_KEY

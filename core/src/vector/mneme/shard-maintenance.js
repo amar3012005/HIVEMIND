@@ -36,6 +36,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 /** Files that constitute a slot. `shard.lock` is deliberately NOT copied. */
 const SHARD_FILES = ['shard.amr', 'shard.vec', 'shard.txt', 'shard.edg'];
@@ -93,7 +94,61 @@ export function verifyShardSnapshot(snapshotDir) {
   return { ok: true, org: manifest.org, ts: manifest.ts, files: manifest.files.length };
 }
 
+/**
+ * Verify that a snapshot has an upload acknowledgement bound to its exact
+ * manifest and encrypted portable bundle. The uploader is responsible for
+ * returning success only after the remote object checksum has been verified.
+ */
+export function verifyOffsiteReceipt(snapshotDir) {
+  const receiptPath = path.join(snapshotDir, 'OFFSITE_RECEIPT.json');
+  let receipt;
+  try { receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8')); }
+  catch (error) { return { ok: false, error: `receipt_unreadable:${error.message}` }; }
+  if (receipt?.complete !== true || !/^[a-f0-9]{64}$/.test(receipt.bundle_sha256 || '')
+      || !/^[a-f0-9]{64}$/.test(receipt.snapshot_manifest_sha256 || '')
+      || typeof receipt.target !== 'string' || !receipt.target.trim()
+      || !Number.isFinite(Date.parse(receipt.uploaded_at || ''))) {
+    return { ok: false, error: 'receipt_invalid' };
+  }
+  if (sha256File(path.join(snapshotDir, 'MANIFEST.json')) !== receipt.snapshot_manifest_sha256) {
+    return { ok: false, error: 'receipt_manifest_mismatch' };
+  }
+  return { ok: true, target: receipt.target, uploaded_at: receipt.uploaded_at };
+}
+
 const isOn = (v, dflt) => String(process.env[v] ?? dflt).toLowerCase() === 'true';
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+export function uploadSnapshotsOffsite(snapshots = [], {
+  enabled = isOn('MNEME_OFFSITE_UPLOAD_ENABLED', 'false'),
+  runner = execFileSync,
+  logger = console,
+} = {}) {
+  const out = { attempted: 0, uploaded: 0, failed: 0, orgs: [] };
+  if (!enabled) return out;
+  const uploader = path.resolve(MODULE_DIR, '../../../scripts/amr-offsite-upload.sh');
+  for (const snapshot of snapshots) {
+    out.attempted += 1;
+    try {
+      runner('bash', [uploader, snapshot.path], { env: process.env, stdio: 'pipe' });
+      const receipt = verifyOffsiteReceipt(snapshot.path);
+      if (!receipt.ok) throw new Error(receipt.error);
+      out.uploaded += 1;
+      out.orgs.push(snapshot.org);
+    } catch (error) {
+      out.failed += 1;
+      logger.warn?.(`[shard-offsite] slot ${String(snapshot.org).slice(0, 8)} failed: ${error.message}`);
+    }
+  }
+  if (out.attempted) logger.info?.(`[shard-offsite] attempted=${out.attempted} uploaded=${out.uploaded} failed=${out.failed}`);
+  return out;
+}
+
+export function offsiteEligibleOrgs(snapshots = []) {
+  return snapshots
+    .filter((snapshot) => verifyOffsiteReceipt(snapshot.path).ok)
+    .map((snapshot) => snapshot.org);
+}
 
 /**
  * One snapshot pass over every slot under dataRoot.
@@ -108,7 +163,7 @@ export function snapshotShardsOnce({
   logger = console,
 } = {}) {
   const root = backupRoot || path.join(path.dirname(dataRoot), 'mneme-backups');
-  const stats = { slots: 0, snapped: 0, pruned: 0, failed: 0, bytes: 0, orgs: [] };
+  const stats = { slots: 0, snapped: 0, pruned: 0, failed: 0, bytes: 0, orgs: [], snapshots: [] };
 
   let entries = [];
   try {
@@ -174,6 +229,7 @@ export function snapshotShardsOnce({
       stats.snapped += 1;
       stats.bytes += bytes;
       stats.orgs.push(org);
+      stats.snapshots.push({ org, path: dst });
 
       // Retention: keep the newest `keep` COMPLETE snapshots, drop the rest.
       let existing = [];
@@ -205,11 +261,19 @@ export function snapshotShardsOnce({
  * @returns {Promise<{backup:object,compact:object|null}>}
  */
 export async function runShardMaintenanceOnce({ logger = console } = {}) {
-  const out = { backup: null, mirror: null, docs: null, entities: null, provenance: null, evidence: null, compact: null };
+  const out = {
+    backup: null, offsite: null, mirror: null, docs: null,
+    entities: null, provenance: null, evidence: null, compact: null,
+  };
 
   out.backup = isOn('MNEME_BACKUP_ENABLED', 'true')
     ? snapshotShardsOnce({ logger })
-    : { slots: 0, snapped: 0, pruned: 0, failed: 0, bytes: 0, orgs: [] };
+    : { slots: 0, snapped: 0, pruned: 0, failed: 0, bytes: 0, orgs: [], snapshots: [] };
+
+  // Upload the exact snapshot from this pass before any destructive operation.
+  // The uploader writes a receipt only after its operator-owned remote command
+  // returns success and the receipt is verified again here.
+  out.offsite = uploadSnapshotsOffsite(out.backup.snapshots || [], { logger });
 
   // ── SQL-mirror backfill ───────────────────────────────────────────────────
   // /v1/lexical (the lexical half of hybrid recall) runs Postgres FTS over the
@@ -316,10 +380,13 @@ export async function runShardMaintenanceOnce({ logger = console } = {}) {
 
   if (!isOn('MNEME_COMPACT_ENABLED', 'false')) return out;
 
-  // Compaction rewrites the slot — only touch what was just snapshotted.
-  const backedUp = new Set(out.backup.orgs || []);
+  // Compaction rewrites the slot. A local snapshot protects against a bad
+  // rewrite but not device loss, so eligibility requires a same-pass snapshot
+  // whose encrypted portable bundle has an off-host receipt bound to the exact
+  // manifest. Compaction stays fail-closed when upload is not configured.
+  const backedUp = new Set(offsiteEligibleOrgs(out.backup.snapshots || []));
   if (!backedUp.size) {
-    logger.warn?.('[shard-compact] skipped — no slot was snapshotted this pass (never compact unbacked data)');
+    logger.warn?.('[shard-compact] skipped — no same-pass snapshot has a verified off-host receipt');
     return out;
   }
   try {

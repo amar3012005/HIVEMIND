@@ -4556,3 +4556,68 @@ model AuditCheckpoint {
   @@index([orgId, id(sort: Desc)], map: "audit_checkpoints_org_idx")
   @@map("audit_checkpoints")
 }
+
+// Server-owned model routing and cost attribution. The runtime uses raw SQL at
+// its inference chokepoint; these canonical models keep drift/migration tooling
+// from treating the governance ledger as disposable infrastructure.
+model AiModelPolicy {
+  useCase        String   @id @map("use_case") @db.VarChar(80)
+  primaryModel   String   @map("primary_model") @db.VarChar(160)
+  secondaryModel String?  @map("secondary_model") @db.VarChar(160)
+  enabled        Boolean  @default(true)
+  revision       Int      @default(1)
+  updatedBy      String?  @map("updated_by") @db.VarChar(120)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("ai_model_policies")
+}
+
+model AiModelPrice {
+  id                         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  model                      String    @db.VarChar(160)
+  provider                   String    @default("*") @db.VarChar(80)
+  currency                   String    @default("USD") @db.Char(3)
+  inputMicrosPerMillion      BigInt    @default(0) @map("input_micros_per_million")
+  outputMicrosPerMillion     BigInt    @default(0) @map("output_micros_per_million")
+  cacheReadMicrosPerMillion  BigInt    @default(0) @map("cache_read_micros_per_million")
+  effectiveFrom              DateTime  @default(now()) @map("effective_from") @db.Timestamptz(6)
+  effectiveTo                DateTime? @map("effective_to") @db.Timestamptz(6)
+  updatedBy                  String?   @map("updated_by") @db.VarChar(120)
+  createdAt                  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("ai_model_prices")
+}
+
+model AiUsageEvent {
+  id                         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  idempotencyKey             String   @unique @map("idempotency_key") @db.VarChar(180)
+  orgId                      String?  @map("org_id") @db.Uuid
+  userId                     String?  @map("user_id") @db.Uuid
+  apiKeyId                   String?  @map("api_key_id") @db.Uuid
+  traceId                    String?  @map("trace_id") @db.VarChar(160)
+  useCase                    String   @default("unspecified") @map("use_case") @db.VarChar(80)
+  requestedModel             String   @map("requested_model") @db.VarChar(160)
+  servedModel                String   @map("served_model") @db.VarChar(160)
+  provider                   String   @default("unknown") @db.VarChar(80)
+  promptTokens               BigInt   @default(0) @map("prompt_tokens")
+  completionTokens           BigInt   @default(0) @map("completion_tokens")
+  cachedPromptTokens         BigInt   @default(0) @map("cached_prompt_tokens")
+  reasoningTokens            BigInt   @default(0) @map("reasoning_tokens")
+  inputCostMicros            BigInt   @default(0) @map("input_cost_micros")
+  outputCostMicros           BigInt   @default(0) @map("output_cost_micros")
+  cacheCostMicros            BigInt   @default(0) @map("cache_cost_micros")
+  providerReportedCostMicros BigInt?  @map("provider_reported_cost_micros")
+  totalCostMicros            BigInt   @default(0) @map("total_cost_micros")
+  pricingSource              String   @default("catalog") @map("pricing_source") @db.VarChar(40)
+  appliedPricing             Json     @default("{}") @map("applied_pricing") @db.JsonB
+  status                     String   @default("completed") @db.VarChar(24)
+  gatewayRequestId           String?  @map("gateway_request_id") @db.VarChar(160)
+  occurredAt                 DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  requestCount               Int      @default(1) @map("request_count")
+
+  @@index([servedModel, provider, occurredAt(sort: Desc)], map: "idx_ai_usage_model_time")
+  @@index([orgId, occurredAt(sort: Desc)], map: "idx_ai_usage_org_time")
+  @@index([userId, occurredAt(sort: Desc)], map: "idx_ai_usage_user_time")
+  @@map("ai_usage_events")
+}

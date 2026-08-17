@@ -114,6 +114,7 @@ PostgreSQL owns content, metadata, provenance, graph, lifecycle state, and autho
 - Managed backup artifacts are packaged only after manifest verification and encrypted as an authenticated `.hmstorage` bundle. The backup key lives in a root-only operator file outside the Compose environment; upload commands receive ciphertext and its checksum, never the key or plaintext directory.
 - Per-tenant failure isolation for queues, circuits, quotas, and maintenance so one tenant cannot starve interactive recall for another.
 - Restore drills into a non-production namespace; validate counts, tenant isolation, vector dimension, graph links, evidence hydration, and exact recall canaries.
+- A weekly locked systemd drill decrypts the newest managed bundle with the operator-only key, restores PostgreSQL/Qdrant/AMR into disposable namespaces, and atomically records a content-free verification receipt retained for 90 days.
 
 ## Self-hosted BYOD Memory Box
 

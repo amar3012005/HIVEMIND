@@ -1,0 +1,11 @@
+[Unit]
+Description=HIVEMIND encrypted managed storage restore drill
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=REPO_ROOT=/usr/local/libexec/hivemind-storage
+Environment=BACKUP_DIR=/var/backups/hivemind
+Environment=MANAGED_BACKUP_KEY_FILE=/root/.config/hivemind-backup.env
+ExecStart=/usr/local/libexec/hivemind-storage/infra/scripts/singulance-restore-drill.sh

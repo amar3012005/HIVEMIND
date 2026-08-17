@@ -6,8 +6,8 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Field | Evidence |
 |---|---|
-| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; portable/off-host AMR recovery through `562c4da8bc86941289985c699c7e17218de284c3`; encrypted BYOD replay through `dc51d2a3e48626238605126df7028c4192d70d9c` |
-| Immutable images | `PASS` — Core `sha-dc51d2a3`; Memory Box agent `sha-7b403436` |
+| Canonical merged SHA | `PASS` — storage runtime included in `7b4034368fc981fcac11e3c8b5f0b31d269fb3a4`; isolated restore automation through `d7688e0738c049f9e4816a268954373b880ea4a9`; portable/off-host AMR recovery through `562c4da8bc86941289985c699c7e17218de284c3`; encrypted BYOD replay through `dc51d2a3e48626238605126df7028c4192d70d9c`; managed tenant admission through `b3c2382e24997e17b5f38a676c4fe969fdbe18bc` |
+| Immutable images | `PASS` — Core `sha-b3c2382e`; Memory Box agent `sha-7b403436` |
 | Migration IDs | `NOT_PROVEN` |
 | Rollback targets | `PASS` — Core canonical release rollback manifest; Memory Box agent `sha-7a8298a8` retained as rollback image |
 
@@ -29,13 +29,13 @@ Status values: `NOT_PROVEN`, `PASS`, `FAIL`, `BLOCKED`. A code merge or healthy 
 
 | Gate | Status | Required evidence |
 |---|---|---|
-| PostgreSQL recovery point | `PASS` for portable dump restore; PITR remains `NOT_PROVEN` — isolated restore contained 813 tables | Timestamp/LSN and successful isolated restore |
+| PostgreSQL recovery point | `PASS` for portable dump restore; PITR remains `NOT_PROVEN` — isolated restore contained 813 tables, and the installed weekly systemd drill completed successfully on 2026-08-17 with an atomic content-free receipt bound to the encrypted bundle hash | Timestamp/LSN and successful isolated restore |
 | Qdrant recovery | `PASS` — exact v1.12.4 full snapshot restored 21 collections; canary collection contained 2 points | Snapshot restores expected collections/dimension/counts |
 | Cross-store consistency | `PASS` — 2026-08-17 full production comparison checked 1,304 active memories: 1,304/1,304 actual Qdrant points recorded `synced`, zero missing/failed; all 5,540 evidence rows report `vector_stored=true` | Pending vectors repaired; no false `synced` rows |
 | Tenant isolation | `PASS` — immutable Core `sha-6681586d`; storage-boundary canary returned 20/20 correctly scoped org hits and 20/20 correctly scoped project hits, while an Org A context attempting an Org B filter was rejected before Qdrant | Cross-tenant/project negative tests for memory and evidence |
 | Graph/provenance recovery | `PASS` — isolated managed restore on 2026-08-17 recovered 2,134 relationships, 1,286 memory-evidence links, 3,204 memory-entity links, and 1,834 canonical entities | Links and citations survive restore |
 | Encryption/key recovery | `PASS` — 2026-08-17 operator drill encrypted the real 331,724,940-byte managed recovery unit, authenticated and decrypted it into isolation, reverified all 3 manifest artifacts, and removed the probe; the 32-byte key is root-only outside Compose and absent from Core | Restore operator can decrypt; application credentials cannot manage keys |
-| Failure isolation | `NOT_PROVEN` | One tenant outage does not exhaust another tenant's interactive budget |
+| Failure isolation | `PASS` — immutable Core `sha-b3c2382e` gates `/api/chat`, `/api/recall`, and graph work by organization with independent bounded FIFOs, disconnect cleanup, and no false release of still-running work. Unit acceptance saturated tenant A while tenant B acquired immediately; the production route canary launched eight tenant-A recalls and tenant B still returned grounded memory/evidence in 1,267 ms while tenant-A requests completed in 1,795–3,338 ms. Core remained healthy with zero restarts and no fresh gate, bulkhead, circuit, timeout, or application errors | One tenant outage does not exhaust another tenant's interactive budget |
 
 ## Self-hosted BYOD
 

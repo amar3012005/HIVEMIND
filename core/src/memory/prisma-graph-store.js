@@ -570,6 +570,9 @@ export class PrismaGraphStore {
       const rIsLatest = patch.isLatest ?? patch.is_latest;
       if (rIsLatest !== undefined) remotePatch.is_latest = rIsLatest;
       if (patch.memoryType !== undefined) remotePatch.memory_type = patch.memoryType;
+      if (patch.content !== undefined) remotePatch.content = patch.content;
+      if (patch.title !== undefined) remotePatch.title = patch.title;
+      if (patch.importanceScore !== undefined) remotePatch.importance_score = patch.importanceScore;
       if (patch.metadata !== undefined) remotePatch.metadata = patch.metadata;
       const rValidTo = patch.validTo ?? patch.valid_to;
       if (rValidTo !== undefined) remotePatch.valid_to = rValidTo;

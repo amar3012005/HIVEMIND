@@ -1242,6 +1242,9 @@ function routesFor(ctx) {
         if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
         if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
         if (b.valid_to !== undefined) { args.push(b.valid_to); sets.push(`valid_to=$${args.length}::timestamptz`); }
+        if (b.content !== undefined) { args.push(b.content); sets.push(`content=$${args.length}`); }
+        if (b.title !== undefined) { args.push(b.title); sets.push(`title=$${args.length}`); }
+        if (b.importance_score !== undefined) { args.push(Number(b.importance_score)); sets.push(`confidence=$${args.length}`); }
         if (b.metadata !== undefined) { args.push(JSON.stringify(b.metadata || {})); sets.push(`metadata=$${args.length}::jsonb`); }
         if (sets.length) await db().query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
       } catch (e) { console.warn(`[embedded-agent] patch mirror failed id=${b.id}: ${e.message}`); }

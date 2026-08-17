@@ -6,6 +6,7 @@ import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pq
 import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrGraph } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList, isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
+import { buildWideTsQuery, lexicalQueryTokens } from './lexical-query.js';
 
 /**
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
@@ -1102,12 +1103,10 @@ export class PrismaGraphStore {
     // Only run outside transactions — $queryRawUnsafe corrupts Prisma interactive transactions
     if (query && this.client.$queryRawUnsafe && !this.inTransaction) {
       try {
-        // Sanitize: tsquery rejects punctuation, special chars, leading digits-only.
-        // Strip everything except a-z0-9, lowercase, drop tokens <2 chars.
-        const tsQuery = query.trim().split(/\s+/)
-          .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, ''))
-          .filter(w => w.length > 1)
-          .map(w => w + ':*').join(' & ');
+        // Unicode-wide candidate query. The previous ASCII-only sanitizer
+        // changed accented words (`retención` -> `retencin`), erased Arabic/
+        // CJK entirely, and AND-joined filler with the answer-bearing terms.
+        const tsQuery = buildWideTsQuery(query);
         // Hybrid lexical recall (rosemary, flag-gated): collapsed distinctive
         // query forms for a pg_trgm word_similarity lane. FTS prefix-matching
         // (tim:*) can't match INSIDE a concatenated token ("SolvisTim" → one
@@ -1115,8 +1114,7 @@ export class PrismaGraphStore {
         // collapsed bigram "solvistim" + trigram word_similarity does. Default
         // OFF → _trgmForms=[] → the query below is byte-identical to before.
         const _trgmForms = (process.env.HYBRID_LEXICAL_RECALL === 'true') ? (() => {
-          const toks = query.trim().split(/\s+/)
-            .map(w => w.toLowerCase().replace(/[^a-z0-9]/g, '')).filter(w => w.length >= 2);
+          const toks = lexicalQueryTokens(query).filter((token) => Array.from(token).length >= 2);
           const forms = new Set();
           for (let i = 0; i + 1 < toks.length; i += 1) { const j = toks[i] + toks[i + 1]; if (j.length >= 6) forms.add(j); }
           for (const t of toks) if (t.length >= 6) forms.add(t); // already-concatenated names

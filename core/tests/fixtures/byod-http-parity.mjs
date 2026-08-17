@@ -15,7 +15,7 @@ const ids = {
 };
 const vector = (index) => Array.from({ length: 8 }, (_, position) => position === index ? 1 : 0);
 const access = { userId: '00000000-0000-4000-8000-00000000c301' };
-const longClaim = `Records are retained for seven years. ${'Complete supporting context must survive. '.repeat(20)}`;
+const longClaim = `Records are retained for seven years. El periodo de retención es de siete años. ${'Complete supporting context must survive. '.repeat(20)}`;
 
 async function call(path, body, customHeaders = headers) {
   const response = await fetch(`${base}${path}`, {
@@ -72,7 +72,7 @@ if (process.argv[2] === 'write') {
   } })).payload.ok, true);
   assert.equal((await call('/v1/kb-segment', { segment: {
     id: ids.segment, documentId: ids.document, userId: '00000000-0000-4000-8000-00000000c301',
-    content: 'Die Vertragsnummer lautet 35113. Records are retained for seven years.', contentHash: 'segment-hash', segmentIndex: 0,
+    content: 'Die Vertragsnummer lautet 35113. رمز العقد هو ٩٨٧٦. Records are retained for seven years.', contentHash: 'segment-hash', segmentIndex: 0,
     startPage: 4, endPage: 4, wordCount: 9, metadata: { source_start: 0, source_end: 67 },
   }, vector: vector(1) })).payload.ok, true);
 }
@@ -94,6 +94,8 @@ assert.equal(recalled.status, 200);
 assert.equal(recalled.payload.results[0].id, ids.claim);
 const hydrated = await call('/v1/hydrate', { ids: [ids.claim] });
 assert.equal(hydrated.payload.memories[0].content, longClaim);
+const spanishLexical = await call('/v1/lexical', { text: '¿Cuál es el periodo de retención de siete años?', filter: { layer: 'memory', is_latest: true }, limit: 5 });
+assert.equal(spanishLexical.payload.results[0]?.id, ids.claim);
 const evidence = await call('/v1/kb-recall', { vector: vector(1), limit: 5, documentId: ids.document, access });
 assert.equal(evidence.payload.results[0].segment_id, ids.segment);
 assert.equal(evidence.payload.results[0].title, 'German policy');
@@ -107,6 +109,8 @@ assert.ok(lexical.payload.results.length > 0, 'AMR lexical canary must find segm
 assert.equal(lexical.payload.results[0].segment_id, ids.segment);
 assert.equal(lexical.payload.results[0].title, 'German policy');
 assert.equal(lexical.payload.results[0].start_page, 4);
+const arabicLexical = await call('/v1/kb-lexical', { text: 'ما هو رمز العقد ٩٨٧٦؟', filter: { documentId: ids.document, access }, limit: 5 });
+assert.equal(arabicLexical.payload.results[0]?.segment_id, ids.segment);
 const listedWithoutAccess = await call('/v1/kb-docs', { limit: 5 });
 assert.equal(listedWithoutAccess.payload.documents.length, 0);
 const listed = await call('/v1/kb-docs', { limit: 5, access });

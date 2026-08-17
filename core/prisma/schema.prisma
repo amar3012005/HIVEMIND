@@ -4384,7 +4384,9 @@ model MemoryOutbox {
   recordId      String    @map("record_id") @db.Uuid
   /// Op type: 'write' | 'edge' | 'update' | 'updateTags' | 'delete'
   op            String    @map("op") @db.VarChar(20)
-  /// Full replay envelope. Shape per op:
+  /// Authenticated encrypted replay envelope while pending/dead; redacted after
+  /// acknowledgement. Legacy plaintext rows are migrated before encryption is
+  /// required. Decrypted shape per op:
   ///   write      → { record, vector, rels }
   ///   edge       → { rel }
   ///   update     → { id, patch }

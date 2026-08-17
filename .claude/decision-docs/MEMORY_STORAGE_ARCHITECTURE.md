@@ -128,6 +128,7 @@ The customer box owns PostgreSQL and Qdrant. Core sends authenticated requests t
 - A customer-run backup command creates PostgreSQL and Qdrant artifacts, hashes them, and emits a portable manifest without secrets.
 - A doctor command validates dependencies, schema, dimension, disk headroom, backup freshness, pending recovery work, and Core reachability.
 - Offline writes queue durably and replay idempotently. Interactive reads fail honestly when the authoritative box is unavailable.
+- The offline delivery queue stores only authenticated encrypted envelopes. Sequence allocation is serialized per record, pending/dead envelopes support key rotation, and acknowledged rows redact their payload immediately. Historical plaintext rows must be migrated before `PUSH_OUTBOX_REQUIRE_ENCRYPTION=true` is enabled.
 - Agent upgrades are immutable, signed, rollbackable, and backward compatible for at least the supported protocol window.
 - Core retains only endpoint, encrypted credentials, negotiated capabilities, last-seen health, and non-content counters.
 

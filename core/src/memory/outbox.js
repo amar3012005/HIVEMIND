@@ -5,7 +5,7 @@
  * Central / personal / managed orgs are byte-unchanged.
  *
  * Guarantees
- *   DURABLE    — every push is written to memory_outbox (central PG) BEFORE
+ *   DURABLE    — every push is encrypted into memory_outbox (central PG) BEFORE
  *                the BullMQ job is queued.  A Redis blip at enqueue time does
  *                not lose the push: sweepStuckOutbox() re-enqueues 'pending'
  *                rows whose nextAttemptAt < now and that have no live BullMQ job.
@@ -20,9 +20,10 @@
  *                saturating the worker pool.
  *
  * Design choice on write success: on a successful remoteWrite we do NOT write an
- * extra 'acked' outbox row.  The synchronous write succeeds, the caller continues,
- * and the audit trail lives in the agent itself.  Only on write FAILURE do we
- * enqueue for retry — this keeps the outbox write-free on the happy path.
+ * extra 'acked' outbox row. The synchronous write succeeds, the caller continues,
+ * and the audit trail lives in the agent itself. Only on write FAILURE do we
+ * enqueue for retry. After remote acknowledgement the replay payload is redacted;
+ * the row retains only non-content delivery telemetry.
  */
 
 import { createRequire } from 'node:module';
@@ -35,6 +36,7 @@ import {
   remoteDelete,
   remoteKbSegment,
 } from '../vector/mneme/remote-backend.js';
+import { openOutboxPayload, redactedOutboxPayload, sealOutboxPayload } from './outbox-crypto.js';
 
 const require_ = createRequire(import.meta.url);
 
@@ -118,21 +120,31 @@ function isRetryable(err) {
 }
 
 // ─── dispatch: map op to the correct remote-backend function ─────────────────
-async function dispatch(row) {
-  const { op, payload, orgId } = row;
+const DEFAULT_HANDLERS = {
+  write: remoteWrite,
+  edge: remoteAddEdge,
+  update: remoteUpdate,
+  updateTags: remoteUpdateTags,
+  delete: remoteDelete,
+  kbSegment: remoteKbSegment,
+};
+
+export async function dispatchOutboxRow(row, handlers = DEFAULT_HANDLERS) {
+  const { op, orgId } = row;
+  const payload = openOutboxPayload(row.payload);
   switch (op) {
     case 'write':
-      return remoteWrite(orgId, payload.record, payload.vector, payload.rels ?? []);
+      return handlers.write(orgId, payload.record, payload.vector, payload.rels ?? []);
     case 'edge':
-      return remoteAddEdge(orgId, payload.rel);
+      return handlers.edge(orgId, payload.rel);
     case 'update':
-      return remoteUpdate(orgId, payload.id, payload.patch);
+      return handlers.update(orgId, payload.id, payload.patch);
     case 'updateTags':
-      return remoteUpdateTags(orgId, payload.id, payload.tags);
+      return handlers.updateTags(orgId, payload.id, payload.tags);
     case 'delete':
-      return remoteDelete(orgId, payload.id, payload.hard ?? false);
+      return handlers.delete(orgId, payload.id, payload.hard ?? false);
     case 'kbSegment':
-      return remoteKbSegment(orgId, payload.segment, payload.vector);
+      return handlers.kbSegment(orgId, payload.segment, payload.vector);
     default:
       throw new Error(`[outbox] unknown op '${op}' for org=${orgId}`);
   }
@@ -165,27 +177,30 @@ function tryLoadIORedis() {
  */
 export async function enqueuePush(orgId, op, recordId, payload) {
   const prisma = getCentralPrismaClient();
-  // Compute next seq for this recordId atomically via raw SQL (Prisma lacks
-  // a SQL-level max()+1 in a single upsert without raw).  COALESCE so the
-  // first row for a recordId starts at 1.
-  const seqResult = await prisma.$queryRaw`
-    SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
-    FROM memory_outbox
-    WHERE record_id = ${recordId}::uuid
-  `;
-  const seq = seqResult[0]?.next_seq ?? 1n;
-
-  const row = await prisma.memoryOutbox.create({
-    data: {
-      orgId,
-      recordId,
-      op,
-      payload,
-      seq,
-      status: 'pending',
-      attempts: 0,
-      nextAttemptAt: new Date(),
-    },
+  const sealedPayload = sealOutboxPayload(payload);
+  // Serialize max(seq)+1 per record. Without the transaction-scoped lock, two
+  // concurrent update operations can receive the same sequence and violate the
+  // FIFO contract even though both inserts succeed.
+  const row = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${recordId}::text))`;
+    const seqResult = await tx.$queryRaw`
+      SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
+      FROM memory_outbox
+      WHERE record_id = ${recordId}::uuid
+    `;
+    const seq = seqResult[0]?.next_seq ?? 1n;
+    return tx.memoryOutbox.create({
+      data: {
+        orgId,
+        recordId,
+        op,
+        payload: sealedPayload,
+        seq,
+        status: 'pending',
+        attempts: 0,
+        nextAttemptAt: new Date(),
+      },
+    });
   });
 
   // Best-effort BullMQ enqueue: if Redis is unreachable the row already exists
@@ -207,11 +222,14 @@ export async function enqueuePush(orgId, op, recordId, payload) {
 }
 
 // ─── PushWorker processor ────────────────────────────────────────────────────
-async function processJob(job) {
+export async function processOutboxJob(job, {
+  prisma = getCentralPrismaClient(),
+  queue = _queue,
+  handlers = DEFAULT_HANDLERS,
+  runWithOrgFn = runWithOrg,
+} = {}) {
   const { outboxId } = job.data;
   if (!outboxId) return;
-
-  const prisma = getCentralPrismaClient();
   const row = await prisma.memoryOutbox.findUnique({ where: { id: outboxId } });
   if (!row || row.status !== 'pending') return; // already acked/dead or not found
 
@@ -228,8 +246,8 @@ async function processJob(job) {
   });
   if (blocker) {
     // Re-delay this job without counting as an attempt failure.
-    if (_queue) {
-      await _queue.add(QUEUE_NAME, { outboxId }, {
+    if (queue) {
+      await queue.add(QUEUE_NAME, { outboxId }, {
         jobId: `${outboxId}-retry-${Date.now()}`,
         delay: ORDERING_REDEALY_MS,
         removeOnComplete: true,
@@ -246,8 +264,8 @@ async function processJob(job) {
       where: { id: outboxId },
       data: { nextAttemptAt: new Date(Date.now() + delay) },
     });
-    if (_queue) {
-      await _queue.add(QUEUE_NAME, { outboxId }, {
+    if (queue) {
+      await queue.add(QUEUE_NAME, { outboxId }, {
         jobId: `${outboxId}-breaker-${Date.now()}`,
         delay,
         removeOnComplete: true,
@@ -261,8 +279,8 @@ async function processJob(job) {
   let succeeded = false;
   let lastErr = null;
   try {
-    await runWithOrg(orgId, async () => {
-      const result = await dispatch(row);
+    await runWithOrgFn(orgId, async () => {
+      const result = await dispatchOutboxRow(row, handlers);
       // remoteWrite/etc return truthy on success, null/false on caught error
       if (result === null || result === false) throw new Error('remote returned falsy — classified as failure');
       succeeded = true;
@@ -275,7 +293,7 @@ async function processJob(job) {
     breakerRecord(orgId, true);
     await prisma.memoryOutbox.update({
       where: { id: outboxId },
-      data: { status: 'acked', ackedAt: new Date() },
+      data: { status: 'acked', ackedAt: new Date(), payload: redactedOutboxPayload() },
     });
     return;
   }
@@ -304,9 +322,9 @@ async function processJob(job) {
     data: { attempts: newAttempts, lastError: String(lastErr?.message || lastErr), nextAttemptAt },
   });
   // Re-add with backoff delay
-  if (_queue) {
+  if (queue) {
     try {
-      await _queue.add(QUEUE_NAME, { outboxId }, {
+      await queue.add(QUEUE_NAME, { outboxId }, {
         jobId: `${outboxId}-a${newAttempts}-${Date.now()}`,
         delay,
         removeOnComplete: true,
@@ -420,7 +438,7 @@ export async function startPushWorker() {
   const connection = { host, port, password, username, db, maxRetriesPerRequest: null };
 
   _queue = new bullmq.Queue(QUEUE_NAME, { connection });
-  _worker = new bullmq.Worker(QUEUE_NAME, processJob, {
+  _worker = new bullmq.Worker(QUEUE_NAME, processOutboxJob, {
     connection,
     concurrency: PUSH_WORKER_CONCURRENCY,
     removeOnComplete: { count: 1000 },

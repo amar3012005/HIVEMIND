@@ -17,6 +17,7 @@ import { qdrantUrlFor } from './mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 import { resolveCollectionForOrg, PER_TENANT } from './container-router.js';
 import { currentStageSignal } from '../runtime/stage-deadline.js';
+import { assertTenantOrg, enforceTenantFilter } from './tenant-filter.js';
 import {
   isTrackableManagedMemory,
   markVectorFailed,
@@ -261,6 +262,7 @@ export class QdrantClient {
    * @returns {Promise<string>} Memory ID
    */
   async storeMemory(memory, options = {}) {
+    assertTenantOrg(memory.org_id, currentOrg());
     const collectionName = await routeCollection({ explicit: options.collectionName, orgId: memory.org_id });
     const layer = options.layer || memory.layer || (memory.cognitive_layer_role ? 'cognitive' : 'memory');
     const trackManaged = isTrackableManagedMemory(memory, {
@@ -494,7 +496,9 @@ export class QdrantClient {
    * @returns {Promise<Array>} Search results
    */
   async searchMemories({ query, vector, filter, limit = 10, score_threshold = DEFAULT_SCORE_THRESHOLD, collectionName, hnsw_ef, layer, timing }) {
-    const _mnemeOrg = filterMatchValue(filter, 'org_id') || globalThis.__hivemindOrgCtx?.currentOrg?.() || null;
+    const contextOrg = currentOrg() || globalThis.__hivemindOrgCtx?.currentOrg?.() || null;
+    filter = enforceTenantFilter(filter, contextOrg);
+    const _mnemeOrg = contextOrg || filterMatchValue(filter, 'org_id') || null;
     const usesSovereignBackend = Boolean(_mnemeOrg && memoryBackend(_mnemeOrg) !== 'central');
     // A sovereign tenant's search must not depend on central Qdrant readiness.
     // The prior ordering probed central Qdrant first and returned [] before it
@@ -512,7 +516,7 @@ export class QdrantClient {
     const autoResolved = !collectionName && PER_TENANT;
     const resolvedCollection = await routeCollection({
       explicit: collectionName,
-      orgId: filterMatchValue(filter, 'org_id')
+      orgId: _mnemeOrg,
     });
 
     // When we auto-routed into a shared org container, constrain to the memory

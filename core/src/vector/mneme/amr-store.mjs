@@ -59,7 +59,10 @@ function tokenizeFolded(text) {
     .toLowerCase()
     .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
     .normalize('NFKD').replace(/[̀-ͯ]/g, '')
-    .split(/[^a-z0-9]+/)
+    // Unicode properties keep every writing system in the lexical lane. The
+    // previous ASCII-only split silently reduced Arabic, Devanagari, CJK, and
+    // other scripts to an empty query even though semantic recall supported them.
+    .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean);
 }
 

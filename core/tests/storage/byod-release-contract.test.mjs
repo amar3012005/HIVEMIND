@@ -1,0 +1,54 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+import { signReleaseManifest, verifyReleaseManifest } from '../../../byod/release-contract.mjs';
+
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const UPGRADE = path.resolve(TEST_DIR, '../../../byod/upgrade.sh');
+
+test('BYOD release accepts only a valid signature over an immutable digest image', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-byod-release-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const manifest = {
+    version: 1,
+    release: 'agent-abcdef123456',
+    protocol_version: 'memory-box.v1',
+    image: `ghcr.io/singulance/hm-agent@sha256:${'a'.repeat(64)}`,
+    created_at: '2026-08-17T12:00:00Z',
+  };
+  const signed = signReleaseManifest(manifest, privateKey);
+  const manifestPath = path.join(root, 'release.json');
+  const signaturePath = path.join(root, 'release.sig');
+  const publicKeyPath = path.join(root, 'release.pub');
+  fs.writeFileSync(manifestPath, signed.bytes);
+  fs.writeFileSync(signaturePath, signed.signature);
+  fs.writeFileSync(publicKeyPath, publicKey.export({ type: 'spki', format: 'pem' }));
+  assert.deepEqual(verifyReleaseManifest({ manifestPath, signaturePath, publicKeyPath }), manifest);
+
+  const dryRun = execFileSync('bash', [UPGRADE, manifestPath, signaturePath], {
+    env: { ...process.env, BYOD_RELEASE_PUBLIC_KEY: publicKeyPath, BYOD_UPGRADE_DRY_RUN: 'true' },
+    encoding: 'utf8',
+  });
+  assert.match(dryRun, /Signed Memory Box release verified/);
+
+  fs.appendFileSync(manifestPath, ' ');
+  assert.throws(() => verifyReleaseManifest({ manifestPath, signaturePath, publicKeyPath }), /signature/);
+});
+
+test('BYOD release rejects mutable image tags even when signed', () => {
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  assert.throws(() => signReleaseManifest({
+    version: 1,
+    release: 'agent-abcdef123456',
+    protocol_version: 'memory-box.v1',
+    image: 'hivemind/hm-agent:latest',
+    created_at: '2026-08-17T12:00:00Z',
+  }, privateKey), /sha256 digest/);
+});

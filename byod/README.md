@@ -66,3 +66,27 @@ memory and evidence recall through a restored agent, then removes the disposable
 ## Updating
 This bundle is a self-contained branch; `git pull` to get a newer agent, then `./setup.sh`.
 The HIVEMIND engine/features upgrade independently on their side — this bundle is unaffected.
+
+### Signed agent upgrades
+
+Never upgrade the Memory Box agent from `latest` or another mutable tag. Obtain
+`release.json`, `release.sig`, and the pinned Singulance Ed25519 public key through
+the governed release channel, then run:
+
+```bash
+BYOD_RELEASE_PUBLIC_KEY=/secure/singulance-byod-release.pub \
+  ./upgrade.sh release.json release.sig
+```
+
+The updater verifies the signature, rejects non-digest image references, retains
+the current local image under a timestamped rollback tag, deploys only the agent,
+and verifies the authenticated capability response reports the signed release.
+Any failed upgrade automatically restores the prior image. A later manual
+rollback uses the locally protected receipt:
+
+```bash
+./rollback.sh
+```
+
+Release signing is performed in CI/offline release infrastructure with
+`sign-release.mjs`; the private key must never be placed on a customer Memory Box.

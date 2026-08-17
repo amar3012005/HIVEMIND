@@ -135,6 +135,14 @@ function cloudflareError(payload, fallback) {
 
 async function sendWithCloudflare({ config, to, from, rendered, templateId, threadHeaders }) {
   const url = `${CLOUDFLARE_SEND_BASE}/${encodeURIComponent(config.accountId)}/email/sending/send`;
+  // Cloudflare's Email Sending API rejects the request outright
+  // (errors[0].code 10202, "email.sending.error.email.invalid") if a custom
+  // `Message-ID` header is present in `headers` — confirmed live 2026-08-17
+  // by isolating each header key against the real API; In-Reply-To/References
+  // and arbitrary X-* headers are accepted fine, only Message-ID is rejected.
+  // Cloudflare assigns and returns its own message_id in the response instead,
+  // so we drop ours for this provider and use theirs as the thread anchor.
+  const { 'Message-ID': _ignoredMessageId, ...cfHeaders } = threadHeaders || {};
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetch(url, {
@@ -149,13 +157,7 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId, thre
           subject: rendered.subject,
           html: rendered.html,
           text: rendered.text,
-          // RFC 5322 threading, documented by Cloudflare's Email Sending API
-          // as a passthrough `headers` object: we mint our own Message-ID
-          // (Cloudflare doesn't hand one back in a documented field we can
-          // rely on) and reference the thread's root on every later send —
-          // referencing just the root is a well-established simplified
-          // threading pattern that still groups correctly in Gmail/Outlook.
-          ...(threadHeaders ? { headers: threadHeaders } : {}),
+          ...(Object.keys(cfHeaders).length ? { headers: cfHeaders } : {}),
         }),
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       });
@@ -167,7 +169,7 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId, thre
       if (res.ok && (delivered || queued)) {
         const deliveryStatus = delivered ? 'delivered' : 'queued';
         log('info', 'sent', { provider: 'cloudflare', templateId, recipientDomain: recipientDomain(to), deliveryStatus });
-        return { ok: true, provider: 'cloudflare', deliveryStatus };
+        return { ok: true, provider: 'cloudflare', deliveryStatus, messageId: result.message_id || null };
       }
       if (bounced) {
         log('warn', 'permanent_bounce', { provider: 'cloudflare', templateId, recipientDomain: recipientDomain(to) });
@@ -361,6 +363,9 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
 
   if (providers.cloudflare) {
     const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, threadHeaders });
+    // Cloudflare rejects our self-minted Message-ID (see sendWithCloudflare) —
+    // prefer its own returned message_id for thread continuity; only fall
+    // back to our mint if Cloudflare's response is somehow missing one.
     if (cloudflareResult.ok || cloudflareResult.permanent || !gmail) return { ...cloudflareResult, messageId: cloudflareResult.messageId || mintedMessageId };
     log('warn', 'provider_fallback', { from: 'cloudflare', to: 'gmail_nango', templateId, recipientDomain: recipientDomain(to) });
   }

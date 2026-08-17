@@ -54,7 +54,10 @@ test('Cloudflare is the primary transactional provider and reports queued delive
   assert.equal(request.init.headers.Authorization, 'Bearer unit-token');
   const body = JSON.parse(request.init.body);
   assert.equal(body.from, 'Singulance Support <support@singulancelabs.com>');
-  assert.equal(body.headers['Message-ID'], result.messageId);
+  // Cloudflare's Email Sending API rejects a custom Message-ID header outright
+  // (errors[0].code 10202, confirmed live 2026-08-17) — it must never be sent
+  // to Cloudflare, even though we still mint one for our own thread bookkeeping.
+  assert.equal(body.headers, undefined, 'no headers field at all when there is nothing else to send');
   assert.equal(body.to, 'owner@example.com');
   assert.match(body.html, /background:#117dff/);
   assert.match(body.html, /HIVEMIND/);
@@ -79,7 +82,22 @@ test('a thread\'s inReplyTo becomes real In-Reply-To/References headers on the r
   const body = JSON.parse(request.init.body);
   assert.equal(body.headers['In-Reply-To'], '<root-message-id@singulancelabs.com>');
   assert.equal(body.headers.References, '<root-message-id@singulancelabs.com>');
-  assert.notEqual(body.headers['Message-ID'], '<root-message-id@singulancelabs.com>', 'this send must mint its OWN Message-ID, not reuse the root\'s');
+  assert.equal(body.headers['Message-ID'], undefined, 'Message-ID must never reach Cloudflare — it 400s the whole send');
+});
+
+test('Cloudflare\'s own returned message_id becomes the thread anchor, since ours is never sent', async () => {
+  setEnv({
+    CLOUDFLARE_EMAIL_API_TOKEN: 'unit-token',
+    CLOUDFLARE_ACCOUNT_ID: 'unit-account',
+    CLOUDFLARE_EMAIL_FROM: 'Runtime <runtime@singulancelabs.com>',
+  });
+  global.fetch = async () => new Response(JSON.stringify({
+    success: true,
+    result: { delivered: ['owner@example.com'], queued: [], permanent_bounces: [], message_id: '<cf-real-id@admin.singulancelabs.com>' },
+  }), { status: 200 });
+  const result = await sendSystemEmail({ templateId: 'announcement', to: 'owner@example.com', vars: { subject: 'x', heading: 'x', body: 'x' } });
+  assert.equal(result.ok, true);
+  assert.equal(result.messageId, '<cf-real-id@admin.singulancelabs.com>');
 });
 
 test('a Cloudflare permanent bounce is not retried through another provider', async () => {

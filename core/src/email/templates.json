@@ -79,5 +79,17 @@
     "preheader": "{{preheader}}",
     "text": "Hi {{name}},\n\n{{body}}\n\n{{appUrl}}\n\n— The HIVEMIND team\n© {{year}} Da'vinci Solutions",
     "html": "<h1 style=\"margin:0 0 14px;font-family:'Space Grotesk',Inter,sans-serif;font-size:22px;color:#0a0a0a\">{{heading}}</h1><div style=\"margin:0 0 24px;font-size:15px;line-height:1.65;color:#525252;white-space:pre-line\">{{body}}</div><p style=\"margin:0 0 28px\"><a href=\"{{appUrl}}\" style=\"display:inline-block;background:#117dff;color:#fff;text-decoration:none;font-family:'Space Grotesk',Inter,sans-serif;font-weight:600;font-size:15px;padding:12px 22px;border-radius:999px\">Open HIVEMIND</a></p><p style=\"margin:0;font-size:13px;color:#a3a3a3\">— the HIVEMIND team</p>"
+  },
+  "runtime_persona_update": {
+    "subject": "{{subject}}",
+    "preheader": "{{preheader}}",
+    "text": "{{body}}\n\n{{appUrl}}\n\n— {{personaName}}, Runtime for {{orgName}}",
+    "html": "<div style=\"margin:0 0 24px;font-size:15px;line-height:1.65;color:#292824;white-space:pre-line;font-family:Inter,Arial,sans-serif\">{{body}}</div><p style=\"margin:0 0 28px\"><a href=\"{{appUrl}}\" style=\"display:inline-block;background:#171717;color:#fff;text-decoration:none;font-family:'Space Grotesk',Inter,sans-serif;font-weight:600;font-size:14px;padding:11px 20px;border-radius:8px\">Open the Runtime terminal</a></p><p style=\"margin:0;font-size:13px;color:#8a8577\">— {{personaName}}, Runtime for {{orgName}}</p>"
+  },
+  "runtime_persona_approval_update": {
+    "subject": "{{subject}}",
+    "preheader": "{{preheader}}",
+    "text": "{{body}}\n\nApprove: {{approveUrl}}\n\n{{appUrl}}\n\n— {{personaName}}, Runtime for {{orgName}}",
+    "html": "<div style=\"margin:0 0 24px;font-size:15px;line-height:1.65;color:#292824;white-space:pre-line;font-family:Inter,Arial,sans-serif\">{{body}}</div><p style=\"margin:0 0 20px\"><a href=\"{{approveUrl}}\" style=\"display:inline-block;background:#171717;color:#fff;text-decoration:none;font-family:'Space Grotesk',Inter,sans-serif;font-weight:700;font-size:15px;padding:14px 28px;border-radius:8px\">Approve</a></p><p style=\"margin:0 0 28px;font-size:12px;color:#8a8577\">Opens a page with the exact details before anything happens — no app login needed.</p><p style=\"margin:0;font-size:13px;color:#8a8577\">— {{personaName}}, Runtime for {{orgName}}</p>"
   }
 }

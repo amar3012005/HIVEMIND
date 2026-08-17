@@ -94,6 +94,7 @@ import { listGrowthBaselines, runGrowthBaseline } from './growth/baseline.js';
 import { commitGrowthPlan, createGrowthGoal, getGrowthOperatingState } from './growth/operating-loop.js';
 import { getLatestGrowthPlan, listGrowthPlans, runGrowthPlan } from './growth/planner.js';
 import { createHqRuntimeRouteHandler } from './hq-runtime/routes.js';
+import { previewApprovalToken, consumeApprovalToken } from './hq-runtime/approval-links.js';
 import { activateHqAfterOnboarding, appendHqEvent, FIRST_LIFE_OBJECTIVE, resetHqForCompanyReplacement, scheduleHqWake } from './hq-runtime/repository.js';
 import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { runtimeTransportStats } from './runtime-transport/client.js';
@@ -2906,6 +2907,27 @@ const server = http.createServer(async (req, res) => {
     runtimePlaybooks: () => hqScheduler?.runtimePlaybooks || null,
   });
   if (await handleHqRuntimeRoute(req, res, url)) return;
+
+  // One-click approval links embedded in HQ Runtime's persona emails
+  // (2026-08-17) — public, token-gated, no session required, same
+  // established pattern as OrgInvite's /v1/join/:token preview+decline
+  // just below. GET is a read-only PREVIEW (a security scanner or email
+  // client prefetching this link must never approve anything); only the
+  // explicit POST /approve performs the actual, single-use grant.
+  const approvalPreviewMatch = pathname.match(/^\/v1\/hq\/approvals\/([^/]+)$/);
+  if (approvalPreviewMatch && req.method === 'GET') {
+    const preview = await previewApprovalToken({ prisma, token: approvalPreviewMatch[1] });
+    return jsonResponse(res, preview);
+  }
+  const approvalActionMatch = pathname.match(/^\/v1\/hq\/approvals\/([^/]+)\/approve$/);
+  if (approvalActionMatch && req.method === 'POST') {
+    const result = await consumeApprovalToken({
+      prisma, token: approvalActionMatch[1],
+      runtimePlaybooks: () => hqScheduler?.runtimePlaybooks || null,
+      wakeScheduler: () => hqScheduler?.wake?.(),
+    });
+    return jsonResponse(res, result, result.ok ? 200 : (result.status === 'not_found' ? 404 : 409));
+  }
 
   // Public waitlist intake is pre-tenant, deliberately data-minimal, rate
   // limited, and always returns the same accepted shape to avoid account

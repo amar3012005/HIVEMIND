@@ -1465,10 +1465,44 @@ model HqRuntime {
   activatedAt     DateTime? @map("activated_at") @db.Timestamptz(6)
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  // Persona email thread (2026-08-17): one continuous email thread per
+  // runtime narrating activation, the first growth plan, and every
+  // decision-required moment — additive, nullable, no backfill needed.
+  emailUpdatesEnabled Boolean   @default(true) @map("email_updates_enabled")
+  emailThreadTo       String?  @map("email_thread_to") @db.VarChar(320)
+  emailThreadSubject  String?  @map("email_thread_subject") @db.VarChar(512)
+  emailThreadMessageId String? @map("email_thread_message_id") @db.VarChar(998)
+  emailThreadSentCount Int     @default(0) @map("email_thread_sent_count")
+  emailThreadLastSentAt DateTime? @map("email_thread_last_sent_at") @db.Timestamptz(6)
 
   @@index([state, nextWakeAt])
   @@index([orgId, epoch], map: "hq_runtimes_org_epoch_idx")
   @@map("hq_runtimes")
+}
+
+/// One-click approval link embedded in a persona email (2026-08-17). GET
+/// preview + POST approve are BOTH public/token-gated (no session) — same
+/// established pattern as OrgInvite's `/v1/join/:token` preview+decline —
+/// so the owner can approve from a phone without a desktop login. The GET
+/// preview must never mutate anything; only the POST /approve call does.
+model HqApprovalToken {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  token              String    @unique @db.VarChar(128)
+  orgId              String    @map("org_id") @db.Uuid
+  runtimeId          String    @map("runtime_id") @db.Uuid
+  kind               String    @db.VarChar(24) // 'authority' (only kind wired in v1)
+  runId              String?   @map("run_id") @db.Uuid
+  gate               String?   @db.VarChar(120)
+  title              String    @db.VarChar(500)
+  summary            String
+  orgName            String?   @map("org_name") @db.VarChar(255)
+  usedAt             DateTime? @map("used_at") @db.Timestamptz(6)
+  expiresAt          DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([orgId])
+  @@index([expiresAt])
+  @@map("hq_approval_tokens")
 }
 
 /// HqCycle — one leased, resumable wake execution.

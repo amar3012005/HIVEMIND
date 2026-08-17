@@ -26,6 +26,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { fetchBearerFromNango } from '../connectors/mcp/nango-service.js';
@@ -132,7 +133,7 @@ function cloudflareError(payload, fallback) {
   return detail?.code ? `cloudflare_${detail.code}` : fallback;
 }
 
-async function sendWithCloudflare({ config, to, from, rendered, templateId }) {
+async function sendWithCloudflare({ config, to, from, rendered, templateId, threadHeaders }) {
   const url = `${CLOUDFLARE_SEND_BASE}/${encodeURIComponent(config.accountId)}/email/sending/send`;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -148,6 +149,13 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId }) {
           subject: rendered.subject,
           html: rendered.html,
           text: rendered.text,
+          // RFC 5322 threading, documented by Cloudflare's Email Sending API
+          // as a passthrough `headers` object: we mint our own Message-ID
+          // (Cloudflare doesn't hand one back in a documented field we can
+          // rely on) and reference the thread's root on every later send —
+          // referencing just the root is a well-established simplified
+          // threading pattern that still groups correctly in Gmail/Outlook.
+          ...(threadHeaders ? { headers: threadHeaders } : {}),
         }),
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       });
@@ -183,13 +191,14 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId }) {
   return { ok: false, provider: 'cloudflare', retryable: true, error: 'send_failed' };
 }
 
-async function sendWithGmail({ connectionId, to, from, rendered, templateId }) {
+async function sendWithGmail({ connectionId, to, from, rendered, templateId, threadHeaders }) {
   const raw = buildRawMessage({
     to,
     from,
     subject: rendered.subject,
     text: rendered.text,
     html: rendered.html,
+    threadHeaders,
   });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -271,12 +280,15 @@ function wrapHtml(inner, preheader, ctx) {
 }
 
 /** Build a base64url RFC 5322 multipart/alternative message. */
-function buildRawMessage({ to, from, subject, text, html }) {
+function buildRawMessage({ to, from, subject, text, html, threadHeaders }) {
   const boundary = `hm_${Date.now().toString(36)}`;
   const headers = [
     `To: ${to}`,
     from ? `From: ${from}` : null,
     `Subject: ${subject}`,
+    threadHeaders?.['Message-ID'] ? `Message-ID: ${threadHeaders['Message-ID']}` : null,
+    threadHeaders?.['In-Reply-To'] ? `In-Reply-To: ${threadHeaders['In-Reply-To']}` : null,
+    threadHeaders?.References ? `References: ${threadHeaders.References}` : null,
     'MIME-Version: 1.0',
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
   ].filter(Boolean).join('\r\n');
@@ -306,9 +318,14 @@ function buildRawMessage({ to, from, subject, text, html }) {
  * @param {Record<string,any>} [args.vars]   placeholder values (name, orgName, ...)
  * @param {string} [args.from]       override From header (defaults to SYSTEM_EMAIL_FROM)
  * @param {string} [args.connectionId]  override Nango sender connection id
+ * @param {{inReplyTo?: string, references?: string}} [args.thread]  RFC 5322
+ *   threading: pass the thread's root Message-ID to group this send with
+ *   prior ones. A fresh Message-ID is always minted for THIS send (returned
+ *   as `messageId` in the result) — the caller persists it as the thread
+ *   root on the first send, then passes it back in on every later send.
  * @returns {Promise<{ok: boolean, skipped?: boolean, messageId?: string, error?: string}>}
  */
-export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId } = {}) {
+export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId, thread } = {}) {
   if (!to) return { ok: false, skipped: true, error: 'no_recipient' };
   if (!validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
   if (!validFromHeader(from)) return { ok: false, skipped: true, error: 'invalid_sender' };
@@ -331,12 +348,24 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
     return { ok: false, error: err.message };
   }
 
+  // Extract the bare domain even from a "Name <user@domain>" From header —
+  // splitting the whole header on '@' left a trailing '>' in the domain,
+  // confirmed by a failing existing test before this fix.
+  const fromDomain = (String(from || providers.cloudflare?.from || providers.gmail?.from || 'runtime.local')
+    .match(/@([^\s>]+)/)?.[1]) || 'runtime.local';
+  const mintedMessageId = `<${crypto.randomUUID()}@${fromDomain}>`;
+  const threadHeaders = {
+    'Message-ID': mintedMessageId,
+    ...(thread?.inReplyTo ? { 'In-Reply-To': thread.inReplyTo, References: thread.references || thread.inReplyTo } : {}),
+  };
+
   if (providers.cloudflare) {
-    const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId });
-    if (cloudflareResult.ok || cloudflareResult.permanent || !gmail) return cloudflareResult;
+    const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, threadHeaders });
+    if (cloudflareResult.ok || cloudflareResult.permanent || !gmail) return { ...cloudflareResult, messageId: cloudflareResult.messageId || mintedMessageId };
     log('warn', 'provider_fallback', { from: 'cloudflare', to: 'gmail_nango', templateId, recipientDomain: recipientDomain(to) });
   }
-  return sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId });
+  const gmailResult = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, threadHeaders });
+  return { ...gmailResult, messageId: gmailResult.messageId || mintedMessageId };
 }
 
 /**

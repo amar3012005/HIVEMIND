@@ -12,6 +12,7 @@ import { rerank as crossEncoderRerank } from './reranker.js';
 import { meterTokens } from '../billing/usage-tracker.js';
 import { isMemoryInDateRange } from './temporal-range.js';
 import { memoryBackend } from '../vector/mneme/driver.js';
+import { matchesMemoryAccess } from './memory-access.js';
 
 // PHASE-B: single canonical ALGORITHMIC reranker, shared with three-tier-retrieval.js.
 // Lazily constructed inside the RECALL_TIERED_VIEW=true branch so the dark-by-default
@@ -744,45 +745,7 @@ async function vectorCandidatesForRecall(store, {
     if (!isMemoryInDateRange(memory, dateRange)) return null;
     if (!isMemoryInTemporalSnapshot(memory, { validAt, knownAt })) return null;
     // V2 scope filtering: enforce after hydrate (vector index doesn't carry scope)
-    if (access_context) {
-      const m = memory;
-      // Guests are project-scoped external invitees. Two hard rules:
-      //  (1) they NEVER see the org-wide tier (was leaking here — the FTS/store
-      //      paths in prisma-graph-store already gate it on orgRole!=='guest');
-      //  (2) M2b: they NEVER see a cross-project synthesis (tag scope:cross-project)
-      //      — by definition it aggregates projects beyond their single invite.
-      const isGuest = access_context.orgRole === 'guest';
-      // Cross-project syntheses (tag scope:cross-project) are dropped for: (a) guests
-      // always; (b) ALL users when the org has cross_project disabled (M2b members) —
-      // a synthesis that bridges projects must not surface once the org turns the
-      // feature off. crossProject defaults true (fail-open) so members are unaffected
-      // when enabled or when the flag is unknown.
-      const dropCrossProject = isGuest || access_context.crossProject === false;
-      if (dropCrossProject && Array.isArray(m.tags) && m.tags.includes('scope:cross-project')) return null;
-      // Older vector payloads carry no `scope` field at all — requiring an
-      // exact scope match dropped EVERY such memory whenever an access context
-      // was active (a project-scoped /chat recall returned 0 hits against 61
-      // stored project memories). Infer conservatively from the payload:
-      // a project link ⇒ project semantics; else org-tier (still org_id +
-      // non-guest gated below). Never inferred to 'personal' — a scoped row
-      // is required to claim the personal tier.
-      const mScope = m.scope
-        || ((m.project_id || (Array.isArray(m.project_ids) && m.project_ids.length)) ? 'project' : 'organization');
-      const ok =
-        (mScope === 'personal' && m.user_id === user_id) ||
-        (mScope === 'organization' && m.org_id === org_id && !isGuest) ||
-        (mScope === 'team' && (access_context.teamIds || []).includes(m.primary_team_id)) ||
-        // Project memories may carry a project_ids ARRAY (memory_projects link)
-        // or only the single project_id column — accept either. Requiring the
-        // array silently dropped every single-project memory whenever an access
-        // context was active (scoped /chat recall → 0 hits on 61 memories).
-        (mScope === 'project' && (
-          (Array.isArray(m.project_ids)
-            && m.project_ids.some(pid => (access_context.projectIds || []).includes(pid)))
-          || (m.project_id && (access_context.projectIds || []).includes(m.project_id))
-        ));
-      if (!ok) return null;
-    }
+    if (!matchesMemoryAccess(memory, { userId: user_id, orgId: org_id, accessContext: access_context })) return null;
     // Project-scope narrowing (replaces the broken Qdrant `project` pre-filter):
     // when a specific project is requested, keep only memories that actually
     // belong to it, using the reliable hydrated DB fields. Narrowing-only.
@@ -1638,6 +1601,7 @@ async function _recallPersistedMemoriesImpl(store, {
     if (!project && memTags.includes('longmemeval')) return false;
     if (!isMemoryInDateRange(memory, effectiveDateRange)) return false;
     if (!isMemoryInTemporalSnapshot(memory, { validAt: snapshotValidAt, knownAt: known_at })) return false;
+    if (!matchesMemoryAccess(memory, { userId: user_id, orgId: org_id, accessContext: access_context })) return false;
     if (!matchesScopeFilter(memory, scope_filter)) return false;
     // Exclude canonical-summary rows from default recall — BUT ONLY the
     // generic chat / conversation compactions. Knowledge-base, document,

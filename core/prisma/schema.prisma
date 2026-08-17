@@ -27,7 +27,6 @@ model User {
   lastActiveAt         DateTime?             @map("last_active_at") @db.Timestamptz(6)
   deletedAt            DateTime?             @map("deleted_at") @db.Timestamptz(6)
   apiKeys              ApiKey[]              @relation("UserApiKeys")
-  auditLogs            AuditLog[]            @relation("UserAuditLogs")
   exportRequests       DataExportRequest[]   @relation("UserExportRequests")
   memories             Memory[]              @relation("UserMemories")
   platformIntegrations PlatformIntegration[] @relation("UserPlatformIntegrations")
@@ -118,7 +117,6 @@ model Organization {
   // user_id/project_id/layer). Null until provisioned.
   vectorContainer              String?            @map("vector_container") @db.VarChar(255)
   apiKeys                      ApiKey[]           @relation("OrgApiKeys")
-  auditLogs                    AuditLog[]         @relation("OrgAuditLogs")
   memories                     Memory[]           @relation("OrgMemories")
   invites                      OrgInvite[]
   projects                     Project[]
@@ -1138,7 +1136,6 @@ model Memory {
   // match. Recall filters by projectId (preferred) OR free-text `project` (legacy).
   projectId                                                   String?              @map("project_id") @db.Uuid
   version                                                     Int                  @default(1)
-  auditLogs                                                   AuditLog[]           @relation("MemoryAuditLogs")
   codeMetadata                                                CodeMemoryMetadata?
   derivationSources                                           DerivationJob[]      @relation("DerivationSourceMemory")
   derivationTargets                                           DerivationJob[]      @relation("DerivationTargetMemory")
@@ -1875,7 +1872,7 @@ model DocumentTable {
   rowCount     Int                 @default(0) @map("row_count")
   createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
   rows         DocumentTableRow[]
-  document     KnowledgeDocument   @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  document     KnowledgeDocument   @relation(fields: [documentId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "document_tables_document_id_fkey")
 
   @@unique([documentId, tableIndex])
   @@index([orgId])
@@ -1889,7 +1886,7 @@ model DocumentTableRow {
   orgId     String        @map("org_id") @db.Uuid
   rowIndex  Int           @map("row_index")
   cells     Json
-  table     DocumentTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  table     DocumentTable @relation(fields: [tableId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "document_table_rows_table_id_fkey")
 
   @@unique([tableId, rowIndex])
   @@index([orgId])
@@ -2277,9 +2274,6 @@ model AuditLog {
   processingBasis String?       @map("processing_basis") @db.VarChar(100)
   legalBasisNote  String?       @map("legal_basis_note")
   createdAt       DateTime?     @default(now()) @map("created_at") @db.Timestamptz(6)
-  organization    Organization? @relation("OrgAuditLogs", fields: [organizationId], references: [id])
-  memory          Memory?       @relation("MemoryAuditLogs", fields: [resourceId], references: [id])
-  user            User?         @relation("UserAuditLogs", fields: [userId], references: [id])
 
   @@index([userId])
   @@index([organizationId])

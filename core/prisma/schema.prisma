@@ -2946,7 +2946,7 @@ model BillingCheckout {
 model ApiKeyUsage {
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId            String    @map("org_id") @db.Uuid
-  apiKeyId         String    @default("00000000-0000-0000-0000-000000000000") @map("api_key_id") @db.Uuid
+  apiKeyId         String    @default(dbgenerated("'00000000-0000-0000-0000-000000000000'::uuid")) @map("api_key_id") @db.Uuid
   month            String    @db.VarChar(7)
   model            String    @default("") @db.VarChar(128)
   feature          String    @default("") @db.VarChar(64)
@@ -3061,7 +3061,7 @@ model DigitalEmployee {
   // lessons distilled across ALL rooms. One row per org+slug. Surfaced lazily via the
   // recall_experience tool in rooms AND 1-on-1 chat. Stored here (NOT the vector KB) so
   // lessons never pollute recall. Distinct from hyper_rooms.evo_playbooks (per-room).
-  evoPlaybook           Json           @default("[]") @map("evo_playbook")
+  evoPlaybook           Json?          @default("[]") @map("evo_playbook")
   // Per-agent connector grants → 1-on-1 chat registers the same toolkits the agent uses
   // in rooms. Distinct from hyper_rooms.enabledConnectors (per-room). Empty = none.
   enabledConnectors     String[]       @default([]) @map("enabled_connectors")

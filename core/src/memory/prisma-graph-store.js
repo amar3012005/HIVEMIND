@@ -795,7 +795,7 @@ export class PrismaGraphStore {
     if (_remoteHardOrg && orgIsRemote(_remoteHardOrg)) {
       let removed = 0;
       for (const id of ids) {
-        try { await amrDelete(_remoteHardOrg, id); removed += 1; } catch (e) {
+        try { await amrDelete(_remoteHardOrg, id, true); removed += 1; } catch (e) {
           console.warn(`[hard-delete] amrDelete failed for ${id}: ${e.message}`);
         }
       }

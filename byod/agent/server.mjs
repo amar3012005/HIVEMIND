@@ -30,6 +30,8 @@ function tokenOk(header) {
 const PORT = Number(process.env.AGENT_PORT || 8787);
 const DIM = Number(process.env.MNEME_DIM || 1024);
 const SCHEMA_VERSION = 2; // v2 adds valid_to and indexed bi-temporal eligibility.
+const PROTOCOL_VERSION = 'memory-box.v1';
+const AGENT_RELEASE = process.env.AGENT_RELEASE || 'unknown';
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
 const QCOLL = `org_${ORG}`.replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -497,13 +499,20 @@ const readBody = (req) => new Promise((resolve, reject) => {
 const routes = {
   '/v1/capabilities': async () => ({
     ok: true,
+    protocol_version: PROTOCOL_VERSION,
     schema_version: SCHEMA_VERSION,
+    agent_release: AGENT_RELEASE,
+    storage_mode: 'byod_postgres_qdrant',
     vector_dimension: DIM,
     capabilities: [
       'memory.recall',
       'memory.lexical',
       'memory.hydrate',
       'evidence.recall',
+      'evidence.lexical',
+      'evidence.hydrate',
+      'graph.read',
+      'relationship.read',
       'vector.status',
       'vector.pending',
       'vector.repair',
@@ -1864,7 +1873,18 @@ http.createServer(async (req, res) => {
   if (req.url === '/health') {
     let pgOk = false; try { await pg.query('SELECT 1'); pgOk = true; } catch { pgOk = false; }
     const qdrantOk = await qdrantHealthy();
-    return send(res, pgOk && qdrantOk ? 200 : 503, { ok: pgOk && qdrantOk, org: ORG, store: 'pg-qdrant', pg: pgOk, qdrant: qdrantOk, dim: DIM, schemaVersion: SCHEMA_VERSION });
+    return send(res, pgOk && qdrantOk ? 200 : 503, {
+      ok: pgOk && qdrantOk,
+      org: ORG,
+      store: 'pg-qdrant',
+      storage_mode: 'byod_postgres_qdrant',
+      protocol_version: PROTOCOL_VERSION,
+      agent_release: AGENT_RELEASE,
+      pg: pgOk,
+      qdrant: qdrantOk,
+      dim: DIM,
+      schemaVersion: SCHEMA_VERSION,
+    });
   }
   if (req.method !== 'POST' || !routes[req.url]) return send(res, 404, { error: 'not found' });
   // Origin lock — the engine is server-to-server (no Origin). A present Origin/Referer means a browser

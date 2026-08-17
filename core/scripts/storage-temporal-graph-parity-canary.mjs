@@ -60,7 +60,7 @@ async function createMemory(content, validFrom) {
 async function recall(query, validAt = null) {
   return json(await fetch(`${baseUrl}/api/recall`, {
     method: 'POST', headers,
-    body: JSON.stringify({ query, mode: 'quick', limit: 15, ...(validAt ? { valid_at: validAt } : {}) }),
+    body: JSON.stringify({ query, mode: 'quick', limit: 15, debug_timing: true, ...(validAt ? { valid_at: validAt } : {}) }),
   }));
 }
 
@@ -92,26 +92,33 @@ try {
   } });
   keyId = key.id;
 
-  const oldId = await createMemory(`${topic} ${entity} was ${oldMarker}.`, '2024-01-01T00:00:00.000Z');
+  // Use validity dates after this canary's transaction time. Asking for a
+  // valid-time before the row was ingested would correctly fail the bitemporal
+  // known-at constraint and would not test interval supersession.
+  const oldId = await createMemory(`${topic} ${entity} was ${oldMarker}.`, '2027-01-01T00:00:00.000Z');
   const oldBeforeClose = await json(await fetch(`${baseUrl}/api/memories/${encodeURIComponent(oldId)}`, { headers }));
-  if (!String(oldBeforeClose.valid_from || oldBeforeClose.document_date || '').startsWith('2024-01-01')) {
+  if (!String(oldBeforeClose.valid_from || oldBeforeClose.document_date || '').startsWith('2027-01-01')) {
     throw new Error(`temporal_origin_missing:${JSON.stringify(oldBeforeClose)}`);
   }
+  const baseline = await awaitRecall(
+    { query: topic },
+    (rows) => rows.some((x) => x.includes(oldMarker)),
+  );
   await json(await fetch(`${baseUrl}/api/memories/${encodeURIComponent(oldId)}`, {
-    method: 'PUT', headers, body: JSON.stringify({ valid_to: '2025-01-01T00:00:00.000Z' }),
+    method: 'PUT', headers, body: JSON.stringify({ valid_to: '2028-01-01T00:00:00.000Z' }),
   }));
   const oldAfterClose = await json(await fetch(`${baseUrl}/api/memories/${encodeURIComponent(oldId)}`, { headers }));
-  if (!String(oldAfterClose.valid_to || '').startsWith('2025-01-01')) {
+  if (!String(oldAfterClose.valid_to || '').startsWith('2028-01-01')) {
     throw new Error(`temporal_close_missing:${JSON.stringify(oldAfterClose)}`);
   }
-  const currentId = await createMemory(`${topic} ${entity} is ${currentMarker}.`, '2025-01-01T00:00:00.000Z');
+  const currentId = await createMemory(`${topic} ${entity} is ${currentMarker}.`, '2028-01-01T00:00:00.000Z');
 
   const historical = await awaitRecall(
-    { query: topic, validAt: '2024-06-01T00:00:00.000Z' },
+    { query: topic, validAt: '2027-06-01T00:00:00.000Z' },
     (rows) => rows.some((x) => x.includes(oldMarker)) && !rows.some((x) => x.includes(currentMarker)),
   );
   const current = await awaitRecall(
-    { query: topic, validAt: '2026-01-01T00:00:00.000Z' },
+    { query: topic, validAt: '2029-01-01T00:00:00.000Z' },
     (rows) => rows.some((x) => x.includes(currentMarker)) && !rows.some((x) => x.includes(oldMarker)),
   );
   const entityRecall = await awaitRecall(
@@ -152,6 +159,7 @@ try {
     ok: true,
     storage_mode: embedded ? 'amr_embedded' : remote ? 'byod' : 'managed',
     historical_attempts: historical.attempt,
+    baseline_attempts: baseline.attempt,
     current_attempts: current.attempt,
     entity_attempts: entityRecall.attempt,
     relationship_edges: [...(relationshipRead.out || []), ...(relationshipRead.in || [])].filter((x) => x.type === 'Updates').length,

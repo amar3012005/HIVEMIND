@@ -3,7 +3,32 @@ import assert from 'node:assert/strict';
 import { recallPersistedMemories } from '../../src/memory/persisted-retrieval.js';
 import { buildHybridSearchFilter, getQdrantClient } from '../../src/vector/qdrant-client.js';
 import { PrismaGraphStore } from '../../src/memory/prisma-graph-store.js';
-import { RecallRouter } from '../../src/memory/recall-router.js';
+import { RecallRouter, shouldUseTagAnchoredRecall } from '../../src/memory/recall-router.js';
+
+test('valid_at without tags keeps the normal retrieval lane enabled', () => {
+  assert.equal(shouldUseTagAnchoredRecall({
+    callerTags: false,
+    inferredTags: null,
+    validAtDate: new Date('2027-06-01T00:00:00.000Z'),
+  }), false);
+  assert.equal(shouldUseTagAnchoredRecall({
+    callerTags: false,
+    inferredTags: [],
+    validAtDate: new Date('2027-06-01T00:00:00.000Z'),
+  }), false);
+});
+
+test('valid_at with explicit or inferred tags uses the tag-anchored lane', () => {
+  assert.equal(shouldUseTagAnchoredRecall({
+    callerTags: true,
+    validAtDate: new Date('2027-06-01T00:00:00.000Z'),
+  }), true);
+  assert.equal(shouldUseTagAnchoredRecall({
+    callerTags: false,
+    inferredTags: ['gmail'],
+    validAtDate: new Date('2027-06-01T00:00:00.000Z'),
+  }), true);
+});
 
 test('managed batch hydration applies independent valid and known time filters', async () => {
   let where = null;

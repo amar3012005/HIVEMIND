@@ -80,6 +80,13 @@ function normalizedIso(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+export function shouldUseTagAnchoredRecall({ callerTags = false, isRecentish = false, inferredTags = null, validAtDate = null } = {}) {
+  const hasInferredTags = Array.isArray(inferredTags) && inferredTags.length > 0;
+  return callerTags
+    || (isRecentish && hasInferredTags)
+    || (!!validAtDate && (callerTags || hasInferredTags));
+}
+
 function boundedString(value, maxLength) {
   if (typeof value !== 'string') return null;
   const normalized = value.trim();
@@ -742,7 +749,7 @@ async function hop1Memory({ store, query, options, ctx }) {
   // Triggers when: (a) caller explicitly passes tags (intentional filter),
   // (b) recency cue + connector keyword, (c) valid_at + connector keyword.
   const callerTags = Array.isArray(options.tags) && options.tags.length > 0;
-  const willOverride = callerTags || (isRecentish && inferredTags) || (validAtDate && (options.tags || inferredTags));
+  const willOverride = shouldUseTagAnchoredRecall({ callerTags, isRecentish, inferredTags, validAtDate });
   // Caller-provided date_range takes priority over derived valid_at end-
   // cap. Used for today/yesterday/this-week shortcuts where we need a
   // hard start+end window, not just an upper bound.

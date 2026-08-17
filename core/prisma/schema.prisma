@@ -479,8 +479,8 @@ model PendingWrite {
   approvedAt DateTime? @map("approved_at") @db.Timestamptz(6)
   sentAt     DateTime? @map("sent_at") @db.Timestamptz(6)
 
-  @@index([userId, status, createdAt])
-  @@index([orgId, createdAt])
+  @@index([userId, status, createdAt(sort: Desc)], map: "pending_writes_user_status_created_idx")
+  @@index([orgId, createdAt(sort: Desc)], map: "pending_writes_org_created_idx")
   @@index([orgId, status, expiresAt])
   @@map("pending_writes")
 }
@@ -1894,6 +1894,7 @@ model DocumentTableRow {
   @@unique([tableId, rowIndex])
   @@index([orgId])
   @@index([tableId])
+  @@index([cells], type: Gin, map: "document_table_rows_cells_gin")
   @@map("document_table_rows")
 }
 
@@ -3381,7 +3382,7 @@ model TaraCall {
   id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId            String    @map("org_id") @db.Uuid
   userId           String    @map("user_id") @db.Uuid
-  sessionId        String    @map("session_id") @db.VarChar(120)
+  sessionId        String    @unique(map: "tara_calls_session_id_key") @map("session_id") @db.VarChar(120)
   provider         String    @default("deepgram") @db.VarChar(32)
   providerModel    String?   @map("provider_model") @db.VarChar(120)
   configRevision   Int       @default(1) @map("config_revision")
@@ -3933,6 +3934,7 @@ model CanonicalEntity {
   memoryLinks MemoryEntityLink[]
 
   @@index([organizationId, entityKind])
+  @@index([organizationId, entityKind, normalizedName], map: "canonical_entities_org_kind_normalized_idx")
   @@index([aliases], type: Gin)
   @@index([emailDomains], type: Gin)
   @@index([primaryEmail])
@@ -4385,6 +4387,7 @@ model MeetingSegment {
   @@unique([sessionId, idx], map: "meeting_segments_session_idx_key")
   @@index([meetingId], map: "meeting_segments_meeting_idx")
   @@index([orgId, userId], map: "meeting_segments_org_user_idx")
+  @@index([extractionStatus, extractionNextAttemptAt, createdAt], map: "meeting_segments_extraction_retry_idx")
   @@map("meeting_segments")
 }
 

@@ -45,6 +45,7 @@ processing must also remain entirely on the customer network.
 docker compose -f docker-compose.byod.yml logs -f agent     # agent logs
 ./backup.sh                                                  # verified PG + Qdrant recovery set
 ./doctor.sh                                                  # read-only health, backlog, disk and backup proof
+./restore-drill.sh --backup ./backups/<timestamp> --org-id <org-uuid>  # disposable full restore + recall
 docker compose -f docker-compose.byod.yml down              # stop
 ./setup.sh                                                  # reconnect (idempotent)
 ```
@@ -57,6 +58,10 @@ reference and never records database URLs, access tokens, or raw content.
 `doctor.sh` fails closed when a container is missing/unhealthy, the authenticated protocol contract
 is incomplete, disk headroom is unsafe, or the latest backup is missing, stale, or corrupt. Vector
 repair backlog is reported without printing row content or credentials.
+
+`restore-drill.sh` never restores over the live box. It creates isolated containers and temporary
+storage, restores the exact PostgreSQL and Qdrant image IDs recorded in the manifest, exercises
+memory and evidence recall through a restored agent, then removes the disposable environment.
 
 ## Updating
 This bundle is a self-contained branch; `git pull` to get a newer agent, then `./setup.sh`.

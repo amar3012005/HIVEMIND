@@ -34,10 +34,64 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 /** Files that constitute a slot. `shard.lock` is deliberately NOT copied. */
 const SHARD_FILES = ['shard.amr', 'shard.vec', 'shard.txt', 'shard.edg'];
+
+function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let read = 0;
+    do {
+      read = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (read) hash.update(buffer.subarray(0, read));
+    } while (read);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+/**
+ * Verify a completed shard snapshot without opening or mutating the live shard.
+ * A manifest is the restore boundary: every declared file must exist, match its
+ * byte length and SHA-256 digest, and shard.amr must be present.
+ */
+export function verifyShardSnapshot(snapshotDir) {
+  const manifestPath = path.join(snapshotDir, 'MANIFEST.json');
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); }
+  catch (error) { return { ok: false, error: `manifest_unreadable:${error.message}` }; }
+
+  if (manifest?.complete !== true || !Array.isArray(manifest.files)
+      || !manifest.files.includes('shard.amr')) {
+    return { ok: false, error: 'manifest_incomplete' };
+  }
+  if (Number(manifest.version || 0) < 2 || !manifest.artifacts) {
+    return { ok: false, error: 'manifest_unverifiable' };
+  }
+
+  for (const file of manifest.files) {
+    if (!SHARD_FILES.includes(file)) return { ok: false, error: `unexpected_file:${file}` };
+    const artifact = manifest.artifacts[file];
+    if (!artifact || !Number.isSafeInteger(artifact.bytes) || !/^[a-f0-9]{64}$/.test(artifact.sha256 || '')) {
+      return { ok: false, error: `artifact_metadata_invalid:${file}` };
+    }
+    const target = path.join(snapshotDir, file);
+    try {
+      const stat = fs.statSync(target);
+      if (!stat.isFile() || stat.size !== artifact.bytes) return { ok: false, error: `size_mismatch:${file}` };
+      if (sha256File(target) !== artifact.sha256) return { ok: false, error: `checksum_mismatch:${file}` };
+    } catch (error) {
+      return { ok: false, error: `artifact_unreadable:${file}:${error.message}` };
+    }
+  }
+  return { ok: true, org: manifest.org, ts: manifest.ts, files: manifest.files.length };
+}
 
 const isOn = (v, dflt) => String(process.env[v] ?? dflt).toLowerCase() === 'true';
 
@@ -75,12 +129,15 @@ export function snapshotShardsOnce({
 
     const orgBackupDir = path.join(root, org);
     const dst = path.join(orgBackupDir, ts);
+    const staging = path.join(orgBackupDir, `.${ts}.partial-${process.pid}`);
     try {
-      fs.mkdirSync(dst, { recursive: true, mode: 0o700 });
+      fs.rmSync(staging, { recursive: true, force: true });
+      fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
       let bytes = 0;
+      const artifacts = {};
       for (const f of present) {
         const from = path.join(src, f);
-        const to = path.join(dst, f);
+        const to = path.join(staging, f);
         // `shard.vec` is SPARSE — 4 MB apparent, almost nothing allocated. A plain
         // fs.copyFileSync FILLS THE HOLES: measured on prod, 5.4 MB of live slots
         // produced 35 MB per snapshot (6.5x), which then multiplies by the retention
@@ -96,16 +153,24 @@ export function snapshotShardsOnce({
         if (!copied) fs.copyFileSync(from, to);
         // Count ALLOCATED bytes (blocks*512), not apparent size, so the log reports the
         // real footprint rather than the sparse illusion.
-        try { const st = fs.statSync(to); bytes += (st.blocks != null ? st.blocks * 512 : st.size); }
+        try {
+          const st = fs.statSync(to);
+          bytes += (st.blocks != null ? st.blocks * 512 : st.size);
+          artifacts[f] = { bytes: st.size, sha256: sha256File(to) };
+        }
         catch { /* size is best-effort */ }
       }
       // Write the manifest LAST: its presence is what marks a snapshot complete, so a
       // half-copied dir (process killed mid-sweep) is never mistaken for a restore point.
       fs.writeFileSync(
-        path.join(dst, 'MANIFEST.json'),
-        JSON.stringify({ org, ts, files: present, bytes, warm: true, complete: true }, null, 2),
+        path.join(staging, 'MANIFEST.json'),
+        JSON.stringify({ version: 2, org, ts, files: present, artifacts, bytes, warm: true, complete: true }, null, 2),
         { mode: 0o600 },
       );
+      const verified = verifyShardSnapshot(staging);
+      if (!verified.ok) throw new Error(`snapshot verification failed: ${verified.error}`);
+      fs.rmSync(dst, { recursive: true, force: true });
+      fs.renameSync(staging, dst);
       stats.snapped += 1;
       stats.bytes += bytes;
       stats.orgs.push(org);
@@ -122,6 +187,7 @@ export function snapshotShardsOnce({
         catch { /* best-effort prune */ }
       }
     } catch (e) {
+      try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
       stats.failed += 1;
       logger.warn?.(`[shard-backup] slot ${String(org).slice(0, 8)} failed: ${e.message}`);
     }

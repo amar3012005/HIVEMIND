@@ -92,8 +92,19 @@ try {
   ));
   if (!String(fetched.content || '').includes(marker)) throw new Error('memory_get_content_mismatch');
 
-  const recalled = await recall();
-  const memories = Array.isArray(recalled.memories) ? recalled.memories : [];
+  let recalled = null;
+  let memories = [];
+  let recallAttempts = 0;
+  // The write is durable when POST returns, while vector visibility may be
+  // briefly eventual on embedded/remote stores. Bound the acceptance wait so
+  // a permanent indexing failure still fails loudly instead of hanging.
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    recallAttempts = attempt;
+    recalled = await recall();
+    memories = Array.isArray(recalled.memories) ? recalled.memories : [];
+    if (memories.some((row) => String(row.content || row.snippet || '').includes(marker))) break;
+    if (attempt < 6) await new Promise((resolve) => setTimeout(resolve, 500));
+  }
   if (!memories.some((row) => String(row.content || row.snippet || '').includes(marker))) {
     throw new Error(`public_memory_recall_miss:${JSON.stringify({
       memories: memories.length,
@@ -110,7 +121,9 @@ try {
   if (!remote && central !== 1) throw new Error(`managed_memory_missing:${central}`);
 
   const removed = await removeMemory();
-  if (removed?.ok !== true) throw new Error(`memory_delete_failed:${JSON.stringify(removed)}`);
+  if (removed?.ok !== true && removed?.success !== true) {
+    throw new Error(`memory_delete_failed:${JSON.stringify(removed)}`);
+  }
   const after = await recall();
   if ((after.memories || []).some((row) => String(row.content || row.snippet || '').includes(marker))) {
     throw new Error('deleted_memory_remains_recallable');
@@ -120,6 +133,7 @@ try {
     ok: true,
     storage_mode: embedded ? 'amr_embedded' : remote ? 'byod' : 'managed',
     recalled_memories: memories.length,
+    recall_attempts: recallAttempts,
     central_memories: central,
     deleted: true,
     duration_ms: Date.now() - startedAt,

@@ -20583,7 +20583,19 @@ exit \$RC
               if ((mf.org_id && mf.org_id !== orgId) || (mt.org_id && mt.org_id !== orgId)) {
                 return jsonResponse(res, { error: 'cross-tenant relationship refused' }, 403);
               }
-              const rel = await engine.createRelationship({ from_id: _from, to_id: _to, type: _type, confidence: body.confidence, metadata: body.metadata });
+              // Persist through the residency-aware graph store. `engine` is the
+              // legacy in-memory facade; accepting its result here acknowledged a
+              // relationship that disappeared immediately and never reached
+              // Postgres or a tenant Memory Box.
+              const rel = await persistentMemoryStore.createRelationship({
+                from_id: _from,
+                to_id: _to,
+                type: _type,
+                confidence: body.confidence,
+                metadata: body.metadata,
+                created_by: userId,
+                org_id: orgId,
+              });
               return jsonResponse(res, { success: true, relationship: rel });
             } catch (relErr) {
               return jsonResponse(res, { error: relErr.message }, 500);

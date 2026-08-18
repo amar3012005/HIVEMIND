@@ -146,7 +146,8 @@ function makeOpenRouterService() {
   return new LiteLLMEmbedService(
     process.env.OPENROUTER_EMBED_MODEL || 'baai/bge-m3',
     process.env.OPENROUTER_API_KEY || '',
-    process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1'
+    process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+    { timeoutMs: Number(process.env.OPENROUTER_EMBED_TIMEOUT_MS || 2000) },
   );
 }
 

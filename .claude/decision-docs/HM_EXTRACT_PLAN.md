@@ -1,10 +1,49 @@
 # hm-extract — detailed build + rollout plan
 
-Status: **planned, not built.** Extends `~/anydoc-eval/HM_EXTRACT_SPEC.md` (the
-API contract) with implementation, concurrency, failure-mode, and rollout
-detail for running this at hundreds-of-tenants scale. That file is the
-contract; this file is how to build and ship it without it becoming a second
-core.
+Status (2026-08-19): **built, locally e2e-verified, wired into core behind
+`KB_EXTRACT_URL` — narrow format scope, not the blanket docling replacement
+originally discussed.** Service lives at `hm-extract/` in this repo. Extends
+`~/anydoc-eval/HM_EXTRACT_SPEC.md` (the API contract) with implementation,
+concurrency, failure-mode, and rollout detail for running this at
+hundreds-of-tenants scale. That file is the contract; this file is how to
+build and ship it without it becoming a second core.
+
+## Scope decision, revised after reading the CURRENT tier ladder (2026-08-19)
+
+The original ask was to replace docling and the "legacy pipeline" wholesale.
+Reading `core/src/server.js`'s `doclingAdapter.parseBuffer` on the latest
+`origin/singulance-main` tip (1073 commits past what an earlier session last
+saw) showed that "docling" is not one parser — it's an 8+ tier router, each
+tier backed by a specific measured production incident:
+`whisper → plain-text → groq-image → sheet-direct → csv-direct →
+groq-vision/fast-pdf (PDF) → mammoth seam (docx/html/md/txt) → docling
+(last resort)`.
+
+Several of those tiers already measurably beat plain docling in ways
+hm-extract does not:
+- **sheet-direct/csv-direct** (xlsx/xls/xlsm/ods, csv/tsv) keep a real
+  structured cell grid (`tables: [{headers, rows}]`) via SheetJS/native CSV
+  parsing. Docling flattens a workbook to prose, losing rows/columns
+  entirely — measured zero structured tables recovered. hm-extract only
+  returns markdown text, no structured grid — replacing this tier would be
+  a regression.
+- **the mammoth seam** (docx/html/md/txt) already solves docx heading-loss
+  (docling measured `chars=173 chunks=0` on a real 2-heading docx; mammoth's
+  `convertToHtml` correctly preserves `# Marktumfeld und Wettbewerb`-style
+  headings from Word's own styles).
+- **fast-pdf + groq-vision** (PDF) already beats docling on PDF specifically
+  (docling measured 18-606s for `chunks=0` on real PDFs; fast-pdf ~800ms,
+  keeps page markers). hm-extract measured **zero page numbers for PDF** —
+  a real, working capability (page citations) that would be lost, not
+  gained, by swapping this tier.
+
+**Revised scope: hm-extract covers only pptx/ppt/pptm/ppsx/ppsm and legacy
+doc/docm/odt/rtf/epub** — the formats where docling genuinely is still the
+primary/only path today, not a proven-inferior fallback. xlsx/csv/docx/pdf
+are explicitly excluded; their existing tiers stay untouched. See
+`core/src/knowledge/enterprise/hm-extract-adapter.js`'s header for the same
+reasoning inline with the code, and `KB_EXTRACT_FORMATS` env var to adjust
+the allowlist without a code change.
 
 ## Direct answer to "is this a great plan for multi-tenant, hundreds of users"
 

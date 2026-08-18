@@ -2130,6 +2130,41 @@ if (process.env.DOCLING_URL) {
           }
         }
 
+        // ── Tier 1.7: hm-extract, for a NARROW allowlist only ──
+        // Scope decision (2026-08-19), see hm-extract-adapter.js's header for the
+        // full reasoning: xlsx/csv/docx/pdf are DELIBERATELY excluded — those
+        // already have dedicated tiers (sheet-direct, csv-direct, the mammoth
+        // seam, fast-pdf+vision) each proven better than plain docling for their
+        // format, and hm-extract does not clearly beat any of them (it has no
+        // structured cell grid, no page numbers on PDF). Default allowlist covers
+        // exactly the formats where docling is STILL the primary/only path today:
+        // pptx/ppt (picture description off by default, still slow, still real
+        // docling) and legacy doc/docm/odt/rtf/epub. Gated on KB_EXTRACT_URL being
+        // set at all — unset means this entire tier is skipped, zero behavior
+        // change from before this was added. On any failure (including the
+        // circuit breaker's cooldown window) falls through to docling below,
+        // exactly like the seam tier does.
+        const { isHmExtractEnabled: _isHmExtractEnabled, parseWithHmExtract: _parseWithHmExtract }
+          = await import('./knowledge/enterprise/hm-extract-adapter.js');
+        if (_isHmExtractEnabled(ext)) {
+          try {
+            const _hmx = await _parseWithHmExtract(fileBuffer, filename);
+            if (_hmx.ok && (_hmx.markdown || _hmx.text)) {
+              const _body = _hmx.markdown || _hmx.text;
+              console.log(`[docling-adapter] tier=${_hmx.tier} file=${filename} chars=${_body.length} `
+                + `segments=${_hmx.meta?.segments || 0} ms=${Date.now() - tParse}`);
+              return {
+                text: _hmx.text, markdown: _hmx.markdown, json: null,
+                tables: [], pages: null, confidence: null, error: null,
+                hybridChunks: [], chunkerError: null, engine: _hmx.tier,
+              };
+            }
+            console.warn(`[docling-adapter] hm-extract declined ${filename} (${_hmx.error || 'no text'}) — trying docling`);
+          } catch (e) {
+            console.warn(`[docling-adapter] hm-extract threw for ${filename}: ${e.message} — trying docling`);
+          }
+        }
+
         // ── Tier 2: Docling (smart=true via enterprise upload only) ──
         const useSmart = smart === true;
         // Text-bearing and not image-heavy → neither OCR nor picture description is

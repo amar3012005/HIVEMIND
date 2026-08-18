@@ -34,6 +34,12 @@ services:
       USE_QDRANT_STORAGE: ${USE_QDRANT_STORAGE:-true}
       USE_AST_CHUNKING: ${USE_AST_CHUNKING:-true}
       USE_STATEFUL_MANAGER: ${USE_STATEFUL_MANAGER:-true}
+      # hm-extract: OFF by default (KB_EXTRACT_URL unset in ./core/.env means this
+      # whole tier is skipped, zero behavior change). Set KB_EXTRACT_URL in
+      # core/.env to http://hm-extract:8088 to enable, narrow format allowlist
+      # only — see core/src/knowledge/enterprise/hm-extract-adapter.js.
+      KB_EXTRACT_URL: ${KB_EXTRACT_URL:-}
+      KB_EXTRACT_FORMATS: ${KB_EXTRACT_FORMATS:-pptx,ppt,pptm,ppsx,ppsm,doc,docm,odt,rtf,epub}
     ports:
       - "3000:3000"
     volumes:
@@ -54,6 +60,34 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+
+  # ==========================================
+  # hm-extract — standalone document extraction (anydoc-based)
+  # Stateless, no tenant identity, no DB. See hm-extract/README.md and
+  # .claude/decision-docs/HM_EXTRACT_PLAN.md for the full design and why.
+  # Internal network only — never exposed via a published port in any
+  # deploy profile (P2 of the rollout plan: dark, internal-only).
+  # ==========================================
+  hm-extract:
+    build:
+      context: ./hm-extract
+    container_name: hivemind-hm-extract
+    environment:
+      UV_THREADPOOL_SIZE: 8
+      # Sized per the real measurement in hm-extract/README.md's "Memory"
+      # section: repeated large-document passes plateau around ~5.3GB, not
+      # the earlier-assumed 2GB. 4g here is a local-dev floor, not the
+      # verified production number (that still needs real x86 hardware).
+    mem_limit: 4g
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8088/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - hivemind-network
 
   # ==========================================
   # PostgreSQL 15 + Apache AGE

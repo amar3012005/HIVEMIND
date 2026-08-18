@@ -30,6 +30,10 @@ const PROVIDER  = (process.env.RERANK_PROVIDER || 'cohere').toLowerCase();
 const URL       = (process.env.RERANK_URL || '').replace(/\/+$/, '');
 const MODEL     = process.env.RERANK_MODEL || 'voyageai/rerank-2.5';
 const API_KEY   = process.env.RERANK_API_KEY || '';
+const FALLBACK_URL = (process.env.RERANK_FALLBACK_URL || '').replace(/\/+$/, '');
+const FALLBACK_PROVIDER = (process.env.RERANK_FALLBACK_PROVIDER || 'cohere').toLowerCase();
+const FALLBACK_MODEL = process.env.RERANK_FALLBACK_MODEL || '';
+const FALLBACK_API_KEY = process.env.RERANK_FALLBACK_API_KEY || process.env.OPENROUTER_API_KEY || '';
 const POOL      = Math.min(Number(process.env.RERANK_POOL || 100), 200); // hard cap 200
 // 1500ms was too tight: Cohere-via-OpenRouter is ~300ms normally but spikes to
 // 1-2s under burst/queueing, tripping the abort → the cross-encoder pass got
@@ -68,6 +72,33 @@ const MODEL_CHAIN = [...new Set([
   ...String(process.env.RERANK_FALLBACK_MODELS || 'voyageai/rerank-2.5-lite,cohere/rerank-4-fast,qwen/qwen3-reranker-8b')
     .split(',').map((m) => m.trim()).filter(Boolean),
 ])];
+
+// A fallback model is not necessarily served by the primary endpoint. Keep the
+// route together with its model/provider/key so a self-hosted primary can fail
+// over to a managed provider without sending an unsupported model to the
+// primary host. Legacy RERANK_FALLBACK_MODELS remain same-endpoint fallbacks.
+const TARGET_CHAIN = [];
+const seenTargets = new Set();
+function addTarget(target) {
+  if (!target?.url || !target?.model) return;
+  const key = `${target.provider}|${target.url}|${target.model}`;
+  if (seenTargets.has(key)) return;
+  seenTargets.add(key);
+  TARGET_CHAIN.push(target);
+}
+addTarget({ role: 'primary', provider: PROVIDER, url: URL, model: MODEL, apiKey: API_KEY });
+if (FALLBACK_URL && FALLBACK_MODEL) {
+  addTarget({
+    role: 'fallback',
+    provider: FALLBACK_PROVIDER,
+    url: FALLBACK_URL,
+    model: FALLBACK_MODEL,
+    apiKey: FALLBACK_API_KEY,
+  });
+}
+for (const model of MODEL_CHAIN.slice(1)) {
+  addTarget({ role: 'legacy-fallback', provider: PROVIDER, url: URL, model, apiKey: API_KEY });
+}
 
 export function isRerankEnabled() {
   return ENABLED && !!URL;
@@ -113,30 +144,53 @@ function textOf(c) {
     .filter(Boolean).join('\n').slice(0, 2000);
 }
 
-async function callTei(query, texts, signal, model = MODEL) {
-  // HuggingFace TEI reranker: { query, texts } → [{ index, score }]
-  const r = await gatewayFirstFetch(`${URL}/rerank`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}) },
-    body: JSON.stringify({ query, texts, model }),
-    signal,
-  });
-  if (!r.ok) throw new Error(`TEI rerank ${r.status} (${model})`);
-  const j = await r.json();
-  return (Array.isArray(j) ? j : j.results || []).map((x) => ({ index: x.index, score: x.score ?? x.relevance_score }));
+function validateScores(scored, expectedCount, model) {
+  if (!Array.isArray(scored) || scored.length !== expectedCount) {
+    throw new Error(`invalid rerank row count (${model}): got ${scored?.length ?? 'none'}, want ${expectedCount}`);
+  }
+  const seen = new Set();
+  for (const row of scored) {
+    if (!Number.isInteger(row.index) || row.index < 0 || row.index >= expectedCount
+        || seen.has(row.index) || !Number.isFinite(row.score)) {
+      throw new Error(`invalid rerank score contract (${model})`);
+    }
+    seen.add(row.index);
+  }
+  return scored;
 }
 
-async function callCohere(query, texts, signal, model = MODEL) {
-  // Cohere Rerank: { model, query, documents } → { results:[{ index, relevance_score }] }
-  const r = await gatewayFirstFetch(`${URL}`, {
+async function callTei(query, texts, signal, target) {
+  // HuggingFace TEI reranker: { query, texts } → [{ index, score }]
+  const r = await gatewayFirstFetch(`${target.url}/rerank`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
-    body: JSON.stringify({ model, query, documents: texts, top_n: texts.length }),
+    headers: { 'Content-Type': 'application/json', ...(target.apiKey ? { Authorization: `Bearer ${target.apiKey}` } : {}) },
+    body: JSON.stringify({ query, texts, model: target.model }),
     signal,
   });
-  if (!r.ok) throw new Error(`Cohere rerank ${r.status} (${model})`);
+  if (!r.ok) throw new Error(`TEI rerank ${r.status} (${target.model})`);
   const j = await r.json();
-  return (j.results || []).map((x) => ({ index: x.index, score: x.relevance_score }));
+  return validateScores(
+    (Array.isArray(j) ? j : j.results || []).map((x) => ({ index: x.index, score: x.score ?? x.relevance_score })),
+    texts.length,
+    target.model,
+  );
+}
+
+async function callCohere(query, texts, signal, target) {
+  // Cohere Rerank: { model, query, documents } → { results:[{ index, relevance_score }] }
+  const r = await gatewayFirstFetch(`${target.url}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(target.apiKey ? { Authorization: `Bearer ${target.apiKey}` } : {}) },
+    body: JSON.stringify({ model: target.model, query, documents: texts, top_n: texts.length }),
+    signal,
+  });
+  if (!r.ok) throw new Error(`Cohere rerank ${r.status} (${target.model})`);
+  const j = await r.json();
+  return validateScores(
+    (j.results || []).map((x) => ({ index: x.index, score: x.relevance_score })),
+    texts.length,
+    target.model,
+  );
 }
 
 /**
@@ -168,7 +222,7 @@ export async function rerank(query, candidates, { topN } = {}) {
 
   // One attempt with a fresh timeout. Retryable failures (transient) get one
   // more shot before we degrade; anything else degrades immediately.
-  const attempt = async (model, attemptBudget) => {
+  const attempt = async (target, attemptBudget) => {
     const ctrl = new AbortController();
     const parentSignal = currentStageSignal();
     const abortFromParent = () => {
@@ -181,9 +235,9 @@ export async function rerank(query, candidates, { topN } = {}) {
     }, attemptBudget);
     try {
       if (parentSignal?.aborted) throw parentSignal.reason || new Error('rerank cancelled by upstream deadline');
-      const scored = PROVIDER === 'cohere'
-        ? await callCohere(query, texts, ctrl.signal, model)
-        : await callTei(query, texts, ctrl.signal, model);
+      const scored = target.provider === 'cohere'
+        ? await callCohere(query, texts, ctrl.signal, target)
+        : await callTei(query, texts, ctrl.signal, target);
       if (!scored.length) throw new Error('empty rerank result');
       const byIdx = new Map(scored.map((s) => [s.index, s.score]));
       const reordered = pool
@@ -202,8 +256,9 @@ export async function rerank(query, candidates, { topN } = {}) {
   // working chain — "it worked" and "it worked on the third choice" are different facts.
   let lastErr = null;
   const attemptedModels = [];
-  for (let mi = 0; mi < MODEL_CHAIN.length; mi += 1) {
-    const model = MODEL_CHAIN[mi];
+  for (let mi = 0; mi < TARGET_CHAIN.length; mi += 1) {
+    const target = TARGET_CHAIN[mi];
+    const model = target.model;
     let failed = false;
     for (let a = 0; a <= RETRIES; a++) {
       const attemptsLeft = Math.max(1, MAX_ATTEMPTS_TOTAL - totalAttempts);
@@ -232,12 +287,12 @@ export async function rerank(query, candidates, { topN } = {}) {
       totalAttempts += 1;
       if (!attemptedModels.includes(model)) attemptedModels.push(model);
       try {
-        const out = await attempt(model, attemptBudget);
+        const out = await attempt(target, attemptBudget);
         if (mi > 0) {
           console.warn(`[reranker] primary ${MODEL_CHAIN[0]} unavailable — request served by `
             + `fallback #${mi} ${model}. Investigate the primary; the chain is a safety net, not a plan.`);
         }
-        return finish(out, { status: 'served', model, fallback_index: mi });
+        return finish(out, { status: 'served', model, route: target.role, fallback_index: mi });
       } catch (err) {
         lastErr = err;
         if (currentStageSignal()?.aborted || remainingStageMs(1) <= 0) {
@@ -246,12 +301,12 @@ export async function rerank(query, candidates, { topN } = {}) {
         // When a distinct fallback model exists, spend the second bounded
         // attempt on provider diversity instead of retrying the same failing
         // route. A single-model deployment may still use its configured retry.
-        if (MODEL_CHAIN.length === 1 && a < RETRIES && RETRYABLE.test(String(err?.message || ''))) continue;
+        if (TARGET_CHAIN.length === 1 && a < RETRIES && RETRYABLE.test(String(err?.message || ''))) continue;
         failed = true;
         break;
       }
     }
-    if (failed && mi < MODEL_CHAIN.length - 1
+    if (failed && mi < TARGET_CHAIN.length - 1
         && totalAttempts < MAX_ATTEMPTS_TOTAL
         && Math.max(0, runDeadlineAt - Date.now()) > 0
         && remainingStageMs(1) > 0) {
@@ -261,7 +316,7 @@ export async function rerank(query, candidates, { topN } = {}) {
   }
   // Graceful degrade — keep algorithmic order (correctness preserved by the
   // upstream tiered reranker + stable tie-break; we just lose the cross-encoder).
-  console.warn(`[reranker] DEGRADED to algorithmic order — attempted ${attemptedModels.length}/${MODEL_CHAIN.length} model(s) `
+  console.warn(`[reranker] DEGRADED to algorithmic order — attempted ${attemptedModels.length}/${TARGET_CHAIN.length} target(s) `
     + `(${attemptedModels.join(' -> ') || 'none'}); last error: ${lastErr?.message}. The cross-encoder is `
     + `absent for this request, so lanes are interleaved rather than compared.`);
   return finish(candidates, { status: 'degraded', model: null, error: lastErr?.message || 'budget exhausted' });

@@ -48,3 +48,55 @@ test('reranker shares one total budget across primary and fallback and reports t
   assert.equal(rows.rerank_meta.attempts, 2);
   assert.ok(Date.now() - startedAt < 260, 'the complete provider chain must obey one wall-clock budget');
 });
+
+test('reranker can fail over to a distinct endpoint and model', async (t) => {
+  const primary = http.createServer((_req, res) => {
+    res.writeHead(503, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'gpu unavailable' }));
+  });
+  const fallbackBodies = [];
+  const fallback = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      fallbackBodies.push(JSON.parse(Buffer.concat(chunks).toString()));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ results: [
+        { index: 1, relevance_score: 0.9 },
+        { index: 0, relevance_score: 0.1 },
+      ] }));
+    });
+  });
+  await new Promise((resolve) => primary.listen(0, '127.0.0.1', resolve));
+  await new Promise((resolve) => fallback.listen(0, '127.0.0.1', resolve));
+  t.after(() => Promise.all([
+    new Promise((resolve) => primary.close(resolve)),
+    new Promise((resolve) => fallback.close(resolve)),
+  ]));
+
+  process.env.RERANK_ENABLED = 'true';
+  process.env.RERANK_PROVIDER = 'cohere';
+  process.env.RERANK_URL = `http://127.0.0.1:${primary.address().port}`;
+  process.env.RERANK_MODEL = 'bge-reranker-v2-m3';
+  process.env.RERANK_FALLBACK_URL = `http://127.0.0.1:${fallback.address().port}`;
+  process.env.RERANK_FALLBACK_PROVIDER = 'cohere';
+  process.env.RERANK_FALLBACK_MODEL = 'voyageai/rerank-2.5-lite';
+  process.env.RERANK_FALLBACK_MODELS = '';
+  process.env.RERANK_TIMEOUT_MS = '500';
+  process.env.RERANK_TOTAL_TIMEOUT_MS = '800';
+  process.env.RERANK_MAX_ATTEMPTS_TOTAL = '2';
+  process.env.RERANK_RETRIES = '0';
+  const { rerank } = await import(`../../src/memory/reranker.js?route=${Date.now()}`);
+
+  const rows = await rerank('target', [
+    { id: 'other', content: 'unrelated' },
+    { id: 'target', content: 'target' },
+  ], { topN: 2 });
+
+  assert.equal(rows[0].id, 'target');
+  assert.equal(rows.rerank_meta.status, 'served');
+  assert.equal(rows.rerank_meta.model, 'voyageai/rerank-2.5-lite');
+  assert.equal(rows.rerank_meta.route, 'fallback');
+  assert.equal(fallbackBodies.length, 1);
+  assert.equal(fallbackBodies[0].model, 'voyageai/rerank-2.5-lite');
+});

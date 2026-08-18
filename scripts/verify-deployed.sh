@@ -31,15 +31,25 @@ declare -A IMAGE_FILE=(
 )
 
 hash_stream() { sha256sum | awk '{print $1}'; }
+# LC_ALL=C pins byte-order sort collation. Without it, `sort -z` orders
+# filenames by the shell's locale, which differs between this host and the
+# container's shell — same 40 files, same content, different aggregate list
+# order, different final hash. Hit exactly this on 2026-08-16 (see
+# ENGINEERING_JOURNAL.md) and again on 2026-08-19 during the hm-extract
+# deploy: verified live both times that every individual file hash matched
+# byte-for-byte, only the list order (thus the final combined hash)
+# differed. Documented as a known bug both times but never actually fixed —
+# fixing it here so it stops producing a FATAL false-positive on every
+# deploy going forward.
 fixture_hash_local() {
   (
     cd "$SOURCE_ROOT/core/src/runtime-playbooks/fixtures"
-    find . -maxdepth 1 -type f -name '*.json' -print0 | sort -z | xargs -0 sha256sum
+    find . -maxdepth 1 -type f -name '*.json' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
   ) | hash_stream
 }
 fixture_hash_container() {
   docker exec "$1" sh -lc \
-    "cd /app/src/runtime-playbooks/fixtures && find . -maxdepth 1 -type f -name '*.json' -print0 | sort -z | xargs -0 sha256sum" \
+    "cd /app/src/runtime-playbooks/fixtures && find . -maxdepth 1 -type f -name '*.json' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum" \
     | hash_stream
 }
 

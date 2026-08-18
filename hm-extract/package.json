@@ -1,0 +1,17 @@
+{
+  "name": "hm-extract",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Stateless bytes-in/segments-out document extraction service. No DB, no tenant identity. See .claude/decision-docs/HM_EXTRACT_PLAN.md in the main repo.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@firecrawl/anydoc": "^0.1.9",
+    "express": "^4.19.2",
+    "multer": "^2.2.0"
+  }
+}

@@ -263,8 +263,28 @@ export function renderTemplate(templateId, vars = {}) {
     })
     : tpl.layout === 'singulance_transactional'
       ? renderSingulanceTransactionalEmail({ preheader, innerHtml: inner, year: escapeHtml(ctx.year) })
-      : wrapHtml(inner, preheader, ctx);
+      : tpl.layout === 'runtime_dark'
+        ? renderRuntimeDarkEmail(inner, preheader)
+        : wrapHtml(inner, preheader, ctx);
   return { subject, text, html };
+}
+
+/**
+ * Runtime's dedicated persona theme: full-bleed dark background, text
+ * directly on it — deliberately NOT the light card/box shell every other
+ * transactional email uses (`wrapHtml`). Matches the dark investor-deck
+ * aesthetic Runtime's brand reference uses. No card, no border, no shadow.
+ */
+function renderRuntimeDarkEmail(inner, preheader) {
+  const pre = preheader
+    ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0">${preheader}</div>`
+    : '';
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>` +
+    `<body style="margin:0;background:#060b16;padding:0;font-family:Inter,Arial,sans-serif">${pre}` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#060b16"><tr><td align="center" style="padding:64px 24px">` +
+    `<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:560px;max-width:100%">` +
+    `<tr><td>${inner}</td></tr>` +
+    `</table></td></tr></table></body></html>`;
 }
 
 /** Wrap inner HTML in a minimal, email-client-safe shell. */

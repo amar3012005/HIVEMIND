@@ -1,15 +1,20 @@
 /**
- * Persona email thread for HQ Runtime (2026-08-17).
+ * Persona email notifications for HQ Runtime (2026-08-17, revised).
  *
- * One continuous email thread per runtime, written in Runtime's own first-
- * person voice, narrating: Day-0 activation, the first growth plan, and
- * every decision-required moment (the same events the Runtime terminal's
- * own POPUP=true classification uses — kept in sync deliberately, not
- * reinvented). Reuses core/src/email/email-service.js (Cloudflare Email
- * Sending, already configured in production) rather than a second send
- * path — real RFC 5322 threading via Message-ID/In-Reply-To/References,
- * persisted on the HqRuntime row so the SAME thread continues across every
- * wake, not a new email chain each time.
+ * Each narrated moment (Day-0 activation, first growth plan, every decision-
+ * required popup — the same events the Runtime terminal's own POPUP=true
+ * classification uses, kept in sync deliberately, not reinvented) is sent as
+ * its OWN independent email with its own subject line — NOT threaded into
+ * one chain. A fresh, varied subject per send reads like a real running
+ * update stream (and avoids every email looking identical in an inbox list),
+ * rather than one growing thread. Reuses core/src/email/email-service.js
+ * (Cloudflare Email Sending, already configured in production) rather than a
+ * second send path.
+ *
+ * Sent from Runtime's own persona address (runtime@admin.singulancelabs.com
+ * by default), rendered on Runtime's dedicated dark theme (see email-service
+ * `runtime_dark` layout) — text directly on a full-bleed dark background, no
+ * light card/box shell.
  *
  * Never throws, never blocks the caller — a failed/skipped email must never
  * break a real Runtime cycle.
@@ -20,26 +25,67 @@ import { createAuthorityApprovalToken } from './approval-links.js';
 const APP_URL = process.env.HIVEMIND_APP_URL || 'https://next.singulancelabs.com/hivemind/app';
 const APPROVAL_BASE_URL = process.env.HQ_RUNTIME_APPROVAL_BASE_URL || 'https://next.singulancelabs.com/hivemind/approve';
 const PERSONA_NAME = process.env.HQ_RUNTIME_PERSONA_NAME || 'Runtime';
+const RUNTIME_EMAIL_FROM = process.env.RUNTIME_EMAIL_FROM || 'Runtime <runtime@admin.singulancelabs.com>';
+
+function pick(variants) {
+  return variants[Math.floor(Math.random() * variants.length)];
+}
+
+/** A short, inbox-safe excerpt of a task title/summary for use inside a subject line. */
+function excerpt(text, max = 60) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return null;
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+function craftSubject(kind, { orgName, title, summary }) {
+  const org = orgName || 'your company';
+  if (kind === 'activation') {
+    return pick([
+      `${org} — I'm awake and getting to work`,
+      `${org}: Runtime just started its first shift`,
+      `Starting up for ${org}`,
+    ]);
+  }
+  if (kind === 'growth_plan') {
+    const what = excerpt(title || summary);
+    return pick([
+      `${org} — here's the plan I've built`,
+      `${org}: our first operating plan is ready`,
+      what ? `${org}: I've built our plan around "${what}"` : `${org}: first operating plan drafted`,
+    ]);
+  }
+  // 'popup' — approval_required / capability_required / decision_required
+  const what = excerpt(title || summary);
+  return pick([
+    what ? `${org}: I need your OK — ${what}` : `${org}: I need something from you`,
+    what ? `${org} needs a decision: ${what}` : `${org}: waiting on your input`,
+    what ? `Action needed for ${org}: ${what}` : `${org}: I'm blocked until you weigh in`,
+  ]);
+}
+
+function personaLabel(kind) {
+  if (kind === 'activation') return 'ACTIVATION';
+  if (kind === 'growth_plan') return 'GROWTH PLAN';
+  return 'ACTION NEEDED';
+}
 
 function personaCopy(kind, { orgName, title, summary }) {
   const org = orgName || 'your company';
   if (kind === 'activation') {
     return {
-      subject: `${org} — I'm awake and getting to work`,
       heading: `Hi — I'm ${PERSONA_NAME}.`,
-      body: `I just came online for ${org}. Before I touch anything, I'm reading everything I can find — your website, connected channels, campaigns, leads — so the first plan I build is grounded in what's actually true today, not a guess.\n\nI'll write back here as I go: when I've built the first operating plan, and any time I need your input before I can act. One thread, so you always have the whole story in one place.`,
+      body: `I just came online for ${org}. Before I touch anything, I'm reading everything I can find — your website, connected channels, campaigns, leads — so the first plan I build is grounded in what's actually true today, not a guess.\n\nI'll email you as I go: when I've built the first operating plan, and any time I need your input before I can act.`,
     };
   }
   if (kind === 'growth_plan') {
     return {
-      subject: `${org} — here's the plan I've built`,
       heading: `I've built our first operating plan.`,
-      body: `${summary || title}\n\nI'm starting on the highest-leverage pieces now. Anything that needs your say-so before it goes external, I'll ask you right here.`,
+      body: `${summary || title}\n\nI'm starting on the highest-leverage pieces now. Anything that needs your say-so before it goes external, I'll email you about it directly.`,
     };
   }
   // 'popup' — approval_required / capability_required / decision_required
   return {
-    subject: `${org} — I need something from you`,
     heading: title || 'I need your input to keep going.',
     body: summary || 'I\'ve reached a point where I want your decision before I act any further.',
   };
@@ -76,11 +122,10 @@ export async function notifyOwnerByEmail({ prisma, runtime, kind, title, summary
     const orgName = org?.name || null;
 
     const copy = personaCopy(kind, { orgName, title, summary });
-    // The thread's own subject is fixed at the FIRST send and reused
-    // unchanged for every later one — a consistent subject is what actually
-    // makes mail clients group these as one thread, on top of the real
-    // References/In-Reply-To headers.
-    const subject = runtime.emailThreadSubject || copy.subject;
+    // Every send gets its own fresh, varied subject — these are deliberately
+    // INDEPENDENT emails, not one growing thread, so no root subject/message
+    // is reused or referenced here.
+    const subject = craftSubject(kind, { orgName, title, summary });
 
     let approveUrl = null;
     if (kind === 'popup' && details?.run_id && details?.gate) {
@@ -93,16 +138,18 @@ export async function notifyOwnerByEmail({ prisma, runtime, kind, title, summary
     const result = await sendEmail({
       templateId: approveUrl ? 'runtime_persona_approval_update' : 'runtime_persona_update',
       to,
+      from: RUNTIME_EMAIL_FROM,
       vars: {
         subject,
+        label: personaLabel(kind),
         preheader: copy.heading,
-        body: `${copy.heading}\n\n${copy.body}`,
+        heading: copy.heading,
+        body: copy.body,
         personaName: PERSONA_NAME,
         orgName: orgName || 'your company',
         appUrl: APP_URL,
         ...(approveUrl ? { approveUrl } : {}),
       },
-      thread: runtime.emailThreadMessageId ? { inReplyTo: runtime.emailThreadMessageId } : undefined,
     });
 
     if (result.ok || result.messageId) {
@@ -110,12 +157,6 @@ export async function notifyOwnerByEmail({ prisma, runtime, kind, title, summary
         where: { id: runtime.id, orgId: runtime.orgId },
         data: {
           emailThreadTo: to,
-          emailThreadSubject: subject,
-          // Keep referencing the ORIGINAL root message, not the most recent
-          // one — a well-established simplified threading pattern that
-          // still groups correctly and never loses the thread if one send's
-          // provider response is missing a messageId.
-          emailThreadMessageId: runtime.emailThreadMessageId || result.messageId || null,
           emailThreadSentCount: { increment: 1 },
           emailThreadLastSentAt: new Date(),
         },

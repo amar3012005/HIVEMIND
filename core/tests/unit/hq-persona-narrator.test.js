@@ -61,38 +61,41 @@ test('notifyOwnerByEmail is a no-op when no owner email can be resolved at all',
   assert.equal(result.error, 'no_owner_email');
 });
 
-test('the FIRST send persists the thread root (subject + Message-ID) on the runtime row', async () => {
+test('each send is INDEPENDENT — no thread field, no reused subject/message-id; sent count still tracked', async () => {
   const runtimeRows = [baseRuntime()];
-  const sendEmail = async () => ({ ok: true, messageId: '<root-message-id@singulancelabs.com>' });
+  let capturedThread = 'unset';
+  const sendEmail = async (args) => { capturedThread = args.thread; return { ok: true, messageId: '<send-1@x>' }; };
   await notifyOwnerByEmail(
     { prisma: prismaWith({ runtimeRows }), runtime: runtimeRows[0], kind: 'activation' },
     { sendEmail },
   );
-  assert.equal(runtimeRows[0].emailThreadMessageId, '<root-message-id@singulancelabs.com>');
+  assert.equal(capturedThread, undefined, 'no thread/In-Reply-To is ever passed — every email stands alone');
   assert.equal(runtimeRows[0].emailThreadSentCount, 1);
-  assert.ok(runtimeRows[0].emailThreadSubject);
 });
 
-test('every send AFTER the first references the ORIGINAL root message and reuses its subject — real thread continuity, not a fresh chain each time', async () => {
-  const runtimeRows = [baseRuntime({
-    emailThreadMessageId: '<root@x>', emailThreadSubject: 'Acme — I\'m awake and getting to work',
-  })];
-  let capturedThread = null;
-  let capturedSubject = null;
-  const sendEmail = async (args) => {
-    capturedThread = args.thread;
-    capturedSubject = args.vars.subject;
-    return { ok: true, messageId: '<second-send@x>' };
-  };
+test('every send gets its own fresh subject — not reused verbatim across calls', async () => {
+  const runtimeRows = [baseRuntime()];
+  const subjects = [];
+  const sendEmail = async (args) => { subjects.push(args.vars.subject); return { ok: true, messageId: '<m@x>' }; };
+  for (let i = 0; i < 12; i++) {
+    // eslint-disable-next-line no-await-in-loop
+    await notifyOwnerByEmail(
+      { prisma: prismaWith({ runtimeRows }), runtime: runtimeRows[0], kind: 'popup', title: 'Qualify outreach prospects', summary: 'Needs a decision.' },
+      { sendEmail },
+    );
+  }
+  assert.ok(subjects.every((s) => typeof s === 'string' && s.length > 0));
+  assert.ok(new Set(subjects).size > 1, 'subject rotates across sends rather than being identical every time');
+});
+
+test('sends from the Runtime persona address, not the generic system From', async () => {
+  let sentFrom = null;
+  const sendEmail = async (args) => { sentFrom = args.from; return { ok: true, messageId: '<m@x>' }; };
   await notifyOwnerByEmail(
-    { prisma: prismaWith({ runtimeRows }), runtime: runtimeRows[0], kind: 'popup', title: 'Approval required', summary: 'Needs a decision.' },
+    { prisma: prismaWith(), runtime: baseRuntime(), kind: 'activation' },
     { sendEmail },
   );
-  assert.deepEqual(capturedThread, { inReplyTo: '<root@x>' });
-  assert.equal(capturedSubject, 'Acme — I\'m awake and getting to work');
-  // The root Message-ID must never be overwritten by a later send's id.
-  assert.equal(runtimeRows[0].emailThreadMessageId, '<root@x>');
-  assert.equal(runtimeRows[0].emailThreadSentCount, 1);
+  assert.match(sentFrom, /runtime@admin\.singulancelabs\.com/);
 });
 
 test('a failed send still never throws out of notifyOwnerByEmail', async () => {

@@ -285,6 +285,24 @@ export function cadenceIdempotencyKey(runtimeId, dueAt) {
   return `daily_cadence:${runtimeId}:${dueAt.toISOString().slice(0, 10)}`;
 }
 
+/**
+ * The queue-exhausted sleep's declared checkpoint (`dueAt`) can be many days
+ * out — a real trace showed 7. daily_cadence, when enabled, already has its
+ * own independent ~24h wake armed regardless, so the TRUE next wake can be
+ * much sooner than the checkpoint. This resolves what should actually be
+ * displayed/narrated as "next wake" (`runtime.nextWakeAt`, the sleep-reason
+ * text, the schedule_created event) — never later than the real checkpoint,
+ * but reflecting cadence when it fires first. Pulled out as a pure function
+ * so it's directly unit-testable — `runCycle` itself needs a live Prisma
+ * transaction to exercise.
+ */
+export function resolveQueueExhaustedDisplayWakeAt({ queueExhausted, dueAt, cadenceEnabled, now = new Date() }) {
+  if (!queueExhausted || !cadenceEnabled) return { displayDueAt: dueAt, displayDueAtIsCadence: false };
+  const cadenceDueAt = nextCadenceDueAt(now);
+  if (!dueAt || cadenceDueAt.getTime() < dueAt.getTime()) return { displayDueAt: cadenceDueAt, displayDueAtIsCadence: true };
+  return { displayDueAt: dueAt, displayDueAtIsCadence: false };
+}
+
 // Journal-recall (2026-08-15): context.growth.journal is already fetched by
 // buildHqContext (last 12 growth_journal rows) and already reaches the FE
 // dashboard — but until now nothing fed it back into the one place that
@@ -1825,15 +1843,30 @@ export class NativeHqEngine {
     const declaredDueAt = stageCheckpoint && Number.isFinite(stageCheckpoint.getTime()) ? stageCheckpoint : null;
     // A measurement date cannot outrank executable preparation. Measurement begins
     // only after launch or an explicit playbook monitoring checkpoint.
-    const dueAt = finalReadyTodo || queueContinuationScheduled ? null : declaredDueAt;
+    const queueExhausted = !finalReadyTodo && !queueContinuationScheduled;
+    const dueAt = queueExhausted ? declaredDueAt : null;
     if (dueAt) await scheduleHqWake({
       prisma, runtimeId: runtime.id, orgId: runtime.orgId, runtimeEpoch: runtime.epoch,
       idempotencyKey: `checkpoint:${runtime.activeStageId}:${dueAt.toISOString()}`,
       triggerType: 'checkpoint', dueAt, payload: { stage_id: runtime.activeStageId },
     });
+    // The real declared checkpoint above can be many days out (a live trace
+    // showed 7) — but once the queue is fully exhausted, daily_cadence
+    // (when enabled) already has its OWN independent wake armed roughly
+    // every 24h, completely uncoordinated with this one. Previously
+    // `nextWakeAt`/the narration below only ever reflected the far
+    // checkpoint, so Runtime told the user "I'll wake in 7 days" even
+    // though it would genuinely wake itself tomorrow via cadence — true in
+    // the narrow sense (that checkpoint IS scheduled) but misleading about
+    // what actually happens first. Reusing nextCadenceDueAt() (already
+    // exported, already tested) rather than inventing a second "wake
+    // tonight" mechanism that would just be a third uncoordinated schedule.
+    const { displayDueAt, displayDueAtIsCadence } = resolveQueueExhaustedDisplayWakeAt({
+      queueExhausted, dueAt, cadenceEnabled: dailyCadenceEnabled(),
+    });
     const measurement = context.growth.active_stage?.measurement || {};
     const metrics = [...new Set([...(measurement.primary_metrics || []), ...(measurement.metrics || []), ...Object.keys(measurement.thresholds || {})])].slice(0, 6);
-    const waitingDays = dueAt ? Math.max(1, Math.ceil((dueAt.getTime() - Date.now()) / DAY)) : null;
+    const waitingDays = displayDueAt ? Math.max(1, Math.ceil((displayDueAt.getTime() - Date.now()) / DAY)) : null;
     const openCapability = capabilityState.requests[0];
     // Root-caused live (2026-08-15, orgs DIOR/Brdteengal, then Singulance
     // itself): the sole promoted first-life task goes capacity-frozen —
@@ -1906,13 +1939,22 @@ export class NativeHqEngine {
         ? `I am waiting for the specialist working on ${pendingSpecialist.title}. Its result, a connector failure, or a new instruction will wake me immediately.`
       : blockedTodos.length
         ? `${blockedTodos.length} retained todo(s) cannot advance because their exact lifecycle or owner is unavailable. No work is running, and I will not describe this as observation or completed activity.`
-      : dueAt
-        ? `I am sleeping because the active stage now needs ${waitingDays} day(s) of measured observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${dueAt.toISOString()} or earlier for material evidence.`
+      : displayDueAt
+        ? (displayDueAtIsCadence
+          ? `I have no executable work left in the queue. My daily operating cadence will check the company again at ${displayDueAt.toISOString()}${dueAt ? `, sooner than the active stage's own checkpoint at ${dueAt.toISOString()}` : ''}.`
+          : `I am sleeping because the active stage now needs ${waitingDays} day(s) of measured observation${metrics.length ? ` across ${metrics.join(', ')}` : ''}. I will wake at ${displayDueAt.toISOString()} or earlier for material evidence.`)
       : 'No executable or in-flight work remains. I will wake for a new instruction, connector event, or durable result.';
-    if (dueAt) await event(prisma, runtime, cycle, { eventType: 'schedule_created', title: 'I scheduled the next measurement checkpoint', summary: `The next evidence review is ${dueAt.toISOString()} because the active Growth Stage declares that checkpoint.`, details: { wake_reasons: ['checkpoint', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics } });
+    if (displayDueAt) await event(prisma, runtime, cycle, {
+      eventType: 'schedule_created',
+      title: displayDueAtIsCadence ? 'I scheduled my next daily check-in' : 'I scheduled the next measurement checkpoint',
+      summary: displayDueAtIsCadence
+        ? `The queue is empty, so my daily cadence will check the company again at ${displayDueAt.toISOString()} rather than waiting for the active stage's own checkpoint${dueAt ? ` (${dueAt.toISOString()})` : ''}.`
+        : `The next evidence review is ${displayDueAt.toISOString()} because the active Growth Stage declares that checkpoint.`,
+      details: { wake_reasons: ['checkpoint', 'daily_cadence', 'work_result', 'instruction_updated', 'connector_changed', 'material_evidence'], metrics },
+    });
     const initialStartRequired = initialPolicyCommitted
       && (firstLifePolicy.require_initial_start_decision === true || firstLifePolicy.require_initial_policy_choice === true);
-    await move('WAITING', { nextWakeAt: dueAt, currentCycleId: null, blockedReason: initialStartRequired ? 'initial_start_decision' : null });
+    await move('WAITING', { nextWakeAt: displayDueAt, currentCycleId: null, blockedReason: initialStartRequired ? 'initial_start_decision' : null });
     const waitingTitle = adminCheckinScheduled ? 'The initial diagnosis is ready'
       : initialPolicyCommitted ? 'The first operating plan is ready'
       : queueContinuationScheduled ? 'The queue is still moving'
@@ -1923,7 +1965,7 @@ export class NativeHqEngine {
     // isNoisyRepeatCycle: the final wait/sleep narration is the last of the
     // repeated block — the move('WAITING', ...) state transition above still
     // always runs; only this specific duplicate event is skipped.
-    if (!isNoisyRepeatCycle) await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled || waitingForResponse ? 'observation' : blockedTodos.length ? 'blocked' : 'sleep', title: waitingTitle, summary: sleepReason, details: { due_at: dueAt?.toISOString() || null, capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist, blocked_todo_ids: blockedTodos.map((todo) => todo.id) } });
-    return { transition: 'WAIT', nextWakeAt: dueAt };
+    if (!isNoisyRepeatCycle) await event(prisma, runtime, cycle, { eventType: queueContinuationScheduled || waitingForResponse ? 'observation' : blockedTodos.length ? 'blocked' : 'sleep', title: waitingTitle, summary: sleepReason, details: { due_at: displayDueAt?.toISOString() || null, capability_request_id: openCapability?.id || null, pending_specialist: pendingSpecialist, blocked_todo_ids: blockedTodos.map((todo) => todo.id) } });
+    return { transition: 'WAIT', nextWakeAt: displayDueAt };
   }
 }

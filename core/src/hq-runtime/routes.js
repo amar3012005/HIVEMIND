@@ -441,19 +441,32 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
       const artifactMatch = pathname.match(/^\/v1\/hq\/artifacts\/([^/]+)$/);
       if (artifactMatch && req.method === 'GET') {
         const id = artifactMatch[1];
+        // Every ref the FE ever holds for a RuntimePlaybookArtifact is the
+        // string business key (`artifactId`, e.g. "artifact:research_decision:1"
+        // — see publicArtifact() in postgres-store.js), never the row's own
+        // UUID `id`. Matching against `id` too (as an earlier version of this
+        // route did) throws a Prisma validation error on a non-UUID string —
+        // silently swallowed by the .catch below into a false "not found".
+        // Confirmed live 2026-08-18: a real research_decision popup showed
+        // "Could not load this artifact" because of exactly this.
         const playbookArtifact = await prisma.runtimePlaybookArtifact.findFirst({
-          where: { orgId, OR: [{ id }, { artifactId: id }] },
+          where: { orgId, artifactId: id },
+          orderBy: { createdAt: 'desc' },
         }).catch(() => null);
         if (playbookArtifact) {
           return jsonResponse(res, {
-            id: playbookArtifact.id,
+            id: playbookArtifact.artifactId,
             key: playbookArtifact.artifactKey,
             title: playbookArtifact.artifactKey?.replaceAll('_', ' ') || 'Artifact',
             kind: 'json',
             content: JSON.stringify(playbookArtifact.data ?? {}, null, 2),
+            data: playbookArtifact.data ?? {},
             createdAt: playbookArtifact.createdAt,
           });
         }
+        // SourceArtifact IS keyed by a real UUID `id` (baseline_id/plan_id
+        // collected client-side genuinely are SourceArtifact.id values) —
+        // this branch is correct as-is, unlike the one above.
         const sourceArtifact = await prisma.sourceArtifact.findFirst({ where: { orgId, id } }).catch(() => null);
         if (sourceArtifact) {
           return jsonResponse(res, {

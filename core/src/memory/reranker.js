@@ -10,9 +10,9 @@
  * cross-encoder endpoint exists (TEI self-host on GPU, or Cohere Rerank):
  *   RERANK_ENABLED=true
  *   RERANK_PROVIDER=tei|cohere
- *   RERANK_URL=<endpoint>            # TEI: .../rerank
- *   RERANK_MODEL=bge-reranker-v2-m3  # cohere: rerank-english-v3.0
- *   RERANK_API_KEY=<key>             # cohere
+ *   RERANK_URL=<endpoint>            # OpenRouter: .../api/v1/rerank
+ *   RERANK_MODEL=voyageai/rerank-2.5
+ *   RERANK_API_KEY=<key>             # OpenRouter or compatible endpoint
  *   RERANK_POOL=100                  # candidates to rerank (cap 200 — pointwise
  *                                    #   rerankers DEGRADE past ~500, arXiv 2411.11767)
  *   RERANK_TIMEOUT_MS=1500
@@ -26,9 +26,9 @@ import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
 import { currentStageSignal, remainingStageMs } from '../runtime/stage-deadline.js';
 
 const ENABLED   = process.env.RERANK_ENABLED === 'true';
-const PROVIDER  = (process.env.RERANK_PROVIDER || 'tei').toLowerCase();
+const PROVIDER  = (process.env.RERANK_PROVIDER || 'cohere').toLowerCase();
 const URL       = (process.env.RERANK_URL || '').replace(/\/+$/, '');
-const MODEL     = process.env.RERANK_MODEL || 'bge-reranker-v2-m3';
+const MODEL     = process.env.RERANK_MODEL || 'voyageai/rerank-2.5';
 const API_KEY   = process.env.RERANK_API_KEY || '';
 const POOL      = Math.min(Number(process.env.RERANK_POOL || 100), 200); // hard cap 200
 // 1500ms was too tight: Cohere-via-OpenRouter is ~300ms normally but spikes to
@@ -52,18 +52,20 @@ const RETRYABLE = /abort|timeout|429|50[0-9]|network|fetch failed|ECONNRESET|ETI
 // deliverHybrid interleaves lanes instead of comparing them, which is what buries the
 // German `E3DC Zähler` row. So a single model being unavailable must not cost us the pass.
 //
-// Production evaluation on 2026-08-15: Cohere v4-fast and Voyage both scored
-// Both Voyage and v4-fast scored 10/10 on the small-detail multilingual/product
-// corpus. Production promotes Voyage for reliability: repeated v4-fast aborts
-// consumed its first budget share before Voyage served the same request. The
-// code-level chain below remains a safety net for environments that do not load
-// prod-defaults.conf.
+// Production evaluation on 2026-08-18 compared every generally available
+// text reranker exposed by OpenRouter. Voyage rerank-2.5 retained every
+// required multilingual, small-detail, negation, source-specific and 150-row
+// late-pool fact. Its measured p95 was 501ms. Voyage 2.5 Lite provides the
+// first rapid fallback; it also retained every fact and served the 150-row
+// pool in 252-266ms. One shared 1200ms budget gives the quality model enough
+// room while reserving one warm-sized fallback attempt. The code-level chain
+// remains a safety net for environments that do not load prod-defaults.conf.
 // NOT in the chain: nvidia/llama-nemotron-rerank-vl-1b-v2:free is free but returned HTTP 404
 // "No endpoints available matching your guardrail restrictions" on this account — a free
 // model that cannot be called is not a fallback.
 const MODEL_CHAIN = [...new Set([
   MODEL,
-  ...String(process.env.RERANK_FALLBACK_MODELS || 'cohere/rerank-4-fast,voyageai/rerank-2.5-lite,cohere/rerank-v3.5')
+  ...String(process.env.RERANK_FALLBACK_MODELS || 'voyageai/rerank-2.5-lite,cohere/rerank-4-fast,qwen/qwen3-reranker-8b')
     .split(',').map((m) => m.trim()).filter(Boolean),
 ])];
 

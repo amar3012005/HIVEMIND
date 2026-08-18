@@ -19,7 +19,7 @@ const {
   HOME, CFG_PATH, loadCfg, saveCfg, statusReport, ingestDir, recallQuery, embeddingsConfigured,
   llmConfigured, skillSave, skillList, parseClaudeTranscript,
   signingEnabled, verifySlot, checkpointAudit, verifyAuditChain,
-  hivemindConfigured, hivemindIngestDir, hivemindRecallQuery,
+  hivemindConfigured, hivemindIngestDir, hivemindRecallQuery, attemptHivemindOAuth,
 } = require('./cli-lib.js');
 
 // Flags that are pure on/off switches (no value token follows) — everything else keeps the
@@ -189,21 +189,44 @@ async function cmdConnect(flags, cfg, sharedAsk) {
   // one read at a time.
   if (flags.token !== undefined) {
     if (!flags.token) return console.log('  skipped.');
-    cfg.hivemind = { connected: true, url: base, token: flags.token, connectedAt: new Date().toISOString() };
+    cfg.hivemind = { connected: true, url: base, token: flags.token, apiUrl: flags['api-url'] || cfg.hivemind?.apiUrl, connectedAt: new Date().toISOString() };
     saveCfg(cfg);
-    return console.log('  ✓ HIVEMIND connected. Token stored in', CFG_PATH);
+    console.log('  ✓ HIVEMIND connected. Token stored in', CFG_PATH);
+    if (!cfg.hivemind.apiUrl) console.log('  (no --api-url given — icarus ingest/recall will use the local engine until you set one: icarus connect --api-url <url>)');
+    return;
   }
   console.log(`\nConnect ICARUS ↔ HIVEMIND`);
-  console.log(`  1. Open: ${base}/settings/connections (authorize "icarus local")`);
-  console.log(`  2. Copy the access token shown after authorizing.\n`);
   // A caller (icarus setup) that's already mid-wizard passes its own prompter through, so this
   // never touches stdin itself — a SECOND fs.readFileSync(0) on piped input reads nothing, since
   // the first prompter already drained the pipe (a real bug, caught running the actual wizard).
   const ask = sharedAsk || makePrompter();
+  // Deliberately asked FIRST and separately from the console URL above — that's an OAuth/
+  // authorize page, not necessarily the same host as the REST API base (a real TLS failure was
+  // hit earlier assuming they were interchangeable; see cli-lib.js's hivemindApiBase()). Needed
+  // up front regardless of which auth path follows: OAuth discovery needs it to know where to
+  // look, and manual-token entry needs it to know where to send requests.
+  const apiUrl = await ask('  Memory server REST API base URL (e.g. https://your-server.example.com, or blank to stay local-only for now): ');
+  if (!apiUrl) { if (!sharedAsk) ask.close(); return console.log('  skipped — staying on the local engine.'); }
+
+  // Try real OAuth first (authorization-code + PKCE + dynamic client registration — see
+  // attemptHivemindOAuth's own doc comment for why this never throws and what it needs from the
+  // server). Only on failure does this fall to the manual paste-your-own-token flow below —
+  // exactly the "first run redirect oauth, fallback is api key" order this was built for.
+  console.log('  Trying OAuth...');
+  const oauth = await attemptHivemindOAuth(apiUrl);
+  if (oauth) {
+    if (!sharedAsk) ask.close();
+    cfg.hivemind = { connected: true, url: base, token: oauth.token, refreshToken: oauth.refreshToken, apiUrl, connectedAt: new Date().toISOString() };
+    saveCfg(cfg);
+    return console.log('  ✓ HIVEMIND connected via OAuth. Token stored in', CFG_PATH);
+  }
+  console.log('  OAuth isn\'t available for this server (or the flow didn\'t complete) — falling back to a manual token.');
+  console.log(`  1. Open: ${base}/settings/connections (authorize "icarus local")`);
+  console.log(`  2. Copy the access token shown after authorizing.\n`);
   const token = await ask('  Paste HIVEMIND token (or blank to skip): ');
   if (!sharedAsk) ask.close();
   if (!token) return console.log('  skipped.');
-  cfg.hivemind = { connected: true, url: base, token, connectedAt: new Date().toISOString() };
+  cfg.hivemind = { connected: true, url: base, token, apiUrl, connectedAt: new Date().toISOString() };
   saveCfg(cfg);
   console.log('  ✓ HIVEMIND connected. Token stored in', CFG_PATH);
 }

@@ -717,6 +717,52 @@ test('checkpoint-bound intervention resume resets only the current repair budget
   assert.equal(store.checkpoints.filter((checkpoint) => checkpoint.phase === 'INTERVENTION_RESUMED').length, 1);
 });
 
+// Real incident, 2026-08-18 (org Singulance, playbook outreach.prospect-to-
+// conversation, stage deliver_outreach): the stage's deadline clock started
+// on FIRST entry into the stage — before the authority_gate check — so a
+// ~22 MINUTE human approval wait alone ate the entire hard_execution_after_
+// seconds budget. The instant authority was granted and execution resumed,
+// the stage failed via HARD_DEADLINE before doing any real work at all.
+test('a stage\'s execution deadline clock restarts when authority is granted — a long human approval wait must never count against it', async () => {
+  const registry = new RuntimePlaybookRegistry();
+  registry.register({
+    playbook_id: 'generic.authority-deadline', version: 1, status: 'ACTIVE',
+    name: 'Authority deadline', description: 'One authority-gated stage with a short hard deadline.',
+    initial_stage_id: 'send', terminal_states: ['done'],
+    stages: [{
+      id: 'send', objective: 'Send it.', expected_artifacts: ['receipt'], input_refs: [],
+      authority_gate: 'outbound_messages', authority_policy_key: 'outbound_messages',
+      completion_checks: [{ predicate: 'has_min_count', select: 'receipt', value: 1 }],
+      transitions: [{ default: true, to_terminal: 'done' }], on_failure: 'ESCALATE',
+    }],
+  });
+  const store = new TestRuntimeStore();
+  const director = { async execute() { return { artifacts: [{ id: 'receipt-1', key: 'receipt', data: {} }] }; } };
+  const executor = new GenericStageExecutor({
+    registry, predicates: new PredicateEngine(), store, director, workerId: 'authority-deadline',
+    executionPolicy: { soft_progress_after_seconds: 30, hard_execution_after_seconds: 60 },
+  });
+  const created = await executor.createRun({
+    orgId: 'organization-1', playbookId: 'generic.authority-deadline', playbookVersion: 1,
+    idempotencyKey: 'authority-deadline-1', trigger: {},
+  });
+  let run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'WAITING_AUTHORITY');
+  assert.ok(run.context.runtime_deadlines.send.started_at, 'the clock starts on first entry, before the authority gate');
+
+  // Simulate a long approval wait — far longer than the 60s hard deadline —
+  // by rewinding the stored started_at, exactly like a real ~22 minute wait
+  // would leave it, then grant authority.
+  const stored = store.runs.get(created.id);
+  stored.context = { ...stored.context, runtime_deadlines: { send: { started_at: new Date(Date.now() - 20 * 60_000).toISOString() } } };
+  stored.authorityGates = ['outbound_messages'];
+
+  const beforeGrant = Date.now();
+  run = await executor.run(created.id, { orgId: created.orgId });
+  assert.equal(run.status, 'COMPLETED', 'must actually execute, not fail on a deadline blown entirely by the approval wait');
+  assert.ok(new Date(run.context.runtime_deadlines.send.started_at).getTime() >= beforeGrant, 'the clock must restart at the moment authority is granted, discarding the stale pre-wait timestamp');
+});
+
 test('artifact persistence failures obey the bounded playbook retry policy', async () => {
   const registry = new RuntimePlaybookRegistry();
   registry.register({

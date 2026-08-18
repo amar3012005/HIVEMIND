@@ -140,6 +140,13 @@ export class PostgresRuntimeStore {
       const context = asObject(found.context);
       const repairs = { ...asObject(context.runtime_repair_attempts) };
       delete repairs[found.currentStageId];
+      // A HARD_DEADLINE intervention leaves `runtime_deadlines[stage].hard_emitted_at`
+      // set — without clearing it, resuming just flips status back to ACTIVE and
+      // the executor's own re-entry guard (stage-executor.js, checked before any
+      // work) immediately fails it again with the exact same verdict. A genuine
+      // resume must restart that stage's deadline clock.
+      const deadlines = { ...asObject(context.runtime_deadlines) };
+      delete deadlines[found.currentStageId];
       const interventions = [
         ...asArray(context.runtime_interventions),
         {
@@ -158,6 +165,7 @@ export class PostgresRuntimeStore {
           context: {
             ...context,
             runtime_repair_attempts: repairs,
+            runtime_deadlines: deadlines,
             runtime_interventions: interventions,
             runtime_intervention_resume_stage: found.currentStageId,
           },

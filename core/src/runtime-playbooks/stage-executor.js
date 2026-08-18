@@ -403,7 +403,18 @@ export class GenericStageExecutor {
 
         if (run.status === 'WAITING_AUTHORITY') {
           if (!authorityGranted(run, stage)) return run;
-          run = await this.store.updateRun(runId, orgId, { status: 'ACTIVE' });
+          // The stage's deadline clock (started_at, set above BEFORE the
+          // authority-gate check further down) must not count how long a
+          // human took to grant authority. Real production incident
+          // (2026-08-18, an outreach delivery stage): a ~22min authority
+          // wait alone exceeded hard_execution_after_seconds, so the stage
+          // failed via HARD_DEADLINE the instant it resumed, before any
+          // actual work. Reset the clock here, when real execution begins.
+          const priorDeadlines = asObject(asObject(run.context).runtime_deadlines);
+          run = await this.store.updateRun(runId, orgId, {
+            status: 'ACTIVE',
+            context: { ...asObject(run.context), runtime_deadlines: { ...priorDeadlines, [stage.id]: { started_at: new Date().toISOString() } } },
+          });
         }
 
         await this.store.appendCheckpoint(runId, orgId, {

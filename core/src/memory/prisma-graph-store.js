@@ -6,7 +6,7 @@ import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pq
 import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrGraph } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList, isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
-import { buildWideTsQuery, lexicalQueryTokens } from './lexical-query.js';
+import { buildTrigramFallbackForms, buildWideTsQuery, shouldRunTrigramFallback } from './lexical-query.js';
 
 /**
  * Strip null bytes (\u0000) from strings — Postgres text columns reject them (code 22P05).
@@ -1127,13 +1127,9 @@ export class PrismaGraphStore {
         // token "solvistim"), so a query "solvis tim" never retrieves it. The
         // collapsed bigram "solvistim" + trigram word_similarity does. Default
         // OFF → _trgmForms=[] → the query below is byte-identical to before.
-        const _trgmForms = (process.env.HYBRID_LEXICAL_RECALL === 'true') ? (() => {
-          const toks = lexicalQueryTokens(query).filter((token) => Array.from(token).length >= 2);
-          const forms = new Set();
-          for (let i = 0; i + 1 < toks.length; i += 1) { const j = toks[i] + toks[i + 1]; if (j.length >= 6) forms.add(j); }
-          for (const t of toks) if (t.length >= 6) forms.add(t); // already-concatenated names
-          return [...forms].slice(0, 8);
-        })() : [];
+        const _trgmForms = process.env.HYBRID_LEXICAL_RECALL === 'true'
+          ? buildTrigramFallbackForms(query)
+          : [];
         if (tsQuery) {
           // Scope predicate: V2 multi-tier OR when access_context provided,
           // else legacy personal/org single-scope. Skips FTS only if neither
@@ -1142,7 +1138,11 @@ export class PrismaGraphStore {
           // already fixed; additional bound values are appended here and
           // referenced as $3, $4, … so NO user-supplied value is ever
           // string-interpolated into the query.
-          const ftsParams = [tsQuery, n_results * 3];
+          // The SQL predicate below already applies authorization, temporal,
+          // type, tag and source filters.  Returning 3x full-content rows only
+          // inflated transfer/hydration cost before immediately slicing them
+          // back to n_results.
+          const ftsParams = [tsQuery, n_results];
           // nextParam() is called AFTER pushing the value, so length already
           // reflects the newly-added element — no +1 needed.
           const nextParam = () => `$${ftsParams.length}`;
@@ -1228,54 +1228,82 @@ export class PrismaGraphStore {
             ? (ftsParams.push(new Date(known_at).toISOString()), `AND m.created_at <= ${nextParam()}::timestamptz`)
             : '';
 
-          // Trigram lane fragments (flag-gated; empty when _trgmForms=[] → query
-          // identical to before). Reuses the SAME scope params above → tenant-safe.
+          const memoryTypeWhere = memory_type
+            ? (ftsParams.push(memory_type), `AND m.memory_type = ${nextParam()}`)
+            : '';
+          const sourcePlatformWhere = source_platform
+            ? (ftsParams.push(source_platform), `AND m.source_platform = ${nextParam()}`)
+            : '';
+          const tagsWhere = tags?.length
+            ? (ftsParams.push(tags), `AND m.tags @> ${nextParam()}::text[]`)
+            : '';
+
+          // Trigram is intentionally NOT OR-ed into the primary FTS predicate.
+          // `word_similarity(...) > 0.4` cannot use the FTS GIN index and, with
+          // several conversational forms, caused a full-content scan that took
+          // 0.8-1.1s and starved the final unified rerank.  Run indexed FTS
+          // first; use fuzzy matching only when FTS is genuinely sparse.
           // title-first to EXACTLY match idx_memories_trgm_title_content's
           // indexed expression (title || ' ' || content) → the pg_trgm GIN index
           // is used instead of a seq scan (critical at millions of rows).
           const _txt = "(COALESCE(m.title, '') || ' ' || COALESCE(m.content, ''))";
-          let trgmWhere = '';
-          let trgmScoreExpr = '0';
-          if (_trgmForms.length) {
-            // WIDE retrieval (rosemary): explicit word_similarity > 0.4 instead of
-            // the `<%` operator's default 0.6 threshold. A collapsed query form
-            // like "solvispia" scores ~0.6 against the SPACED memory "Solvis PIA"
-            // — right at the default cutoff, so verbose phrasings ("when is the
-            // LAUNCHDAY for solvis pia", where FTS-AND already fails on the
-            // compound token) missed it entirely. 0.4 makes the collapsed-name
-            // lane reliably RETRIEVE the memory; the narrow scoring below
-            // (rare-token boost + rerank + importance/RRF) ranks it. Org-scoped
-            // WHERE already bounds the row set, so seq word_similarity is cheap.
-            const ors = []; const sims = [];
-            // public.-qualified: pg_trgm lives in schema `public`, but Prisma's
-            // connection search_path is `hivemind` only — unqualified
-            // word_similarity threw 42883, the catch swallowed it, and the whole
-            // FTS+trigram lane silently degraded to token-similarity in prod.
-            for (const f of _trgmForms) { ftsParams.push(f); const p = nextParam(); ors.push(`public.word_similarity(${p}, ${_txt}) > 0.4`); sims.push(`public.word_similarity(${p}, ${_txt})`); }
-            trgmWhere = ` OR (${ors.join(' OR ')})`;
-            trgmScoreExpr = `GREATEST(${sims.join(', ')})`;
-          }
-          const ftsResults = await this.client.$queryRawUnsafe(`
+          const selectColumns = `
             SELECT m.id, m.content, m.title, m.tags, m.memory_type, m.project,
                    m.importance_score, m.is_latest, m.created_at, m.updated_at,
                    m.document_date, m.valid_from, m.valid_to, m.event_dates, m.source_platform AS source, m.visibility,
                    m.synthesis_confidence, m.synthesis_cluster_hash, m.synthesis_revision, m.synthesis_evidence_ids,
                    m.tier, m.last_accessed_at, m.promoted_at, m.cognitive_layer_role,
                    m.scope, m.user_id, m.org_id, m.primary_team_id, m.project_id,
-                   (SELECT array_agg(mp.project_id) FROM memory_projects mp WHERE mp.memory_id = m.id) AS project_ids,
-                   GREATEST(ts_rank(to_tsvector('simple', COALESCE(m.title, '') || ' ' || COALESCE(m.content, '')),
-                           to_tsquery('simple', $1)), 0) + (${trgmScoreExpr}) as fts_score
+                   (SELECT array_agg(mp.project_id) FROM memory_projects mp WHERE mp.memory_id = m.id) AS project_ids`;
+          const commonWhere = `
             FROM memories m
             WHERE m.deleted_at IS NULL
               ${scopeWhere} ${projectWhere} ${latestWhere} ${dateAfterWhere} ${dateBeforeWhere} ${validAtWhere} ${knownAtWhere}
-              AND (to_tsvector('simple', COALESCE(m.title, '') || ' ' || COALESCE(m.content, ''))
-                  @@ to_tsquery('simple', $1)${trgmWhere})
+              ${memoryTypeWhere} ${sourcePlatformWhere} ${tagsWhere}`;
+          const ftsResults = await this.client.$queryRawUnsafe(`
+            ${selectColumns},
+                   ts_rank(to_tsvector('simple', COALESCE(m.title, '') || ' ' || COALESCE(m.content, '')),
+                           to_tsquery('simple', $1)) as fts_score
+            ${commonWhere}
+              AND to_tsvector('simple', COALESCE(m.title, '') || ' ' || COALESCE(m.content, ''))
+                  @@ to_tsquery('simple', $1)
             ORDER BY fts_score DESC
             LIMIT $2
           `, ...ftsParams);
 
-          if (ftsResults.length > 0) {
-            return ftsResults.map(r => ({
+          let lexicalResults = ftsResults;
+          if (shouldRunTrigramFallback({
+            enabled: process.env.HYBRID_LEXICAL_RECALL === 'true',
+            forms: _trgmForms,
+            ftsCount: ftsResults.length,
+            requested: n_results,
+            threshold: Number(process.env.RECALL_TRIGRAM_FALLBACK_THRESHOLD || 12),
+          })) {
+            const trgmParams = [...ftsParams];
+            const ors = [];
+            const sims = [];
+            for (const form of _trgmForms) {
+              trgmParams.push(form);
+              const param = `$${trgmParams.length}`;
+              ors.push(`public.word_similarity(${param}, ${_txt}) > 0.4`);
+              sims.push(`public.word_similarity(${param}, ${_txt})`);
+            }
+            const fuzzyResults = await this.client.$queryRawUnsafe(`
+              ${selectColumns}, GREATEST(${sims.join(', ')}) AS fts_score
+              ${commonWhere}
+                AND (${ors.join(' OR ')})
+              ORDER BY fts_score DESC
+              LIMIT $2
+            `, ...trgmParams);
+            lexicalResults = [...new Map(
+              [...ftsResults, ...fuzzyResults].map((row) => [row.id, row]),
+            ).values()]
+              .sort((left, right) => Number(right.fts_score || 0) - Number(left.fts_score || 0))
+              .slice(0, n_results);
+          }
+
+          if (lexicalResults.length > 0) {
+            return lexicalResults.map(r => ({
               id: r.id,
               content: r.content,
               title: r.title,
@@ -1313,7 +1341,7 @@ export class PrismaGraphStore {
               cognitive_layer_role: r.cognitive_layer_role || null,
               score: Number(r.fts_score) || 0,
               _searchMethod: 'fts_tsvector',
-            })).slice(0, n_results);
+            }));
           }
         }
       } catch (ftsErr) {

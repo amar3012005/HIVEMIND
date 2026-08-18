@@ -12,13 +12,14 @@ esac; done
 [ -n "$SHA" ] && [ -n "$SERVICES" ] && [ -d "$SOURCE_ROOT" ] \
   || { echo "usage: $0 --sha FULL_SHA --services core,control-plane,employees,frontend --source-root PATH" >&2; exit 2; }
 
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=hivemind-next-frontend-1 )
+declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=hivemind-next-frontend-1 [hm-extract]=hm-extract )
 declare -A LOCAL_FILE=(
   [core]="core/src/runtime-playbooks/stage-executor.js"
   [control-plane]="core/src/runtime-playbooks/stage-executor.js"
   [employees]="employees-service/src/hivemind_employees/api_hyper_rooms.py"
   [tara-grok]="services/tara-grok/tara_grok/app.py"
   [tara-deepgram]="services/tara-deepgram/tara_deepgram/app.py"
+  [hm-extract]="hm-extract/src/server.js"
 )
 declare -A IMAGE_FILE=(
   [core]="/app/src/runtime-playbooks/stage-executor.js"
@@ -26,6 +27,7 @@ declare -A IMAGE_FILE=(
   [employees]="/app/src/hivemind_employees/api_hyper_rooms.py"
   [tara-grok]="/app/tara_grok/app.py"
   [tara-deepgram]="/app/tara_deepgram/app.py"
+  [hm-extract]="/app/src/server.js"
 )
 
 hash_stream() { sha256sum | awk '{print $1}'; }

@@ -42,8 +42,8 @@ PRESENCE="$HDIR/scripts/release-presence.sh"
 RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=hivemind-next-frontend-1 )
-declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=fe )
+declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=hivemind-next-frontend-1 [hm-extract]=hm-extract )
+declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=fe [hm-extract]=hm-extract )
 build_cmd() { local s="$1" tag="$2"; case "$s" in
   core)          docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=core -t "$tag" -f Dockerfile.production . ;;
   control-plane) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=control-plane -t "$tag" -f Dockerfile.control-plane . ;;
@@ -51,6 +51,7 @@ build_cmd() { local s="$1" tag="$2"; case "$s" in
   tara-grok)     docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=tara-grok -t "$tag" ./services/tara-grok ;;
   tara-deepgram) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=tara-deepgram -t "$tag" ./services/tara-deepgram ;;
   frontend)      docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=frontend -t "$tag" ./frontend/Da-vinci ;;
+  hm-extract)    docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=hm-extract -t "$tag" ./hm-extract ;;
 esac; }
 
 IFS=',' read -ra SVCS <<< "$SERVICES"

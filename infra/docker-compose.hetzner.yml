@@ -243,6 +243,32 @@ services:
     volumes:
       - docling-models:/opt/app-root/src/.cache
 
+  # hm-extract: stateless anydoc-based extraction, NARROW format scope only
+  # (pptx/ppt/legacy doc/docm/odt/rtf/epub — see hm-extract-adapter.js's
+  # header for why xlsx/csv/docx/pdf are deliberately excluded). Internal
+  # network only, no published port — core reaches it at KB_EXTRACT_URL,
+  # unset by default so this entire tier is inert until explicitly enabled.
+  # Memory sized per hm-extract/README.md's real measurement: repeated
+  # large-document passes plateau around ~5.3GB on QEMU-emulated amd64;
+  # 4g here is a starting point for real x86 hardware, not yet re-verified
+  # there — watch memory in production before raising traffic through it.
+  hm-extract:
+    build: { context: ../hm-extract }
+    image: hivemind/hm-extract:${VERSION:-latest}
+    container_name: hm-extract
+    restart: unless-stopped
+    mem_limit: 4g
+    memswap_limit: 5g
+    cpus: 1.0
+    environment:
+      UV_THREADPOOL_SIZE: "8"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8088/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # BYOD broker: validates a customer's API key → binds their hm-agent to their org by writing the
   # shared registry the core reads. Outbound enrollment only; reachable at /v1/byod/enroll. Optional —
   # only needed to OFFER BYOD. Shares the hivemind-data volume so core + broker see one registry file.

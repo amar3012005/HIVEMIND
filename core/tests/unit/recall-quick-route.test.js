@@ -52,6 +52,7 @@ test('quick recall uses one bounded parallel runtime and preserves public respon
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].options.limit, 15);
+  assert.equal(calls[0].options.structured_intent, true);
   assert.equal(response.status, 200);
   assert.equal(response.body.mode_used, 'quick');
   assert.equal(response.body.search_method, 'hybrid');

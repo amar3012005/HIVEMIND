@@ -253,6 +253,12 @@ export async function handleRecallRoute(ctx = {}) {
           source: recallPlan.source,
           time: recallPlan.time,
           operation: recallPlan.operation,
+          // Scope, source, time and canonical entities were already compiled
+          // into recallPlan above. Treat that plan as authoritative so hop1
+          // does not launch another recall-time LLM for entity extraction or
+          // query expansion. Public recall stays retrieval-only: parallel
+          // memory + evidence lanes followed by one unified rerank.
+          structured_intent: true,
           // An explicit public API limit is caller intent. Forward it to the
           // unified retrieval service instead of silently falling back to the
           // org's synthesis delivery window (commonly five).

@@ -432,6 +432,42 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
         return jsonResponse(res, { runtime: asJsonRuntime(runtime), usage });
       }
 
+      // GET /v1/hq/artifacts/:id — one org-scoped lookup for the Runtime
+      // "Artifacts" panel's click-to-preview popup. Artifact refs collected
+      // client-side (collectRuntimeArtifacts) come from two different rows
+      // depending on stage: RuntimePlaybookArtifact (per-checkpoint outputs,
+      // e.g. planning evidence) or SourceArtifact (company_baseline/
+      // growth_plan). Try both rather than inventing a third unified table.
+      const artifactMatch = pathname.match(/^\/v1\/hq\/artifacts\/([^/]+)$/);
+      if (artifactMatch && req.method === 'GET') {
+        const id = artifactMatch[1];
+        const playbookArtifact = await prisma.runtimePlaybookArtifact.findFirst({
+          where: { orgId, OR: [{ id }, { artifactId: id }] },
+        }).catch(() => null);
+        if (playbookArtifact) {
+          return jsonResponse(res, {
+            id: playbookArtifact.id,
+            key: playbookArtifact.artifactKey,
+            title: playbookArtifact.artifactKey?.replaceAll('_', ' ') || 'Artifact',
+            kind: 'json',
+            content: JSON.stringify(playbookArtifact.data ?? {}, null, 2),
+            createdAt: playbookArtifact.createdAt,
+          });
+        }
+        const sourceArtifact = await prisma.sourceArtifact.findFirst({ where: { orgId, id } }).catch(() => null);
+        if (sourceArtifact) {
+          return jsonResponse(res, {
+            id: sourceArtifact.id,
+            key: sourceArtifact.sourcePlatform,
+            title: String(sourceArtifact.sourcePlatform || 'Artifact').replaceAll('_', ' '),
+            kind: 'json',
+            content: JSON.stringify(sourceArtifact.payload ?? {}, null, 2),
+            createdAt: sourceArtifact.createdAt,
+          });
+        }
+        return jsonResponse(res, { error: 'artifact_not_found' }, 404);
+      }
+
       if (pathname === '/v1/hq/authority-policy' && req.method === 'PATCH') {
         const runtime = await getHqRuntime({ prisma, orgId });
         if (!runtime) return jsonResponse(res, { error: 'hq_runtime_not_found' }, 404);

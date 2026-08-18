@@ -9,6 +9,27 @@ import { employeesSidecarUrl, warmRuntimeOrigin } from '../runtime-transport/cli
 import { recordRuntimeMetric } from './runtime-metrics.js';
 import { projectExternalActionEvent } from './external-action-marker.js';
 
+// Which accepted-checkpoint artifact KEYS are worth a Runtime terminal
+// popup (vs. a plain trace bubble). Most Room checkpoints (campaign_status,
+// campaign_capability_status, preflight results, ...) are routine pipeline
+// steps — popping a modal for every one of them would flood the terminal.
+// `research_decision` (core/src/runtime-playbooks/artifact-schema.js) is a
+// real deliverable someone actually wants to read/download/share. Extend
+// this set as more genuinely presentable artifact keys ship.
+const ROOM_ARTIFACT_POPUP_KEYS = new Set(['research_decision']);
+
+/**
+ * Lightweight {id, key} refs for an ACCEPTED checkpoint's artifacts, plus
+ * whether any of them warrant a Runtime terminal popup. Pulled out as its
+ * own pure function so it's directly unit-testable — the calling closure
+ * (onStageState, inside startHqScheduler) needs a live Postgres-backed
+ * playbook service to exercise otherwise.
+ */
+export function acceptedArtifactPopupState(phase, artifacts = []) {
+  const refs = phase === 'ACCEPTED' ? (artifacts || []).map((a) => ({ id: a.id, key: a.key })) : [];
+  return { refs, popupWorthy: refs.some((a) => ROOM_ARTIFACT_POPUP_KEYS.has(a.key)) };
+}
+
 function artifactCountSummary(artifacts = []) {
   const counts = artifacts.reduce((result, artifact) => {
     const key = String(artifact?.key || 'artifact');
@@ -156,6 +177,11 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
       const externalAction = phase === 'ACCEPTED'
         ? projectExternalActionEvent({ run, stage, artifacts })
         : null;
+      // Lightweight refs (id/key only, not the full data) — the popup fetches
+      // full content via the existing GET /v1/hq/artifacts/:id when opened,
+      // the same path the Artifacts panel already uses, rather than bloating
+      // every checkpoint event with a full payload most of them never need.
+      const { refs: acceptedArtifactRefs, popupWorthy } = acceptedArtifactPopupState(phase, artifacts);
       if (externalAction) {
         await appendHqEvent({
           prisma,
@@ -188,6 +214,8 @@ export async function startHqScheduler({ prisma, logger = console, intervalMs = 
           stage_id: stage.id,
           phase,
           artifact_refs: (artifacts || []).map((artifact) => artifact.id),
+          artifacts: acceptedArtifactRefs,
+          ...(popupWorthy ? { type: 'room.artifact_ready' } : {}),
           artifact_counts: accepted.counts,
           verdict: verdict || null,
           contract_rejections: verdict?.contract_rejections || [],

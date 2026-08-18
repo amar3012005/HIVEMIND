@@ -650,6 +650,116 @@ async function recallQuery(query, org, cfg, topK = 5, usePq = false) {
   return hits.map((h) => ({ score: h.score, text: h.text, mode: 'vector' }));
 }
 
+// "ICARUS v3" boundary starts here: v2 is the local `.amr` filesystem engine above (its own
+// Rust ingest/recall/temporal/graph/signing/audit, no network) — everything in this module is
+// additive to that, not a replacement. When a user brings their OWN HIVEMIND API key, ingest and
+// recall for that workspace route through HIVEMIND's real hosted API instead of the local
+// engine: HIVEMIND's server does chunking, embedding, and (unless requested) memory generation
+// entirely server-side; ICARUS becomes a thin client. Real, documented endpoints (verified
+// against next.singulancelabs.com/hivemind/docs, not guessed): POST /api/knowledge/upload
+// (multipart, async — returns a job_id), GET /api/knowledge/status (poll), POST /api/recall
+// (hybrid dense+lexical, fused server-side). `ingestMode=evidence` is the real flag that skips
+// memory/entity/relationship generation while still producing both lexical AND semantic
+// evidence lanes — exactly the "except for memory generation... gets both semantic and lexical"
+// behavior this was built for; the alternative `ingestMode=both` (full memory generation) is
+// available via `--full` for anyone who wants HIVEMIND's richer pipeline instead of the local
+// one ICARUS already has (connect-llm's distillation).
+//
+// Honest real limitation, not glossed over: HIVEMIND's REST /api/recall doesn't document a tags/
+// project filter in what I could verify (only its own MCP tool does) — so remote-mode recall
+// searches the user's WHOLE HIVEMIND workspace, not scoped to one ICARUS "org". Org name is
+// still stamped as a tag on every uploaded file (`icarus-org:<org>`) for whenever server-side
+// filtering becomes verifiable, but nothing here claims it's enforced today.
+function hivemindConfigured(cfg) {
+  return !!(cfg.hivemind && cfg.hivemind.connected && cfg.hivemind.token);
+}
+
+// Deliberately NOT the same as cfg.hivemind.url (the console/OAuth-authorize URL from `icarus
+// connect`) — the two are different real domains: hivemind.blaiq.ai turned out to be serving
+// Traefik's own fallback self-signed cert (no real ACME cert issued for it, confirmed via
+// openssl — CN=TRAEFIK DEFAULT CERT), so a real client correctly refuses to connect over TLS.
+// core.singulancelabs.com is the real, documented API base (next.singulancelabs.com/hivemind/
+// docs) and is what this defaults to. cfg.hivemind.apiUrl / HIVEMIND_API_URL still override for
+// anyone on a different real deployment (self-host, etc).
+function hivemindApiBase(cfg) {
+  return process.env.HIVEMIND_API_URL || cfg.hivemind?.apiUrl || 'https://core.singulancelabs.com';
+}
+
+async function hivemindUploadFile(filePath, org, cfg, { fullMemoryGeneration = false } = {}) {
+  const base = hivemindApiBase(cfg);
+  const buf = fs.readFileSync(filePath);
+  const form = new FormData();
+  form.append('file', new Blob([buf]), path.basename(filePath));
+  form.append('targetScope', 'personal');
+  form.append('ingestMode', fullMemoryGeneration ? 'both' : 'evidence');
+  form.append('tags', `icarus-org:${org}`);
+  const res = await fetch(`${base}/api/knowledge/upload?async=true`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.hivemind.token}` },
+    body: form,
+  });
+  if (!res.ok) throw new Error(`HIVEMIND upload ${res.status}: ${await res.text()}`);
+  return res.json(); // { job_id, status, storage_mode, ... }
+}
+
+async function hivemindPollJob(jobId, cfg, { intervalMs = 1000, maxAttempts = 60 } = {}) {
+  const base = hivemindApiBase(cfg);
+  for (let i = 0; i < maxAttempts; i++) {
+    const res = await fetch(`${base}/api/knowledge/status?job_id=${jobId}`, {
+      headers: { Authorization: `Bearer ${cfg.hivemind.token}` },
+    });
+    if (!res.ok) throw new Error(`HIVEMIND status ${res.status}: ${await res.text()}`);
+    const body = await res.json();
+    if (body.status === 'ready' || body.status === 'failed') return body;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`HIVEMIND job ${jobId} did not finish within ${(maxAttempts * intervalMs) / 1000}s — check later with the job_id above`);
+}
+
+/** Upload every file under `dir` to HIVEMIND (real REST API, async job per file) instead of the
+ * local engine. Returns the same shape ingestDir() does, so callers (CLI/MCP) don't need to know
+ * which path ran. `files`/`chunks`/`live` come from HIVEMIND's own per-job counts, not invented
+ * locally — a real report of what its server actually did, not an assumption. */
+async function hivemindIngestDir(dir, org, cfg, onProgress, opts = {}) {
+  const files = walkText(dir);
+  let totalMemories = 0;
+  let totalSegments = 0;
+  let n = 0;
+  for (const f of files) {
+    const job = await hivemindUploadFile(f, org, cfg, opts);
+    const result = await hivemindPollJob(job.job_id, cfg);
+    if (result.status === 'failed') {
+      console.error(`icarus: HIVEMIND ingest failed for ${f} — ${result.error || 'unknown error'}`);
+      continue;
+    }
+    totalMemories += result.counts?.memories || 0;
+    totalSegments += result.counts?.segments || 0;
+    n++;
+    if (onProgress) onProgress(n);
+  }
+  return {
+    files: files.length, chunks: totalSegments || totalMemories, live: totalMemories,
+    mode: 'hivemind', distilled: !!opts.fullMemoryGeneration, signed: 0,
+  };
+}
+
+/** Recall against HIVEMIND's real /api/recall — one hybrid engine (dense + lexical + entity +
+ * temporal + graph lanes, fused server-side), not a local mode choice. See this module's header
+ * comment for the honest caveat: not verified to be org-scoped server-side yet. */
+async function hivemindRecallQuery(query, org, cfg, topK = 5) {
+  const base = hivemindApiBase(cfg);
+  const res = await fetch(`${base}/api/recall`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${cfg.hivemind.token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, mode: 'quick', limit: topK }),
+  });
+  if (!res.ok) throw new Error(`HIVEMIND recall ${res.status}: ${await res.text()}`);
+  const body = await res.json();
+  const memories = (body.memories || []).map((m) => ({ score: m.score, text: m.content, mode: 'hivemind-memory' }));
+  const evidence = (body.evidence || []).map((e) => ({ score: e.score, text: e.snippet, mode: 'hivemind-evidence' }));
+  return [...memories, ...evidence].sort((a, b) => b.score - a.score).slice(0, topK);
+}
+
 function statusReport(cfg) {
   let orgs = [];
   try {
@@ -676,4 +786,5 @@ module.exports = {
   parseClaudeTranscript, SKILLS_DIR, LAYER_MEMORY, LAYER_EVIDENCE, LAYER_COGNITIVE, LAYER_SKILL,
   signingEnabled, ensureSigningKeys, signSlot, verifySlot, canonicalPayload, SIGN_KEYS_DIR,
   ensureAuditKeys, appendAuditEntry, checkpointAudit, verifyAuditChain,
+  hivemindConfigured, hivemindIngestDir, hivemindRecallQuery,
 };

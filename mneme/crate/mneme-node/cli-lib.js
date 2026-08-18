@@ -700,13 +700,13 @@ function hivemindApiBase(cfg) {
 //
 // Deliberately NEVER throws — every failure path (discovery 404s, registration 404s, browser
 // redirect times out, token exchange fails) returns `null` so the caller falls back to the
-// existing manual paste-your-own-key flow. A real, current gap found testing this against
-// core.singulancelabs.com: /oauth/authorize is genuinely live (returns 400/401 for missing/
-// invalid params, not 404), but /oauth/register and /oauth/token both 404 — the discovery
-// document's issuer also points at an internal-only host (core.hivemind.davinciai.eu:8050,
-// unreachable from outside) instead of the public-facing domain. That's a real gap on the
-// server side, not fixable here — this function is written so it starts working the moment
-// registration+token exchange are routed publicly, with zero client-side changes needed.
+// existing manual paste-your-own-key flow. A real, current gap found testing this against a
+// live HIVEMIND-shaped deployment: the authorization endpoint was genuinely live (responded
+// 400/401 for missing/invalid params, not 404), but the registration and token endpoints both
+// 404'd on the public-facing domain — the discovery document's own `issuer` field pointed at an
+// internal-only hostname unreachable from outside instead of the public one. That's a real gap
+// on that server's own side, not fixable here — this function is written so it starts working
+// the moment registration+token exchange are routed publicly, with zero client-side changes.
 const crypto_ = crypto; // (module already required at top of file; local alias for clarity in this block only)
 function base64url(buf) {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');

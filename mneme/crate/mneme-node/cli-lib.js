@@ -652,37 +652,153 @@ async function recallQuery(query, org, cfg, topK = 5, usePq = false) {
 
 // "ICARUS v3" boundary starts here: v2 is the local `.amr` filesystem engine above (its own
 // Rust ingest/recall/temporal/graph/signing/audit, no network) — everything in this module is
-// additive to that, not a replacement. When a user brings their OWN HIVEMIND API key, ingest and
-// recall for that workspace route through HIVEMIND's real hosted API instead of the local
-// engine: HIVEMIND's server does chunking, embedding, and (unless requested) memory generation
-// entirely server-side; ICARUS becomes a thin client. Real, documented endpoints (verified
-// against next.singulancelabs.com/hivemind/docs, not guessed): POST /api/knowledge/upload
-// (multipart, async — returns a job_id), GET /api/knowledge/status (poll), POST /api/recall
-// (hybrid dense+lexical, fused server-side). `ingestMode=evidence` is the real flag that skips
-// memory/entity/relationship generation while still producing both lexical AND semantic
-// evidence lanes — exactly the "except for memory generation... gets both semantic and lexical"
-// behavior this was built for; the alternative `ingestMode=both` (full memory generation) is
-// available via `--full` for anyone who wants HIVEMIND's richer pipeline instead of the local
-// one ICARUS already has (connect-llm's distillation).
+// additive to that, not a replacement. When a user brings their OWN HIVEMIND-compatible memory
+// server key, ingest and recall for that workspace route through that server's REST API instead
+// of the local engine: the server does chunking, embedding, and (unless requested) memory
+// generation entirely server-side; ICARUS becomes a thin client. Endpoints this targets (real,
+// from a HIVEMIND-shaped server's own docs, not guessed): POST /api/knowledge/upload (multipart,
+// async — returns a job_id), GET /api/knowledge/status (poll), POST /api/recall (hybrid
+// dense+lexical, fused server-side). `ingestMode=evidence` is the real flag that skips memory/
+// entity/relationship generation while still producing both lexical AND semantic evidence lanes
+// — exactly the "except for memory generation... gets both semantic and lexical" behavior this
+// was built for; the alternative `ingestMode=both` (full memory generation) is available via
+// `--full` for anyone who wants the server's richer pipeline instead of the local one ICARUS
+// already has (connect-llm's distillation). ICARUS itself has no opinion on WHICH server —
+// there's no default API base baked in here on purpose, same reason there's no default
+// HIVEMIND provider hardcoded elsewhere in this file; see hivemindApiBase() below.
 //
-// Honest real limitation, not glossed over: HIVEMIND's REST /api/recall doesn't document a tags/
-// project filter in what I could verify (only its own MCP tool does) — so remote-mode recall
-// searches the user's WHOLE HIVEMIND workspace, not scoped to one ICARUS "org". Org name is
-// still stamped as a tag on every uploaded file (`icarus-org:<org>`) for whenever server-side
-// filtering becomes verifiable, but nothing here claims it's enforced today.
+// Honest real limitation, not glossed over: a real HIVEMIND-shaped server's REST /api/recall
+// doesn't document a tags/project filter in what was verified (only its MCP tool interface
+// does) — so remote-mode recall searches the user's WHOLE workspace, not scoped to one ICARUS
+// "org". Org name is still stamped as a tag on every uploaded file (`icarus-org:<org>`) for
+// whenever server-side filtering becomes verifiable, but nothing here claims it's enforced today.
 function hivemindConfigured(cfg) {
-  return !!(cfg.hivemind && cfg.hivemind.connected && cfg.hivemind.token);
+  const hasApiBase = !!(process.env.HIVEMIND_API_URL || cfg.hivemind?.apiUrl);
+  return !!(cfg.hivemind && cfg.hivemind.connected && cfg.hivemind.token && hasApiBase);
 }
 
-// Deliberately NOT the same as cfg.hivemind.url (the console/OAuth-authorize URL from `icarus
-// connect`) — the two are different real domains: hivemind.blaiq.ai turned out to be serving
-// Traefik's own fallback self-signed cert (no real ACME cert issued for it, confirmed via
-// openssl — CN=TRAEFIK DEFAULT CERT), so a real client correctly refuses to connect over TLS.
-// core.singulancelabs.com is the real, documented API base (next.singulancelabs.com/hivemind/
-// docs) and is what this defaults to. cfg.hivemind.apiUrl / HIVEMIND_API_URL still override for
-// anyone on a different real deployment (self-host, etc).
+// Deliberately NO hardcoded default here, unlike embed()'s OpenRouter default above — that one
+// is a genuinely neutral third-party provider; a HIVEMIND-shaped memory server is somebody's own
+// deployment, and ICARUS (an open-source, provider-agnostic local engine) shouldn't ship with
+// any one company's hostname baked in as the fallback. Also a real, concrete reason a fallback
+// would be actively wrong: testing this against the console URL `icarus connect` itself offers
+// (a DIFFERENT real endpoint from the REST API base) hit a genuine TLS failure — that host was
+// serving a fallback self-signed certificate, not a real one for that domain, and a correct
+// client refuses that handshake. The console/OAuth URL and the REST API base are not
+// interchangeable; require the API base explicitly rather than guess at either.
 function hivemindApiBase(cfg) {
-  return process.env.HIVEMIND_API_URL || cfg.hivemind?.apiUrl || 'https://core.singulancelabs.com';
+  const base = process.env.HIVEMIND_API_URL || cfg.hivemind?.apiUrl;
+  if (!base) throw new Error('no HIVEMIND API base configured — set HIVEMIND_API_URL or cfg.hivemind.apiUrl to your memory server\'s REST API base URL');
+  return base;
+}
+
+// Real OAuth2 authorization-code + PKCE + Dynamic Client Registration (RFC 8414/7591/7636) — a
+// server exposing this shape doesn't need a pre-registered client_id or secret; ICARUS registers
+// itself on the fly, then does a real browser redirect + local callback, exactly like `gh auth
+// login`/`vercel login`. Verified this shape is real (not guessed) against a live server's own
+// `/.well-known/oauth-authorization-server` discovery document before writing any of this.
+//
+// Deliberately NEVER throws — every failure path (discovery 404s, registration 404s, browser
+// redirect times out, token exchange fails) returns `null` so the caller falls back to the
+// existing manual paste-your-own-key flow. A real, current gap found testing this against
+// core.singulancelabs.com: /oauth/authorize is genuinely live (returns 400/401 for missing/
+// invalid params, not 404), but /oauth/register and /oauth/token both 404 — the discovery
+// document's issuer also points at an internal-only host (core.hivemind.davinciai.eu:8050,
+// unreachable from outside) instead of the public-facing domain. That's a real gap on the
+// server side, not fixable here — this function is written so it starts working the moment
+// registration+token exchange are routed publicly, with zero client-side changes needed.
+const crypto_ = crypto; // (module already required at top of file; local alias for clarity in this block only)
+function base64url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function openBrowser(url) {
+  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+  try { require('child_process').spawn(cmd, [url], { stdio: 'ignore', detached: true }).unref(); } catch (_) { /* user copies the URL manually below */ }
+}
+
+async function attemptHivemindOAuth(baseUrl, { timeoutMs = 120000 } = {}) {
+  const http = require('http');
+  try {
+    const discoRes = await fetch(`${baseUrl}/.well-known/oauth-authorization-server`);
+    if (!discoRes.ok) return null;
+    const disco = await discoRes.json();
+    if (!disco.authorization_endpoint || !disco.token_endpoint) return null;
+
+    // Local callback server FIRST — the redirect_uri registered below must exactly match what
+    // the browser is actually sent back to, so the real port has to be known before registering.
+    const { server, port, waitForCode } = await new Promise((resolve, reject) => {
+      let resolveCode, rejectCode;
+      const srv = http.createServer((req, res) => {
+        const url = new URL(req.url, 'http://127.0.0.1');
+        if (url.pathname !== '/callback') { res.writeHead(404); res.end(); return; }
+        const code = url.searchParams.get('code');
+        const err = url.searchParams.get('error');
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(err ? `<h2>ICARUS: authorization failed (${err}) — return to your terminal.</h2>` : '<h2>ICARUS connected — you can close this tab and return to your terminal.</h2>');
+        if (err) rejectCode(new Error(err)); else resolveCode(code);
+      });
+      srv.on('error', reject);
+      srv.listen(0, '127.0.0.1', () => {
+        const p = srv.address().port;
+        resolve({
+          server: srv, port: p,
+          waitForCode: () => new Promise((res, rej) => { resolveCode = res; rejectCode = rej; }),
+        });
+      });
+    });
+
+    try {
+      const redirectUri = `http://127.0.0.1:${port}/callback`;
+      const regRes = await fetch(disco.registration_endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          redirect_uris: [redirectUri],
+          token_endpoint_auth_method: 'none',
+          grant_types: ['authorization_code', 'refresh_token'],
+          response_types: ['code'],
+          client_name: 'icarus-cli',
+        }),
+      });
+      if (!regRes.ok) return null; // e.g. registration_endpoint 404s — the real gap found this session
+      const { client_id } = await regRes.json();
+      if (!client_id) return null;
+
+      const codeVerifier = base64url(crypto_.randomBytes(32));
+      const codeChallenge = base64url(crypto_.createHash('sha256').update(codeVerifier).digest());
+      const state = base64url(crypto_.randomBytes(16));
+      const scopes = (disco.scopes_supported || ['memory.read', 'memory.write', 'workspace.connect']).join(' ');
+      const authUrl = `${disco.authorization_endpoint}?${new URLSearchParams({
+        response_type: 'code', client_id, redirect_uri: redirectUri, scope: scopes,
+        code_challenge: codeChallenge, code_challenge_method: 'S256', state,
+      })}`;
+
+      console.log('\n  Opening your browser to authorize ICARUS...');
+      console.log(`  If it doesn't open automatically: ${authUrl}\n`);
+      openBrowser(authUrl);
+
+      const code = await Promise.race([
+        waitForCode(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timed out waiting for browser authorization')), timeoutMs)),
+      ]);
+
+      const tokenRes = await fetch(disco.token_endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id, code_verifier: codeVerifier,
+        }),
+      });
+      if (!tokenRes.ok) return null; // e.g. token_endpoint 404s — the other half of the real gap found this session
+      const tokenBody = await tokenRes.json();
+      if (!tokenBody.access_token) return null;
+      return { token: tokenBody.access_token, refreshToken: tokenBody.refresh_token || null };
+    } finally {
+      server.close();
+    }
+  } catch (_) {
+    return null; // any network/timeout/parse failure -> caller falls back to manual key entry
+  }
 }
 
 async function hivemindUploadFile(filePath, org, cfg, { fullMemoryGeneration = false } = {}) {
@@ -786,5 +902,5 @@ module.exports = {
   parseClaudeTranscript, SKILLS_DIR, LAYER_MEMORY, LAYER_EVIDENCE, LAYER_COGNITIVE, LAYER_SKILL,
   signingEnabled, ensureSigningKeys, signSlot, verifySlot, canonicalPayload, SIGN_KEYS_DIR,
   ensureAuditKeys, appendAuditEntry, checkpointAudit, verifyAuditChain,
-  hivemindConfigured, hivemindIngestDir, hivemindRecallQuery,
+  hivemindConfigured, hivemindIngestDir, hivemindRecallQuery, attemptHivemindOAuth,
 };

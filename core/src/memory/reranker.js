@@ -35,6 +35,8 @@ const FALLBACK_PROVIDER = (process.env.RERANK_FALLBACK_PROVIDER || 'cohere').toL
 const FALLBACK_MODEL = process.env.RERANK_FALLBACK_MODEL || '';
 const FALLBACK_API_KEY = process.env.RERANK_FALLBACK_API_KEY || process.env.OPENROUTER_API_KEY || '';
 const POOL      = Math.min(Number(process.env.RERANK_POOL || 100), 200); // hard cap 200
+const PRIMARY_SHARDS = Math.max(1, Math.min(4, Number(process.env.RERANK_PRIMARY_SHARDS || 3)));
+const PRIMARY_SHARD_MIN_DOCS = Math.max(2, Number(process.env.RERANK_PRIMARY_SHARD_MIN_DOCS || 18));
 // 1500ms was too tight: Cohere-via-OpenRouter is ~300ms normally but spikes to
 // 1-2s under burst/queueing, tripping the abort → the cross-encoder pass got
 // silently dropped exactly when load was highest. 2500ms covers spikes while
@@ -193,6 +195,26 @@ async function callCohere(query, texts, signal, target) {
   );
 }
 
+async function callTarget(query, texts, signal, target) {
+  if (target.provider !== 'cohere') return callTei(query, texts, signal, target);
+  // BGE cross-encoder scores are pointwise: each query/document score is
+  // independent and therefore comparable across batches. Split only the
+  // self-hosted primary's wide pool; this removes serial GPU queue time while
+  // avoiding multiplied calls/cost on a managed fallback.
+  if (target.role !== 'primary' || PRIMARY_SHARDS === 1 || texts.length < PRIMARY_SHARD_MIN_DOCS) {
+    return callCohere(query, texts, signal, target);
+  }
+  const shardCount = Math.min(PRIMARY_SHARDS, texts.length);
+  const shardSize = Math.ceil(texts.length / shardCount);
+  const batches = [];
+  for (let offset = 0; offset < texts.length; offset += shardSize) {
+    const shard = texts.slice(offset, offset + shardSize);
+    batches.push(callCohere(query, shard, signal, target)
+      .then((rows) => rows.map((row) => ({ ...row, index: row.index + offset }))));
+  }
+  return validateScores((await Promise.all(batches)).flat(), texts.length, target.model);
+}
+
 /**
  * Rerank candidates by cross-encoder relevance to query. No-op when disabled.
  * @param {string} query
@@ -235,9 +257,7 @@ export async function rerank(query, candidates, { topN } = {}) {
     }, attemptBudget);
     try {
       if (parentSignal?.aborted) throw parentSignal.reason || new Error('rerank cancelled by upstream deadline');
-      const scored = target.provider === 'cohere'
-        ? await callCohere(query, texts, ctrl.signal, target)
-        : await callTei(query, texts, ctrl.signal, target);
+      const scored = await callTarget(query, texts, ctrl.signal, target);
       if (!scored.length) throw new Error('empty rerank result');
       const byIdx = new Map(scored.map((s) => [s.index, s.score]));
       const reordered = pool

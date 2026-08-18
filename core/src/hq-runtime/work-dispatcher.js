@@ -537,6 +537,16 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console, leaseO
       },
     });
   }
+  // Titles/urls the Room or specialist actually produced (verdict.artifacts,
+  // see roomVerdict() above) — previously only the COUNT reached the FE
+  // event, so the Runtime terminal had no way to link/preview/download a
+  // finished research doc or report even though the data existed all along.
+  // `type: 'work.artifact_ready'` mirrors the campaign convention
+  // (`campaign_artifact_progress` / `campaign.asset_ready`) so the FE can
+  // special-case this the same way, without a brand new event taxonomy.
+  const readyArtifacts = Array.isArray(packet.artifacts)
+    ? packet.artifacts.map((a) => ({ title: a?.title || null, url: a?.url || null })).filter((a) => a.title || a.url).slice(0, 12)
+    : [];
   await appendHqEvent({
     prisma, runtimeId: order.runtime_id, orgId: order.org_id, runtimeEpoch: currentRuntime.epoch,
     eventType: status === 'completed' ? 'work_order_completed' : status === 'partial' ? 'observation' : 'blocked',
@@ -546,6 +556,8 @@ export async function dispatchNextHqWorkOrder({ prisma, logger = console, leaseO
     details: {
       status, result_ref: order.id,
       artifact_count: Array.isArray(packet.artifacts) ? packet.artifacts.length : 0,
+      artifacts: readyArtifacts,
+      ...(status === 'completed' && readyArtifacts.length ? { type: 'work.artifact_ready' } : {}),
       evidence_count: Array.isArray(packet.source_refs) ? packet.source_refs.length : 0,
       blockers: Array.isArray(packet.blockers) ? packet.blockers.slice(0, 10) : [],
       failures: Array.isArray(packet.failures) ? packet.failures.slice(0, 10) : [],

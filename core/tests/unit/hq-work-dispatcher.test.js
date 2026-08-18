@@ -109,6 +109,52 @@ test('HQ dispatcher persists a terminal specialist result event and immediate re
   assert.equal(captured.schedule.payload.work_order_id, 'work-1');
 });
 
+test('a completed Room work order carries its real artifact urls into the event, marked ready for the Runtime terminal popup', async (t) => {
+  const previousKey = process.env.HIVEMIND_MASTER_API_KEY;
+  process.env.HIVEMIND_MASTER_API_KEY = 'internal-test-key';
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.HIVEMIND_MASTER_API_KEY;
+    else process.env.HIVEMIND_MASTER_API_KEY = previousKey;
+  });
+  const transport = transportResponse({
+    ok: true,
+    summary: 'Market research complete.',
+    result: {
+      contract_version: 'work-order-result.v2',
+      status: 'completed',
+      acceptance: [{ met: true }],
+      subtasks: [{ status: 'completed', checks: [{ type: 'evidence', passed: true }] }],
+      gaps: [],
+      deliverables: [{ title: 'Market research report', url: 'https://cdn.example.com/reports/market.pdf' }],
+    },
+  });
+  const captured = { event: null };
+  const transactionClient = {
+    $queryRawUnsafe: async (query) => String(query).includes('MAX(sequence)')
+      ? [{ max_sequence: 8n }] : [{ epoch: 'epoch-1', event_sequence: 8n }],
+    hqRuntime: { update: async () => ({ eventSequence: 9n }), updateMany: async () => ({ count: 1 }), findFirst: async () => ({ id: 'runtime-1' }) },
+    hqRuntimeEvent: { create: async ({ data }) => { captured.event = data; return data; } },
+    hqSchedule: { upsert: async ({ create }) => create },
+  };
+  const prisma = {
+    $queryRawUnsafe: async () => [{
+      id: 'work-2', org_id: 'org-1', hq_cycle_id: 'cycle-1', room_id: 'room-1',
+      title: 'Research the Berlin regulated-finance market', runtime_id: 'runtime-1',
+      runtime_epoch: 'epoch-1', input_snapshot: { runtime_epoch: 'epoch-1' },
+    }],
+    $transaction: async (callback) => callback(transactionClient),
+    $executeRawUnsafe: async () => {},
+    hyperWorkOrder: { updateMany: async () => ({ count: 1 }) },
+    hqRuntime: { findFirst: async () => ({ epoch: 'epoch-1' }) },
+  };
+
+  const result = await dispatchNextHqWorkOrder({ prisma, transport });
+  assert.deepEqual(result, { workOrderId: 'work-2', status: 'COMPLETED' });
+  assert.equal(captured.event.eventType, 'work_order_completed');
+  assert.equal(captured.event.details.type, 'work.artifact_ready');
+  assert.deepEqual(captured.event.details.artifacts, [{ title: 'Market research report', url: 'https://cdn.example.com/reports/market.pdf' }]);
+});
+
 test('expired Room work reconciles a durable result instead of replaying the Room', async () => {
   let update = null;
   const prisma = {

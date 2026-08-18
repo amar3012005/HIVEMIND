@@ -1,8 +1,17 @@
 # hm-extract — detailed build + rollout plan
 
 Status (2026-08-19): **built, locally e2e-verified, wired into core behind
-`KB_EXTRACT_URL` — narrow format scope, not the blanket docling replacement
-originally discussed.** Service lives at `hm-extract/` in this repo. Extends
+`KB_EXTRACT_URL`, and DEPLOYED to production — narrow format scope, not the
+blanket docling replacement originally discussed. `KB_EXTRACT_URL` is unset
+in production, so the tier is live but inert until explicitly enabled.**
+Deployed alongside core/control-plane/employees/frontend at commit
+`48fc40059633cf56f9ce2b8f11160b0bafd7e118` — all 5 services healthy,
+source-hash verified. Two real bugs caught on the first deploy attempt and
+fixed: a `wget`-based healthcheck override that doesn't exist in
+`node:22-slim`, and a pre-existing (previously documented, never fixed)
+locale-collation bug in `verify-deployed.sh`'s fixture-hash check. See
+`docs/ENGINEERING_JOURNAL.md`'s 2026-08-19 entry for full detail. Service
+lives at `hm-extract/` in this repo. Extends
 `~/anydoc-eval/HM_EXTRACT_SPEC.md` (the API contract) with implementation,
 concurrency, failure-mode, and rollout detail for running this at
 hundreds-of-tenants scale. That file is the contract; this file is how to

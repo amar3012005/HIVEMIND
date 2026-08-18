@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait, projectRecentDecisions, projectStrategyTrace, occupiedLaneEffectClasses, freeLaneReadyTodo } from '../../src/hq-runtime/native-engine.js';
+import { FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, resolveWorkResultTodo, adminCheckinDisposition, growthPlanModeForState, isPolicyBootstrapTodo, lifecycleSelectionObjective, operatingDecisionEvidenceRefs, playbookRunOwnsCapacity, selectPendingPlaybookRun, shouldAutoStartFirstLifeBootstrap, shouldOfferFirstLifeAdminCheckin, specialistWorkObjective, dailyCadenceEnabled, nextCadenceDueAt, cadenceIdempotencyKey, projectOperatingCycleBrief, buildOperatingCycleBrief, isRepeatCapabilityWait, projectRecentDecisions, projectStrategyTrace, occupiedLaneEffectClasses, freeLaneReadyTodo, resolveQueueExhaustedDisplayWakeAt } from '../../src/hq-runtime/native-engine.js';
 
 test('first-life admin check-in always declares its immutable playbook identity', () => {
   assert.deepEqual(FIRST_LIFE_ADMIN_CHECKIN_PLAYBOOK, {
@@ -564,4 +564,46 @@ test('freeLaneReadyTodo refuses when occupancy cannot be attributed — fail saf
 
 test('freeLaneReadyTodo returns null when readyTodo is absent', () => {
   assert.equal(freeLaneReadyTodo({ readyTodo: null, todos: [], capacityOwningRuns: [] }), null);
+});
+
+test('resolveQueueExhaustedDisplayWakeAt prefers a sooner daily_cadence wake over a far declared checkpoint', () => {
+  const now = new Date('2026-08-18T16:00:00.000Z');
+  const declaredCheckpoint = new Date('2026-08-25T13:46:00.000Z'); // 7 days out — the real production trace
+  const { displayDueAt, displayDueAtIsCadence } = resolveQueueExhaustedDisplayWakeAt({
+    queueExhausted: true, dueAt: declaredCheckpoint, cadenceEnabled: true, now,
+  });
+  assert.equal(displayDueAtIsCadence, true);
+  assert.ok(displayDueAt.getTime() < declaredCheckpoint.getTime(), 'must be sooner than the 7-day checkpoint');
+  assert.deepEqual(displayDueAt, nextCadenceDueAt(now));
+});
+
+test('resolveQueueExhaustedDisplayWakeAt never picks cadence if it would be LATER than the declared checkpoint', () => {
+  const now = new Date('2026-08-18T12:00:00.000Z');
+  const soonCheckpoint = new Date('2026-08-18T12:30:00.000Z'); // sooner than cadence's default 13:00 UTC
+  const { displayDueAt, displayDueAtIsCadence } = resolveQueueExhaustedDisplayWakeAt({
+    queueExhausted: true, dueAt: soonCheckpoint, cadenceEnabled: true, now,
+  });
+  assert.equal(displayDueAtIsCadence, false);
+  assert.deepEqual(displayDueAt, soonCheckpoint);
+});
+
+test('resolveQueueExhaustedDisplayWakeAt falls back to cadence even with no declared checkpoint at all', () => {
+  const now = new Date('2026-08-18T16:00:00.000Z');
+  const { displayDueAt, displayDueAtIsCadence } = resolveQueueExhaustedDisplayWakeAt({
+    queueExhausted: true, dueAt: null, cadenceEnabled: true, now,
+  });
+  assert.equal(displayDueAtIsCadence, true);
+  assert.deepEqual(displayDueAt, nextCadenceDueAt(now));
+});
+
+test('resolveQueueExhaustedDisplayWakeAt is a no-op when cadence is disabled', () => {
+  const declaredCheckpoint = new Date('2026-08-25T13:46:00.000Z');
+  const result = resolveQueueExhaustedDisplayWakeAt({ queueExhausted: true, dueAt: declaredCheckpoint, cadenceEnabled: false });
+  assert.deepEqual(result, { displayDueAt: declaredCheckpoint, displayDueAtIsCadence: false });
+});
+
+test('resolveQueueExhaustedDisplayWakeAt is a no-op when the queue is not actually exhausted', () => {
+  const declaredCheckpoint = new Date('2026-08-25T13:46:00.000Z');
+  const result = resolveQueueExhaustedDisplayWakeAt({ queueExhausted: false, dueAt: declaredCheckpoint, cadenceEnabled: true });
+  assert.deepEqual(result, { displayDueAt: declaredCheckpoint, displayDueAtIsCadence: false });
 });

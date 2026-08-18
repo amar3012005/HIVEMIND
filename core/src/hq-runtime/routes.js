@@ -19,6 +19,33 @@ import { recordRuntimeMetric } from './runtime-metrics.js';
 
 const ACTIVE_STATES = new Set(['OBSERVING', 'DIAGNOSING', 'DELEGATING', 'WAITING', 'REVIEWING', 'BLOCKED']);
 
+/**
+ * A real, confirmed incident (2026-08-18): the browser widget's "session
+ * created" notification (decision:'started') is a separate client-side POST
+ * from "session ended" (decision:'completed') — if the first is ever
+ * dropped, the run stays parked at capture_admin_choice waiting for
+ * admin_checkin.started/skipped, and every subsequent 'completed' POST
+ * silently no-ops (wrong event type for that wait). Observed live: 5
+ * duplicate "received" events, zero progress, permanently stuck. A
+ * conversation that reached "completed" obviously also started, so recover
+ * by resolving the missed 'started' first. Pulled out as a pure predicate
+ * so it's directly unit-testable without mocking the whole HTTP route.
+ */
+export function shouldRecoverMissedAdminCheckinStart({ decision, currentStageId, status }) {
+  return decision === 'completed' && currentStageId === 'capture_admin_choice' && !['COMPLETED', 'TERMINATED'].includes(String(status));
+}
+
+/**
+ * Only narrate a decision that actually moved the run — resumeEvent's own
+ * idempotency guards make a stale/duplicate POST a harmless no-op, but this
+ * route used to log "Internal check-in received" unconditionally on every
+ * one of those no-ops too, producing the exact misleading repeated
+ * narration from the same incident above.
+ */
+export function shouldNarrateAdminCheckinDecision({ decision, stageBefore, stageAfter, status }) {
+  return decision === 'skipped' || stageAfter !== stageBefore || ['COMPLETED', 'TERMINATED'].includes(String(status));
+}
+
 function asJsonEvent(row) {
   return {
     ...row,
@@ -1139,7 +1166,8 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             console.warn('[hq-runtime] admin check-in transcript unavailable:', error.message);
           }
         }
-        const resumed = await service.resumeEvent(run.id, orgId, {
+        const stageBefore = run.currentStageId;
+        let resumed = await service.resumeEvent(run.id, orgId, {
           id: `admin-checkin:${run.id}:${decision}:${sessionId || 'none'}`,
           type: `admin_checkin.${decision}`,
           data: {
@@ -1147,13 +1175,30 @@ export function createHqRuntimeRouteHandler({ prisma, requireSession, requirePri
             ...(transcript ? { transcript, transcript_source: `tara_session:${sessionId}` } : {}),
           },
         });
-        await appendHqEvent({
-          prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
-          eventType: decision === 'skipped' ? 'decision' : 'observation',
-          title: decision === 'skipped' ? 'Internal check-in skipped' : decision === 'started' ? 'Internal check-in started' : 'Internal check-in received',
-          summary: decision === 'skipped' ? 'Runtime retained the explicit skip and will form the first plan from the baseline evidence.' : decision === 'started' ? 'Runtime will wait for the exact browser conversation before it forms the first plan.' : 'Runtime received the completed browser conversation and is preparing the source-backed internal status record.',
-          details: { admin_checkin_run_id: run.id, decision, session_id: sessionId },
-        });
+        if (shouldRecoverMissedAdminCheckinStart({ decision, currentStageId: resumed.currentStageId, status: resumed.status })) {
+          await service.resumeEvent(run.id, orgId, {
+            id: `admin-checkin:${run.id}:started:${sessionId || 'none'}:recovered`,
+            type: 'admin_checkin.started',
+            data: { session_id: sessionId, correlation_ref: sessionId, runtime_epoch: runtime.epoch },
+          });
+          resumed = await service.resumeEvent(run.id, orgId, {
+            id: `admin-checkin:${run.id}:completed:${sessionId || 'none'}:retry`,
+            type: 'admin_checkin.completed',
+            data: {
+              session_id: sessionId, correlation_ref: sessionId, runtime_epoch: runtime.epoch,
+              ...(transcript ? { transcript, transcript_source: `tara_session:${sessionId}` } : {}),
+            },
+          });
+        }
+        if (shouldNarrateAdminCheckinDecision({ decision, stageBefore, stageAfter: resumed.currentStageId, status: resumed.status })) {
+          await appendHqEvent({
+            prisma, runtimeId: runtime.id, orgId, runtimeEpoch: runtime.epoch,
+            eventType: decision === 'skipped' ? 'decision' : 'observation',
+            title: decision === 'skipped' ? 'Internal check-in skipped' : decision === 'started' ? 'Internal check-in started' : 'Internal check-in received',
+            summary: decision === 'skipped' ? 'Runtime retained the explicit skip and will form the first plan from the baseline evidence.' : decision === 'started' ? 'Runtime will wait for the exact browser conversation before it forms the first plan.' : 'Runtime received the completed browser conversation and is preparing the source-backed internal status record.',
+            details: { admin_checkin_run_id: run.id, decision, session_id: sessionId },
+          });
+        }
         // SKIP MUST NEVER BLOCK. The run parks in WAITING_EVENT on the NEXT stage while
         // waiting for admin_checkin.completed (correlated by session_id). A `skipped`
         // event does not match that wait, so resumeEvent silently ignored it and the

@@ -37,6 +37,7 @@ const FALLBACK_API_KEY = process.env.RERANK_FALLBACK_API_KEY || process.env.OPEN
 const POOL      = Math.min(Number(process.env.RERANK_POOL || 100), 200); // hard cap 200
 const PRIMARY_SHARDS = Math.max(1, Math.min(4, Number(process.env.RERANK_PRIMARY_SHARDS || 3)));
 const PRIMARY_SHARD_MIN_DOCS = Math.max(2, Number(process.env.RERANK_PRIMARY_SHARD_MIN_DOCS || 18));
+const PROJECT_TO_CHARS = Math.max(0, Math.min(2000, Number(process.env.RERANK_PROJECT_TO_CHARS || 0)));
 // 1500ms was too tight: Cohere-via-OpenRouter is ~300ms normally but spikes to
 // 1-2s under burst/queueing, tripping the abort → the cross-encoder pass got
 // silently dropped exactly when load was highest. 2500ms covers spikes while
@@ -141,9 +142,9 @@ export async function warmUpReranker({
   return warmupInFlight;
 }
 
-function textOf(c) {
+function textOf(c, maxChars = 2000) {
   return [c.title, typeof c.content === 'string' ? c.content : '']
-    .filter(Boolean).join('\n').slice(0, 2000);
+    .filter(Boolean).join('\n').slice(0, maxChars > 0 ? maxChars : undefined);
 }
 
 function validateScores(scored, expectedCount, model) {
@@ -183,7 +184,18 @@ async function callCohere(query, texts, signal, target) {
   const r = await gatewayFirstFetch(`${target.url}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(target.apiKey ? { Authorization: `Bearer ${target.apiKey}` } : {}) },
-    body: JSON.stringify({ model: target.model, query, documents: texts, top_n: texts.length }),
+    body: JSON.stringify({
+      model: target.model,
+      query,
+      documents: texts,
+      top_n: texts.length,
+      // Singulance's self-hosted route selects the most query-relevant window
+      // before BGE scoring. Full candidate content remains untouched for final
+      // synthesis. Never send this custom extension to managed fallbacks.
+      ...(target.role === 'primary' && PROJECT_TO_CHARS > 0
+        ? { project_to_chars: PROJECT_TO_CHARS }
+        : {}),
+    }),
     signal,
   });
   if (!r.ok) throw new Error(`Cohere rerank ${r.status} (${target.model})`);
@@ -229,7 +241,13 @@ export async function rerank(query, candidates, { topN } = {}) {
   }
   const pool = candidates.slice(0, POOL);
   const tail = candidates.slice(POOL); // never reranked, kept after
-  const texts = pool.map(textOf);
+  const boundedTexts = pool.map((candidate) => textOf(candidate));
+  // Server-side projection must see the complete candidate; otherwise a
+  // relevant fact after the old 2,000-character client cap is irretrievably
+  // absent. Managed fallbacks keep the bounded representation.
+  const projectableTexts = PROJECT_TO_CHARS > 0
+    ? pool.map((candidate) => textOf(candidate, 0))
+    : boundedTexts;
   const runStartedAt = Date.now();
   const runDeadlineAt = runStartedAt + TOTAL_TIMEOUT;
   let totalAttempts = 0;
@@ -257,7 +275,10 @@ export async function rerank(query, candidates, { topN } = {}) {
     }, attemptBudget);
     try {
       if (parentSignal?.aborted) throw parentSignal.reason || new Error('rerank cancelled by upstream deadline');
-      const scored = await callTarget(query, texts, ctrl.signal, target);
+      const targetTexts = target.role === 'primary' && PROJECT_TO_CHARS > 0
+        ? projectableTexts
+        : boundedTexts;
+      const scored = await callTarget(query, targetTexts, ctrl.signal, target);
       if (!scored.length) throw new Error('empty rerank result');
       const byIdx = new Map(scored.map((s) => [s.index, s.score]));
       const reordered = pool

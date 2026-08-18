@@ -82,6 +82,7 @@ test('reranker can fail over to a distinct endpoint and model', async (t) => {
   process.env.RERANK_FALLBACK_PROVIDER = 'cohere';
   process.env.RERANK_FALLBACK_MODEL = 'voyageai/rerank-2.5-lite';
   process.env.RERANK_FALLBACK_MODELS = '';
+  process.env.RERANK_PROJECT_TO_CHARS = '400';
   process.env.RERANK_TIMEOUT_MS = '500';
   process.env.RERANK_TOTAL_TIMEOUT_MS = '800';
   process.env.RERANK_MAX_ATTEMPTS_TOTAL = '2';
@@ -89,7 +90,7 @@ test('reranker can fail over to a distinct endpoint and model', async (t) => {
   const { rerank } = await import(`../../src/memory/reranker.js?route=${Date.now()}`);
 
   const rows = await rerank('target', [
-    { id: 'other', content: 'unrelated' },
+    { id: 'other', content: 'unrelated'.repeat(400) },
     { id: 'target', content: 'target' },
   ], { topN: 2 });
 
@@ -99,6 +100,8 @@ test('reranker can fail over to a distinct endpoint and model', async (t) => {
   assert.equal(rows.rerank_meta.route, 'fallback');
   assert.equal(fallbackBodies.length, 1);
   assert.equal(fallbackBodies[0].model, 'voyageai/rerank-2.5-lite');
+  assert.equal(Object.hasOwn(fallbackBodies[0], 'project_to_chars'), false);
+  assert.equal(fallbackBodies[0].documents[0].length, 2000);
 });
 
 test('self-hosted primary reranks a wide pool in bounded parallel shards', async (t) => {
@@ -128,13 +131,14 @@ test('self-hosted primary reranks a wide pool in bounded parallel shards', async
   process.env.RERANK_FALLBACK_MODELS = '';
   process.env.RERANK_PRIMARY_SHARDS = '3';
   process.env.RERANK_PRIMARY_SHARD_MIN_DOCS = '18';
+  process.env.RERANK_PROJECT_TO_CHARS = '400';
   process.env.RERANK_TOTAL_TIMEOUT_MS = '800';
   process.env.RERANK_MAX_ATTEMPTS_TOTAL = '1';
   process.env.RERANK_RETRIES = '0';
   const { rerank } = await import(`../../src/memory/reranker.js?shards=${Date.now()}`);
   const candidates = Array.from({ length: 21 }, (_, index) => ({
     id: `row-${index}`,
-    content: index === 20 ? 'unique target' : `noise ${index}`,
+    content: index === 20 ? `${'late filler '.repeat(220)}unique target` : `noise ${index}`,
   }));
 
   const rows = await rerank('unique target', candidates, { topN: 15 });
@@ -142,4 +146,7 @@ test('self-hosted primary reranks a wide pool in bounded parallel shards', async
   assert.equal(rows.rerank_meta.status, 'served');
   assert.equal(bodies.length, 3);
   assert.deepEqual(bodies.map((body) => body.documents.length), [7, 7, 7]);
+  assert.deepEqual(bodies.map((body) => body.project_to_chars), [400, 400, 400]);
+  assert.ok(bodies[2].documents.at(-1).length > 2000);
+  assert.match(bodies[2].documents.at(-1), /unique target$/);
 });

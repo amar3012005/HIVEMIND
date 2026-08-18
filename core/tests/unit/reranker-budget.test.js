@@ -100,3 +100,46 @@ test('reranker can fail over to a distinct endpoint and model', async (t) => {
   assert.equal(fallbackBodies.length, 1);
   assert.equal(fallbackBodies[0].model, 'voyageai/rerank-2.5-lite');
 });
+
+test('self-hosted primary reranks a wide pool in bounded parallel shards', async (t) => {
+  const bodies = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      bodies.push(body);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ results: body.documents.map((document, index) => ({
+        index,
+        relevance_score: document.includes('unique target') ? 0.99 : 0.01,
+      })) }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  process.env.RERANK_ENABLED = 'true';
+  process.env.RERANK_PROVIDER = 'cohere';
+  process.env.RERANK_URL = `http://127.0.0.1:${server.address().port}`;
+  process.env.RERANK_MODEL = 'bge-reranker-v2-m3';
+  process.env.RERANK_FALLBACK_URL = '';
+  process.env.RERANK_FALLBACK_MODEL = '';
+  process.env.RERANK_FALLBACK_MODELS = '';
+  process.env.RERANK_PRIMARY_SHARDS = '3';
+  process.env.RERANK_PRIMARY_SHARD_MIN_DOCS = '18';
+  process.env.RERANK_TOTAL_TIMEOUT_MS = '800';
+  process.env.RERANK_MAX_ATTEMPTS_TOTAL = '1';
+  process.env.RERANK_RETRIES = '0';
+  const { rerank } = await import(`../../src/memory/reranker.js?shards=${Date.now()}`);
+  const candidates = Array.from({ length: 21 }, (_, index) => ({
+    id: `row-${index}`,
+    content: index === 20 ? 'unique target' : `noise ${index}`,
+  }));
+
+  const rows = await rerank('unique target', candidates, { topN: 15 });
+  assert.equal(rows[0].id, 'row-20');
+  assert.equal(rows.rerank_meta.status, 'served');
+  assert.equal(bodies.length, 3);
+  assert.deepEqual(bodies.map((body) => body.documents.length), [7, 7, 7]);
+});

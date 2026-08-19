@@ -654,6 +654,14 @@ async function main() {
   const flags = parseFlags(rest);
   const cfg = loadCfg();
   try {
+    // Bare `icarus` (no subcommand) on a real TTY launches the interactive shell instead of the
+    // help text — matches the "grok-build-style boxed banner + /slash-command REPL" request.
+    // Piped/non-TTY invocations (scripts, CI) keep falling through to the plain-text help below —
+    // a slash-command shell has no meaning without a terminal to type into.
+    if (cmd === undefined && process.stdout.isTTY && process.stdin.isTTY) {
+      await require('./tui.js').run();
+      return;
+    }
     switch (cmd) {
       case 'ingest': await cmdIngest(flags, cfg); break;
       case 'recall': await cmdRecall(flags, cfg); break;
@@ -686,6 +694,9 @@ async function main() {
       case 'audit': cmdAudit(flags, cfg); break;
       default:
         console.log(colorizeHelp(`icarus — memory filesystem CLI (the .amr engine)
+
+  Run "icarus" with no arguments on a real terminal for an interactive shell (/ingest, /recall,
+  /status, /connect as slash commands) instead of one-shot subcommands below.
 
   icarus ingest <dir> --org <name>     extract + embed + store a folder. If icarus connect has a
                                         HIVEMIND token, routes through HIVEMIND's real API

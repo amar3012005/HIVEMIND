@@ -16415,6 +16415,14 @@ exit \$RC
               else deleteUploadId = rawId;
             }
 
+            // Entity extraction is intentionally asynchronous. Cancel the
+            // document-scoped flight before cascading source rows so a late LLM
+            // response cannot create mentions against a deleted document.
+            const candidateDocumentId = deleteMemoryId || (UUID_RE.test(rawId || '') ? rawId : null);
+            if (candidateDocumentId && documentFirstIngestion?.cancelDocumentEnrichment) {
+              await documentFirstIngestion.cancelDocumentEnrichment(candidateDocumentId);
+            }
+
             // ── Remote (self-host) orgs: the doc + segments + fact memories live on the AGENT,
             // central Prisma holds no rows — the 600-line cascade below would resolve nothing and
             // silently no-op ("delete button does nothing" / memories survive doc deletion). One

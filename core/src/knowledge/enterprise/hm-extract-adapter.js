@@ -25,6 +25,18 @@
  * chunking/structural_density are NOT used here; the existing, already-tuned
  * chunker/semantic-reslice pipeline keeps doing its job on the returned
  * markdown/text, same as the plain-text and seam tiers.
+ *
+ * REACHABILITY NOTE (found 2026-08-19, verified in production): this tier
+ * only fires for uploads that pass core/src/knowledge/upload-contract.js's
+ * KB_EXTENSIONS.document allowlist first — that allowlist only admits
+ * ['pdf','docx','xlsx','pptx','txt','md','markdown','csv','tsv','html','htm'].
+ * doc/docm/odt/rtf/epub and even ppt/pptm/ppsx/ppsm are NOT in it (deliberately
+ * withdrawn there — legacy binary needs LibreOffice, OpenDocument is untested
+ * on this deployment) and so can never reach this tier via the real upload
+ * path today. Only pptx is currently reachable. The default below still lists
+ * the full originally-scoped set for when/if that allowlist is widened, but
+ * do not assume anything beyond pptx actually runs without checking
+ * upload-contract.js first.
  */
 
 const KB_EXTRACT_URL = process.env.KB_EXTRACT_URL || '';

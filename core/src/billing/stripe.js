@@ -13,16 +13,30 @@
  *   STRIPE_PRICE_ID_PRO          — price_… for the Pro plan
  *   STRIPE_PRICE_ID_SCALE        — price_… for the Scale plan
  *
+ *   STRIPE_AUTOMATIC_TAX_ENABLED   — opt-in only after Stripe Tax
+ *       registrations and product tax codes are configured (defaults false)
  *   STRIPE_PUBLIC_CHECKOUT_RETURN  — defaults to
- *       https://hivemind.davinciai.eu/hivemind/app/billing?checkout=success
+ *       https://next.singulancelabs.com/hivemind/app/billing?checkout=success
  *   STRIPE_PUBLIC_CHECKOUT_CANCEL  — defaults to
- *       https://hivemind.davinciai.eu/hivemind/app/billing?checkout=cancelled
+ *       https://next.singulancelabs.com/hivemind/app/billing?checkout=cancelled
  *   STRIPE_PUBLIC_PORTAL_RETURN    — defaults to
- *       https://hivemind.davinciai.eu/hivemind/app/billing
+ *       https://next.singulancelabs.com/hivemind/app/billing
  */
 
 let _client = null;
 let _clientPromise = null;
+
+const PUBLIC_BILLING_URL = 'https://next.singulancelabs.com/hivemind/app/billing';
+
+/**
+ * Tax must be an explicit production decision.  Stripe accepts a Checkout
+ * request with automatic_tax enabled even when no active registration exists,
+ * which silently produces zero tax.  Keep it off until Finance has recorded
+ * the applicable registrations and product tax codes in Stripe.
+ */
+export function isAutomaticTaxEnabled() {
+  return String(process.env.STRIPE_AUTOMATIC_TAX_ENABLED || '').trim().toLowerCase() === 'true';
+}
 
 export function isEnabled() {
   return Boolean(process.env.STRIPE_SECRET_KEY);
@@ -40,7 +54,7 @@ export async function getStripe() {
     const mod = await import('stripe');
     const Ctor = mod.default || mod.Stripe || mod;
     _client = new Ctor(process.env.STRIPE_SECRET_KEY, {
-      apiVersion: '2024-06-20',
+      apiVersion: '2026-06-24.dahlia',
       maxNetworkRetries: 2,
       timeout: 15_000,
       appInfo: { name: 'HIVEMIND', version: '1.0' },
@@ -85,9 +99,10 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const returnSuccess = process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
-    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=success';
+    || `${PUBLIC_BILLING_URL}?checkout=success`;
   const returnCancel = process.env.STRIPE_PUBLIC_CHECKOUT_CANCEL
-    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=cancelled';
+    || `${PUBLIC_BILLING_URL}?checkout=cancelled`;
+  const automaticTax = isAutomaticTaxEnabled();
   return stripe.checkout.sessions.create({
     mode: 'subscription',
     customer: customerId,
@@ -100,8 +115,10 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
       ? { discounts: [{ promotion_code: promotionCodeId }] }
       : { allow_promotion_codes: true }),
     billing_address_collection: 'auto',
-    automatic_tax: { enabled: true },
-    customer_update: { address: 'auto', name: 'auto' },
+    ...(automaticTax ? {
+      automatic_tax: { enabled: true },
+      customer_update: { address: 'auto', name: 'auto' },
+    } : {}),
     subscription_data: {
       metadata: { hivemind_org_id: orgId, hivemind_user_id: userId || '' },
     },
@@ -152,9 +169,9 @@ export async function createRunwayCheckoutSession({ customerId, orgId, userId, q
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const returnSuccess = process.env.STRIPE_PUBLIC_CHECKOUT_RETURN
-    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=success';
+    || `${PUBLIC_BILLING_URL}?checkout=success`;
   const returnCancel = process.env.STRIPE_PUBLIC_CHECKOUT_CANCEL
-    || 'https://hivemind.davinciai.eu/hivemind/app/billing?checkout=cancelled';
+    || `${PUBLIC_BILLING_URL}?checkout=cancelled`;
   const currency = String(quote?.currency || 'eur').toLowerCase();
   const cfg = quote?.config || {};
   const label = `HIVEMIND Runway — ${quote?.mode || 'managed'} · ${cfg.seats} seats · ${cfg.tokens}M tokens`
@@ -217,7 +234,7 @@ export async function createPortalSession({ customerId }) {
   const stripe = await getStripe();
   if (!stripe) throw new Error('Stripe not configured');
   const returnUrl = process.env.STRIPE_PUBLIC_PORTAL_RETURN
-    || 'https://hivemind.davinciai.eu/hivemind/app/billing';
+    || PUBLIC_BILLING_URL;
   return stripe.billingPortal.sessions.create({
     customer: customerId,
     return_url: returnUrl,

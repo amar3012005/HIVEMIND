@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   getSubscriptionIdFromStripeObject,
   getSubscriptionPriceId,
+  isAutomaticTaxEnabled,
   isEntitledSubscriptionStatus,
 } from '../../src/billing/stripe.js';
 
@@ -18,5 +19,17 @@ describe('Stripe subscription payload helpers', () => {
     assert.equal(isEntitledSubscriptionStatus('active'), true);
     assert.equal(isEntitledSubscriptionStatus('trialing'), true);
     assert.equal(isEntitledSubscriptionStatus('past_due'), false);
+  });
+
+  it('keeps automatic tax opt-in rather than silently enabling it', () => {
+    const original = process.env.STRIPE_AUTOMATIC_TAX_ENABLED;
+    delete process.env.STRIPE_AUTOMATIC_TAX_ENABLED;
+    assert.equal(isAutomaticTaxEnabled(), false);
+    process.env.STRIPE_AUTOMATIC_TAX_ENABLED = 'true';
+    assert.equal(isAutomaticTaxEnabled(), true);
+    process.env.STRIPE_AUTOMATIC_TAX_ENABLED = 'false';
+    assert.equal(isAutomaticTaxEnabled(), false);
+    if (original === undefined) delete process.env.STRIPE_AUTOMATIC_TAX_ENABLED;
+    else process.env.STRIPE_AUTOMATIC_TAX_ENABLED = original;
   });
 });

@@ -4,7 +4,8 @@ const candidateKey = (candidate = {}) => candidate.kind === 'memory'
   ? `memory:${candidate.memory_id || candidate.id || ''}`
   : `evidence:${candidate.segment_id || candidate.id || ''}`;
 
-export function evidenceWindowSizeForDepth(depth = 'standard') {
+export function evidenceWindowSizeForDepth(depth = 'standard', { nativeSingleCall = false } = {}) {
+  if (nativeSingleCall && depth === 'detailed') return 15;
   return ({ standard: 5, detailed: 10, comprehensive: 15 })[depth] || 5;
 }
 

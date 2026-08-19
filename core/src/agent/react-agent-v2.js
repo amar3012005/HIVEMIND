@@ -1109,7 +1109,8 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     };
   }
   let escalationCount = 0;
-  if (remaining() > 0
+  if (!plan._native_single_call
+      && remaining() > 0
       && !coverage.retrieval_timed_out
       && !coverage.retrieval_unavailable
       && (!plan.explicit_recall_mode || (coverage.source_requested && !coverage.source_covered))) {
@@ -2945,6 +2946,9 @@ export async function runReactAgentV2({
     // The required structured intent call is the plan. This removes the old
     // quick-gate, JSON planner, tool-router switch, and phrase rescue stack.
     let plan = intentDecisionToPlan(intentDecision, message);
+    // Suppress legacy retry/escalation seams only for the single-call native
+    // planner. Tool-enabled/Composio turns retain their existing orchestration.
+    plan._native_single_call = useTools !== true && intentDecision._router === 'progressive';
     if (hasBrowserContext && !plan.sub_queries.length && plan.operation !== 'direct') {
       plan.sub_queries = [message];
     }
@@ -3485,6 +3489,7 @@ export async function runReactAgentV2({
       canonicalQuery: plan.query_canonical_en,
       coverage: evidence.coverage,
       alreadyOptimized: queryOptimizerRan,
+      useTools,
     })) {
       const retryOptimizerStartedAt = Date.now();
       const retryResult = await optimizeRecallQueries({
@@ -3518,7 +3523,9 @@ export async function runReactAgentV2({
     // selects exactly one synthesis window before the model runs: ordinary
     // turns see five, detailed turns ten, comprehensive turns fifteen. There
     // is no post-answer reveal, retrieval retry, rerank, or synthesis hop.
-    const evidenceWindowSize = evidenceWindowSizeForDepth(plan.response_depth);
+    const evidenceWindowSize = evidenceWindowSizeForDepth(plan.response_depth, {
+      nativeSingleCall: plan._native_single_call === true,
+    });
     const progressiveSession = createProgressiveRecallSession({
       rankedCandidates: evidence.ranked_candidates || [],
       memories: evidence.memories || [],

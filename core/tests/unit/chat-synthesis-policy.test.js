@@ -45,7 +45,7 @@ test('JSON synthesis normalizes provider nulls and scalars to an object', () => 
 
 test('native recall reuses the planner query while missing/tool-enabled queries retain optimization', () => {
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color' }), false);
-  assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: '' }), true);
+  assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: '' }), false);
   assert.equal(shouldOptimizeRecallQuery({ router: 'progressive', canonicalQuery: 'handbag color', useTools: true }), true);
   assert.equal(shouldRunRecallOptimizer({ operation: 'recall' }), true);
   assert.equal(shouldRunRecallOptimizer({ operation: 'timeline' }), true);
@@ -88,10 +88,11 @@ test('grounded candidate validation is required only when the final packet conta
   assert.equal(hasGroundingEvidence({ memories: [], evidence: [], recall_packets: [] }), false);
 });
 
-test('progressive canonical query is rewritten only after first recall has zero coverage', () => {
-  assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: false }), true);
+test('native progressive planning never starts a second query-rewrite call after zero coverage', () => {
+  assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: false }), false);
   assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: true }, alreadyOptimized: false }), false);
   assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: true }), false);
+  assert.equal(shouldRetryAfterZeroCoverage({ router: 'progressive', canonicalQuery: 'handbag brand', coverage: { evidence_found: false }, alreadyOptimized: false, useTools: true }), true);
 });
 
 test('GPT-OSS Nitro is default and Nemotron requires an explicit canary opt-in', () => {

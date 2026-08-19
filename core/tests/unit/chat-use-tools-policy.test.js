@@ -20,6 +20,9 @@ test('native planner requests a semantic retrieval expression instead of a copie
     'hivemind_recall', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline',
     'hivemind_aggregate_entities', 'hivemind_relation_between',
   ]);
+  assert.deepEqual(context.function.parameters.properties.temporal_axis.enum, [
+    'none', 'valid_time', 'known_time',
+  ]);
   const description = context.function.parameters.properties.query_canonical_en.description;
   assert.match(description, /intent-preserving English retrieval expression/);
   assert.match(description, /names\/models\/variants\/categories/);
@@ -55,7 +58,7 @@ test('native profile is an explicit language-independent capability', () => {
 
 test('native tool selection is authoritative over an inconsistent high-level operation', () => {
   const { decision } = adaptToDecision('hivemind_context', {
-    native_tool: 'hivemind_at', operation: 'recall', temporal_semantics: 'none',
+    native_tool: 'hivemind_at', temporal_axis: 'valid_time', operation: 'recall', temporal_semantics: 'none',
     query_original: 'What was true then?', query_canonical_en: 'workspace truth at 2026-08-08',
     response_language: 'en', mode: 'fact', entities: [], response_depth: 'standard',
     retrieval_shape: 'fact', answer_objective: 'State what was true.', source_title: null,
@@ -64,6 +67,23 @@ test('native tool selection is authoritative over an inconsistent high-level ope
   }, 'What was true on 2026-08-08?', 'en', { useTools: false });
   assert.equal(decision.operation, 'timeline');
   assert.equal(decision.time.kind, 'snapshot_at');
+});
+
+test('native point-in-time axis cannot populate both valid and known time', () => {
+  const common = {
+    native_tool: 'hivemind_at', operation: 'temporal', temporal_semantics: 'snapshot_at',
+    query_original: 'time question', query_canonical_en: 'Solvis at 2026-08-01',
+    response_language: 'en', mode: 'fact', entities: [], response_depth: 'standard',
+    retrieval_shape: 'fact', answer_objective: 'Answer the snapshot.', source_title: null,
+    valid_at: '2026-08-01', known_at: '2026-08-01', range_start: null, range_end: null,
+    aggregate_kind: null, answer_type: 'fact',
+  };
+  const known = adaptToDecision('hivemind_context', { ...common, temporal_axis: 'known_time' }, 'What did we know?', 'en', { useTools: false }).decision;
+  assert.equal(known.time.valid_at, null);
+  assert.equal(known.time.known_at, '2026-08-01');
+  const valid = adaptToDecision('hivemind_context', { ...common, temporal_axis: 'valid_time' }, 'What was true?', 'en', { useTools: false }).decision;
+  assert.equal(valid.time.valid_at, '2026-08-01');
+  assert.equal(valid.time.known_at, null);
 });
 
 test('native aggregate and relation selections compile their required executor inputs', () => {

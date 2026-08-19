@@ -7,11 +7,12 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/"
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "dependencies": {
     "@firecrawl/anydoc": "^0.1.9",
     "express": "^4.19.2",
+    "fflate": "^0.8.3",
     "multer": "^2.2.0"
   }
 }

@@ -53,6 +53,58 @@ export function shouldSalvageTruncatedJson(finishReason) {
   return finishReason === 'length';
 }
 
+export class TruncatedJsonCompletionError extends Error {
+  constructor(message, partial = null) {
+    super(message);
+    this.name = 'TruncatedJsonCompletionError';
+    this.code = 'LLM_JSON_TRUNCATED';
+    this.partial = partial;
+  }
+}
+
+function completionItemCount(value) {
+  if (Array.isArray(value)) return value.length;
+  if (Array.isArray(value?.facts)) return value.facts.length;
+  return 0;
+}
+
+/**
+ * Parse a JSON-mode completion while preserving the provider's finish contract.
+ * A syntactically salvageable prefix is useful as a last-resort recovery asset,
+ * but it is not a complete extraction when the provider says finish=length.
+ */
+export function parseJsonCompletion(content, finishReason, { rejectTruncated = false } = {}) {
+  const tryParse = (s) => {
+    try { return JSON.parse(s); } catch { return null; }
+  };
+  let parsed = tryParse(content);
+  if (parsed === null && shouldSalvageTruncatedJson(finishReason)) {
+    const fenced = String(content).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    parsed = tryParse(fenced);
+  }
+  if (parsed === null) {
+    const m = String(content).match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+    if (m) parsed = tryParse(m[0]);
+  }
+  if (parsed === null && shouldSalvageTruncatedJson(finishReason)) {
+    const salvaged = _salvageArrayObjects(content);
+    if (salvaged.length) parsed = /"facts"\s*:/.test(content) ? { facts: salvaged } : salvaged;
+  }
+  if (parsed !== null) {
+    if (rejectTruncated && shouldSalvageTruncatedJson(finishReason)) {
+      throw new TruncatedJsonCompletionError(
+        `[enterprise-extract] JSON output truncated after ${completionItemCount(parsed)} complete item(s)`,
+        parsed,
+      );
+    }
+    if (shouldSalvageTruncatedJson(finishReason)) {
+      console.warn(`[enterprise-extract] truncation-salvaged ${completionItemCount(parsed)} objects (finish=length)`);
+    }
+    return parsed;
+  }
+  throw new Error(`[enterprise-extract] Failed to parse JSON response (finish=${finishReason || 'unknown'}): ${String(content).slice(0, 200)}`);
+}
+
 // Default routes through Groq direct (gpt-oss-20b — fast, cheap, JSON-mode).
 // LITELLM_BASE_URL still wins when explicitly set (preserves backward compat).
 // Routing logic:
@@ -132,7 +184,7 @@ const reasoningDisableRejected = new Set();
  * @param {boolean} [opts.json_mode=false] - Request JSON output
  * @returns {Promise<string|Object>} Parsed JSON object if json_mode, otherwise raw content string
  */
-export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, feature = 'enterprise-extract' }) {
+export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, reject_truncated_json = false, feature = 'enterprise-extract' }) {
   model = model || DEFAULT_MODEL;
   const useCase = /entity|relationship/i.test(feature) ? 'entity_linking' : 'ingestion_extraction';
   const modelPolicy = await resolveAiModelPolicy(useCase, model);
@@ -292,37 +344,9 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   void recordAiUsage({ usage, requestedModel: model, servedModel: json.model || model, provider: json.provider || route.provider, useCase });
 
   if (json_mode) {
-    // Robust parse: try direct, then strip code fences, then salvage first {...}/[...]
-    const tryParse = (s) => {
-      try { return JSON.parse(s); } catch { return null; }
-    };
-    let parsed = tryParse(content);
-    if (parsed === null && shouldSalvageTruncatedJson(json.choices?.[0]?.finish_reason)) {
-      // Strip ```json ... ``` fences if present
-      const fenced = content.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-      parsed = tryParse(fenced);
-    }
-    if (parsed === null) {
-      // Salvage first balanced object/array
-      const m = content.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-      if (m) parsed = tryParse(m[0]);
-    }
-    if (parsed === null) {
-      // TRUNCATION SALVAGE (finish=length): a cut-off response has no closing
-      // bracket, so the balanced-match above fails and every fact in that
-      // section would be lost. Recover every COMPLETE top-level object from the
-      // (possibly truncated) array — brace-counted, string/escape aware — so a
-      // response cut mid-object still yields the N-1 facts that completed.
-      const salvaged = _salvageArrayObjects(content);
-      if (salvaged.length) {
-        // Rebuild the shape the caller expects: {"facts":[…]} if the payload
-        // was a facts array, else the bare array.
-        parsed = /"facts"\s*:/.test(content) ? { facts: salvaged } : salvaged;
-        console.warn(`[enterprise-extract] truncation-salvaged ${salvaged.length} objects (finish=length)`);
-      }
-    }
-    if (parsed !== null) return parsed;
-    throw new Error(`[enterprise-extract] Failed to parse JSON response (finish=${json.choices?.[0]?.finish_reason || 'unknown'}): ${content.slice(0, 200)}`);
+    return parseJsonCompletion(content, json.choices?.[0]?.finish_reason, {
+      rejectTruncated: reject_truncated_json,
+    });
   }
 
   return content;
@@ -345,14 +369,20 @@ export async function chatCompletionWithFallback({ models = [], model, ...opts }
   const list = [...new Set((models.length ? models : [model]).filter(Boolean))];
   if (!list.length) throw new Error('[llm-fallback] no model(s) provided');
   let lastErr = null;
+  let bestTruncated = null;
   for (let i = 0; i < list.length; i += 1) {
     try {
       return await chatCompletion({ ...opts, model: list[i] });
     } catch (err) {
       lastErr = err;
+      if (err?.code === 'LLM_JSON_TRUNCATED'
+          && (!bestTruncated || completionItemCount(err.partial) > completionItemCount(bestTruncated.partial))) {
+        bestTruncated = err;
+      }
       const next = i + 1 < list.length ? `falling back to ${list[i + 1]}` : 'no more models';
       console.warn(`[llm-fallback] model ${list[i]} failed (${String(err.message).slice(0, 120)}) — ${next}`);
     }
   }
+  if (bestTruncated) throw bestTruncated;
   throw lastErr;
 }

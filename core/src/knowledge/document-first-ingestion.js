@@ -1630,7 +1630,8 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       // the reliability layer tries another model, then bounded structural splits.
       models: [model, ..._fallbacks], temperature: 0,
       max_tokens: llmProfile('kb-unified-extract', { compact }).maxTokens,
-      json_mode: true, reject_truncated_json: true, feature: 'kb-unified-extract',
+      json_mode: true, reject_truncated_json: true,
+      prefer_truncated_if_more_items: true, feature: 'kb-unified-extract',
       messages: [
         { role: 'system', content: sys },
         ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),

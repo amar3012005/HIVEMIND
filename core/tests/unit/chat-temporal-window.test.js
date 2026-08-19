@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { adaptToDecision } from '../../src/agent/chat-progressive-router.js';
 import { intentDecisionToPlan } from '../../src/agent/chat-intent-decision.js';
-import { isMemoryInDateRange } from '../../src/memory/temporal-range.js';
+import { isMemoryInDateRange, selectEventRangeCandidates } from '../../src/memory/temporal-range.js';
 
 test('activity during yesterday compiles to an event-time recall window, not time travel', () => {
   const { decision } = adaptToDecision('hivemind_context', {
@@ -139,4 +139,15 @@ test('event windows match canonical temporal tags even when record time is outsi
     start: '2026-08-07T00:00:00.000Z',
     end: '2026-08-07T23:59:59.999Z',
   }), false);
+});
+
+test('large event windows stay bounded and prioritize the planner-selected memory type', () => {
+  const rows = Array.from({ length: 500 }, (_, index) => ({
+    id: `m-${index}`,
+    memory_type: index % 10 === 0 ? 'decision' : 'fact',
+  }));
+  const selected = selectEventRangeCandidates(rows, 'decision', 60);
+  assert.equal(selected.length, 60);
+  assert.equal(selected.slice(0, 50).every((row) => row.memory_type === 'decision'), true);
+  assert.equal(new Set(selected.map((row) => row.id)).size, 60);
 });

@@ -118,6 +118,24 @@ test('intent plan carries aggregate, time, scope, save and continuation structur
   assert.deepEqual(save.tool_groups, ['hivemind-memory-write']);
 });
 
+test('a high-confidence user assertion is preserved as attributable memory context', () => {
+  const decision = normalizeIntentDecision({
+    ...base,
+    operation: 'recall', queries: ['Kruti'], named_entities: ['Kruti'],
+    tool_groups: ['hivemind-recall'],
+    save: {
+      title: 'Note about Kruti', content: 'The user made an assertion about Kruti.',
+      tags: ['entity:Kruti', 'source:chat'], confidence: 0.91,
+      admission_class: 'user_assertion',
+    },
+  }, { message: 'The user made an assertion about Kruti.', language: 'en', allowedGroups: ['hivemind-recall'] });
+
+  const plan = intentDecisionToPlan(decision, 'The user made an assertion about Kruti.');
+  assert.equal(decision.save.admission_class, 'user_assertion');
+  assert.equal(plan.auto_save_intent.admission_class, 'user_assertion');
+  assert.equal(plan.auto_save_intent.content, 'The user made an assertion about Kruti.');
+});
+
 test('intent tool is a closed schema with a required tool call contract', () => {
   const tool = createChatIntentTool(catalog);
   assert.equal(tool.function.parameters.additionalProperties, false);

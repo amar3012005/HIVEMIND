@@ -1819,6 +1819,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const tags = projectedTags.join(', ');
     // Synthesis detection: source_metadata.source_type OR tag fallback (FTS path).
     const srcType = m.source_metadata?.source_type || null;
+    const admission = m.source_metadata?.metadata?.memory_admission || 'trusted_fact';
     const memTags = m.tags || [];
     const isCanonical = srcType === 'canonical-fact' || memTags.includes('synthesis:canonical');
     const isBridge    = srcType === 'synthesis-bridge' || memTags.includes('synthesis:bridge');
@@ -1828,7 +1829,8 @@ export async function answerStep({ message, history, evidence, plan, language, a
     // live facts and can assert a superseded value is still true. Mark it so
     // the model reports it as the PRIOR value ("was X, changed to Y").
     const removedTag = (m._diff_removed || m._superseded_predecessor) ? '[REMOVED/SUPERSEDED] ' : '';
-    const synthTag = removedTag + (isCanonical ? '[SYNTH/CANONICAL] ' : isBridge ? '[SYNTH/BRIDGE] ' : '');
+    const trustTag = admission === 'user_assertion' ? '[USER ASSERTION / UNVERIFIED] ' : '';
+    const synthTag = removedTag + trustTag + (isCanonical ? '[SYNTH/CANONICAL] ' : isBridge ? '[SYNTH/BRIDGE] ' : '');
     const conf = m.synthesis_confidence != null ? ` conf=${Number(m.synthesis_confidence).toFixed(2)}` : '';
     const rev = m.synthesis_revision && m.synthesis_revision > 1 ? ` rev=${m.synthesis_revision}` : '';
     const xClusterBoost = m._cross_cluster_boost && m._cross_cluster_boost > 1.0
@@ -2567,6 +2569,7 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       ...(plan.save_intent.memory_type ? { memory_type: plan.save_intent.memory_type } : {}),
       ...(plan.save_intent.entities?.length ? { entities: plan.save_intent.entities } : {}),
       ...(plan.save_intent.event_time ? { event_time: plan.save_intent.event_time } : {}),
+      _memory_admission: plan.save_intent.admission_class || 'trusted_fact',
       _source_id: ctx._trace?.traceId || null,
       _original_content: message,
       ...(ctx.projectId
@@ -2615,6 +2618,7 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       ...(as.project_hint ? { project: as.project_hint } : {}),
       ...(as.entities?.length ? { entities: as.entities } : {}),
       ...(as.event_time ? { event_time: as.event_time } : {}),
+      _memory_admission: as.admission_class || 'trusted_fact',
       _source_id: ctx._trace?.traceId || null,
       _original_content: message,
       ...(ctx.projectId ? { project_id: ctx.projectId, scope: 'project' } : {}),

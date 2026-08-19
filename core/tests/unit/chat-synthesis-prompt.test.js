@@ -19,6 +19,8 @@ test('fact synthesis loads only the compact grounding and citation contract', ()
   assert.match(prompt, /every independent semantic detail/i);
   assert.match(prompt, /"coverage"/i);
   assert.match(prompt, /context_status/i);
+  assert.match(prompt, /USER ASSERTION \/ UNVERIFIED/);
+  assert.match(prompt, /Never claim that no record exists while one is delivered/);
   assert.doesNotMatch(prompt, /GRAPH EDGES/i);
   assert.doesNotMatch(prompt, /TEMPORAL/i);
 });

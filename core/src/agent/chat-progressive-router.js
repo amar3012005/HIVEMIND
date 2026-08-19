@@ -220,7 +220,7 @@ const NATIVE_POLICY = `You are HIVE, the grounded organizational brain. You MUST
 Choose one minimal native route; never request every native tool and never create speculative hops.
 - hivemind_profile: only maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, language, or location. General company knowledge, products, documents, decisions, meetings, and history are not profile facts.
 - hivemind_context + native_tool=hivemind_recall: ordinary facts, small details, useful inventories, overviews, decisions, goals, events, named files, and activity during a date range. Recall searches the authorized hybrid memory-and-document-evidence pool together. For an event/activity window, use operation=temporal_range and native_tool=hivemind_recall.
-- native_tool=hivemind_at: what was true, or what was known, at one instant. Use operation=temporal.
+- native_tool=hivemind_at: what was true, or what was known, at one instant. Use operation=temporal. Put truth/effective-time questions in valid_at; put explicitly known/recorded/available-at questions in known_at. Never swap these axes.
 - native_tool=hivemind_diff: compare workspace state at two instants. Do not use it for events that merely occurred during a period. Use operation=diff.
 - native_tool=hivemind_timeline: version history, prior values, and how one subject changed over time. Use operation=timeline.
 - native_tool=hivemind_relation_between: an explicit relationship/path between at least two entities. Use operation=relation_between.
@@ -352,7 +352,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
   const connectedPolicy = useTools && Array.isArray(connectedProviders)
     ? `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it. For an email action, a person's name or display label is not a resolved destination: only a syntactically valid email address is resolved, otherwise add a recipient lookup step with output_kind recipient and make the action depend on it.`
     : '';
-  const temporalPolicy = `CURRENT_UTC_DATE=${new Date().toISOString().slice(0, 10)}. Resolve relative dates semantically in the user's language and emit the required ISO temporal fields.`;
+  const temporalPolicy = `CURRENT_UTC_DATE=${new Date().toISOString().slice(0, 10)}. Resolve relative dates semantically in the user's language and emit the required ISO temporal fields. A last-N-days inclusive window contains exactly N UTC dates: subtract N-1 days for range_start and use CURRENT_UTC_DATE for range_end.`;
   const dynamicPolicy = `${useTools
     ? connectedPolicy
     : 'Connected applications and compound execution are not enabled for this turn. Do not claim access to Gmail, Calendar, Docs, Slack, or any connected app; use grounded HIVE-MIND context when appropriate.'} ${temporalPolicy}`.trim();
@@ -449,20 +449,24 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
         return { decision: { ...base, operation: 'profile', queries: [base.query_canonical_en], tool_groups: ['hivemind-recall'] }, usage: null };
       }
       const declaredOp = String(args?.operation || 'recall');
+      const semanticOp = ({
+        event_window: 'temporal_range',
+        snapshot_at: 'temporal',
+        snapshot_diff: 'diff',
+        version_history: 'timeline',
+      })[String(args?.temporal_semantics || '')];
       const nativeOp = ({
-        hivemind_recall: declaredOp,
+        // Event windows are still a recall capability. Preserve the semantic
+        // time contract even if the model used operation=recall alongside the
+        // exact native tool (a valid but previously mis-normalized pairing).
+        hivemind_recall: semanticOp === 'temporal_range' ? semanticOp : declaredOp,
         hivemind_at: 'temporal',
         hivemind_diff: 'diff',
         hivemind_timeline: 'timeline',
         hivemind_aggregate_entities: 'aggregate',
         hivemind_relation_between: 'relation_between',
       })[String(args?.native_tool || '')];
-      const rawOp = nativeOp || ({
-        event_window: 'temporal_range',
-        snapshot_at: 'temporal',
-        snapshot_diff: 'diff',
-        version_history: 'timeline',
-      })[String(args?.temporal_semantics || '')] || declaredOp;
+      const rawOp = nativeOp || semanticOp || declaredOp;
       const op = CONTEXT_OP[rawOp] || 'recall';
       let time = (iso(args?.valid_at) || iso(args?.known_at) || iso(args?.range_start) || iso(args?.range_end))
         ? { valid_at: iso(args?.valid_at), known_at: iso(args?.known_at),

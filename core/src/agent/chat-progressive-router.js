@@ -129,9 +129,14 @@ const NATIVE_CONTEXT_TOOL = (() => {
             enum: ['hivemind_recall', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline', 'hivemind_aggregate_entities', 'hivemind_relation_between'],
             description: 'The one native read capability required. hivemind_recall also owns event windows and named-file evidence retrieval.',
           },
+          temporal_axis: {
+            type: 'string',
+            enum: ['none', 'valid_time', 'known_time'],
+            description: 'For hivemind_at only: valid_time means what was true/effective; known_time means what was known/recorded. none for all other tools.',
+          },
           ...context.function.parameters.properties,
         },
-        required: ['native_tool', ...context.function.parameters.required],
+        required: ['native_tool', 'temporal_axis', ...context.function.parameters.required],
       },
     },
   };
@@ -220,7 +225,7 @@ const NATIVE_POLICY = `You are HIVE, the grounded organizational brain. You MUST
 Choose one minimal native route; never request every native tool and never create speculative hops.
 - hivemind_profile: only maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, language, or location. General company knowledge, products, documents, decisions, meetings, and history are not profile facts.
 - hivemind_context + native_tool=hivemind_recall: ordinary facts, small details, useful inventories, overviews, decisions, goals, events, named files, and activity during a date range. Recall searches the authorized hybrid memory-and-document-evidence pool together. For an event/activity window, use operation=temporal_range and native_tool=hivemind_recall.
-- native_tool=hivemind_at: what was true, or what was known, at one instant. Use operation=temporal. Put truth/effective-time questions in valid_at; put explicitly known/recorded/available-at questions in known_at. Never swap these axes.
+- native_tool=hivemind_at: what was true, or what was known, at one instant. Use operation=temporal. Set temporal_axis=valid_time and only valid_at for truth/effective-time questions; set temporal_axis=known_time and only known_at for explicitly known/recorded/available-at questions. Never fill both axes.
 - native_tool=hivemind_diff: compare workspace state at two instants. Do not use it for events that merely occurred during a period. Use operation=diff.
 - native_tool=hivemind_timeline: version history, prior values, and how one subject changed over time. Use operation=timeline.
 - native_tool=hivemind_relation_between: an explicit relationship/path between at least two entities. Use operation=relation_between.
@@ -480,6 +485,16 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
             : rawOp === 'temporal'
               ? 'snapshot_at'
               : 'version_timeline';
+      }
+      if (rawOp === 'temporal' && time) {
+        const axis = String(args?.temporal_axis || 'none');
+        if (axis === 'known_time') {
+          const instant = time.known_at || time.valid_at;
+          time = { valid_at: null, known_at: instant, range: null, kind: 'snapshot_at' };
+        } else if (axis === 'valid_time') {
+          const instant = time.valid_at || time.known_at;
+          time = { valid_at: instant, known_at: null, range: null, kind: 'snapshot_at' };
+        }
       }
       if (rawOp === 'temporal_range' && time?.range) {
         time = { ...time, valid_at: null, known_at: null, range: eventRange(time.range.start, time.range.end) };

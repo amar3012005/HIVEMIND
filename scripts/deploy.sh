@@ -390,7 +390,9 @@ start_core_benchmark() {
     --env-file "$COOLIFY_ENV" \
     -e NODE_ENV=production \
     -e "QDRANT_COLLECTION=BENCHMARK" \
-    -e "EMBEDDING_PROVIDER=litellm" \
+    -e "EMBEDDING_PROVIDER=singulance" \
+    -e "EMBEDDING_FALLBACK_PROVIDER=blaiq" \
+    -e "EMBEDDING_FALLBACK2_PROVIDER=openrouter" \
     -e "EMBEDDING_DIMENSION=1024" \
     -e "DATABASE_URL=postgresql://hivemind_user:hivemind_secure_pwd_2026@${COOLIFY_PG}:5432/hivemind?schema=hivemind&connection_limit=20&pool_timeout=30" \
     -e "REDIS_URL=redis://:redis_secure_vault_7711@${COOLIFY_REDIS}:6379/0" \

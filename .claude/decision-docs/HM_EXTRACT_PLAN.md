@@ -255,3 +255,41 @@ session (the offset-anchor fallback, the word-join bug). Rewriting them
   generation too" looks. See the argument at the top of this file for why.
 - No per-tenant rate limiting here — core's existing `KB_QUEUE_ORG_CONCURRENCY`
   already owns that.
+
+## Production acceptance — 2026-08-19
+
+Accepted at canonical SHA `6764d157beea886b361f69b513fa65cddf58bf50`
+(PR #443). `KB_EXTRACT_URL=http://hm-extract:8088` is now enabled for the
+narrow set `pptx,doc,docm,odt,rtf,epub`. PDF, DOCX, XLSX, CSV/text and images
+remain on their existing dedicated tiers. The old Docling path remains the
+runtime fallback behind the existing timeout and circuit breaker; Docling has
+not been removed.
+
+Binary acceptance was through the real asynchronous upload API, not a direct
+service health probe:
+
+- complete 55-file SOLVIS folder in an isolated project: 53 unique durable
+  jobs plus two content duplicates, all 53 unique jobs `ready`, zero failed;
+- aggregate results: 703 pages, 1,862 evidence segments, 727 candidates and
+  703 promoted memories;
+- both real SOLVIS PPTX files logged `tier=hm-extract:pptx`, parsed at the Core
+  boundary in 290-350ms, and persisted 11/15 final evidence segments plus 24
+  memories each;
+- separate DOC/DOCM/ODT/RTF/EPUB project: every format accepted, routed through
+  `hm-extract`, and reached `ready`;
+- project-scoped hybrid recall returned memory and evidence lanes together;
+  grounded chat answered both an exact WP-storage question and a detailed
+  Solvis product-family question with citations;
+- live Core image `hivemind/core-api:sha-6764d157`, healthy, zero restarts;
+  fresh fatal and hm-extract failure scans were empty.
+
+Rollback is either the release manifest's preserved Core image or removing
+`KB_EXTRACT_URL` and recreating Core. Extraction logs contain format, byte
+count, timing and aggregate structure only; never document contents.
+
+This acceptance does not erase downstream ingestion warnings observed on a
+few large non-PPTX documents: the memory-promotion LLM reported atomic-fact
+shortfalls, and one 1s embedding attempt timed out before fallback completed
+with `failed=0`. The verbatim evidence lane remained complete and recallable;
+those are separate memory-generation/model-budget follow-ups, not hm-extract
+parser failures.

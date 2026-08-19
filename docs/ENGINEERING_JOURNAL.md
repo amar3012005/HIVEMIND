@@ -750,3 +750,31 @@ slides that find no unique anchor get a page instead of `null`.
 - Real gap found while locating the upload endpoint for this test: `core/src/knowledge/upload-contract.js`'s `KB_EXTENSIONS.document` allowlist is `['pdf','docx','xlsx','pptx','txt','md','markdown','csv','tsv','html','htm']` — doc/docm/odt/rtf/epub are NOT in it at all, and only `pptx` (not ppt/pptm/ppsx/ppsm) is admitted. The file's own comment explains why: "STILL WITHDRAWN: ppt, doc, xls (legacy binary)... need LibreOffice... OpenDocument (odt/ods/odp) is untested." This means most of the hm-extract-adapter's narrow allowlist (everything except pptx) is currently DEAD CODE via the real upload path — those formats get rejected at the contract layer before parsing ever starts. Not fixed in this session; recorded as an open gap for whoever decides to actually enable and use this beyond pptx.
 - Production: unchanged from the 2026-08-19 hm-extract deploy entry above — `KB_EXTRACT_URL` unset, tier live but inert.
 - Next: either widen `KB_EXTENSIONS.document` to admit doc/docm/odt/rtf/epub (a real, separate decision — those formats were deliberately withdrawn before for LibreOffice/untested reasons unrelated to hm-extract, so admitting them now needs its own review) or narrow `KB_EXTRACT_FORMATS`'s default to just `pptx` to match what's actually reachable today.
+
+## 2026-08-19 UTC — hm-extract activated and accepted through real uploads
+
+- PR #443, canonical SHA `6764d157beea886b361f69b513fa65cddf58bf50`.
+- Closed the reachability gap by admitting only `doc,docm,odt,rtf,epub` in
+  addition to the already-admitted PPTX. Added ZIP/OLE/RTF signature guards.
+  Legacy PPT/PPTM/PPSX/PPSM/XLS/ODS/ODP remain rejected.
+- Enabled `KB_EXTRACT_URL=http://hm-extract:8088` and deployed only Core via
+  the immutable release runner with the explicit divergence override; no
+  Runtime/Room envelope changed, so Control, Employees and frontend were not
+  rebuilt. Rollback env backup: `.env.pre-hm-extract-20260819T094516Z`.
+- Local/live-service validation: 26/26 anydoc golden, atomicity, admission and
+  memory-budget tests; 22/22 upload contract/service/route/quota tests.
+- Real tenant E2E project `27362239-f287-4829-b160-f9e755b5adcd`: complete
+  55-file SOLVIS folder, 53 unique ready jobs + two duplicates, zero failures;
+  totals 703 pages / 1,862 segments / 727 candidates / 703 memories.
+- The two SOLVIS decks used `hm-extract:pptx` (not Docling), with 22/26 service
+  segments and 290-350ms Core parse-boundary latency. Both final jobs were
+  ready with 11/15 evidence segments and 24 memories each.
+- Legacy canary project `e959f666-5c4a-45f8-8d2f-c9dc5ea561c4`: DOC, DOCM,
+  ODT, RTF and EPUB all used hm-extract and reached ready.
+- Scoped recall was hybrid (memory + evidence) at 0.84-1.01s internal; grounded
+  chat returned cited answers for WP-storage benefits and detailed Solvis
+  product families. Fresh fatal/hm-extract failure logs: zero.
+- Honest separate findings: some large-document memory extraction windows had
+  fact shortfalls; one embedding attempt hit the 1s primary timeout and healed
+  through fallback with zero failed segments. Evidence remained persisted and
+  recallable. These are not parser failures and were not hidden in acceptance.

@@ -638,3 +638,18 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - `verify-deployed.sh` fixture-catalog gate false-positived a 9th time — same confirmed locale-`sort` artifact.
 - Rollback: prior per-service images retagged `rollback`; DB rollback via the fresh encrypted backup if ever needed (migrations are additive-only, so a code rollback alone is safe without a schema rollback).
 - External side effects: none beyond the schema change (no real email sent yet, no real approval granted yet).
+
+## 6764d157 — activate hm-extract upload tier (Core only)
+
+- Canonical SHA: `6764d157beea886b361f69b513fa65cddf58bf50` (PR #443).
+  Image: `hivemind/core-api:sha-6764d157`; no migrations.
+- Enabled internal `hm-extract:8088` for `pptx,doc,docm,odt,rtf,epub` only.
+  Existing PDF/DOCX/XLSX/CSV/text/image tiers and Docling fallback are intact.
+- Manifest: `/root/releases/manifests/6764d157/20260819T094539Z/RELEASE_MANIFEST.json`.
+  Environment rollback: `/root/hivemind/.env.pre-hm-extract-20260819T094516Z`;
+  prior Core image preserved by the canonical release runner.
+- Acceptance: 53/53 unique SOLVIS jobs ready (55 files including two content
+  duplicates), zero failed; both real decks routed through hm-extract; five
+  legacy-format canaries ready; hybrid recall and cited grounded chat passed.
+- Live verification: Core healthy, zero restarts, exact revision label;
+  hm-extract healthy; fresh fatal and extraction-failure logs empty.

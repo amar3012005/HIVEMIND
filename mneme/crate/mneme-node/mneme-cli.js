@@ -20,6 +20,7 @@ const {
   llmConfigured, skillSave, skillList, parseClaudeTranscript,
   signingEnabled, verifySlot, checkpointAudit, verifyAuditChain,
   hivemindConfigured, hivemindIngestDir, hivemindRecallQuery, attemptHivemindOAuth,
+  DEFAULT_HIVEMIND_AUTH_URL, DEFAULT_HIVEMIND_API_URL,
 } = require('./cli-lib.js');
 const { c, glyphs, heading, ok, err, bullet, rule, spinnerFrame, colorizeHelp } = require('./theme.js');
 
@@ -179,26 +180,10 @@ function makePrompter() {
   return ask;
 }
 
-// Default target: Singulance's own hosted HIVEMIND control-plane — api.singulancelabs.com, the
-// real, live-verified host for /auth/cli/start (confirmed via direct curl: 400 with no params,
-// 302 to the branded login page with valid params — NOT core.singulancelabs.com, which is a
-// different service, hm-core's generic OAuth-spec discovery endpoint, and 404s on this route).
-// Matches "just like claude does it": zero typing for the common case. HIVEMIND_URL (or
-// --api-url) still overrides for anyone self-hosting or pointing ICARUS at a different
-// HIVEMIND-shaped server; this is a default, not a hardcoded requirement.
-// Two DIFFERENT services, confirmed live and NOT interchangeable — a real bug caught by an
-// actual failed `icarus ingest` (404 Not Found) right after a successful connect:
-//   - api.singulancelabs.com   = hivemind-control-plane: /auth/cli/start, session/API-key minting.
-//     Confirmed: POST /api/knowledge/upload here -> 404 (route doesn't exist on this service).
-//   - core.singulancelabs.com  = hm-core: the actual REST API ICARUS calls for ingest/recall
-//     (/api/knowledge/upload, /api/recall, ...). Confirmed: POST /api/knowledge/upload here ->
-//     401 (route exists, needs the bearer token) — the SAME token minted by the auth host works
-//     here too (one shared, revocable API key across both services).
-// So `icarus connect` signs in against the AUTH host but must store the REST host separately —
-// never reuse one for the other. HIVEMIND_URL overrides the auth host; HIVEMIND_API_URL (or
-// --api-url) overrides the REST host — same split cli-lib.js's hivemindApiBase() already expects.
-const DEFAULT_HIVEMIND_AUTH_URL = 'https://api.singulancelabs.com';
-const DEFAULT_HIVEMIND_API_URL = 'https://core.singulancelabs.com';
+// DEFAULT_HIVEMIND_AUTH_URL/DEFAULT_HIVEMIND_API_URL are defined ONCE in cli-lib.js (imported
+// above) and reused here and by tui.js's /connect — see cli-lib.js's own comment on them for the
+// full "two different services" story (a real duplication bug was caught by the publish scanner
+// flagging a second hardcoded copy in tui.js; fixed by centralizing instead of allowlisting both).
 
 async function cmdConnect(flags, cfg, sharedAsk) {
   const authUrl = process.env.HIVEMIND_URL || cfg.hivemind?.url || DEFAULT_HIVEMIND_AUTH_URL;

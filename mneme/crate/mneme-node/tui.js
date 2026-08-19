@@ -16,8 +16,9 @@ const path = require('path');
 const readline = require('readline');
 const { c, heading, ok, err, bullet, glyphs, rule, spinnerFrame } = require('./theme.js');
 const {
-  loadCfg, ingestDir, recallQuery, statusReport, signingEnabled,
+  loadCfg, saveCfg, ingestDir, recallQuery, statusReport, signingEnabled,
   hivemindConfigured, hivemindIngestDir, hivemindRecallQuery, attemptHivemindOAuth,
+  DEFAULT_HIVEMIND_AUTH_URL, DEFAULT_HIVEMIND_API_URL,
 } = require('./cli-lib.js');
 
 function boxWidth() {
@@ -198,11 +199,13 @@ async function dispatch(line, state, cfg) {
       break;
     }
     case 'connect': {
+      const authUrl = process.env.HIVEMIND_URL || cfg.hivemind?.url || DEFAULT_HIVEMIND_AUTH_URL;
+      const restUrl = process.env.HIVEMIND_API_URL || cfg.hivemind?.apiUrl || DEFAULT_HIVEMIND_API_URL;
       console.log(c.running('  Opening your browser...'));
-      const oauth = await attemptHivemindOAuth(process.env.HIVEMIND_URL || 'https://api.singulancelabs.com');
+      const oauth = await attemptHivemindOAuth(authUrl);
       if (oauth) {
-        cfg.hivemind = { connected: true, url: process.env.HIVEMIND_URL || 'https://api.singulancelabs.com', token: oauth.token, userEmail: oauth.userEmail, apiUrl: process.env.HIVEMIND_API_URL || 'https://core.singulancelabs.com', connectedAt: new Date().toISOString() };
-        require('./cli-lib.js').saveCfg(cfg);
+        cfg.hivemind = { connected: true, url: authUrl, token: oauth.token, userEmail: oauth.userEmail, apiUrl: restUrl, connectedAt: new Date().toISOString() };
+        saveCfg(cfg);
         console.log(ok(`HIVEMIND connected${oauth.userEmail ? ` as ${oauth.userEmail}` : ''}.`));
       } else {
         console.log(err('browser sign-in didn\'t complete — run `icarus connect` outside the TUI for the manual-token fallback.'));

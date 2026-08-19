@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 /**
  * Stripe client wrapper.
  *
@@ -40,6 +42,16 @@ export function isAutomaticTaxEnabled() {
 
 export function isEnabled() {
   return Boolean(process.env.STRIPE_SECRET_KEY);
+}
+
+/**
+ * Checkout traffic is identified in Stripe without using tenant or user data.
+ * Stripe requires an eight-letter random suffix for API versions >= 2026-03-25.
+ */
+export function createCheckoutIntegrationIdentifier() {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz';
+  const bytes = randomBytes(8);
+  return `hivemind_checkout_${Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('')}`;
 }
 
 /**
@@ -104,6 +116,7 @@ export async function createCheckoutSession({ customerId, priceId, orgId, userId
     || `${PUBLIC_BILLING_URL}?checkout=cancelled`;
   const automaticTax = isAutomaticTaxEnabled();
   return stripe.checkout.sessions.create({
+    integration_identifier: createCheckoutIntegrationIdentifier(),
     mode: 'subscription',
     customer: customerId,
     line_items: [{ price: priceId, quantity: 1 }],
@@ -211,6 +224,7 @@ export async function createRunwayCheckoutSession({ customerId, orgId, userId, q
     });
   }
   return stripe.checkout.sessions.create({
+    integration_identifier: createCheckoutIntegrationIdentifier(),
     mode: 'subscription',
     customer: customerId,
     line_items,

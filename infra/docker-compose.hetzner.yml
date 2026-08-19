@@ -244,10 +244,9 @@ services:
       - docling-models:/opt/app-root/src/.cache
 
   # hm-extract: stateless anydoc-based extraction, NARROW format scope only
-  # (pptx/ppt/legacy doc/docm/odt/rtf/epub — see hm-extract-adapter.js's
+  # (pptx/doc/docm/odt/rtf/epub — see hm-extract-adapter.js's
   # header for why xlsx/csv/docx/pdf are deliberately excluded). Internal
-  # network only, no published port — core reaches it at KB_EXTRACT_URL,
-  # unset by default so this entire tier is inert until explicitly enabled.
+  # network only, no published port — core reaches it at KB_EXTRACT_URL.
   # Memory sized per hm-extract/README.md's real measurement: repeated
   # large-document passes plateau around ~5.3GB on QEMU-emulated amd64;
   # 4g here is a starting point for real x86 hardware, not yet re-verified

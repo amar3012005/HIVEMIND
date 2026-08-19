@@ -66,6 +66,8 @@ test('native tool selection is authoritative over an inconsistent high-level ope
     aggregate_kind: null, answer_type: 'fact',
   }, 'What was true on 2026-08-08?', 'en', { useTools: false });
   assert.equal(decision.operation, 'timeline');
+  assert.equal(decision.native_tool, 'hivemind_at');
+  assert.equal(decision.temporal_axis, 'valid_time');
   assert.equal(decision.time.kind, 'snapshot_at');
 });
 

@@ -456,6 +456,8 @@ export function intentDecisionToPlan(decision, message) {
     answer_type: decision.answer_type || null,
     query_original: decision.query_original,
     query_canonical_en: decision.query_canonical_en,
+    native_tool: decision.native_tool || null,
+    temporal_axis: decision.temporal_axis || null,
     response_depth: decision.response_depth || 'standard',
     retrieval_shape: decision.retrieval_shape || 'fact',
     answer_objective: decision.answer_objective || message,

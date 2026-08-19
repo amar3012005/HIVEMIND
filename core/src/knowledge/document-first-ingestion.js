@@ -853,35 +853,58 @@ export class DocumentFirstIngestionService {
     // Database constraints protect rows across processes; this prevents callers
     // in one process from racing before the unchanged-document check is visible.
     this.documentIngestFlights = new Map();
+    this.entityExtractionFlights = new Map();
+    this.cancelledEntityDocuments = new Set();
   }
 
   /** Fire-and-forget entity extraction over segments (P1 #9).
    *  Parallel workers — bound by ENTITY_EXTRACT_CONCURRENCY (default 6). */
   _extractEntitiesAsync({ segments, userId, orgId, documentId, force = false }) {
-    if (!this.entityExtractor || process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return;
+    if (!this.entityExtractor || process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return null;
     // Skip entity extraction on tiny docs (single short segment) — no real value.
     const totalChars = segments.reduce((acc, s) => acc + (s.content?.length || 0), 0);
     if (!force && segments.length <= 2 && totalChars < 1500) {
       this.logger.info?.(`[entity-extractor] skipping tiny doc ${documentId} (${segments.length} segs, ${totalChars} chars)`);
-      return;
+      return null;
     }
     const CONCURRENCY = Number(process.env.ENTITY_EXTRACT_CONCURRENCY || 6);
-    (async () => {
+    const flight = (async () => {
       let i = 0;
       const workers = Array.from({ length: Math.min(CONCURRENCY, segments.length) }, async () => {
         while (true) {
+          if (this.cancelledEntityDocuments.has(documentId)) return;
           const idx = i++;
           if (idx >= segments.length) return;
           const segment = segments[idx];
           try {
-            await this.entityExtractor.extractFromSegment({ segment, userId, orgId, documentId });
+            await this.entityExtractor.extractFromSegment({
+              segment, userId, orgId, documentId,
+              shouldContinue: () => !this.cancelledEntityDocuments.has(documentId),
+            });
           } catch (err) {
             this.logger.warn(`[entity-extractor] segment ${segment.id} failed: ${err.message}`);
           }
         }
       });
       await Promise.all(workers);
-    })().catch(err => this.logger.warn(`[entity-extractor] batch failed: ${err.message}`));
+    })().catch(err => this.logger.warn(`[entity-extractor] batch failed: ${err.message}`))
+      .finally(() => {
+        if (this.entityExtractionFlights.get(documentId) === flight) this.entityExtractionFlights.delete(documentId);
+        this.cancelledEntityDocuments.delete(documentId);
+      });
+    this.entityExtractionFlights.set(documentId, flight);
+    return flight;
+  }
+
+  async cancelDocumentEnrichment(documentId, { waitMs = 5000 } = {}) {
+    if (!documentId) return;
+    this.cancelledEntityDocuments.add(documentId);
+    const flight = this.entityExtractionFlights.get(documentId);
+    if (!flight) return;
+    await Promise.race([
+      flight,
+      new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(waitMs) || 0))),
+    ]);
   }
 
   _extractPromotedEntitiesAsync({ memories, userId, orgId, documentId }) {

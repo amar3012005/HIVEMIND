@@ -65,7 +65,7 @@ export class EntityExtractor {
    * Extract entities from a single segment and persist mentions.
    * Returns { entities: [], mentions: [], skipped: false }
    */
-  async extractFromSegment({ segment, userId, orgId, documentId }) {
+  async extractFromSegment({ segment, userId, orgId, documentId, shouldContinue = () => true }) {
     if (!segment?.content || segment.content.trim().length < 20) {
       return { entities: [], mentions: [], skipped: true, reason: 'too_short' };
     }
@@ -95,10 +95,13 @@ export class EntityExtractor {
     // 3b. Entity resolution: collapse aliases pointing at same canonical (P1 #10)
     merged = await this._resolveCandidates(merged, orgId);
 
+    if (!shouldContinue()) return { entities: [], mentions: [], skipped: true, reason: 'document_deleted' };
+
     // 4. Upsert entities + write mentions
     const entities = [];
     const mentions = [];
     for (const cand of merged) {
+      if (!shouldContinue()) break;
       try {
         const entity = await this.prisma.entity.upsert({
           where: {
@@ -125,6 +128,7 @@ export class EntityExtractor {
         });
         entities.push(entity);
 
+        if (!shouldContinue()) break;
         const mention = await this.prisma.entityMention.create({
           data: {
             entityId: entity.id,

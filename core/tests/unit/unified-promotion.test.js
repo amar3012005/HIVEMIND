@@ -280,6 +280,41 @@ test('canonical entity extraction runs only over curated durable memories', asyn
   else process.env.ENABLE_ENTITY_EXTRACTION = previous;
 });
 
+test('document deletion cancels queued entity enrichment before source rows disappear', async () => {
+  const previousEnabled = process.env.ENABLE_ENTITY_EXTRACTION;
+  const previousConcurrency = process.env.ENTITY_EXTRACT_CONCURRENCY;
+  process.env.ENABLE_ENTITY_EXTRACTION = 'true';
+  process.env.ENTITY_EXTRACT_CONCURRENCY = '1';
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const seen = [];
+  const service = new DocumentFirstIngestionService({
+    db: {},
+    entityExtractor: {
+      extractFromSegment: async ({ segment, shouldContinue }) => {
+        seen.push(segment.id);
+        await gate;
+        return shouldContinue() ? { skipped: false } : { skipped: true, reason: 'document_deleted' };
+      },
+    },
+    logger: { info() {}, warn() {} },
+  });
+  const flight = service._extractEntitiesAsync({
+    segments: [{ id: 's1', content: 'First durable entity-bearing claim.' }, { id: 's2', content: 'Second durable entity-bearing claim.' }],
+    userId: 'u1', orgId: 'o1', documentId: 'd-delete', force: true,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await service.cancelDocumentEnrichment('d-delete', { waitMs: 0 });
+  release();
+  await flight;
+  assert.deepEqual(seen, ['s1']);
+  assert.equal(service.entityExtractionFlights.has('d-delete'), false);
+  if (previousEnabled === undefined) delete process.env.ENABLE_ENTITY_EXTRACTION;
+  else process.env.ENABLE_ENTITY_EXTRACTION = previousEnabled;
+  if (previousConcurrency === undefined) delete process.env.ENTITY_EXTRACT_CONCURRENCY;
+  else process.env.ENTITY_EXTRACT_CONCURRENCY = previousConcurrency;
+});
+
 test('curated Updates use the atomic version operator', async () => {
   const calls = [];
   const service = new DocumentFirstIngestionService({

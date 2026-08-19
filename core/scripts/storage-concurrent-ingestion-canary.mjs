@@ -85,13 +85,17 @@ try {
   } });
   keyId = key.id;
   const items = await Promise.all(Array.from({ length: 8 }, (_, index) => upload(index)));
-  const recallStarted = Date.now();
-  const interactive = json(await fetch(`${baseUrl}/api/recall`, {
+  const interactive = (async () => {
+    const started = Date.now();
+    const result = await json(await fetch(`${baseUrl}/api/recall`, {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify({ query: 'What are the latest organizational facts?', mode: 'quick', limit: 5, debug_timing: true }),
-  }));
-  const [ready, recalled] = await Promise.all([Promise.all(items.map(waitReady)), interactive]);
-  const recallWallMs = Date.now() - recallStarted;
+    }));
+    return { result, wallMs: Date.now() - started };
+  })();
+  const [ready, recalledProbe] = await Promise.all([Promise.all(items.map(waitReady)), interactive]);
+  const recalled = recalledProbe.result;
+  const recallWallMs = recalledProbe.wallMs;
   const documentIds = ready.map((item) => item.documentId);
   const remote = orgIsRemote(orgId);
   let vectorState = { total: 0, synced: 0, pending: 0 };

@@ -589,6 +589,30 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   return out;
 }
 
+/** Split a provider-truncated extraction window at a real structural boundary. */
+export function splitDenseExtractionContent(value, minPartChars = 320) {
+  const content = String(value || '').trim();
+  if (content.length < minPartChars * 2) return [];
+  const midpoint = Math.floor(content.length / 2);
+  const low = Math.max(minPartChars, Math.floor(content.length * 0.3));
+  const high = Math.min(content.length - minPartChars, Math.ceil(content.length * 0.7));
+  const boundaries = [];
+  const addMatches = (pattern) => {
+    for (const match of content.matchAll(pattern)) {
+      const at = Number(match.index) + match[0].length;
+      if (at >= low && at <= high) boundaries.push(at);
+    }
+  };
+  addMatches(/\n\s*\n/gu);
+  if (!boundaries.length) addMatches(/(?<=[.!?。！？])\s+/gu);
+  if (!boundaries.length) addMatches(/\s+/gu);
+  if (!boundaries.length) return [];
+  const at = boundaries.sort((a, b) => Math.abs(a - midpoint) - Math.abs(b - midpoint))[0];
+  const left = content.slice(0, at).trim();
+  const right = content.slice(at).trim();
+  return left.length >= minPartChars && right.length >= minPartChars ? [left, right] : [];
+}
+
 export function resolveEvidenceSegment(sourceQuote, segments, fallbackId = null) {
   const quote = String(sourceQuote || '').trim();
   if (!quote) return fallbackId;
@@ -1602,10 +1626,11 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       // Dense sections emit up to 8 facts × (180-700 char claim + 40-900 char
       // source_quote + entities). 1800 tokens overflowed → finish=length →
       // truncated JSON → whole-section fact loss (~28% of calls). Give ample
-      // headroom; the truncation-salvage in litellm-client is the backstop.
+      // headroom. A provider-confirmed finish=length is rejected as incomplete;
+      // the reliability layer tries another model, then bounded structural splits.
       models: [model, ..._fallbacks], temperature: 0,
       max_tokens: llmProfile('kb-unified-extract', { compact }).maxTokens,
-      json_mode: true, feature: 'kb-unified-extract',
+      json_mode: true, reject_truncated_json: true, feature: 'kb-unified-extract',
       messages: [
         { role: 'system', content: sys },
         ...(entityContext ? [{ role: 'system', content: `KNOWN CANONICAL ENTITIES already in this workspace — reuse these EXACT spellings when the same thing appears:\n${entityContext}` }] : []),
@@ -1694,6 +1719,64 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // Env override honoured only if someone deliberately sets it ABOVE 0.
     const minImportance = Number(process.env.KB_UNIFIED_MIN_IMPORTANCE || 0);
     return normalizeUnifiedClaims(rawFacts, content, factCap, minImportance);
+  }
+
+  async _recoverTruncatedUnified(window, options, error, depth = 0) {
+    const content = String(window?.content || '').trim();
+    const maxFacts = Math.max(1, Number(options?.maxFacts) || 8);
+    const rawPartial = Array.isArray(error?.partial?.facts)
+      ? error.partial.facts : (Array.isArray(error?.partial) ? error.partial : []);
+    const partial = normalizeUnifiedClaims(rawPartial, content, maxFacts, 0);
+    const maxDepth = Math.max(0, Math.min(3, Number(process.env.KB_TRUNCATION_SPLIT_DEPTH ?? 2)));
+    const parts = depth < maxDepth ? splitDenseExtractionContent(content) : [];
+    if (parts.length !== 2) {
+      this.logger.warn?.(`[kb-unified] truncation recovery exhausted at depth=${depth}; retaining `
+        + `${partial.length} grounded complete claim(s), evidence remains authoritative`);
+      return partial;
+    }
+
+    const recovered = [];
+    const partBudget = Math.max(2, Math.min(maxFacts, Math.ceil(maxFacts / 2) + 1));
+    let searchFrom = 0;
+    for (const part of parts) {
+      const partOffset = Math.max(0, content.indexOf(part, searchFrom));
+      searchFrom = partOffset + part.length;
+      const child = { ...window, content: part };
+      try {
+        const childClaims = await this._extractUnified(child, { ...options, maxFacts: partBudget });
+        recovered.push(...childClaims.map((claim) => ({
+          ...claim,
+          source_start: Number.isInteger(claim?.source_start) ? claim.source_start + partOffset : claim?.source_start,
+          source_end: Number.isInteger(claim?.source_end) ? claim.source_end + partOffset : claim?.source_end,
+        })));
+      } catch (childError) {
+        if (childError?.code === 'LLM_JSON_TRUNCATED') {
+          const childClaims = await this._recoverTruncatedUnified(child, { ...options, maxFacts: partBudget }, childError, depth + 1);
+          recovered.push(...childClaims.map((claim) => ({
+            ...claim,
+            source_start: Number.isInteger(claim?.source_start) ? claim.source_start + partOffset : claim?.source_start,
+            source_end: Number.isInteger(claim?.source_end) ? claim.source_end + partOffset : claim?.source_end,
+          })));
+        } else {
+          this.logger.warn?.(`[kb-unified] truncated child recovery failed: ${childError.message}`);
+        }
+      }
+    }
+
+    // Prefer complete child responses, then use the original grounded prefix only
+    // to fill gaps. Deduplication is content-based and language-independent.
+    const combined = [...recovered, ...partial];
+    const unique = [];
+    const seen = new Set();
+    for (const claim of combined) {
+      const key = String(claim?.f || '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      unique.push(claim);
+    }
+    this.logger.info?.(`[kb-unified] provider truncation recovered by semantic split depth=${depth}: `
+      + `${unique.length} unique grounded claim(s)`);
+    return unique.slice(0, maxFacts);
   }
 
   async _extractUnifiedReliable(window, options = {}) {
@@ -1796,6 +1879,9 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         }
         return best;
       } catch (error) {
+        if (error?.code === 'LLM_JSON_TRUNCATED') {
+          return this._recoverTruncatedUnified(window, { ...options, maxFacts }, error);
+        }
         lastError = error;
         if (attempt === attempts) throw error;
         this.logger.warn?.(`[kb-unified] extraction failed; retrying degraded (${attempt}/${attempts}): ${error.message}`);

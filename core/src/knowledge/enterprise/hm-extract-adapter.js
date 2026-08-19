@@ -46,6 +46,25 @@ const KB_EXTRACT_COOLDOWN_MS = Number(process.env.KB_EXTRACT_COOLDOWN_MS || 60_0
 let consecutiveFailures = 0;
 let cooldownUntil = 0;
 
+export function injectSeparatedPageMarks(text, marks) {
+  const source = String(text || '');
+  const valid = (Array.isArray(marks) ? marks : [])
+    .map((mark) => ({ at: Number(mark?.at), page: Number(mark?.page) }))
+    .filter((mark) => Number.isInteger(mark.at) && mark.at >= 0 && mark.at <= source.length
+      && Number.isInteger(mark.page) && mark.page > 0)
+    .sort((a, b) => a.at - b.at || a.page - b.page)
+    .filter((mark, index, list) => index === 0 || mark.at !== list[index - 1].at || mark.page !== list[index - 1].page);
+  if (!valid.length) return source;
+  let out = '';
+  let previous = 0;
+  for (const mark of valid) {
+    if (mark.at < previous) continue;
+    out += source.slice(previous, mark.at) + `\n<!-- page ${mark.page} -->\n`;
+    previous = mark.at;
+  }
+  return out + source.slice(previous);
+}
+
 function recordSuccess() {
   consecutiveFailures = 0;
   cooldownUntil = 0;
@@ -96,13 +115,18 @@ export async function parseWithHmExtract(fileBuffer, filename) {
     }
 
     recordSuccess();
+    const cleanText = body.text || body.markdown || '';
+    const markedText = injectSeparatedPageMarks(cleanText, body.page_marks);
+    const pageCount = new Set((Array.isArray(body.page_marks) ? body.page_marks : [])
+      .map((mark) => Number(mark?.page)).filter((page) => page > 0)).size;
     return {
       ok: true,
       tier: `hm-extract:${body.format}`,
-      markdown: body.markdown || null,
-      text: body.text || body.markdown || '',
+      markdown: markedText || null,
+      text: markedText,
       meta: {
         segments: Array.isArray(body.segments) ? body.segments.length : 0,
+        pages: pageCount || null,
         structural_density: body.structural_density || null,
       },
     };

@@ -12,6 +12,7 @@ import express from 'express';
 import multer from 'multer';
 import { toMarkdownBytes, formatFromBytes, formatFromExtension } from '@firecrawl/anydoc';
 import { stripPageMarkers } from './strip-page-markers.js';
+import { injectPptxSlideMarkers } from './pptx-provenance.js';
 import { buildSegments, sanitizeDocument, computeStructuralDensity } from './segments.js';
 import { collapseLetterSpacing } from './collapse-letter-spacing.js';
 import { mapConvertError, tooLargeError } from './errors.js';
@@ -243,7 +244,10 @@ app.post('/extract', (req, res, next) => {
     // possibility of drift between them.
     const repaired = collapseLetterSpacing(markdown);
     const sanitized = sanitizeDocument(repaired);
-    const { text: cleanText, marks: pageMarks } = stripPageMarkers(sanitized);
+    const provenanceMarked = detected === 'pptx'
+      ? injectPptxSlideMarkers(sanitized, buf)
+      : sanitized;
+    const { text: cleanText, marks: pageMarks } = stripPageMarkers(provenanceMarked);
     const segments = buildSegments(cleanText, pageMarks, { targetSize, overlapSize: overlap });
     const structuralDensity = computeStructuralDensity(segments, cleanText.length);
     const chunkMs = Date.now() - tChunkStart;

@@ -6,6 +6,7 @@ import {
   normalizeCuratedClaims,
   normalizeUnifiedClaims,
   resolveEvidenceSegment,
+  splitDenseExtractionContent,
 } from '../../src/knowledge/document-first-ingestion.js';
 
 test('atomic memory budget scales by information-bearing source size without page-count explosion', () => {
@@ -362,6 +363,50 @@ test('unified extraction retries sparse long-document coverage and keeps the bet
   const result = await service._extractUnifiedReliable({ content: 'x'.repeat(800) }, { maxFacts: 6 });
   assert.equal(calls, 2);
   assert.equal(result.length, 3);
+});
+
+test('provider truncation recovers head and tail through bounded structural splits', async () => {
+  const service = Object.create(DocumentFirstIngestionService.prototype);
+  service.logger = { warn() {}, info() {} };
+  const left = `HeadMarker approved capacity 73. ${'Head context remains grounded. '.repeat(18)}`;
+  const right = `TailMarker is not compatible with diesel. ${'Tail context remains grounded. '.repeat(18)}`;
+  const content = `${left}\n\n${right}`;
+  const calls = [];
+  service._extractUnified = async (window) => {
+    calls.push(window.content);
+    if (window.content === content) {
+      const error = new Error('truncated');
+      error.code = 'LLM_JSON_TRUNCATED';
+      error.partial = { facts: [] };
+      throw error;
+    }
+    const quote = window.content.includes('HeadMarker')
+      ? 'HeadMarker approved capacity 73.' : 'TailMarker is not compatible with diesel.';
+    return [{
+      f: quote,
+      source_quote: quote,
+      source_start: 0,
+      source_end: quote.length,
+      memory_type: 'fact', importance: 0.9, entities: [], rels: [],
+    }];
+  };
+  const result = await service._extractUnifiedReliable({ content }, { maxFacts: 6 });
+  assert.equal(calls.length, 3, 'one original call plus two smaller recovery calls');
+  assert.deepEqual(result.map((claim) => claim.f), [
+    'HeadMarker approved capacity 73.',
+    'TailMarker is not compatible with diesel.',
+  ]);
+  assert.equal(result[0].source_start, 0);
+  assert.equal(result[1].source_start, content.indexOf('TailMarker'));
+});
+
+test('dense split chooses a structural boundary and preserves every source character', () => {
+  const left = 'A'.repeat(420);
+  const right = 'B'.repeat(430);
+  const source = `${left}\n\n${right}`;
+  const parts = splitDenseExtractionContent(source);
+  assert.equal(parts.length, 2);
+  assert.equal(parts.join('\n\n'), source);
 });
 
 test('unified promotion replaces language-code titles and rejects value entities', () => {

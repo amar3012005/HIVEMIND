@@ -24,7 +24,6 @@
  * @module src/embeddings/factory
  */
 
-import { getMistralEmbedService, MistralEmbedService } from './mistral.js';
 import { getLiteLLMEmbedService, LiteLLMEmbedService } from './litellm.js';
 
 // How long a link that just failed is DEPRIORITISED for. It is never removed — see embed().
@@ -151,6 +150,24 @@ function makeOpenRouterService() {
   );
 }
 
+function makeSingulanceService() {
+  return new LiteLLMEmbedService(
+    process.env.SINGULANCE_EMBED_MODEL || 'bge-m3',
+    process.env.SINGULANCE_EMBED_API_KEY || process.env.EMBEDDING_API_KEY || '',
+    process.env.SINGULANCE_EMBED_BASE_URL || 'https://embeddings.singulancelabs.com/v1',
+    { timeoutMs: Number(process.env.EMBEDDING_TIMEOUT_MS || 1200) },
+  );
+}
+
+function makeBlaiqService() {
+  return new LiteLLMEmbedService(
+    process.env.BLAIQ_EMBED_MODEL || 'bge-m3',
+    process.env.BLAIQ_EMBED_API_KEY || process.env.LITELLM_API_KEY || '',
+    process.env.BLAIQ_EMBED_BASE_URL || 'https://api.blaiq.ai/v1',
+    { timeoutMs: Number(process.env.BLAIQ_EMBED_TIMEOUT_MS || 1500) },
+  );
+}
+
 /**
  * @param {string} provider
  * @param {boolean} fresh build a NEW instance rather than the module singleton. Required for any
@@ -158,15 +175,14 @@ function makeOpenRouterService() {
  *   object, or "failover" would retry the same dead endpoint.
  */
 function buildService(provider, fresh = false) {
+  if (provider === 'singulance') return makeSingulanceService();
+  if (provider === 'blaiq') return makeBlaiqService();
+  // Compatibility alias for older deployments. It remains OpenAI-compatible
+  // LiteLLM transport, but production declares `singulance` and `blaiq`
+  // explicitly so the two failure domains cannot collapse into one instance.
   if (provider === 'litellm') return fresh ? new LiteLLMEmbedService() : getLiteLLMEmbedService();
   if (provider === 'openrouter') return makeOpenRouterService();
-  // 'mistral' / custom-endpoint / default
-  if (!fresh) return getMistralEmbedService();
-  return new MistralEmbedService(
-    process.env.MISTRAL_API_KEY || process.env.EMBEDDING_API_KEY,
-    process.env.MISTRAL_EMBEDDING_MODEL || process.env.EMBEDDING_MODEL_NAME || 'mistral-embed',
-    process.env.EMBEDDING_FALLBACK_URL || undefined
-  );
+  throw new Error(`unknown embedding provider '${provider}'`);
 }
 
 /**
@@ -182,11 +198,11 @@ function buildService(provider, fresh = false) {
  * bge-m3 emits 1024, and appending it to a chain of a different width would produce vectors that
  * cannot be stored or compared. Set EMBEDDING_TERMINAL_FALLBACK=false to opt out.
  */
-function buildChain() {
+export function buildEmbeddingChain() {
   const wanted = [
-    process.env.EMBEDDING_PROVIDER || 'mistral',
-    process.env.EMBEDDING_FALLBACK_PROVIDER,
-    process.env.EMBEDDING_FALLBACK2_PROVIDER,
+    process.env.EMBEDDING_PROVIDER || 'singulance',
+    process.env.EMBEDDING_FALLBACK_PROVIDER || 'blaiq',
+    process.env.EMBEDDING_FALLBACK2_PROVIDER || 'openrouter',
   ].filter(Boolean);
 
   const dim = Number(process.env.EMBEDDING_DIMENSION || 1024);
@@ -234,7 +250,7 @@ let _instance = null;
  */
 export function getEmbedService() {
   if (_instance) return _instance;
-  const links = buildChain();
+  const links = buildEmbeddingChain();
   // A single link is returned BARE. Wrapping one provider in the chain would add a cooldown map
   // and a rewritten error message around a service that has nowhere to fail over to.
   _instance = links.length > 1 ? new FallbackEmbedService(links) : links[0].service;

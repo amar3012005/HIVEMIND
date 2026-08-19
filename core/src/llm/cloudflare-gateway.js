@@ -42,6 +42,14 @@ export function gatewayProviderForUrl(value) {
   if (host === 'api.cohere.com' || host === 'api.cohere.ai') return 'cohere';
   if (host === 'api.anthropic.com') return 'anthropic';
   if (host === 'api.together.xyz') return 'together-ai';
+  if (host === 'embeddings.singulancelabs.com') {
+    return String(process.env.CLOUDFLARE_AI_GATEWAY_BGE_EMBEDDINGS_PROVIDER || '').trim()
+      || 'custom-bge-embeddings';
+  }
+  if (host === 'rerank.singulancelabs.com') {
+    return String(process.env.CLOUDFLARE_AI_GATEWAY_BGE_RERANKER_PROVIDER || '').trim()
+      || 'custom-bge-reranker';
+  }
   // These are custom-provider routes in some accounts. They are opt-in because
   // Cloudflare requires the exact `custom-{slug}` configured in that account.
   if (host === 'api.x.ai') return String(process.env.CLOUDFLARE_AI_GATEWAY_XAI_PROVIDER || '').trim() || null;

@@ -15,6 +15,8 @@ const KEYS = [
   'CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS',
   'CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS',
   'CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE',
+  'CLOUDFLARE_AI_GATEWAY_BGE_EMBEDDINGS_PROVIDER',
+  'CLOUDFLARE_AI_GATEWAY_BGE_RERANKER_PROVIDER',
 ];
 
 async function withEnv(values, fn) {
@@ -61,6 +63,8 @@ test('Gateway maps only known provider hosts and uses provider-native paths', ()
   assert.equal(gatewayProviderForUrl('https://api.cohere.ai/v2/rerank'), 'cohere');
   assert.equal(gatewayProviderForUrl('https://api.anthropic.com/v1/messages'), 'anthropic');
   assert.equal(gatewayProviderForUrl('https://api.together.xyz/v1/chat/completions'), 'together-ai');
+  assert.equal(gatewayProviderForUrl('https://embeddings.singulancelabs.com/v1/embeddings'), 'custom-bge-embeddings');
+  assert.equal(gatewayProviderForUrl('https://rerank.singulancelabs.com/api/v1/rerank'), 'custom-bge-reranker');
   assert.equal(gatewayProviderUrl('openrouter', 'https://openrouter.ai/api/v1/chat/completions'), 'https://gateway.ai.cloudflare.com/v1/account/gateway/openrouter/chat/completions');
   assert.deepEqual(gatewayHeaders('cerebras'), {
     'cf-aig-authorization': 'Bearer token', 'cf-aig-skip-cache': 'true', 'cf-aig-byok-alias': 'first',
@@ -85,6 +89,28 @@ test('Gateway routes embeddings and reranking without replaying upstream', async
   assert.match(calls[0].url, /\/gateway\/mistral\/v1\/embeddings$/);
   assert.match(calls[1].url, /\/gateway\/cohere\/v2\/rerank$/);
   assert.equal(calls[0].headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+  assert.equal(calls.length, 2);
+}));
+
+test('Gateway routes Singulance BGE services through their custom providers', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+}, async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), headers: new Headers(init.headers) });
+    return new Response('{}');
+  };
+  await gatewayFirstFetch('https://embeddings.singulancelabs.com/v1/embeddings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+  }, { fetchImpl });
+  await gatewayFirstFetch('https://rerank.singulancelabs.com/api/v1/rerank', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+  }, { fetchImpl });
+  assert.equal(calls[0].url, 'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-bge-embeddings/v1/embeddings');
+  assert.equal(calls[1].url, 'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-bge-reranker/api/v1/rerank');
+  assert.equal(calls[0].headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+  assert.equal(calls[1].headers.get('cf-aig-authorization'), 'Bearer gateway-token');
   assert.equal(calls.length, 2);
 }));
 

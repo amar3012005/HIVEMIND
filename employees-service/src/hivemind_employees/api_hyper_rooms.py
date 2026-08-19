@@ -3706,6 +3706,18 @@ def _should_withhold_ungrounded_answer(room_mode: Optional[str], status: str, fi
     )
 
 
+def _verification_failure_result(exc: BaseException) -> Dict[str, Any]:
+    """A crashed/timed-out verifier is not the same as a verifier that ran
+    and passed — this is the fail-safe default recorded when the grounding
+    check itself could not execute, so the turn is treated as unverified
+    (grounded_ok=False) rather than silently defaulting to "complete"."""
+    return {
+        "met": False, "grounded_ok": False,
+        "gaps": ["Verification could not run for this answer, so it is being treated as unverified rather than accepted silently."],
+        "note": f"verifier_error: {exc}",
+    }
+
+
 def _grounding_withheld_text(gaps: Optional[List[str]]) -> str:
     preview = "; ".join(list(gaps or [])[:3]) or "the claim could not be verified against real evidence"
     return (
@@ -4310,6 +4322,15 @@ async def _orchestrate_single_agent(
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("[single] verify failed: %s", exc)
+            # Fail-SAFE, not fail-open: previously, a crashed/timed-out verifier
+            # left `_PLAN_BY_TURN[turn]["verification"]` unset, so `_gv` below
+            # evaluated as falsy and `status` silently stayed the default
+            # "complete" — an unverified, possibly fabricated answer shipped
+            # exactly as if grounding had passed. Record a real failure verdict
+            # so the existing withhold path (status in blocked/escalated)
+            # treats this like any other failed grounding check, without
+            # adding any new constraint on the normal, successful case.
+            _PLAN_BY_TURN.setdefault(req.turn_id, {})["verification"] = _verification_failure_result(exc)
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side
     # idempotent retry is still counted. Non-destructive snapshots; post_room_turn emits.
     artifacts = drain_artifacts()

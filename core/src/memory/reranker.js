@@ -35,7 +35,11 @@ const FALLBACK_PROVIDER = (process.env.RERANK_FALLBACK_PROVIDER || 'cohere').toL
 const FALLBACK_MODEL = process.env.RERANK_FALLBACK_MODEL || '';
 const FALLBACK_API_KEY = process.env.RERANK_FALLBACK_API_KEY || process.env.OPENROUTER_API_KEY || '';
 const POOL      = Math.min(Number(process.env.RERANK_POOL || 100), 200); // hard cap 200
-const PRIMARY_SHARDS = Math.max(1, Math.min(4, Number(process.env.RERANK_PRIMARY_SHARDS || 3)));
+// The self-hosted endpoint accepts the complete 150-document pool and batches
+// internally on one GPU. One request avoids multiplied network overhead and
+// keeps the provider receipt/latency attributable to one authoritative rerank.
+// Sharding remains an explicit emergency knob but is no longer the default.
+const PRIMARY_SHARDS = Math.max(1, Math.min(4, Number(process.env.RERANK_PRIMARY_SHARDS || 1)));
 const PRIMARY_SHARD_MIN_DOCS = Math.max(2, Number(process.env.RERANK_PRIMARY_SHARD_MIN_DOCS || 18));
 const PROJECT_TO_CHARS = Math.max(0, Math.min(2000, Number(process.env.RERANK_PROJECT_TO_CHARS || 0)));
 // 1500ms was too tight: Cohere-via-OpenRouter is ~300ms normally but spikes to

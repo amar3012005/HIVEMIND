@@ -129,7 +129,7 @@ test('central vector batch failure is never marked stored or reported embedded',
     db: { knowledgeSegment: { updateMany: async (query) => updated.push(query) } },
     memoryGraphEngine: {}, smartIngestRouter: null,
     embeddingService: {
-      embed: async () => [0.1, 0.2],
+      embed: async () => Array(1024).fill(0.1),
       storeVectors: async () => { throw new Error('qdrant unavailable'); },
     },
     logger: { info() {}, warn() {}, error() {} },
@@ -144,4 +144,64 @@ test('central vector batch failure is never marked stored or reported embedded',
 
   assert.deepEqual(coverage, { total: 1, embedded: 0, failed: 1, healed: 0 });
   assert.deepEqual(updated, []);
+});
+
+test('large evidence embedding uses provider batches of at most twenty and one vector upsert', async () => {
+  const embedBatchSizes = [];
+  const stored = [];
+  const updated = [];
+  const service = new DocumentFirstIngestionService({
+    db: { knowledgeSegment: { updateMany: async (query) => updated.push(query) } },
+    memoryGraphEngine: {}, smartIngestRouter: null,
+    embeddingService: {
+      embed: async (input) => {
+        const rows = Array.isArray(input) ? input : [input];
+        embedBatchSizes.push(rows.length);
+        const vectors = rows.map(() => Array(1024).fill(0.1));
+        return Array.isArray(input) ? vectors : vectors[0];
+      },
+      storeVectors: async ({ points }) => stored.push(...points),
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  const segments = Array.from({ length: 45 }, (_, index) => ({
+    id: `55555555-5555-4555-8555-${String(index).padStart(12, '0')}`,
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    documentId: '33333333-3333-4333-8333-333333333333',
+    content: `Evidence row ${index}.`, contentHash: `hash-${index}`,
+    segmentType: 'paragraph', segmentIndex: index,
+  }));
+
+  const coverage = await service._embedSegments(segments, '22222222-2222-4222-8222-222222222222');
+  assert.deepEqual(embedBatchSizes.sort((a, b) => b - a), [20, 20, 5]);
+  assert.equal(stored.length, 45);
+  assert.deepEqual(coverage, { total: 45, embedded: 45, failed: 0, healed: 0 });
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0].where.id.in.length, 45);
+});
+
+test('invalid evidence vectors never reach Qdrant and remain recoverable', async () => {
+  let storeCalls = 0;
+  const updated = [];
+  const service = new DocumentFirstIngestionService({
+    db: { knowledgeSegment: { updateMany: async (query) => updated.push(query) } },
+    memoryGraphEngine: {}, smartIngestRouter: null,
+    embeddingService: {
+      embed: async () => [],
+      storeVectors: async () => { storeCalls += 1; },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  const coverage = await service._embedSegments([{
+    id: '55555555-5555-4555-8555-555555555556',
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    documentId: '33333333-3333-4333-8333-333333333333',
+    content: 'Evidence without a valid vector.', contentHash: 'invalid-vector',
+    segmentType: 'paragraph', segmentIndex: 0,
+  }], '22222222-2222-4222-8222-222222222222');
+  assert.equal(storeCalls, 0);
+  assert.deepEqual(updated, []);
+  assert.deepEqual(coverage, { total: 1, embedded: 0, failed: 1, healed: 0 });
 });

@@ -104,7 +104,7 @@ test('reranker can fail over to a distinct endpoint and model', async (t) => {
   assert.equal(fallbackBodies[0].documents[0].length, 2000);
 });
 
-test('self-hosted primary reranks a wide pool in bounded parallel shards', async (t) => {
+test('self-hosted primary reranks the complete wide pool in one request', async (t) => {
   const bodies = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -129,7 +129,7 @@ test('self-hosted primary reranks a wide pool in bounded parallel shards', async
   process.env.RERANK_FALLBACK_URL = '';
   process.env.RERANK_FALLBACK_MODEL = '';
   process.env.RERANK_FALLBACK_MODELS = '';
-  process.env.RERANK_PRIMARY_SHARDS = '3';
+  process.env.RERANK_PRIMARY_SHARDS = '1';
   process.env.RERANK_PRIMARY_SHARD_MIN_DOCS = '18';
   process.env.RERANK_PROJECT_TO_CHARS = '400';
   process.env.RERANK_TOTAL_TIMEOUT_MS = '800';
@@ -144,9 +144,9 @@ test('self-hosted primary reranks a wide pool in bounded parallel shards', async
   const rows = await rerank('unique target', candidates, { topN: 15 });
   assert.equal(rows[0].id, 'row-20');
   assert.equal(rows.rerank_meta.status, 'served');
-  assert.equal(bodies.length, 3);
-  assert.deepEqual(bodies.map((body) => body.documents.length), [7, 7, 7]);
-  assert.deepEqual(bodies.map((body) => body.project_to_chars), [400, 400, 400]);
-  assert.ok(bodies[2].documents.at(-1).length > 2000);
-  assert.match(bodies[2].documents.at(-1), /unique target$/);
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].documents.length, 21);
+  assert.equal(bodies[0].project_to_chars, 400);
+  assert.ok(bodies[0].documents.at(-1).length > 2000);
+  assert.match(bodies[0].documents.at(-1), /unique target$/);
 });

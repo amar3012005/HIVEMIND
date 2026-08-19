@@ -47,7 +47,9 @@ async function embedWithRetry(qdrantClient, memShape, logger, attempts = 3) {
   let lastErr = null;
   for (let i = 0; i < attempts; i++) {
     try {
-      const stored = await qdrantClient.storeMemory(memShape, {}); // routeCollection picks per-tenant collection
+      const stored = await qdrantClient.storeMemory(memShape, {
+        embeddingWorkload: 'maintenance',
+      }); // routeCollection picks per-tenant collection
       if (!stored) throw new Error('vector_store_not_acknowledged');
       return true;
     } catch (e) {

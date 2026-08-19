@@ -41,9 +41,14 @@ import { validateSupersedingEdge, computeHubEntitySlugs, relationshipValidatorMo
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 import { countPages } from './page-count.js';
+import { isValidEmbeddingVector } from '../embeddings/vector-contract.js';
 
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
 const CLAIM_ENTITY_KINDS = new Set(['person', 'organization', 'product', 'place', 'technology', 'standard']);
+
+function usableEmbedding(vector) {
+  return isValidEmbeddingVector(vector);
+}
 
 function boundedClaimText(value, max = 500) {
   return typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -1349,7 +1354,9 @@ Output the JSON object and nothing else.`;
         const vs = this.memoryGraphEngine.vectorStore;
         let vectors = [];
         try {
-          vectors = (await vs?.generateEmbeddings?.(pending.map((p) => p.ctxInput))) || [];
+          vectors = (await vs?.generateEmbeddings?.(pending.map((p) => p.ctxInput), {
+            workload: 'ingestion', tenantId: orgId,
+          })) || [];
         } catch (e) {
           this.logger.warn?.(`[kb-distill] batch embed failed (${pending.length} facts): ${e.message}`);
           vectors = [];
@@ -1357,14 +1364,15 @@ Output the JSON object and nothing else.`;
         await Promise.all(pending.map(async (p, idx) => {
           try {
             const vec = vectors[idx];
-            if (vec) enrichRecs.push({ factId: p.factId, vec });
+            if (!usableEmbedding(vec)) return; // authoritative memory remains; reconciler indexes it
+            enrichRecs.push({ factId: p.factId, vec });
             await vs?.storeMemory({
               id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
               memory_type: 'fact', is_latest: true, tags: p.entityTags,
               project_ids: Array.isArray(p.t.project_ids) ? p.t.project_ids : [],
               primary_team_id: p.t.primary_team_id || null, visibility: p.t.visibility || 'private',
               created_at: new Date().toISOString(),
-            }, vec ? { vector: vec } : {});
+            }, { vector: vec, embeddingWorkload: 'ingestion' });
           } catch (vecErr) {
             this.logger.warn?.(`[kb-distill] vector index failed for ${p.factId}: ${vecErr.message}`);
           }
@@ -1889,16 +1897,23 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // Contextual embeds (one batched call) so the facts are vector-recallable.
     if (embedPending.length && vs) {
       try {
-        const vecs = (await vs.generateEmbeddings?.(embedPending.map((p) => p.ctxInput))) || [];
+        const vecs = (await vs.generateEmbeddings?.(embedPending.map((p) => p.ctxInput), {
+          workload: 'ingestion', tenantId: orgId,
+        })) || [];
+        let deferredVectors = 0;
         await Promise.all(embedPending.map(async (p, idx) => {
           try {
             const vec = vecs[idx];
+            if (!usableEmbedding(vec)) { deferredVectors += 1; return; }
             // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
             // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
             // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
-            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: p.memory_type, is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, vec ? { vector: vec } : {});
+            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: p.memory_type, is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, { vector: vec, embeddingWorkload: 'ingestion' });
           } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
         }));
+        if (deferredVectors) {
+          this.logger.warn?.(`[kb-unified] deferred ${deferredVectors}/${embedPending.length} fact vector(s) to reconciler after batch embedding returned incomplete rows`);
+        }
       } catch (e) { this.logger.warn?.(`[kb-unified] batch embed failed: ${e.message}`); }
     }
     // ROUTED, like the batch flush further down. I broke this once: after making the collection
@@ -3968,7 +3983,7 @@ Every item must include a non-empty content field and one or more valid support_
     stats.orgs = byOrg.size;
     for (const [orgId, segs] of byOrg) {
       try {
-        const cov = await this._embedSegments(segs, orgId);
+        const cov = await this._embedSegments(segs, orgId, { workload: 'maintenance' });
         stats.healed += Number(cov?.embedded || 0) + Number(cov?.healed || 0);
         stats.failed += Number(cov?.failed || 0);
       } catch (err) {
@@ -4413,7 +4428,7 @@ Every item must include a non-empty content field and one or more valid support_
    * @param {Array} segments - segment objects (DB rows for central, in-memory for remote)
    * @param {string} [callerOrgId] - orgId hint; falls back to segment.orgId
    */
-  async _embedSegments(segments, callerOrgId) {
+  async _embedSegments(segments, callerOrgId, { workload = 'ingestion' } = {}) {
     if (!this.embeddingService) return;
 
     // Legacy: a dedicated hivemind_evidence collection. Per-tenant: evidence
@@ -4425,16 +4440,17 @@ Every item must include a non-empty content field and one or more valid support_
     // point per call) + a per-row DB update. 45 segments = 135 serial round trips.
     // Measured on a 173KB/11-page PDF: seg=630863ms / embed=630626ms. Because _msSeg
     // WRAPS _msEmbed, that reads as "segmentation is slow" — segmentation was 237ms.
-    // Everything here is independent per segment, so: embed with bounded concurrency,
-    // upsert vectors in ONE batched Qdrant call, and flip vectorStored with ONE
-    // updateMany. Same fix as the persist loop (325s -> 6s), one function over.
+    // Everything here is independent per segment, so: embed TRUE PROVIDER BATCHES
+    // (up to 20 texts/request) with bounded, process-wide admission; upsert vectors
+    // in ONE batched Qdrant call; and flip vectorStored with ONE updateMany. The old
+    // per-document `concurrency=8` limit multiplied across concurrent documents and
+    // exhausted both embedding providers during large uploads.
     const _tEmb = Date.now();
     const _conc = Math.max(1, Number(process.env.KB_EMBED_CONCURRENCY || 8));
     const _isRemote = orgIsRemote(callerOrgId || segments[0]?.orgId);
     const _vectorRows = [];       // central: collected for one batched upsert
     const _embeddedIds = [];      // central: for one updateMany
     let _failed = 0;
-    const _failedSegs = [];       // P1b: segments that did NOT embed → ingest-time heal below
     const _remotePayload = (segment) => ({
       id: segment.id, userId: segment.userId, documentId: segment.documentId,
       content: segment.content, contentHash: segment.contentHash,
@@ -4444,24 +4460,49 @@ Every item must include a non-empty content field and one or more valid support_
       wordCount: segment.wordCount || null, metadata: segment.metadata || {},
       createdAt: segment.createdAt || new Date().toISOString(),
     });
-    let _qi = 0;
-    await Promise.all(Array.from({ length: Math.min(_conc, segments.length) }, async () => {
-      while (_qi < segments.length) {
-        const segment = segments[_qi++];
-        const segOrgId = callerOrgId || segment.orgId;
+    const _batchSize = Math.max(1, Math.min(20, Number(process.env.KB_EMBED_BATCH_SIZE || 20)));
+    const _batches = [];
+    for (let i = 0; i < segments.length; i += _batchSize) _batches.push(segments.slice(i, i + _batchSize));
+    let _batchIndex = 0;
+    await Promise.all(Array.from({ length: Math.min(_conc, _batches.length) }, async () => {
+      while (_batchIndex < _batches.length) {
+        const batch = _batches[_batchIndex++];
+        const inputs = batch.map((segment) => contextualEmbedInputForSegment(segment));
+        let vectors;
         try {
-          // Embed the chunk WITH its document/heading anchor, not bare. Stored content is
-          // untouched -- the prefix exists only in the vector. See contextual-embed-input.js.
-          const embedding = await this.embeddingService.embed(contextualEmbedInputForSegment(segment));
+          const output = await this.embeddingService.embed(
+            batch.length === 1 ? inputs[0] : inputs,
+            { workload, tenantId: callerOrgId || batch[0]?.orgId },
+          );
+          vectors = batch.length === 1 && Array.isArray(output) && output.every(Number.isFinite)
+            ? [output] : output;
+          if (!Array.isArray(vectors) || vectors.length !== batch.length) {
+            throw new Error(`embedding row count=${vectors?.length ?? 'none'}, want ${batch.length}`);
+          }
+        } catch (error) {
+          for (const segment of batch) {
+            _failed += 1;
+          }
+          console.error(`[DocumentFirstIngestion] Failed to embed segment batch (${batch.length}):`, error.message);
+          continue;
+        }
+        for (let index = 0; index < batch.length; index += 1) {
+          const segment = batch[index];
+          const segOrgId = callerOrgId || segment.orgId;
+          const embedding = vectors[index];
+          if (!usableEmbedding(embedding)) {
+            _failed += 1;
+            console.error(`[DocumentFirstIngestion] Invalid embedding for segment ${segment.id}; deferring to reconciliation`);
+            continue;
+          }
           if (_isRemote) {
-            // remoteKbSegment returns true | null (null = failed after its own
-            // retries). It was AWAITED but the result IGNORED — so a segment that
-            // failed all retries was silently dropped from the evidence store with
-            // no count and no heal. Capture the failure so the ingest-time heal
-            // below re-embeds it.
-            const _ok = await amrKbSegment(segOrgId, _remotePayload(segment),
-              Array.isArray(embedding) ? embedding : []);
-            if (!_ok) { _failed += 1; _failedSegs.push({ segment, segOrgId }); }
+            try {
+              const _ok = await amrKbSegment(segOrgId, _remotePayload(segment), embedding);
+              if (!_ok) _failed += 1;
+            } catch (error) {
+              _failed += 1;
+              console.error(`[DocumentFirstIngestion] Failed to store remote segment ${segment.id}:`, error.message);
+            }
           } else {
             _vectorRows.push({
               orgId: segment.orgId,
@@ -4478,10 +4519,6 @@ Every item must include a non-empty content field and one or more valid support_
               },
             });
           }
-        } catch (error) {
-          _failed += 1;
-          _failedSegs.push({ segment, segOrgId });
-          console.error(`[DocumentFirstIngestion] Failed to embed segment ${segment.id}:`, error.message);
         }
       }
     }));
@@ -4509,7 +4546,6 @@ Every item must include a non-empty content field and one or more valid support_
         } catch (error) {
           console.error(`[DocumentFirstIngestion] batched vector upsert failed (${collectionName}): ${error.message}`);
           _failed += rows.length;
-          _failedSegs.push(...rows.map((row) => ({ segment: row.segment, segOrgId: row.segOrgId })));
         }
       }
       // ONE update instead of 45.
@@ -4523,40 +4559,12 @@ Every item must include a non-empty content field and one or more valid support_
         }
       }
     }
-    // ── P1b INGEST-TIME HEAL ──────────────────────────────────────────────────
-    // Re-embed segments that failed the first pass ONCE more. Transient embed /
-    // agent hiccups (the common case, incl. the amr segment-write abort under
-    // load) heal here. A segment that fails even this is reported in the returned
-    // coverage (P3) so the job never silently ships partial evidence.
-    let _healed = 0;
-    if (_failedSegs.length) {
-      const _healRows = [];
-      for (const { segment, segOrgId } of _failedSegs) {
-        try {
-          // Heal path must embed the SAME text as the primary path, or a healed segment
-          // would sit in a different vector space from its neighbours.
-          const emb = await this.embeddingService.embed(contextualEmbedInputForSegment(segment));
-          if (orgIsRemote(segOrgId)) {
-            const ok = await amrKbSegment(segOrgId, _remotePayload(segment), Array.isArray(emb) ? emb : []);
-            if (ok) _healed += 1;
-          } else {
-            const collectionName = PER_TENANT ? await resolveCollectionForOrg(segment.orgId) : legacyEvidence;
-            const point = { id: segment.id, vector: emb, payload: {
-              segment_id: segment.id, document_id: segment.documentId, user_id: segment.userId,
-              org_id: segment.orgId, segment_type: segment.segmentType, layer: 'evidence',
-              content_preview: segment.content.slice(0, 200) } };
-            if (typeof this.embeddingService.storeVectors === 'function') await this.embeddingService.storeVectors({ collectionName, points: [point] });
-            else await this.embeddingService.storeVector({ collectionName, id: point.id, vector: point.vector, payload: point.payload });
-            _healRows.push(segment.id); _healed += 1;
-          }
-        } catch (e) { console.warn(`[kb-embed] heal failed seg=${segment.id}: ${e.message}`); }
-      }
-      if (_healRows.length) {
-        try { await this.db.knowledgeSegment.updateMany({ where: { id: { in: _healRows } }, data: { vectorStored: true } }); }
-        catch (e) { console.warn(`[kb-embed] heal vectorStored update failed: ${e.message}`); }
-      }
-    }
-    const _finalFailed = Math.max(0, _failed - _healed);
+    // Never turn a failed provider batch into N immediate per-segment retries.
+    // The persisted row and vectorStored=false are the durable recovery queue;
+    // the maintenance-priority reconciler retries later under global admission.
+    // This protects interactive recall and avoids repeating a provider outage.
+    const _healed = 0;
+    const _finalFailed = _failed;
     console.log(`[kb-embed] n=${segments.length} concurrency=${_conc} remote=${_isRemote} `
       + `failed=${_finalFailed} healed=${_healed} ms=${Date.now() - _tEmb} ms_per_segment=${segments.length ? Math.round((Date.now() - _tEmb) / segments.length) : 0}`);
     return { total: segments.length, embedded: segments.length - _finalFailed, failed: _finalFailed, healed: _healed };

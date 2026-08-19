@@ -546,7 +546,15 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
         queries: [base.query_canonical_en],
         recall_mode: ['fact', 'explain', 'full'].includes(args?.mode) ? args.mode : 'fact',
         answer_type: ['decision', 'goal', 'preference', 'lesson', 'event', 'relationship', 'fact'].includes(String(args?.answer_type || '').toLowerCase()) ? String(args.answer_type).toLowerCase() : null,
-        source: s(args?.source_title, 512) ? { title: s(args.source_title, 512) } : null,
+        // Source-read planners sometimes preserve an exact multilingual file
+        // title in `entities[0]` while leaving the redundant source_title null.
+        // Both are structured model output, so compile either representation
+        // into the same source-isolated recall contract without keyword rules.
+        source: s(args?.source_title, 512)
+          ? { title: s(args.source_title, 512) }
+          : rawOp === 'source_read' && s(base.named_entities[0], 512)
+            ? { title: s(base.named_entities[0], 512) }
+            : null,
         aggregate: rawOp === 'aggregate'
           ? { parent: s(base.named_entities[0] || base.query_canonical_en, 256), kind: s(args?.aggregate_kind, 128) || 'entity', requires_complete_coverage: true }
           : null,

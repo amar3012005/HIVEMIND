@@ -2360,13 +2360,25 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
       memoryGraphEngine: persistentMemoryEngine,
       doclingAdapter, // Pass Docling adapter if DOCLING_URL is set, null otherwise
       embeddingService: {
-        embed: async (text) => {
+        embed: async (input, options = {}) => {
           // Use the existing Qdrant client's embedding pipeline
-          return qdrantClient.generateEmbedding(String(text).slice(0, 8000));
+          if (Array.isArray(input)) {
+            return qdrantClient.generateEmbeddings(
+              input.map((text) => String(text).slice(0, 8000)),
+              { workload: 'ingestion', ...options },
+            );
+          }
+          return qdrantClient.generateEmbedding(String(input).slice(0, 8000), {
+            workload: 'ingestion', ...options,
+          });
         },
         // BATCHED upsert: Qdrant accepts many points per PUT. The single-point path
         // below, called once per segment with wait=true, was ~1/3 of a 630s embed stage.
         storeVectors: async ({ collectionName, points }) => {
+          const { validateEmbeddingVector } = await import('./embeddings/vector-contract.js');
+          for (let i = 0; i < points.length; i += 1) {
+            validateEmbeddingVector(points[i]?.vector, { label: `qdrant point ${points[i]?.id || i}` });
+          }
           const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
           const qKey = process.env.QDRANT_API_KEY || '';
           const hdrs = { 'Content-Type': 'application/json' };
@@ -2381,6 +2393,8 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
           }
         },
         storeVector: async ({ collectionName, id, vector, payload }) => {
+          const { validateEmbeddingVector } = await import('./embeddings/vector-contract.js');
+          validateEmbeddingVector(vector, { label: `qdrant point ${id}` });
           // qdrantClient has no .upsert() method — call REST endpoint directly
           const qUrl = process.env.QDRANT_URL || 'http://qdrant:6333';
           const qKey = process.env.QDRANT_API_KEY || '';
@@ -25174,6 +25188,8 @@ if (shouldStartHttpServer()) {
     const _reconEveryMs = Math.max(60000, Number(process.env.EMBED_RECONCILE_INTERVAL_MS || 3 * 60 * 1000));
     let _reconBusy = false;
     let _reconTicks = 0;
+    let _lastAdmissionFailed = 0;
+    let _lastAdmissionRejected = 0;
     const _runReconcile = async () => {
       if (_reconBusy) return; // no overlap — a long sweep skips the next tick
       _reconBusy = true;
@@ -25181,7 +25197,7 @@ if (shouldStartHttpServer()) {
         _reconTicks += 1;
         const { reconcileEmbeddingsOnce } = await import('./memory/embed-reconciler.js');
         const fullSweep = _reconTicks % 20 === 0; // ~hourly full sweep at 3min cadence
-        await reconcileEmbeddingsOnce({ prisma, qdrantClient, fullSweep, sinceHours: 72 });
+        const memoryVectorStats = await reconcileEmbeddingsOnce({ prisma, qdrantClient, fullSweep, sinceHours: 72 });
         // P0.2 — the SEGMENT lane. The pass above guards memories only; an evidence
         // segment whose ingest-time heal also failed had nothing left to retry it,
         // so it stayed in Postgres with vectorStored=false — permanently
@@ -25189,12 +25205,29 @@ if (shouldStartHttpServer()) {
         // the same no-overlap guard. Recent-window on normal ticks, whole backlog
         // on the full sweep, both bounded so a large backlog drains over several
         // passes instead of stalling one.
+        let evidenceVectorStats = null;
         if (documentFirstIngestion?.healUnembeddedSegments) {
-          await documentFirstIngestion.healUnembeddedSegments({
+          evidenceVectorStats = await documentFirstIngestion.healUnembeddedSegments({
             limit: fullSweep ? 500 : 100,
             sinceHours: fullSweep ? null : 72,
           });
         }
+        const { getEmbeddingAdmissionController } = await import('./embeddings/admission.js');
+        const admission = getEmbeddingAdmissionController().stats();
+        const admissionChanged = admission.failed > _lastAdmissionFailed
+          || admission.rejected > _lastAdmissionRejected;
+        if (memoryVectorStats.missing || memoryVectorStats.failed
+            || evidenceVectorStats?.candidates || evidenceVectorStats?.failed
+            || admission.queued || admissionChanged) {
+          console.warn('[embedding-health]', JSON.stringify({
+            memory_vectors: memoryVectorStats,
+            evidence_vectors: evidenceVectorStats,
+            admission,
+            full_sweep: fullSweep,
+          }));
+        }
+        _lastAdmissionFailed = admission.failed;
+        _lastAdmissionRejected = admission.rejected;
       } catch (e) {
         console.warn('[embed-reconciler] tick failed:', e?.message?.slice(0, 160));
       } finally { _reconBusy = false; }

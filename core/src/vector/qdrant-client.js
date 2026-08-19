@@ -24,6 +24,7 @@ import {
   markVectorPending,
   markVectorSynced,
 } from './managed-vector-ledger.js';
+import { isValidEmbeddingVector } from '../embeddings/vector-contract.js';
 
 // Per-org Qdrant base: the customer's Qdrant (via tunnel) for a self-host-hybrid org, else central.
 const qbase = () => qdrantUrlFor(currentOrg()) || QDRANT_URL;
@@ -226,7 +227,7 @@ export class QdrantClient {
    * @param {string} text - Text to embed
    * @returns {Promise<number[]>} Configured embedding vector
    */
-  async generateEmbedding(text) {
+  async generateEmbedding(text, options = {}) {
     // Wait for async LiteLLM init if needed
     if (this._litellmReady) await this._litellmReady;
 
@@ -236,7 +237,7 @@ export class QdrantClient {
     }
 
     try {
-      return await this.embedService.embedOne(text);
+      return await this.embedService.embedOne(text, options);
     } catch (error) {
       console.error('Embedding generation failed:', error.message);
       return null;
@@ -250,10 +251,10 @@ export class QdrantClient {
    * @param {string[]} texts
    * @returns {Promise<number[][]>} one vector per input, in order
    */
-  async generateEmbeddings(texts) {
+  async generateEmbeddings(texts, options = {}) {
     if (this._litellmReady) await this._litellmReady;
     if (!this.embedService || !Array.isArray(texts) || texts.length === 0) return [];
-    return this.embedService.embed(texts);
+    return this.embedService.embed(texts, options);
   }
 
   /**
@@ -291,7 +292,7 @@ export class QdrantClient {
     // pre-embeds chunks in parallel before smart ingest to avoid re-embedding).
     let embedding = options.vector || null;
 
-    if (!embedding) {
+    if (!isValidEmbeddingVector(embedding)) {
       // Contextual Retrieval: embed enriched key (facts + content), store raw content in payload
       let embeddingInput = memory.content || '';
       const pipelineFactSentences = memory.metadata?.factSentences || [];
@@ -306,16 +307,21 @@ export class QdrantClient {
           console.warn('[qdrant] Fact extraction failed, using raw content:', augErr.message);
         }
       }
-      embedding = await this.generateEmbedding(embeddingInput);
+      const embeddingOptions = {
+        workload: options.embeddingWorkload || 'interactive',
+        tenantId: memory.org_id,
+        signal: options.signal,
+      };
+      embedding = await this.generateEmbedding(embeddingInput, embeddingOptions);
       // Retry transient embed-service blips before giving up — a memory with no
       // real vector is invisible to semantic recall (the drift bug).
-      for (let _r = 0; _r < 2 && !embedding; _r++) {
+      for (let _r = 0; _r < 2 && !isValidEmbeddingVector(embedding); _r++) {
         await new Promise((r) => setTimeout(r, 300 * (_r + 1)));
-        try { embedding = await this.generateEmbedding(embeddingInput); } catch { /* keep null, retry */ }
+        try { embedding = await this.generateEmbedding(embeddingInput, embeddingOptions); } catch { /* keep null, retry */ }
       }
     }
 
-    if (!embedding) {
+    if (!isValidEmbeddingVector(embedding)) {
       // Do NOT upsert a placeholder vector: a garbage point looks "present" to
       // the embed-reconciler and would never be re-embedded, permanently
       // polluting recall. Skip the upsert + log LOUD; the reconciler (or the next
@@ -327,7 +333,7 @@ export class QdrantClient {
 
     const point = {
       id: memory.id,
-      vector: embedding || this._generatePlaceholderVector(),
+      vector: embedding,
       payload: {
         user_id: memory.user_id,
         org_id: memory.org_id,

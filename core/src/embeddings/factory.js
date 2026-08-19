@@ -75,11 +75,11 @@ export class FallbackEmbedService {
     return [...hot, ...cold];
   }
 
-  async embed(input) {
+  async embed(input, options = {}) {
     const errors = [];
     for (const link of this._order(Date.now())) {
       try {
-        const out = await link.service.embed(input);
+        const out = await link.service.embed(input, options);
         if (this._downUntil.delete(link.name)) console.log(`✅ Embedding link '${link.name}' recovered`);
         if (errors.length) console.warn(`[embed] served by fallback '${link.name}' after ${errors.length} failure(s)`);
         return out;
@@ -98,8 +98,8 @@ export class FallbackEmbedService {
     throw new Error(`all ${this.links.length} embedding providers failed — ${errors.join(' | ')}`);
   }
 
-  async embedOne(text) {
-    const [vec] = await this.embed(text);
+  async embedOne(text, options = {}) {
+    const [vec] = await this.embed(text, options);
     return vec;
   }
 

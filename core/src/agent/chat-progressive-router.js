@@ -537,6 +537,12 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       return { decision: {
         ...base,
         operation: op,
+        // Retain the planner's native capability choice as first-class trace
+        // data. `operation` remains the compatibility dispatch field used by
+        // the existing executor, while this field proves that the one native
+        // planning call selected the capability rather than a later heuristic.
+        native_tool: useTools ? null : (String(args?.native_tool || '') || 'hivemind_recall'),
+        temporal_axis: useTools ? null : (String(args?.temporal_axis || 'none')),
         queries: [base.query_canonical_en],
         recall_mode: ['fact', 'explain', 'full'].includes(args?.mode) ? args.mode : 'fact',
         answer_type: ['decision', 'goal', 'preference', 'lesson', 'event', 'relationship', 'fact'].includes(String(args?.answer_type || '').toLowerCase()) ? String(args.answer_type).toLowerCase() : null,

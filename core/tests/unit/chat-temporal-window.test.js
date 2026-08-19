@@ -109,6 +109,23 @@ test('semantic event-window contract corrects an inconsistent diff operation', (
   assert.equal(plan.needs_time_travel, false);
 });
 
+test('event-window semantics remain authoritative when native tool is ordinary recall', () => {
+  const { decision } = adaptToDecision('hivemind_context', {
+    native_tool: 'hivemind_recall', operation: 'recall', temporal_semantics: 'event_window',
+    query_canonical_en: 'decisions during the last seven days', response_language: 'en',
+    mode: 'explain', entities: [], range_start: '2026-08-13', range_end: '2026-08-19',
+    valid_at: null, known_at: null, source_title: null, aggregate_kind: null,
+    answer_type: 'decision', response_depth: 'standard', retrieval_shape: 'inventory',
+    answer_objective: 'List decisions made during the window.',
+  }, 'What decisions did we make in the last 7 days?', 'en', { useTools: false });
+  assert.equal(decision.operation, 'recall');
+  assert.equal(decision.time.kind, 'event_range');
+  assert.deepEqual(decision.time.range, {
+    start: '2026-08-13T00:00:00.000Z',
+    end: '2026-08-19T23:59:59.999Z',
+  });
+});
+
 test('event windows match canonical temporal tags even when record time is outside the window', () => {
   const memory = {
     created_at: '2026-08-09T10:00:00.000Z',

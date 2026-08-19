@@ -113,6 +113,27 @@ test('save refuses a caller project outside the authorized project set', async (
   assert.equal(result.error, 'project_access_denied');
 });
 
+test('save preserves user-assertion provenance for grounded synthesis', async () => {
+  let persisted;
+  const result = await dispatchTool('hivemind_save_memory', {
+    title: 'A user-authored note about Kruti',
+    content: 'The user recorded an assertion about Kruti.',
+    tags: ['entity:kruti'],
+    _memory_admission: 'user_assertion',
+  }, {
+    ...authCtx,
+    persistentMemoryEngine: {},
+    buildRoutedIngestPayloads: async (payload) => [payload],
+    ingestRoutedPayload: async (payload) => {
+      persisted = payload;
+      return { memoryId: 'assertion-memory' };
+    },
+  });
+  assert.equal(result.saved, true);
+  assert.equal(persisted.source_metadata.metadata.memory_admission, 'user_assertion');
+  assert.ok(persisted.tags.includes('provenance:user-assertion'));
+});
+
 test('recall rejects an inaccessible request project before touching storage', async () => {
   let touched = false;
   const router = new RecallRouter({

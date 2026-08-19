@@ -199,6 +199,7 @@ export const TOOL_SCHEMAS = [
           },
           entities: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Exact entity names preserved by the router.' },
           event_time: { type: 'string', description: 'ISO event/valid time explicitly supplied by the user.' },
+          _memory_admission: { type: 'string', enum: ['trusted_fact', 'user_assertion'], description: 'Internal provenance supplied by chat planning. A user assertion remains recallable but is not promoted into independently verified background.' },
         },
         required: ['title', 'content', 'tags'],
       },
@@ -1217,10 +1218,12 @@ const TOOL_HANDLERS = {
       ? explicitScope
       : (hasProject ? 'project' : (autoScope || 'personal'));
 
+    const memoryAdmission = args._memory_admission === 'user_assertion' ? 'user_assertion' : 'trusted_fact';
+    const provenanceTag = memoryAdmission === 'user_assertion' ? 'provenance:user-assertion' : 'provenance:user-fact';
     const payload = {
       title: args.title,
       content: args.content,
-      tags: args.tags || [],
+      tags: Array.from(new Set([...(args.tags || []), provenanceTag])),
       memory_type: memType,
       user_id: ctx.userId,
       org_id: ctx.orgId,
@@ -1232,6 +1235,7 @@ const TOOL_HANDLERS = {
         source_platform: 'talk-to-hive', source_type: 'chat-turn', via: 'react-agent',
         source_id: args._source_id || null,
         original_content: args._original_content || args.content,
+        metadata: { memory_admission: memoryAdmission },
       },
     };
     let saved;

@@ -37,7 +37,15 @@ INTERNAL_RE='(singulancelabs\.com|davinciai|hm-core|hm-postgres|/root/hivemind|[
 # to every file). These bench harnesses document, in comments, that they were run inside
 # the production container; the container name is not a credential and these files were
 # already public before this script existed. Reviewed 2026-08-05.
-ALLOW_RE='mneme/bench/(shadow_qdrant_search\.cjs|shadow_scroll\.js|shadow_mneme\.cjs|shadow_compare\.cjs)'
+#
+# mneme-cli.js/cli-lib.js/install.sh: `api.singulancelabs.com` is a DELIBERATE, explicitly
+# user-approved default HIVEMIND server (the real, live-verified host exposing /auth/cli/start —
+# confirmed by direct curl: 400 with no params, 302 to the branded login page with valid ones;
+# core.singulancelabs.com is a DIFFERENT service and 404s on this route, do not confuse the two)
+# — not an accidental leak. Reviewed + approved 2026-08-19: ICARUS defaults to it so `icarus
+# connect` needs zero typing for the common case ("just like claude does it"), same reasoning as
+# any CLI shipping a default endpoint, still fully overridable via HIVEMIND_URL/--api-url.
+ALLOW_RE='mneme/bench/(shadow_qdrant_search\.cjs|shadow_scroll\.js|shadow_mneme\.cjs|shadow_compare\.cjs)|mneme/crate/mneme-node/(mneme-cli|cli-lib)\.js|mneme/install\.sh'
 HITS="$(grep -rInE "$SECRET_RE|$INTERNAL_RE" "$MNEME_DIR" 2>/dev/null \
         | grep -vE '\.lock:|example|placeholder|YOUR_|<your|dummy' \
         | grep -vE "$ALLOW_RE" || true)"

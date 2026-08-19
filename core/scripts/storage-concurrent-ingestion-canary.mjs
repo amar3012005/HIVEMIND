@@ -96,6 +96,9 @@ try {
   const [ready, recalledProbe] = await Promise.all([Promise.all(items.map(waitReady)), interactive]);
   const recalled = recalledProbe.result;
   const recallWallMs = recalledProbe.wallMs;
+  if (recallWallMs > 5_000) {
+    throw new Error(`interactive recall exceeded 5000ms during ingestion burst (${recallWallMs}ms)`);
+  }
   const documentIds = ready.map((item) => item.documentId);
   const remote = orgIsRemote(orgId);
   let vectorState = { total: 0, synced: 0, pending: 0 };

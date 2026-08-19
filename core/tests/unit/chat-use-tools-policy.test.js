@@ -114,6 +114,21 @@ test('native aggregate and relation selections compile their required executor i
   assert.deepEqual(relation.relation, { entities: ['Solvis', 'SolvisLea'] });
 });
 
+test('native source reads retain an exact filename supplied as a planner entity', () => {
+  const title = 'Solvis Elektrifizierung 2025.pdf';
+  const { decision } = adaptToDecision('hivemind_context', {
+    native_tool: 'hivemind_recall', temporal_axis: 'none', operation: 'source_read',
+    temporal_semantics: 'none', query_original: `Tell me about ${title}`,
+    query_canonical_en: `summary and passages from ${title}`, response_language: 'en',
+    mode: 'explain', entities: [title], response_depth: 'standard',
+    retrieval_shape: 'overview', answer_objective: 'Summarize the file.', source_title: null,
+    valid_at: null, known_at: null, range_start: null, range_end: null,
+    aggregate_kind: null, answer_type: 'fact',
+  }, `Tell me about ${title}`, 'en', { useTools: false });
+  assert.equal(decision.operation, 'source_read');
+  assert.deepEqual(decision.source, { title });
+});
+
 test('connection-aware tools disclose only active connector providers', () => {
   const tools = getProgressiveTools({ useTools: true, connectedProviders: ['gmail', 'slack', 'unknown-provider'] });
   const connector = tools.find((tool) => tool.function.name === 'use_connector');

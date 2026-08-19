@@ -30,54 +30,226 @@ function writeJsonPreserving(p, obj) {
   fs.writeFileSync(p, JSON.stringify(obj, null, 2) + '\n');
 }
 
+// Claude Code's SessionEnd hook — a DIFFERENT real file from the MCP registration above:
+// ~/.claude/settings.json (hooks config), not ~/.claude.json (MCP servers + app state). Verified
+// against real Claude Code hook docs: hooks.SessionEnd is an array of {matcher, hooks:[{type,
+// command, timeout}]} groups; an empty matcher "" matches every SessionEnd trigger. This is what
+// makes "automatic skill generation during coding sessions" (as opposed to `icarus skill save`,
+// which needs a human to remember to run it) actually automatic.
+function claudeSettingsPath() { return path.join(HOME, '.claude', 'settings.json'); }
+
+function detectHook() {
+  const p = claudeSettingsPath();
+  if (!fs.existsSync(p)) return { found: false };
+  const cfg = readJsonSafe(p);
+  const existing = cfg?.hooks?.SessionEnd || [];
+  const already = existing.some((g) => (g.hooks || []).some((h) => (h.command || '').includes('hook session-end')));
+  return { found: already, path: p };
+}
+
+function installHook(command) {
+  const p = claudeSettingsPath();
+  const cfg = fs.existsSync(p) ? (readJsonSafe(p) || {}) : {};
+  cfg.hooks = cfg.hooks || {};
+  cfg.hooks.SessionEnd = cfg.hooks.SessionEnd || [];
+  const already = cfg.hooks.SessionEnd.some((g) => (g.hooks || []).some((h) => (h.command || '').includes('hook session-end')));
+  if (already) return { installed: false, reason: 'already installed', path: p };
+  cfg.hooks.SessionEnd.push({
+    matcher: '',
+    hooks: [{ type: 'command', command: `${command} hook session-end`, timeout: 30 }],
+  });
+  writeJsonPreserving(p, cfg);
+  return { installed: true, path: p };
+}
+
+// Surgical inverse of installHook — removes only entries whose command mentions our own hook
+// subcommand, from whichever SessionEnd group(s) contain it, without touching unrelated
+// SessionEnd hooks or any other key in the same settings.json.
+function removeHook() {
+  const p = claudeSettingsPath();
+  if (!fs.existsSync(p)) return { removed: false };
+  const cfg = readJsonSafe(p);
+  if (!cfg?.hooks?.SessionEnd) return { removed: false };
+  let removed = false;
+  cfg.hooks.SessionEnd = cfg.hooks.SessionEnd
+    .map((g) => ({ ...g, hooks: (g.hooks || []).filter((h) => {
+      const match = (h.command || '').includes('hook session-end');
+      if (match) removed = true;
+      return !match;
+    }) }))
+    .filter((g) => g.hooks.length > 0);
+  if (cfg.hooks.SessionEnd.length === 0) delete cfg.hooks.SessionEnd;
+  if (removed) writeJsonPreserving(p, cfg);
+  return { removed, path: p };
+}
+
+// Every MCP entry `mcp install`/`icarus setup` can register, name -> {command, args}. Just
+// icarus itself — the native symbol/call-graph indexer (graph-native.js) is exposed as icarus's
+// OWN MCP tools (icarus_graph_build/status/query, see mcp-serve.js) now, not a separate
+// registered server for a wrapped external tool.
+function mcpEntries(command, _repo) {
+  return {
+    icarus: { command, args: ['mcp-serve'] },
+  };
+}
+
 // Claude Code: global ~/.claude.json, top-level `mcpServers.<name> = {command, args, env?}`.
-function installClaudeCode(command) {
+function installClaudeCode(command, repo) {
   const p = path.join(HOME, '.claude.json');
   if (!fs.existsSync(p)) return { agent: 'claude-code', installed: false, reason: 'not found (no ~/.claude.json)' };
   const cfg = readJsonSafe(p);
   if (!cfg) return { agent: 'claude-code', installed: false, reason: 'config exists but failed to parse — left untouched' };
   cfg.mcpServers = cfg.mcpServers || {};
-  if (cfg.mcpServers.icarus) return { agent: 'claude-code', installed: false, reason: 'already registered' };
-  cfg.mcpServers.icarus = { type: 'stdio', command, args: ['mcp-serve'], env: {} };
+  let wrote = false;
+  for (const [name, entry] of Object.entries(mcpEntries(command, repo))) {
+    if (cfg.mcpServers[name]) continue;
+    cfg.mcpServers[name] = { type: 'stdio', ...entry, env: {} };
+    wrote = true;
+  }
+  if (!wrote) return { agent: 'claude-code', installed: false, reason: 'already registered' };
   writeJsonPreserving(p, cfg);
   return { agent: 'claude-code', installed: true, path: p };
 }
 
 // Cursor: global ~/.cursor/mcp.json, same `mcpServers.<name> = {command, args}` shape.
-function installCursor(command) {
+function installCursor(command, repo) {
   const dir = path.join(HOME, '.cursor');
   const p = path.join(dir, 'mcp.json');
   if (!fs.existsSync(dir)) return { agent: 'cursor', installed: false, reason: 'not found (no ~/.cursor)' };
   const cfg = fs.existsSync(p) ? readJsonSafe(p) : { mcpServers: {} };
   if (!cfg) return { agent: 'cursor', installed: false, reason: 'mcp.json exists but failed to parse — left untouched' };
   cfg.mcpServers = cfg.mcpServers || {};
-  if (cfg.mcpServers.icarus) return { agent: 'cursor', installed: false, reason: 'already registered' };
-  cfg.mcpServers.icarus = { command, args: ['mcp-serve'] };
+  let wrote = false;
+  for (const [name, entry] of Object.entries(mcpEntries(command, repo))) {
+    if (cfg.mcpServers[name]) continue;
+    cfg.mcpServers[name] = entry;
+    wrote = true;
+  }
+  if (!wrote) return { agent: 'cursor', installed: false, reason: 'already registered' };
   writeJsonPreserving(p, cfg);
   return { agent: 'cursor', installed: true, path: p };
 }
 
-// Codex: ~/.codex/config.toml (TOML, not JSON). Appending a well-formed new `[mcp_servers.icarus]`
-// section is enough — Codex's own writes go through the same file, and this never re-serializes
+// Codex: ~/.codex/config.toml (TOML, not JSON). Appending well-formed new `[mcp_servers.<name>]`
+// sections is enough — Codex's own writes go through the same file, and this never re-serializes
 // (so no existing content, formatting, or comments elsewhere in the file can be disturbed).
-// Deliberately NOT a general TOML editor: it only ever appends, and only if the section is absent.
-function installCodex(command) {
+// Deliberately NOT a general TOML editor: it only ever appends, and only for sections absent.
+function installCodex(command, repo) {
   const dir = path.join(HOME, '.codex');
   const p = path.join(dir, 'config.toml');
   if (!fs.existsSync(dir)) return { agent: 'codex', installed: false, reason: 'not found (no ~/.codex)' };
   let existing = '';
-  if (fs.existsSync(p)) {
-    existing = fs.readFileSync(p, 'utf8');
-    if (/^\[mcp_servers\.icarus\]/m.test(existing)) {
-      return { agent: 'codex', installed: false, reason: 'already registered' };
-    }
+  if (fs.existsSync(p)) existing = fs.readFileSync(p, 'utf8');
+  let block = '';
+  let wrote = false;
+  for (const [name, entry] of Object.entries(mcpEntries(command, repo))) {
+    if (new RegExp(`^\\[mcp_servers\\.${name}\\]`, 'm').test(existing)) continue;
+    const argsToml = JSON.stringify(entry.args); // ["a","b"] is valid TOML array syntax too
+    block += `\n[mcp_servers.${name}]\ncommand = ${JSON.stringify(entry.command)}\nargs = ${argsToml}\n`;
+    wrote = true;
   }
-  const argsToml = JSON.stringify(['mcp-serve']); // ["mcp-serve"] is valid TOML array syntax too
-  const block = `\n[mcp_servers.icarus]\ncommand = ${JSON.stringify(command)}\nargs = ${argsToml}\n`;
+  if (!wrote) return { agent: 'codex', installed: false, reason: 'already registered' };
   fs.mkdirSync(dir, { recursive: true });
   fs.appendFileSync(p, (existing && !existing.endsWith('\n') ? '\n' : '') + block);
   return { agent: 'codex', installed: true, path: p };
 }
+
+// Existence-check ONLY, no writing — for `icarus setup`'s wizard to ask "register with X?" one
+// agent at a time BEFORE committing to any write, instead of installClaudeCode/installCodex/
+// installCursor's current all-in-one detect+write behavior (still used as-is by `mcp install`).
+function detectAgents() {
+  return [
+    { agent: 'claude-code', found: fs.existsSync(path.join(HOME, '.claude.json')) },
+    { agent: 'codex', found: fs.existsSync(path.join(HOME, '.codex')) },
+    { agent: 'cursor', found: fs.existsSync(path.join(HOME, '.cursor')) },
+  ];
+}
+
+// `icarus prune`'s uninstall counterpart to installClaudeCode/installCursor/installCodex — each
+// removes ONLY the icarus key (plus a stray "code-review-graph" entry, in case an earlier
+// session of this tool registered one before that concept was dropped in favor of icarus's own
+// native graph tools) and leaves every other entry in the file completely untouched. Detection
+// only, no writing, so `icarus prune` can show the user what WOULD be removed before doing it.
+const REMOVABLE_NAMES = ['icarus', 'code-review-graph'];
+
+function detectClaudeCode() {
+  const p = path.join(HOME, '.claude.json');
+  if (!fs.existsSync(p)) return { agent: 'claude-code', found: false };
+  const cfg = readJsonSafe(p);
+  const present = REMOVABLE_NAMES.filter((n) => cfg?.mcpServers?.[n]);
+  return { agent: 'claude-code', found: present.length > 0, path: p, entries: present };
+}
+function removeClaudeCode() {
+  const p = path.join(HOME, '.claude.json');
+  const cfg = readJsonSafe(p);
+  if (!cfg?.mcpServers) return { agent: 'claude-code', removed: false };
+  let removed = false;
+  for (const n of REMOVABLE_NAMES) {
+    if (cfg.mcpServers[n]) { delete cfg.mcpServers[n]; removed = true; }
+  }
+  if (removed) writeJsonPreserving(p, cfg);
+  return { agent: 'claude-code', removed, path: p };
+}
+
+function detectCursor() {
+  const p = path.join(HOME, '.cursor', 'mcp.json');
+  if (!fs.existsSync(p)) return { agent: 'cursor', found: false };
+  const cfg = readJsonSafe(p);
+  const present = REMOVABLE_NAMES.filter((n) => cfg?.mcpServers?.[n]);
+  return { agent: 'cursor', found: present.length > 0, path: p, entries: present };
+}
+function removeCursor() {
+  const p = path.join(HOME, '.cursor', 'mcp.json');
+  const cfg = readJsonSafe(p);
+  if (!cfg?.mcpServers) return { agent: 'cursor', removed: false };
+  let removed = false;
+  for (const n of REMOVABLE_NAMES) {
+    if (cfg.mcpServers[n]) { delete cfg.mcpServers[n]; removed = true; }
+  }
+  if (removed) writeJsonPreserving(p, cfg);
+  return { agent: 'cursor', removed, path: p };
+}
+
+function detectCodex() {
+  const p = path.join(HOME, '.codex', 'config.toml');
+  if (!fs.existsSync(p)) return { agent: 'codex', found: false };
+  const text = fs.readFileSync(p, 'utf8');
+  const present = REMOVABLE_NAMES.filter((n) => new RegExp(`^\\[mcp_servers\\.${n}\\]`, 'm').test(text));
+  return { agent: 'codex', found: present.length > 0, path: p, entries: present };
+}
+// Surgical block removal: from a `[mcp_servers.<name>]` header LINE to (but not including) the
+// next line that starts a new section header, or EOF — the exact inverse of installCodex's
+// append. Line-based on purpose: a character-class regex stopping at the next literal `[` broke
+// on `args = ["mcp-serve"]`, since `[` also appears inside TOML array syntax, not just section
+// headers — caught by actually running removal against a real generated config and diffing the
+// result (it left a garbled `["mcp-serve"]` orphan behind). Only whole lines are ever dropped.
+function removeCodex() {
+  const p = path.join(HOME, '.codex', 'config.toml');
+  if (!fs.existsSync(p)) return { agent: 'codex', removed: false };
+  const lines = fs.readFileSync(p, 'utf8').split('\n');
+  let removed = false;
+  for (const n of REMOVABLE_NAMES) {
+    const headerRe = new RegExp(`^\\[mcp_servers\\.${n}\\]\\s*$`);
+    const startIdx = lines.findIndex((l) => headerRe.test(l));
+    if (startIdx === -1) continue;
+    let endIdx = lines.length;
+    for (let i = startIdx + 1; i < lines.length; i++) {
+      if (/^\[/.test(lines[i])) { endIdx = i; break; }
+    }
+    lines.splice(startIdx, endIdx - startIdx);
+    removed = true;
+  }
+  if (removed) {
+    // collapse any run of 2+ blank lines left behind by the splice, and drop a leading blank
+    // line at the very top of the file — cosmetic only, never touches surviving content.
+    const text = lines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '');
+    fs.writeFileSync(p, text);
+  }
+  return { agent: 'codex', removed, path: p };
+}
+
+function detectRemovable() { return [detectClaudeCode(), detectCodex(), detectCursor()]; }
+function removeAll() { return [removeClaudeCode(), removeCodex(), removeCursor()]; }
 
 async function run(_flags) {
   const command = resolveIcarusCommand();
@@ -97,7 +269,11 @@ async function run(_flags) {
   } else {
     console.log('\nNothing to do — either no supported agent was found, or icarus is already registered everywhere it was.');
   }
-  console.log('Tools exposed: icarus_status, icarus_ingest, icarus_recall, icarus_train_pq, icarus_compact.');
+  console.log('Tools exposed: icarus_status, icarus_ingest, icarus_recall, icarus_train_pq, icarus_compact,');
+  console.log('               icarus_graph_build, icarus_graph_status, icarus_graph_query (native symbol/call graph).');
 }
 
-module.exports = { run, resolveIcarusCommand };
+module.exports = {
+  run, resolveIcarusCommand, detectAgents, installClaudeCode, installCodex, installCursor,
+  detectRemovable, removeAll, detectHook, installHook, removeHook,
+};

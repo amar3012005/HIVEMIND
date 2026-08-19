@@ -23,14 +23,29 @@ DATA_DIR="$HOME_DIR/data"
 BIN_DIR="$HOME_DIR/bin"
 USED_BINARY=0 # 1 once the prebuilt-binary path succeeds — later steps skip the source build
 
-c() { printf '\033[%sm%s\033[0m\n' "$1" "$2"; }
-info() { c "36" "▸ $1"; }
-ok()   { c "32" "✓ $1"; }
-warn() { c "33" "! $1"; }
-die()  { c "31" "✗ $1"; exit 1; }
+# Truecolor ANSI matching the Node CLI's theme.js — ported from the same grok-build GrokNight
+# palette (crates/codegen/xai-grok-pager-render/src/theme/groknight.rs), so install.sh and every
+# `icarus` command afterward share one visual identity instead of drifting onto two color sets.
+# Degrades the same way theme.js does: NO_COLOR wins, then a real TTY check (curl|bash's own
+# stdout may not be one).
+if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then
+  C_ENABLED=0
+else
+  C_ENABLED=1
+fi
+rgb() { # rgb R G B text
+  if [ "$C_ENABLED" = "1" ]; then printf '\033[38;2;%s;%s;%sm%s\033[0m\n' "$1" "$2" "$3" "$4"
+  else printf '%s\n' "$4"; fi
+}
+info() { rgb 122 162 247 "▸ $1"; }               # accent_system (blue)
+ok()   { rgb 158 206 106 "✓ $1"; }               # accent_success (green)
+warn() { rgb 224 175 104 "! $1"; }               # command/warning (yellow)
+die()  { rgb 247 118 142 "✗ $1"; exit 1; }       # accent_error (red)
+dim()  { rgb 108 108 108 "$1"; }                 # comment (muted gray)
+step() { printf '\n'; rgb 122 162 247 "◆ $1"; }  # accent_system + diamond, matches icarus setup's steps
 
 banner() {
-  c "35" "
+  rgb 187 154 247 "
    ██╗ ██████╗ █████╗ ██████╗ ██╗   ██╗███████╗
    ██║██╔════╝██╔══██╗██╔══██╗██║   ██║██╔════╝
    ██║██║     ███████║██████╔╝██║   ██║███████╗
@@ -67,9 +82,14 @@ try_binary_install() {
   else
     url="${REPO}/releases/download/${RELEASE_TAG}/${asset}"
   fi
-  info "Downloading prebuilt binary ($asset)"
+  info "Downloading prebuilt binary ($asset, ~65MB)"
   mkdir -p "$HOME_DIR" "$DATA_DIR" "$BIN_DIR"
-  if ! curl -fsSL "$url" -o "$BIN_DIR/icarus.tmp"; then
+  # -s (silent) hides curl's own progress entirely -- on a slow connection this ~65MB download
+  # can run a minute or more with ZERO screen output, indistinguishable from a hang (a real user
+  # report: "stuck here" right after this line, when it was actually still downloading at ~50%).
+  # --progress-bar keeps -f/-S/-L (fail-fast, show real errors, follow redirects) but prints a
+  # single updating progress line instead of pure silence.
+  if ! curl -fSL --progress-bar "$url" -o "$BIN_DIR/icarus.tmp"; then
     warn "prebuilt binary not available at $url — building from source instead"
     rm -f "$BIN_DIR/icarus.tmp"
     return 1
@@ -153,14 +173,27 @@ EOF
 # --- 5. config + PATH + HIVEMIND OAuth (both paths) -------------------------
 write_config() {
   local cfg="$HOME_DIR/config.json"
+  # Default embeddings provider: OpenRouter's real baai/bge-m3 (openrouter.ai/baai/bge-m3,
+  # verified live: native 1024-dim output, matches `dim` below exactly). LITELLM_BASE_URL still
+  # overrides this wholesale for anyone pointing at their own LiteLLM/blaiq gateway instead.
+  local embed_endpoint="${LITELLM_BASE_URL:-https://openrouter.ai/api/v1}"
+  local embed_model="bge-m3"
+  [ -z "${LITELLM_BASE_URL:-}" ] && embed_model="baai/bge-m3"
   [ -f "$cfg" ] || cat > "$cfg" <<EOF
 {
   "dataRoot": "$DATA_DIR",
   "dim": 1024,
   "embeddings": {
     "disabled": false,
-    "endpoint": "${LITELLM_BASE_URL:-https://api.blaiq.ai/v1}",
-    "model": "bge-m3",
+    "endpoint": "$embed_endpoint",
+    "model": "$embed_model",
+    "apiKey": null
+  },
+  "llm": {
+    "disabled": false,
+    "provider": "openrouter",
+    "endpoint": "https://openrouter.ai/api/v1",
+    "model": "anthropic/claude-3.5-haiku",
     "apiKey": null
   },
   "hivemind": { "connected": false }
@@ -191,44 +224,96 @@ ensure_path() {
   fi
 }
 
-connect_hivemind() {
-  # only prompt when interactive; piping `| bash` is non-interactive, so skip gracefully.
-  if [ ! -t 0 ]; then
-    warn "Non-interactive install — skipping HIVEMIND connect."
-    echo "    Run later:  icarus connect"
-    return 0
-  fi
-  printf '\n'
-  c "36" "Connect your HIVEMIND account now? ICARUS can sync recall with HIVEMIND."
-  read -r -p "  Connect? [y/N] " ans
-  case "$ans" in
-    y|Y) "$BIN_DIR/icarus" connect ;;
-    *)   echo "    Skipped. Run later:  icarus connect" ;;
-  esac
-}
+# `curl -fsSL ... | bash` makes bash's OWN stdin the pipe FROM curl, not the user's keyboard —
+# `[ -t 0 ]` is always false there even when the user is sitting at a real interactive terminal.
+# That's exactly why this installer used to silently skip straight to "run later" messages after
+# a `curl | bash` install (a real user reported it as looking "stuck"/abandoned) instead of
+# actually guiding them. /dev/tty is the real fix every major curl-pipe installer uses (rustup,
+# nvm, homebrew): it's the controlling terminal device, reachable independently of stdin, so
+# reads against it work even mid-pipe. Only genuinely non-interactive contexts (CI, a script
+# with no controlling terminal at all) fail this check — a real curl|bash-in-a-terminal user
+# does not.
+#
+# `[ -r /dev/tty ] && [ -w /dev/tty ]` alone is NOT enough: those check the device node's
+# permission BITS, which can be readable/writable even when nothing is actually attached to open
+# it as a controlling terminal — a genuinely detached process (found testing this exact script:
+# a sandboxed tool context with no session TTY) passes that check and then fails with "device
+# not configured" the moment something actually tries to read/write it. Attempt a real, harmless
+# open-for-read instead and trust its exit status, not the permission bits. The `2>/dev/null`
+# MUST be on the braced group, not the inner command — bash reports a failed redirection's own
+# setup error before a same-command stderr redirect can catch it (confirmed by testing: the
+# inner-command form leaked a raw "Device not configured" line straight to the terminal even
+# with `2>/dev/null` right there — exactly the scary-looking noise this function exists to avoid).
+has_tty() { { : < /dev/tty; } 2>/dev/null; }
 
-connect_embeddings() {
-  # ICARUS works with zero embedding provider — BM25 lexical search needs no vector at all.
-  # This is an OFFER, not a requirement; default is no, and that default is a fully working tool.
-  # `export LITELLM_API_KEY=...` before running this installer is ALSO enough on its own,
-  # .env-style, no interactive step needed either way — same pattern TencentDB Agent Memory's
-  # own setup uses (fill in the env vars, it just works).
-  if [ -n "${LITELLM_API_KEY:-}" ]; then
-    ok "LITELLM_API_KEY found in the environment — vector recall is already enabled, no setup needed."
-    return 0
-  fi
-  if [ ! -t 0 ]; then
-    warn "Non-interactive install, no LITELLM_API_KEY in the environment — ingest/recall will be lexical-only (BM25)."
-    echo "    Add a provider later:  icarus connect-embeddings   (or just export LITELLM_API_KEY and re-run)"
+# All four guided steps read via bash's own `read ... < /dev/tty` (the single-read pattern every
+# curl-pipe installer relies on, well-proven) and then call the matching icarus subcommand with
+# the answer already in hand via flags -- NEVER handing off tty control to a long-lived node
+# child process for more than the split-second of one non-interactive invocation. Earlier version
+# of this function spawned `icarus setup` (a single Node process doing 4+ sequential /dev/tty
+# reads) directly as install.sh's child -- a real test of the actual published `curl | bash`
+# install showed that process dying silently after its very first question, no error printed
+# (consistent with a signal-based kill, not a JS exception) -- most likely a controlling-
+# terminal/process-group interaction specific to being spawned from inside a shell pipeline
+# (`curl url | bash`), since a plain interactive `icarus setup` run (not spawned by install.sh)
+# had no such issue in any of this session's own testing. Untested unknown, so removed the
+# dependency on it entirely rather than trying to explain away one unreproduced failure.
+guided_setup() {
+  if ! has_tty; then
+    warn "No controlling terminal — skipping guided setup."
+    dim "    Run later:  icarus setup   (or individually: icarus mcp install / connect-llm / connect-embeddings / connect)"
     return 0
   fi
   printf '\n'
-  c "36" "Connect an external embedding provider now? Without one, ICARUS still works — ingest/recall"
-  c "36" "just run lexical-only (BM25 keyword search), not semantic. You can add one anytime."
-  read -r -p "  Connect an embedding provider? [y/N] " ans
-  case "$ans" in
-    y|Y) "$BIN_DIR/icarus" connect-embeddings ;;
-    *)   echo "    Skipped — running lexical-only (BM25) until you run: icarus connect-embeddings" ;;
+  dim "Continuing with guided setup. Press Ctrl+C at any point to stop — whatever"
+  dim "step you're on can always be re-run later with the command shown for it."
+
+  step "Step 1/4 — registering with any coding agents found on this machine"
+  "$BIN_DIR/icarus" mcp install || true
+
+  step "Step 2/4 — memory generation (distills ingested text into key facts before storing)"
+  if [ -n "${OPENROUTER_API_KEY:-}${ANTHROPIC_API_KEY:-}" ]; then
+    ok "API key already in the environment — memory generation is enabled, nothing to do."
+  else
+    dim "  Skip this entirely and ICARUS still works — raw text is stored and searchable as-is."
+    dim "    1) OpenRouter (one key, routes to Claude/GPT/etc by model name)"
+    dim "    2) Anthropic API key (console.anthropic.com — NOT a Claude.ai subscription login)"
+    dim "    3) Skip"
+    read -r -p "  Choice [1/2/3]: " llm_choice < /dev/tty
+    case "$llm_choice" in
+      1) read -r -s -p "  OpenRouter API key: " llm_key < /dev/tty; printf '\n'
+         "$BIN_DIR/icarus" connect-llm --provider openrouter --key "$llm_key" ;;
+      2) read -r -s -p "  Anthropic API key: " llm_key < /dev/tty; printf '\n'
+         "$BIN_DIR/icarus" connect-llm --provider anthropic --key "$llm_key" ;;
+      *) "$BIN_DIR/icarus" connect-llm --provider skip ;;
+    esac
+  fi
+
+  step "Step 3/4 — vector recall (semantic search on top of lexical/BM25)"
+  if [ -n "${OPENROUTER_API_KEY:-}${LITELLM_API_KEY:-}" ]; then
+    ok "API key already in the environment — vector recall is enabled, nothing to do."
+  else
+    dim "  Skip this entirely and ICARUS still works — BM25 lexical search needs no vector."
+    read -r -p "  Connect an embedding provider (OpenRouter baai/bge-m3)? [y/N] " emb_ans < /dev/tty
+    case "$emb_ans" in
+      y|Y) read -r -s -p "  OpenRouter API key: " emb_key < /dev/tty; printf '\n'
+           "$BIN_DIR/icarus" connect-embeddings --key "$emb_key" ;;
+      *) dim "    Skipped — running lexical-only (BM25) until you run: icarus connect-embeddings" ;;
+    esac
+  fi
+
+  step "Step 4/4 — HIVEMIND account (optional)"
+  read -r -p "  Connect your HIVEMIND account? [y/N] " hm_ans < /dev/tty
+  case "$hm_ans" in
+    y|Y)
+      if [ -n "${HIVEMIND_URL:-}" ]; then
+        dim "  Open: ${HIVEMIND_URL}/settings/connections (authorize \"icarus local\")"
+      else
+        dim "  Set HIVEMIND_URL to your server first (e.g. HIVEMIND_URL=https://your-server.example.com) — no default is baked in."
+      fi
+      read -r -s -p "  Paste HIVEMIND token: " hm_token < /dev/tty; printf '\n'
+      "$BIN_DIR/icarus" connect --token "$hm_token" ;;
+    *) dim "    Skipped. Run later:  icarus connect" ;;
   esac
 }
 
@@ -252,8 +337,6 @@ main() {
     write_config
     ensure_path
     verify
-    connect_embeddings
-    connect_hivemind
   else
     ensure_toolchain
     fetch_src
@@ -262,15 +345,16 @@ main() {
     write_config
     ensure_path
     verify
-    connect_embeddings
-    connect_hivemind
   fi
+
+  guided_setup
+
   printf '\n'
-  c "32" "Done. Try:  icarus status"
+  ok "Done. Try:  icarus status"
   if [ "$USED_BINARY" = "1" ]; then
-    c "90" "Docs: ${REPO}#readme"
+    dim "Docs: ${REPO}#readme"
   else
-    c "90" "Docs: $ROOT/README.md   Thesis: $ROOT/THESIS.md"
+    dim "Docs: $ROOT/README.md   Thesis: $ROOT/THESIS.md"
   fi
 }
 

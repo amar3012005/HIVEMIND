@@ -566,3 +566,153 @@ impl MnemeStore {
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 }
+
+// Post-quantum signing (ML-DSA-65 / FIPS 204, via RustCrypto's `ml-dsa`) — proved safe through
+// `bun build --compile` before any of this was written (a real crash was hit earlier this
+// session with a DIFFERENT native crate, better-sqlite3, whose own N-API bindings broke Bun's
+// N-API compat shim; `ml-dsa` is pure Rust with no such surface, and a throwaway probe function
+// confirmed it survives the identical compile+run before this real implementation replaced it).
+//
+// Deliberately NOT part of the frozen 202-byte slot format — signatures live in a side-table the
+// Node layer manages (one JSONL file per org shard), the same "frozen slot, side-table for
+// anything new" shape used in production (see the research page's own "memory_signatures" side-
+// table). This module only does the cryptography; canonical-payload construction, key storage,
+// and the append-only signature log all live in cli-lib.js.
+mod sign {
+    use ml_dsa::{Generate, Keypair, MlDsa65, Signature, SigningKey, VerifyingKey};
+    use signature::{SignatureEncoding, Signer, Verifier};
+    use napi::bindgen_prelude::*;
+    use napi_derive::napi;
+
+    /// A freshly generated ML-DSA-65 keypair, as raw bytes for the Node layer to persist.
+    /// `signing_key` is the 32-byte SEED (`SigningKey::to_seed()`/`from_seed()` — the crate's own
+    /// "preferred serialization... consistently 32-bytes" form), not the full expanded key —
+    /// smaller to store, and re-expanding from seed on load is cheap.
+    #[napi(object)]
+    pub struct SigningKeypair {
+        pub signing_key: Buffer,
+        pub verifying_key: Buffer,
+    }
+
+    #[napi]
+    pub fn generate_signing_keypair() -> Result<SigningKeypair> {
+        let sk = SigningKey::<MlDsa65>::generate();
+        let vk = sk.verifying_key();
+        Ok(SigningKeypair {
+            signing_key: sk.to_seed().as_slice().to_vec().into(),
+            verifying_key: vk.encode().as_slice().to_vec().into(),
+        })
+    }
+
+    /// Sign arbitrary bytes with a raw 32-byte signing-key seed (from
+    /// `generate_signing_keypair`). The CALLER builds the canonical payload (slot id + text,
+    /// etc.) — this function only does the cryptographic operation, so the exact bytes being
+    /// signed are never ambiguous from reading this file alone.
+    #[napi]
+    pub fn sign_bytes(signing_key_seed: Buffer, payload: Buffer) -> Result<Buffer> {
+        let seed = ml_dsa::B32::try_from(signing_key_seed.as_ref())
+            .map_err(|_| Error::from_reason(format!("signing key must be exactly 32 bytes, got {}", signing_key_seed.len())))?;
+        let sk = SigningKey::<MlDsa65>::from_seed(&seed);
+        let sig = sk.sign(&payload);
+        Ok(sig.to_bytes().to_vec().into())
+    }
+
+    /// Verify `signature` over `payload` against a raw verifying-key encoding. Returns `false`
+    /// for a bad signature or tampered payload, NOT an error — only a malformed key/signature
+    /// (wrong length, can't even be parsed) is an error. A caller checking "is this memory
+    /// authentic" wants a clean boolean for the common tamper case, not exception-handling for it.
+    #[napi]
+    pub fn verify_bytes(verifying_key_bytes: Buffer, payload: Buffer, signature: Buffer) -> Result<bool> {
+        let enc = ml_dsa::EncodedVerifyingKey::<MlDsa65>::try_from(verifying_key_bytes.as_ref())
+            .map_err(|_| Error::from_reason(format!("verifying key wrong length: got {}", verifying_key_bytes.len())))?;
+        let vk = VerifyingKey::<MlDsa65>::decode(&enc);
+        let sig = Signature::<MlDsa65>::try_from(signature.as_ref())
+            .map_err(|e| Error::from_reason(format!("invalid signature encoding: {e}")))?;
+        Ok(vk.verify(&payload, &sig).is_ok())
+    }
+}
+pub use sign::{generate_signing_keypair, sign_bytes, verify_bytes, SigningKeypair};
+
+// SLH-DSA-SHA2-128s (FIPS 205 / SPHINCS+) — the audit-trail checkpoint signer. Deliberately a
+// SEPARATE keypair and algorithm from `sign` module's ML-DSA-65: ML-DSA signs individual memories
+// (many signatures, smaller ~3.3KB each); SLH-DSA here signs periodic CHECKPOINTS over an
+// append-only hash chain of write events (few signatures, larger ~7.9KB each, but SLH-DSA's
+// security rests on hash-function assumptions alone — a genuinely different, more conservative
+// trust basis than ML-DSA's lattice assumptions, which is the actual point of using a second,
+// different algorithm for the audit trail rather than reusing the same one). The hash chain
+// itself, its storage, and checkpoint scheduling all live in cli-lib.js — this module is only
+// the cryptographic primitive, same split as the `sign` module above.
+mod audit_sign {
+    use slh_dsa::{Sha2_128s, SigningKey, VerifyingKey};
+    use signature::{Keypair, Signer, Verifier};
+    use rand_core::{TryCryptoRng, TryRng};
+    use std::convert::Infallible;
+    use napi::bindgen_prelude::*;
+    use napi_derive::napi;
+
+    /// A minimal CryptoRng backed by the OS's own randomness (`getrandom`), written by hand
+    /// instead of pulling in the `rand`/`rand_core` "os_rng" feature: rand_core 0.10's own
+    /// feature-flag surface for this turned out fragmented across crate versions when actually
+    /// tried (a real dead end hit building this — `rand_core::OsRng` wasn't resolvable through
+    /// any combination of `signature`'s or `rand_core`'s own feature flags in this dependency
+    /// graph), while implementing the trait directly over `getrandom::fill` is ~15 lines and has
+    /// no such ambiguity.
+    struct SysRng;
+    impl TryRng for SysRng {
+        type Error = Infallible;
+        // Explicit `core::result::Result` here — the module-level `use napi::bindgen_prelude::*`
+        // shadows the prelude `Result` with napi's own alias (`Result<T, napi::Error>`-shaped),
+        // which doesn't accept `Infallible` as the error type. A real compile error hit writing
+        // this, not a stylistic choice.
+        fn try_next_u32(&mut self) -> core::result::Result<u32, Infallible> {
+            let mut buf = [0u8; 4];
+            getrandom::fill(&mut buf).expect("OS randomness source failed");
+            Ok(u32::from_ne_bytes(buf))
+        }
+        fn try_next_u64(&mut self) -> core::result::Result<u64, Infallible> {
+            let mut buf = [0u8; 8];
+            getrandom::fill(&mut buf).expect("OS randomness source failed");
+            Ok(u64::from_ne_bytes(buf))
+        }
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> core::result::Result<(), Infallible> {
+            getrandom::fill(dst).expect("OS randomness source failed");
+            Ok(())
+        }
+    }
+    impl TryCryptoRng for SysRng {}
+
+    #[napi(object)]
+    pub struct AuditKeypair {
+        pub signing_key: Buffer,
+        pub verifying_key: Buffer,
+    }
+
+    #[napi]
+    pub fn generate_audit_keypair() -> Result<AuditKeypair> {
+        let mut rng = SysRng;
+        let sk = SigningKey::<Sha2_128s>::new(&mut rng);
+        let vk = sk.verifying_key();
+        Ok(AuditKeypair {
+            signing_key: sk.to_bytes().to_vec().into(),
+            verifying_key: vk.to_bytes().to_vec().into(),
+        })
+    }
+
+    #[napi]
+    pub fn audit_sign_bytes(signing_key_bytes: Buffer, payload: Buffer) -> Result<Buffer> {
+        let sk = SigningKey::<Sha2_128s>::try_from(signing_key_bytes.as_ref())
+            .map_err(|e| Error::from_reason(format!("invalid audit signing key: {e}")))?;
+        let sig = sk.sign(&payload);
+        Ok(sig.to_bytes().to_vec().into())
+    }
+
+    #[napi]
+    pub fn audit_verify_bytes(verifying_key_bytes: Buffer, payload: Buffer, signature: Buffer) -> Result<bool> {
+        let vk = VerifyingKey::<Sha2_128s>::try_from(verifying_key_bytes.as_ref())
+            .map_err(|e| Error::from_reason(format!("invalid audit verifying key: {e}")))?;
+        let sig = slh_dsa::Signature::<Sha2_128s>::try_from(signature.as_ref())
+            .map_err(|e| Error::from_reason(format!("invalid audit signature encoding: {e}")))?;
+        Ok(vk.verify(&payload, &sig).is_ok())
+    }
+}
+pub use audit_sign::{generate_audit_keypair, audit_sign_bytes, audit_verify_bytes, AuditKeypair};

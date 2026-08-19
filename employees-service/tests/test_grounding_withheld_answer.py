@@ -3,6 +3,7 @@ import unittest
 from hivemind_employees.api_hyper_rooms import (
     _should_withhold_ungrounded_answer,
     _grounding_withheld_text,
+    _verification_failure_result,
 )
 
 
@@ -49,6 +50,37 @@ class GroundingWithheldTextTests(unittest.TestCase):
         # Regression guard on the actual message content the user sees.
         text = _grounding_withheld_text(["x"])
         self.assertIn("withholding the draft", text)
+
+
+class VerificationFailureResultTests(unittest.TestCase):
+    """Real gap: a crashed/timed-out verifier previously left the turn's
+    verification unset, which the status-derivation code (`_gv and not
+    _gv.get('grounded_ok')`) treats as falsy — silently defaulting to
+    status='complete' with an unverified answer, i.e. fail-OPEN. This is
+    the fail-SAFE default recorded instead."""
+
+    def test_a_verification_crash_is_recorded_as_ungrounded_not_silently_passed(self):
+        result = _verification_failure_result(RuntimeError("model timeout"))
+        self.assertFalse(result["grounded_ok"])
+        self.assertFalse(result["met"])
+        self.assertIn("model timeout", result["note"])
+
+    def test_the_failure_result_is_truthy_so_status_derivation_does_not_skip_it(self):
+        # The real bug: an EMPTY dict is falsy, so `_gv and not _gv.get(...)`
+        # short-circuits to False and status stays "complete". This result
+        # must never be empty/falsy.
+        result = _verification_failure_result(Exception("boom"))
+        self.assertTrue(result)
+        self.assertTrue(bool(result))
+
+    def test_a_recorded_verification_failure_correctly_triggers_the_withhold_path(self):
+        # End-to-end of the real fix: verifier crashes -> failure result has
+        # grounded_ok=False -> the real code's status derivation would set
+        # status='escalated' -> the withhold path (tested above) must fire.
+        failure = _verification_failure_result(Exception("timeout"))
+        status = "escalated" if failure and not failure.get("grounded_ok") else "complete"
+        self.assertEqual(status, "escalated")
+        self.assertTrue(_should_withhold_ungrounded_answer(None, status, "A confident but unverified answer."))
 
 
 if __name__ == "__main__":

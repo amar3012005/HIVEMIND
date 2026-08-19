@@ -42,3 +42,22 @@ export function isMemoryInDateRange(memory = {}, dateRange = null) {
     return true;
   });
 }
+
+// Date-window scans may legitimately match hundreds of tenant memories. The
+// final hybrid ranker retains only a small bounded set, so feeding the whole
+// range into MMR and cross-encoding creates O(n^2) work without improving
+// delivery. Prioritize the atomic kind selected by the semantic planner, then
+// retain a bounded diversity tail. This uses structured intent, not keywords.
+export function selectEventRangeCandidates(memories, boostType, limit = 60) {
+  const rows = Array.isArray(memories) ? memories : [];
+  const cap = Math.max(15, Math.min(120, Number(limit) || 60));
+  const bt = String(boostType || '').toLowerCase();
+  if (!bt) return rows.slice(0, cap);
+  const matching = [];
+  const remaining = [];
+  for (const memory of rows) {
+    const mt = String(memory?.memory_type || memory?.memoryType || '').toLowerCase();
+    (mt === bt ? matching : remaining).push(memory);
+  }
+  return [...matching, ...remaining].slice(0, cap);
+}

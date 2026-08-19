@@ -30,7 +30,7 @@ import { rerank } from './reranker.js';
 import { ResultReranker } from '../search/result-reranker.js';
 import { buildEvidencePacket } from './recall-packet.js';
 import { isDurableKbPromotionAdmitted } from './durable-content.js';
-import { isMemoryInDateRange } from './temporal-range.js';
+import { isMemoryInDateRange, selectEventRangeCandidates } from './temporal-range.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
 import { orgIsRemote, amrKbDocs, memoryBackend } from '../vector/mneme/driver.js';
 import { scopedMemoryWhere } from './prisma-graph-store.js';
@@ -343,6 +343,7 @@ function applyEventTimeBoost(memories, query) {
 // through store.getMemories, which applies the same visibility rules).
 const TYPE_AWARE_RECALL = (process.env.V5_TYPE_AWARE_RECALL || 'false').toLowerCase() === 'true';
 const MEMORY_TYPE_BOOST_ALPHA = Number(process.env.MEMORY_TYPE_BOOST_ALPHA || 0.6);
+const EVENT_RANGE_CANDIDATE_LIMIT = Math.max(15, Math.min(120, Number(process.env.RECALL_EVENT_RANGE_CANDIDATE_LIMIT || 60)));
 function applyMemoryTypeBoost(memories, boostType) {
   if (!boostType || !memories?.length) return memories;
   const bt = String(boostType).toLowerCase();
@@ -1724,7 +1725,7 @@ export class RecallRouter {
           access_context: ctx.accessContext,
         }), Math.min(900, remainingBudget()), { memories: [] });
         const boostType = String(options.boost_memory_type || '').toLowerCase();
-        const ranged = (listed?.memories || [])
+        const allRanged = (listed?.memories || [])
           .filter((memory) => isMemoryInDateRange(memory, recallPlan.time.range))
           .map((memory) => ({
             ...memory,
@@ -1737,6 +1738,7 @@ export class RecallRouter {
             ),
             _event_range_match: true,
           }));
+        const ranged = selectEventRangeCandidates(allRanged, boostType, EVENT_RANGE_CANDIDATE_LIMIT);
         eventRangeCount = ranged.length;
         if (ranged.length) {
           const byId = new Map(

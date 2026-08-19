@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   _salvageArrayObjects,
   parseJsonCompletion,
+  truncatedCompletionHasMoreItems,
   TruncatedJsonCompletionError,
 } from '../../src/knowledge/enterprise/litellm-client.js';
 
@@ -55,4 +56,14 @@ test('normal complete JSON remains a one-pass success', () => {
     rejectTruncated: true,
   });
   assert.equal(value.facts.length, 1);
+});
+
+test('dense fallback rejects a thin completion after a richer truncated prefix', () => {
+  const truncated = new TruncatedJsonCompletionError('cut', {
+    facts: Array.from({ length: 7 }, (_, index) => ({ f: `fact ${index}` })),
+  });
+  assert.equal(truncatedCompletionHasMoreItems(truncated, { facts: [{ f: 'one' }] }), true);
+  assert.equal(truncatedCompletionHasMoreItems(truncated, {
+    facts: Array.from({ length: 8 }, (_, index) => ({ f: `fact ${index}` })),
+  }), false);
 });

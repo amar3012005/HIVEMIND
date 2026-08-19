@@ -68,6 +68,10 @@ function completionItemCount(value) {
   return 0;
 }
 
+export function truncatedCompletionHasMoreItems(truncated, completed) {
+  return completionItemCount(truncated?.partial) > completionItemCount(completed);
+}
+
 /**
  * Parse a JSON-mode completion while preserving the provider's finish contract.
  * A syntactically salvageable prefix is useful as a last-resort recovery asset,
@@ -365,14 +369,26 @@ export function getDefaultModel() {
 // NEXT model. Cross-family list (e.g. gpt-oss-120b → gemini-flash-lite →
 // gpt-oss-20b) so a single-model/provider issue can't drop a memory. Returns
 // the first success; throws the last error only if every model fails.
-export async function chatCompletionWithFallback({ models = [], model, ...opts } = {}) {
+export async function chatCompletionWithFallback({
+  models = [], model, prefer_truncated_if_more_items = false, ...opts
+} = {}) {
   const list = [...new Set((models.length ? models : [model]).filter(Boolean))];
   if (!list.length) throw new Error('[llm-fallback] no model(s) provided');
   let lastErr = null;
   let bestTruncated = null;
   for (let i = 0; i < list.length; i += 1) {
     try {
-      return await chatCompletion({ ...opts, model: list[i] });
+      const completed = await chatCompletion({ ...opts, model: list[i] });
+      // A provider-confirmed truncated prefix can hold far more grounded items
+      // than a later model's syntactically complete but nearly empty response.
+      // Dense extraction opts into rejecting that thin completion so its
+      // bounded structural recovery can split the source window. Other JSON
+      // callers retain first-success fallback behavior.
+      if (prefer_truncated_if_more_items && bestTruncated
+          && truncatedCompletionHasMoreItems(bestTruncated, completed)) {
+        throw bestTruncated;
+      }
+      return completed;
     } catch (err) {
       lastErr = err;
       if (err?.code === 'LLM_JSON_TRUNCATED'

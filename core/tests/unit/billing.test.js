@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { getPlan, getAllPlans, isFeatureEnabled, getLimit } from '../../src/billing/plans.js';
 
 describe('Plans', () => {
-  it('publishes the B2C free, pro, and scale tiers plus enterprise', () => {
-    assert.deepEqual(getAllPlans().map(plan => plan.id), ['free', 'pro', 'scale', 'enterprise']);
+  it('publishes the B2C free, plus, pro, and scale tiers plus enterprise', () => {
+    assert.deepEqual(getAllPlans().map(plan => plan.id), ['free', 'plus', 'pro', 'scale', 'enterprise']);
   });
 
   it('defines daily and monthly hard limits for free', () => {
@@ -31,8 +31,13 @@ describe('Plans', () => {
     assert.equal(scale.overage, null);
   });
 
-  it('keeps the shared feature set available on B2C plans', () => {
-    assert.equal(isFeatureEnabled('free', 'agentSwarm'), true);
+  it('gates OS and VOICE according to the product ladder', () => {
+    assert.equal(isFeatureEnabled('free', 'operatingSystem'), true);
+    assert.equal(isFeatureEnabled('plus', 'operatingSystem'), false);
+    assert.equal(isFeatureEnabled('pro', 'operatingSystem'), true);
+    assert.equal(isFeatureEnabled('pro', 'taraVoiceAgent'), false);
+    assert.equal(isFeatureEnabled('scale', 'taraVoiceAgent'), true);
+    assert.equal(isFeatureEnabled('enterprise', 'taraVoiceAgent'), true);
     assert.equal(isFeatureEnabled('free', 'webIntelligence'), true);
     assert.equal(isFeatureEnabled('free', 'llmObserver'), true);
   });

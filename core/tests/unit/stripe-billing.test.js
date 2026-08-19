@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   getSubscriptionIdFromStripeObject,
   getSubscriptionPriceId,
+  createCheckoutIntegrationIdentifier,
   isAutomaticTaxEnabled,
   isEntitledSubscriptionStatus,
 } from '../../src/billing/stripe.js';
@@ -31,5 +32,13 @@ describe('Stripe subscription payload helpers', () => {
     assert.equal(isAutomaticTaxEnabled(), false);
     if (original === undefined) delete process.env.STRIPE_AUTOMATIC_TAX_ENABLED;
     else process.env.STRIPE_AUTOMATIC_TAX_ENABLED = original;
+  });
+
+  it('uses an opaque unique Checkout integration identifier', () => {
+    const first = createCheckoutIntegrationIdentifier();
+    const second = createCheckoutIntegrationIdentifier();
+    assert.match(first, /^hivemind_checkout_[a-z]{8}$/);
+    assert.match(second, /^hivemind_checkout_[a-z]{8}$/);
+    assert.notEqual(first, second);
   });
 });

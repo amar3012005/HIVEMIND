@@ -9,6 +9,7 @@
  * Required env vars (control-plane container):
  *   STRIPE_SECRET_KEY            — sk_live_… or sk_test_…
  *   STRIPE_WEBHOOK_SECRET        — whsec_… (for signature verification)
+ *   STRIPE_PRICE_ID_PLUS         — price_… for the Plus plan
  *   STRIPE_PRICE_ID_PRO          — price_… for the Pro plan
  *   STRIPE_PRICE_ID_SCALE        — price_… for the Scale plan
  *

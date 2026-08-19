@@ -19,14 +19,15 @@ const rankedCandidates = Array.from({ length: 8 }, (_, index) => [
 test('semantic response depth selects one bounded window while retaining top fifteen', () => {
   assert.equal(evidenceWindowSizeForDepth('standard'), 5);
   assert.equal(evidenceWindowSizeForDepth('detailed'), 10);
+  assert.equal(evidenceWindowSizeForDepth('detailed', { nativeSingleCall: true }), 15);
   assert.equal(evidenceWindowSizeForDepth('comprehensive'), 15);
   assert.equal(evidenceWindowSizeForDepth('unknown'), 5);
   const session = createProgressiveRecallSession({
     rankedCandidates, memories, evidence, query: 'Solvis products',
-    initialSize: evidenceWindowSizeForDepth('detailed'), maxVisible: 15,
+    initialSize: evidenceWindowSizeForDepth('detailed', { nativeSingleCall: true }), maxVisible: 15,
   });
   assert.equal(session.candidates.length, 15);
-  assert.equal(session.delivered_until, 10);
+  assert.equal(session.delivered_until, 15);
   assert.equal(session.expansion_count, 0);
 });
 
@@ -55,13 +56,13 @@ test('retains camelCase evidence IDs from remote and central recall adapters', (
     memories: [],
     evidence: camelEvidence,
     query: 'multilingual product inventory',
-    initialSize: evidenceWindowSizeForDepth('detailed'),
+    initialSize: evidenceWindowSizeForDepth('detailed', { nativeSingleCall: true }),
     maxVisible: 15,
   });
   assert.equal(session.candidates.length, 14);
-  assert.equal(session.delivered_until, 10);
+  assert.equal(session.delivered_until, 14);
   const view = applyProgressiveRecallView({ memories: [], evidence: camelEvidence, recall_packets: [] }, session);
-  assert.deepEqual(view.evidence.map((row) => row.segmentId), candidates.slice(0, 10).map((row) => row.segment_id));
+  assert.deepEqual(view.evidence.map((row) => row.segmentId), candidates.slice(0, 15).map((row) => row.segment_id));
 });
 
 test('use_tools native-only compound plans collapse to the identical native recall path', () => {

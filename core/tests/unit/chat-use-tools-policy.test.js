@@ -6,6 +6,7 @@ import { adaptToDecision, getProgressiveTools } from '../../src/agent/chat-progr
 test('use_tools false never discloses connected or compound capabilities', () => {
   const names = getProgressiveTools({ useTools: false }).map((tool) => tool.function.name);
   assert.ok(names.includes('hivemind_context'));
+  assert.ok(names.includes('hivemind_profile'));
   assert.ok(names.includes('hivemind_memory'));
   assert.equal(names.includes('use_connector'), false);
   assert.equal(names.includes('use_campaign'), false);
@@ -15,6 +16,10 @@ test('use_tools false never discloses connected or compound capabilities', () =>
 test('native planner requests a semantic retrieval expression instead of a copied query', () => {
   const context = getProgressiveTools({ useTools: false })
     .find((tool) => tool.function.name === 'hivemind_context');
+  assert.deepEqual(context.function.parameters.properties.native_tool.enum, [
+    'hivemind_recall', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline',
+    'hivemind_aggregate_entities', 'hivemind_relation_between',
+  ]);
   const description = context.function.parameters.properties.query_canonical_en.description;
   assert.match(description, /intent-preserving English retrieval expression/);
   assert.match(description, /names\/models\/variants\/categories/);
@@ -30,9 +35,61 @@ test('use_tools true discloses connected and compound capabilities', () => {
   assert.ok(names.includes('use_connector'));
   assert.ok(names.includes('use_campaign'));
   assert.ok(names.includes('compound_plan'));
+  assert.equal(names.includes('hivemind_profile'), false);
+  const context = tools.find((tool) => tool.function.name === 'hivemind_context');
+  assert.equal('native_tool' in context.function.parameters.properties, false);
   const connector = tools.find((tool) => tool.function.name === 'use_connector');
   assert.ok(connector.function.parameters.properties.provider.enum.includes('google-calendar'));
   assert.ok(connector.function.parameters.properties.provider.enum.includes('google-tasks'));
+});
+
+test('native profile is an explicit language-independent capability', () => {
+  const { decision } = adaptToDecision('hivemind_profile', {
+    target: 'organization', query_original: '組織のプロフィールを教えて',
+    response_language: 'ja', answer_objective: 'Describe the maintained organization profile.',
+  }, '組織のプロフィールを教えて', 'ja', { useTools: false });
+  assert.equal(decision.operation, 'profile');
+  assert.deepEqual(decision.queries, []);
+  assert.equal(decision.profile_target, 'organization');
+});
+
+test('native tool selection is authoritative over an inconsistent high-level operation', () => {
+  const { decision } = adaptToDecision('hivemind_context', {
+    native_tool: 'hivemind_at', operation: 'recall', temporal_semantics: 'none',
+    query_original: 'What was true then?', query_canonical_en: 'workspace truth at 2026-08-08',
+    response_language: 'en', mode: 'fact', entities: [], response_depth: 'standard',
+    retrieval_shape: 'fact', answer_objective: 'State what was true.', source_title: null,
+    valid_at: '2026-08-08', known_at: null, range_start: null, range_end: null,
+    aggregate_kind: null, answer_type: 'fact',
+  }, 'What was true on 2026-08-08?', 'en', { useTools: false });
+  assert.equal(decision.operation, 'timeline');
+  assert.equal(decision.time.kind, 'snapshot_at');
+});
+
+test('native aggregate and relation selections compile their required executor inputs', () => {
+  const common = {
+    operation: 'recall', temporal_semantics: 'none', query_original: 'request',
+    response_language: 'en', mode: 'explain', response_depth: 'detailed',
+    retrieval_shape: 'inventory', answer_objective: 'answer', source_title: null,
+    valid_at: null, known_at: null, range_start: null, range_end: null,
+    answer_type: 'relationship',
+  };
+  const aggregate = adaptToDecision('hivemind_context', {
+    ...common, native_tool: 'hivemind_aggregate_entities',
+    query_canonical_en: 'Solvis product registry', entities: ['Solvis'], aggregate_kind: 'product',
+  }, 'Count every registered Solvis product', 'en', { useTools: false }).decision;
+  assert.equal(aggregate.operation, 'aggregate');
+  assert.deepEqual(aggregate.aggregate, {
+    parent: 'Solvis', kind: 'product', requires_complete_coverage: true,
+  });
+
+  const relation = adaptToDecision('hivemind_context', {
+    ...common, native_tool: 'hivemind_relation_between',
+    query_canonical_en: 'relationship between Solvis and SolvisLea',
+    entities: ['Solvis', 'SolvisLea'], aggregate_kind: null,
+  }, 'How are Solvis and SolvisLea related?', 'en', { useTools: false }).decision;
+  assert.equal(relation.operation, 'relation_between');
+  assert.deepEqual(relation.relation, { entities: ['Solvis', 'SolvisLea'] });
 });
 
 test('connection-aware tools disclose only active connector providers', () => {

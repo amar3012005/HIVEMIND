@@ -100,11 +100,53 @@ export const HIGH_TOOLS = [
 ];
 
 const EXTERNAL_TOOL_NAMES = new Set(['use_connector', 'use_campaign', 'compound_plan']);
+const NATIVE_PROFILE_TOOL = { type: 'function', function: { name: 'hivemind_profile', strict: true,
+  description: 'Read the authenticated caller\'s maintained user and organization profile. Use for identity, role, company, preferences, language, location, or other profile-owned facts. Do not use it for general organizational knowledge, documents, meetings, decisions, products, or historical activity; those belong to hivemind_context.',
+  parameters: object({
+    target: { type: 'string', enum: ['user', 'organization', 'user_and_organization'] },
+    query_original: { type: 'string' },
+    response_language: { type: 'string' },
+    answer_objective: { type: 'string' },
+  }),
+} };
+
+// The native-only context contract exposes the exact server capability the
+// planner intends to use. The high-level operation remains for compatibility,
+// but native_tool is authoritative and prevents a vague "context" choice from
+// fanning out across temporal, graph, aggregate, and recall tools.
+const NATIVE_CONTEXT_TOOL = (() => {
+  const context = HIGH_TOOLS.find((tool) => tool.function?.name === 'hivemind_context');
+  return {
+    ...context,
+    function: {
+      ...context.function,
+      description: 'Plan exactly one grounded HIVE-MIND read. Select the single native capability that best matches the semantic request; ordinary recall already searches memories and document evidence together.',
+      parameters: {
+        ...context.function.parameters,
+        properties: {
+          native_tool: {
+            type: 'string',
+            enum: ['hivemind_recall', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline', 'hivemind_aggregate_entities', 'hivemind_relation_between'],
+            description: 'The one native read capability required. hivemind_recall also owns event windows and named-file evidence retrieval.',
+          },
+          ...context.function.parameters.properties,
+        },
+        required: ['native_tool', ...context.function.parameters.required],
+      },
+    },
+  };
+})();
+
 // The initial router prompt stays small: native HIVE-MIND capabilities are
 // always available, while connected apps and compound execution are disclosed
 // only after the caller explicitly opts in for this turn.
 export function getProgressiveTools({ useTools = false, connectedProviders = null } = {}) {
-  if (!useTools) return HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name));
+  if (!useTools) return [
+    NATIVE_CONTEXT_TOOL,
+    NATIVE_PROFILE_TOOL,
+    ...HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name)
+      && tool.function?.name !== 'hivemind_context'),
+  ];
   if (!Array.isArray(connectedProviders)) return HIGH_TOOLS;
 
   const allowed = [...new Set(connectedProviders
@@ -173,6 +215,22 @@ Examples:
 - "Find the Google Doc about X" => use_connector provider=google-docs intent=read.
 - "Search Notion for X" => use_connector provider=notion intent=read.
 Never invent workspace facts. Never bypass approval. Preserve exact entities, filenames, identifiers and dates. Respond in the user's language.`;
+
+const NATIVE_POLICY = `You are HIVE, the grounded organizational brain. You MUST call exactly one supplied high-level tool. Perform planning, semantic query optimization, tool selection, temporal normalization, answer-depth selection, and answer-shape selection in this ONE call.
+Choose one minimal native route; never request every native tool and never create speculative hops.
+- hivemind_profile: only maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, language, or location. General company knowledge, products, documents, decisions, meetings, and history are not profile facts.
+- hivemind_context + native_tool=hivemind_recall: ordinary facts, small details, useful inventories, overviews, decisions, goals, events, named files, and activity during a date range. Recall searches the authorized hybrid memory-and-document-evidence pool together. For an event/activity window, use operation=temporal_range and native_tool=hivemind_recall.
+- native_tool=hivemind_at: what was true, or what was known, at one instant. Use operation=temporal.
+- native_tool=hivemind_diff: compare workspace state at two instants. Do not use it for events that merely occurred during a period. Use operation=diff.
+- native_tool=hivemind_timeline: version history, prior values, and how one subject changed over time. Use operation=timeline.
+- native_tool=hivemind_relation_between: an explicit relationship/path between at least two entities. Use operation=relation_between.
+- native_tool=hivemind_aggregate_entities: only a certified exact count or registry-complete enumeration. Use operation=aggregate. A useful list of known items is ordinary recall.
+For a named file, preserve its closest recognizable title in source_title and use operation=source_read with native_tool=hivemind_recall. Ask recall for both the file summary and answer-bearing passages; the retrieval layer resolves the closest authorized source and falls through from summary memories to document evidence without another planner call.
+query_canonical_en is the sole model-authored retrieval query. Make it a compact semantic expression that preserves the subject, requested attribute, qualifiers, negation, relationship direction, temporal boundary, and source title. Expand only the requested facets; never add guessed facts. The server will not call a second query-rewrite model.
+Select response_depth from semantic breadth, in any language: standard for a bounded fact or ordinary question; detailed for a multi-aspect explanation, overview, comparison, or informative inventory; comprehensive only for an explicitly exhaustive cross-source treatment. Standard exposes the unified top 5; detailed and comprehensive expose the unified top 15. Retrieval itself retains the top 15 in one pass. There is no later 5-to-10-to-15 hop.
+Use hivemind_memory only for an explicit durable save, update, delete, profile update, or assistant rename; do not turn a question into a write. Use hivemind_projects only to list or resolve authorized projects. Use web_research only for current public-internet information. Use respond_directly only for greetings, arithmetic, harmless general conversation, a necessary clarification, or a safety refusal; never use it for workspace knowledge.
+Classify answer_type by meaning in the user's language: decision for choices or agreements; goal for targets, action items, or next steps; preference for priorities or likes; lesson for learnings; event for what happened, meetings, or quotes; relationship for entity connections; fact for objective attributes.
+Never invent workspace facts, identifiers, filenames, entities, or dates. Preserve exact user constraints and answer in the user's language.`;
 
 // capability.operation (router enum) → the current planner's operation enum.
 // hivemind_context's temporal/diff → the existing 'timeline' op (gatherEvidence's
@@ -286,7 +344,10 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
         .map((h) => ({ role: h.role, content: String(h.content).slice(0, 1200) }))
     : [];
   const staticPrompt = getStaticPromptArtifact({
-    family: 'chat-progressive-router', version: 'v3', variant: 'capability-contract', build: () => SYSTEM,
+    family: 'chat-progressive-router',
+    version: useTools ? 'v3' : 'v4',
+    variant: useTools ? 'capability-contract' : 'native-single-call',
+    build: () => useTools ? SYSTEM : NATIVE_POLICY,
   });
   const connectedPolicy = useTools && Array.isArray(connectedProviders)
     ? `For this tenant, the only active external connector groups are: ${connectedProviders.length ? connectedProviders.join(', ') : '(none)'}. Native HIVE-MIND capabilities remain available. Never plan an external connector group outside this active list. Add explicit prerequisite read steps whenever a later action needs an unresolved recipient, record ID, document link, channel, or other identifier; never invent it. For an email action, a person's name or display label is not a resolved destination: only a syntactically valid email address is resolved, otherwise add a recipient lookup step with output_kind recipient and make the action depend on it.`
@@ -384,11 +445,19 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
   switch (tool) {
     case 'hivemind_context': {
       // Preserve the dedicated caller-scoped profile op for "about me/my org".
-      if (args?.operation === 'recall' && PROFILE_RE.test(message)) {
+      if (useTools && args?.operation === 'recall' && PROFILE_RE.test(message)) {
         return { decision: { ...base, operation: 'profile', queries: [base.query_canonical_en], tool_groups: ['hivemind-recall'] }, usage: null };
       }
       const declaredOp = String(args?.operation || 'recall');
-      const rawOp = ({
+      const nativeOp = ({
+        hivemind_recall: declaredOp,
+        hivemind_at: 'temporal',
+        hivemind_diff: 'diff',
+        hivemind_timeline: 'timeline',
+        hivemind_aggregate_entities: 'aggregate',
+        hivemind_relation_between: 'relation_between',
+      })[String(args?.native_tool || '')];
+      const rawOp = nativeOp || ({
         event_window: 'temporal_range',
         snapshot_at: 'temporal',
         snapshot_diff: 'diff',
@@ -453,14 +522,24 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
         recall_mode: ['fact', 'explain', 'full'].includes(args?.mode) ? args.mode : 'fact',
         answer_type: ['decision', 'goal', 'preference', 'lesson', 'event', 'relationship', 'fact'].includes(String(args?.answer_type || '').toLowerCase()) ? String(args.answer_type).toLowerCase() : null,
         source: s(args?.source_title, 512) ? { title: s(args.source_title, 512) } : null,
-        aggregate: args?.operation === 'aggregate'
+        aggregate: rawOp === 'aggregate'
           ? { parent: s(base.named_entities[0] || base.query_canonical_en, 256), kind: s(args?.aggregate_kind, 128) || 'entity', requires_complete_coverage: true }
           : null,
-        relation: args?.operation === 'relation_between' ? { entities: base.named_entities } : null,
+        relation: rawOp === 'relation_between' ? { entities: base.named_entities } : null,
         time,
         tool_groups: ['hivemind-recall'],
       }, usage: null };
     }
+    case 'hivemind_profile':
+      return { decision: {
+        ...base,
+        operation: 'profile',
+        queries: [],
+        answer_objective: s(args?.answer_objective, 1000) || message,
+        profile_target: ['user', 'organization', 'user_and_organization'].includes(args?.target)
+          ? args.target : 'user_and_organization',
+        tool_groups: ['hivemind-recall'],
+      }, usage: null };
     case 'hivemind_memory': {
       const op = ['save', 'update', 'delete', 'rename_assistant', 'update_profile'].includes(args?.operation) ? args.operation : 'save';
       return { decision: {

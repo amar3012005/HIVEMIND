@@ -4,15 +4,18 @@ export function shouldOptimizeRecallQuery({ canonicalQuery, useTools = false } =
   // recall paid for a second LLM call (~1.2-1.7s) and could erase exact names.
   // Keep the optimizer only as a compatibility path for missing planner output
   // or tool-enabled turns; zero-coverage recovery remains independently bounded.
-  if (useTools === true) return true;
-  return !String(canonicalQuery || '').trim();
+  // use_tools:false has exactly one semantic LLM call. On planner failure the
+  // original user message is the safe retrieval query; starting a second model
+  // would violate that latency and authority contract.
+  return useTools === true;
 }
 
 export function shouldRunRecallOptimizer({ operation } = {}) {
   return !new Set(['aggregate', 'connector_read', 'relation_between', 'profile']).has(operation);
 }
 
-export function shouldRetryAfterZeroCoverage({ router, canonicalQuery, coverage, alreadyOptimized = false } = {}) {
+export function shouldRetryAfterZeroCoverage({ router, canonicalQuery, coverage, alreadyOptimized = false, useTools = false } = {}) {
+  if (useTools !== true) return false;
   return router === 'progressive'
     && !!String(canonicalQuery || '').trim()
     && coverage?.evidence_found === false

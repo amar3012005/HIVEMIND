@@ -86,6 +86,24 @@ test('base quick recall: single recall, dedup by id, step + event sequence', asy
   assert.deepEqual(names, ['tool_selected', 'tool_started', 'tool_call', 'tool_completed', 'tool_result']);
 });
 
+test('single-call native plan never starts a second recall when first-pass coverage is empty', async () => {
+  let recallCalls = 0;
+  const { ctx } = makeCtx({
+    hivemind_recall: () => {
+      recallCalls += 1;
+      return { memories: [], evidence: [], evidence_count: 0 };
+    },
+  });
+  const r = await gatherEvidence({
+    plan: basePlan({ _native_single_call: true }),
+    ctx,
+    deadlineAt: FAR(),
+  });
+  assert.equal(recallCalls, 1);
+  assert.equal(r.escalation_count, 0);
+  assert.deepEqual(toolNames(r), ['hivemind_recall']);
+});
+
 test('base recall preserves distinct adapter evidence rows with identical prefixes', async () => {
   const sharedPrefix = 'The same document boilerplate starts every chunk before its distinct product detail.';
   const { ctx } = makeCtx({

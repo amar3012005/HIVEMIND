@@ -3689,6 +3689,32 @@ async def _run_agentic_task_agent(
         return None
 
 
+# Plain (non-Work-Room) human turns whose answer failed grounding previously
+# still shipped the model's original, possibly fabricated draft to the user —
+# only an internal `status` was downgraded to "blocked"/"escalated", which the
+# user never sees. Work Rooms intentionally keep showing in-progress drafts
+# (persist_work_room_progress, "needs_evidence"/"caveated") because partial
+# operational progress is real and useful; a plain factual answer that failed
+# verification is a different case — an unverified claim must never read as a
+# normal completed answer. Pulled out as pure functions so this is directly
+# unit-testable without mocking the whole (very large) orchestration function.
+def _should_withhold_ungrounded_answer(room_mode: Optional[str], status: str, final_text: str) -> bool:
+    return (
+        (room_mode or "").strip().lower() != "work"
+        and status in ("blocked", "escalated")
+        and bool((final_text or "").strip())
+    )
+
+
+def _grounding_withheld_text(gaps: Optional[List[str]]) -> str:
+    preview = "; ".join(list(gaps or [])[:3]) or "the claim could not be verified against real evidence"
+    return (
+        "Runtime could not verify this answer against real evidence, so it is "
+        f"withholding the draft rather than presenting an unverified claim as fact. "
+        f"Gap: {preview}. Ask again with more context, or specify the exact evidence needed."
+    )
+
+
 async def _orchestrate_single_agent(
     req: "RoomTurnRequest",
     participants: List[Dict[str, Any]],
@@ -4365,6 +4391,8 @@ async def _orchestrate_single_agent(
                 "gaps": list((_gv or {}).get("gaps") or [])[:8],
                 "message": "The best grounded result is available; unresolved evidence or verification limits are shown explicitly.",
             })
+    elif _should_withhold_ungrounded_answer(req.room_mode, status, final_text):
+        final_text = _grounding_withheld_text((_gv or {}).get("gaps"))
 
     # The single-engine path must emit the same durable report contract as the
     # legacy orchestrator. CampaignOperatingReport uses this event as its render
@@ -4480,7 +4508,12 @@ async def _orchestrate_single_agent(
                 "tokens_out": int(_io.get("output", 0) or 0),
                 "tokens_cached": int(_io.get("cached", 0) or 0),
                 "tok_by": {k: int(v) for k, v in _tok_by.items()},
-                "quality_mode": _qmode}
+                "quality_mode": _qmode,
+                # Previously invisible to core — status alone doesn't say WHY a
+                # turn was downgraded. Carrying the raw verdict lets core (or any
+                # future defense-in-depth check on the seal path) see grounded_ok/
+                # met/gaps without re-deriving them.
+                "verification": _gv if isinstance(_gv, dict) else {}}
     if _GK_ACTIVE.get(req.turn_id):
         # Goalkeeper owns the seal: stash this round's payload; the loop emits ONE
         # final seal after the last round so the FE stream stays open across re-rounds.

@@ -26,22 +26,15 @@
  * chunker/semantic-reslice pipeline keeps doing its job on the returned
  * markdown/text, same as the plain-text and seam tiers.
  *
- * REACHABILITY NOTE (found 2026-08-19, verified in production): this tier
- * only fires for uploads that pass core/src/knowledge/upload-contract.js's
- * KB_EXTENSIONS.document allowlist first — that allowlist only admits
- * ['pdf','docx','xlsx','pptx','txt','md','markdown','csv','tsv','html','htm'].
- * doc/docm/odt/rtf/epub and even ppt/pptm/ppsx/ppsm are NOT in it (deliberately
- * withdrawn there — legacy binary needs LibreOffice, OpenDocument is untested
- * on this deployment) and so can never reach this tier via the real upload
- * path today. Only pptx is currently reachable. The default below still lists
- * the full originally-scoped set for when/if that allowlist is widened, but
- * do not assume anything beyond pptx actually runs without checking
- * upload-contract.js first.
+ * REACHABILITY NOTE: the real upload contract admits the same proven narrow
+ * set: pptx plus doc/docm/odt/rtf/epub. Formats merely advertised by anydoc
+ * (ppt/pptm/ppsx/ppsm and others) remain unreachable until their complete
+ * upload, extraction, ingestion and recall lifecycle is accepted.
  */
 
 const KB_EXTRACT_URL = process.env.KB_EXTRACT_URL || '';
 const KB_EXTRACT_FORMATS = String(
-  process.env.KB_EXTRACT_FORMATS || 'pptx,ppt,pptm,ppsx,ppsm,doc,docm,odt,rtf,epub',
+  process.env.KB_EXTRACT_FORMATS || 'pptx,doc,docm,odt,rtf,epub',
 ).split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
 const KB_EXTRACT_TIMEOUT_MS = Number(process.env.KB_EXTRACT_TIMEOUT_MS || 30_000);
 // Circuit breaker: after this many consecutive failures, skip hm-extract for

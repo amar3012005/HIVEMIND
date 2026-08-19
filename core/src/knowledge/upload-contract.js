@@ -37,14 +37,16 @@ export function normalizeKnowledgeIngestMode(value) {
 // A second real deck (15 slides, 18.5MB): 0.20s, 100/100 text runs, 15/15 slides
 // carrying page_no provenance. Both via the async path the adapter already uses.
 //
-// STILL WITHDRAWN: ppt, doc, xls (legacy binary). Docling parses OOXML natively
-// via python-pptx/python-docx/openpyxl — verified present in hm-docling — but the
-// binary formats need LibreOffice, and `command -v soffice` in that container
-// returns nothing. They remain unparseable here, so refusing is still correct.
-// OpenDocument (odt/ods/odp) is untested on this deployment; do not add it on the
-// strength of a FORMAT_PROFILES entry alone — that is how pptx got stuck.
+// hm-extract RESTORED 2026-08-19: doc/docm/odt/rtf/epub are accepted because
+// the dedicated hm-extract tier has now been measured for those formats and is
+// deployed with a circuit-breaker/fallback boundary. Other legacy presentation,
+// spreadsheet and OpenDocument formats remain withdrawn until their complete
+// upload lifecycle is proven; an extractor advertising a format is not enough.
 export const KB_EXTENSIONS = Object.freeze({
-  document: ['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm'],
+  document: [
+    'pdf', 'doc', 'docx', 'docm', 'odt', 'rtf', 'epub',
+    'xlsx', 'pptx', 'txt', 'md', 'markdown', 'csv', 'tsv', 'html', 'htm',
+  ],
   image: ['png', 'jpg', 'jpeg', 'tiff', 'tif', 'webp', 'gif'],
   audio: ['mp3', 'wav', 'm4a', 'flac', 'ogg'],
 });
@@ -83,7 +85,9 @@ function hasExpectedSignature(ext, buffer) {
   if (ext === 'jpg' || ext === 'jpeg') return hex.startsWith('ffd8ff');
   if (ext === 'gif') return ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a');
   if (ext === 'webp') return ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP';
-  if (['docx', 'xlsx', 'pptx'].includes(ext)) return hex.startsWith('504b0304');
+  if (['docx', 'docm', 'odt', 'epub', 'xlsx', 'pptx'].includes(ext)) return hex.startsWith('504b0304');
+  if (ext === 'doc') return hex.startsWith('d0cf11e0a1b11ae1');
+  if (ext === 'rtf') return ascii.startsWith('{\\rtf');
   if (ext === 'wav') return ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WAVE';
   if (ext === 'mp3') return ascii.startsWith('ID3') || hex.startsWith('fffb') || hex.startsWith('fff3') || hex.startsWith('fff2');
   return true;

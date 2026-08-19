@@ -158,7 +158,7 @@ try {
   const required = [
     [productA], ['73'], [productB], ['145'], ['nine months', 'nine month'], ['three months'],
     [contract, `9876-${suffix}`],
-    ['ليلى منصور', 'Leila Mansour', 'Layla Mansour'],
+    ['ليلى منصور', 'Leila Mansour', 'Layla Mansour', 'Laila Mansour'],
   ];
   const foldedAnswer = foldForComparison(answer);
   const missing = required

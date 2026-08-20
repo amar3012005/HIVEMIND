@@ -199,6 +199,15 @@ function prepareOpenRouterBody(body, route) {
   // OpenRouter reject every provider with a misleading "no endpoints" 404.
   // Only GPT-OSS receives this compatibility parameter.
   if (!/^openai\/gpt-oss-/i.test(route.wireModel)) delete body.reasoning_effort;
+  // Do not send OpenRouter's provider-specific reasoning switch from a
+  // caller-selected model. Admin policy resolution can replace that model
+  // before this request is sent; `reasoning: { enabled: false }` then reaches
+  // providers where reasoning is mandatory and makes every endpoint reject
+  // the request. HIVE-MIND's normal chat path does not need hidden reasoning:
+  // GPT-OSS is bounded with `reasoning_effort: low` above and non-reasoning
+  // models receive neither control. This also makes primary and secondary
+  // requests share the exact same Cloudflare Gateway contract.
+  delete body.reasoning;
   const callerProviderPolicy = body.provider || {};
   body.provider = { ...(route.providerPolicy || {}), ...callerProviderPolicy };
   if (Array.isArray(callerProviderPolicy.order) && callerProviderPolicy.order.length) {

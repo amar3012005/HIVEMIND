@@ -181,17 +181,18 @@ test('GPT-OSS synthesis permits provider failover through OpenRouter when no dir
   }
 });
 
-test('only GPT-OSS retains its reasoning-effort compatibility parameter after policy routing', async () => {
+test('policy routing removes incompatible reasoning controls before the Gateway request', async () => {
   const prior = process.env.OPENROUTER_API_KEY;
   process.env.OPENROUTER_API_KEY = 'or-test';
   try {
     await chatCompletionFetch('openai/gpt-4.1', {
       method: 'POST',
-      body: JSON.stringify({ messages: [{ role: 'user', content: 'Answer' }], reasoning_effort: 'low' }),
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Answer' }], reasoning_effort: 'low', reasoning: { enabled: false } }),
     }, {
       fetchImpl: async (_url, options) => {
         const sent = JSON.parse(options.body);
         assert.equal(sent.reasoning_effort, undefined);
+        assert.equal(sent.reasoning, undefined);
         return new Response('{}', { status: 200 });
       },
     });
@@ -218,7 +219,7 @@ test('streaming retries the policy secondary after a provider-capability 404', a
   try {
     const result = await chatCompletionStream(DEFAULT_CHAT_SYNTHESIS_MODEL, {
       method: 'POST',
-      body: JSON.stringify({ messages: [{ role: 'user', content: 'Answer' }], reasoning_effort: 'low' }),
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Answer' }], reasoning_effort: 'low', reasoning: { enabled: false } }),
     }, {
       useCase: 'chat_synthesis',
       fetchImpl: async (_url, options) => {
@@ -232,8 +233,10 @@ test('streaming retries the policy secondary after a provider-capability 404', a
     assert.equal(calls.length, 2);
     assert.equal(calls[0].model, 'openai/gpt-4.1');
     assert.equal(calls[0].reasoning_effort, undefined);
+    assert.equal(calls[0].reasoning, undefined);
     assert.equal(calls[1].model, 'openai/gpt-oss-20b:nitro');
     assert.equal(calls[1].reasoning_effort, 'low');
+    assert.equal(calls[1].reasoning, undefined);
     assert.equal(result.content, 'Recovered');
     assert.equal(result.model, 'openai/gpt-oss-20b:nitro');
   } finally {

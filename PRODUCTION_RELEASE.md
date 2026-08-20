@@ -249,3 +249,15 @@
 - **Known independent issue:** broad Solvis chat synthesis remains intermittently unstable (`candidate_synthesis_validation_failed` / synthesis timeout) even though Gateway requests return HTTP 200; this is a grounded-synthesis/model-contract issue, not a Gateway transport failure, and is not hidden by this release.
 - **Manifest:** `/root/releases/manifests/4fd255f5/20260816T214510Z/RELEASE_MANIFEST.json`.
 - **Rollback:** canonical release aliases for Core, Employees and TARA Deepgram retain the previously accepted `3a87f0a3` images.
+
+## prod-20260820-1fbaac3f — chat answer depth and Memory Box hydration fan-out
+- **Date:** 2026-08-20
+- **Parent:** `singulance-main` at `1fbaac3fd5f8ac25c00cda9314e214fbeba6fb86`; frontend unchanged.
+- **Chat delivery:** the planner-selected window remains one pass: standard turns see the focused five-result window; detailed and comprehensive turns retain their selected broad window and use a rank-preserving coverage pack, without a second semantic-projection embedding pass. Fallback excerpts retain opening context and closing qualifiers rather than silently clipping to a prefix.
+- **Synthesis:** detailed/comprehensive responses explicitly enumerate distinct supported findings from their delivered window and use deliberate final-synthesis reasoning; concise standard turns retain the lower-latency focused policy.
+- **Memory Box transport:** grounded chat does not hydrate display-only synthesis-card evidence. Rich recall keeps that feature, but hydrates its supporting rows once in a batch. Graph expansion now batches neighbour hydration too, instead of fanning out a request per neighbour.
+- **Scope:** native `use_tools:false` recall/chat only. Composio routing, approvals, writes, and `use_tools:true` execution were unchanged. No migrations or provider writes.
+- **Tests:** 17 focused synthesis, evidence-projection, and progressive-router contracts passed; syntax and diff checks passed.
+- **Acceptance:** authenticated read-only chat for the same tenant passed at standard, detailed, and comprehensive depth. Detailed returned four distinct supported facts; comprehensive returned the two distinct recorded remarks. Traces showed semantic projection only for the standard turn and rank-preserving coverage for broad turns. Fresh Core logs contained no hydration queue-full, listener, reranker-degradation, projection-timeout, fatal, or uncaught errors.
+- **Images:** Core `hivemind/core-api:sha-1fbaac3f` (`sha256:fe9e21dfe7e336ea36c774bcccec3e2f29579c3f51c51c84378413c509dee6d1`), Control Plane (`sha256:276eec2de38bc78e8e0b260e773902e8294e72e67785d8e496a780a6ac4218c4`) and Employees (`sha256:4bf0bff3385bc35b87a89e1a1e59972a4b17d354f522abc57b8099e1be86cd56`) all run `sha-1fbaac3f`, healthy.
+- **Rollback:** immutable preceding release images `sha-71b0806a` remain available through the release rollback aliases.

@@ -2929,11 +2929,15 @@ export async function runReactAgentV2({
         queries: intentDecision.queries?.length ? intentDecision.queries : [message],
       };
     }
-    // Final native-grounding boundary after every planner/normalization seam
-    // and before the direct-answer fast path. It shares the router's rule so
-    // no future normalization or model-provided refusal label can bypass
-    // tenant-scoped recall by returning `operation: direct`.
-    const nativeGrounding = enforceNativeGroundingDecision(intentDecision, message, { useTools });
+    // Final native-grounding boundary for the progressive native planner after
+    // every normalization seam and before the direct-answer fast path. It
+    // shares the router's rule so no progressive model-provided refusal label
+    // can bypass tenant-scoped recall by returning `operation: direct`.
+    // Legacy direct turns retain their explicit compatibility contract; the
+    // live native router is `CHAT_ROUTER=progressive`.
+    const nativeGrounding = intentDecision._router === 'progressive'
+      ? enforceNativeGroundingDecision(intentDecision, message, { useTools })
+      : { decision: intentDecision, overridden: false };
     intentDecision = nativeGrounding.decision;
     if (nativeGrounding.overridden) {
       trace.warnings.push('native_direct_grounding_override');

@@ -34,7 +34,11 @@ test('native planner requests a semantic retrieval expression instead of a copie
   );
   assert.deepEqual(
     context.function.parameters.properties.answer_scope.enum,
-    ['bounded', 'broad', 'exhaustive'],
+    ['exhaustive', 'broad', 'bounded'],
+  );
+  assert.deepEqual(
+    context.function.parameters.properties.answer_completion_requirement.enum,
+    ['complete_set', 'multi_facet', 'single_answer'],
   );
 });
 
@@ -47,6 +51,20 @@ test('semantic exhaustive scope cannot be reduced to a five-item answer window',
     source_title: null, valid_at: null, known_at: null, range_start: null, range_end: null,
     aggregate_kind: null, answer_type: 'fact',
   }, 'Give me the complete account of this person.', 'en', { useTools: false });
+  assert.equal(decision.answer_scope, 'exhaustive');
+  assert.equal(decision.response_depth, 'comprehensive');
+});
+
+test('complete-set commitment protects against a contradictory bounded scope', () => {
+  const { decision } = adaptToDecision('hivemind_context', {
+    native_tool: 'hivemind_recall', temporal_axis: 'none', operation: 'recall', temporal_semantics: 'none',
+    query_original: 'complete retained claims', query_canonical_en: 'all retained claims for named subject',
+    response_language: 'en', mode: 'full', entities: ['Person'], answer_scope: 'bounded',
+    answer_completion_requirement: 'complete_set', response_depth: 'standard', retrieval_shape: 'fact',
+    answer_objective: 'Collect the complete retained set.', source_title: null,
+    valid_at: null, known_at: null, range_start: null, range_end: null,
+    aggregate_kind: null, answer_type: 'fact',
+  }, 'Complete retained claims for this person.', 'en', { useTools: false });
   assert.equal(decision.answer_scope, 'exhaustive');
   assert.equal(decision.response_depth, 'comprehensive');
 });

@@ -10,6 +10,7 @@ import {
   DEFAULT_HQ_AWAKENING_MODEL,
   DEFAULT_HQ_DISPATCH_MODEL,
   resolveChatCompletionRoute,
+  shouldPolicyFallbackStatus,
 } from '../../src/llm/chat-provider.js';
 import { configureAiGovernance, invalidateAiModelPolicyCache } from '../../src/llm/ai-governance.js';
 
@@ -177,6 +178,68 @@ test('GPT-OSS synthesis permits provider failover through OpenRouter when no dir
     else process.env.OPENROUTER_API_KEY = priorOpenRouter;
     if (priorCerebras == null) delete process.env.CEREBRAS_API_KEY;
     else process.env.CEREBRAS_API_KEY = priorCerebras;
+  }
+});
+
+test('only GPT-OSS retains its reasoning-effort compatibility parameter after policy routing', async () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  try {
+    await chatCompletionFetch('openai/gpt-4.1', {
+      method: 'POST',
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Answer' }], reasoning_effort: 'low' }),
+    }, {
+      fetchImpl: async (_url, options) => {
+        const sent = JSON.parse(options.body);
+        assert.equal(sent.reasoning_effort, undefined);
+        return new Response('{}', { status: 200 });
+      },
+    });
+  } finally {
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
+  }
+});
+
+test('provider capability 404 is eligible for the policy fallback', () => {
+  assert.equal(shouldPolicyFallbackStatus(404), true);
+  assert.equal(shouldPolicyFallbackStatus(400), false);
+});
+
+test('streaming retries the policy secondary after a provider-capability 404', async () => {
+  const prior = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'or-test';
+  configureAiGovernance({ $queryRawUnsafe: async () => [{
+    use_case: 'chat_synthesis', primary_model: 'openai/gpt-4.1', secondary_model: 'openai/gpt-oss-20b:nitro', enabled: true, revision: 1,
+  }] });
+  invalidateAiModelPolicyCache();
+  const encoder = new TextEncoder();
+  const calls = [];
+  try {
+    const result = await chatCompletionStream(DEFAULT_CHAT_SYNTHESIS_MODEL, {
+      method: 'POST',
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'Answer' }], reasoning_effort: 'low' }),
+    }, {
+      useCase: 'chat_synthesis',
+      fetchImpl: async (_url, options) => {
+        calls.push(JSON.parse(options.body));
+        if (calls.length === 1) return new Response('{"error":"no eligible endpoint"}', { status: 404 });
+        return new Response(new ReadableStream({
+          start(controller) { controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Recovered"},"finish_reason":"stop"}]}\n\n')); controller.close(); },
+        }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      },
+    });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].model, 'openai/gpt-4.1');
+    assert.equal(calls[0].reasoning_effort, undefined);
+    assert.equal(calls[1].model, 'openai/gpt-oss-20b:nitro');
+    assert.equal(calls[1].reasoning_effort, 'low');
+    assert.equal(result.content, 'Recovered');
+    assert.equal(result.model, 'openai/gpt-oss-20b:nitro');
+  } finally {
+    configureAiGovernance(null); invalidateAiModelPolicyCache();
+    if (prior == null) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = prior;
   }
 });
 

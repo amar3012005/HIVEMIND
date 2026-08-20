@@ -1084,16 +1084,27 @@ async function expandCandidatesViaGraph(store, {
     }
   }
 
-  // PASS 2 (concurrent): batch-fetch every neighbour memory at once instead of
-  // one-await-at-a-time inside the double loop. This was the dominant recall
-  // latency stage (serial N+1 getMemory). Same set of memories, fetched in
-  // parallel (bounded by the Prisma pool). Unfetchable ids are skipped, exactly
-  // like the old per-item try/catch.
-  const _fetchedById = new Map();
-  await Promise.all(_toExpand.map(async ({ relatedId }) => {
-    try { const m = await store.getMemory(relatedId); if (m) _fetchedById.set(relatedId, m); }
-    catch { /* skip — mirrors old silent per-item catch */ }
-  }));
+  // PASS 2: hydrate every neighbour in one store batch.  A Promise.all of
+  // individual getMemory calls is only "concurrent", not a batch; for a
+  // remote Memory Box it becomes one /hydrate request per graph neighbour and
+  // can consume the tenant transport queue before the actual recall is done.
+  // getMemories is a single findMany centrally and a single /v1/hydrate
+  // remotely, while preserving the same absent-row behaviour.
+  let _fetchedById = new Map();
+  const _expandIds = [...new Set(_toExpand.map(({ relatedId }) => relatedId).filter(Boolean))];
+  if (_expandIds.length) {
+    try {
+      if (typeof store.getMemories === 'function') {
+        _fetchedById = await store.getMemories(_expandIds);
+      } else {
+        const rows = await Promise.all(_expandIds.map((relatedId) =>
+          Promise.resolve(store.getMemory?.(relatedId)).catch(() => null)));
+        _fetchedById = new Map(rows.filter(Boolean).map((memory) => [memory.id, memory]));
+      }
+    } catch {
+      _fetchedById = new Map();
+    }
+  }
 
   // PASS 3 (sync): score + push in the SAME encounter order the serial loop
   // produced, so the output array (and the downstream MAX-dedup/merge) is

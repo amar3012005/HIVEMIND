@@ -342,7 +342,15 @@ function redraw(state) {
   // the whole screen each frame — flickers visibly on a real terminal).
   const body = frame.map((l) => {
     const pad = Math.max(0, cols - visLen(l));
-    return BG_BLACK + l + ' '.repeat(pad) + RESET;
+    // Every m.xxx() span ends with a bare RESET (\x1b[0m), which clears the background too —
+    // so any content built from more than one styled span (or followed by trailing pad spaces)
+    // would fall through to the terminal's OWN default background between/after them. Real bug
+    // caught from an actual screenshot: white rectangles behind short lines (the tip hints) where
+    // their content's own reset landed well before the padding that fills out the rest of the
+    // row. Re-assert the black background after every internal reset, not just once at the very
+    // start of the line.
+    const forced = l.split(RESET).join(RESET + BG_BLACK);
+    return BG_BLACK + forced + ' '.repeat(pad) + RESET;
   }).join('\r\n');
 
   // Input row = the box's MIDDLE line: everything above it, plus its own top border, plus 1

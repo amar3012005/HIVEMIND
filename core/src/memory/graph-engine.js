@@ -71,6 +71,39 @@ function _sleep(ms) {
 
 const ENTITY_MEMORY_TYPES = new Set(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'relationship']);
 
+// qwen3-ingest needs a shape contract, not merely JSON mode. This mirrors the
+// linker parser below: required arrays keep a single extracted entity from
+// being returned as the whole response, while optional fields preserve the
+// current tolerant enrichment and retry semantics.
+const QWEN_ENTITY_LINK_RESPONSE_FORMAT = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'hivemind_entity_link',
+    schema: {
+      type: 'object',
+      properties: {
+        entities: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              kind: { type: 'string', enum: ['person', 'organization', 'product', 'place', 'technology', 'standard'] },
+            },
+            required: ['name', 'kind'],
+            additionalProperties: true,
+          },
+        },
+        temporal: { type: 'object' },
+        memory_type: { type: 'string' },
+        links: { type: 'array', items: { type: 'object' } },
+      },
+      required: ['entities', 'links'],
+      additionalProperties: true,
+    },
+  },
+};
+
 function extractedEntityCandidates(memory) {
   const out = [];
   const seen = new Set();
@@ -78,7 +111,10 @@ function extractedEntityCandidates(memory) {
     const name = typeof value === 'string'
       ? value.trim()
       : (value && typeof value.name === 'string' ? value.name.trim() : '');
-    if (!name || name.length >= 120) return;
+    // A canonical entity must contain a letter in some human language. This
+    // rejects years, bare quantities and timestamps even when a model labels
+    // one as a product, while retaining genuine model names such as "3M".
+    if (!name || name.length >= 120 || !/\p{L}/u.test(name)) return;
     const slug = normalizeEntity(name);
     if (!slug || seen.has(slug)) return;
     seen.add(slug);
@@ -2718,6 +2754,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
             temperature: 0.1,
             max_tokens: 700,
             json_mode: true,
+            response_format: QWEN_ENTITY_LINK_RESPONSE_FORMAT,
             feature: 'entity-linking',
           });
           lastRaw = JSON.stringify(parsed);

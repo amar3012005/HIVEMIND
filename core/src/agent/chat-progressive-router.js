@@ -5,24 +5,25 @@
  * CHAT_ROUTER=progressive, which is the live production default as of the
  * 2026-07 flip (set CHAT_ROUTER=legacy to fall back to parseChatIntent, which
  * is kept in sync). The router picks ONE of seven high-level capabilities
- * via a single Cerebras-direct call; a compact adapter compiles that choice
+ * via a single structured model call; a compact adapter compiles that choice
  * into the SAME `decision` shape parseChatIntent produces, which then flows
  * through the UNCHANGED intentDecisionToPlan → gatherEvidence → citation
  * validation → GPT-OSS synthesis pipeline. No behavior is duplicated; the seven
  * tools are a thinner front-door, not a second orchestrator.
  *
- * Benchmarked: 96.7% routing accuracy, ~0.78s avg / 1.55s p95, ~1.3k tokens
- * (vs the current Gemini/GPT-OSS router at 69.6% / 2.47s). See
- * benchmarks/tool-routing/. The live A/B gate passed, so this is now the
- * default path; the legacy planner remains the maintained fallback.
+ * The router is intentionally one call. Native turns require dependable
+ * semantic coverage classification as well as tool selection, so GPT-4.1 is
+ * the primary structured planner; GPT-OSS Nitro remains the independent
+ * fallback for availability.
  */
 
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 import { getStaticPromptArtifact, promptContributionTelemetry } from './chat-static-prompt-cache.js';
 
-// Router model: Cerebras-direct gpt-oss-120b (the hardened synthesis path).
-// Env-overridable for A/B; falls back to the resolved synthesis model.
-const ROUTER_MODEL = process.env.CHAT_PROGRESSIVE_ROUTER_MODEL || 'cerebras/gpt-oss-120b';
+// Router model: semantic routing errors can hide retained evidence by choosing
+// a five-record window. Prefer the stronger structured planner for this one
+// decision; it is env-overridable and has an independent Nitro fallback.
+const ROUTER_MODEL = process.env.CHAT_PROGRESSIVE_ROUTER_MODEL || 'openai/gpt-4.1';
 const ROUTER_FALLBACK_MODEL = process.env.CHAT_PROGRESSIVE_ROUTER_FALLBACK_MODEL || 'openai/gpt-oss-20b:nitro';
 
 const object = (properties, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false });

@@ -1,6 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { configureAiGovernance, invalidateAiModelPolicyCache, recordAiUsage, resolveAiModelPolicy, validateModelId } from '../../src/llm/ai-governance.js';
+import { configureAiGovernance, invalidateAiModelPolicyCache, normalizeModelPolicyInput, recordAiUsage, resolveAiModelPolicy, validateModelId } from '../../src/llm/ai-governance.js';
+
+test('model policy input accepts the platform UI camelCase contract', () => {
+  assert.deepEqual(normalizeModelPolicyInput({
+    useCase: 'chat_synthesis', primaryModel: 'openai/gpt-oss-20b:nitro', secondaryModel: 'openai/gpt-4.1',
+  }), {
+    useCase: 'chat_synthesis', primaryModel: 'openai/gpt-oss-20b:nitro', secondaryModel: 'openai/gpt-4.1',
+  });
+  assert.deepEqual(normalizeModelPolicyInput({ policy: {
+    use_case: 'chat_planner', primary_model: 'google/gemini-2.5-flash-lite', secondary_model: null,
+  } }), {
+    useCase: 'chat_planner', primaryModel: 'google/gemini-2.5-flash-lite', secondaryModel: null,
+  });
+});
 
 test('model policy resolves an admin primary and secondary atomically', async () => {
   configureAiGovernance({ $queryRawUnsafe: async () => [{ use_case: 'chat_synthesis', primary_model: 'openai/gpt-oss-20b:nitro', secondary_model: 'nvidia/nemotron-3.5-lightning:nitro', enabled: true, revision: 7 }] });

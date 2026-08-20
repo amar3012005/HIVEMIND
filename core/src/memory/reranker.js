@@ -52,7 +52,12 @@ const TIMEOUT   = Number(process.env.RERANK_TIMEOUT_MS || 2500);
 // allowing the chain to outlive the recall response by many seconds.
 const TOTAL_TIMEOUT = Math.max(100, Number(process.env.RERANK_TOTAL_TIMEOUT_MS || 1200));
 const MAX_ATTEMPTS_TOTAL = Math.max(1, Number(process.env.RERANK_MAX_ATTEMPTS_TOTAL || 2));
-const FALLBACK_RESERVE = Math.max(50, Number(process.env.RERANK_FALLBACK_RESERVE_MS || 350));
+// The managed fallback needs a real warm request budget. Reserving 350ms
+// made a timeout on the self-hosted primary leave Voyage Lite only ~350ms,
+// which is below its observed normal tail and caused a needless degradation.
+// With the production two-attempt contract, split the 1.2s total budget into
+// two viable ~600ms attempts. Operators can still tune this explicitly.
+const FALLBACK_RESERVE = Math.max(50, Number(process.env.RERANK_FALLBACK_RESERVE_MS || 600));
 // One transient retry (abort/timeout/429/5xx) so a single slow attempt doesn't
 // drop the rerank — ensures Cohere is actually used, not just when the network
 // is calm. Non-transient errors degrade immediately (no load amplification).
@@ -308,14 +313,13 @@ export async function rerank(query, candidates, { topN } = {}) {
     for (let a = 0; a <= RETRIES; a++) {
       const attemptsLeft = Math.max(1, MAX_ATTEMPTS_TOTAL - totalAttempts);
       const remainingRunMs = Math.max(0, runDeadlineAt - Date.now());
-      // A 50/50 split gave the healthy primary only ~600ms even though its
-      // normal latency is ~300ms and provider cold-tail occasionally crosses
-      // 600ms. That aborted useful work, then left the fallback another full
-      // half-budget and doubled tail latency. Give the primary most of the
-      // shared budget while retaining a measured warm-sized fallback reserve.
-      // The reserve scales down for small test/deadline budgets.
+      // A provider fallback is useful only when it receives enough budget to
+      // complete. Split the remaining shared budget across the remaining
+      // attempts, bounded by the configured reserve. This keeps a failed
+      // primary from starving the next provider while preserving one strict
+      // end-to-end deadline for the entire rerank operation.
       const fallbackReserve = attemptsLeft > 1
-        ? Math.min(FALLBACK_RESERVE, Math.floor(remainingRunMs * 0.35))
+        ? Math.min(FALLBACK_RESERVE, Math.floor(remainingRunMs / attemptsLeft))
         : 0;
       const fairShare = attemptsLeft > 1
         ? Math.max(1, remainingRunMs - fallbackReserve)

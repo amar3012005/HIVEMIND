@@ -49,6 +49,51 @@ test('reranker shares one total budget across primary and fallback and reports t
   assert.ok(Date.now() - startedAt < 260, 'the complete provider chain must obey one wall-clock budget');
 });
 
+test('a primary timeout leaves the managed fallback a viable equal share of the total budget', async (t) => {
+  const attempts = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      attempts.push(body.model);
+      const delay = body.model === 'primary-timeout' ? 700 : 430;
+      setTimeout(() => {
+        if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
+        if (!res.writableEnded) res.end(JSON.stringify({ results: [
+          { index: 1, relevance_score: 0.95 }, { index: 0, relevance_score: 0.05 },
+        ] }));
+      }, delay);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  process.env.RERANK_ENABLED = 'true';
+  process.env.RERANK_PROVIDER = 'cohere';
+  process.env.RERANK_URL = `http://127.0.0.1:${server.address().port}`;
+  process.env.RERANK_MODEL = 'primary-timeout';
+  process.env.RERANK_FALLBACK_URL = '';
+  process.env.RERANK_FALLBACK_MODEL = '';
+  process.env.RERANK_FALLBACK_MODELS = 'fallback-viable';
+  process.env.RERANK_TIMEOUT_MS = '1200';
+  process.env.RERANK_TOTAL_TIMEOUT_MS = '1200';
+  process.env.RERANK_MAX_ATTEMPTS_TOTAL = '2';
+  process.env.RERANK_RETRIES = '0';
+  process.env.RERANK_FALLBACK_RESERVE_MS = '';
+  const { rerank } = await import(`../../src/memory/reranker.js?equal-share=${Date.now()}`);
+
+  const rows = await rerank('target fact', [
+    { id: 'distractor', content: 'unrelated' }, { id: 'target', content: 'target fact' },
+  ], { topN: 2 });
+
+  assert.equal(rows[0].id, 'target');
+  assert.deepEqual(attempts, ['primary-timeout', 'fallback-viable']);
+  assert.equal(rows.rerank_meta.status, 'served');
+  assert.equal(rows.rerank_meta.model, 'fallback-viable');
+  assert.equal(rows.rerank_meta.attempts, 2);
+});
+
 test('reranker can fail over to a distinct endpoint and model', async (t) => {
   const primary = http.createServer((_req, res) => {
     res.writeHead(503, { 'content-type': 'application/json' });

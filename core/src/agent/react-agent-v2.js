@@ -1801,7 +1801,9 @@ export async function answerStep({ message, history, evidence, plan, language, a
     const semanticProjectionMaxRows = Math.max(1, Number(process.env.HIVEMIND_SEMANTIC_PROJECTION_MAX_ROWS || 5));
     const semanticProjectionMaxChars = Math.max(1000, Number(process.env.HIVEMIND_SEMANTIC_PROJECTION_MAX_CHARS || 7000));
     const selectedProjectionChars = _selectedMemories.reduce((sum, memory) => sum + String(memory?.content || '').length, 0);
-    const useSemanticProjection = _selectedMemories.length <= semanticProjectionMaxRows
+    const requiresBroadEvidenceDelivery = ['detailed', 'comprehensive'].includes(plan.response_depth);
+    const useSemanticProjection = !requiresBroadEvidenceDelivery
+      && _selectedMemories.length <= semanticProjectionMaxRows
       && selectedProjectionChars <= semanticProjectionMaxChars;
     if (!_projectedMemories && useSemanticProjection) {
       const timeoutMs = Number(process.env.HIVEMIND_EVIDENCE_PROJECTION_TIMEOUT_MS || 3500);

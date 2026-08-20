@@ -390,9 +390,12 @@ export function getDefaultModel() {
  */
 export function buildModelFallbackChain({ requested = [], policy = null } = {}) {
   const requestedModels = Array.isArray(requested) ? requested.filter(Boolean) : [];
-  const policyModels = policy?.source === 'admin'
-    ? [policy.primary, policy.secondary].filter(Boolean)
-    : [];
+  // Defaults are policy too. Excluding them meant a caller-provided legacy
+  // model silently won whenever no admin row existed, which made new safe
+  // defaults (including Qwen ingestion) inert until a database row happened
+  // to be configured. Requested models remain behind the policy chain as
+  // resilient fallbacks.
+  const policyModels = [policy?.primary, policy?.secondary].filter(Boolean);
   return [...new Set([...policyModels, ...requestedModels])];
 }
 

@@ -59,6 +59,23 @@ test('chat rejects model-invented citations and keeps opt-in general knowledge v
   assert.equal(allowed.grounded, false);
 });
 
+test('chat canonicalizes an unambiguous local evidence citation but rejects an ambiguous one', () => {
+  const packets = [
+    { citations: [{ id: 'C1', memory_id: 'm1' }] },
+    { citations: [{ id: 'E1', segment_id: 's1' }] },
+  ];
+  const resolved = validateChatAnswer({
+    claims: [{ text: 'The document names Kruti.', grounded: true, citation_ids: ['E1'] }],
+  }, packets);
+  assert.deepEqual(resolved.claims[0].citation_ids, ['P2-E1']);
+
+  const ambiguous = validateChatAnswer({
+    claims: [{ text: 'Uncertain citation.', grounded: true, citation_ids: ['C1'] }],
+  }, [{ citations: [{ id: 'C1', memory_id: 'm1' }] }, { citations: [{ id: 'C1', segment_id: 's1' }] }]);
+  assert.equal(ambiguous.claims.length, 0);
+  assert.equal(ambiguous.rejected_claims[0].reason, 'missing_valid_citation');
+});
+
 test('memory-only citations expose the server-owned memory id and memory evidence type', () => {
   const sources = buildChatCitationSources([{
     facts: [{ id: 'memory-1', title: 'Operations note', content: 'The recovery code is ZX-91-Q.' }],

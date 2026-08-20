@@ -1406,9 +1406,36 @@ export function buildChatCitationSources(recallPackets = [], claims = []) {
 }
 
 export function validateChatAnswer(payload, recallPackets = [], { allowGeneralKnowledge = false } = {}) {
+  // The server namespaces citations across recall packets (P1-C1, P2-E1) so
+  // a claim can never accidentally cite the wrong subquery. Some providers
+  // nevertheless reproduce the local, source-owned ID visible in an evidence
+  // row (C1/E1). Preserve grounding without weakening it: resolve such an ID
+  // only when exactly one delivered citation has that suffix. Ambiguous local
+  // IDs remain invalid and model-invented IDs are still rejected.
+  const packet = buildChatCitationPacket(recallPackets);
+  const validIds = new Set(packet.citations.map((citation) => citation.id));
+  const resolveCitation = (candidate) => {
+    const id = typeof candidate === 'string' ? candidate.trim() : '';
+    if (!id) return null;
+    if (validIds.has(id)) return id;
+    const matches = [...validIds].filter((known) => known.endsWith(`-${id}`));
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const normalizedPayload = {
+    ...(payload && typeof payload === 'object' ? payload : {}),
+    claims: Array.isArray(payload?.claims) ? payload.claims.map((claim) => {
+      const rawIds = Array.isArray(claim?.citation_ids)
+        ? claim.citation_ids
+        : (Array.isArray(claim?.citations) ? claim.citations : []);
+      return {
+        ...claim,
+        citation_ids: [...new Set(rawIds.map(resolveCitation).filter(Boolean))],
+      };
+    }) : [],
+  };
   return validateGroundedClaims(
-    payload,
-    buildChatCitationPacket(recallPackets),
+    normalizedPayload,
+    packet,
     { allowGeneralKnowledge },
   );
 }

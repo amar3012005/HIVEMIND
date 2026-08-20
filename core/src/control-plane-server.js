@@ -1486,7 +1486,14 @@ function getPlatformAdminSession(req) {
   const expected = crypto.createHmac('sha256', ADMIN_SECRET).update(`platform:${expiresAt}:${operatorToken}`).digest('base64url');
   if (!secretsMatch(signature, expected)) return null;
   const operator = normalizePlatformOperator(Buffer.from(operatorToken, 'base64url').toString('utf8'));
-  return operator ? { operator, expiresAt: Number(expiresAt), sessionId: crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32) } : null;
+  if (!operator) return null;
+  // audit_logs.session_id is a UUID column.  The platform-admin cookie is not
+  // a database session, but we still need a stable, non-sensitive correlation
+  // id for its short lifetime.  Derive an RFC-4122-shaped value from the
+  // signed cookie rather than passing a raw hash into Prisma's UUID field.
+  const digest = crypto.createHash('sha256').update(raw).digest('hex');
+  const sessionId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
+  return { operator, expiresAt: Number(expiresAt), sessionId };
 }
 
 function hasPlatformAdminCookie(req) {
@@ -3005,8 +3012,11 @@ const server = http.createServer(async (req, res) => {
       const input = normalizeModelPolicyInput(body);
       const policy = await upsertModelPolicy({ ...input, operator: operator.operator });
       await audit({ eventType: 'platform.model_policy_updated', eventCategory: 'ai_governance', action: 'update',
-        resourceType: 'ai_model_policy', resourceId: policy.use_case,
-        metadata: { operator: operator.operator, primary_model: policy.primary_model, secondary_model: policy.secondary_model, revision: policy.revision },
+        // A policy use case is a natural key (for example, `chat_planner`),
+        // while AuditLog.resource_id is explicitly UUID-typed.  Preserve the
+        // key in immutable metadata instead of writing an invalid UUID.
+        resourceType: 'ai_model_policy', resourceId: null,
+        metadata: { operator: operator.operator, policy_use_case: policy.use_case, primary_model: policy.primary_model, secondary_model: policy.secondary_model, revision: policy.revision },
         ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
       return jsonResponse(res, { policy });
     } catch (error) { return jsonResponse(res, { error: error.message }, 400); }

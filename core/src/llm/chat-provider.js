@@ -193,12 +193,24 @@ function prepareOpenRouterBody(body, route) {
       && body.reasoning_effort == null) {
     body.reasoning_effort = 'low';
   }
+  // A caller can decide its request shape before policy resolution. Once an
+  // admin policy upgrades that request from GPT-OSS to a non-reasoning model
+  // such as GPT-4.1, carrying the stale GPT-OSS-only parameter makes
+  // OpenRouter reject every provider with a misleading "no endpoints" 404.
+  // Only GPT-OSS receives this compatibility parameter.
+  if (!/^openai\/gpt-oss-/i.test(route.wireModel)) delete body.reasoning_effort;
   const callerProviderPolicy = body.provider || {};
   body.provider = { ...(route.providerPolicy || {}), ...callerProviderPolicy };
   if (Array.isArray(callerProviderPolicy.order) && callerProviderPolicy.order.length) {
     delete body.provider.sort;
   }
   return body;
+}
+
+export function shouldPolicyFallbackStatus(status) {
+  // 404 here is OpenRouter's provider-capability response, not a missing API
+  // route. It is safe to move to the policy's independently configured model.
+  return [404, 408, 429, 500, 502, 503, 504].includes(Number(status));
 }
 
 function inferUseCase(model, explicit) {
@@ -257,7 +269,7 @@ export async function chatCompletionFetch(model, options = {}, { fallbackApiKey,
     body: JSON.stringify(body),
   });
   void meterCompletionResponse(response, { requestedModel: policy.primary, useCase: policy.useCase, traceId });
-  if (!response.ok && policy.source === 'admin' && policy.secondary && [408, 429, 500, 502, 503, 504].includes(response.status) && !options.signal?.aborted) {
+  if (!response.ok && policy.source === 'admin' && policy.secondary && shouldPolicyFallbackStatus(response.status) && !options.signal?.aborted) {
     const fallbackRoute = resolveChatCompletionRoute(policy.secondary, { fallbackApiKey, concreteGatewayModel: policy.source === 'admin' });
     let fallbackBody = options.body ? JSON.parse(options.body) : {};
     fallbackBody.model = fallbackRoute.wireModel;
@@ -294,36 +306,37 @@ export async function chatCompletionStream(model, options = {}, {
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('chat_fetch_unavailable');
   const policy = await resolveAiModelPolicy(inferUseCase(model, useCase), model);
-  const route = resolveChatCompletionRoute(policy.primary, { fallbackApiKey, concreteGatewayModel: policy.source === 'admin' });
-  let body;
+  let route = resolveChatCompletionRoute(policy.primary, { fallbackApiKey, concreteGatewayModel: policy.source === 'admin' });
+  let sourceBody;
   try {
-    body = options.body ? JSON.parse(options.body) : {};
+    sourceBody = options.body ? JSON.parse(options.body) : {};
   } catch {
     throw new Error('chat_request_body_invalid');
   }
-  body.model = route.wireModel;
-  body.stream = true;
-  body.stream_options = { ...(body.stream_options || {}), include_usage: true };
-  if (route.provider.startsWith('openrouter:')) {
-    prepareOpenRouterBody(body, route);
-  }
-
-  const requestHeaders = {
-    ...(options.headers || {}),
-    'Content-Type': 'application/json',
-    ...(route.apiKey ? { Authorization: `Bearer ${route.apiKey}` } : {}),
-    ...(route.provider.startsWith('openrouter:') ? {
-      'HTTP-Referer': 'https://singulancelabs.com',
-      'X-Title': 'SINGULANCE HIVEMIND',
-    } : {}),
+  const requestFor = (selectedRoute) => {
+    const body = { ...sourceBody, model: selectedRoute.wireModel, stream: true,
+      stream_options: { ...(sourceBody.stream_options || {}), include_usage: true } };
+    if (selectedRoute.provider.startsWith('openrouter:')) prepareOpenRouterBody(body, selectedRoute);
+    const headers = {
+      ...(options.headers || {}), 'Content-Type': 'application/json',
+      ...(selectedRoute.apiKey ? { Authorization: `Bearer ${selectedRoute.apiKey}` } : {}),
+      ...(selectedRoute.provider.startsWith('openrouter:') ? { 'HTTP-Referer': 'https://singulancelabs.com', 'X-Title': 'SINGULANCE HIVEMIND' } : {}),
+    };
+    return {
+      ...options,
+      headers: selectedRoute.provider === 'cloudflare-dynamic' || isGatewayUrl(selectedRoute.url)
+        ? gatewayRequestHeaders(headers, selectedRoute.provider.startsWith('openrouter:') ? 'openrouter' : undefined)
+        : headers,
+      body: JSON.stringify(body),
+    };
   };
-  const response = await fetchImpl(route.url, {
-    ...options,
-    headers: route.provider === 'cloudflare-dynamic' || isGatewayUrl(route.url)
-      ? gatewayRequestHeaders(requestHeaders, route.provider.startsWith('openrouter:') ? 'openrouter' : undefined)
-      : requestHeaders,
-    body: JSON.stringify(body),
-  });
+  let response = await fetchImpl(route.url, requestFor(route));
+  let selectedModel = policy.primary;
+  if (!response.ok && policy.source === 'admin' && policy.secondary && shouldPolicyFallbackStatus(response.status) && !options.signal?.aborted) {
+    route = resolveChatCompletionRoute(policy.secondary, { fallbackApiKey, concreteGatewayModel: true });
+    selectedModel = policy.secondary;
+    response = await fetchImpl(route.url, requestFor(route));
+  }
   if (!response.ok || !response.body?.getReader) {
     const errorText = await response.text().catch(() => '');
     return {
@@ -366,7 +379,7 @@ export async function chatCompletionStream(model, options = {}, {
     if (done) break;
   }
   if (buffer.trim()) await consume(buffer);
-  void recordAiUsage({ usage, requestedModel: policy.primary, servedModel: route.wireModel,
+  void recordAiUsage({ usage, requestedModel: selectedModel, servedModel: route.wireModel,
     provider: provider || response.headers.get('cf-aig-provider') || 'unknown', useCase: policy.useCase, traceId,
     gatewayRequestId: response.headers.get('cf-aig-log-id') || response.headers.get('cf-ray') });
   return { ok: true, status: response.status, content, usage, provider, model: route.wireModel, finish_reason: finishReason };

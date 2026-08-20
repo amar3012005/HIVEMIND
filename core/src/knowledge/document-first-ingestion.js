@@ -80,6 +80,29 @@ const QWEN_UNIFIED_FACTS_RESPONSE_FORMAT = {
   },
 };
 
+const QWEN_RELATION_EDGES_RESPONSE_FORMAT = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'hivemind_document_relationships',
+    schema: {
+      type: 'object',
+      properties: {
+        edges: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { from: { type: 'integer' }, to: { type: 'integer' }, type: { type: 'string' } },
+            required: ['from', 'to', 'type'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['edges'],
+      additionalProperties: false,
+    },
+  },
+};
+
 function usableEmbedding(vector) {
   return isValidEmbeddingVector(vector);
 }
@@ -2404,8 +2427,11 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
       }));
 
     if (pool.length === 1) return fallback();
-    const model = process.env.KB_CURATOR_MODEL || process.env.KB_UNIFIED_MODEL
-      || process.env.MEMORY_PROCESSOR_MODEL || 'deepseek/deepseek-v4-flash-0731';
+    // Curator intentionally has an independent model policy from atomic
+    // ingestion. Do not inherit KB_UNIFIED_MODEL here: that switch belongs to
+    // Qwen fact/entity/relation extraction, while this stage needs the proven
+    // multi-candidate grounding model until Qwen passes its own corpus.
+    const model = process.env.KB_CURATOR_MODEL || 'google/gemini-2.5-flash-lite';
     const input = pool.map((candidate, index) => ({
       i: index,
       type: candidate.memory_type,
@@ -2436,9 +2462,14 @@ Every item must include a non-empty content field and one or more valid support_
       || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean);
     try {
       const parsed = await chatCompletionWithFallback({
-        models: [model, ..._curatorFallbacks], temperature: 0,
+        // Qwen is used for atomic fact/entity/relation extraction. The
+        // document curator has a stricter multi-candidate grounding contract;
+        // its Qwen canary fabricated unsupported context and hit its output
+        // limit, so retain the proven curator family until it passes a
+        // dedicated acceptance corpus.
+        models: [process.env.KB_CURATOR_MODEL || model, ..._curatorFallbacks], temperature: 0,
         max_tokens: llmProfile('kb-document-curator').maxTokens,
-        json_mode: true, feature: 'kb-document-curator',
+        json_mode: true, honorModelPolicy: false, feature: 'kb-document-curator',
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: `Document: ${docTitle}\nCandidates:\n${JSON.stringify(input)}` },
@@ -5151,7 +5182,8 @@ Every item must include a non-empty content field and one or more valid support_
                 _relParsed = await chatCompletionWithFallback({
                   models: [process.env.KB_UNIFIED_MODEL || 'deepseek/deepseek-v4-flash-0731',
                     ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean)],
-                  temperature: 0, max_tokens: llmProfile('kb-doc-relations').maxTokens, json_mode: true, feature: 'kb-doc-relations',
+                  temperature: 0, max_tokens: llmProfile('kb-doc-relations').maxTokens, json_mode: true,
+                  response_format: QWEN_RELATION_EDGES_RESPONSE_FORMAT, feature: 'kb-doc-relations',
                   messages: [
                     { role: 'system', content: 'You link facts extracted from ONE document. Given numbered facts, output JSON {"edges":[{"from":<idx>,"to":<idx>,"type":"Updates"|"Extends"|"Contradicts"|"Derives"}]}. Updates: from REPLACES to (newer value of the same attribute). Extends: from adds detail to to. Contradicts: they cannot both hold. Derives: from is an inference implied by to. Only edges you are CONFIDENT of — an empty list is a good answer. Never invent facts.' },
                     { role: 'user', content: `Document: ${docTitle}\nFacts:\n${_relList}` },

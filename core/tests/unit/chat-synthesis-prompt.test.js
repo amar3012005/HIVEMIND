@@ -11,6 +11,9 @@ test('fact synthesis loads only the compact grounding and citation contract', ()
   assert.match(prompt, /closely related grounded detail/i);
   assert.match(prompt, /living memory/i);
   assert.match(prompt, /thoughtful colleague/i);
+  assert.match(prompt, /well-informed human colleague/i);
+  assert.match(prompt, /one bounded fact/i);
+  assert.match(prompt, /semantic breadth and the useful evidence determine length/i);
   assert.match(prompt, /default to the inside voice/i);
   assert.match(prompt, /Humanity never licenses invention/i);
   assert.match(prompt, /clarification question is appropriate only/i);

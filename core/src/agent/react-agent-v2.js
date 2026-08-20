@@ -3007,6 +3007,10 @@ export async function runReactAgentV2({
       version: intentDecision.version,
       operation: intentDecision.operation,
       language: intentDecision.response_language,
+      answer_scope: intentDecision.answer_scope || 'bounded',
+      response_depth: intentDecision.response_depth || 'standard',
+      retrieval_shape: intentDecision.retrieval_shape || 'fact',
+      answer_objective: intentDecision.answer_objective || message,
       side_effect_policy: intentDecision.side_effect_policy,
     };
     const hasBrowserContext = /<METADATA:(SELECTION|SECTION|BROWSER_CONTEXT)>/i.test(message || '');

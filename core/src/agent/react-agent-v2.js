@@ -2931,8 +2931,8 @@ export async function runReactAgentV2({
     }
     // Final native-grounding boundary for the progressive native planner after
     // every normalization seam and before the direct-answer fast path. It
-    // shares the router's rule so no progressive model-provided refusal label
-    // can bypass tenant-scoped recall by returning `operation: direct`.
+    // shares the router's rule so no progressive model-provided direct or
+    // profile label can bypass tenant-scoped recall.
     // Legacy direct turns retain their explicit compatibility contract; the
     // live native router is `CHAT_ROUTER=progressive`.
     const nativeGrounding = intentDecision._router === 'progressive'
@@ -2940,8 +2940,8 @@ export async function runReactAgentV2({
       : { decision: intentDecision, overridden: false };
     intentDecision = nativeGrounding.decision;
     if (nativeGrounding.overridden) {
-      trace.warnings.push('native_direct_grounding_override');
-      console.warn(`[chat-router] native direct decision overridden to recall trace=${trace.traceId}`);
+      trace.warnings.push('native_knowledge_grounding_override');
+      console.warn(`[chat-router] native knowledge decision overridden to recall trace=${trace.traceId}`);
     }
     // A single connected-app intent is an external execution plan with one
     // step. Route it through the same Composio-backed path as multi-step plans

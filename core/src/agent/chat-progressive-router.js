@@ -106,16 +106,6 @@ export const HIGH_TOOLS = [
 ];
 
 const EXTERNAL_TOOL_NAMES = new Set(['use_connector', 'use_campaign', 'compound_plan']);
-const NATIVE_PROFILE_TOOL = { type: 'function', function: { name: 'hivemind_profile', strict: true,
-  description: 'Read the authenticated caller\'s maintained user and organization profile. Use for identity, role, company, preferences, language, location, or other profile-owned facts. Do not use it for general organizational knowledge, documents, meetings, decisions, products, or historical activity; those belong to hivemind_context.',
-  parameters: object({
-    target: { type: 'string', enum: ['user', 'organization', 'user_and_organization'] },
-    query_original: { type: 'string' },
-    response_language: { type: 'string' },
-    answer_objective: { type: 'string' },
-  }),
-} };
-
 // The native-only context contract exposes the exact server capability the
 // planner intends to use. The high-level operation remains for compatibility,
 // but native_tool is authoritative and prevents a vague "context" choice from
@@ -154,7 +144,6 @@ const NATIVE_CONTEXT_TOOL = (() => {
 export function getProgressiveTools({ useTools = false, connectedProviders = null } = {}) {
   if (!useTools) return [
     NATIVE_CONTEXT_TOOL,
-    NATIVE_PROFILE_TOOL,
     ...HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name)
       && tool.function?.name !== 'hivemind_context'),
   ];
@@ -264,12 +253,19 @@ const s = (v, n = 2000) => (typeof v === 'string' ? v.slice(0, n) : null);
  * before execution.
  */
 export function enforceNativeGroundingDecision(decision, message, { useTools = false } = {}) {
-  if (useTools === true || decision?.operation !== 'direct') {
+  // The authenticated user/org profile is already preloaded into every native
+  // synthesis turn. It is useful context, but it cannot be a separate answer
+  // lane: a profile decision would otherwise skip tenant-scoped hybrid recall
+  // and let the model assert that workspace knowledge is absent. Treat both
+  // direct and legacy profile decisions as ungrounded native knowledge paths.
+  const bypassesNativeRecall = decision?.operation === 'direct' || decision?.operation === 'profile';
+  if (useTools === true || !bypassesNativeRecall) {
     return { decision, overridden: false };
   }
   const canonicalQuery = String(
     decision.query_canonical_en
     || decision.queries?.[0]
+    || decision.answer_objective
     || message,
   ).trim() || message;
   return {
@@ -280,6 +276,7 @@ export function enforceNativeGroundingDecision(decision, message, { useTools = f
       tool_groups: ['hivemind-recall'],
       direct_response: null,
       _native_direct_grounding_override: true,
+      _native_knowledge_grounding_override: decision.operation,
     },
     overridden: true,
   };

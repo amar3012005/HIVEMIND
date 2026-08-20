@@ -805,6 +805,10 @@ async function hop1Memory({ store, query, options, ctx }) {
     // this path. Fact/quick also has no graph hop, so relationship expansion
     // cannot affect its candidate set or final unified cross-encoder order.
     include_injection_context: false,
+    // Chat already has its one selected, citation-bearing unified delivery
+    // window.  Do not hydrate secondary source rows merely to build rich
+    // synthesis cards that the chat path never renders.
+    include_synthesis_evidence: false,
     graph_expansion_depth: options.mode === 'fact' ? 0 : 2,
     trace_stages: options.trace_stages === true,
     timing: options.timing || null,

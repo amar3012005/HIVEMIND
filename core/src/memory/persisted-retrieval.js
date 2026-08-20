@@ -1299,6 +1299,11 @@ async function _recallPersistedMemoriesImpl(store, {
   alternate_lexical_query = null,
   semantic_recovery = false,
   include_injection_context = true,
+  // Rich synthesis cards are useful for recall API/graph consumers, but a
+  // chat turn already receives its selected unified memory/evidence packets.
+  // Make the expensive secondary evidence hydration explicitly opt-in so one
+  // chat cannot fan out dozens of remote /hydrate calls for display-only data.
+  include_synthesis_evidence = null,
   trace_stages = false,
   timing = null,
 }) {
@@ -2665,22 +2670,47 @@ async function _recallPersistedMemoriesImpl(store, {
   const synthesizedItems = flatMemories.filter(m => isSynthesisMemory(m));
   const rawItems         = flatMemories.filter(m => !isSynthesisMemory(m));
 
-  // Build evidence snippets for synthesized items from synthesisEvidenceIds
-  const buildEvidenceSnippets = async (synthMem) => {
-    const evidenceIds = synthMem.synthesis_evidence_ids || synthMem.synthesisEvidenceIds || [];
-    if (!evidenceIds.length) return [];
+  // Preserve the historic rich-recall behaviour by default, but let callers
+  // such as grounded chat opt out.  `null` deliberately follows
+  // include_injection_context for backwards compatibility.
+  const hydrateSynthesisEvidence = include_synthesis_evidence == null
+    ? include_injection_context === true
+    : include_synthesis_evidence === true;
+
+  // Fetch all needed source rows in ONE batch.  The previous implementation
+  // did Promise.all(synthesis rows × five source ids), which can turn a
+  // perfectly valid recall into 30+ concurrent remote hydrations.  Remote
+  // Memory Boxes correctly bound their transport queue; chat then saw noisy
+  // queue-full warnings for data it did not consume.
+  const synthesisEvidenceIds = hydrateSynthesisEvidence
+    ? [...new Set(synthesizedItems.flatMap((memory) => {
+      const ids = memory.synthesis_evidence_ids || memory.synthesisEvidenceIds || [];
+      return Array.isArray(ids) ? ids.slice(0, 5).filter(Boolean) : [];
+    }))].slice(0, 80)
+    : [];
+  let synthesisEvidenceById = new Map();
+  if (synthesisEvidenceIds.length && store?.getMemories) {
     try {
-      const evidenceMems = await Promise.all(
-        evidenceIds.slice(0, 5).map(id => store.getMemory(id).catch(() => null))
-      );
-      return evidenceMems.filter(Boolean).map(e => ({
+      synthesisEvidenceById = await store.getMemories(synthesisEvidenceIds);
+    } catch {
+      // Rich card enrichment is optional.  Never degrade the canonical recall
+      // result merely because its supporting preview could not be hydrated.
+      synthesisEvidenceById = new Map();
+    }
+  }
+
+  // Build evidence snippets for synthesized items from synthesisEvidenceIds
+  const buildEvidenceSnippets = (synthMem) => {
+    const evidenceIds = synthMem.synthesis_evidence_ids || synthMem.synthesisEvidenceIds || [];
+    if (!hydrateSynthesisEvidence || !Array.isArray(evidenceIds) || !evidenceIds.length) return [];
+    return evidenceIds.slice(0, 5)
+      .map((id) => synthesisEvidenceById.get(id))
+      .filter(Boolean)
+      .map(e => ({
         id:      e.id,
         title:   e.title || null,
         snippet: (e.content || '').slice(0, 200),
       }));
-    } catch {
-      return [];
-    }
   };
 
   // Enrich synthesized items with evidence snippets (async but bounded)
@@ -2689,7 +2719,7 @@ async function _recallPersistedMemoriesImpl(store, {
     const conf     = typeof m.synthesis_confidence === 'number' ? m.synthesis_confidence
       : (typeof m.synthesisConfidence === 'number' ? m.synthesisConfidence : null);
     const revision = m.synthesis_revision || m.synthesisRevision || 1;
-    const evidence = await buildEvidenceSnippets(m);
+    const evidence = buildEvidenceSnippets(m);
     return {
       id:         m.id,
       type:       srcType,

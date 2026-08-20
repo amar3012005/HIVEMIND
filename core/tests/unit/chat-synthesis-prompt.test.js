@@ -38,8 +38,18 @@ test('answer objective and semantic depth shape one synthesis without encouragin
   assert.match(prompt, /DETAILED DEPTH/);
   assert.match(prompt, /Inspect every delivered evidence item/);
   assert.match(prompt, /collect and deduplicate every distinct supported item/);
+  assert.match(prompt, /multiple distinct findings/i);
   assert.match(prompt, /must never replace, obscure, or distract/);
   assert.match(prompt, /telemetry, not a request for another retrieval or synthesis pass/);
+});
+
+test('comprehensive synthesis asks for every distinct delivered finding without claiming corpus-wide completeness', () => {
+  const prompt = buildSynthesisSystemPrompt({
+    language: 'en', operation: 'recall', recallMode: 'explain', responseDepth: 'comprehensive',
+  });
+  assert.match(prompt, /COMPREHENSIVE DEPTH/);
+  assert.match(prompt, /every distinct supported finding/i);
+  assert.match(prompt, /Do not claim completeness outside the delivered window/);
 });
 
 test('timeline synthesis adds temporal handling without making fact prompts temporal', () => {

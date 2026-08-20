@@ -70,7 +70,14 @@ export function projectRankedMemoryFallback(memories = [], { totalBudget = 12000
     const allowance = index === 0
       ? remaining
       : Math.min(remaining, Math.max(120, Number(lowerRankBudget) || 320, fairShare));
-    const excerpt = content.slice(0, allowance);
+    // If an availability fallback must trim a long lower-ranked record, retain
+    // both its opening context and closing qualifiers rather than silently
+    // dropping everything after a prefix.  This is language-independent and
+    // preserves dates, negations, identifiers, and conclusions that commonly
+    // occur at the end of an otherwise relevant record.
+    const excerpt = content.length <= allowance
+      ? content
+      : coverageExcerpt(content, allowance);
     remaining = Math.max(0, remaining - excerpt.length);
     return {
       memory,
@@ -79,6 +86,15 @@ export function projectRankedMemoryFallback(memories = [], { totalBudget = 12000
       projection: 'rank-preserving-fallback',
     };
   });
+}
+
+function coverageExcerpt(content, allowance) {
+  if (allowance < 160) return content.slice(0, allowance);
+  const marker = '\n[…middle omitted in fallback…]\n';
+  const usable = Math.max(0, allowance - marker.length);
+  const headLength = Math.ceil(usable * 0.6);
+  const tailLength = Math.max(0, usable - headLength);
+  return `${content.slice(0, headLength).trimEnd()}${marker}${content.slice(-tailLength).trimStart()}`;
 }
 
 function fitPassages(passages, budget) {

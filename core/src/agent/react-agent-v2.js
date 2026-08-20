@@ -1791,7 +1791,19 @@ export async function answerStep({ message, history, evidence, plan, language, a
       const { getEmbedService } = await import('../embeddings/factory.js');
       return getEmbedService().embed(texts);
     });
-    if (!_projectedMemories) {
+    // Semantic passage projection is valuable for a small focused window.  On
+    // a detailed/comprehensive window it can create a second large embedding
+    // workload after recall has already selected the relevant ranks.  Deliver
+    // the complete fitting rows plus rank-preserving coverage excerpts there
+    // instead: no extra provider round trip, no timeout, and no prefix-only
+    // loss of late details.  This is governed by evidence volume, not request
+    // wording or a language-specific rule.
+    const semanticProjectionMaxRows = Math.max(1, Number(process.env.HIVEMIND_SEMANTIC_PROJECTION_MAX_ROWS || 5));
+    const semanticProjectionMaxChars = Math.max(1000, Number(process.env.HIVEMIND_SEMANTIC_PROJECTION_MAX_CHARS || 7000));
+    const selectedProjectionChars = _selectedMemories.reduce((sum, memory) => sum + String(memory?.content || '').length, 0);
+    const useSemanticProjection = _selectedMemories.length <= semanticProjectionMaxRows
+      && selectedProjectionChars <= semanticProjectionMaxChars;
+    if (!_projectedMemories && useSemanticProjection) {
       const timeoutMs = Number(process.env.HIVEMIND_EVIDENCE_PROJECTION_TIMEOUT_MS || 3500);
       let timer;
       try {
@@ -1812,11 +1824,17 @@ export async function answerStep({ message, history, evidence, plan, language, a
       }
       if (projectionCacheKey) await getSharedChatProjectionCache().set(projectionCacheKey, _projectedMemories);
     }
+    if (!_projectedMemories) {
+      _projectedMemories = projectRankedMemoryFallback(_selectedMemories, {
+        totalBudget: projectionBudget,
+        lowerRankBudget: _contentBudget,
+      });
+    }
     if (ctx?._trace) {
       ctx._trace.evidence_projection = {
-        mode: 'semantic',
+        mode: useSemanticProjection ? 'semantic' : 'rank-preserving-coverage',
         memories: _selectedMemories.length,
-        input_chars: _selectedMemories.reduce((sum, memory) => sum + String(memory?.content || '').length, 0),
+        input_chars: selectedProjectionChars,
         output_chars: _projectedMemories.reduce((sum, item) => sum + String(item?.excerpt || '').length, 0),
       };
     }
@@ -2129,10 +2147,12 @@ ${message}`;
   const answerCap = process.env.HIVEMIND_ANSWER_MAX_TOKENS
     ? ANSWER_MAX_TOKENS
     : Math.max(depthCap, modeCap);
-  // Grounded synthesis over already-retrieved evidence needs little reasoning;
-  // full reconstruction gets 'medium', everything else 'low'. Env-overridable.
+  // Grounded synthesis over a focused answer needs little reasoning.  A user
+  // who asked for a detailed/comprehensive account expects the model to
+  // reconcile the complete selected window, so use deliberate reasoning only
+  // for that opt-in depth (or full reconstruction). Env-overridable.
   const answerReasoning = process.env.HIVEMIND_ANSWER_REASONING_EFFORT
-    || (answerMode === 'full' ? 'medium' : 'low');
+    || (answerMode === 'full' || ['detailed', 'comprehensive'].includes(plan.response_depth) ? 'medium' : 'low');
   const finalSynthesisProviderOrder = String(
     process.env.OPENROUTER_DEEPSEEK_SYNTHESIS_PROVIDER_ORDER || 'baidu,digitalocean,streamlake',
   ).split(',').map((value) => value.trim()).filter(Boolean);

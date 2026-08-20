@@ -188,11 +188,13 @@ const reasoningDisableRejected = new Set();
  * @param {boolean} [opts.json_mode=false] - Request JSON output
  * @returns {Promise<string|Object>} Parsed JSON object if json_mode, otherwise raw content string
  */
-export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, reject_truncated_json = false, feature = 'enterprise-extract' }) {
+export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, reject_truncated_json = false, feature = 'enterprise-extract', respectModelPolicy = true }) {
   model = model || DEFAULT_MODEL;
   const useCase = /entity|relationship/i.test(feature) ? 'entity_linking' : 'ingestion_extraction';
-  const modelPolicy = await resolveAiModelPolicy(useCase, model);
-  model = modelPolicy.primary;
+  if (respectModelPolicy) {
+    const modelPolicy = await resolveAiModelPolicy(useCase, model);
+    model = modelPolicy.primary;
+  }
 
   // Org-context gate: every LLM call should be attributable to an org (and, on the request path, its
   // HIVEMIND API key). Legitimate system/boot calls run with NO org context, so the default is to LOG,
@@ -364,6 +366,18 @@ export function getDefaultModel() {
   return DEFAULT_MODEL;
 }
 
+/**
+ * Materialize a model chain once before issuing any request. This is deliberately
+ * pure so model-governance behavior can be tested without a provider or database.
+ */
+export function buildModelFallbackChain({ requested = [], policy = null } = {}) {
+  const requestedModels = Array.isArray(requested) ? requested.filter(Boolean) : [];
+  const policyModels = policy?.source === 'admin'
+    ? [policy.primary, policy.secondary].filter(Boolean)
+    : [];
+  return [...new Set([...policyModels, ...requestedModels])];
+}
+
 // Model-fallback wrapper: try each model in order; on ANY failure (provider
 // error, timeout, finish=error, unparseable-after-salvage) fall through to the
 // NEXT model. Cross-family list (e.g. gpt-oss-120b → gemini-flash-lite →
@@ -372,13 +386,20 @@ export function getDefaultModel() {
 export async function chatCompletionWithFallback({
   models = [], model, prefer_truncated_if_more_items = false, ...opts
 } = {}) {
-  const list = [...new Set((models.length ? models : [model]).filter(Boolean))];
+  const requested = (models.length ? models : [model]).filter(Boolean);
+  const useCase = /entity|relationship/i.test(opts.feature || '') ? 'entity_linking' : 'ingestion_extraction';
+  const policy = await resolveAiModelPolicy(useCase, requested[0] || null);
+  // A policy-selected primary must have a policy-selected secondary. Previously
+  // every fallback call re-entered chatCompletion() and was rewritten back to
+  // the same admin primary, so an outage retried it N times instead of failing
+  // over. Build the chain once, then make each attempt explicit.
+  const list = buildModelFallbackChain({ requested, policy });
   if (!list.length) throw new Error('[llm-fallback] no model(s) provided');
   let lastErr = null;
   let bestTruncated = null;
   for (let i = 0; i < list.length; i += 1) {
     try {
-      const completed = await chatCompletion({ ...opts, model: list[i] });
+      const completed = await chatCompletion({ ...opts, model: list[i], respectModelPolicy: false });
       // A provider-confirmed truncated prefix can hold far more grounded items
       // than a later model's syntactically complete but nearly empty response.
       // Dense extraction opts into rejecting that thin completion so its

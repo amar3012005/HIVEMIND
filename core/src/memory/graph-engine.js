@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { isMnemeOrg, mnemeMode, amrUpdateTags, orgIsRemote, amrListRecent } from '../vector/mneme/driver.js';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch } from '../llm/groq-fallback.js';
+import { chatCompletionWithFallback, isQwenIngestModel } from '../knowledge/enterprise/litellm-client.js';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
@@ -2376,7 +2377,8 @@ OUTPUT JSON only.`;
       await persistEntityStatus('skipped:disabled', { entity_link_completed_at: nowIso() });
       return { ok: true, status: 'skipped', reason: 'disabled', entities: 0, edges: 0 };
     }
-    if (!process.env.GROQ_API_KEY && !this.hasInjectedMemoryChatClient) {
+    const configuredEntityLinkModel = process.env.ENTITY_LINKER_MODEL || 'cerebras/gpt-oss-120b';
+    if (!process.env.GROQ_API_KEY && !this.hasInjectedMemoryChatClient && !isQwenIngestModel(configuredEntityLinkModel)) {
       console.warn('[entity-co-mention] GROQ_API_KEY missing — skipping LLM extraction');
       await persistEntityStatus('error:provider_unavailable', { entity_link_error: 'provider_unavailable' });
       return { ok: false, status: 'error', error: 'provider_unavailable', entities: 0, edges: 0 };
@@ -2697,7 +2699,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     // edgeless MCP saves, e.g. the GTM/B&B memory, despite 13 valid
     // candidates). Up to 3 attempts with exponential backoff; only a
     // genuine 4xx (bad request / auth) or exhausted retries gives up.
-    const LINK_MODEL = process.env.ENTITY_LINKER_MODEL || 'cerebras/gpt-oss-120b';
+    const LINK_MODEL = configuredEntityLinkModel;
     const LINK_TIMEOUT_MS = Number(process.env.ENTITY_LINK_TIMEOUT_MS || 25000);
     const LINK_MAX_ATTEMPTS = Number(process.env.ENTITY_LINK_MAX_ATTEMPTS || 3);
     let parsed;
@@ -2705,6 +2707,23 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     let linkLastErr = null;
     for (let attempt = 1; attempt <= LINK_MAX_ATTEMPTS; attempt++) {
       try {
+        if (isQwenIngestModel(LINK_MODEL) && !this.hasInjectedMemoryChatClient) {
+          // Keep the injected legacy client seam intact for unit tests. In
+          // production Qwen travels through the Cloudflare-only route and the
+          // established fallback chain protects a transient custom-provider
+          // failure from orphaning entity/relationship enrichment.
+          parsed = await chatCompletionWithFallback({
+            models: [LINK_MODEL, process.env.ENTITY_LINKER_FALLBACK_MODEL || 'google/gemini-2.5-flash-lite'],
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+            max_tokens: 700,
+            json_mode: true,
+            feature: 'entity-linking',
+          });
+          lastRaw = JSON.stringify(parsed);
+          linkLastErr = null;
+          break;
+        }
         const resp = await this.memoryChatClient('https://api.groq.com/openai/v1/chat/completions', {
           method: 'POST',
           headers: {

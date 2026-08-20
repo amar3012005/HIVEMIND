@@ -46,6 +46,40 @@ import { isValidEmbeddingVector } from '../embeddings/vector-contract.js';
 const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
 const CLAIM_ENTITY_KINDS = new Set(['person', 'organization', 'product', 'place', 'technology', 'standard']);
 
+// qwen3-ingest is schema-led: plain JSON mode can return a valid but unrelated
+// shape. Keep required fields deliberately small so the existing normalization
+// and source-quote validation still own quality, while the model is forced to
+// return the unified extractor envelope used by all downstream persistence.
+const QWEN_UNIFIED_FACTS_RESPONSE_FORMAT = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'hivemind_unified_facts',
+    schema: {
+      type: 'object',
+      properties: {
+        facts: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              t: { type: 'string' }, f: { type: 'string' },
+              memory_type: { type: 'string' }, importance: { type: 'number' },
+              extraction_confidence: { type: 'number' }, source_quote: { type: 'string' },
+              subject: { type: 'object' }, predicate: { type: 'string' }, object: { type: 'object' },
+              qualifiers: { type: 'object' }, entities: { type: 'array', items: { type: 'object' } },
+              relationships: { type: 'array', items: { type: 'object' } },
+            },
+            required: ['t', 'f'],
+            additionalProperties: true,
+          },
+        },
+      },
+      required: ['facts'],
+      additionalProperties: false,
+    },
+  },
+};
+
 function usableEmbedding(vector) {
   return isValidEmbeddingVector(vector);
 }
@@ -1631,6 +1665,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       models: [model, ..._fallbacks], temperature: 0,
       max_tokens: llmProfile('kb-unified-extract', { compact }).maxTokens,
       json_mode: true, reject_truncated_json: true,
+      response_format: QWEN_UNIFIED_FACTS_RESPONSE_FORMAT,
       prefer_truncated_if_more_items: true, feature: 'kb-unified-extract',
       messages: [
         { role: 'system', content: sys },

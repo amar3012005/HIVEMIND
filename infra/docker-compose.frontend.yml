@@ -1,19 +1,5 @@
+# The production web application is hosted on Cloudflare Workers at
+# next.singulancelabs.com. This file is deliberately service-free so a Docker
+# Compose invocation cannot recreate a competing server-side frontend.
 name: hivemind-next
-
-# Standalone production frontend. It intentionally joins the existing public
-# frontend network and does not own Core, Control Plane, or any data service.
-services:
-  frontend:
-    image: hivemind/fe:prod-20260801-singulance-main-aef7082
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:${NEXT_FRONTEND_PORT:-2388}:80"
-    networks:
-      - next
-    mem_limit: 128m
-    cpus: 0.25
-
-networks:
-  next:
-    name: hivemind-next
-    external: true
+services: {}

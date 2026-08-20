@@ -20,11 +20,16 @@ git -C /root/hivemind-main cat-file -e "$SHA^{commit}" 2>/dev/null \
 # Runtime contracts span this complete group. An omitted explicit member is
 # accepted only when release-canonical proves it already runs the target SHA.
 if [ $# -eq 0 ]; then
-  SERVICES="core,control-plane,employees,frontend"
+  SERVICES="core,control-plane,employees"
 else
   normalized=()
   for service in "$@"; do
-    [ "$service" = fe ] && service=frontend
+    case "$service" in
+      fe|frontend)
+        echo "FATAL: frontend is hosted on Cloudflare; deploy it from the Da-vinci repository with Wrangler"
+        exit 2
+        ;;
+    esac
     [ "$service" = control ] && service=control-plane
     normalized+=("$service")
   done

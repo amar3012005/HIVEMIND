@@ -151,15 +151,6 @@ services:
     mem_limit: 768m
     cpus: 1.0
 
-  frontend-b2b:
-    image: hivemind/fe:${NEXT_VERSION:?build and set NEXT_VERSION}-b2b
-    profiles: [b2b]
-    restart: unless-stopped
-    ports: ["127.0.0.1:${NEXT_B2B_FRONTEND_PORT:-2188}:80"]
-    networks: [next]
-    mem_limit: 128m
-    cpus: 0.25
-
   core-b2c:
     <<: *core-service
     profiles: [b2c]
@@ -220,26 +211,6 @@ services:
     depends_on: [core-b2c]
     mem_limit: 512m
     cpus: 0.5
-
-  frontend-b2c:
-    image: hivemind/fe:${NEXT_VERSION:?build and set NEXT_VERSION}-b2c
-    profiles: [b2c]
-    restart: unless-stopped
-    ports: ["127.0.0.1:${NEXT_B2C_FRONTEND_PORT:-2288}:80"]
-    networks: [next]
-    mem_limit: 128m
-    cpus: 0.25
-
-  # Single production-compatible frontend: current control plane owns login,
-  # connector callbacks, Cartesia token minting, and BYOD enrollment.
-  frontend:
-    image: hivemind/fe:${NEXT_VERSION:?build and set NEXT_VERSION}-single
-    profiles: [single]
-    restart: unless-stopped
-    ports: ["127.0.0.1:${NEXT_FRONTEND_PORT:-2388}:80"]
-    networks: [next]
-    mem_limit: 128m
-    cpus: 0.25
 
 networks:
   next:

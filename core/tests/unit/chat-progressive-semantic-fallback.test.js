@@ -29,7 +29,7 @@ test('an uncertified direct response is grounded through recall', () => {
   assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
 });
 
-test('a certified context-free direct response remains direct', () => {
+test('a certified context-free direct response is still grounded for native chat', () => {
   const { decision } = adaptToDecision('respond_directly', {
     response: 'Hello — how can I help?',
     response_language: 'en',
@@ -37,6 +37,15 @@ test('a certified context-free direct response remains direct', () => {
     context_free: true,
   }, 'Hello', 'en');
 
+  assert.equal(decision.operation, 'recall');
+  assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
+});
+
+test('tool-enabled direct behavior remains unchanged', () => {
+  const { decision } = adaptToDecision('respond_directly', {
+    response: 'Hello — how can I help?', response_language: 'en',
+    reason: 'general', context_free: false,
+  }, 'Hello', 'en', { useTools: true });
+
   assert.equal(decision.operation, 'direct');
-  assert.equal(decision.direct_response, 'Hello — how can I help?');
 });

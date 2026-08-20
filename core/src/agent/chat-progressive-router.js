@@ -705,12 +705,15 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       //     statement like "let's meet on August 5" is NOT diverted.
       // If any of those fail, behaviour is byte-identical to before.
       const _reason = String(args?.reason || 'general');
-      // This is an authority boundary, not a keyword router. The one planner
-      // call must explicitly certify a direct answer as context-free. Missing
-      // (old/malformed model output) and false both fail safely into recall,
-      // so no user/organization knowledge question can be answered from model
-      // parameters merely because the router chose `respond_directly`.
-      if (useTools !== true && args?.context_free !== true && _reason !== 'safety_refusal') {
+      // Native HIVE chat is grounding-first. A model is not an authority for
+      // deciding that a possible workspace question has no workspace answer:
+      // the preceding context-free certificate was still a model assertion and
+      // could be incorrectly marked true. For `use_tools:false`, every
+      // non-safety direct selection therefore enters the single native recall
+      // path. The final synthesizer can still answer a greeting naturally after
+      // the bounded read, but no person/company/file/decision question can
+      // bypass tenant-scoped recall. Connector/Composio routing is unchanged.
+      if (useTools !== true && _reason !== 'safety_refusal') {
         return { decision: {
           ...base,
           operation: 'recall',
@@ -719,12 +722,8 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
         }, usage: null };
       }
       // A clarification is a semantic admission that the router is unsure; it
-      // is not proof that workspace evidence is absent. Ground it through the
-      // bounded recall path first. If recall also finds nothing, synthesis can
-      // still ask for clarification, but a multilingual routing miss can no
-      // longer bypass stored knowledge. Greetings/arithmetic (`general`) and
-      // safety refusals retain the direct path. No language or domain keywords
-      // are involved in this recovery contract.
+      // is not proof that workspace evidence is absent. Tool-enabled turns
+      // retain the existing behavior below; native turns returned above.
       if (_reason === 'clarification') {
         return { decision: {
           ...base,

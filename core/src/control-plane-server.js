@@ -1868,7 +1868,10 @@ function applyCorsHeaders(req, res) {
     res.setHeader('Vary', 'Origin');
   }
 
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+  // The platform model-policy editor persists changes with PUT.  Keep this
+  // list aligned with the routes we expose so browsers do not reject the
+  // authenticated cross-origin preflight before it reaches the handler.
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   // Idempotency-Key is used by durable mutation clients, including workspace
   // invitation creation. Leaving it out makes browsers reject the preflight
   // before the server can provide exactly-once semantics.

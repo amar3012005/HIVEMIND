@@ -418,7 +418,7 @@ export async function remoteBumpRecall(orgId, ids) {
 // Hydrate full memory rows from the customer's Postgres (so recall content stays on their box).
 export async function remoteHydrate(orgId, ids) {
   try { const out = await _call(orgId, '/v1/hydrate', { ids }); return out?.memories || []; }
-  catch (e) { console.warn(`[mneme/remote] hydrate failed org=${orgId}: ${e.message}`); return []; }
+  catch (e) { _logRemoteOnce('warn', 'hydrate', orgId, e); return []; }
 }
 
 // Filtered enumeration from the agent (listMemories for remote orgs). Returns { memories, cursor }.

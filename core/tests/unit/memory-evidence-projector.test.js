@@ -123,6 +123,20 @@ test('degraded projection uses remaining global budget to keep short lower-ranke
   assert.ok(projected.reduce((sum, item) => sum + item.excerpt.length, 0) <= 1200);
 });
 
+test('degraded projection covers both the beginning and late qualifier of a clipped lower-ranked record', async () => {
+  const projector = await import('../../src/agent/memory-evidence-projector.js');
+  const content = `Opening context: the policy applies to all contractors. ${'background '.repeat(80)}Late qualifier: it does not apply to emergency access.`;
+  const projected = projector.projectRankedMemoryFallback([
+    { id: 'top', content: 'Top context. '.repeat(72) },
+    { id: 'lower', content },
+  ], { totalBudget: 1100, lowerRankBudget: 220 });
+
+  assert.match(projected[1].excerpt, /Opening context/);
+  assert.match(projected[1].excerpt, /does not apply to emergency access/);
+  assert.match(projected[1].excerpt, /middle omitted in fallback/);
+  assert.ok(projected[1].excerpt.length <= 220);
+});
+
 test('adaptive projection gives the complete fitting rank-one record to synthesis', async () => {
   const projector = await import('../../src/agent/memory-evidence-projector.js');
   const topContent = `${'Context. '.repeat(90)}Late decisive detail: G ROCHER.`;

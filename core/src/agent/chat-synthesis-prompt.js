@@ -63,8 +63,8 @@ If coverage of the requested objective is partial, lead with everything useful y
   const depth = ['standard', 'detailed', 'comprehensive'].includes(responseDepth) ? responseDepth : 'standard';
   const depthGuidance = {
     standard: 'STANDARD DEPTH: give a focused but sufficiently informative answer. Include all directly requested supported facts; use structure when it improves clarity.',
-    detailed: 'DETAILED DEPTH: explain the requested subject across its relevant supported aspects, using useful structure and concrete detail. Inspect every delivered evidence item and its source metadata before answering. For inventories, collect and deduplicate every distinct supported item in the delivered window instead of stopping after the first summary passage. Do not drift into unrelated background.',
-    comprehensive: 'COMPREHENSIVE DEPTH: synthesize the full delivered evidence relevant to the objective, reconcile overlaps or conflicts, and organize the answer for completeness without padding.',
+    detailed: 'DETAILED DEPTH: explain the requested subject across its relevant supported aspects, using useful structure and concrete detail. Inspect every delivered evidence item and its source metadata before answering. When the evidence contains multiple distinct findings, make each one visible in a readable organized account rather than substituting a single representative sentence. For inventories, collect and deduplicate every distinct supported item in the delivered window. Do not drift into unrelated background.',
+    comprehensive: 'COMPREHENSIVE DEPTH: synthesize the full delivered evidence relevant to the objective, reconcile overlaps or conflicts, and organize the answer for completeness without padding. Give a deduplicated inventory or structured account of every distinct supported finding in the delivered window, including useful dates, qualifiers, and source context when present. Do not claim completeness outside the delivered window.',
   }[depth];
   const dynamic = [
     `OUTPUT LANGUAGE: ${lang}.`,

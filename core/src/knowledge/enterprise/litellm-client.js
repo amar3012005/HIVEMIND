@@ -405,14 +405,14 @@ export function buildModelFallbackChain({ requested = [], policy = null } = {}) 
 // gpt-oss-20b) so a single-model/provider issue can't drop a memory. Returns
 // the first success; throws the last error only if every model fails.
 export async function chatCompletionWithFallback({
-  models = [], model, prefer_truncated_if_more_items = false, ...opts
+  models = [], model, prefer_truncated_if_more_items = false, honorModelPolicy = true, ...opts
 } = {}) {
   const requested = (models.length ? models : [model]).filter(Boolean);
   const useCase = /entity|relationship/i.test(opts.feature || '') ? 'entity_linking' : 'ingestion_extraction';
   // Resolve the use-case policy without a caller model. Passing requested[0]
   // here changes an unconfigured policy into `source: caller`, bypassing the
   // default primary altogether. Requested models belong later in the chain.
-  const policy = await resolveAiModelPolicy(useCase);
+  const policy = honorModelPolicy ? await resolveAiModelPolicy(useCase) : null;
   // A policy-selected primary must have a policy-selected secondary. Previously
   // every fallback call re-entered chatCompletion() and was rewritten back to
   // the same admin primary, so an outage retried it N times instead of failing

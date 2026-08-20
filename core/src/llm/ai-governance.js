@@ -25,6 +25,20 @@ export function validateModelId(value) {
   return model;
 }
 
+// The platform-admin UI and the public control-plane API have historically
+// used different JavaScript naming conventions. Normalize at the authority
+// boundary so a successful Save can never silently leave the policy unchanged.
+export function normalizeModelPolicyInput(input = {}) {
+  const raw = input && typeof input === 'object' && input.policy && typeof input.policy === 'object'
+    ? input.policy
+    : (input || {});
+  return {
+    useCase: raw.use_case ?? raw.useCase,
+    primaryModel: raw.primary_model ?? raw.primaryModel,
+    secondaryModel: raw.secondary_model ?? raw.secondaryModel ?? null,
+  };
+}
+
 async function policyRows() {
   if (!prisma) return new Map();
   if (policyCache.expires > Date.now()) return policyCache.rows;

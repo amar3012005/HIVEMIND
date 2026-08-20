@@ -216,7 +216,7 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
-const { configureAiGovernance, listModelGovernance, listModelPrices, replaceModelPrice, totalAiCost, upsertModelPolicy, userCostSummary } = await import('./llm/ai-governance.js');
+const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, replaceModelPrice, totalAiCost, upsertModelPolicy, userCostSummary } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 const signupWelcome = createSignupWelcomeDispatcher({ prisma, sendEmail: sendSystemEmail });
 async function taraProviderFor(orgId) {
@@ -2999,8 +2999,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET') return jsonResponse(res, { policies: await listModelGovernance(), prices: await listModelPrices() });
     try {
       const body = await parseBody(req).catch(() => ({}));
-      const policy = await upsertModelPolicy({ useCase: body.use_case, primaryModel: body.primary_model,
-        secondaryModel: body.secondary_model || null, operator: operator.operator });
+      const input = normalizeModelPolicyInput(body);
+      const policy = await upsertModelPolicy({ ...input, operator: operator.operator });
       await audit({ eventType: 'platform.model_policy_updated', eventCategory: 'ai_governance', action: 'update',
         resourceType: 'ai_model_policy', resourceId: policy.use_case,
         metadata: { operator: operator.operator, primary_model: policy.primary_model, secondary_model: policy.secondary_model, revision: policy.revision },

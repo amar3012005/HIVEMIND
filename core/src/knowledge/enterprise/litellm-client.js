@@ -409,7 +409,10 @@ export async function chatCompletionWithFallback({
 } = {}) {
   const requested = (models.length ? models : [model]).filter(Boolean);
   const useCase = /entity|relationship/i.test(opts.feature || '') ? 'entity_linking' : 'ingestion_extraction';
-  const policy = await resolveAiModelPolicy(useCase, requested[0] || null);
+  // Resolve the use-case policy without a caller model. Passing requested[0]
+  // here changes an unconfigured policy into `source: caller`, bypassing the
+  // default primary altogether. Requested models belong later in the chain.
+  const policy = await resolveAiModelPolicy(useCase);
   // A policy-selected primary must have a policy-selected secondary. Previously
   // every fallback call re-entered chatCompletion() and was rewritten back to
   // the same admin primary, so an outage retried it N times instead of failing

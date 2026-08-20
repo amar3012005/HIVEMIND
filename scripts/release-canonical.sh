@@ -2,7 +2,7 @@
 # release-canonical.sh — immutable, single-SHA production release.
 #
 #   release-canonical.sh --sha <merged-singulance-main-sha> \
-#                        --services core,tara-grok,tara-deepgram,control-plane,employees,frontend \
+#                        --services core,tara-grok,tara-deepgram,control-plane,employees \
 #                        [--canary-url https://next.singulancelabs.com/hivemind/app] \
 #                        [--skip-canary] [--dry-run] [--allow-divergence]
 #
@@ -35,22 +35,18 @@ esac; done
 CANON=/root/hivemind-main
 HDIR=/root/hivemind
 ENVF="$HDIR/.env"
-NEXT_REPO=/root/hivemind-next
-NEXT="$NEXT_REPO/infra/docker-compose.next.yml"
-NEXTENV="$NEXT_REPO/.env.embedding-canary-runtime"
 PRESENCE="$HDIR/scripts/release-presence.sh"
 RELEASE_SESSION_ID="${RELEASE_SESSION_ID:-codex-$$}"
 
 # service → container / image-name / build recipe (run from the release worktree root)
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=hivemind-next-frontend-1 [hm-extract]=hm-extract )
-declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=fe [hm-extract]=hm-extract )
+declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
+declare -A IMG=( [core]=core-api [control-plane]=control-plane [employees]=employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
 build_cmd() { local s="$1" tag="$2"; case "$s" in
   core)          docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=core -t "$tag" -f Dockerfile.production . ;;
   control-plane) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=control-plane -t "$tag" -f Dockerfile.control-plane . ;;
   employees)     docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=employees -t "$tag" ./employees-service ;;
   tara-grok)     docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=tara-grok -t "$tag" ./services/tara-grok ;;
   tara-deepgram) docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=tara-deepgram -t "$tag" ./services/tara-deepgram ;;
-  frontend)      docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=frontend -t "$tag" ./frontend/Da-vinci ;;
   hm-extract)    docker build -q "${IMAGE_LABELS[@]}" --label com.singulance.service=hm-extract -t "$tag" ./hm-extract ;;
 esac; }
 
@@ -89,12 +85,12 @@ SHORT=$(git -C "$CANON" rev-parse --short "$FULLSHA")
 SHA="$FULLSHA"
 echo "[gate] $SHORT is on canonical ✓"
 
-# Core, Control Plane, Employees and frontend share Runtime/Room contracts. A
+# Core, Control Plane, and Employees share Runtime/Room contracts. A
 # partial release is safe only when every omitted member is already running the
 # exact target revision. An ancestor check is insufficient here: an older
 # ancestor can still speak an incompatible envelope. The explicit override is
 # reserved for incident response and leaves a conspicuous release-log record.
-COUPLED=(core control-plane employees frontend)
+COUPLED=(core control-plane employees)
 declare -A REQUESTED=()
 for s in "${SVCS[@]}"; do REQUESTED[$s]=1; done
 coupled_requested=0
@@ -110,7 +106,7 @@ if [ "$coupled_requested" = 1 ] && [ "$ALLOW_DIVERGENCE" != 1 ]; then
       [ -n "$live_short" ] && live_sha=$(git -C "$CANON" rev-parse "$live_short^{commit}" 2>/dev/null || true)
     fi
     [ "$live_sha" = "$FULLSHA" ] || {
-      echo "FATAL: contract-coupled service '$s' runs ${live_sha:-unknown}, target is $FULLSHA; include core,control-plane,employees,frontend or pass --allow-divergence for incident response"
+      echo "FATAL: contract-coupled service '$s' runs ${live_sha:-unknown}, target is $FULLSHA; include core,control-plane,employees or pass --allow-divergence for incident response"
       exit 1
     }
   done
@@ -124,7 +120,6 @@ REL="/root/releases/builds/$FULLSHA"
 if [ ! -d "$REL/.git" ] && [ ! -f "$REL/.git" ]; then
   mkdir -p "$(dirname "$REL")"
   git -C "$CANON" worktree add --detach --force "$REL" "$FULLSHA" >/dev/null
-  git -C "$REL" -c submodule.recurse=false submodule update --init --force -q frontend/Da-vinci
 fi
 [ "$(git -C "$REL" rev-parse HEAD)" = "$FULLSHA" ] || { echo "FATAL: release worktree SHA drift"; exit 1; }
 [ -z "$(git -C "$REL" status --porcelain --ignore-submodules=none)" ] || { echo "FATAL: release worktree is dirty"; exit 1; }
@@ -160,7 +155,6 @@ fi
 # ── build immutable sha images + preserve rollback ─────────────────────────
 echo "services:" > "$OVERRIDE.tmp"
 for s in "${SVCS[@]}"; do
-  [ "$s" = frontend ] && continue   # FE handled on its own compose below
   TAG="hivemind/${IMG[$s]}:sha-$SHORT"
   # rollback: retag the currently-live image of this service
   CUR=$(docker inspect "${CONTAINER[$s]}" --format '{{.Config.Image}}' 2>/dev/null || true)
@@ -188,25 +182,11 @@ fi
 
 # ── deploy named hetzner services (--no-deps, override pins the sha image) ──
 for s in "${SVCS[@]}"; do
-  [ "$s" = frontend ] && continue
   echo "[deploy] $s"
   "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:$s"
   docker compose --project-directory "$REL/infra" -f "$HETZNER" -f "$OVERRIDE" \
     --env-file "$ENVF" up -d --no-deps --force-recreate "$s" >/dev/null
 done
-
-# ── frontend (separate compose/project) ────────────────────────────────────
-if printf '%s\n' "${SVCS[@]}" | grep -qx frontend; then
-  FTAG="hivemind/fe:sha-$SHORT"
-  CUR=$(docker inspect hivemind-next-frontend-1 --format '{{.Config.Image}}' 2>/dev/null || true)
-  [ -n "$CUR" ] && { docker tag "$CUR" hivemind/fe:rollback-single; ROLLBACK[frontend]="$CUR"; }
-  echo "[build] frontend → $FTAG"; ( cd "$REL" && build_cmd frontend "$FTAG" ) >/dev/null
-  "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase "deploying:frontend"
-  FOVERRIDE="$STATE_ROOT/frontend-override.yml"
-  printf 'services:\n  frontend:\n    image: %s\n' "$FTAG" > "$FOVERRIDE"
-  docker compose -p hivemind-next -f "$NEXT" -f "$FOVERRIDE" --env-file "$NEXTENV" --profile single config -q
-  ( cd "$NEXT_REPO" && docker compose -p hivemind-next -f "$NEXT" -f "$FOVERRIDE" --env-file "$NEXTENV" --profile single up -d --no-deps --force-recreate frontend >/dev/null )
-fi
 
 # ── verify: health + image-SHA label + optional canary ─────────────────────
 FAIL=0

@@ -10,9 +10,9 @@ while [ "$#" -gt 0 ]; do case "$1" in
   *) echo "unknown arg: $1" >&2; exit 2 ;;
 esac; done
 [ -n "$SHA" ] && [ -n "$SERVICES" ] && [ -d "$SOURCE_ROOT" ] \
-  || { echo "usage: $0 --sha FULL_SHA --services core,control-plane,employees,frontend --source-root PATH" >&2; exit 2; }
+  || { echo "usage: $0 --sha FULL_SHA --services core,control-plane,employees --source-root PATH" >&2; exit 2; }
 
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [frontend]=hivemind-next-frontend-1 [hm-extract]=hm-extract )
+declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
 declare -A LOCAL_FILE=(
   [core]="core/src/runtime-playbooks/stage-executor.js"
   [control-plane]="core/src/runtime-playbooks/stage-executor.js"

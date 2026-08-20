@@ -50,7 +50,14 @@ const TIMEOUT   = Number(process.env.RERANK_TIMEOUT_MS || 2500);
 // One request receives one wall-clock budget across primary, retry and
 // fallback providers. Previously each combination received a fresh 2.5s,
 // allowing the chain to outlive the recall response by many seconds.
-const TOTAL_TIMEOUT = Math.max(100, Number(process.env.RERANK_TOTAL_TIMEOUT_MS || 1200));
+// The self-hosted BGE service scores the complete mixed pool in one request.
+// A 1.2s shared budget gave it only ~600ms after reserving the provider
+// fallback, while a real 45–52-row request can legitimately take 0.8–2.2s
+// end-to-end even though GPU compute is much shorter. That configuration
+// guaranteed an abort, then lane interleaving made unrelated evidence compete
+// with the requested topic. Keep a bounded fallback window, but let the
+// authoritative primary finish a normal full-pool request.
+const TOTAL_TIMEOUT = Math.max(100, Number(process.env.RERANK_TOTAL_TIMEOUT_MS || 3500));
 const MAX_ATTEMPTS_TOTAL = Math.max(1, Number(process.env.RERANK_MAX_ATTEMPTS_TOTAL || 2));
 // The managed fallback needs a real warm request budget. Reserving 350ms
 // made a timeout on the self-hosted primary leave Voyage Lite only ~350ms,

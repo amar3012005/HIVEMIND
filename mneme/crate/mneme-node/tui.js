@@ -28,7 +28,7 @@ const {
   loadCfg, saveCfg, ingestDir, recallQuery, statusReport, richOrgStats, signingEnabled, embeddingsConfigured,
   hivemindConfigured, hivemindIngestDir, attemptHivemindOAuth,
   DEFAULT_HIVEMIND_AUTH_URL, DEFAULT_HIVEMIND_API_URL,
-  ICARUS_VERSION, checkForUpdate, performSelfUpdate, noIngestableFilesReason, HIVEMIND_INGESTABLE_EXTS,
+  ICARUS_VERSION, checkForUpdate, performSelfUpdate, noIngestableFilesReason, HIVEMIND_INGESTABLE_EXTS, pickFolderNative,
   hivemindSaveMemory, saveLocalMemory,
 } = require('./cli-lib.js');
 
@@ -155,7 +155,7 @@ const SLASH_COMMANDS = [
 function printHelp(state) {
   out(state, '');
   out(state, heading('Commands'));
-  out(state, `  ${c.command('/ingest')} <dir> [--org name] [--local] [--force] [--keep-cloud]  ingest a folder. HIVEMIND (when connected) is a stateless extraction pipeline only — segments mirror locally, then the cloud document icarus itself created is deleted (--keep-cloud to leave it there).`);
+  out(state, `  ${c.command('/ingest')} [dir|file] [--org name] [--local] [--force] [--keep-cloud]  ingest a folder or a single file — leave the path off to open a native file/folder picker. HIVEMIND (when connected) is a stateless extraction pipeline only — segments mirror locally, then the cloud document icarus itself created is deleted (--keep-cloud to leave it there).`);
   out(state, `  ${c.command('/recall')} <query> [--org name] [--k 5] [--pq]     local recall, always. Real parallel hybrid (dense+lexical, RRF-merged); narrow-reranked if HIVEMIND connected, else the hybrid merge is final. Never HIVEMIND's shared recall (a real cross-tenant leak was found there).`);
   out(state, `  ${c.command('/save')} <text> [--org name] [--cloud]              LOCAL ONLY by default — real embedding, never touches HIVEMIND's cloud memory box on its own. --cloud opts in to a real, permanent, smart-routed HIVEMIND memory too — recallable via /recall either way.`);
   out(state, `  ${c.command('/status')}                                          org shards + real memory/evidence/relationship counts + signing/audit`);
@@ -509,8 +509,18 @@ async function dispatch(line, state, cfg) {
 
   switch (cmd) {
     case 'ingest': {
-      const dir = flags._[0];
-      if (!dir) { console.log(err('usage: /ingest <dir> [--org name] [--local] [--force] [--no-mirror] [--keep-cloud]')); break; }
+      let dir = flags._[0];
+      if (!dir) {
+        // Both supported, per the exact ask: a typed path works as before, and pressing enter
+        // on bare "/ingest" opens the OS's real native folder picker (Finder's own "choose
+        // folder" dialog on macOS via osascript, zenity/kdialog on Linux) instead of forcing
+        // everyone to paste a path. Async, not execFileSync — the redraw loop and stdin
+        // handling keep running while the dialog is open, so the TUI doesn't freeze on it.
+        console.log(c.dim('  no path given — opening the native folder picker...'));
+        dir = await pickFolderNative(`icarus: select a folder to ingest into org "${org}"`);
+        if (!dir) { console.log(err('no file or folder selected — usage: /ingest <dir|file> [--org name] [--local] [--force] [--no-mirror] [--keep-cloud]')); break; }
+        console.log(ok(`selected ${c.path(dir)}`));
+      }
       const viaHivemind = hivemindConfigured(cfg) && !flags.local;
       const skipReason = noIngestableFilesReason(dir, viaHivemind ? HIVEMIND_INGESTABLE_EXTS : undefined);
       if (skipReason) { console.log(err(skipReason)); break; }

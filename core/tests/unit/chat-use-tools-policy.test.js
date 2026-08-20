@@ -6,7 +6,9 @@ import { adaptToDecision, getProgressiveTools } from '../../src/agent/chat-progr
 test('use_tools false never discloses connected or compound capabilities', () => {
   const names = getProgressiveTools({ useTools: false }).map((tool) => tool.function.name);
   assert.ok(names.includes('hivemind_context'));
-  assert.ok(names.includes('hivemind_profile'));
+  // Native turns preload profile context but must still use the hybrid recall
+  // path, so the planner never gets a profile-only bypass capability.
+  assert.equal(names.includes('hivemind_profile'), false);
   assert.ok(names.includes('hivemind_memory'));
   assert.equal(names.includes('use_connector'), false);
   assert.equal(names.includes('use_campaign'), false);
@@ -30,6 +32,36 @@ test('native planner requests a semantic retrieval expression instead of a copie
     context.function.parameters.properties.retrieval_shape.enum,
     ['fact', 'inventory', 'overview', 'comparison'],
   );
+  assert.deepEqual(
+    context.function.parameters.properties.answer_scope.enum,
+    ['bounded', 'broad', 'exhaustive'],
+  );
+});
+
+test('semantic exhaustive scope cannot be reduced to a five-item answer window', () => {
+  const { decision } = adaptToDecision('hivemind_context', {
+    native_tool: 'hivemind_recall', temporal_axis: 'none', operation: 'recall', temporal_semantics: 'none',
+    query_original: 'complete account of this person', query_canonical_en: 'all recorded claims about the named person',
+    response_language: 'en', mode: 'full', entities: ['Person'], answer_scope: 'exhaustive',
+    response_depth: 'standard', retrieval_shape: 'overview', answer_objective: 'Give the complete account.',
+    source_title: null, valid_at: null, known_at: null, range_start: null, range_end: null,
+    aggregate_kind: null, answer_type: 'fact',
+  }, 'Give me the complete account of this person.', 'en', { useTools: false });
+  assert.equal(decision.answer_scope, 'exhaustive');
+  assert.equal(decision.response_depth, 'comprehensive');
+});
+
+test('semantic broad scope cannot be reduced to a five-item answer window', () => {
+  const { decision } = adaptToDecision('hivemind_context', {
+    native_tool: 'hivemind_recall', temporal_axis: 'none', operation: 'recall', temporal_semantics: 'none',
+    query_original: 'multi-facet overview', query_canonical_en: 'subject facets and related records',
+    response_language: 'en', mode: 'explain', entities: ['Subject'], answer_scope: 'broad',
+    response_depth: 'standard', retrieval_shape: 'overview', answer_objective: 'Give a useful overview.',
+    source_title: null, valid_at: null, known_at: null, range_start: null, range_end: null,
+    aggregate_kind: null, answer_type: 'fact',
+  }, 'Give a useful overview.', 'en', { useTools: false });
+  assert.equal(decision.answer_scope, 'broad');
+  assert.equal(decision.response_depth, 'detailed');
 });
 
 test('use_tools true discloses connected and compound capabilities', () => {

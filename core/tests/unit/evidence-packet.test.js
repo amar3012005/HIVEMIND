@@ -22,7 +22,7 @@ test('remote evidence fusion preserves semantic and lexical provenance without f
   assert.ok(fused.every((row) => row.score !== 0.7));
 });
 
-test('unified delivery returns ranked lane fallback instead of overrunning an exhausted parent deadline', async () => {
+test('unified delivery gives the fast reranker a bounded grace window after retrieval budget exhaustion', async () => {
   const started = Date.now();
   const delivered = await deliverHybrid({
     query: 'deadline-safe mixed recall',
@@ -32,8 +32,8 @@ test('unified delivery returns ranked lane fallback instead of overrunning an ex
     evidenceN: 5,
     budgetMs: 1,
   });
-  assert.ok(Date.now() - started < 100);
-  assert.equal(delivered.ranking_mode, 'lane_interleave_fallback');
+  assert.ok(Date.now() - started < 250);
+  assert.equal(delivered.ranking_mode, 'provider_failure_interleave');
   assert.equal(delivered.rerank_passes, 0);
   assert.equal(delivered.ranked_candidates.length, 2);
   assert.equal(delivered.evidence.length, 1);

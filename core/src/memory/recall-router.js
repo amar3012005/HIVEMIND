@@ -593,24 +593,26 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // recall look non-deterministic: 3 degradations in 40 minutes and a canary flapping
   // 4/5 -> 5/5 on the one cross-lingual question, with nothing in the log to explain it.
   //
-  // The parent deadline is authoritative. A previous "inner timeout + margin"
-  // floor expanded a 900ms remaining budget to 1350ms; /api/recall returned an
-  // EMPTY outer-timeout packet while this function completed moments later.
-  // If there is too little time for a measured warm call, skip external rerank
-  // and return the deterministic lane interleave immediately. Accuracy is
-  // explicitly marked degraded, but available recall is never replaced by [].
+  // A retrieval budget is a latency target, never permission to omit the only
+  // stage that makes memory and evidence scores comparable. In particular,
+  // returning a mixed pool unranked can place an unrelated source ahead of a
+  // directly relevant memory and make synthesis assert a false absence.
+  //
+  // Give the primary fast reranker a small, explicit grace window once the
+  // retrieval lanes have completed. The request-level deadline remains in
+  // force through currentStageSignal(), and provider failure still follows the
+  // configured fallback chain. This avoids an exhausted *internal* fact-mode
+  // budget silently changing answer correctness.
   const _rrInner = Number(process.env.RERANK_TOTAL_TIMEOUT_MS || 1200);
   const _rrBudget = Math.max(0, Number(budgetMs) || 0);
-  const _rrMin = Number(process.env.RERANK_MIN_BUDGET_MS || 400);
+  const _rrGrace = Math.max(100, Number(process.env.RECALL_HYBRID_RERANK_GRACE_MS || 1200));
+  const _rrAttemptBudget = Math.max(_rrBudget, _rrGrace);
   const _rrStart = Date.now();
   let rerankMeta = null;
-  if (_rrBudget < _rrMin) {
-    console.warn(`[recall-hybrid] SKIPPING cross-encoder: ${_rrBudget}ms remain `
-      + `(needs >=${_rrMin}ms; pool=${deduped.length}) — returning lane interleave within parent deadline.`);
-  } else try {
+  try {
     const rr = await withTimeout(
       () => rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
-      _rrBudget,
+      _rrAttemptBudget,
       null,
       'recall-hybrid-rerank',
     );
@@ -622,7 +624,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
       }); usedCrossEncoder = true;
     } else if (rr === null) {
       console.warn(`[recall-hybrid] cross-encoder TIMED OUT after ${Date.now() - _rrStart}ms `
-        + `(budget=${_rrBudget}ms inner=${_rrInner}ms pool=${deduped.length}) — ranking degrades to `
+        + `(retrieval_remaining=${_rrBudget}ms rerank_budget=${_rrAttemptBudget}ms inner=${_rrInner}ms pool=${deduped.length}) — ranking degrades to `
         + `interleave. This is the silent path that made recall look non-deterministic.`);
     } else {
       console.warn(`[recall-hybrid] cross-encoder returned no usable scores after `
@@ -648,7 +650,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
       if (byLane.memory[i]) woven.push(byLane.memory[i]);
     }
     ordered = woven;
-    console.warn(`[recall-hybrid] DEGRADED: no cross-encoder — interleaving ${byLane.memory.length} memories / ${byLane.evidence.length} evidence instead of comparing incomparable scores`);
+    console.warn(`[recall-hybrid] DEGRADED: all ranking providers failed — interleaving ${byLane.memory.length} memories / ${byLane.evidence.length} evidence. This response is explicitly marked degraded and must not assert unsupported absence.`);
   }
 
   const outMem = []; const outEv = []; const rankedCandidates = [];
@@ -682,7 +684,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
     // Preserve the cross-encoder's one authoritative mixed order. Consumers
     // may progressively reveal this list without another retrieval/rerank.
     ranked_candidates: retainedCandidates,
-    ranking_mode: usedCrossEncoder ? 'cross_encoder' : 'lane_interleave_fallback',
+    ranking_mode: usedCrossEncoder ? 'cross_encoder' : 'provider_failure_interleave',
     rerank_passes: usedCrossEncoder ? 1 : 0,
     rerank_ms: Date.now() - _rrStart,
     rerank: rerankMeta,

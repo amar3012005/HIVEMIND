@@ -254,6 +254,36 @@ const CONTEXT_OP = {
 // Defense-in-depth bounds (the current planner runs normalizeIntentDecision;
 // the adapter must not send unbounded/malformed values straight to the plan).
 const s = (v, n = 2000) => (typeof v === 'string' ? v.slice(0, n) : null);
+
+/**
+ * Server-owned native grounding boundary.
+ *
+ * The planner is useful for choosing a retrieval shape and canonical query,
+ * but it is not an authority on whether a tenant has relevant context. Keep
+ * this reusable because decisions can be normalized after the router adapter
+ * before execution.
+ */
+export function enforceNativeGroundingDecision(decision, message, { useTools = false } = {}) {
+  if (useTools === true || decision?.operation !== 'direct') {
+    return { decision, overridden: false };
+  }
+  const canonicalQuery = String(
+    decision.query_canonical_en
+    || decision.queries?.[0]
+    || message,
+  ).trim() || message;
+  return {
+    decision: {
+      ...decision,
+      operation: 'recall',
+      queries: [canonicalQuery],
+      tool_groups: ['hivemind-recall'],
+      direct_response: null,
+      _native_direct_grounding_override: true,
+    },
+    overridden: true,
+  };
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const uuid = (v) => (typeof v === 'string' && UUID_RE.test(v.trim()) ? v.trim() : null);
 const iso = (v) => (typeof v === 'string' && !Number.isNaN(new Date(v).getTime()) ? v : null);
@@ -435,7 +465,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
  * runs intentDecisionToPlan(decision, message) exactly as for the current
  * planner, so ALL downstream behavior is identical.
  */
-export function adaptToDecision(tool, args, message, language, { useTools = true } = {}) {
+export function adaptToDecision(tool, args, message, language, { useTools = false } = {}) {
   const lang = args?.response_language || language || 'und';
   const base = {
     version: 'chat-progressive.v1',
@@ -713,7 +743,7 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       // path. The final synthesizer can still answer a greeting naturally after
       // the bounded read, but no person/company/file/decision question can
       // bypass tenant-scoped recall. Connector/Composio routing is unchanged.
-      if (useTools !== true && _reason !== 'safety_refusal') {
+      if (useTools !== true) {
         return { decision: {
           ...base,
           operation: 'recall',

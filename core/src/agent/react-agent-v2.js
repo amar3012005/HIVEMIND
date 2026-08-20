@@ -46,6 +46,7 @@ import {
   evidenceWindowSizeForDepth,
 } from './progressive-recall-session.js';
 import { intentDecisionToPlan, parseChatIntent } from './chat-intent-decision.js';
+import { enforceNativeGroundingDecision } from './chat-progressive-router.js';
 import { buildStructuredRecallQuery } from './structured-recall-query.js';
 import {
   chatCompletionFetch,
@@ -2927,6 +2928,16 @@ export async function runReactAgentV2({
         subtasks: undefined,
         queries: intentDecision.queries?.length ? intentDecision.queries : [message],
       };
+    }
+    // Final native-grounding boundary after every planner/normalization seam
+    // and before the direct-answer fast path. It shares the router's rule so
+    // no future normalization or model-provided refusal label can bypass
+    // tenant-scoped recall by returning `operation: direct`.
+    const nativeGrounding = enforceNativeGroundingDecision(intentDecision, message, { useTools });
+    intentDecision = nativeGrounding.decision;
+    if (nativeGrounding.overridden) {
+      trace.warnings.push('native_direct_grounding_override');
+      console.warn(`[chat-router] native direct decision overridden to recall trace=${trace.traceId}`);
     }
     // A single connected-app intent is an external execution plan with one
     // step. Route it through the same Composio-backed path as multi-step plans

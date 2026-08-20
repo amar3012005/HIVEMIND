@@ -96,7 +96,13 @@ export const HIGH_TOOLS = [
     }) } },
   { type: 'function', function: { name: 'respond_directly', strict: true,
     description: 'Use only for greetings, arithmetic, harmless general conversation, clarification questions, or safety refusals. Never use for workspace knowledge, memory writes, projects, web research or named connected applications.',
-    parameters: object({ response: { type: 'string' }, response_language: { type: 'string' }, reason: { type: 'string', enum: ['general', 'clarification', 'safety_refusal'] } }) } },
+    parameters: object({ response: { type: 'string' }, response_language: { type: 'string' }, reason: { type: 'string', enum: ['general', 'clarification', 'safety_refusal'] },
+      // An explicit semantic certificate, rather than a language-specific
+      // keyword guess. A direct answer is safe only when it is fully answerable
+      // from the message/history and general knowledge — never from presumed
+      // workspace state or an asserted lack of workspace state.
+      context_free: { type: 'boolean', description: 'true only when the proposed reply is completely answerable from the user message/history and general knowledge. false whenever it asks about any person, company, project, file, event, decision, memory, record, or other possible workspace context.' },
+    }) } },
 ];
 
 const EXTERNAL_TOOL_NAMES = new Set(['use_connector', 'use_campaign', 'compound_plan']);
@@ -192,7 +198,7 @@ function getWorkflowPlannerTool() {
 // (the benchmark's exact prompt — the examples are cheap and materially lift
 // cross-language accuracy; broad example lists live in the eval suite, not here).
 const SYSTEM = `You are HIVE, an enterprise assistant. You MUST call exactly one supplied high-level tool for every turn.
-Use respond_directly only for greetings, arithmetic, clarification, or safety refusal.
+Use respond_directly only for greetings, arithmetic, clarification, or safety refusal. Set context_free=true only when the reply is fully answerable from the message/history and general knowledge. If a request could be answered by authorized workspace context — including any named or unnamed person, organization, product, file, project, event, decision, record, or prior work — it is NOT context-free: use hivemind_context. Never answer that you lack internal records without first using hivemind_context.
 Use hivemind_context for all internal knowledge: facts, named files, exact counts, relationships in every language, timelines and temporal questions.
 Any explicit filename or file extension such as .pdf, .docx, .pptx, .xlsx, .md or .html is HIVEMIND source context, never a connector request. Only use a connector when the user explicitly names the connected application or asks to act in it.
 Use hivemind_memory for remember/save/update/delete/rename requests in every language, AND for any durable fact the user simply ASSERTS - no request needed. A statement of fact about the user, their organisation, its products, people, naming or history is a save: \"Singulance was first known as Davinci AI\", \"X is our new pricing\", \"Y replaced Z\". The user is the authority on their own company, so a third-person claim still counts. Never acknowledge a write without this tool, and never reply \"would you like me to save this?\" - a new fact is additive, so store it and say you did. Deletion is the only write needing approval, and that is enforced in code by a one-time server token, not by asking. Questions, opinions and chit-chat are NOT saves. Distinguish the two "name" operations: "change MY name / my role / my company / I prefer X" => operation=update_profile (the USER's own profile). "Call yourself X / rename the assistant" => operation=rename_assistant (the ASSISTANT). Ambiguous "change it" with no clear target => ask ONE clarification via respond_directly(reason=clarification), never guess.
@@ -233,7 +239,7 @@ Choose one minimal native route; never request every native tool and never creat
 For a named file, preserve its closest recognizable title in source_title and use operation=source_read with native_tool=hivemind_recall. Ask recall for both the file summary and answer-bearing passages; the retrieval layer resolves the closest authorized source and falls through from summary memories to document evidence without another planner call.
 query_canonical_en is the sole model-authored retrieval query. Make it a compact semantic expression that preserves the subject, requested attribute, qualifiers, negation, relationship direction, temporal boundary, and source title. Expand only the requested facets; never add guessed facts. The server will not call a second query-rewrite model.
 Select response_depth from semantic breadth, in any language: standard for a bounded fact or ordinary question; detailed for a multi-aspect explanation, overview, comparison, or informative inventory; comprehensive only for an explicitly exhaustive cross-source treatment. Standard exposes the unified top 5; detailed and comprehensive expose the unified top 15. Retrieval itself retains the top 15 in one pass. There is no later 5-to-10-to-15 hop.
-Use hivemind_memory only for an explicit durable save, update, delete, profile update, or assistant rename; do not turn a question into a write. Use hivemind_projects only to list or resolve authorized projects. Use web_research only for current public-internet information. Use respond_directly only for greetings, arithmetic, harmless general conversation, a necessary clarification, or a safety refusal; never use it for workspace knowledge.
+Use hivemind_memory only for an explicit durable save, update, delete, profile update, or assistant rename; do not turn a question into a write. Use hivemind_projects only to list or resolve authorized projects. Use web_research only for current public-internet information. Use respond_directly only for greetings, arithmetic, harmless general conversation, a necessary clarification, or a safety refusal; never use it for workspace knowledge. Mark context_free=true only if that direct response is fully determined by the message/history and general knowledge. Any question that could be answered from workspace context — including a named person, organization, product, file, project, event, decision, record, or prior work — must use hivemind_context with context_free=false.
 Classify answer_type by meaning in the user's language: decision for choices or agreements; goal for targets, action items, or next steps; preference for priorities or likes; lesson for learnings; event for what happened, meetings, or quotes; relationship for entity connections; fact for objective attributes.
 Never invent workspace facts, identifiers, filenames, entities, or dates. Preserve exact user constraints and answer in the user's language.`;
 
@@ -699,6 +705,19 @@ export function adaptToDecision(tool, args, message, language, { useTools = true
       //     statement like "let's meet on August 5" is NOT diverted.
       // If any of those fail, behaviour is byte-identical to before.
       const _reason = String(args?.reason || 'general');
+      // This is an authority boundary, not a keyword router. The one planner
+      // call must explicitly certify a direct answer as context-free. Missing
+      // (old/malformed model output) and false both fail safely into recall,
+      // so no user/organization knowledge question can be answered from model
+      // parameters merely because the router chose `respond_directly`.
+      if (useTools !== true && args?.context_free !== true && _reason !== 'safety_refusal') {
+        return { decision: {
+          ...base,
+          operation: 'recall',
+          queries: [base.query_canonical_en],
+          tool_groups: ['hivemind-recall'],
+        }, usage: null };
+      }
       // A clarification is a semantic admission that the router is unsure; it
       // is not proof that workspace evidence is absent. Ground it through the
       // bounded recall path first. If recall also finds nothing, synthesis can

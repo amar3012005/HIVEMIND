@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { adaptToDecision, enforceNativeGroundingDecision } from '../../src/agent/chat-progressive-router.js';
+import {
+  adaptToDecision,
+  enforceNativeGroundingDecision,
+  getProgressiveTools,
+} from '../../src/agent/chat-progressive-router.js';
 
 test('router clarification is grounded through recall before asking the user', () => {
   const { decision } = adaptToDecision('respond_directly', {
@@ -65,6 +69,25 @@ test('final native boundary grounds a direct decision produced after routing', (
   assert.deepEqual(decision.queries, ['Kruti person workspace information']);
   assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
   assert.equal(decision.direct_response, null);
+});
+
+test('native-only planner cannot select a profile lane that bypasses hybrid recall', () => {
+  const tools = getProgressiveTools({ useTools: false });
+  assert.equal(tools.some((tool) => tool.function?.name === 'hivemind_profile'), false);
+
+  const { decision, overridden } = enforceNativeGroundingDecision({
+    operation: 'profile',
+    query_canonical_en: 'Kruti person workspace information',
+    queries: [],
+    tool_groups: [],
+    answer_objective: 'Describe Kruti from the workspace context.',
+  }, 'What do you know about Kruti?', { useTools: false });
+
+  assert.equal(overridden, true);
+  assert.equal(decision.operation, 'recall');
+  assert.deepEqual(decision.queries, ['Kruti person workspace information']);
+  assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
+  assert.equal(decision._native_knowledge_grounding_override, 'profile');
 });
 
 test('final native boundary grounds even a model-labelled refusal while preserving tool mode', () => {

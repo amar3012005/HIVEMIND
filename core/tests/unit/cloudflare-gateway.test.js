@@ -17,6 +17,7 @@ const KEYS = [
   'CLOUDFLARE_AI_GATEWAY_TEXT_ROUTE',
   'CLOUDFLARE_AI_GATEWAY_BGE_EMBEDDINGS_PROVIDER',
   'CLOUDFLARE_AI_GATEWAY_BGE_RERANKER_PROVIDER',
+  'CLOUDFLARE_AI_GATEWAY_QWEN_INGEST_PROVIDER',
 ];
 
 async function withEnv(values, fn) {
@@ -65,6 +66,7 @@ test('Gateway maps only known provider hosts and uses provider-native paths', ()
   assert.equal(gatewayProviderForUrl('https://api.together.xyz/v1/chat/completions'), 'together-ai');
   assert.equal(gatewayProviderForUrl('https://embeddings.singulancelabs.com/v1/embeddings'), 'custom-bge-embeddings');
   assert.equal(gatewayProviderForUrl('https://rerank.singulancelabs.com/api/v1/rerank'), 'custom-bge-reranker');
+  assert.equal(gatewayProviderForUrl('https://synthesize.singulancelabs.com/v1/chat/completions'), 'custom-qwen3-ingest');
   assert.equal(gatewayProviderUrl('openrouter', 'https://openrouter.ai/api/v1/chat/completions'), 'https://gateway.ai.cloudflare.com/v1/account/gateway/openrouter/chat/completions');
   assert.deepEqual(gatewayHeaders('cerebras'), {
     'cf-aig-authorization': 'Bearer token', 'cf-aig-skip-cache': 'true', 'cf-aig-byok-alias': 'first',
@@ -112,6 +114,22 @@ test('Gateway routes Singulance BGE services through their custom providers', as
   assert.equal(calls[0].headers.get('cf-aig-authorization'), 'Bearer gateway-token');
   assert.equal(calls[1].headers.get('cf-aig-authorization'), 'Bearer gateway-token');
   assert.equal(calls.length, 2);
+}));
+
+test('Gateway routes Qwen ingestion through its custom provider without an origin credential', async () => withEnv({
+  CLOUDFLARE_AI_GATEWAY_ENABLED: 'true', CLOUDFLARE_ACCOUNT_ID: 'account',
+  CLOUDFLARE_AI_GATEWAY_ID: 'gateway', CLOUDFLARE_AI_GATEWAY_TOKEN: 'gateway-token',
+}, async () => {
+  let call;
+  await gatewayFirstFetch('https://synthesize.singulancelabs.com/v1/chat/completions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+  }, { fetchImpl: async (url, init) => {
+    call = { url: String(url), headers: new Headers(init.headers) };
+    return new Response('{}');
+  } });
+  assert.equal(call.url, 'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-qwen3-ingest/v1/chat/completions');
+  assert.equal(call.headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+  assert.equal(call.headers.get('authorization'), null);
 }));
 
 test('Gateway request headers strip a prepared direct-provider credential', () => withEnv({

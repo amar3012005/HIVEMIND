@@ -50,6 +50,12 @@ export function gatewayProviderForUrl(value) {
     return String(process.env.CLOUDFLARE_AI_GATEWAY_BGE_RERANKER_PROVIDER || '').trim()
       || 'custom-bge-reranker';
   }
+  // The structured-ingestion origin credential belongs to the Gateway custom
+  // provider. Core must never carry it or bypass the Gateway transport.
+  if (host === 'synthesize.singulancelabs.com') {
+    return String(process.env.CLOUDFLARE_AI_GATEWAY_QWEN_INGEST_PROVIDER || '').trim()
+      || 'custom-qwen3-ingest';
+  }
   // These are custom-provider routes in some accounts. They are opt-in because
   // Cloudflare requires the exact `custom-{slug}` configured in that account.
   if (host === 'api.x.ai') return String(process.env.CLOUDFLARE_AI_GATEWAY_XAI_PROVIDER || '').trim() || null;

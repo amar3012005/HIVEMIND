@@ -8,7 +8,7 @@
  */
 
 import fetch from 'node-fetch';
-import { gatewayFirstFetch } from '../../llm/cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayFirstFetch } from '../../llm/cloudflare-gateway.js';
 import { meterTokens } from '../../billing/usage-tracker.js';
 import { currentOrg, currentApiKey } from '../../db/prisma.js';
 import { recordAiUsage, resolveAiModelPolicy } from '../../llm/ai-governance.js';
@@ -162,7 +162,22 @@ function mapModelForOpenRouter(model) {
   return model;
 }
 
+// Logical model id for the Cloudflare custom provider. It intentionally is
+// not an OpenRouter id: the origin token remains in Gateway configuration.
+export function isQwenIngestModel(model) {
+  return String(model || '').trim() === (process.env.QWEN_INGEST_MODEL || 'singulance/qwen3-ingest');
+}
+
 function pickRoute(model) {
+  if (isQwenIngestModel(model)) {
+    if (!cloudflareGatewayEnabled()) {
+      throw new Error('[enterprise-extract] qwen ingestion requires enabled Cloudflare AI Gateway');
+    }
+    return {
+      base: (process.env.QWEN_INGEST_BASE_URL || 'https://synthesize.singulancelabs.com/v1').replace(/\/+$/, ''),
+      key: '', provider: 'qwen-ingest', wireModel: process.env.QWEN_INGEST_WIRE_MODEL || 'qwen3-ingest',
+    };
+  }
   if (LLM_PRIMARY === 'openrouter' && OPENROUTER_KEY) {
     return { base: OPENROUTER_BASE_URL, key: OPENROUTER_KEY, provider: 'openrouter' };
   }
@@ -188,7 +203,7 @@ const reasoningDisableRejected = new Set();
  * @param {boolean} [opts.json_mode=false] - Request JSON output
  * @returns {Promise<string|Object>} Parsed JSON object if json_mode, otherwise raw content string
  */
-export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, reject_truncated_json = false, feature = 'enterprise-extract', respectModelPolicy = true }) {
+export async function chatCompletion({ messages, model, temperature = 0.1, max_tokens = 4096, json_mode = false, response_format = null, reject_truncated_json = false, feature = 'enterprise-extract', respectModelPolicy = true }) {
   model = model || DEFAULT_MODEL;
   const useCase = /entity|relationship/i.test(feature) ? 'entity_linking' : 'ingestion_extraction';
   if (respectModelPolicy) {
@@ -216,6 +231,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   };
 
   const route = pickRoute(model);
+  if (route.wireModel) body.model = route.wireModel;
   // On OpenRouter, remap Groq model ids to their OpenRouter equivalents.
   if (route.provider === 'openrouter') {
     body.model = mapModelForOpenRouter(model);
@@ -235,7 +251,9 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   }
   // Groq's strict json_object mode rejects empty/invalid generations with
   // a 400. Skip strict mode there and rely on the salvage parser below.
-  if (json_mode && route.provider !== 'groq') {
+  if (response_format) {
+    body.response_format = response_format;
+  } else if (json_mode && route.provider !== 'groq') {
     body.response_format = { type: 'json_object' };
   }
 
@@ -399,7 +417,14 @@ export async function chatCompletionWithFallback({
   let bestTruncated = null;
   for (let i = 0; i < list.length; i += 1) {
     try {
-      const completed = await chatCompletion({ ...opts, model: list[i], respectModelPolicy: false });
+      // A caller may supply the strict Qwen schema for a stable persistence
+      // envelope. Do not impose that provider-specific schema on a fallback
+      // family; normal json_mode remains enforced there.
+      const { response_format, ...withoutSchema } = opts;
+      const completed = await chatCompletion({
+        ...(isQwenIngestModel(list[i]) ? opts : withoutSchema),
+        model: list[i], respectModelPolicy: false,
+      });
       // A provider-confirmed truncated prefix can hold far more grounded items
       // than a later model's syntactically complete but nearly empty response.
       // Dense extraction opts into rejecting that thin completion so its

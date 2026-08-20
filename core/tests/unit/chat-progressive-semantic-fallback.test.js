@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { adaptToDecision } from '../../src/agent/chat-progressive-router.js';
+import { adaptToDecision, enforceNativeGroundingDecision } from '../../src/agent/chat-progressive-router.js';
 
 test('router clarification is grounded through recall before asking the user', () => {
   const { decision } = adaptToDecision('respond_directly', {
@@ -48,4 +48,35 @@ test('tool-enabled direct behavior remains unchanged', () => {
   }, 'Hello', 'en', { useTools: true });
 
   assert.equal(decision.operation, 'direct');
+});
+
+test('final native boundary grounds a direct decision produced after routing', () => {
+  const { decision, overridden } = enforceNativeGroundingDecision({
+    operation: 'direct',
+    query_canonical_en: 'Kruti person workspace information',
+    queries: [],
+    tool_groups: [],
+    direct_response: 'I do not know Kruti.',
+    failure_response: null,
+  }, 'What do you know about Kruti?', { useTools: false });
+
+  assert.equal(overridden, true);
+  assert.equal(decision.operation, 'recall');
+  assert.deepEqual(decision.queries, ['Kruti person workspace information']);
+  assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
+  assert.equal(decision.direct_response, null);
+});
+
+test('final native boundary grounds even a model-labelled refusal while preserving tool mode', () => {
+  const safety = enforceNativeGroundingDecision({
+    operation: 'direct', failure_response: 'I cannot help with that.', queries: [],
+  }, 'unsafe request', { useTools: false });
+  const tools = enforceNativeGroundingDecision({
+    operation: 'direct', failure_response: null, queries: [],
+  }, 'Hello', { useTools: true });
+
+  assert.equal(safety.overridden, true);
+  assert.equal(safety.decision.operation, 'recall');
+  assert.equal(tools.overridden, false);
+  assert.equal(tools.decision.operation, 'direct');
 });

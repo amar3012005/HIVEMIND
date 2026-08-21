@@ -161,6 +161,18 @@ WEB_INTEL_GROQ_TOOLS = ("web_search", "visit_website")
 
 HYPER_ROOM_AGENT_MAX_ITERS = int(os.environ.get("HYPER_ROOM_AGENT_MAX_ITERS", "3"))
 BLACKBOARD_MIN_SCORE = float(os.environ.get("HYPER_ROOM_BLACKBOARD_MIN_SCORE", "0.45"))
+# Real incident (2026-08-20): a manual chat follow-up in an already-open room
+# hung forever on "selecting lead and reactors" with zero error surfaced. Root
+# cause: `_orchestrate` starts with several sequential asyncpg pool.acquire()
+# calls (db.py) that carry NO timeout — if the process-wide pool (max_size=8)
+# is saturated by other in-flight work, that first DB read blocks
+# indefinitely, and nothing upstream of it (the fire-and-forget dispatch in
+# control-plane, the goalkeeper's plain `await`) ever times out either. This
+# is a generous SAFETY NET, not a new constraint on normal turns — a healthy
+# round finishes in seconds to low minutes; this only fires when something is
+# truly stuck, and turns it into a real, user-visible terminal state instead
+# of infinite silence.
+HYPER_ROOM_ROUND_DEADLINE_SECONDS = float(os.environ.get("HYPER_ROOM_ROUND_DEADLINE_SECONDS", "240"))
 
 # Agentic task engine (dual-engine, 2026-08-13): default-off. When on, the
 # planner may route a turn to a real multi-step ReAct loop (lead agent +
@@ -5112,7 +5124,28 @@ async def post_room_turn(
     rnd = 0
     try:
         for rnd in range(1, max_rounds + 1):
-            resp = await _orchestrate(req)
+            try:
+                resp = await asyncio.wait_for(_orchestrate(req), timeout=HYPER_ROOM_ROUND_DEADLINE_SECONDS)
+            except asyncio.TimeoutError:
+                log.error("[goalkeeper] round=%d exceeded %.0fs deadline (turn=%s) — sealing deadline_exceeded instead of hanging",
+                          rnd, HYPER_ROOM_ROUND_DEADLINE_SECONDS, req.turn_id)
+                # `_orchestrate` never finished, so it never stashed a seal onto
+                # `_SEAL_BY_TURN` — without emitting one here directly, the FE
+                # (which only stops polling/rendering on a genuine status change)
+                # would stay on "selecting lead and reactors" forever even though
+                # the backend gave up. This is the actual fix for the reported
+                # hang, not just bookkeeping.
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "line", "agent": "system", "kind": "timeout",
+                    "content": "This round took too long to respond and was stopped. "
+                               "Please try asking again.",
+                })
+                await _emit_event(req.callback_url, req.turn_id, {
+                    "t": "seal", "status": "deadline_exceeded", "cost_tokens": total_cost,
+                    "duration_ms": int((time.time() - _gk_started) * 1000),
+                })
+                resp = RoomTurnResponse(ok=False, cost_tokens=total_cost, status="deadline_exceeded")
+                return resp
             total_cost += int(resp.cost_tokens or 0)
             # P2 Governor — per-turn token ceiling across goalkeeper rounds. Stop a runaway
             # re-plan loop from burning budget; seal the turn cost_capped. 0 = unlimited.

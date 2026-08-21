@@ -85,3 +85,17 @@ class VerificationFailureResultTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoundDeadlineConfigTests(unittest.TestCase):
+    """Real incident (2026-08-20): a manual chat follow-up in an
+    already-open room hung forever on "selecting lead and reactors" with
+    zero user-visible error — root-caused to unbounded asyncpg pool.acquire()
+    calls inside _orchestrate with no outer deadline anywhere in the call
+    chain. HYPER_ROOM_ROUND_DEADLINE_SECONDS is the safety net; this guards
+    its parsing doesn't silently regress to 0/unset."""
+
+    def test_default_deadline_is_a_sane_positive_number_of_minutes(self):
+        from hivemind_employees.api_hyper_rooms import HYPER_ROOM_ROUND_DEADLINE_SECONDS
+        self.assertGreater(HYPER_ROOM_ROUND_DEADLINE_SECONDS, 60)
+        self.assertLess(HYPER_ROOM_ROUND_DEADLINE_SECONDS, 1800)

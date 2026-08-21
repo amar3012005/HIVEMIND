@@ -109,6 +109,14 @@ export const HIGH_TOOLS = [
 ];
 
 const EXTERNAL_TOOL_NAMES = new Set(['use_connector', 'use_campaign', 'compound_plan']);
+const NATIVE_TOOL_CATALOG = [
+  'hivemind_recall — grounded facts, entity overviews, decisions, goals, events in a period, useful inventories, and named-file contents; not snapshots, state comparisons, histories, exact registries, or graph paths.',
+  'hivemind_at — what was true or known at one instant; valid_time is truth/effective state and known_time is knowledge available by then; not events occurring during a range.',
+  'hivemind_diff — compare workspace state at exactly two instants; not events during a period or a general history.',
+  'hivemind_timeline — chronological versions, prior values, and how one subject evolved; not a one-date snapshot or two-date comparison.',
+  'hivemind_aggregate_entities — certified exact count or registry-complete entity enumeration; ordinary useful lists use recall.',
+  'hivemind_relation_between — verified relationship or graph path between at least two exact entities; ordinary multi-entity facts use recall.',
+].join('\n');
 // The native-only context contract exposes the exact server capability the
 // planner intends to use. The high-level operation remains for compatibility,
 // but native_tool is authoritative and prevents a vague "context" choice from
@@ -126,7 +134,7 @@ const NATIVE_CONTEXT_TOOL = (() => {
           native_tool: {
             type: 'string',
             enum: ['hivemind_recall', 'hivemind_at', 'hivemind_diff', 'hivemind_timeline', 'hivemind_aggregate_entities', 'hivemind_relation_between'],
-            description: 'The one native read capability required. hivemind_recall also owns event windows and named-file evidence retrieval.',
+            description: `Choose exactly one capability by semantic intent in any language:\n${NATIVE_TOOL_CATALOG}`,
           },
           temporal_axis: {
             type: 'string',
@@ -247,13 +255,7 @@ Never invent workspace facts. Never bypass approval. Preserve exact entities, fi
 const NATIVE_POLICY = `You are HIVE, the grounded organizational brain. You MUST call exactly one supplied high-level tool. Perform planning, semantic query optimization, tool selection, temporal normalization, answer-depth selection, and answer-shape selection in this ONE call.
 Choose one minimal native route; never request every native tool and never create speculative hops.
 - hivemind_profile: maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, goals, language, or location. A request whose semantic subject is the caller or their maintained organization profile belongs here in every language. It is caller-scoped by the server and takes no identifiers. Do not substitute a generic recall merely because profile facts may be absent; profile must run first. General company knowledge, products, documents, decisions, meetings, and history that are not maintained profile facts belong to recall.
-- hivemind_context + native_tool=hivemind_recall: ordinary facts, small details, useful inventories, overviews, decisions, goals, events, named files, and activity during a date range. Recall searches the authorized hybrid memory-and-document-evidence pool together. For an event/activity window, use operation=temporal_range and native_tool=hivemind_recall.
-- native_tool=hivemind_at: what was true, or what was known, at one instant. Use operation=temporal. Set temporal_axis=valid_time and only valid_at for truth/effective-time questions; set temporal_axis=known_time and only known_at for explicitly known/recorded/available-at questions. Never fill both axes.
-- native_tool=hivemind_diff: compare workspace state at two instants. Do not use it for events that merely occurred during a period. Use operation=diff.
-- native_tool=hivemind_timeline: version history, prior values, and how one subject changed over time. Use operation=timeline.
-- native_tool=hivemind_relation_between: an explicit relationship/path between at least two entities. Use operation=relation_between.
-- native_tool=hivemind_aggregate_entities: only a certified exact count or registry-complete enumeration. Use operation=aggregate. A useful list of known items is ordinary recall.
-For a named file, preserve its closest recognizable title in source_title and use operation=source_read with native_tool=hivemind_recall. Ask recall for both the file summary and answer-bearing passages; the retrieval layer resolves the closest authorized source and falls through from summary memories to document evidence without another planner call.
+For a grounded read, use hivemind_context and follow the native_tool catalog attached to that field; its descriptions are authoritative. Set operation to recall/source_read/temporal_range for hivemind_recall, temporal for hivemind_at, diff for hivemind_diff, timeline for hivemind_timeline, aggregate for hivemind_aggregate_entities, and relation_between for hivemind_relation_between. For a named file, preserve its closest recognizable title in source_title and use operation=source_read. Set temporal_axis=valid_time or known_time only for hivemind_at and none otherwise.
 query_canonical_en is the sole model-authored retrieval query. Make it a compact semantic expression that preserves the subject, requested attribute, qualifiers, negation, relationship direction, temporal boundary, and source title. Expand only the requested facets; never add guessed facts. For a multi-facet overview of exactly one named entity, use that exact entity or alias as the retrieval query and carry the requested facets in answer_objective; this maximizes coverage without losing what the final answer must cover. The server will not call a second query-rewrite model.
 Select answer_completion_requirement and answer_scope before response_depth from semantic breadth, in any language. complete_set/exhaustive is required when the answer must collect every retained member or every relevant claim of a category about a subject; multi_facet/broad is required for a multi-aspect explanation, overview, comparison, or informative inventory; single_answer/bounded is only for one answerable point. If uncertain between levels, choose the broader level: omitting a supported member is worse than giving the synthesis more grounded context. The minimum response_depth is bounded => standard, broad => detailed, exhaustive => comprehensive. Standard exposes the unified top 5; detailed and comprehensive expose the unified top 15. Retrieval itself retains the top 15 in one pass. There is no later 5-to-10-to-15 hop.
 Use hivemind_memory only for an explicit durable save, update, delete, profile update, or assistant rename; do not turn a question into a write. Use hivemind_projects only to list or resolve authorized projects. Use web_research only for current public-internet information. Use respond_directly only for greetings, arithmetic, harmless general conversation, a necessary clarification, or a safety refusal; never use it for workspace knowledge. Mark context_free=true only if that direct response is fully determined by the message/history and general knowledge. Any question that could be answered from workspace context — including a named person, organization, product, file, project, event, decision, record, or prior work — must use hivemind_context with context_free=false.
@@ -522,7 +524,9 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
   // lookup. Keep its exact language-preserving entity as the retrieval anchor;
   // answer_objective below retains every facet requested by the user. This is
   // structural planner output, not a keyword or locale-specific rewrite.
-  const canonicalQuery = !useTools && retrievalShape === 'overview' && namedEntities.length === 1
+  const entityAnchoredRecall = String(args?.native_tool || '') === 'hivemind_recall'
+    && ['recall', 'source_read', 'temporal_range'].includes(String(args?.operation || 'recall'));
+  const canonicalQuery = !useTools && entityAnchoredRecall && retrievalShape === 'overview' && namedEntities.length === 1
     ? namedEntities[0]
     : plannerCanonicalQuery;
   const base = {

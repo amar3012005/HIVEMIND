@@ -104,15 +104,19 @@ test('Gateway routes Singulance BGE services through their custom providers', as
     return new Response('{}');
   };
   await gatewayFirstFetch('https://embeddings.singulancelabs.com/v1/embeddings', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { Authorization: 'Bearer embeddings-origin-key', 'Content-Type': 'application/json' },
   }, { fetchImpl });
   await gatewayFirstFetch('https://rerank.singulancelabs.com/api/v1/rerank', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { Authorization: 'Bearer reranker-origin-key', 'Content-Type': 'application/json' },
   }, { fetchImpl });
   assert.equal(calls[0].url, 'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-bge-embeddings/v1/embeddings');
   assert.equal(calls[1].url, 'https://gateway.ai.cloudflare.com/v1/account/gateway/custom-bge-reranker/api/v1/rerank');
   assert.equal(calls[0].headers.get('cf-aig-authorization'), 'Bearer gateway-token');
   assert.equal(calls[1].headers.get('cf-aig-authorization'), 'Bearer gateway-token');
+  // Custom BGE providers authenticate the origin with Authorization while the
+  // Gateway credential stays in cf-aig-authorization. These must coexist.
+  assert.equal(calls[0].headers.get('authorization'), 'Bearer embeddings-origin-key');
+  assert.equal(calls[1].headers.get('authorization'), 'Bearer reranker-origin-key');
   assert.equal(calls.length, 2);
 }));
 

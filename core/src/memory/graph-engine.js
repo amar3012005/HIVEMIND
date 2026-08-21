@@ -1245,11 +1245,36 @@ export class MemoryGraphEngine {
         }
 
         const shouldSkipRelationshipClassification = input.skip_relationship_classification === true && !input.relationship;
-        const classification = shouldSkipRelationshipClassification
+        let classification = shouldSkipRelationshipClassification
           ? { operation: 'created', relationship: null }
           : input.relationship
           ? this._explicitClassification(input.relationship)
           : this.relationshipClassifier.classifyRelationship(baseMemory, latestMemories);
+
+        // An inferred Updates edge is destructive and also becomes persisted
+        // semantic metadata. Validate its subject identity before storing the
+        // row, not only later when applyUpdate runs; otherwise a rejected edge
+        // still leaves the memory claiming it updated an unrelated target and
+        // the API reports `operation: updated` even though nothing was changed.
+        if (classification.relationship?.type === 'Updates' && !callerAuthorizedRelationship) {
+          const targetId = classification.relationship.targetId;
+          const confidence = Number(classification.relationship.confidence || 0);
+          let target = (latestMemories || []).find((memory) => memory?.id === targetId) || null;
+          if (!target && targetId) {
+            target = await store.getMemory(targetId).catch(() => null);
+          }
+          const entityTags = (memory) => new Set((memory?.tags || [])
+            .filter((tag) => typeof tag === 'string' && tag.startsWith('entity:'))
+            .map((tag) => tag.toLowerCase()));
+          const nextEntities = entityTags(baseMemory);
+          const targetEntities = entityTags(target);
+          const sharesSubject = [...nextEntities].some((entity) => targetEntities.has(entity));
+          if (!targetId || confidence < 0.85 || !sharesSubject) {
+            console.log(`[graph-engine] inferred Updates rejected before persistence: memory=${baseMemory.id.slice(0, 8)} target=${targetId?.slice(0, 8) || 'none'} conf=${confidence} shared_entity=${sharesSubject}`);
+            classification = { operation: 'created', relationship: null };
+            if (input.relationship?.type === 'Updates') delete input.relationship;
+          }
+        }
 
         const deriveSources = classification.relationship?.sourceIds?.length
           ? classification.relationship.sourceIds

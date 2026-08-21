@@ -291,7 +291,9 @@ export async function rerank(query, candidates, { topN } = {}) {
     };
     if (parentSignal?.aborted) abortFromParent();
     else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       if (!ctrl.signal.aborted) ctrl.abort(new Error(`rerank timeout after ${attemptBudget}ms`));
     }, attemptBudget);
     try {
@@ -299,7 +301,19 @@ export async function rerank(query, candidates, { topN } = {}) {
       const targetTexts = target.role === 'primary' && PROJECT_TO_CHARS > 0
         ? projectableTexts
         : boundedTexts;
-      const scored = await callTarget(query, targetTexts, ctrl.signal, target);
+      let scored;
+      try {
+        scored = await callTarget(query, targetTexts, ctrl.signal, target);
+      } catch (error) {
+        if (timedOut || parentSignal?.aborted) {
+          const deadlineError = new Error(timedOut
+            ? `rerank timeout after ${attemptBudget}ms`
+            : 'rerank cancelled by upstream deadline');
+          deadlineError.code = timedOut ? 'RERANK_TIMEOUT' : 'RERANK_CANCELLED';
+          throw deadlineError;
+        }
+        throw error;
+      }
       if (!scored.length) throw new Error('empty rerank result');
       const byIdx = new Map(scored.map((s) => [s.index, s.score]));
       const reordered = pool
@@ -356,6 +370,9 @@ export async function rerank(query, candidates, { topN } = {}) {
         return finish(out, { status: 'served', model, route: target.role, fallback_index: mi });
       } catch (err) {
         lastErr = err;
+        if (err?.code === 'RERANK_TIMEOUT' || err?.code === 'RERANK_CANCELLED') {
+          return finish(candidates, { status: 'cancelled', model, error: err.message });
+        }
         if (currentStageSignal()?.aborted || remainingStageMs(1) <= 0) {
           return finish(candidates, { status: 'cancelled', model });
         }

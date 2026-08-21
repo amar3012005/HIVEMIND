@@ -603,36 +603,23 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // force through currentStageSignal(), and provider failure still follows the
   // configured fallback chain. This avoids an exhausted *internal* fact-mode
   // budget silently changing answer correctness.
-  const _rrInner = Number(process.env.RERANK_TOTAL_TIMEOUT_MS || 1200);
   const _rrBudget = Math.max(0, Number(budgetMs) || 0);
-  const _rrGrace = Math.max(100, Number(process.env.RECALL_HYBRID_RERANK_GRACE_MS || 1200));
-  const _rrAttemptBudget = Math.max(_rrBudget, _rrGrace);
   const _rrStart = Date.now();
-  let rerankMeta = null;
-  try {
-    const rr = await withTimeout(
-      () => rerank(query, deduped.map((c) => ({ title: c._title, content: c._content, _u: c })), { topN: deduped.length }),
-      _rrAttemptBudget,
-      null,
-      'recall-hybrid-rerank',
-    );
-    rerankMeta = rr?.rerank_meta || null;
-    if (Array.isArray(rr) && rr.length && rr.some((x) => x.rerank_score != null)) {
-      ordered = rr.map((x) => {
-        const score = Number(x.rerank_score);
-        return { ...x._u, _rerankScore: Number.isFinite(score) ? score : null };
-      }); usedCrossEncoder = true;
-    } else if (rr === null) {
-      console.warn(`[recall-hybrid] cross-encoder TIMED OUT after ${Date.now() - _rrStart}ms `
-        + `(retrieval_remaining=${_rrBudget}ms rerank_budget=${_rrAttemptBudget}ms inner=${_rrInner}ms pool=${deduped.length}) — ranking degrades to `
-        + `interleave. This is the silent path that made recall look non-deterministic.`);
-    } else {
-      console.warn(`[recall-hybrid] cross-encoder returned no usable scores after `
-        + `${Date.now() - _rrStart}ms (rows=${Array.isArray(rr) ? rr.length : 'n/a'}) — see [reranker].`);
-    }
-  } catch (error) {
-    console.warn(`[recall-hybrid] cross-encoder threw after ${Date.now() - _rrStart}ms: ${error.message}`);
+  const rr = await rerank(
+    query,
+    deduped.map((c) => ({ title: c._title, content: c._content, _u: c })),
+    { topN: deduped.length },
+  );
+  const rerankMeta = rr?.rerank_meta || null;
+  if (rerankMeta?.status !== 'served' || !Array.isArray(rr) || !rr.some((x) => x.rerank_score != null)) {
+    const reason = rerankMeta?.error || rerankMeta?.status || 'no usable scores';
+    throw new Error(`unified recall rerank unavailable: ${reason} (retrieval_remaining=${_rrBudget}ms)`);
   }
+  ordered = rr.map((x) => {
+    const score = Number(x.rerank_score);
+    return { ...x._u, _rerankScore: Number.isFinite(score) ? score : null };
+  });
+  usedCrossEncoder = true;
 
   // FALLBACK MUST NOT COMPARE LANES BY SCORE. Lexical evidence scores are synthetic
   // (0.55-0.95), vector scores are real cosine (often <0.15), and memory scores come
@@ -641,17 +628,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // outright. That is exactly what buried the German `E3DC Zähler` row behind keyword
   // hits on the one question that needed semantics. When the cross-encoder is
   // unavailable, INTERLEAVE the lanes instead so neither can dominate, and say so.
-  if (!usedCrossEncoder) {
-    const byLane = { memory: [], evidence: [] };
-    for (const c of deduped) byLane[c._kind]?.push(c);
-    const woven = [];
-    for (let i = 0; i < Math.max(byLane.memory.length, byLane.evidence.length); i += 1) {
-      if (byLane.evidence[i]) woven.push(byLane.evidence[i]);
-      if (byLane.memory[i]) woven.push(byLane.memory[i]);
-    }
-    ordered = woven;
-    console.warn(`[recall-hybrid] DEGRADED: all ranking providers failed — interleaving ${byLane.memory.length} memories / ${byLane.evidence.length} evidence. This response is explicitly marked degraded and must not assert unsupported absence.`);
-  }
+  if (!usedCrossEncoder) throw new Error('unified recall rerank did not produce a comparable ordering');
 
   const outMem = []; const outEv = []; const rankedCandidates = [];
   for (const c of ordered) {
@@ -768,6 +745,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     : null;
   const recallArgs = {
     query_context: query,
+    query_vector: options.query_vector || null,
     user_id: ctx.userId,
     org_id: ctx.orgId,
     max_memories: Math.min(options.limit || HOP1_DEFAULT_LIMIT, 50),
@@ -1069,7 +1047,7 @@ async function resolveProjectDocIds({ prisma, projectId, orgId }) {
 // backstop, and hop-1 returning *some* memories doesn't mean it answered the
 // query (the competitor footnote case). retrieveEvidence runs vector + the
 // lexical fallback, so buried exact terms surface regardless of cosine rank.
-export async function hop2Evidence({ evidenceService, query, ctx, inspection, prisma }) {
+export async function hop2Evidence({ evidenceService, query, queryVector = null, ctx, inspection, prisma }) {
   if (!evidenceService) return { items: [], reason: null };
 
   let docIds = [...inspection.docIds];
@@ -1139,6 +1117,7 @@ export async function hop2Evidence({ evidenceService, query, ctx, inspection, pr
   // approximating by refusing to look.
   const items = await evidenceService.retrieveEvidence({
     query, userId: ctx.userId, orgId: ctx.orgId,
+    queryVector,
     projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
     scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
     ...(docIds.length > 0 ? { documentIds: docIds } : {}),
@@ -1545,7 +1524,12 @@ export class RecallRouter {
     // source-specific and can hide better product evidence. Legacy /api/recall
     // callers retain metadata-based filename resolution for compatibility.
     const allowImplicitSource = !recallPlan.source.requested;
-    const [implicitSource, canonicalEntities] = await Promise.all([
+    const queryVectorPromise = this.evidence?.qdrantClient?.generateEmbedding
+      ? this.evidence.qdrantClient.generateEmbedding(query, {
+          workload: 'interactive', tenantId: ctx.orgId,
+        })
+      : Promise.reject(new Error('unified recall embedding service unavailable'));
+    const [implicitSource, canonicalEntities, queryVector] = await Promise.all([
       allowImplicitSource ? resolveImplicitSource({
         evidence: this.evidence,
         query,
@@ -1560,7 +1544,11 @@ export class RecallRouter {
         250,
         [],
       ),
+      queryVectorPromise,
     ]);
+    if (!Array.isArray(queryVector) || queryVector.length === 0) {
+      throw new Error('unified recall query embedding unavailable');
+    }
     if (stageTiming) stageTiming.entity_resolution_ms = Date.now() - startedAt;
     if (implicitSource) {
       recallPlan = resolveRecallPlan({
@@ -1585,6 +1573,7 @@ export class RecallRouter {
       date_range: recallPlan.time.range,
       include_superseded: recallPlan.operation === 'timeline' || options.include_superseded === true,
       canonical_entities: mergedCanonicalEntities,
+      query_vector: queryVector,
     };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     // THE RERANKER GETS A FLOOR, NOT A SLICE OF SOMEONE ELSE'S BUDGET.
@@ -1683,19 +1672,16 @@ export class RecallRouter {
     const sourceFirstEvidence = recallPlan.expand_evidence
       ? (explicitSourceRequested && explicitSourceDocuments.length === 0
         ? Promise.resolve({ items: [], reason: 'source-not-found', docIds: [] })
-        : withTimeout(
-        hop2Evidence({
+        : hop2Evidence({
           evidenceService: this.evidence,
           query,
+          queryVector,
           ctx,
           inspection: explicitSourceDocuments.length
             ? { ...inspectMemories([]), docIds: explicitSourceDocuments.map((document) => document.id) }
             : inspectMemories([]),
           prisma: this.prisma,
-        }),
-        Math.min(2_300, remainingBudget()),
-        { items: [], reason: 'timeout' },
-      ))
+        }))
       : null;
     const measuredSourceFirstEvidence = sourceFirstEvidence && stageTiming
       ? sourceFirstEvidence.then((value) => {
@@ -1706,15 +1692,11 @@ export class RecallRouter {
 
     // ── HOP 1 ─────────────────────────────────────────────────────────────
     const t1 = Date.now();
-    let memories = await withTimeout(
-      hop1Memory({ store: this.store, query, options: {
+    let memories = await hop1Memory({ store: this.store, query, options: {
         ...options,
         trace_stages: options.trace_stages === true,
         timing: stageTiming ? (stageTiming.memory_detail = {}) : null,
-      }, ctx }),
-      Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
-      [],
-    );
+      }, ctx });
     let eventRangeCount = 0;
     if (options.event_range === true && recallPlan.time.range && this.store?.listMemories) {
       try {
@@ -1770,7 +1752,7 @@ export class RecallRouter {
     // to disable per deployment) so high-volume tenants can opt out.
     let projectFallbackFired = false;
     const _projectFallbackEnabled = process.env.RECALL_PROJECT_FALLBACK !== 'false';
-    if (_projectFallbackEnabled && memories.length === 0 && ctx.projectId) {
+    if (_projectFallbackEnabled && options.structured_intent !== true && memories.length === 0 && ctx.projectId) {
       // ISOLATION: the broad retry may escape to personal/org/team knowledge,
       // but must NEVER surface ANOTHER project's scoped memories — asking about
       // "Solvis" inside the Singulance project must not answer from the SOLVIS
@@ -1807,13 +1789,9 @@ export class RecallRouter {
     const [hop2, hop3] = await Promise.all([
       !recallPlan.expand_evidence
         ? Promise.resolve({ items: [], reason: 'disabled' })
-        : measuredSourceFirstEvidence || withTimeout(
-        hop2Evidence({
-          evidenceService: this.evidence, query, ctx, inspection, prisma: this.prisma,
+        : measuredSourceFirstEvidence || hop2Evidence({
+          evidenceService: this.evidence, query, queryVector, ctx, inspection, prisma: this.prisma,
         }),
-        Math.min(HOP2_TIMEOUT_MS, remainingBudget()),
-        { items: [], reason: 'timeout' },
-      ),
       !isLiveExpansionEligible({
         includeLive: recallPlan.include_live,
         inspection,
@@ -2037,7 +2015,7 @@ export class RecallRouter {
         evidenceN: HOP2_DOC_LIMIT,
         budgetMs: remainingBudget(),
         structuredIntent: options.structured_intent === true,
-      }).catch(() => null);
+      });
       if (v2 && Array.isArray(v2.memories)) {
         deliverMemories = dedupeMemoriesById(v2.memories);
         finalEvidence = v2.evidence || evidenceWithLineage;
@@ -2064,6 +2042,8 @@ export class RecallRouter {
       live: hop3.items,
       trace: {
         recall_plan:     recallPlan,
+        embedding_passes: 1,
+        retrieval_passes: 1,
         hybrid_ranking_mode: hybridRankingMode,
         rerank_passes: hybridRerankPasses,
         rerank_ms: hybridRerankMs,

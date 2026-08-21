@@ -237,11 +237,9 @@ export async function handleRecallRoute(ctx = {}) {
       // ceiling so it can return either its ranked result or explicit fallback.
       const routeReserveMs = Number(process.env.RECALL_ROUTE_COMPLETION_RESERVE_MS || 900);
       const remainingMs = () => Math.max(1, recallPlan.latency_budget_ms + routeReserveMs - (Date.now() - _recallT0));
-      const timeoutResult = { memories: [], evidence: [], live: [], trace: { timeout: true } };
       let bounded;
       try {
-        bounded = await resolveWithinDeadline(
-          () => recallRuntime.recall(query, {
+        bounded = await recallRuntime.recall(query, {
           mode: recallPlan.mode,
           explicit_mode: true,
           include_live: body.include_live === true,
@@ -270,11 +268,7 @@ export async function handleRecallRoute(ctx = {}) {
           orgId,
           projectId: recallProjectId,
           accessContext: recallAccessCtx,
-        }),
-          remainingMs(),
-          timeoutResult,
-          'recall-route-retrieval',
-        );
+        });
       } catch (error) {
         if (isRemoteMemoryUnavailableError(error)) {
           return jsonResponse(res, {
@@ -342,6 +336,12 @@ export async function handleRecallRoute(ctx = {}) {
         mode_used: String(body.mode || '').toLowerCase() === 'quick' ? 'quick' : effectivePlan.mode,
         search_method: 'hybrid',
         recall_plan: effectivePlan,
+        retrieval_trace: {
+          embedding_passes: Number(bounded.trace?.embedding_passes) || 0,
+          retrieval_passes: Number(bounded.trace?.retrieval_passes) || 0,
+          rerank_passes: Number(bounded.trace?.rerank_passes) || 0,
+          ranking_mode: bounded.trace?.hybrid_ranking_mode || null,
+        },
         evidence_packet: packet,
         cutoff_reason: cutoffReason,
         project_scope_applied: _boundedScoped.project_scope_applied,

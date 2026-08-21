@@ -83,6 +83,7 @@ export class FallbackEmbedService {
         if (errors.length) console.warn(`[embed] served by fallback '${link.name}' after ${errors.length} failure(s)`);
         return out;
       } catch (err) {
+        if (err?.code === 'EMBEDDING_TIMEOUT' || err?.code === 'EMBEDDING_CANCELLED') throw err;
         // Log the FIRST failure of each link, not every one — a hot loop with a dead primary
         // would otherwise bury the log. The cooldown entry doubles as the "already reported" mark.
         if (!this._downUntil.has(link.name)) {
@@ -155,7 +156,7 @@ function makeSingulanceService() {
     process.env.SINGULANCE_EMBED_MODEL || 'bge-m3',
     process.env.SINGULANCE_EMBED_API_KEY || process.env.EMBEDDING_API_KEY || '',
     process.env.SINGULANCE_EMBED_BASE_URL || 'https://embeddings.singulancelabs.com/v1',
-    { timeoutMs: Number(process.env.EMBEDDING_TIMEOUT_MS || 1200) },
+    { timeoutMs: Number(process.env.SINGULANCE_EMBED_TIMEOUT_MS || 8000) },
   );
 }
 

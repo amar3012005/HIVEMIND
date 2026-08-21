@@ -10,7 +10,6 @@
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
-import { settleEvidenceLaneWithin } from './evidence-lane-deadline.js';
 
 export function fuseRemoteEvidenceHits(vectorHits = [], lexicalHits = [], { rankConstant = 60 } = {}) {
   const byId = new Map();
@@ -227,6 +226,7 @@ export class EvidenceRetrievalService {
    */
   async retrieveEvidence({
     query, userId, orgId, limit = 10,
+    queryVector = null,
     // DEPTH vs DELIVER. One `limit` used to do BOTH jobs — it sized the Qdrant
     // over-fetch AND the returned slice — so production's limit:6 handed the
     // cross-encoder 12 candidates while RERANK_POOL=150 sat unused. Measured on
@@ -278,19 +278,16 @@ export class EvidenceRetrievalService {
         // Exact terms and embeddings are complementary. Start the lexical lane
         // immediately so a part number still returns when embedding is unavailable.
         const lexicalPromise = amrKbLexicalRemote(orgId, query, { filter, limit: _depth, access });
-        const vectorPromise = Promise.resolve(this.qdrantClient.generateEmbedding(query))
-          .then((queryVector) => queryVector
-            ? amrKbRecall(orgId, queryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold, access })
+        const vectorPromise = Promise.resolve(queryVector || this.qdrantClient.generateEmbedding(query))
+          .then((resolvedQueryVector) => resolvedQueryVector
+            ? amrKbRecall(orgId, resolvedQueryVector, { limit: _depth, ...filter, scoreThreshold: effectiveThreshold, access })
             : []);
         // A Memory Box evidence hop has a 1.5s outer budget. Previously a
         // completed lexical result was discarded whenever cold embedding kept
         // Promise.all pending until that outer deadline. Bound each lane so a
         // slow semantic provider degrades independently instead of erasing an
         // exact/phrase match that is already available.
-        const [vectorHits, lexicalHits] = await Promise.all([
-          settleEvidenceLaneWithin(vectorPromise, Number(process.env.REMOTE_EVIDENCE_VECTOR_BUDGET_MS || 1100), null),
-          settleEvidenceLaneWithin(lexicalPromise, Number(process.env.REMOTE_EVIDENCE_LEXICAL_BUDGET_MS || 1250), null),
-        ]);
+        const [vectorHits, lexicalHits] = await Promise.all([vectorPromise, lexicalPromise]);
         // null (not []) means the lane FAILED rather than matched nothing — see
         // remote-backend.js. Say which lane is missing, because a half-working remote agent
         // returns plausible answers with a whole retrieval mode silently absent, and that is
@@ -410,6 +407,7 @@ export class EvidenceRetrievalService {
       const vectorPromise = this.qdrantClient.searchMemories({
         collectionName,
         query,
+        vector: queryVector,
         filter: {
           must: [
             // NO user_id here. Scope is enforced authoritatively in the Postgres
@@ -426,21 +424,7 @@ export class EvidenceRetrievalService {
         // Per-tenant: constrain to evidence layer within the shared org container.
         layer: PER_TENANT ? 'evidence' : undefined,
       });
-      const [boundedVectorResults, lexicalSegments] = await Promise.all([
-        settleEvidenceLaneWithin(
-          vectorPromise,
-          // RecallRouter's evidence hop is 1500ms end-to-end. Reserve time for
-          // canonical hydration and shaping instead of letting embedding alone
-          // consume almost the entire parent budget.
-          Number(process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS || 700),
-          null,
-        ),
-        settleEvidenceLaneWithin(
-          lexicalPromise,
-          Number(process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS || 700),
-          null,
-        ),
-      ]);
+      const [boundedVectorResults, lexicalSegments] = await Promise.all([vectorPromise, lexicalPromise]);
       if (boundedVectorResults === null) {
         console.warn(`[EvidenceRetrieval] CENTRAL VECTOR LANE TIMEOUT org=${orgId}; delivering bounded lexical evidence`);
       }

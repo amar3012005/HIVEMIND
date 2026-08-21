@@ -662,6 +662,7 @@ function matchesScopeFilter(m, scope_filter) {
 
 async function vectorCandidatesForRecall(store, {
   query_context,
+  query_vector = null,
   user_id,
   org_id,
   project,
@@ -695,6 +696,7 @@ async function vectorCandidatesForRecall(store, {
   // ThreeTierRetrieval path (server.js → three-tier-retrieval.js → ResultReranker).
   const vectorLaneStartedAt = timing ? Date.now() : 0;
   const results = await qdrantClient.hybridSearch(query_context, {
+    vector: query_vector,
     user_id,
     org_id,
     // NOTE: do NOT pass `project` as a Qdrant pre-filter. Project-scoped memories
@@ -1269,6 +1271,7 @@ export async function recallPersistedMemories(store, opts) {
 }
 async function _recallPersistedMemoriesImpl(store, {
   query_context,
+  query_vector = null,
   user_id,
   org_id,
   project,
@@ -1463,6 +1466,7 @@ async function _recallPersistedMemoriesImpl(store, {
   // result is consumed at `await _vectorCandidatesPromise` further down.
   const _vectorCandidatesPromise = vectorCandidatesForRecall(store, {
     query_context,
+    query_vector,
     user_id,
     org_id,
     project,

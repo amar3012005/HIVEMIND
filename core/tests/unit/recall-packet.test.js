@@ -11,9 +11,12 @@ test('RecallPacket assigns server-owned stable citation ids', () => {
     ],
     plan: { mode: 'explain' },
   });
-  assert.equal(packet.citations.length, 1);
+  assert.equal(packet.citations.length, 2);
   assert.deepEqual(packet.citations[0], {
     id: 'C1', segment_id: 's1', document_id: 'd1', title: 'Board notes', page: null, source_label: 'Board notes',
+  });
+  assert.deepEqual(packet.citations[1], {
+    id: 'C2', memory_id: 'm1', segment_id: null, document_id: null, title: null, page: null, source_label: 'Workspace memory',
   });
   assert.equal(packet.coverage.source_sections, 2);
 });

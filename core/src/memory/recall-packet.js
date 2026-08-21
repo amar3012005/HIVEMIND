@@ -40,7 +40,12 @@ export function buildRecallPacket({
       source_label: section.document_title || section.source_platform || 'Workspace source',
     }];
   });
-  for (const fact of citations.length === 0 ? facts : []) {
+  // Hybrid recall has two authoritative lanes.  A document citation must not
+  // make a concurrently retrieved memory unciteable: doing so lets synthesis
+  // see a memory fact but forces it to cite an unrelated document (or discard
+  // the fact entirely).  Keep one stable, server-owned citation for every
+  // delivered memory as well as every delivered source section.
+  for (const fact of facts) {
     const memoryId = fact?.id || fact?.memory_id || fact?.memoryId || null;
     if (!memoryId || seen.has(`memory:${memoryId}`)) continue;
     seen.add(`memory:${memoryId}`);
@@ -153,7 +158,10 @@ export function buildEvidencePacket({ memories = [], evidence = [], graph = [], 
     seen.add(key);
     citations.push({ id: `C${citations.length + 1}`, segment_id: section.segment_id, document_id: section.document_id, title: section.document_title, page: section.page });
   }
-  for (const memory of citations.length === 0 ? memories.slice(0, 5) : []) {
+  // Preserve citations for the memory lane even when document evidence is
+  // present.  The packet represents a unified reranked result, not a
+  // source-first fallback where one lane invalidates the other.
+  for (const memory of memories.slice(0, 5)) {
     if (!memory?.id) continue;
     citations.push({
       id: `C${citations.length + 1}`,

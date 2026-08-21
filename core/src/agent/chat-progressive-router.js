@@ -254,7 +254,7 @@ Choose one minimal native route; never request every native tool and never creat
 - native_tool=hivemind_relation_between: an explicit relationship/path between at least two entities. Use operation=relation_between.
 - native_tool=hivemind_aggregate_entities: only a certified exact count or registry-complete enumeration. Use operation=aggregate. A useful list of known items is ordinary recall.
 For a named file, preserve its closest recognizable title in source_title and use operation=source_read with native_tool=hivemind_recall. Ask recall for both the file summary and answer-bearing passages; the retrieval layer resolves the closest authorized source and falls through from summary memories to document evidence without another planner call.
-query_canonical_en is the sole model-authored retrieval query. Make it a compact semantic expression that preserves the subject, requested attribute, qualifiers, negation, relationship direction, temporal boundary, and source title. Expand only the requested facets; never add guessed facts. The server will not call a second query-rewrite model.
+query_canonical_en is the sole model-authored retrieval query. Make it a compact semantic expression that preserves the subject, requested attribute, qualifiers, negation, relationship direction, temporal boundary, and source title. Expand only the requested facets; never add guessed facts. For a multi-facet overview of exactly one named entity, use that exact entity or alias as the retrieval query and carry the requested facets in answer_objective; this maximizes coverage without losing what the final answer must cover. The server will not call a second query-rewrite model.
 Select answer_completion_requirement and answer_scope before response_depth from semantic breadth, in any language. complete_set/exhaustive is required when the answer must collect every retained member or every relevant claim of a category about a subject; multi_facet/broad is required for a multi-aspect explanation, overview, comparison, or informative inventory; single_answer/bounded is only for one answerable point. If uncertain between levels, choose the broader level: omitting a supported member is worse than giving the synthesis more grounded context. The minimum response_depth is bounded => standard, broad => detailed, exhaustive => comprehensive. Standard exposes the unified top 5; detailed and comprehensive expose the unified top 15. Retrieval itself retains the top 15 in one pass. There is no later 5-to-10-to-15 hop.
 Use hivemind_memory only for an explicit durable save, update, delete, profile update, or assistant rename; do not turn a question into a write. Use hivemind_projects only to list or resolve authorized projects. Use web_research only for current public-internet information. Use respond_directly only for greetings, arithmetic, harmless general conversation, a necessary clarification, or a safety refusal; never use it for workspace knowledge. Mark context_free=true only if that direct response is fully determined by the message/history and general knowledge. Any question that could be answered from workspace context — including a named person, organization, product, file, project, event, decision, record, or prior work — must use hivemind_context with context_free=false.
 Classify answer_type by meaning in the user's language: decision for choices or agreements; goal for targets, action items, or next steps; preference for priorities or likes; lesson for learnings; event for what happened, meetings, or quotes; relationship for entity connections; fact for objective attributes.
@@ -513,17 +513,29 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
   const responseDepth = depthRank[requestedDepth] >= depthRank[minimumDepth]
     ? requestedDepth
     : minimumDepth;
+  const namedEntities = Array.isArray(args?.entities) ? args.entities.filter(Boolean) : [];
+  const retrievalShape = ['fact', 'inventory', 'overview', 'comparison'].includes(args?.retrieval_shape)
+    ? args.retrieval_shape
+    : 'fact';
+  const plannerCanonicalQuery = args?.query_canonical_en || args?.query || message;
+  // A one-subject overview is a coverage request, not a compound attribute
+  // lookup. Keep its exact language-preserving entity as the retrieval anchor;
+  // answer_objective below retains every facet requested by the user. This is
+  // structural planner output, not a keyword or locale-specific rewrite.
+  const canonicalQuery = !useTools && retrievalShape === 'overview' && namedEntities.length === 1
+    ? namedEntities[0]
+    : plannerCanonicalQuery;
   const base = {
     version: 'chat-progressive.v1',
     confidence: 0.9,
     response_language: lang,
     query_original: args?.query_original || message,
-    query_canonical_en: args?.query_canonical_en || args?.query || message,
-    named_entities: Array.isArray(args?.entities) ? args.entities.filter(Boolean) : [],
+    query_canonical_en: canonicalQuery,
+    named_entities: namedEntities,
     recall_mode: 'fact', source: null, aggregate: null, relation: null,
     answer_scope: answerScope,
     response_depth: responseDepth,
-    retrieval_shape: ['fact', 'inventory', 'overview', 'comparison'].includes(args?.retrieval_shape) ? args.retrieval_shape : 'fact',
+    retrieval_shape: retrievalShape,
     answer_objective: s(args?.answer_objective, 1000) || message,
     save: null, update: null, delete: null, time: null, connector_provider: null,
     scope_filter: null, tool_groups: [], continuation: null, assistant_name: null,

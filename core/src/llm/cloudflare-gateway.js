@@ -59,7 +59,14 @@ export function gatewayProviderForUrl(value) {
   // These are custom-provider routes in some accounts. They are opt-in because
   // Cloudflare requires the exact `custom-{slug}` configured in that account.
   if (host === 'api.x.ai') return String(process.env.CLOUDFLARE_AI_GATEWAY_XAI_PROVIDER || '').trim() || null;
-  if (host === 'api.blaiq.ai') return String(process.env.CLOUDFLARE_AI_GATEWAY_BLAIQ_PROVIDER || '').trim() || null;
+  // BLAIQ is the first managed fallback for BGE embeddings.  Keep it on the
+  // same Gateway-only transport as the self-hosted primary rather than
+  // silently falling through to a direct provider request when an optional
+  // environment override is absent.
+  if (host === 'api.blaiq.ai') {
+    return String(process.env.CLOUDFLARE_AI_GATEWAY_BLAIQ_PROVIDER || '').trim()
+      || 'custom-blaiq-openrouter';
+  }
   if (host === 'api.lemonfox.ai') return String(process.env.CLOUDFLARE_AI_GATEWAY_LEMONFOX_PROVIDER || '').trim() || null;
   if (host === 'api.voyageai.com') return String(process.env.CLOUDFLARE_AI_GATEWAY_VOYAGE_PROVIDER || '').trim() || null;
   return null;

@@ -88,7 +88,12 @@ const RETRYABLE = /abort|timeout|429|50[0-9]|network|fetch failed|ECONNRESET|ETI
 // model that cannot be called is not a fallback.
 const MODEL_CHAIN = [...new Set([
   MODEL,
-  ...String(process.env.RERANK_FALLBACK_MODELS || 'voyageai/rerank-2.5-lite,cohere/rerank-4-fast,qwen/qwen3-reranker-8b')
+  // An explicitly empty setting means no same-endpoint legacy fallbacks. The
+  // managed RERANK_FALLBACK_URL is the one authorized secondary route. Using
+  // `||` here accidentally restored three historical models whenever the
+  // production setting was blank, turning the intended two-provider chain
+  // into five attempts.
+  ...String(process.env.RERANK_FALLBACK_MODELS ?? '')
     .split(',').map((m) => m.trim()).filter(Boolean),
 ])];
 

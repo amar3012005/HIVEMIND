@@ -736,7 +736,16 @@ export class MemoryGraphEngine {
     const ingestResult = await _acquire(baseMemory.user_id, async lockedStore => {
       const transactionalStore = lockedStore || this.store;
       return transactionalStore.transaction(async store => {
-        const latestMemories = await store.listLatestMemories(baseMemory);
+        // A caller-declared pure insert has explicitly disabled dedup,
+        // relationship inference and contradiction detection. None of those
+        // paths may consume the latest-memory set, so do not make a remote
+        // Memory Box `/v1/list` call merely to throw its result away. This is
+        // especially important for `.amr` tenants: an unavailable list route
+        // must not block an otherwise durable, deterministic append. Explicit
+        // Updates resolve their authorized target by id below.
+        const latestMemories = _pureInsert
+          ? []
+          : await store.listLatestMemories(baseMemory);
 
         // V5 corroboration pre-check (Postgres, immediately consistent — unlike the
         // Qdrant/FTS smart-ingest search below which lags on just-created rows, so

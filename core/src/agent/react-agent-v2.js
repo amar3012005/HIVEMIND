@@ -866,7 +866,14 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
     recallQueries.map(async (q) => {
       const args = {
         query: q,
-        query_original: plan.query_original || plan.user_message || q,
+        // In progressive native chat, q is already the single planner's
+        // intent-preserving optimized query. RecallRouter treats
+        // query_original as its primary vector/hybrid query, so forwarding the
+        // raw conversational message here silently bypassed optimization and
+        // used the canonical query only as an alternate lexical hint.
+        query_original: plan._native_single_call
+          ? q
+          : (plan.query_original || plan.user_message || q),
         query_canonical_en: plan.query_canonical_en || q,
         entities: plan.named_entities || [],
         answer_type: plan.answer_type || null,

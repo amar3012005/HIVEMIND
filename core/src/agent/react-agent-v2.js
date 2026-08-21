@@ -191,6 +191,7 @@ const GROUNDED_SYNTHESIS_RESPONSE_FORMAT = {
         response: { type: 'string' },
         claims: {
           type: 'array',
+          minItems: 1,
           items: {
             type: 'object',
             additionalProperties: false,

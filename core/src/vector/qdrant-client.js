@@ -673,6 +673,7 @@ export class QdrantClient {
 
     return await this.searchMemories({
       query,
+      vector: filters.vector,
       filter,
       limit: filters.limit || 10,
       score_threshold: filters.score_threshold || 0.5,

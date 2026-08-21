@@ -37,7 +37,6 @@ import { authorizeKnowledgeScope } from './knowledge/upload-authorization.js';
 import { knowledgeUploadCapabilities, safeUploadFilename, uploadError, validateKnowledgeFile } from './knowledge/upload-contract.js';
 import { projectScopedAnchorFilter } from './knowledge/document-delete-scope.js';
 import { handleQuickSearchRoute, handleRecallRoute } from './routes/recall.js';
-import { warmUpReranker } from './memory/reranker.js';
 import {
   getRuntimeRole,
   shouldRunConnectorBackground,
@@ -25080,17 +25079,17 @@ async function warmUpRecall() {
     // Full-pipeline warm at boot (not just embed) so the FIRST real recall after
     // a restart is already warm across the reranker + lanes + pool.
     if (warm) {
-      await Promise.all([synthRecall(), warmUpReranker()]);
+      await synthRecall();
     }
     console.log(warm ? '✅ Recall warm-up complete (full pipeline ready)' : '⚠️  Recall warm-up timed out — embedding service still cold');
     // KEEP-WARM: a full synthetic recall every N min keeps the WHOLE pipeline hot
     // (embed gateway scale-to-zero + reranker connection + Qdrant + PG pool +
     // query-plan cache) — not just the embedder. Default 4min (under the typical
     // idle-to-zero window); RECALL_KEEPWARM_MS=0 disables. Idempotent + unref'd.
-    const keepWarmMs = Number(process.env.RECALL_KEEPWARM_MS || 240000);
+    const keepWarmMs = Number(process.env.RECALL_KEEPWARM_MS || 0);
     if (keepWarmMs > 0 && !warmUpRecall._keepWarm) {
       warmUpRecall._keepWarm = setInterval(() => {
-        Promise.all([synthRecall(), warmUpReranker()]).catch((error) => {
+        synthRecall().catch((error) => {
           console.warn('recall keep-warm pass failed:', error.message);
         });
       }, keepWarmMs);

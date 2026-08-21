@@ -51,7 +51,11 @@ export class LiteLLMEmbedService {
       };
       if (signal?.aborted) abortFromParent();
       else signal?.addEventListener('abort', abortFromParent, { once: true });
-      const timer = setTimeout(() => ctrl.abort(), effectiveTimeout);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        ctrl.abort(new Error(`embedding deadline after ${effectiveTimeout}ms`));
+      }, effectiveTimeout);
       let res;
       try {
         res = await gatewayFirstFetch(`${this.baseUrl}/embeddings`, {
@@ -64,9 +68,13 @@ export class LiteLLMEmbedService {
           signal: ctrl.signal,
         });
       } catch (err) {
-        throw new Error(err.name === 'AbortError'
+        const wrapped = new Error(timedOut
           ? `LiteLLM embedding timeout after ${effectiveTimeout}ms`
-          : `LiteLLM embedding fetch failed: ${err.message}`);
+          : (signal?.aborted
+              ? 'LiteLLM embedding cancelled by recall deadline'
+              : `LiteLLM embedding fetch failed: ${err.message}`));
+        wrapped.code = timedOut ? 'EMBEDDING_TIMEOUT' : (signal?.aborted ? 'EMBEDDING_CANCELLED' : 'EMBEDDING_PROVIDER_ERROR');
+        throw wrapped;
       } finally {
         clearTimeout(timer);
         signal?.removeEventListener('abort', abortFromParent);

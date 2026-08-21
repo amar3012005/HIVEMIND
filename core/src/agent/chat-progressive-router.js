@@ -533,7 +533,11 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
   switch (tool) {
     case 'hivemind_context': {
       // Preserve the dedicated caller-scoped profile op for "about me/my org".
-      if (useTools && args?.operation === 'recall' && PROFILE_RE.test(message)) {
+      // Native chat owns caller-profile reads. The previous `useTools` guard
+      // inverted this and made the normal use_tools:false path fall through to
+      // tenant recall, where profile facts are not guaranteed to be embedded.
+      // Keep the external/Composio route unchanged.
+      if (!useTools && args?.operation === 'recall' && PROFILE_RE.test(message)) {
         return { decision: { ...base, operation: 'profile', queries: [base.query_canonical_en], tool_groups: ['hivemind-recall'] }, usage: null };
       }
       const declaredOp = String(args?.operation || 'recall');

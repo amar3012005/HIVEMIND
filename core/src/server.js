@@ -25086,7 +25086,13 @@ async function warmUpRecall() {
     // (embed gateway scale-to-zero + reranker connection + Qdrant + PG pool +
     // query-plan cache) — not just the embedder. Default 4min (under the typical
     // idle-to-zero window); RECALL_KEEPWARM_MS=0 disables. Idempotent + unref'd.
-    const keepWarmMs = Number(process.env.RECALL_KEEPWARM_MS || 0);
+    // Remote model warm-ups create embedding/rerank calls with no user turn,
+    // obscuring per-turn accounting and competing with interactive recall.
+    // An old interval value alone must never reactivate them: require an
+    // explicit operational opt-in as well.
+    const keepWarmMs = process.env.RECALL_REMOTE_KEEPWARM_ENABLED === 'true'
+      ? Number(process.env.RECALL_KEEPWARM_MS || 0)
+      : 0;
     if (keepWarmMs > 0 && !warmUpRecall._keepWarm) {
       warmUpRecall._keepWarm = setInterval(() => {
         synthRecall().catch((error) => {

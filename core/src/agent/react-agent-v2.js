@@ -1051,6 +1051,13 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     // is language-neutral, changes no normally viable result set, and avoids
     // paying for a duplicate recall solely to recover small buried details.
     semantic_recovery: true,
+    // The progressive planner extracts exact language-preserving entity
+    // anchors in the same call that writes the canonical query. Forward them
+    // into RecallRouter so its entity lane can protect a named subject from
+    // being displaced by semantically broad but unrelated document evidence.
+    ...(Array.isArray(plan.named_entities) && plan.named_entities.length
+      ? { entities: plan.named_entities }
+      : {}),
     // Internal-only delivery mode: ranking still runs on the canonical recall
     // path, but answer synthesis receives the complete authorized rows so its
     // semantic projector can recover details beyond the public 400-char preview.

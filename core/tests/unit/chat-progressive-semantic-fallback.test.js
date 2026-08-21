@@ -71,23 +71,25 @@ test('final native boundary grounds a direct decision produced after routing', (
   assert.equal(decision.direct_response, null);
 });
 
-test('native-only planner cannot select a profile lane that bypasses hybrid recall', () => {
+test('native-only planner exposes the caller-scoped profile lane without external tools', () => {
   const tools = getProgressiveTools({ useTools: false });
-  assert.equal(tools.some((tool) => tool.function?.name === 'hivemind_profile'), false);
+  const profile = tools.find((tool) => tool.function?.name === 'hivemind_profile');
+  assert.ok(profile);
+  assert.deepEqual(profile.function.parameters.properties.target.enum, [
+    'user', 'organization', 'user_and_organization',
+  ]);
 
   const { decision, overridden } = enforceNativeGroundingDecision({
     operation: 'profile',
-    query_canonical_en: 'Kruti person workspace information',
+    query_canonical_en: 'authenticated caller maintained profile',
     queries: [],
     tool_groups: [],
-    answer_objective: 'Describe Kruti from the workspace context.',
-  }, 'What do you know about Kruti?', { useTools: false });
+    answer_objective: 'Describe the authenticated caller from maintained profile facts.',
+  }, 'What do you know about me?', { useTools: false });
 
-  assert.equal(overridden, true);
-  assert.equal(decision.operation, 'recall');
-  assert.deepEqual(decision.queries, ['Kruti person workspace information']);
-  assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
-  assert.equal(decision._native_knowledge_grounding_override, 'profile');
+  assert.equal(overridden, false);
+  assert.equal(decision.operation, 'profile');
+  assert.deepEqual(decision.queries, []);
 });
 
 test('final native boundary grounds even a model-labelled refusal while preserving tool mode', () => {

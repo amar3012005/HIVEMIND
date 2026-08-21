@@ -141,11 +141,36 @@ const NATIVE_CONTEXT_TOOL = (() => {
   };
 })();
 
+// A caller-scoped read that is intentionally native-only.  Unlike a generic
+// recall query it has no model-supplied subject, user, org, or scope argument:
+// the executor derives all identity from the authenticated request context.
+// Keep it separate from HIGH_TOOLS so use_tools:true retains its established
+// Composio/compound capability contract unchanged.
+const NATIVE_PROFILE_TOOL = {
+  type: 'function',
+  function: {
+    name: 'hivemind_profile',
+    strict: true,
+    description: 'Read the maintained profile of the authenticated caller and their organization. Use when the user asks about themselves, their identity, role, company, preferences, goals, language, location, or the maintained organization profile. This is not document recall and takes no identifiers.',
+    parameters: object({
+      target: {
+        type: 'string',
+        enum: ['user', 'organization', 'user_and_organization'],
+        description: 'Which maintained caller-scoped profile facts answer the request.',
+      },
+      query_original: { type: 'string' },
+      response_language: { type: 'string' },
+      answer_objective: { type: 'string' },
+    }),
+  },
+};
+
 // The initial router prompt stays small: native HIVE-MIND capabilities are
 // always available, while connected apps and compound execution are disclosed
 // only after the caller explicitly opts in for this turn.
 export function getProgressiveTools({ useTools = false, connectedProviders = null } = {}) {
   if (!useTools) return [
+    NATIVE_PROFILE_TOOL,
     NATIVE_CONTEXT_TOOL,
     ...HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name)
       && tool.function?.name !== 'hivemind_context'),
@@ -221,7 +246,7 @@ Never invent workspace facts. Never bypass approval. Preserve exact entities, fi
 
 const NATIVE_POLICY = `You are HIVE, the grounded organizational brain. You MUST call exactly one supplied high-level tool. Perform planning, semantic query optimization, tool selection, temporal normalization, answer-depth selection, and answer-shape selection in this ONE call.
 Choose one minimal native route; never request every native tool and never create speculative hops.
-- hivemind_profile: only maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, language, or location. General company knowledge, products, documents, decisions, meetings, and history are not profile facts.
+- hivemind_profile: maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, goals, language, or location. A request whose semantic subject is the caller or their maintained organization profile belongs here in every language. It is caller-scoped by the server and takes no identifiers. Do not substitute a generic recall merely because profile facts may be absent; profile must run first. General company knowledge, products, documents, decisions, meetings, and history that are not maintained profile facts belong to recall.
 - hivemind_context + native_tool=hivemind_recall: ordinary facts, small details, useful inventories, overviews, decisions, goals, events, named files, and activity during a date range. Recall searches the authorized hybrid memory-and-document-evidence pool together. For an event/activity window, use operation=temporal_range and native_tool=hivemind_recall.
 - native_tool=hivemind_at: what was true, or what was known, at one instant. Use operation=temporal. Set temporal_axis=valid_time and only valid_at for truth/effective-time questions; set temporal_axis=known_time and only known_at for explicitly known/recorded/available-at questions. Never fill both axes.
 - native_tool=hivemind_diff: compare workspace state at two instants. Do not use it for events that merely occurred during a period. Use operation=diff.
@@ -256,12 +281,10 @@ const s = (v, n = 2000) => (typeof v === 'string' ? v.slice(0, n) : null);
  * before execution.
  */
 export function enforceNativeGroundingDecision(decision, message, { useTools = false } = {}) {
-  // The authenticated user/org profile is already preloaded into every native
-  // synthesis turn. It is useful context, but it cannot be a separate answer
-  // lane: a profile decision would otherwise skip tenant-scoped hybrid recall
-  // and let the model assert that workspace knowledge is absent. Treat both
-  // direct and legacy profile decisions as ungrounded native knowledge paths.
-  const bypassesNativeRecall = decision?.operation === 'direct' || decision?.operation === 'profile';
+  // A model must not bypass tenant-scoped knowledge with a direct answer.  The
+  // profile operation is different: it is a server-owned, caller-scoped read
+  // and is the authoritative first lane for questions about the caller.
+  const bypassesNativeRecall = decision?.operation === 'direct';
   if (useTools === true || !bypassesNativeRecall) {
     return { decision, overridden: false };
   }
@@ -386,7 +409,7 @@ async function callRouter({ message, history, apiKey, signal, useTools = false, 
     : [];
   const staticPrompt = getStaticPromptArtifact({
     family: 'chat-progressive-router',
-    version: useTools ? 'v3' : 'v4',
+    version: useTools ? 'v3' : 'v5',
     variant: useTools ? 'capability-contract' : 'native-single-call',
     build: () => useTools ? SYSTEM : NATIVE_POLICY,
   });

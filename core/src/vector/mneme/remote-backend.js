@@ -610,8 +610,37 @@ export async function remoteKbDocDetail(orgId, documentId, access) {
 // Per-memory edge counts for remote org — returns { <id>: {in, out} } or {} on failure.
 // Entity-hop0 TAG path: memory ids carrying any of `tags`, scanned in the shard.
 export async function remoteFindByTags(orgId, tags, limit, isLatest) {
-  try { const out = await _call(orgId, '/v1/by-tags', { tags, limit, is_latest: isLatest }); return Array.isArray(out?.ids) ? out.ids : []; }
-  catch (e) { console.warn(`[mneme/remote] by-tags failed org=${orgId}: ${e.message}`); return []; }
+  const wanted = new Set((Array.isArray(tags) ? tags : []).map((tag) => String(tag || '').trim()).filter(Boolean));
+  if (!wanted.size) return [];
+  const cap = Math.max(1, Math.min(Number(limit) || 200, 2000));
+  try {
+    const out = await _call(orgId, '/v1/by-tags', { tags: [...wanted], limit: cap, is_latest: isLatest });
+    return Array.isArray(out?.ids) ? out.ids : [];
+  } catch (error) {
+    // Boxes released before `/v1/by-tags` still expose `/v1/list`. Preserve
+    // entity recall across that rolling-upgrade boundary without converting a
+    // transport failure into an empty result: only an explicit capability 404
+    // may use the bounded compatibility scan.
+    if (!/agent \/v1\/by-tags → 404\b/.test(String(error?.message || ''))) {
+      _logRemoteOnce('warn', 'by-tags', orgId, error);
+      throw isRemoteMemoryUnavailableError(error)
+        ? error
+        : new RemoteMemoryUnavailableError(orgId, '/v1/by-tags', error);
+    }
+    const scanLimit = Math.min(2000, Math.max(500, cap * 20));
+    const out = await _call(orgId, '/v1/list', {
+      filter: { is_latest: isLatest !== false },
+      cursor: null,
+      limit: scanLimit,
+      offset: 0,
+    });
+    const rows = Array.isArray(out?.memories) ? out.memories : [];
+    return rows
+      .filter((row) => (Array.isArray(row?.tags) ? row.tags : []).some((tag) => wanted.has(String(tag))))
+      .map((row) => row?.id)
+      .filter(Boolean)
+      .slice(0, cap);
+  }
 }
 
 export async function remoteMemEdges(orgId, ids) {

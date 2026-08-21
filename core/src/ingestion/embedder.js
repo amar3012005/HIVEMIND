@@ -1,6 +1,10 @@
 const { tokenizeApprox } = require('./chunkers/text-chunker');
 
-const EMBEDDING_BATCH_SIZE = 32;
+// The custom BGE-M3 endpoint accepts at most 20 texts per request. Keeping
+// this legacy ingestion path within the shared provider contract prevents an
+// oversized batch from bypassing the primary and needlessly falling through
+// custom BGE-M3 → BLAIQ BGE-M3 → OpenRouter BGE-M3.
+const EMBEDDING_BATCH_SIZE = Math.max(1, Math.min(20, Number(process.env.KB_EMBED_BATCH_SIZE || 20)));
 const MAX_EMBED_TOKENS = 8192;
 // bge-m3 → 1024-dim. Env-driven so the target dim follows the configured embed
 // model + Qdrant collection without re-creating it. (Timeout/retry now live in

@@ -48,12 +48,13 @@ export const HIGH_TOOLS = [
       answer_type: { type: ['string', 'null'], enum: ['decision', 'goal', 'preference', 'lesson', 'event', 'relationship', 'fact', null], description: 'REQUIRED CLASSIFICATION: the KIND of memory the user is asking for, judged by MEANING in any language. decision=what was decided/agreed/chosen; goal=goals/targets/action items/next steps; preference=likes/dislikes/priorities; lesson=learnings/takeaways/postmortems; event=what happened/meetings/quotes; relationship=how entities relate; fact=objective attribute. null ONLY for generic lookups that fit none.' },
     }) } },
   { type: 'function', function: { name: 'hivemind_memory', strict: true,
-    description: 'Use for durable memory creation, versioned updates, deletion requests, decisions and assistant renaming. The server scopes, validates, confirms destructive actions and creates graph provenance.',
+    description: 'Use for durable memory creation, including stable facts or attributable assertions the user states without an explicit save command; also use for versioned updates, deletion requests, decisions and assistant renaming. Resolve third-person pronouns from conversation history before saving. The server scopes, validates, confirms destructive actions and creates graph provenance.',
     parameters: object({
       operation: { type: 'string', enum: ['save', 'update', 'delete', 'rename_assistant', 'update_profile'] }, response_language: { type: 'string' },
       title: nullable('string'), content: nullable('string'), target_query: nullable('string'), memory_id: nullable('string'),
       memory_type: nullable('string'), project_hint: nullable('string'), entities: { type: 'array', items: { type: 'string' } },
       event_time: nullable('string'), assistant_name: nullable('string'),
+      admission_class: { type: 'string', enum: ['trusted_fact', 'user_assertion'], description: 'trusted_fact only for first-party facts the user can authoritatively establish about themselves or their organization; user_assertion for claims, descriptions, or opinions about another person.' },
       // Explicit properties (NOT a bare object) — strict-mode structured output
       // rejects an object type with no properties.
       profile_name: nullable('string'), profile_role: nullable('string'), profile_company: nullable('string'),
@@ -159,7 +160,7 @@ const NATIVE_PROFILE_TOOL = {
   function: {
     name: 'hivemind_profile',
     strict: true,
-    description: 'Read the maintained profile of the authenticated caller and their organization. Use when the user asks about themselves, their identity, role, company, preferences, goals, language, location, or the maintained organization profile. This is not document recall and takes no identifiers.',
+    description: 'Read the maintained profile of the authenticated caller and their organization. Use only when the semantic subject is the caller, their identity, role, company, preferences, goals, language, location, or maintained organization profile. Never use for another person referred to by name or by a third-person pronoun resolved from history. This is not document recall and takes no identifiers.',
     parameters: object({
       target: {
         type: 'string',
@@ -254,11 +255,11 @@ Never invent workspace facts. Never bypass approval. Preserve exact entities, fi
 
 const NATIVE_POLICY = `You are HIVE, the grounded organizational brain. You MUST call exactly one supplied high-level tool. Perform planning, semantic query optimization, tool selection, temporal normalization, answer-depth selection, and answer-shape selection in this ONE call.
 Choose one minimal native route; never request every native tool and never create speculative hops.
-- hivemind_profile: maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, goals, language, or location. A request whose semantic subject is the caller or their maintained organization profile belongs here in every language. It is caller-scoped by the server and takes no identifiers. Do not substitute a generic recall merely because profile facts may be absent; profile must run first. General company knowledge, products, documents, decisions, meetings, and history that are not maintained profile facts belong to recall.
+- hivemind_profile: maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, goals, language, or location. Use it only when the semantic subject is the caller or the caller's maintained organization profile. A third-person pronoun resolved from conversation history still refers to that other person and must never become a caller-profile read or write. It is caller-scoped by the server and takes no identifiers. Do not substitute a generic recall merely because profile facts may be absent; profile must run first. General company knowledge, products, documents, decisions, meetings, and history that are not maintained profile facts belong to recall.
 For a grounded read, use hivemind_context and follow the native_tool catalog attached to that field; its descriptions are authoritative. Set operation to recall/source_read/temporal_range for hivemind_recall, temporal for hivemind_at, diff for hivemind_diff, timeline for hivemind_timeline, aggregate for hivemind_aggregate_entities, and relation_between for hivemind_relation_between. For a named file, preserve its closest recognizable title in source_title and use operation=source_read. Set temporal_axis=valid_time or known_time only for hivemind_at and none otherwise.
 query_canonical_en is the sole model-authored retrieval query. Make it a compact semantic expression that preserves the subject, requested attribute, qualifiers, negation, relationship direction, temporal boundary, and source title. Expand only the requested facets; never add guessed facts. For a multi-facet overview of exactly one named entity, use that exact entity or alias as the retrieval query and carry the requested facets in answer_objective; this maximizes coverage without losing what the final answer must cover. The server will not call a second query-rewrite model.
 Select answer_completion_requirement and answer_scope before response_depth from semantic breadth, in any language. complete_set/exhaustive is required when the answer must collect every retained member or every relevant claim of a category about a subject; multi_facet/broad is required for a multi-aspect explanation, overview, comparison, or informative inventory; single_answer/bounded is only for one answerable point. If uncertain between levels, choose the broader level: omitting a supported member is worse than giving the synthesis more grounded context. The minimum response_depth is bounded => standard, broad => detailed, exhaustive => comprehensive. Standard exposes the unified top 5; detailed and comprehensive expose the unified top 15. Retrieval itself retains the top 15 in one pass. There is no later 5-to-10-to-15 hop.
-Use hivemind_memory only for an explicit durable save, update, delete, profile update, or assistant rename; do not turn a question into a write. Use hivemind_projects only to list or resolve authorized projects. Use web_research only for current public-internet information. Use respond_directly only for greetings, arithmetic, harmless general conversation, a necessary clarification, or a safety refusal; never use it for workspace knowledge. Mark context_free=true only if that direct response is fully determined by the message/history and general knowledge. Any question that could be answered from workspace context — including a named person, organization, product, file, project, event, decision, record, or prior work — must use hivemind_context with context_free=false.
+Use hivemind_memory for explicit memory writes and for a stable declarative assertion the user contributes, even without words asking to save it. Resolve ellipsis and pronouns from conversation history and write a self-contained statement with the exact subject; never store an unresolved pronoun. Facts the user can authoritatively establish about themselves or their organization use admission_class=trusted_fact. A description, opinion, or factual claim about another person uses admission_class=user_assertion so it remains attributable to the user rather than becoming independently verified background. This semantic rule applies in every language. Questions and transient conversational reactions are not writes. Use hivemind_projects only to list or resolve authorized projects. Use web_research only for current public-internet information. Use respond_directly only for greetings, arithmetic, harmless general conversation, a necessary clarification, or a safety refusal; never use it for workspace knowledge. Mark context_free=true only if that direct response is fully determined by the message/history and general knowledge. Any question that could be answered from workspace context — including a named person, organization, product, file, project, event, decision, record, or prior work — must use hivemind_context with context_free=false.
 Classify answer_type by meaning in the user's language: decision for choices or agreements; goal for targets, action items, or next steps; preference for priorities or likes; lesson for learnings; event for what happened, meetings, or quotes; relationship for entity connections; fact for objective attributes.
 Never invent workspace facts, identifiers, filenames, entities, or dates. Preserve exact user constraints and answer in the user's language.`;
 
@@ -682,7 +683,15 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
         ...base,
         operation: op,
         queries: [],
-        save: op === 'save' ? { title: s(args?.title, 256), content: s(args?.content), tags: [], project_hint: s(args?.project_hint, 256) } : null,
+        save: op === 'save' ? {
+          title: s(args?.title, 256), content: s(args?.content), tags: [],
+          project_hint: s(args?.project_hint, 256),
+          memory_type: s(args?.memory_type, 64) || 'fact',
+          entities: Array.isArray(args?.entities) ? args.entities.map((entity) => s(entity, 256)).filter(Boolean) : [],
+          event_time: iso(args?.event_time),
+          admission_class: args?.admission_class === 'trusted_fact' ? 'trusted_fact' : 'user_assertion',
+          confidence: 0.9,
+        } : null,
         // memory_id must be a real UUID or null (never an entity name) — matches
         // the current planner's isUuid guard so update/delete can't target junk.
         update: op === 'update' ? { id: uuid(args?.memory_id), target_query: s(args?.target_query, 512), content: s(args?.content) } : null,

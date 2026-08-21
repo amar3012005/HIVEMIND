@@ -2819,8 +2819,12 @@ export async function runReactAgentV2({
     confidence_path: [],
     warnings: [],
     models: {
-      planner: INTENT_MODEL,
-      query_optimizer: QUERY_OPTIMIZER_MODEL,
+      // Set these only when the corresponding call actually runs. The
+      // progressive router can select a different primary/fallback model than
+      // the legacy INTENT_MODEL, and native single-call turns intentionally do
+      // not run the separate query optimizer.
+      planner: null,
+      query_optimizer: null,
       synthesis: requestedAnswerModel,
     },
     usage_stages: usageStages,
@@ -2973,6 +2977,7 @@ export async function runReactAgentV2({
         signal: abortCtrl.signal,
       });
     }
+    trace.models.planner = intentParsed?.usage?.routing_model || INTENT_MODEL;
     _pt('intent_parse_ms', _ps);
     let intentDecision = collapseNativeOnlyCompoundDecision(intentParsed.decision, message);
     // `use_tools` is an authority boundary, not a prompt hint. A legacy or
@@ -3561,6 +3566,7 @@ export async function runReactAgentV2({
         })) {
       const optimizerStartedAt = Date.now();
       try {
+        trace.models.query_optimizer = QUERY_OPTIMIZER_MODEL;
         const optimizedResult = await optimizeRecallQueries({
           message, plan, model: QUERY_OPTIMIZER_MODEL, apiKey, signal: abortCtrl.signal,
         });
@@ -3605,6 +3611,7 @@ export async function runReactAgentV2({
       useTools,
     })) {
       const retryOptimizerStartedAt = Date.now();
+      trace.models.query_optimizer = QUERY_OPTIMIZER_MODEL;
       const retryResult = await optimizeRecallQueries({
         message, plan, model: QUERY_OPTIMIZER_MODEL, apiKey, signal: abortCtrl.signal,
       });

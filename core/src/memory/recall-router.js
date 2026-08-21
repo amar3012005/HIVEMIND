@@ -1571,7 +1571,9 @@ export class RecallRouter {
       valid_at: recallPlan.time.valid_at,
       known_at: recallPlan.time.known_at,
       date_range: recallPlan.time.range,
-      include_superseded: recallPlan.operation === 'timeline' || options.include_superseded === true,
+      include_superseded: recallPlan.operation === 'timeline'
+        || Boolean(recallPlan.time.valid_at)
+        || options.include_superseded === true,
       canonical_entities: mergedCanonicalEntities,
       query_vector: queryVector,
     };

@@ -261,7 +261,12 @@ export async function handleRecallRoute(ctx = {}) {
           // unified retrieval service instead of silently falling back to the
           // org's synthesis delivery window (commonly five).
           limit: normalizeRecallLimit(body.limit),
-          include_superseded: recallPlan.operation === 'timeline' || body.include_superseded === true,
+          // A valid-time snapshot must search historical revisions too. If
+          // retrieval is restricted to `is_latest`, the post-filter cannot
+          // recover the version that was valid at the requested instant.
+          include_superseded: recallPlan.operation === 'timeline'
+            || Boolean(recallPlan.time?.valid_at)
+            || body.include_superseded === true,
           trace_stages: body.debug_timing === true,
         }, {
           userId,
@@ -394,7 +399,7 @@ export async function handleRecallRoute(ctx = {}) {
       include_expired: body.include_expired,
       sort: body.sort,
       preference_boost: body.preference_boost,
-      include_superseded: body.include_superseded,
+      include_superseded: Boolean(body.valid_at) || body.include_superseded === true,
       access_context: recallAccessCtx,
       ...(recallProjectId ? { project_id: recallProjectId, project_ids: [recallProjectId] } : {}),
       scope_filter: body.scope_filter || null,

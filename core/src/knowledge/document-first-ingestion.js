@@ -69,7 +69,12 @@ const QWEN_UNIFIED_FACTS_RESPONSE_FORMAT = {
               qualifiers: { type: 'object' }, entities: { type: 'array', items: { type: 'object' } },
               relationships: { type: 'array', items: { type: 'object' } },
             },
-            required: ['t', 'f'],
+            // The downstream normalizer deliberately rejects a fact without a
+            // durable type or a verbatim grounding span.  Leaving these
+            // optional made Qwen's otherwise valid schema response look like
+            // a successful extraction while every candidate was discarded.
+            // Require the minimal persistence contract at generation time.
+            required: ['t', 'f', 'memory_type', 'source_quote'],
             additionalProperties: true,
           },
         },

@@ -6,9 +6,9 @@ import { adaptToDecision, getProgressiveTools } from '../../src/agent/chat-progr
 test('use_tools false never discloses connected or compound capabilities', () => {
   const names = getProgressiveTools({ useTools: false }).map((tool) => tool.function.name);
   assert.ok(names.includes('hivemind_context'));
-  // Native turns preload profile context but must still use the hybrid recall
-  // path, so the planner never gets a profile-only bypass capability.
-  assert.equal(names.includes('hivemind_profile'), false);
+  // Profile is a caller-scoped native read: it takes no identity argument and
+  // is the authoritative first lane for "what do you know about me?".
+  assert.equal(names.includes('hivemind_profile'), true);
   assert.ok(names.includes('hivemind_memory'));
   assert.equal(names.includes('use_connector'), false);
   assert.equal(names.includes('use_campaign'), false);

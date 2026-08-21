@@ -251,6 +251,9 @@ export async function handleRecallRoute(ctx = {}) {
           source: recallPlan.source,
           time: recallPlan.time,
           operation: recallPlan.operation,
+          named_entities: Array.isArray(recallPlan.entities)
+            ? recallPlan.entities
+            : (Array.isArray(body.entities) ? body.entities : []),
           // Scope, source, time and canonical entities were already compiled
           // into recallPlan above. Treat that plan as authoritative so hop1
           // does not launch another recall-time LLM for entity extraction or

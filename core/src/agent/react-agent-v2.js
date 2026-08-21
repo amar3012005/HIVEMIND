@@ -3482,7 +3482,11 @@ export async function runReactAgentV2({
     // Skip the evidence-gated answer step — its grounding rules cause
     // the model to refuse / return empty for self-contained questions
     // like '2+2' that have no recall context to lean on.
-    if (plan.sub_queries.length === 0 && !plan.save_intent && !plan.needs_web) {
+    // Only a genuine direct plan may skip the capability stage. Dedicated
+    // native reads such as caller profile, aggregate, relation, and timeline
+    // intentionally have no recall sub-query; treating that absence as a
+    // direct answer bypasses their authoritative server-side tool.
+    if (plan.operation === 'direct' && plan.sub_queries.length === 0 && !plan.save_intent && !plan.needs_web) {
       // No-recall direct answer uses the model selected by the caller.
       const { response, usage } = await answerDirectly({
         message, gateKind: 'general', language, assistantName, orgName,

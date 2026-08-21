@@ -2039,7 +2039,10 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             distill_agent: 'kb_unified_v2',
           },
           skip_fact_extraction: true, defer_entity_linking: true,
-          append_timestamp_to_content: false,
+          // Memories carry their authoritative document/event time as the
+          // canonical suffix. Evidence remains verbatim in knowledge_segments;
+          // this suffix is intentionally limited to promoted memory rows.
+          append_timestamp_to_content: true,
           skipSmartRouting: true, skipPredictCalibrate: true, skipAdvisoryLock: true,
           skip_relationship_classification: true, skip_contradiction_detection: true,
         });
@@ -2691,7 +2694,7 @@ Every item must include a non-empty content field and one or more valid support_
         source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'document', document_id: documentId, source_id: metadata.source_id || documentId, filename: metadata.filename || null, document_type: metadata.document_type || 'general' },
         metadata: { semantic_role: 'document', ingest_tree_role: 'parent', document_id: documentId, document_type: metadata.document_type || 'general', document_type_confidence: metadata.document_type_confidence ?? null, child_count: childIds.length, total_facts: totalFacts },
         skip_fact_extraction: true, skipPredictCalibrate: true, skip_contradiction_detection: true,
-        append_timestamp_to_content: false,
+        append_timestamp_to_content: true,
         skip_relationship_classification: true, smartIngest: false, skipAdvisoryLock: true, defer_entity_linking: true,
       });
       docParentId = parentRes?.memoryId || parentRes?.id || null;

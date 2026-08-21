@@ -56,13 +56,12 @@ function computeImportanceScore({ memory_type, priority } = {}) {
 }
 
 // ── Memory-ingest LLM model (overrides per-stage env vars). ────────────
-// gpt-oss-20b chosen for JSON field extraction over llama-3.3-70b:
-//   • ~5× cheaper ($0.0003 vs $0.0015 / call)
-//   • ~3× higher TPM headroom on Groq tier-1 → fewer 429s
-//   • sufficient quality for structured field extraction (not creative gen)
+// The schema-led Qwen ingestion model is the canonical default. It runs via
+// Cloudflare's custom provider and has a governed Gemini fallback, avoiding the
+// malformed/truncated free-form JSON observed on the legacy direct Groq path.
 // Override per-stage via STRUCTURED_ENRICHER_MODEL / ENTITY_LINKER_MODEL
 // if a specific stage needs different quality vs. cost tradeoff.
-const MEMORY_INGEST_MODEL = process.env.MEMORY_INGEST_MODEL || 'openai/gpt-oss-20b';
+const MEMORY_INGEST_MODEL = process.env.MEMORY_INGEST_MODEL || 'singulance/qwen3-ingest';
 
 // Sleep helper for retry backoff.
 function _sleep(ms) {
@@ -2426,7 +2425,7 @@ OUTPUT JSON only.`;
       await persistEntityStatus('skipped:disabled', { entity_link_completed_at: nowIso() });
       return { ok: true, status: 'skipped', reason: 'disabled', entities: 0, edges: 0 };
     }
-    const configuredEntityLinkModel = process.env.ENTITY_LINKER_MODEL || 'cerebras/gpt-oss-120b';
+    const configuredEntityLinkModel = process.env.ENTITY_LINKER_MODEL || 'singulance/qwen3-ingest';
     if (!process.env.GROQ_API_KEY && !this.hasInjectedMemoryChatClient && !isQwenIngestModel(configuredEntityLinkModel)) {
       console.warn('[entity-co-mention] GROQ_API_KEY missing — skipping LLM extraction');
       await persistEntityStatus('error:provider_unavailable', { entity_link_error: 'provider_unavailable' });

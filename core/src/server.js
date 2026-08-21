@@ -25008,99 +25008,29 @@ async function ensureQdrantSearchIndexes() {
   }
 }
 
-// Cold-start fix: the embedding service (bge-m3 via LiteLLM) inits ASYNC after
-// boot — until it's ready, generateEmbedding returns null → query vector is
-// empty → recall returns 0 for the first ~25-30s after every restart. Force the
-// init + retry until a valid 1024-d vector comes back, THEN the pool is warm. A
-// dummy hybridSearch also warms the qdrant client + collection routing cache.
+// Cold-start readiness without synthetic tenant work.
+//
+// This function previously called recallPersistedMemories() with the legacy
+// defaults. One boot therefore launched entity/query LLMs plus base, entity and
+// rewritten-query embeddings before any user request. Besides wasting calls,
+// that traffic bypassed the single-pass RecallRouter contract. Startup now
+// warms local connections and performs exactly one provider embedding probe.
+// It never executes recall, reranking, profile synthesis or an LLM.
 async function warmUpRecall() {
   if (process.env.RECALL_WARMUP === 'false') return;
-  // FULL-PIPELINE warm: a real synthetic recall warms EVERYTHING a live recall
-  // touches — embed gateway + Qdrant routing + Postgres pool + query-plan cache
-  // + the cross-encoder reranker connection. The old embed-only ping left the
-  // reranker/lanes/pool cold, so the first real recall after idle still paid the
-  // full ~4s cold cliff. Probe org defaults to the canonical test tenant (read
-  // only; never writes). Falls back to an embed ping if recall is unavailable.
-  const warmOrg = process.env.RECALL_WARMUP_ORG || '67503d34-97e9-49a8-8c52-8ee30cc7603e';
-  const warmUser = process.env.RECALL_WARMUP_USER || '54f5568b-4d6a-4ae1-9a33-48cb2909d59b';
-  // Warm a specific tenant's FULL recall pipeline (its Qdrant collection +
-  // connection + reranker + PG pool). Best-effort; falls back to an embed ping.
-  const warmTenant = async (uid, oid, pids) => {
-    try {
-      if (typeof recallPersistedMemories === 'function' && persistentMemoryStore) {
-        await Promise.all([
-          recallPersistedMemories(persistentMemoryStore, {
-            query_context: 'system keep-warm probe', user_id: uid, org_id: oid,
-            ...(Array.isArray(pids) && pids.length ? { project_ids: pids } : {}),
-            max_memories: 3,
-            // The provider is primed once below with a synthetic, tenant-free
-            // request. This tenant sweep exists to warm storage/routing only.
-            cross_rerank: false,
-          }),
-          // Profile context is part of final synthesis. Warm it beside recall
-          // for every recently active tenant so this benefits web, mobile,
-          // Slack, API, and rooms rather than being tied to one chat page.
-          profileStore?.buildProfileContext(uid, oid).catch(() => ''),
-        ]);
-        return true;
-      }
-    } catch { /* fall through */ }
-    try { await getQdrantClient().generateEmbedding('keep-warm ping'); } catch { /* best-effort */ }
-    return false;
-  };
-  // Keep-warm sweep: warm every RECENTLY-ACTIVE org (so real tenants' Qdrant
-  // collections stay hot, not just a dummy), plus the canonical probe org as a
-  // floor. Prune orgs idle > the active window so the sweep stays bounded.
-  const ACTIVE_WINDOW_MS = Number(process.env.RECALL_ACTIVE_WINDOW_MS || 900_000); // 15 min
-  const MAX_WARM_ORGS = Number(process.env.RECALL_MAX_WARM_ORGS || 12);
-  const synthRecall = async () => {
-    const now = Date.now();
-    for (const [oid, info] of _activeOrgs) {
-      if (now - info.lastSeen > ACTIVE_WINDOW_MS) _activeOrgs.delete(oid);
-    }
-    const targets = [...(_activeOrgs.entries())]
-      .sort((a, b) => b[1].lastSeen - a[1].lastSeen)
-      .slice(0, MAX_WARM_ORGS)
-      .map(([oid, info]) => ({ uid: info.userId, oid, pids: info.projectIds }));
-    // Always include the canonical probe org as a floor (warms shared infra even
-    // when no real org has been active recently).
-    targets.push({ uid: warmUser, oid: warmOrg, pids: [] });
-    for (const t of targets) { await warmTenant(t.uid, t.oid, t.pids); }
-  };
   try {
     const qc = getQdrantClient();
-    const deadline = Date.now() + 30000;
-    let warm = false;
-    while (Date.now() < deadline && !warm) {
-      const v = await qc.generateEmbedding('warmup recall query').catch(() => null);
-      if (Array.isArray(v) && v.length >= 64) { warm = true; break; }
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-    // Full-pipeline warm at boot (not just embed) so the FIRST real recall after
-    // a restart is already warm across the reranker + lanes + pool.
-    if (warm) {
-      await synthRecall();
-    }
-    console.log(warm ? '✅ Recall warm-up complete (full pipeline ready)' : '⚠️  Recall warm-up timed out — embedding service still cold');
-    // KEEP-WARM: a full synthetic recall every N min keeps the WHOLE pipeline hot
-    // (embed gateway scale-to-zero + reranker connection + Qdrant + PG pool +
-    // query-plan cache) — not just the embedder. Default 4min (under the typical
-    // idle-to-zero window); RECALL_KEEPWARM_MS=0 disables. Idempotent + unref'd.
-    // Remote model warm-ups create embedding/rerank calls with no user turn,
-    // obscuring per-turn accounting and competing with interactive recall.
-    // An old interval value alone must never reactivate them: require an
-    // explicit operational opt-in as well.
-    const keepWarmMs = process.env.RECALL_REMOTE_KEEPWARM_ENABLED === 'true'
-      ? Number(process.env.RECALL_KEEPWARM_MS || 0)
-      : 0;
-    if (keepWarmMs > 0 && !warmUpRecall._keepWarm) {
-      warmUpRecall._keepWarm = setInterval(() => {
-        synthRecall().catch((error) => {
-          console.warn('recall keep-warm pass failed:', error.message);
-        });
-      }, keepWarmMs);
-      warmUpRecall._keepWarm.unref?.();
-    }
+    const [qdrantReady] = await Promise.all([
+      qc.isConnected().catch(() => false),
+      prisma ? prisma.$queryRaw`SELECT 1`.catch(() => null) : Promise.resolve(null),
+    ]);
+    const vector = await qc.generateEmbedding('warmup recall query', {
+      workload: 'interactive', tenantId: 'system-warmup',
+    }).catch(() => null);
+    const embeddingReady = Array.isArray(vector) && vector.length >= 64;
+    console.log(embeddingReady && qdrantReady
+      ? '✅ Recall readiness complete (local stores + one embedding probe; no synthetic recall)'
+      : '⚠️  Recall readiness incomplete (no retry or provider fan-out at boot)');
   } catch (e) { console.warn('recall warm-up skipped:', e.message); }
 }
 

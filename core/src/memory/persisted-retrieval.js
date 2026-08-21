@@ -993,7 +993,14 @@ async function _queryPersistedMemoriesImpl(store, { pattern, user_id, org_id, pr
  * @param {number} params.depth - Graph traversal depth (default: 2)
  * @returns {Array} Expanded candidate memories with graph_expanded flag
  */
-async function traverseUpdateChain(memories, store, { maxDepth = 3 } = {}) {
+async function traverseUpdateChain(memories, store, {
+  maxDepth = 3,
+  user_id = null,
+  org_id = null,
+  project = null,
+  valid_at = null,
+  known_at = null,
+} = {}) {
   if (!store || !memories?.length) return memories;
 
   const expanded = [...memories];
@@ -1005,17 +1012,39 @@ async function traverseUpdateChain(memories, store, { maxDepth = 3 } = {}) {
   const ids = memories.map(m => m.id || m.memory_id).filter(Boolean);
   const relatedLists = await Promise.all(ids.map(id =>
     Promise.resolve()
-      .then(() => store.getRelatedMemories?.(id, { type: 'Updates', depth: maxDepth }))
+      .then(() => store.getRelatedMemories?.(id, {
+        relationship: 'Updates',
+        maxDepth,
+        user_id,
+        org_id,
+        project,
+        scope: 'all',
+      }))
       .catch(() => [])
   ));
-  for (const related of relatedLists) {
-    if (!related?.length) continue;
-    for (const rel of related) {
-      const relId = rel.id || rel.memory_id;
-      if (relId && !seen.has(relId)) {
-        seen.add(relId);
-        expanded.push({ ...rel, score: (rel.score || 0) * 0.7 }); // lower score for old versions
+
+  // getRelatedMemories returns typed EDGES, not hydrated memories. Collect the
+  // peer ids from both directions, then hydrate them in one scoped batch. The
+  // previous implementation appended edge objects to the candidate pool, so a
+  // version chain appeared traversed while no historical content was present.
+  const relatedIds = [];
+  for (const edges of relatedLists) {
+    for (const edge of (edges || [])) {
+      for (const peerId of [edge.from_id, edge.to_id]) {
+        if (peerId && !seen.has(peerId)) {
+          seen.add(peerId);
+          relatedIds.push(peerId);
+        }
       }
+    }
+  }
+  if (relatedIds.length) {
+    const hydrated = store.getMemories
+      ? await store.getMemories(relatedIds, { valid_at, known_at })
+      : new Map();
+    for (const relId of relatedIds) {
+      const memory = hydrated.get(relId);
+      if (memory) expanded.push({ ...memory, score: (memory.score || 0) * 0.7 });
     }
   }
 
@@ -1389,6 +1418,12 @@ async function _recallPersistedMemoriesImpl(store, {
   // is_latest: undefined = default true, false = include superseded versions
   const temporalSnapshot = !!(valid_at || known_at);
   const snapshotValidAt = valid_at || null;
+  // For valid-time travel, retrieve the current semantic head first, traverse
+  // its Updates chain, and only then apply the valid interval. Pre-filtering the
+  // retrieval lanes by valid_at removes the current head and makes historical
+  // versions unreachable. known_at remains a retrieval-time constraint because
+  // transaction-time snapshots must never see rows ingested later.
+  const retrievalValidAt = (_wantVersionHistory && snapshotValidAt) ? null : snapshotValidAt;
   const effectiveIsLatest = temporalSnapshot ? undefined : (is_latest !== undefined ? is_latest : true);
 
   // Load WorkingSet for this user (rolling spotlight on active context).
@@ -1474,7 +1509,7 @@ async function _recallPersistedMemoriesImpl(store, {
     tags: _effectiveTags,
     max_memories,
     dateRange: effectiveDateRange,
-    validAt: snapshotValidAt,
+    validAt: retrievalValidAt,
     knownAt: known_at,
     scoreThreshold: vectorScoreThreshold,
     hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined, // PHASE-F: per-org ef_search when wired; undefined otherwise (dark-safe)
@@ -1510,7 +1545,7 @@ async function _recallPersistedMemoriesImpl(store, {
     ? vectorCandidatesForRecall(store, {
         query_context, user_id, org_id, project, source_platforms,
         tags: _temporalFilterTags, max_memories,
-        dateRange: null, validAt: snapshotValidAt, knownAt: known_at,
+        dateRange: null, validAt: retrievalValidAt, knownAt: known_at,
         scoreThreshold: vectorScoreThreshold,
         hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
         candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
@@ -1529,7 +1564,7 @@ async function _recallPersistedMemoriesImpl(store, {
         return vectorCandidatesForRecall(store, {
           query_context, user_id, org_id, project, source_platforms,
           tags: entityTags, max_memories,
-          dateRange: effectiveDateRange, validAt: snapshotValidAt, knownAt: known_at,
+          dateRange: effectiveDateRange, validAt: retrievalValidAt, knownAt: known_at,
           scoreThreshold: vectorScoreThreshold,
           hnswEf: _wireCfg ? _cfg?.hnsw_ef : undefined,
           candidatePoolSize, is_latest: effectiveIsLatest, access_context, scope_filter,
@@ -1554,7 +1589,7 @@ async function _recallPersistedMemoriesImpl(store, {
         access_context,
         scope_filter,
         dateRange: effectiveDateRange,
-        validAt: snapshotValidAt,
+        validAt: retrievalValidAt,
         knownAt: known_at,
         is_latest: effectiveIsLatest,
         excludeMemory: (m) => isTaraActivity(m) || isRecallNoise(m),
@@ -1593,7 +1628,7 @@ async function _recallPersistedMemoriesImpl(store, {
   const lexicalArgs = {
     user_id, org_id, project, tags: _effectiveTags, is_latest: effectiveIsLatest,
     n_results: candidatePoolSize, created_after: effectiveDateRange?.start,
-    created_before: effectiveDateRange?.end, valid_at, known_at, access_context,
+    created_before: effectiveDateRange?.end, valid_at: retrievalValidAt, known_at, access_context,
     // This function already starts the semantic vector lane above. Remote
     // stores historically repeated vector retrieval inside searchMemories(),
     // turning the nominal lexical lane into a second hybrid search.
@@ -2333,7 +2368,13 @@ async function _recallPersistedMemoriesImpl(store, {
   let _versionTimeline = [];
   if (_wantVersionHistory) {
     const rawMemories = boostedItems.map(item => item.memory || item);
-    const withSuperseded = await traverseUpdateChain(rawMemories, store);
+    const withSuperseded = await traverseUpdateChain(rawMemories, store, {
+      user_id,
+      org_id,
+      project,
+      valid_at: snapshotValidAt,
+      known_at,
+    });
     // Merge any newly added superseded memories back as scored items
     const existingIds = new Set(boostedItems.map(item => (item.memory || item).id));
     for (const mem of withSuperseded) {
@@ -2348,6 +2389,16 @@ async function _recallPersistedMemoriesImpl(store, {
     }
     // (Time-travel version timeline is built later from the DELIVERED memories —
     // after rerank/head-slot/slice — since the reranker reorders the set.)
+  }
+
+  // Apply the authoritative bitemporal snapshot after chain expansion. This is
+  // the single narrowing boundary for both current candidates and hydrated
+  // historical versions; it uses structured metadata, never prose heuristics.
+  if (temporalSnapshot) {
+    finalItems = finalItems.filter((item) => isMemoryInTemporalSnapshot(
+      item.memory || item,
+      { validAt: snapshotValidAt, knownAt: known_at },
+    ));
   }
 
   const missingPromotionImportance = finalItems.filter((item) => {

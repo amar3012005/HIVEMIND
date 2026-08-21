@@ -689,10 +689,14 @@ export class MemoryGraphEngine {
         };
       }
       const c = String(input.content || '');
-      // Avoid double-stamping when the content already ends with our marker.
-      if (input.append_timestamp_to_content !== false
-        && c && !/\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/.test(c)) {
-        input = { ...input, content: c.replace(/\s+$/, '') + ` (${dispTs})` };
+      if (input.append_timestamp_to_content !== false && c) {
+        // The final marker is canonical EVENT TIME. A pre-router or retry may
+        // already have appended an ingest-time marker; replace it when it does
+        // not match document_date instead of treating any timestamp as valid.
+        // This keeps every saved memory useful to temporal retrieval without
+        // relying on prose inference.
+        const withoutMarker = c.replace(/\s*\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/, '');
+        input = { ...input, content: withoutMarker.replace(/\s+$/, '') + ` (${dispTs})` };
       }
       input._ts_stamped = true;
     }

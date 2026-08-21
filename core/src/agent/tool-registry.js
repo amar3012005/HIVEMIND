@@ -18,6 +18,7 @@ import { scopedMemoryWhere } from '../memory/prisma-graph-store.js';
 import { applyProjectScopeFilter } from '../routes/recall.js';
 import { loadTypedGraphEvidence } from '../memory/recall-router.js';
 import { isStageDeadlineError, runWithStageDeadline } from '../runtime/stage-deadline.js';
+import { normalizeEntity } from '../memory/entity-normalize.js';
 
 export function findDirectEntityEdges(edges, entities, memoryIdsByEntity) {
   return edges.filter((edge) => {
@@ -1220,16 +1221,27 @@ const TOOL_HANDLERS = {
 
     const memoryAdmission = args._memory_admission === 'user_assertion' ? 'user_assertion' : 'trusted_fact';
     const provenanceTag = memoryAdmission === 'user_assertion' ? 'provenance:user-assertion' : 'provenance:user-fact';
+    const plannedEntities = [...new Set((Array.isArray(args.entities) ? args.entities : [])
+      .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
+    // Planner-selected entities are already part of the canonical save
+    // contract. Persist their normalized tags in the same write so a just-saved
+    // memory is entity-recallable before asynchronous enrichment completes (or
+    // even when the enrichment model returns malformed JSON). The canonical
+    // linker still refines entities and typed relationships afterwards.
+    const plannedEntityTags = plannedEntities
+      .map((entity) => normalizeEntity(entity))
+      .filter(Boolean)
+      .map((slug) => `entity:${slug}`);
     const payload = {
       title: args.title,
       content: args.content,
-      tags: Array.from(new Set([...(args.tags || []), provenanceTag])),
+      tags: Array.from(new Set([...(args.tags || []), provenanceTag, ...plannedEntityTags])),
       memory_type: memType,
       user_id: ctx.userId,
       org_id: ctx.orgId,
       scope,
       project_ids: resolvedProjectId ? [resolvedProjectId] : [],
-      entities: Array.isArray(args.entities) ? args.entities : [],
+      entities: plannedEntities,
       ...(args.event_time ? { document_date: args.event_time, event_time: args.event_time, valid_from: args.event_time } : {}),
       source_metadata: {
         source_platform: 'talk-to-hive', source_type: 'chat-turn', via: 'react-agent',

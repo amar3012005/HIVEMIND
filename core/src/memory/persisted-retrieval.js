@@ -1582,9 +1582,10 @@ async function _recallPersistedMemoriesImpl(store, {
   const _ENTITY_HOP0_EMPTY = { candidates: [], matchedEntities: [], matchedQueryEntityCount: 0, latencyMs: 0, cutoff: false };
   const _entityHop0Promise = (process.env.RECALL_ENTITY_HOP0 !== 'false')
     ? resolveEntityRecallCandidates({
-        store,
-        query: query_context,
-        org_id,
+      store,
+      query: query_context,
+      canonicalEntities: canonical_entities,
+      org_id,
         user_id,
         access_context,
         scope_filter,

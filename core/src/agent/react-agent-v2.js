@@ -2254,12 +2254,21 @@ ${message}`;
     answer: response,
     claims: parsed.claims,
   }, evidence.recall_packets || [], { allowGeneralKnowledge });
+  const initialContextStatus = deriveAnswerContextStatus(answerPayload);
+  if (initialContextStatus === 'query_mismatch') {
+    validated = {
+      ...validated,
+      rejected_claims: [...(validated.rejected_claims || []), ...(validated.claims || [])],
+      claims: [],
+      grounded: false,
+    };
+  }
 
   // The validator remains fail-closed. If the model ignored the citation
   // contract despite a non-empty packet, give it one bounded repair pass over
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
-  if (!validated.claims.length && hasGroundedPacketEvidence(evidence)) {
+  if (!validated.claims.length && initialContextStatus !== 'query_mismatch' && hasGroundedPacketEvidence(evidence)) {
     const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
     // stateless API call — it must still see the full evidence in userBlock

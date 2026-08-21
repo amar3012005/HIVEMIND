@@ -195,6 +195,7 @@ function _memoryEligible(memory, {
 export async function resolveEntityRecallCandidates({
   store,
   query,
+  canonicalEntities = [],
   org_id,
   user_id,
   access_context = null,
@@ -211,13 +212,15 @@ export async function resolveEntityRecallCandidates({
   const t0 = Date.now();
   const empty = { candidates: [], matchedEntities: [], matchedQueryEntityCount: 0, latencyMs: 0, cutoff: false };
   const client = store?.client;
-  if (!client || !org_id || !query || !hop0QueryTokens(query).length) return empty;
+  if (!client || !org_id || (!query && !canonicalEntities.length)) return empty;
 
   const work = (async () => {
+    const hasPlannedEntities = Array.isArray(canonicalEntities) && canonicalEntities.some((entity) => String(entity || '').trim());
+    const skipCentralRegistry = orgIsRemote(org_id) && hasPlannedEntities;
     // 1. Registry fetch — org-scoped, indexed, bounded. Both registries in
     //    parallel; each fails independently to [].
     const [entityRows, canonicalRows] = await Promise.all([
-      client.entity?.findMany
+      !skipCentralRegistry && client.entity?.findMany
         ? client.entity.findMany({
             where: { orgId: org_id, isActive: true },
             select: { id: true, canonicalName: true, aliases: true, mentionCount: true },
@@ -225,7 +228,7 @@ export async function resolveEntityRecallCandidates({
             take: 400,
           }).catch(() => [])
         : [],
-      client.canonicalEntity?.findMany
+      !skipCentralRegistry && client.canonicalEntity?.findMany
         ? client.canonicalEntity.findMany({
             where: { organizationId: org_id },
             select: { id: true, canonicalName: true, aliases: true },
@@ -234,7 +237,26 @@ export async function resolveEntityRecallCandidates({
         : [],
     ]);
 
-    const tagRegistry = matchEntitiesLexical(entityRows, query);
+    // A structured planner has already resolved these entity names. Treat them
+    // as authoritative tag anchors instead of requiring a second copy in the
+    // central registry. This matters for remote .amr tenants: their memory and
+    // `entity:<slug>` tags live in the box, while the central entity registry
+    // may legitimately have no corresponding row yet.
+    const plannedRegistry = [...new Set((canonicalEntities || [])
+      .map((name) => String(name || '').trim()).filter(Boolean))]
+      .slice(0, HOP0_MAX_ENTITIES)
+      .map((name, index) => ({
+        id: `planned:${normalizeEntity(name) || index}`,
+        name,
+        slug: normalizeEntity(name),
+        matchScore: SCORE_EXACT,
+        matchedTokens: hop0QueryTokens(name),
+      }))
+      .filter((entity) => entity.slug);
+    const tagRegistry = [
+      ...plannedRegistry,
+      ...matchEntitiesLexical(entityRows, query),
+    ].filter((entity, index, rows) => rows.findIndex((row) => row.slug === entity.slug) === index);
     const linkRegistry = matchEntitiesLexical(canonicalRows, query);
     if (!tagRegistry.length && !linkRegistry.length) return empty;
 
@@ -334,7 +356,13 @@ export async function resolveEntityRecallCandidates({
     };
   })().catch(() => empty);
 
-  const result = await _withDeadline(work, Math.max(25, deadlineMs), { ...empty, cutoff: true });
+  // A remote planned-entity hit requires two bounded reads (tag ids, then
+  // hydration). Give that authoritative lane enough time to complete instead
+  // of applying the central-registry 125 ms budget to a network round trip.
+  const effectiveDeadlineMs = orgIsRemote(org_id) && canonicalEntities.length
+    ? Math.max(500, deadlineMs)
+    : Math.max(25, deadlineMs);
+  const result = await _withDeadline(work, effectiveDeadlineMs, { ...empty, cutoff: true });
   result.latencyMs = result.latencyMs || (Date.now() - t0);
   return result;
 }

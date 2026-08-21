@@ -22,7 +22,12 @@ export function deriveAnswerContextStatus(payload = {}) {
   if (reported === 'query_mismatch') return reported;
   if (reported === 'relevant_but_incomplete') return reported;
   const coverage = normalizeAnswerCoverage(payload?.coverage);
+  const hasSupportedDetail = coverage.some((item) => item.status === 'supported');
   const hasUnsupportedDetail = coverage.some((item) => item.status === 'unsupported');
   const hasGap = Array.isArray(payload?.gaps) && payload.gaps.some((gap) => typeof gap === 'string' && gap.trim());
+  // When the model decomposed the request but found support for none of its
+  // requested details, the packet is off-objective, not merely incomplete.
+  // This keeps an unrelated but citation-valid fact from becoming the answer.
+  if (coverage.length > 0 && !hasSupportedDetail && hasUnsupportedDetail) return 'query_mismatch';
   return (hasUnsupportedDetail || hasGap) ? 'relevant_but_incomplete' : 'sufficient';
 }

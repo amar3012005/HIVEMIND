@@ -163,6 +163,7 @@ function loadLocalEnv(envPath) {
 loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
 
 const { MemoryEngine } = await import('./engine.local.js');
+const { resolveAuthoritySnapshot } = await import('./icarus/authority-snapshot.js');
 const { getGroqClient } = await import('../config/groq.js');
 const { getPrismaClient, ensureTenantContext, enterOrgContext, runWithOrg } = await import('./db/prisma.js');
 const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-streamer.js');
@@ -9450,6 +9451,26 @@ exit \$RC
       // Effective container: explicit request > single-scoped key default > null
       const effectiveContainerTag = resolvedContainerTag
         || (keyContainerTags && keyContainerTags.length === 1 ? keyContainerTags[0] : null);
+
+      // ── ICARUS optional organizational authority ───────────────────────
+      // A narrow read-only projection; authenticated principal identity is the authority.
+      if (pathname === '/api/icarus/authority/snapshot' && req.method === 'GET') {
+        try {
+          const result = await resolveAuthoritySnapshot({
+            principalScopes: principal.scopes,
+            userId,
+            orgId,
+            repoId: url.searchParams.get('repo_id'),
+            projectId: url.searchParams.get('project_id'),
+            prisma,
+            buildAccessContext,
+          });
+          return jsonResponse(res, result.body, result.status);
+        } catch (error) {
+          console.error('[icarus-authority] snapshot failed:', error.message);
+          return jsonResponse(res, { error: 'authority_snapshot_failed' }, 500);
+        }
+      }
 
       if (pathname === '/api/campaigns' || pathname.startsWith('/api/campaigns/')) {
         await handleCampaignRequest({

@@ -4,6 +4,7 @@ import {
   authoritySnapshotDigest,
   buildAuthoritySnapshot,
   isIcarusRepoId,
+  resolveAuthoritySnapshot,
   stableJson,
 } from '../../src/icarus/authority-snapshot.js';
 
@@ -32,4 +33,61 @@ test('canonical JSON is insertion-order independent and invalid scope is rejecte
   assert.throws(() => buildAuthoritySnapshot({
     userId: USER, orgId: ORG, projectId: PROJECT, repoId: 'bad', decisions: [],
   }), /repo_id/);
+});
+
+test('cross-tenant project access is indistinguishable from a missing project', async () => {
+  let memoryQueried = false;
+  const result = await resolveAuthoritySnapshot({
+    principalScopes: ['memory.read'],
+    userId: USER,
+    orgId: ORG,
+    projectId: PROJECT,
+    repoId: 'repo-0123456789abcdef',
+    buildAccessContext: async () => ({ projectIds: [PROJECT] }),
+    prisma: {
+      project: {
+        findFirst: async ({ where }) => {
+          assert.deepEqual(where, { id: PROJECT, orgId: ORG, status: 'active' });
+          return null; // The id exists elsewhere, but not in this caller's org.
+        },
+      },
+      memory: { findMany: async () => { memoryQueried = true; return []; } },
+    },
+  });
+  assert.equal(result.status, 404);
+  assert.deepEqual(result.body, { error: 'not_found' });
+  assert.equal(memoryQueried, false);
+});
+
+test('authority projection queries only explicitly approved decisions in the authenticated scope', async () => {
+  let observedQuery;
+  const result = await resolveAuthoritySnapshot({
+    principalScopes: ['memory.read'],
+    userId: USER,
+    orgId: ORG,
+    projectId: PROJECT,
+    repoId: 'repo-0123456789abcdef',
+    now: new Date('2026-08-21T00:00:00Z'),
+    buildAccessContext: async () => ({ projectIds: [PROJECT] }),
+    prisma: {
+      project: { findFirst: async () => ({ id: PROJECT }) },
+      memory: {
+        findMany: async (query) => {
+          observedQuery = query;
+          return [{ id: DECISION, version: 1, content: 'Approved only.', tags: ['icarus:approved'] }];
+        },
+      },
+    },
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(observedQuery.where, {
+    orgId: ORG,
+    projectId: PROJECT,
+    memoryType: 'decision',
+    isLatest: true,
+    deletedAt: null,
+    tags: { has: 'icarus:approved' },
+  });
+  assert.equal(result.body.scope.org_id, ORG);
+  assert.equal(result.body.decisions.length, 1);
 });

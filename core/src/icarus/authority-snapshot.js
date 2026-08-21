@@ -72,3 +72,54 @@ export function buildAuthoritySnapshot({ userId, orgId, projectId, repoId, decis
   snapshot.digest = authoritySnapshotDigest(snapshot);
   return snapshot;
 }
+
+/**
+ * Resolve the authority projection without coupling tenant checks to the HTTP server. Returning
+ * an explicit status/body pair lets the route remain small and gives the cross-tenant denial
+ * path a direct unit test. Callers must still authenticate the principal before invoking it.
+ */
+export async function resolveAuthoritySnapshot({
+  principalScopes,
+  userId,
+  orgId,
+  repoId,
+  projectId,
+  prisma,
+  buildAccessContext,
+  now,
+}) {
+  if (!prisma) return { status: 503, body: { error: 'authority storage unavailable' } };
+  if (!(principalScopes || []).some((scope) => ['*', 'read', 'memory.read'].includes(scope))) {
+    return { status: 403, body: { error: 'forbidden', message: 'memory.read scope is required' } };
+  }
+  if (!isIcarusRepoId(repoId) || !isUuid(projectId)) {
+    return { status: 400, body: { error: 'invalid_request', message: 'repo_id and project_id are required' } };
+  }
+  const access = await buildAccessContext(userId, orgId);
+  if (!access || !access.projectIds.includes(projectId)) {
+    // Do not distinguish a foreign project from a nonexistent one.
+    return { status: 404, body: { error: 'not_found' } };
+  }
+  const project = await prisma.project.findFirst({
+    where: { id: projectId, orgId, status: 'active' },
+    select: { id: true },
+  });
+  if (!project) return { status: 404, body: { error: 'not_found' } };
+  const decisions = await prisma.memory.findMany({
+    where: {
+      orgId,
+      projectId,
+      memoryType: 'decision',
+      isLatest: true,
+      deletedAt: null,
+      tags: { has: 'icarus:approved' },
+    },
+    select: { id: true, version: true, content: true, title: true, tags: true },
+    orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
+    take: 200,
+  });
+  return {
+    status: 200,
+    body: buildAuthoritySnapshot({ userId, orgId, projectId, repoId, decisions, now }),
+  };
+}

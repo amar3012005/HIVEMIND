@@ -179,7 +179,40 @@ function languageName(code) {
 
 // ── Provider-aware JSON helper ─────────────────────────────────────────
 
-async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy, promptCacheKey }) {
+const GROUNDED_SYNTHESIS_RESPONSE_FORMAT = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'hivemind_grounded_synthesis',
+    strict: true,
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        response: { type: 'string' },
+        claims: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              text: { type: 'string' },
+              grounded: { type: 'boolean' },
+              citation_ids: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['text', 'grounded', 'citation_ids'],
+          },
+        },
+        evidence_used: { type: 'array', items: { type: 'string' } },
+        confidence: { type: 'number' },
+        gaps: { type: 'array', items: { type: 'string' } },
+        context_status: { type: 'string', enum: ['sufficient', 'relevant_but_incomplete', 'query_mismatch'] },
+      },
+      required: ['response', 'claims', 'evidence_used', 'confidence', 'gaps', 'context_status'],
+    },
+  },
+};
+
+async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0.1, signal, reasoningEffort, providerPolicy, promptCacheKey, responseFormat = null }) {
   const reasoningDisabled = String(model || '').startsWith('nvidia/nemotron-3.5-lightning');
   const resp = await chatCompletionFetch(model, {
     method: 'POST',
@@ -187,7 +220,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
     body: JSON.stringify({
       model,
       messages,
-      response_format: { type: 'json_object' },
+      response_format: responseFormat || { type: 'json_object' },
       max_completion_tokens: maxTokens,
       temperature,
       // GPT-OSS is a reasoning model: with no reasoning_effort it defaults to
@@ -1988,8 +2021,9 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // The always-on preload supersedes the old flag-gated passive persona-router
   // (which only fired on persona-ish queries and only when a flag was set).
   const profileForAnswer = evidence.profile_context || preloadedProfileContext || '';
+  const profileCitationId = citationPacket.citations.find((citation) => citation?.source_type === 'user_profile')?.id || null;
   const personaNote = profileForAnswer
-    ? `\n\nUSER + ORG PROFILE (who you're talking to and their organization — authoritative for identity/personalization; the definitive answer to "what do you know about me/my company"; use it directly; never invent beyond it).\nIMPORTANT: this profile also holds the user's OWN goals, preferences, role, company, and strategies. When the question asks about the user's OWN goal/strategy/preference/plan ("what is MY … / my content strategy / my goals / how do I prefer …"), the matching profile fact IS the authoritative answer — state it directly. Do NOT answer "not found in the evidence" when a matching profile fact exists here, and do NOT let lower-ranked corpus passages override an explicit profile fact.\n${profileForAnswer}`
+    ? `\n\nUSER + ORG PROFILE (who you're talking to and their organization — authoritative for identity/personalization; the definitive answer to "what do you know about me/my company"; use it directly; never invent beyond it).\nIMPORTANT: this profile also holds the user's OWN goals, preferences, role, company, and strategies. When the question asks about the user's OWN goal/strategy/preference/plan ("what is MY … / my content strategy / my goals / how do I prefer …"), the matching profile fact IS the authoritative answer — state it directly. Do NOT answer "not found in the evidence" when a matching profile fact exists here, and do NOT let lower-ranked corpus passages override an explicit profile fact.${profileCitationId ? ` Every profile-derived factual claim MUST cite ${profileCitationId}.` : ''}\n${profileForAnswer}`
     : '';
 
   // COVERAGE DISCLOSURE (multi-entity compare/relation). When the planner
@@ -2189,6 +2223,7 @@ ${message}`;
     model, apiKey, maxTokens: answerCap, signal, reasoningEffort: answerReasoning,
     providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
     promptCacheKey: synthesisPrompt.cache.key,
+    responseFormat: GROUNDED_SYNTHESIS_RESPONSE_FORMAT,
   });
 
   let response = typeof parsed.response === 'string' ? parsed.response.trim() : '';
@@ -2225,6 +2260,7 @@ ${message}`;
       model, apiKey, maxTokens: repairCap, signal, reasoningEffort: 'low',
       providerPolicy: finalSynthesisProviderPolicy, temperature: 0,
       promptCacheKey: synthesisPrompt.cache.key,
+      responseFormat: GROUNDED_SYNTHESIS_RESPONSE_FORMAT,
     });
     repairUsage = repaired.usage;
     answerPayload = repaired.parsed;

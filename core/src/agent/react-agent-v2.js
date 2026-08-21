@@ -1095,7 +1095,13 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // MEDIUM: no precedence rule) and can be mistaken for authoritative profile.
   const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between' || plan.operation === 'profile';
   const recallQueries = !dedicatedLane && plannedQueries.length > 0
-    ? [buildStructuredRecallQuery(plannedQueries, plan.answer_objective, plan.retrieval_shape)]
+    ? [plan._native_single_call
+      // The progressive native planner already performed semantic query
+      // optimization. Preserve that exact entity/filename/qualifier-bearing
+      // query for embedding, lexical retrieval and reranking; answer-shape
+      // instructions belong to synthesis and can dilute the retrieval anchor.
+      ? plannedQueries[0]
+      : buildStructuredRecallQuery(plannedQueries, plan.answer_objective, plan.retrieval_shape)]
     : [];
   await execBaseRecall(bus, plan, ctx, helpers, { recallQueries, recallMode, recallLimit, recallExtras });
 

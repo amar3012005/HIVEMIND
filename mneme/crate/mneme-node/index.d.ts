@@ -134,6 +134,8 @@ export declare class MnemeStore {
    * edge_type: 1=Mentions 2=Updates 3=Derives 4=Contradicts 5=PartOf 6=Extends.
    */
   addEdge(slotId: number, target: number, edgeType: number, weight: number): void
+  /** Remove every edge matching slotId --edgeType--> target. */
+  removeEdge(slotId: number, target: number, edgeType: number): boolean
   /**
    * Typed graph traversal from `seed`, following ONLY `edge_type`, up to `max_hops`. Returns
    * reachable slot ids (HIVEMIND `traverse_graph` parity, served from the one shard).

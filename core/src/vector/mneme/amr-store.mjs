@@ -485,6 +485,20 @@ export class AmrMemoryStore {
     return true;
   }
 
+  removeEdge(rel) {
+    const from = this.store.findById(rel.fromId);
+    const to = this.store.findById(rel.toId);
+    if (from < 0 || to < 0) return false;
+    const et = REL_TYPE[rel.type] || 1;
+    const removed = this.store.removeEdge(from, to, et);
+    if (removed) {
+      this.store.flush();
+      this._revEdges = null;
+      this._edgeCount = null;
+    }
+    return removed;
+  }
+
   _ensureRevEdges() {
     if (this._revEdges) return;
     const rev = new Map();

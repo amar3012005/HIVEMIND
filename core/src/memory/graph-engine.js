@@ -1791,37 +1791,13 @@ export class MemoryGraphEngine {
           }
         }
 
-        // --- Auto-Derives from processor similarity ---
-        // When the MemoryProcessor was given 2+ similar memories for comparison
-        // and the relationship was not Updates/Extends (i.e. a new memory that
-        // synthesizes insights from multiple existing ones), create Derives edges.
-        if (processorResult && !input._derives_from
-            && classification.operation === 'created'
-            && processorResult.factSentences?.length > 0) {
-          // The similar memories that were passed to the processor
-          const candidates = pcResult?.needsConflictResolution && pcResult.matchedMemoryIds?.length > 0
-            ? latestMemories.filter(m => pcResult.matchedMemoryIds.includes(m.id))
-            : this.conflictDetector.detectCandidates(baseMemory, latestMemories).map(c => c.memory);
-
-          if (candidates.length >= 2) {
-            for (const cand of candidates.slice(0, 5)) {
-              try {
-                await store.createRelationship({
-                  id: crypto.randomUUID ? crypto.randomUUID() : `drel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                  from_id: cand.id,
-                  to_id: baseMemory.id,
-                  type: 'Derives',
-                  confidence: 0.7,
-                  metadata: { auto_derived: true, source: 'ingest_synthesis' },
-                  created_at: nowIso(),
-                });
-                result.edgesCreated.push({ type: 'Derives', from: cand.id, to: baseMemory.id });
-              } catch (err) {
-                // Non-fatal
-              }
-            }
-          }
-        }
+        // Do not infer Derives from similarity alone. A created memory with
+        // extracted fact sentences is not necessarily a synthesis; direct
+        // user assertions and atomic ingestion facts satisfy those conditions
+        // too. That legacy heuristic attached unrelated nearby memories as
+        // sources at a fixed 0.70 confidence. Derives edges now require an
+        // explicit source set (`_derives_from`) or the validated multi-source
+        // linker/cognition paths, both of which preserve real provenance.
 
         // Attach predict-calibrate metadata when available
         if (pcResult) {

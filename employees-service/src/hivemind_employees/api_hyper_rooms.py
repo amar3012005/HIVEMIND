@@ -2488,8 +2488,6 @@ async def _verify_turn(
         "If nothing is missing, gaps must be []. Output JSON only."
     )
     try:
-        boot = {b["id"]: b for b in await fetch_bootstrap()}
-        boot_emp = boot.get(lead["id"], {}) or {}
         verifier_emp = {
             **lead,
             "tools": ["_verify_noop"],   # truthy, matches no real tool → empty toolkit
@@ -2508,8 +2506,13 @@ async def _verify_turn(
             # previous forced Groq route ignored the model and made verification
             # silently unavailable when Groq billing was restricted.
             verifier_emp["llm_provider"] = "openrouter"
+        # This is a model-only judge.  A bootstrap employee API key is a
+        # HIVE-MIND tool credential, not an OpenRouter credential; passing it
+        # here made AgentScope send that key to the gateway and intermittently
+        # fail with "User not found".  An empty tool credential makes the
+        # factory use the service's configured OpenRouter/Gateway key instead.
         agent = build_react_agent(
-            verifier_emp, boot_emp.get("api_key") or "",
+            verifier_emp, "",
             user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
         )
         reply = await agent(Msg(name="user", content=prompt, role="user"))
@@ -3255,17 +3258,21 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
 
 
 def _quality_models(mode: str) -> tuple:
-    """(gather/director, debate/persona, synthesis) model triple per quality mode.
-    'best' → all gpt-oss-120b. 'auto' → cheap gather+debate + strong 120b synthesis
-    (the synth anchors deliverable quality; gather model barely matters — combo-tested:
-    8b-gather+120b-synth held quality at ~1/7 the cost). All env-tunable."""
-    best = os.environ.get("HYPER_MODEL_BEST", "openai/gpt-oss-120b")
+    """Return the centrally governed model triple for a Room turn.
+
+    HyperAgents uses one approved Gateway model by default for gather, debate,
+    and synthesis.  Operators can deliberately override an individual phase,
+    but an ordinary ``auto`` or ``best`` Room must never quietly switch to a
+    legacy 120B/Haiku path.
+    """
+    default = os.environ.get("HYPER_ROOM_MODEL", "openai/gpt-oss-20b")
+    best = os.environ.get("HYPER_MODEL_BEST", default)
     if (mode or "auto").strip().lower() == "best":
         return (best, best, best)
     return (
-        os.environ.get("HYPER_AUTO_GATHER", "openai/gpt-oss-20b"),
-        os.environ.get("HYPER_AUTO_DEBATE", "openai/gpt-oss-20b"),
-        os.environ.get("HYPER_AUTO_SYNTH") or os.environ.get("HYPER_SYNTH_MODEL", "openai/gpt-oss-120b"),  # P4: auto-mode inherits the frontier synth model
+        os.environ.get("HYPER_AUTO_GATHER", default),
+        os.environ.get("HYPER_AUTO_DEBATE", default),
+        os.environ.get("HYPER_AUTO_SYNTH") or os.environ.get("HYPER_SYNTH_MODEL", default),
     )
 
 
@@ -3774,7 +3781,8 @@ async def _orchestrate_single_agent(
         from .hyper.skills import resolve_turn_room_kind
         _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
     _m_recon = (getattr(req, "agentic_model", None)
-                or os.environ.get("HYPER_MODEL_RECON") or "deepseek/deepseek-v4-flash")
+                or os.environ.get("HYPER_MODEL_RECON")
+                or os.environ.get("HYPER_ROOM_MODEL", "openai/gpt-oss-20b"))
 
     async def _emit(ev: Dict[str, Any]) -> None:
         await _emit_event(req.callback_url, req.turn_id, ev)
@@ -3925,14 +3933,11 @@ async def _orchestrate_single_agent(
     except Exception:  # noqa: BLE001
         _room_instructions = ""
 
-    # Direct-answer via a real tool-using agent — only exercised by Director for
-    # response_depth=="direct" plain-answer turns (see engine.py run()). The
-    # lead's ACTUAL AgentScope agent answers with LIVE tool access (recall,
-    # connectors — progressive, on-demand, not limited to whatever gather
-    # pre-fetched), instead of Director's own tool-less synth. None on any
-    # failure — Director falls back to normal synth automatically. Output
-    # flows through the SAME final_text the existing verify/governance pass
-    # already checks below — no separate safety net needed.
+    # The legacy direct-answer hook builds the stored employee AgentScope
+    # persona.  That lets old employee rows select an unrelated provider/model
+    # and creates a second answer call after the Director already gathered the
+    # required context.  Keep it as an explicit operator opt-in only; normal
+    # Room turns remain on the governed Director/Gateway route.
     async def _direct_answer_via_agent(user_message: str, board_context: str) -> Optional[str]:
         return await _run_direct_answer_agent(
             req.room_id, lead, req.user_id, req.org_id, req.project_id, req.turn_id,
@@ -3971,7 +3976,12 @@ async def _orchestrate_single_agent(
             "sender_email": _sender_email, "out_language": (req.language or ""),
             "campaign_brief": req.campaign_brief,
             "room_id": req.room_id, "turn_id": req.turn_id,
-            "direct_answer_hook": _direct_answer_via_agent,
+            "direct_answer_hook": (
+                _direct_answer_via_agent
+                if str(os.environ.get("HYPER_DIRECT_ANSWER_AGENT_ENABLED", "false")).strip().lower()
+                in {"1", "true", "yes", "on"}
+                else None
+            ),
             "agentic_task_hook": _agentic_task_via_agent if HYPER_AGENTIC_ENGINE else None,
         }
         if _room_kind == "campaign":

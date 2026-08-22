@@ -1461,6 +1461,32 @@ function signupAdmissionFromRequest(url) {
   return verify('personal') || verify('enterprise');
 }
 
+// A workspace invite is also an account-provisioning admission for its named
+// recipient.  It is intentionally verified twice: once before we put its
+// opaque token in the short-lived OAuth state, and again after OAuth returns
+// with a verified email.  The invitation is not consumed here; the existing
+// POST /v1/join/:token path remains the only membership-mutating operation.
+async function workspaceInviteAdmissionFromRequest(url) {
+  const token = String(url.searchParams.get('workspace_invite') || '').trim();
+  if (!token || !prisma) return null;
+  const invite = await prisma.orgInvite.findUnique({
+    where: { token },
+    select: { token: true, email: true, usedAt: true, revokedAt: true, expiresAt: true },
+  }).catch(() => null);
+  if (!invite || !invite.email || invite.usedAt || invite.revokedAt || invite.expiresAt.getTime() <= Date.now()) return null;
+  return { token: invite.token, email: invite.email ? String(invite.email).toLowerCase() : null };
+}
+
+async function workspaceInviteMatchesAuthenticatedEmail(token, email) {
+  if (!token || !email || !prisma) return false;
+  const invite = await prisma.orgInvite.findUnique({
+    where: { token },
+    select: { email: true, usedAt: true, revokedAt: true, expiresAt: true },
+  }).catch(() => null);
+  if (!invite || invite.usedAt || invite.revokedAt || invite.expiresAt.getTime() <= Date.now()) return false;
+  return Boolean(invite.email) && String(invite.email).toLowerCase() === String(email).toLowerCase();
+}
+
 async function platformUserExists({ sub, email }) {
   if (!prisma) return false;
   const user = await prisma.user.findFirst({
@@ -3807,11 +3833,14 @@ const server = http.createServer(async (req, res) => {
     }
     const returnToValue = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
     const admission = signupAdmissionFromRequest(url);
+    const workspaceInvite = await workspaceInviteAdmissionFromRequest(url);
     if (url.searchParams.get('signup_ticket') && !admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
+    if (url.searchParams.get('workspace_invite') && !workspaceInvite) return jsonResponse(res, { error: 'Workspace invitation is unavailable' }, 403);
     const state = await sessionStore.createAuthState({
       returnTo: returnToValue,
       provider: 'google',
       signupAdmission: admission,
+      workspaceInviteToken: workspaceInvite?.token || null,
     });
     // Encode return_to in the state itself as a fallback (base64 suffix after UUID)
     // Format: <stateId>.<base64_return_to> — Google passes this back unchanged
@@ -3912,7 +3941,10 @@ const server = http.createServer(async (req, res) => {
       console.log(`[google-auth] Upserting user...`);
       const googleSub = `google:${userInfo.id}`;
       const existingPlatformUser = await platformUserExists({ sub: googleSub, email: userInfo.email });
-      if (!existingPlatformUser && !authState.signupAdmission) {
+      const workspaceInviteAccepted = authState.workspaceInviteToken
+        ? await workspaceInviteMatchesAuthenticatedEmail(authState.workspaceInviteToken, userInfo.email)
+        : false;
+      if (!existingPlatformUser && !authState.signupAdmission && !workspaceInviteAccepted) {
         return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
       }
       const user = await upsertUserFromZitadel({
@@ -4170,10 +4202,13 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: 'ZITADEL not configured' }, 503);
     }
     const admission = signupAdmissionFromRequest(url);
+    const workspaceInvite = await workspaceInviteAdmissionFromRequest(url);
     if (url.searchParams.get('signup_ticket') && !admission) return jsonResponse(res, { error: 'Invitation is unavailable' }, 403);
+    if (url.searchParams.get('workspace_invite') && !workspaceInvite) return jsonResponse(res, { error: 'Workspace invitation is unavailable' }, 403);
     const state = await sessionStore.createAuthState({
       returnTo: url.searchParams.get('return_to') || CONFIG.postLoginRedirect,
       signupAdmission: admission,
+      workspaceInviteToken: workspaceInvite?.token || null,
     });
     const authorizeOptions = {};
     if (url.searchParams.get('login_hint')) {
@@ -4221,7 +4256,10 @@ const server = http.createServer(async (req, res) => {
     try {
       const { userInfo } = await zitadelClient.exchangeAndResolveUser(code);
       const existingPlatformUser = await platformUserExists({ sub: userInfo.sub, email: userInfo.email });
-      if (!existingPlatformUser && !authState.signupAdmission) {
+      const workspaceInviteAccepted = authState.workspaceInviteToken
+        ? await workspaceInviteMatchesAuthenticatedEmail(authState.workspaceInviteToken, userInfo.email)
+        : false;
+      if (!existingPlatformUser && !authState.signupAdmission && !workspaceInviteAccepted) {
         return redirect(res, `${defaultFrontendBaseUrl}/hivemind/login?create=1&onboarding_error=invitation_required`);
       }
       const user = await upsertUserFromZitadel(userInfo);
@@ -5204,7 +5242,7 @@ const server = http.createServer(async (req, res) => {
 
     const newExpiresAt = new Date(Math.max(
       invite.expiresAt?.getTime?.() || 0,
-      Date.now() + 7 * 24 * 3600 * 1000,
+      Date.now() + WORKSPACE_INVITATION_TTL_MS,
     ));
 
     const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || CONFIG.publicBaseUrl).replace(/\/$/, '');

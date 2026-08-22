@@ -2682,21 +2682,24 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       // any downstream code that bypasses the fallback) carry the scope.
       ...(plan.save_intent.project_hint ? { project: plan.save_intent.project_hint } : {}),
       ...(plan.save_intent.project_id ? { project_id: plan.save_intent.project_id, scope: 'project' } : {}),
+      ...(plan.save_intent.scope ? { scope: plan.save_intent.scope } : {}),
       ...(plan.save_intent.memory_type ? { memory_type: plan.save_intent.memory_type } : {}),
       ...(plan.save_intent.entities?.length ? { entities: plan.save_intent.entities } : {}),
       ...(plan.save_intent.event_time ? { event_time: plan.save_intent.event_time } : {}),
       _memory_admission: plan.save_intent.admission_class || 'trusted_fact',
       _source_id: ctx._trace?.traceId || null,
       _original_content: message,
-      ...(ctx.projectId
-        ? { project_id: ctx.projectId, scope: 'project' }
-        : {}),
+      // Chat saves must never inherit a project merely because the user happens
+      // to be viewing it. The planner may carry an explicitly stated scope, and
+      // a resumed scope choice may carry an explicit project id; otherwise the
+      // save tool returns a destination choice before any write.
+      _require_explicit_scope: true,
     };
     try {
       const r = await dispatchTool('hivemind_save_memory', args, ctx);
       if (r?.needs_project_choice) {
         return { tool: 'hivemind_save_memory', args, result_summary: 'needs project choice',
-          project_choice: { projects: r.projects || [], draft: r.draft || null } };
+          project_choice: { projects: r.projects || [], scope_options: r.scope_options || [], draft: r.draft || null } };
       }
       onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify(args) });
       // A detected contradiction must reach the ANSWER model, not just the DB.
@@ -2732,18 +2735,19 @@ async function maybeSaveOrUpdate({ plan, ctx, onEvent, message, history }) {
       source_type: ['decision','preference','event','goal','lesson','relationship'].includes(as.memory_type) ? as.memory_type : 'text',
       ...(as.project_id ? { project_id: as.project_id, scope: 'project' } : {}),
       ...(as.project_hint ? { project: as.project_hint } : {}),
+      ...(as.scope ? { scope: as.scope } : {}),
       ...(as.entities?.length ? { entities: as.entities } : {}),
       ...(as.event_time ? { event_time: as.event_time } : {}),
       _memory_admission: as.admission_class || 'trusted_fact',
       _source_id: ctx._trace?.traceId || null,
       _original_content: message,
-      ...(ctx.projectId ? { project_id: ctx.projectId, scope: 'project' } : {}),
+      _require_explicit_scope: true,
     };
     try {
       const r = await dispatchTool('hivemind_save_memory', args, ctx);
       if (r?.needs_project_choice) {
         return { tool: 'hivemind_save_memory', args, result_summary: 'needs project choice',
-          project_choice: { projects: r.projects || [], draft: r.draft || null } };
+          project_choice: { projects: r.projects || [], scope_options: r.scope_options || [], draft: r.draft || null } };
       }
       const summary = r?.id ? `auto-saved ${(r.id || '').slice(0, 8)} (conf=${as.confidence.toFixed(2)})` : 'auto-saved';
       onEvent?.({ type: 'tool_call', name: 'hivemind_save_memory', arguments: JSON.stringify({ ...args, __auto: true }) });

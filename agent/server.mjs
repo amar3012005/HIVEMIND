@@ -827,6 +827,16 @@ const routes = {
     return { ok: true };
   },
 
+  '/v1/delete-edge': async (b) => {
+    const rel = b.rel || {};
+    if (!rel.fromId || !rel.toId || !rel.type) return { ok: false, error: 'fromId, toId and type required' };
+    const result = await pg.query(
+      'DELETE FROM relationships WHERE org_id=$1 AND from_id=$2 AND to_id=$3 AND type=$4',
+      [ORG, rel.fromId, rel.toId, rel.type],
+    );
+    return { ok: true, removed: result.rowCount > 0 };
+  },
+
   // Resync entity:* tags after deferred entity-linking (PG row + Qdrant payload).
   '/v1/update-tags': async (b) => {
     if (b.id && Array.isArray(b.tags)) {
@@ -862,6 +872,9 @@ const routes = {
     if (b.is_latest !== undefined) { args.push(!!b.is_latest); sets.push(`is_latest=$${args.length}`); }
     if (b.memory_type !== undefined) { args.push(b.memory_type); sets.push(`memory_type=$${args.length}`); }
     if (b.valid_to !== undefined) { args.push(b.valid_to); sets.push(`valid_to=$${args.length}::timestamptz`); }
+    if (b.content !== undefined) { args.push(b.content); sets.push(`content=$${args.length}`); }
+    if (b.title !== undefined) { args.push(b.title); sets.push(`title=$${args.length}`); }
+    if (b.importance_score !== undefined) { args.push(Number(b.importance_score)); sets.push(`confidence=$${args.length}`); }
     if (b.metadata !== undefined) { args.push(JSON.stringify(b.metadata || {})); sets.push(`metadata=$${args.length}::jsonb`); }
     if (!sets.length) return { ok: true };
     await pg.query(`UPDATE memories SET ${sets.join(', ')} WHERE id=$1 AND org_id=$2`, args);
@@ -870,6 +883,9 @@ const routes = {
       ...(b.is_latest !== undefined ? { is_latest: !!b.is_latest } : {}),
       ...(b.memory_type !== undefined ? { memory_type: b.memory_type } : {}),
       ...(b.valid_to !== undefined ? { valid_to: b.valid_to } : {}),
+      ...(b.content !== undefined ? { content: String(b.content).slice(0, 400) } : {}),
+      ...(b.title !== undefined ? { title: b.title } : {}),
+      ...(b.importance_score !== undefined ? { importance_score: Number(b.importance_score) } : {}),
       ...(b.metadata !== undefined ? { metadata: b.metadata || {} } : {}),
     };
     if (Object.keys(payload).length > 0) {

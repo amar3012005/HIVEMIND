@@ -177,7 +177,7 @@ export const TOOL_SCHEMAS = [
     function: {
       name: 'hivemind_save_memory',
       description:
-        'Save a durable fact, preference, decision, goal, person, or event to HIVEMIND. Call when the user reveals something durable. ALWAYS tag (≥2 tags). NEVER save chitchat or secrets.\n\nPROJECT SCOPING (enterprise multi-tenant):\n  • If the user names a project ("save to SOLVIS", "in my Q2-planning project"), pass project_id (UUID) OR project (name/slug — server resolves).\n  • If unsure which project, FIRST call hivemind_list_projects to see what exists, pick the best match by topic, and use that.\n  • If still ambiguous, ASK the user before saving instead of guessing.\n  • If the org policy is "ask" or no obvious match, omit project_id — server defaults to personal scope.',
+        'Save a durable fact, preference, decision, goal, person, or event to HIVEMIND. Call when the user reveals something durable. ALWAYS tag (≥2 tags). NEVER save chitchat or secrets.\n\nDESTINATION: pass scope when the user explicitly states personal, organization, team, or project destination. For a named project, pass project_id (UUID) or project (name/slug; the server resolves it). Chat-originated saves with no stated destination return an explicit scope choice; do not silently pick a destination from the current page, profile, or project catalog.',
       parameters: {
         type: 'object',
         properties: {
@@ -201,6 +201,7 @@ export const TOOL_SCHEMAS = [
           entities: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Exact entity names preserved by the router.' },
           event_time: { type: 'string', description: 'ISO event/valid time explicitly supplied by the user.' },
           _memory_admission: { type: 'string', enum: ['trusted_fact', 'user_assertion'], description: 'Internal provenance supplied by chat planning. A user assertion remains recallable but is not promoted into independently verified background.' },
+          _require_explicit_scope: { type: 'boolean', description: 'Internal chat orchestration flag. When true, the save handler returns a destination choice instead of inferring or defaulting an omitted scope.' },
         },
         required: ['title', 'content', 'tags'],
       },

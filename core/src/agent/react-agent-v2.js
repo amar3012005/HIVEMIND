@@ -2639,7 +2639,11 @@ RULES:
           try {
             const parsed = JSON.parse(text);
             if (parsed && parsed.needs_project_choice) {
-              projectChoice = { projects: parsed.projects || [], draft: parsed.draft || null };
+              projectChoice = {
+                projects: parsed.projects || [],
+                scope_options: parsed.scope_options || [],
+                draft: parsed.draft || null,
+              };
             }
           } catch { /* result not JSON — ignore */ }
         }
@@ -3336,12 +3340,9 @@ export async function runReactAgentV2({
               memory_type: 'decision',
               tags: ['source:chat', 'update-fallback'],
               _original_content: message,
-              // Scope MUST be forwarded the same way the normal save path does it.
-              // Omitting it drops the memory into the caller's default scope
-              // instead of the project they are working in — a silent
-              // cross-scope write, which is exactly the class of bug the scope
-              // stamping on segments exists to prevent.
-              ...(ctx.projectId ? { project_id: ctx.projectId, scope: 'project' } : {}),
+              // An update fallback is still a new durable write. It must not
+              // inherit the project that happens to be open in the UI.
+              _require_explicit_scope: true,
             }, ctx);
             // needs_project_choice carries NO error field but has NOT saved
             // anything — it is a draft awaiting a scope pick. Counting it as saved

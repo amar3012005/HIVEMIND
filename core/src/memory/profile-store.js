@@ -429,9 +429,15 @@ export class ProfileStore {
     }
     if (!selected.length) return '';
 
-    const lines = ['Authenticated user profile (authoritative):'];
+    const lines = ['Authenticated user profile (authoritative; values describe the caller unless marked organization):'];
     for (const fact of selected) {
-      const label = fact.category === 'preference' ? 'preference' : fact.key;
+      const label = fact.category === 'preference'
+        ? 'user preference'
+        : fact.key === 'company'
+          ? 'organization'
+          : fact.key === 'location'
+            ? 'user location'
+            : fact.key;
       const line = `- ${label}: ${fact.value}`;
       if (`${lines.join('\n')}\n${line}`.length > Math.max(80, maxChars)) break;
       lines.push(line);

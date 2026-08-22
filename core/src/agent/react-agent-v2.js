@@ -2954,7 +2954,7 @@ export async function runReactAgentV2({
       try {
         const { getSharedProfileStore } = await import('../memory/profile-store.js');
         const ps = getSharedProfileStore(ctx.prisma);
-        return (await ps.buildProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null)) || '';
+        return (await ps.buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null)) || '';
       } catch { return ''; }
     })();
     // FLAG: CHAT_ROUTER=progressive swaps ONLY the intent-selection stage for

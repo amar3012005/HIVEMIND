@@ -18500,7 +18500,7 @@ exit \$RC
             // GET /api/profiles/context — lightweight endpoint for LLM context injection
             if (!profileStore) return jsonResponse(res, { error: 'Profile store unavailable' }, 503);
             try {
-              const contextString = await profileStore.buildProfileContext(userId, orgId);
+              const contextString = await profileStore.buildCompactProfileContext(userId, orgId);
               return jsonResponse(res, { context: contextString });
             } catch (err) {
               console.error('[profiles/context] GET failed:', err.message);
@@ -24189,7 +24189,7 @@ exit \$RC
               let profileContext = '';
               if (profileStore) {
                 try {
-                  profileContext = await profileStore.buildProfileContext(userId, orgId);
+                  profileContext = await profileStore.buildCompactProfileContext(userId, orgId);
                 } catch {}
               }
 

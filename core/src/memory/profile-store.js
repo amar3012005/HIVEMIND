@@ -16,6 +16,56 @@ const PREFERENCE_PATTERNS = [
   { key: null, patterns: [/i (?:prefer|like|love|enjoy|always use|favor) ([\w\s]{3,40}?)(?:\.|,|\s+and|\s+but|\s+for|$)/i, /my (?:favorite|preferred|go-to) (\w+) is ([\w\s]{3,30}?)(?:\.|,|$)/i] },
 ];
 
+// A chat save may state an authenticated person's fact in third person
+// ("Amar Sai lives in India"). That is still a user-profile fact when — and
+// only when — the saved subject resolves to the caller's already-maintained
+// name. This deliberately does not promote facts about other people into the
+// caller profile.
+const SELF_REFERENCED_PROFILE_PATTERNS = [
+  { key: 'location', patterns: [
+    /^\s*(.+?)\s+(?:lives|is based|resides)\s+in\s+([^.!?]{2,100})[.!?]?\s*$/i,
+    /^\s*(.+?)\s+is\s+from\s+([^.!?]{2,100})[.!?]?\s*$/i,
+    /^\s*(.+?)\s+(?:lebt|wohnt)\s+in\s+([^.!?]{2,100})[.!?]?\s*$/i,
+    /^\s*(.+?)\s+(?:vive|habite)\s+(?:à|en)\s+([^.!?]{2,100})[.!?]?\s*$/i,
+    /^\s*(.+?)\s+vive\s+en\s+([^.!?]{2,100})[.!?]?\s*$/i,
+  ] },
+  { key: 'company', patterns: [
+    /^\s*(.+?)\s+works\s+(?:at|for)\s+([^.!?]{2,100})[.!?]?\s*$/i,
+    /^\s*(.+?)\s+arbeitet\s+(?:bei|für)\s+([^.!?]{2,100})[.!?]?\s*$/i,
+    /^\s*(.+?)\s+travaille\s+(?:chez|pour)\s+([^.!?]{2,100})[.!?]?\s*$/i,
+  ] },
+  { key: 'role', patterns: [
+    /^\s*(.+?)\s+works\s+as\s+(?:an?\s+|the\s+)?([^.!?]{2,100})[.!?]?\s*$/i,
+    /^\s*(.+?)\s+ist\s+(?:ein(?:e)?\s+)?([^.!?]{2,100})[.!?]?\s*$/i,
+  ] },
+];
+
+function normalizeIdentity(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function isKnownSelfAlias(subject, profileFacts) {
+  const normalizedSubject = normalizeIdentity(subject);
+  // A one-word match is too ambiguous for a durable identity write. A caller
+  // can still use the explicit update-profile route for it.
+  if (normalizedSubject.split(' ').filter(Boolean).length < 2) return false;
+  const aliases = (profileFacts || [])
+    .filter((fact) => fact?.key === 'name' && fact?.value)
+    .map((fact) => normalizeIdentity(fact.value))
+    .filter(Boolean);
+  return aliases.some((alias) => (
+    normalizedSubject === alias
+    || alias.startsWith(`${normalizedSubject} `)
+    || normalizedSubject.startsWith(`${alias} `)
+  ));
+}
+
 // Process-wide singleton so every caller (server.js /api/profiles, the chat
 // get_user_profile tool, onboarding company-fact writes) SHARES one 60s cache.
 // Constructing throwaway instances means a write on one never invalidates
@@ -241,6 +291,33 @@ export class ProfileStore {
       }
     }
 
+    // A caller may refer to themselves by their maintained name rather than
+    // first person. Resolve that name before extracting; never infer identity
+    // from the saved statement alone, otherwise a fact about any third party
+    // could contaminate the authenticated user's profile.
+    const existingFacts = await this.getProfile(userId, orgId);
+    for (const { key, patterns } of SELF_REFERENCED_PROFILE_PATTERNS) {
+      if (extracted.some((fact) => fact.key === key)) continue;
+      for (const pattern of patterns) {
+        const match = userParts.match(pattern);
+        if (!match || !isKnownSelfAlias(match[1], existingFacts)) continue;
+        const value = String(match[2] || '').trim().replace(/[.,!?]+$/, '');
+        if (value.length >= 2 && value.length <= 100) {
+          await this.upsertFact({
+            userId,
+            orgId,
+            category: 'static',
+            key,
+            value,
+            confidence: 0.9,
+            sourceMemoryId: memoryId,
+          });
+          extracted.push({ key, value, source: 'self_referenced_memory' });
+          break;
+        }
+      }
+    }
+
     // Extract preferences
     for (const { patterns } of PREFERENCE_PATTERNS) {
       for (const pattern of patterns) {
@@ -302,5 +379,63 @@ export class ProfileStore {
       for (const f of dynamic) lines.push(`  - ${f.value}`);
     }
     return lines.join('\n');
+  }
+
+  /**
+   * A bounded persona packet for chat routing and answer synthesis.
+   *
+   * The full profile remains available to profile-management routes. Chat does
+   * not need an ever-growing fact dump on every request: identity and durable
+   * preferences are enough to personalize direct/profile answers without
+   * crowding out retrieved evidence.
+   */
+  async buildCompactProfileContext(userId, orgId = null, projectId = null, {
+    maxFacts = 8,
+    maxChars = 900,
+  } = {}) {
+    const allFacts = await this.getProfile(userId, orgId, projectId);
+    const facts = allFacts.filter((fact) => (
+      !fact.lastDreamedAt
+      || (Array.isArray(fact.evidenceMemoryIds) && fact.evidenceMemoryIds.length > 0)
+    ));
+    if (!facts.length) return '';
+
+    const staticPriority = new Map([
+      ['name', 0], ['role', 1], ['company', 2], ['location', 3],
+      ['timezone', 4], ['language', 5],
+    ]);
+    const staticFacts = facts
+      // `company:*` briefing fields are intentionally excluded here. They can
+      // be long, stale and numerous; corpus recall is the right lane for an
+      // organization overview. This packet is only the compact caller persona.
+      .filter((fact) => fact.category === 'static' && fact.confidence >= 0.5 && staticPriority.has(fact.key))
+      .sort((a, b) => {
+        const priority = (staticPriority.get(a.key) ?? 50) - (staticPriority.get(b.key) ?? 50);
+        if (priority) return priority;
+        return new Date(b.lastConfirmedAt || 0) - new Date(a.lastConfirmedAt || 0);
+      });
+    const otherFacts = facts
+      .filter((fact) => ['preference', 'goal', 'dynamic'].includes(fact.category) && fact.confidence >= 0.5)
+      .sort((a, b) => new Date(b.lastConfirmedAt || 0) - new Date(a.lastConfirmedAt || 0));
+
+    const seen = new Set();
+    const selected = [];
+    for (const fact of [...staticFacts, ...otherFacts]) {
+      const dedupeKey = `${fact.category}:${fact.key}:${String(fact.value).toLowerCase()}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      selected.push(fact);
+      if (selected.length >= Math.max(1, maxFacts)) break;
+    }
+    if (!selected.length) return '';
+
+    const lines = ['Authenticated user profile (authoritative):'];
+    for (const fact of selected) {
+      const label = fact.category === 'preference' ? 'preference' : fact.key;
+      const line = `- ${label}: ${fact.value}`;
+      if (`${lines.join('\n')}\n${line}`.length > Math.max(80, maxChars)) break;
+      lines.push(line);
+    }
+    return lines.length > 1 ? lines.join('\n') : '';
   }
 }

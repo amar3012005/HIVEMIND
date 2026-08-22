@@ -1294,6 +1294,53 @@ const TOOL_HANDLERS = {
         : await ctx.persistentMemoryEngine.ingestMemory(routed);
     }
     const id = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
+    // Chat writes use canonical ingestion directly, so they previously skipped
+    // server.js's upload-only profile extraction hook. Derive caller profile
+    // facts only after the canonical memory is durable. ProfileStore itself
+    // accepts first-person statements and self-name aliases, never arbitrary
+    // third-party claims.
+    let profileFacts = [];
+    let profileMemoryId = null;
+    if (ctx.prisma && ctx.userId && typeof args.content === 'string') {
+      try {
+        const { getSharedProfileStore } = await import('../memory/profile-store.js');
+        profileFacts = await getSharedProfileStore(ctx.prisma).extractAndStore(args.content, {
+          userId: ctx.userId,
+          orgId: ctx.orgId,
+          memoryId: id,
+        });
+        // If a caller explicitly filed a self-profile statement outside their
+        // personal scope, retain a private canonical copy too. The shared
+        // memory stays exactly where the user chose; the personal copy gives
+        // the profile fact durable private recall/history without silently
+        // changing the selected destination.
+        if (profileFacts.length && scope !== 'personal') {
+          const profilePayload = {
+            title: 'User profile update',
+            content: args.content,
+            tags: Array.from(new Set(['profile', 'source:chat', 'provenance:user-fact', ...plannedEntityTags])),
+            memory_type: memType,
+            user_id: ctx.userId,
+            org_id: ctx.orgId,
+            scope: 'personal',
+            project_ids: [],
+            source_metadata: {
+              source_platform: 'talk-to-hive', source_type: 'profile-update', via: 'react-agent',
+              mirrors_memory_id: id,
+            },
+          };
+          const mirrored = ctx.ingestCanonicalPayload
+            ? await ctx.ingestCanonicalPayload(profilePayload, { sourceType: 'mcp', mode: 'atomic' })
+            : null;
+          profileMemoryId = mirrored?.parentId || mirrored?.id || mirrored?.memoryId || mirrored?.memory?.id || null;
+        }
+      } catch (profileError) {
+        // The canonical memory write is authoritative. A profile derivation
+        // failure must be observable but must never turn a completed save into
+        // a failed user action.
+        console.warn('[hivemind_save_memory] profile derivation failed:', profileError.message);
+      }
+    }
     // SURFACE A CONTRADICTION THE SAVE JUST DETECTED.
     // graph-engine records every edge it wrote in `edgesCreated`, including
     // Contradicts, but this handler dropped the whole array — so a save that
@@ -1324,6 +1371,8 @@ const TOOL_HANDLERS = {
       id,
       title: args.title,
       operation: saved?.operation || null,
+      profile_facts: profileFacts,
+      profile_memory_id: profileMemoryId,
       ...(conflicts?.length ? { conflicts } : {}),
       childCount: saved?.childIds?.length ?? null,
       scope,
@@ -1627,7 +1676,7 @@ const TOOL_HANDLERS = {
       const store = getSharedProfileStore(ctx.prisma);
       const [facts, context] = await Promise.all([
         store.getProfile(ctx.userId, ctx.orgId, ctx.projectId || null),
-        store.buildProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null),
+        store.buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null),
       ]);
       return { facts: facts || [], context: context || '', fact_count: (facts || []).length };
     } catch (err) {
@@ -1864,12 +1913,43 @@ const TOOL_HANDLERS = {
     try {
       const { getSharedProfileStore } = await import('../memory/profile-store.js');
       const store = getSharedProfileStore(ctx.prisma);
+      // A profile fact is durable user context, not merely a mutable settings
+      // row. Preserve it as one canonical PERSONAL memory as well, so profile
+      // updates remain visible to recall/history with ordinary source lineage.
+      // This does not replace an explicitly chosen organization/project memory
+      // from a separate save; it is the caller's private profile history.
+      const profileContent = fields
+        .map((field) => `My ${field.key.replace(/^preference:/, 'preference ')} is ${field.value}.`)
+        .join('\n');
+      let profileMemoryId = null;
+      if (ctx.ingestCanonicalPayload || ctx.buildRoutedIngestPayloads) {
+        const payload = {
+          title: 'User profile update',
+          content: profileContent,
+          tags: ['profile', 'source:chat', 'provenance:user-fact'],
+          memory_type: 'fact',
+          user_id: ctx.userId,
+          org_id: ctx.orgId,
+          scope: 'personal',
+          project_ids: [],
+          source_metadata: { source_platform: 'talk-to-hive', source_type: 'profile-update', via: 'react-agent' },
+        };
+        const saved = ctx.ingestCanonicalPayload
+          ? await ctx.ingestCanonicalPayload(payload, { sourceType: 'mcp', mode: 'atomic' })
+          : await (async () => {
+              const [routed] = await ctx.buildRoutedIngestPayloads(payload, { smartIngestRouter: ctx.smartIngestRouter });
+              return ctx.ingestRoutedPayload
+                ? ctx.ingestRoutedPayload(routed, ctx.persistentMemoryEngine)
+                : ctx.persistentMemoryEngine?.ingestMemory(routed);
+            })();
+        profileMemoryId = saved?.parentId || saved?.id || saved?.memoryId || saved?.memory?.id || null;
+      }
       const applied = [];
       for (const f of fields) {
-        await store.upsertFact({ userId: ctx.userId, orgId: ctx.orgId, category: f.category, key: f.key, value: f.value, confidence: 1.0, sourceMemoryId: null }).catch(() => {});
+        await store.upsertFact({ userId: ctx.userId, orgId: ctx.orgId, category: f.category, key: f.key, value: f.value, confidence: 1.0, sourceMemoryId: profileMemoryId }).catch(() => {});
         applied.push({ key: f.key, value: f.value });
       }
-      return { updated: true, fields: applied, _terminal: true };
+      return { updated: true, fields: applied, memory_id: profileMemoryId, _terminal: true };
     } catch (err) {
       return { updated: false, error: `profile_update_failed: ${err.message}` };
     }

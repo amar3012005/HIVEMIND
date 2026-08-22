@@ -4828,6 +4828,127 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // Workspace identity is a durable, organization-scoped profile. It is kept
+  // out of UserProfile on purpose: chat, ingestion and agent tools can read it
+  // through Core context, but only an owner/admin can change it here.
+  const organizationProfileMatch = pathname.match(/^\/v1\/orgs\/([0-9a-f-]{36})\/profile$/);
+  if (organizationProfileMatch) {
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = organizationProfileMatch[1];
+    const membership = await getActiveOrganizationMembership(prisma, {
+      userId: current.session.userId,
+      orgId,
+    });
+    if (!membership) return jsonResponse(res, { error: 'Resource not found' }, 404);
+
+    const organization = await prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { id: true, name: true, slug: true, plan: true, dataResidencyRegion: true },
+    });
+    if (!organization) return jsonResponse(res, { error: 'Resource not found' }, 404);
+
+    const serialize = (facts) => ({
+      id: organization.id,
+      name: organization.name,
+      slug: organization.slug,
+      plan: organization.plan || 'free',
+      hosting_mode: 'managed',
+      data_residency_region: organization.dataResidencyRegion || 'eu-central',
+      company_profile: Object.fromEntries(facts.map((fact) => [fact.key.replace(/^company\./, ''), fact.value])),
+      facts: facts.map(({ id, key, value, category, version, updatedAt }) => ({ id, key, value, category, version, updated_at: updatedAt })),
+    });
+
+    if (req.method === 'GET') {
+      const facts = await prisma.organizationProfile.findMany({
+        where: { orgId, deletedAt: null },
+        orderBy: [{ category: 'asc' }, { key: 'asc' }],
+      });
+      return jsonResponse(res, {
+        organization: serialize(facts),
+        can_edit: isOrganizationAdmin(membership) || canManageOrg(membership.role),
+      });
+    }
+
+    if (req.method === 'PATCH') {
+      const admin = await requireOrgAdmin(req, res, current.session.userId, orgId);
+      if (!admin) return;
+      const body = (await parseBody(req)) || {};
+      const companyProfile = body.company_profile;
+      if (!companyProfile || typeof companyProfile !== 'object' || Array.isArray(companyProfile)) {
+        return jsonResponse(res, { error: 'company_profile object is required' }, 400);
+      }
+      const allowedKeys = new Set(['website', 'industry', 'description', 'audience', 'mission']);
+      const entries = Object.entries(companyProfile)
+        .filter(([key]) => allowedKeys.has(key))
+        .map(([key, value]) => [key, typeof value === 'string' ? value.trim() : '']);
+      if (!entries.length) return jsonResponse(res, { error: 'No supported organization profile fields provided' }, 400);
+      if (entries.some(([, value]) => value.length > 4000)) {
+        return jsonResponse(res, { error: 'Organization profile values must be at most 4000 characters' }, 400);
+      }
+
+      const changed = await prisma.$transaction(async (tx) => {
+        const results = [];
+        for (const [key, value] of entries) {
+          const canonicalKey = `company.${key}`;
+          const existing = await tx.organizationProfile.findUnique({
+            where: { orgId_key: { orgId, key: canonicalKey } },
+          });
+          if (!value) {
+            if (existing && !existing.deletedAt) {
+              await tx.organizationProfile.update({
+                where: { id: existing.id },
+                data: { deletedAt: new Date(), version: { increment: 1 }, updatedByUserId: current.session.userId },
+              });
+              results.push({ key: canonicalKey, action: 'deleted', previousValue: existing.value });
+            }
+            continue;
+          }
+          const row = await tx.organizationProfile.upsert({
+            where: { orgId_key: { orgId, key: canonicalKey } },
+            update: {
+              value,
+              category: 'identity',
+              version: { increment: 1 },
+              updatedByUserId: current.session.userId,
+              deletedAt: null,
+            },
+            create: {
+              orgId,
+              key: canonicalKey,
+              value,
+              category: 'identity',
+              updatedByUserId: current.session.userId,
+            },
+          });
+          results.push({ key: canonicalKey, action: existing ? 'updated' : 'created', previousValue: existing?.value || null, row });
+        }
+        return results;
+      });
+      await audit({
+        userId: current.session.userId,
+        organizationId: orgId,
+        eventType: 'organization_profile.updated',
+        eventCategory: 'data_modification',
+        action: 'update',
+        resourceType: 'organization_profile',
+        metadata: { changed: changed.map(({ key, action }) => ({ key, action })) },
+        oldValue: Object.fromEntries(changed.filter((item) => item.previousValue !== null).map((item) => [item.key, item.previousValue])),
+        newValue: Object.fromEntries(changed.filter((item) => item.row).map((item) => [item.key, item.row.value])),
+        ipAddress: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+        userAgent: req.headers['user-agent'] || null,
+      });
+      const facts = await prisma.organizationProfile.findMany({
+        where: { orgId, deletedAt: null },
+        orderBy: [{ category: 'asc' }, { key: 'asc' }],
+      });
+      return jsonResponse(res, { organization: serialize(facts), changed: changed.map(({ key, action }) => ({ key, action })) });
+    }
+
+    return jsonResponse(res, { error: 'Method not allowed' }, 405);
+  }
+
   // POST /v1/orgs/:orgId/invites/bulk — invite MULTIPLE people in one go.
   // Body: { emails: string[], role?: string }. Per email: create an orgInvite
   // + send the branded `team_invite` system email ("{{orgName}} is on

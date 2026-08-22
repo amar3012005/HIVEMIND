@@ -127,6 +127,29 @@ export class ProfileStore {
   }
 
   /**
+   * Organization facts are a read-only context layer for this store. Their
+   * writes live exclusively in the control plane, where org-admin membership
+   * and an audit event are enforced. Keeping this method read-only prevents an
+   * agent or an ingestion path from ever turning a workspace fact into a tool
+   * mutation.
+   */
+  async getOrganizationProfile(orgId) {
+    if (!orgId) return [];
+    const rows = await this.prisma.organizationProfile.findMany({
+      where: { orgId, deletedAt: null },
+      orderBy: [{ category: 'asc' }, { key: 'asc' }],
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      key: row.key,
+      value: row.value,
+      category: row.category,
+      version: row.version,
+      updatedAt: row.updatedAt,
+    }));
+  }
+
+  /**
    * Upsert a profile fact (insert or update if same key exists).
    * Detects value changes and contradictions, returning version metadata.
    */
@@ -342,8 +365,11 @@ export class ProfileStore {
    * Build a context string for injection into LLM prompts / recall results.
    */
   async buildProfileContext(userId, orgId = null, projectId = null) {
-    const allFacts = await this.getProfile(userId, orgId, projectId);
-    if (!allFacts.length) return '';
+    const [allFacts, organizationFacts] = await Promise.all([
+      this.getProfile(userId, orgId, projectId),
+      this.getOrganizationProfile(orgId),
+    ]);
+    if (!allFacts.length && !organizationFacts.length) return '';
 
     // WS5 render-gate: a DREAMED fact (lastDreamedAt set) with NO evidence lineage
     // is ungrounded → must NOT render (anti-hallucination). User-entered / regex
@@ -356,6 +382,10 @@ export class ProfileStore {
     const dynamic = facts.filter(f => f.category === 'dynamic');
 
     const lines = [];
+    if (organizationFacts.length) {
+      lines.push('Organization Profile (admin-managed, read-only):');
+      for (const fact of organizationFacts) lines.push(`  ${fact.key}: ${fact.value}`);
+    }
     if (staticFacts.length) {
       lines.push('User Profile:');
       for (const f of staticFacts) {

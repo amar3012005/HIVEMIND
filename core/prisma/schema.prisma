@@ -2573,6 +2573,26 @@ model UserProfile {
   @@map("user_profiles")
 }
 
+/// Canonical workspace facts. These are deliberately separate from UserProfile:
+/// they describe an organization, are written only by an owner/admin through the
+/// control plane, and are never a target for chat, ingestion, or agent tools.
+model OrganizationProfile {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @map("id") @db.Uuid
+  orgId           String    @map("org_id") @db.Uuid
+  key             String    @db.VarChar(120)
+  value           String    @db.Text
+  category        String    @default("identity") @db.VarChar(50)
+  version         Int       @default(1)
+  updatedByUserId String?   @map("updated_by_user_id") @db.Uuid
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  @@unique([orgId, key])
+  @@index([orgId, deletedAt], map: "organization_profiles_org_deleted_idx")
+  @@map("organization_profiles")
+}
+
 model OrgUsage {
   id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   orgId                String   @db.Uuid

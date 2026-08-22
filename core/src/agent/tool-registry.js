@@ -1119,15 +1119,23 @@ const TOOL_HANDLERS = {
     //                  to personal when nothing supplied)
     // When project_id OR project is set, scope auto-elevates to 'project'
     // unless the caller explicitly chose otherwise.
+    //
+    // Chat orchestration opts into _require_explicit_scope. This is an
+    // authority boundary: a durable statement authorizes saving, but does not
+    // authorize silently deciding whether it belongs to personal, organization,
+    // team, or one of several projects. Other first-party API callers retain
+    // their explicit payload contract; only chat-originated saves ask.
+    const requireExplicitScope = args._require_explicit_scope === true;
     const explicitScope = typeof args.scope === 'string' ? args.scope.toLowerCase() : null;
 
     // Resolve project name/slug → UUID against the user's access list.
     // Server-side resolveScopedIngestPayload only understands project_id(s),
     // so we lift the name lookup up here where we have prisma + accessContext.
     let resolvedProjectId = args.project_id || null;
-    // Fall back to ctx.projectId (the request-level scope set by the caller
-    // e.g. browser-extension scope pill) when the LLM didn't supply one.
-    if (!resolvedProjectId && ctx.projectId) {
+    // Non-chat API callers may use the request-level scope. Chat saves may not:
+    // merely viewing a project is not an explicit choice to store this fact
+    // there.
+    if (!requireExplicitScope && !resolvedProjectId && ctx.projectId) {
       resolvedProjectId = ctx.projectId;
     }
     if (resolvedProjectId) {
@@ -1168,13 +1176,38 @@ const TOOL_HANDLERS = {
       }
     }
 
+    // A chat save with no stated destination pauses before any semantic project
+    // classification or personal fallback. Returning the complete scope menu
+    // lets every client render the same explicit choice; no data is written.
+    if (requireExplicitScope && !resolvedProjectId && (!explicitScope || explicitScope === 'project')) {
+      const accessProjectIds = (ctx.accessContext?.projectIds) || [];
+      const projects = ctx.persistentMemoryStore?.client?.project && accessProjectIds.length > 0
+        ? await ctx.persistentMemoryStore.client.project.findMany({
+            where: { id: { in: accessProjectIds }, orgId: ctx.orgId, status: 'active' },
+            select: { id: true, name: true, slug: true },
+          }).catch(() => [])
+        : [];
+      return {
+        saved: false,
+        needs_project_choice: true,
+        message: 'Memory destination was not stated. Ask the user to choose a personal, organization, team, or authorized project scope before saving; do not retry the save yourself.',
+        scope_options: [
+          { scope: 'personal', label: 'Personal' },
+          { scope: 'organization', label: 'Organization' },
+          { scope: 'team', label: 'Team' },
+        ],
+        projects,
+        draft: { title: args.title, content: args.content, tags: args.tags || [], memory_type: memType },
+      };
+    }
+
     // Auto-classify the project from name+description when the caller gave no
     // project and no explicit scope. Confident match → assign silently;
     // ambiguous → return needs_project_choice (with a pre-selected suggestion)
     // so the UI asks; nothing fits → personal. Honors the org memory_save_policy
     // ('org-wide' → org scope; 'ask' → always ask; else → semantic classify).
     let autoScope = null; // set to 'organization' when policy routes org-wide
-    if (!resolvedProjectId && !explicitScope && ctx.persistentMemoryStore?.client?.project) {
+    if (!requireExplicitScope && !resolvedProjectId && !explicitScope && ctx.persistentMemoryStore?.client?.project) {
       const accessProjectIds = (ctx.accessContext?.projectIds) || [];
       if (accessProjectIds.length > 0) {
         const projs = await ctx.persistentMemoryStore.client.project.findMany({

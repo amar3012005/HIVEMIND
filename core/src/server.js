@@ -23815,6 +23815,8 @@ exit \$RC
                         persistentMemoryStore, persistentMemoryEngine, evidenceRetrieval,
                         smartIngestRouter,
                         buildRoutedIngestPayloads,
+                        ingestRoutedPayload,                 // tree-aware dispatch
+                        ingestCanonicalPayload,
                         accessContext: agentAccessCtx,
                         webIntelligence: globalThis.webIntelligence || null,
                         webJobStore,

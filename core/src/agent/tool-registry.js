@@ -1949,7 +1949,16 @@ const TOOL_HANDLERS = {
         await store.upsertFact({ userId: ctx.userId, orgId: ctx.orgId, category: f.category, key: f.key, value: f.value, confidence: 1.0, sourceMemoryId: profileMemoryId }).catch(() => {});
         applied.push({ key: f.key, value: f.value });
       }
-      return { updated: true, fields: applied, memory_id: profileMemoryId, _terminal: true };
+      return {
+        updated: true,
+        // `id` keeps the standard mutation result/UI contract intact while
+        // `memory_id` remains explicit for API clients.
+        id: profileMemoryId,
+        fields: applied,
+        memory_id: profileMemoryId,
+        profile_memory_saved: Boolean(profileMemoryId),
+        _terminal: true,
+      };
     } catch (err) {
       return { updated: false, error: `profile_update_failed: ${err.message}` };
     }

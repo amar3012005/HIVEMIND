@@ -89,6 +89,37 @@ impl Segment {
         }
     }
 
+    /// Remove every edge from `slot_id` matching `(target, edge_type)`.
+    ///
+    /// Overflow blocks are append-only, so rewriting an overflow edge set
+    /// appends the retained rows and leaves the old block for `compact()`.
+    /// Inline rows are rewritten in place. Returns whether anything changed.
+    pub fn remove_edge(&mut self, slot_id: u32, target: u32, edge_type: u8) -> Result<bool> {
+        let mut edges = self.slot_edges(slot_id)?;
+        let before = edges.len();
+        edges.retain(|(t, ty, _)| !(*t == target && *ty == edge_type));
+        if edges.len() == before {
+            return Ok(false);
+        }
+
+        let mut s = self.slot(slot_id as usize)?;
+        for i in 0..EDGE_SLOTS {
+            s.set_edge(i, SENTINEL_U32, EDGE_NONE, 0);
+        }
+        if edges.len() <= EDGE_SLOTS {
+            s.clear_flag(flags::EDGE_OVERFLOW);
+            for (i, &(t, ty, w)) in edges.iter().enumerate() {
+                s.set_edge(i, t, ty, w);
+            }
+        } else {
+            let ptr = self.append_edge_bytes(&edges_to_bytes(&edges))?;
+            s.set_edge_overflow(ptr, edges.len() as u32);
+            s.set_flag(flags::EDGE_OVERFLOW);
+        }
+        self.write_slot(slot_id as usize, &s)?;
+        Ok(true)
+    }
+
     /// Update memory `old_slot` with a new version (write-path bi-temporal versioning). Inserts
     /// `new`, links `new --Updates--> old`, and marks `old` SUPERSEDED — so vector recall returns
     /// only the latest version while `as_of(new, t)` can still reach every past version. The

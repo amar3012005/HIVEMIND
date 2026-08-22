@@ -48,6 +48,35 @@ fn typed_edges_overflow_to_edg_region() {
     assert_eq!(reached.len(), N as usize, "1-hop must reach all 50 targets");
 }
 
+#[test]
+fn typed_edge_removal_survives_inline_and_overflow_reopen() {
+    let dir = tempdir().unwrap();
+    let mut seg = Segment::create(dir.path(), "g", 4).unwrap();
+    let hub = seg.insert(MemoryInput::new("hub", vec![1.0, 0.0, 0.0, 0.0])).unwrap();
+    let mut targets = Vec::new();
+    for i in 0..12u32 {
+        let target = seg.insert(MemoryInput::new(format!("t{i}"), vec![i as f32, 1.0, 0.0, 0.0])).unwrap();
+        targets.push(target);
+        seg.add_edge(hub, target, EDGE_DERIVES, 179).unwrap();
+    }
+
+    assert!(seg.remove_edge(hub, targets[4], EDGE_DERIVES).unwrap());
+    assert!(!seg.remove_edge(hub, targets[4], EDGE_DERIVES).unwrap());
+    assert_eq!(seg.slot_edges(hub).unwrap().len(), 11);
+    assert!(!seg.slot_edges(hub).unwrap().iter().any(|(target, ty, _)| *target == targets[4] && *ty == EDGE_DERIVES));
+    seg.flush().unwrap();
+
+    let mut reopened = Segment::open(dir.path(), "g").unwrap();
+    assert_eq!(reopened.slot_edges(hub).unwrap().len(), 11);
+    for target in targets.iter().skip(3) {
+        reopened.remove_edge(hub, *target, EDGE_DERIVES).unwrap();
+    }
+    reopened.flush().unwrap();
+
+    let final_store = Segment::open(dir.path(), "g").unwrap();
+    assert_eq!(final_store.slot_edges(hub).unwrap().len(), 3);
+}
+
 /// `.edg` overflow churns (each edge add to an overflowed slot rewrites the whole block, orphaning
 /// the old one). compact() must reclaim those orphans while keeping the edges correct.
 #[test]

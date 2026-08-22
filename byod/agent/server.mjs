@@ -827,6 +827,16 @@ const routes = {
     return { ok: true };
   },
 
+  '/v1/delete-edge': async (b) => {
+    const rel = b.rel || {};
+    if (!rel.fromId || !rel.toId || !rel.type) return { ok: false, error: 'fromId, toId and type required' };
+    const result = await pg.query(
+      'DELETE FROM relationships WHERE org_id=$1 AND from_id=$2 AND to_id=$3 AND type=$4',
+      [ORG, rel.fromId, rel.toId, rel.type],
+    );
+    return { ok: true, removed: result.rowCount > 0 };
+  },
+
   // Resync entity:* tags after deferred entity-linking (PG row + Qdrant payload).
   '/v1/update-tags': async (b) => {
     if (b.id && Array.isArray(b.tags)) {

@@ -312,6 +312,15 @@ impl MnemeStore {
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
+    /// Remove every typed edge matching `slot_id --edge_type--> target`.
+    #[napi]
+    pub fn remove_edge(&mut self, slot_id: u32, target: u32, edge_type: u8) -> Result<bool> {
+        self.shard
+            .segment()
+            .remove_edge(slot_id, target, edge_type)
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
     /// Typed graph traversal from `seed`, following ONLY `edge_type`, up to `max_hops`. Returns
     /// reachable slot ids (HIVEMIND `traverse_graph` parity, served from the one shard).
     #[napi]

@@ -297,7 +297,7 @@ function wrapHtml(inner, preheader, ctx) {
     `<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
     `<table role="presentation" width="480" cellpadding="0" cellspacing="0" style="width:480px;max-width:92%">` +
     `<tr><td style="background:#fff;border:1px solid #e3e0db;border-radius:20px;padding:32px">${inner}</td></tr>` +
-    `<tr><td style="padding:16px 8px;text-align:center;font-size:11px;color:#a3a3a3">© ${escapeHtml(ctx.year)} Da'vinci Solutions · Sovereign AI</td></tr>` +
+    `<tr><td style="padding:16px 8px;text-align:center;font-size:11px;color:#a3a3a3">© ${escapeHtml(ctx.year)} SINGULANCE · Sovereign AI</td></tr>` +
     `</table></td></tr></table></body></html>`;
 }
 

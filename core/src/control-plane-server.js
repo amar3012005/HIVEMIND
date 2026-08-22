@@ -1193,6 +1193,9 @@ const ADMIN_SECRET = requireAdminSecret();
 const PLATFORM_ADMIN_COOKIE = 'hm_platform_admin';
 const PLATFORM_ADMIN_TTL_SECONDS = 15 * 60;
 const PLATFORM_ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+// Workspace invitations are deliberately short-lived: the email is an
+// authentication-bearing join link, so delivery and expiry must agree.
+const WORKSPACE_INVITATION_TTL_MS = 24 * 60 * 60 * 1000;
 const PLATFORM_UNLOCK_MAX_ATTEMPTS = 5;
 const PLATFORM_UNLOCK_WINDOW_MS = 15 * 60 * 1000;
 const platformUnlockAttempts = new Map();
@@ -4832,7 +4835,7 @@ const server = http.createServer(async (req, res) => {
     }).catch(() => null);
     const inviterName = inviter?.displayName || inviter?.email || 'your admin';
     const orgName = membership.org.name || 'your team';
-    const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
+    const expiresAt = new Date(Date.now() + WORKSPACE_INVITATION_TTL_MS);
     const expiresOn = expiresAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
     const results = [];
@@ -4935,7 +4938,7 @@ const server = http.createServer(async (req, res) => {
       : inviteRoles[0] || 'member';
 
     const inviteEmail = typeof body.email === 'string' && body.email.trim() ? body.email.trim().toLowerCase() : null;
-    const expiresAt   = new Date(Date.now() + 1000 * 60 * 60 * 24 * 7);
+    const expiresAt   = new Date(Date.now() + WORKSPACE_INVITATION_TTL_MS);
     const idempotencyKey = typeof req.headers['idempotency-key'] === 'string'
       ? req.headers['idempotency-key'].trim().slice(0, 200)
       : null;

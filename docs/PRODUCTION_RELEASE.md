@@ -1,5 +1,15 @@
 # Current SINGULANCE Production Release
 
+## sha-a2e8db25 — provenance-only Derives and precise Memory Box edge repair
+
+- Parent SHA: `a2e8db25d55968d9ddd771db9c98738ea4ec027b` on `singulance-main` (PRs #521 and #522). Frontend unchanged and still hosted independently on Cloudflare.
+- Runtime: Core `hivemind/core-api:sha-a2e8db25`, digest `sha256:8f06fb17d96d6b9040211aae06efd0ba6139d9bbc4b68445b55ab6ef89574fae`; affected Memory Box agent `hivemind/hm-agent:sha-a2e8db25`, digest `sha256:2d94b343a0c4d797365938de7111c0fc4f35e1a1916135780c19425400ca8e6b`. Core healthy; both restart counts zero. No data service was restarted.
+- Fix: removed the legacy processor-similarity heuristic that labelled ordinary created facts/preferences as multi-source syntheses and attached up to five unrelated `Derives` edges at fixed confidence `0.70`. Explicit `_derives_from`, validated multi-source linker, and cognition synthesis provenance remain unchanged.
+- Repair capability: native `.amr` and PostgreSQL-backed BYOD agents now support exact tenant-scoped typed-edge deletion without deleting or recreating a memory. Rust acceptance covers inline and overflow-backed edges across reopen.
+- Authenticated acceptance: removed the five exact false SOLVIS-to-Nisha `Derives` edges and verified the Nisha memory has zero remaining relationships. A fresh personal preference memory received canonical person/product entity tags, was recalled from the affected tenant, and had zero relationships after deferred enrichment; the synthetic acceptance memory was then deleted.
+- Validation: Node syntax checks, `git diff --check`, relationship route-persistence test, and native Rust edge-removal persistence test passed. Fresh Core and agent fatal/error scans were empty. No migrations.
+- Rollback: Core `hivemind/core-api:sha-c65e77ba`; Memory Box `hivemind/hm-agent:rollback-pre-a2e8db25-20260822T081632Z`. Core manifest: `/root/releases/manifests/a2e8db25/20260822T080938Z/RELEASE_MANIFEST.json`.
+
 ## prod-20260809-5d4e08e3 — generalized inline human input + grounded governed actions
 
 - Parent/Core SHA: `5d4e08e3a333ee516dfc6acc14e5174c91de1aa6` on `singulance-main`; Core image `hivemind/core-api:sha-5d4e08e3`, image ID `sha256:7e92dac2937e1196d7e8f3e4cb6fed78510969405c03ee0839740a15689540cb`.

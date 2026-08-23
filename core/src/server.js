@@ -12174,7 +12174,8 @@ exit \$RC
         // RESIDENCY: remote org — KB doc + segments + promoted memories live on the agent.
         if (orgIsRemote(orgId)) {
           try {
-            const remDetail = await amrKbDocDetail(orgId, documentId, { userId });
+            const accessContext = await buildAccessContext(userId, orgId).catch(() => null);
+            const remDetail = await amrKbDocDetail(orgId, documentId, { userId, accessContext });
             if (!remDetail) return jsonResponse(res, { error: 'Document not found or access denied' }, 404);
             return jsonResponse(res, remDetail);
           } catch (remErr) {
@@ -12183,11 +12184,14 @@ exit \$RC
         }
 
         try {
+          const accessContext = await buildAccessContext(userId, orgId).catch(() => null);
+          const documentAccessWhere = evidenceRetrieval?._accessibleDocumentWhere
+            ? evidenceRetrieval._accessibleDocumentWhere({ userId, orgId, accessContext })
+            : { orgId, userId };
           const document = await prisma.knowledgeDocument.findFirst({
             where: {
+              ...documentAccessWhere,
               id: documentId,
-              userId,
-              orgId
             },
             include: {
               sourceArtifact: {
@@ -12238,13 +12242,19 @@ exit \$RC
             excerpt: link.excerpt
           }));
           const derivedCountMap = await countDerivedMemoriesByDocumentIds([documentId], orgId);
+          const evidenceBytes = segments.reduce(
+            (total, segment) => total + Buffer.byteLength(segment.content || '', 'utf8'),
+            0
+          );
 
           return jsonResponse(res, {
             document,
             segments,
             promotedMemories,
             segmentCount: segments.length,
-            promotedCount: derivedCountMap[documentId] ?? promotedMemories.length
+            promotedCount: derivedCountMap[documentId] ?? promotedMemories.length,
+            evidenceBytes,
+            sourceBytes: Number(document.sourceArtifact?.sizeBytes || 0)
           });
         } catch (err) {
           console.error('[documents/:id] Failed:', err.message);
@@ -22931,13 +22941,54 @@ exit \$RC
               const billingLimits = await usageTracker.checkLimits(orgId, billingPlan);
               return jsonResponse(res, { plan: billingPlan.id, planName: billingPlan.name, usage: billingUsage, limits: billingPlan.limits, warnings: billingLimits.warnings });
             }
-            const usageSummary = await planEnforcer.getUsageSummary(orgId);
-            const memberUsage = usageService && userId
-              ? await usageService.getMemberSummary(orgId, userId).catch(() => [])
-              : [];
+            const summarizeAiUsage = async (forUserId = null) => {
+              const rows = forUserId
+                ? await prisma.$queryRawUnsafe(
+                  `SELECT COALESCE(SUM(prompt_tokens),0)::text AS prompt_tokens,
+                          COALESCE(SUM(completion_tokens),0)::text AS completion_tokens,
+                          COALESCE(SUM(cached_prompt_tokens),0)::text AS cached_prompt_tokens,
+                          COALESCE(SUM(reasoning_tokens),0)::text AS reasoning_tokens,
+                          COALESCE(SUM(total_cost_micros),0)::text AS total_cost_micros,
+                          COALESCE(SUM(request_count),0)::text AS request_count
+                   FROM hivemind.ai_usage_events
+                   WHERE org_id=$1::uuid AND user_id=$2::uuid AND status='completed'`,
+                  orgId, forUserId,
+                )
+                : await prisma.$queryRawUnsafe(
+                  `SELECT COALESCE(SUM(prompt_tokens),0)::text AS prompt_tokens,
+                          COALESCE(SUM(completion_tokens),0)::text AS completion_tokens,
+                          COALESCE(SUM(cached_prompt_tokens),0)::text AS cached_prompt_tokens,
+                          COALESCE(SUM(reasoning_tokens),0)::text AS reasoning_tokens,
+                          COALESCE(SUM(total_cost_micros),0)::text AS total_cost_micros,
+                          COALESCE(SUM(request_count),0)::text AS request_count
+                   FROM hivemind.ai_usage_events
+                   WHERE org_id=$1::uuid AND status='completed'`,
+                  orgId,
+                );
+              const usage = rows[0] || {};
+              const promptTokens = Number(usage.prompt_tokens || 0);
+              const completionTokens = Number(usage.completion_tokens || 0);
+              return {
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                cached_prompt_tokens: Number(usage.cached_prompt_tokens || 0),
+                reasoning_tokens: Number(usage.reasoning_tokens || 0),
+                total_tokens: promptTokens + completionTokens,
+                total_cost_micros: Number(usage.total_cost_micros || 0),
+                request_count: Number(usage.request_count || 0),
+              };
+            };
+            const [usageSummary, memberUsage, organizationAiUsage, memberAiUsage] = await Promise.all([
+              planEnforcer.getUsageSummary(orgId),
+              usageService && userId ? usageService.getMemberSummary(orgId, userId).catch(() => []) : [],
+              summarizeAiUsage(),
+              userId ? summarizeAiUsage(userId) : null,
+            ]);
             return jsonResponse(res, {
               ...usageSummary,
               member_usage: memberUsage,
+              organization_ai_usage: organizationAiUsage,
+              member_ai_usage: memberAiUsage,
               usage_contract: 'usage-event-ledger-v1',
             });
           }
@@ -24663,7 +24714,12 @@ ${injectionText}`;
               const remLimit = parseInt(url.searchParams.get('limit') || '20');
               const remOffset = parseInt(url.searchParams.get('offset') || '0');
               try {
-                const remResult = await amrKbDocs(orgId, { limit: remLimit, offset: remOffset, access: { userId } });
+                const accessContext = await buildAccessContext(userId, orgId).catch(() => null);
+                const remResult = await amrKbDocs(orgId, {
+                  limit: remLimit,
+                  offset: remOffset,
+                  access: { userId, accessContext },
+                });
                 if (remResult) return jsonResponse(res, remResult);
                 return jsonResponse(res, { documents: [], pagination: { total: 0, limit: remLimit, offset: remOffset, hasMore: false } });
               } catch (remErr) {
@@ -24679,11 +24735,20 @@ ${injectionText}`;
             const offset = parseInt(url.searchParams.get('offset') || '0');
             const documentType = url.searchParams.get('document_type');
             const tags = url.searchParams.get('tags');
+            const scopeFilter = url.searchParams.get('scope') || null;
 
             try {
+              // Documents are shared by their durable scope, never by the
+              // uploader.  Reuse the exact ACL predicate used by evidence
+              // retrieval so an accepted member sees organization documents
+              // and only projects they are authorized to access, while a
+              // personal document remains visible only to its owner.
+              const accessContext = await buildAccessContext(userId, orgId).catch(() => null);
+              const documentAccessWhere = evidenceRetrieval?._accessibleDocumentWhere
+                ? evidenceRetrieval._accessibleDocumentWhere({ userId, orgId, accessContext, scopeFilter })
+                : { orgId, userId };
               const where = {
-                userId,
-                orgId,
+                ...documentAccessWhere,
                 ...(documentType ? { documentType } : {}),
                 ...(tags ? { tags: { hasSome: tags.split(',').map(t => t.trim()) } } : {})
               };
@@ -24708,8 +24773,11 @@ ${injectionText}`;
                     structureExtracted: true,
                     tags: true,
                     createdAt: true,
-                    updatedAt: true,
-                    _count: {
+                  updatedAt: true,
+                  sourceArtifact: {
+                    select: { sizeBytes: true }
+                  },
+                  _count: {
                       select: {
                         segments: true,
                         memoryLinks: true
@@ -24721,6 +24789,20 @@ ${injectionText}`;
               ]);
 
               const derivedCountMap = await countDerivedMemoriesByDocumentIds(documents.map(doc => doc.id), orgId);
+              // The evidence footprint is the UTF-8 size of persisted segments,
+              // not the raw upload size. Keep both values distinct for the UI.
+              const evidenceByteRows = documents.length
+                ? await prisma.$queryRawUnsafe(
+                  `SELECT document_id::text AS "documentId", COALESCE(SUM(octet_length(content)), 0)::text AS "evidenceBytes"
+                   FROM hivemind.knowledge_segments
+                   WHERE document_id = ANY($1::uuid[])
+                   GROUP BY document_id`,
+                  documents.map((doc) => doc.id)
+                )
+                : [];
+              const evidenceBytesByDocumentId = new Map(
+                evidenceByteRows.map((row) => [row.documentId, Number(row.evidenceBytes || 0)])
+              );
               const enriched = documents.map(doc => ({
                 ...doc,
                 // Parser metadata records PDF/DOCX pages and PPTX slides. Every
@@ -24728,6 +24810,9 @@ ${injectionText}`;
                 pageCount: Math.max(1, Number(doc.parseMetadata?.pages || doc.parseMetadata?.page_count || 1)),
                 segmentCount: doc._count.segments,
                 promotedCount: derivedCountMap[doc.id] ?? doc._count.memoryLinks,
+                evidenceBytes: evidenceBytesByDocumentId.get(doc.id) || 0,
+                sourceBytes: Number(doc.sourceArtifact?.sizeBytes || 0),
+                sourceArtifact: undefined,
                 _count: undefined
               }));
 
@@ -24763,7 +24848,8 @@ ${injectionText}`;
               // Remote (self-host) orgs have NO central KB rows — list docs from the agent and
               // apply the same title/tag/platform match JS-side.
               if (orgId && orgIsRemote(orgId)) {
-                const rOut = await amrKbDocs(orgId, { limit: 200, offset: 0, access: { userId } });
+                const accessContext = await buildAccessContext(userId, orgId).catch(() => null);
+                const rOut = await amrKbDocs(orgId, { limit: 200, offset: 0, access: { userId, accessContext } });
                 const q = query.toLowerCase();
                 const rMatches = (rOut?.documents || []).filter((doc) =>
                   (doc.title || '').toLowerCase().includes(q)

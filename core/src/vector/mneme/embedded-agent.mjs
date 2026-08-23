@@ -1710,12 +1710,16 @@ function routesFor(ctx) {
       const total = totRow[0]?.c || 0;
       const ids = docs.map((d) => d.id);
       let segMap = {};
+      let evidenceBytesMap = {};
       let proMap = {};
       if (ids.length) {
         const { rows: segs } = await db().query(
-          'SELECT document_id, count(*)::int AS c FROM knowledge_segments WHERE org_id=$1 AND document_id = ANY($2::uuid[]) GROUP BY document_id',
+          'SELECT document_id, count(*)::int AS c, COALESCE(SUM(octet_length(content)), 0)::text AS evidence_bytes FROM knowledge_segments WHERE org_id=$1 AND document_id = ANY($2::uuid[]) GROUP BY document_id',
           [org, ids]);
-        for (const r of segs) segMap[r.document_id] = r.c;
+        for (const r of segs) {
+          segMap[r.document_id] = r.c;
+          evidenceBytesMap[r.document_id] = Number(r.evidence_bytes || 0);
+        }
         proMap = await countDerivedMemories(db(), org, ids);
       }
       const documents = docs.map((d) => ({
@@ -1738,6 +1742,7 @@ function routesFor(ctx) {
         status: d.status,
         metadata: d.metadata || {},
         segmentCount: segMap[d.id] || 0,
+        evidenceBytes: evidenceBytesMap[d.id] || 0,
         promotedCount: proMap[d.id] || 0,
       }));
       return { documents, pagination: { total, limit, offset, hasMore: offset + limit < total } };
@@ -1792,7 +1797,8 @@ function routesFor(ctx) {
         metadata: d.metadata || {},
       };
       const derivedCounts = await countDerivedMemories(db(), org, [d.id]);
-      return { document, segments, promotedMemories, segmentCount: segments.length, promotedCount: derivedCounts[d.id] ?? promotedMemories.length };
+      const evidenceBytes = segments.reduce((total, segment) => total + Buffer.byteLength(segment.content || '', 'utf8'), 0);
+      return { document, segments, promotedMemories, segmentCount: segments.length, evidenceBytes, promotedCount: derivedCounts[d.id] ?? promotedMemories.length };
     },
 
     // KB doc DELETE + cascade — amr branch only (findByTags/remove path).

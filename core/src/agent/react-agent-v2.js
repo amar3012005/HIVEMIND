@@ -822,6 +822,26 @@ async function execProfile(bus, plan, ctx, { beforeDeadline, remaining, startToo
   }
 }
 
+async function execProjects(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
+  if (!(plan.operation === 'projects' && remaining() > 0)) return;
+  const args = { query: plan.project_prompt || plan.query_canonical_en || '' };
+  try {
+    startTool('hivemind_list_projects', args);
+    const result = await beforeDeadline(() => dispatchTool('hivemind_list_projects', args, ctx));
+    const projects = Array.isArray(result?.projects) ? result.projects : [];
+    if (projects.length) {
+      bus.addPacket({ citations: [{
+        id: 'PROJECTS1', source_type: 'authorized_projects', source_label: 'Authorized projects',
+        title: 'Authorized projects', snippet: projects.map((project) => `${project.name} (${project.slug || project.id})`).join('\n').slice(0, 2000),
+      }] });
+    }
+    recordTool('hivemind_list_projects', args, `${projects.length} authorized projects`, result);
+    return { projectsResult: result };
+  } catch (error) {
+    recordTool('hivemind_list_projects', args, `error: ${error.message}`, null);
+  }
+}
+
 async function execConnectorRead(bus, plan, ctx, { beforeDeadline, recordTool, onEvent }) {
   const selectedLiveGroups = Array.isArray(plan.tool_groups) ? plan.tool_groups : [];
   if (!(plan.operation === 'connector_read' && selectedLiveGroups.length > 0 && ctx._readToolkit)) return;
@@ -984,6 +1004,7 @@ const OP_STAGE = [
   { name: 'aggregate', predicate: (p) => !!(p.aggregate?.parent && p.aggregate?.kind), exec: execAggregate, scalar: 'aggregateResult' },
   { name: 'timeline', predicate: (p) => p.operation === 'timeline' || p.needs_time_travel, exec: execTimeline, scalar: 'temporalCoverage' },
   { name: 'profile', predicate: (p) => p.operation === 'profile', exec: execProfile, scalar: 'profileContext' },
+  { name: 'projects', predicate: (p) => p.operation === 'projects', exec: execProjects, scalar: 'projectsResult' },
 ];
 
 // Exported for the characterization test (gather-evidence-characterization.test.js),
@@ -1125,7 +1146,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // do not also run blended recall — otherwise tenant-scoped-but-unrelated
   // memories compete with the profile facts in the synthesis prompt (review
   // MEDIUM: no precedence rule) and can be mistaken for authoritative profile.
-  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between' || plan.operation === 'profile';
+  const dedicatedLane = plan.operation === 'aggregate' || plan.operation === 'connector_read' || plan.operation === 'relation_between' || plan.operation === 'profile' || plan.operation === 'projects';
   const recallQueries = !dedicatedLane && plannedQueries.length > 0
     ? [plan._native_single_call
       // The progressive native planner already performed semantic query
@@ -2919,6 +2940,10 @@ export async function runReactAgentV2({
   // Composio apps / external tools become ELIGIBLE for this turn. Omitted or
   // false keeps the current HIVE-MIND-only path unchanged.
   useTools = false,
+  // Route-owned override used by the isolated /v2/chat acceptance surface.
+  // This never mutates process-wide feature flags and cannot enable V2 for
+  // connector turns.
+  nativeOrchestrator = null,
 }) {
   if (!apiKey && !process.env.OPENROUTER_API_KEY && !process.env.CEREBRAS_API_KEY) {
     throw new Error('chat provider API key required');
@@ -3061,7 +3086,39 @@ export async function runReactAgentV2({
     // SAME decision shape, so intentDecisionToPlan + everything downstream is
     // unchanged. Default (unset/any other value) = the current parseChatIntent.
     let intentParsed;
-    if (process.env.CHAT_ROUTER === 'progressive') {
+    const nativeV2Module = useTools !== true ? await import('./v2/orchestrator.js') : null;
+    const nativeV2Mode = nativeOrchestrator === 'v2' && useTools !== true
+      ? 'serve'
+      : (nativeV2Module?.nativeV2RoutingMode({ useTools, seed: ctx.userId || trace.traceId }) || 'off');
+    const nativeV2Input = async () => ({
+      message, history, language, apiKey, signal: abortCtrl.signal,
+      profileContext: await profilePreloadPromise, projectCatalog,
+      timezone: ctx.timezone || ctx.accessContext?.timezone || 'UTC', now: new Date().toISOString(),
+    });
+    if (nativeV2Mode === 'serve') {
+      try {
+        intentParsed = await nativeV2Module.parseNativeTurnV2(await nativeV2Input());
+      } catch (nativeV2Error) {
+        // Compatibility fallback is permitted only before execution or a write.
+        // The current progressive planner remains the rapid recovery path while
+        // V2 is canaried. The trace makes the downgrade explicit.
+        console.warn(`[chat:native-v2] planner fallback: ${nativeV2Error.message}`);
+        intentParsed = await (await import('./chat-progressive-router.js')).parseChatIntentProgressive({
+          message, history, language, apiKey, signal: abortCtrl.signal, useTools: false,
+        });
+        intentParsed.decision = {
+          ...intentParsed.decision,
+          _native_v2_fallback: nativeV2Error.message,
+        };
+      }
+    } else {
+      if (nativeV2Mode === 'shadow') {
+        void nativeV2Input()
+          .then((input) => nativeV2Module.parseNativeTurnV2(input))
+          .then((shadow) => console.info(`[chat:native-v2-shadow] trace=${trace.traceId} operation=${shadow.decision.operation} tool=${shadow.decision.native_tool || 'none'} validation=${shadow.validation?.status || 'unknown'}`))
+          .catch((error) => console.warn(`[chat:native-v2-shadow] trace=${trace.traceId} failed=${error.message}`));
+      }
+      if (process.env.CHAT_ROUTER === 'progressive') {
       if (useTools && process.env.HOSTED_COMPOSIO_PLANNER_ENABLED === 'true') {
         try {
           const { planHostedComposioWorkflow } = await import('./hosted-composio-planner.js');
@@ -3103,19 +3160,31 @@ export async function runReactAgentV2({
           message, history, language, apiKey, signal: abortCtrl.signal, useTools,
         });
       }
-    } else {
-      intentParsed = await parseChatIntent({
-        message, history, language,
-        groupCatalog,
-        projectCatalog,
-        model: INTENT_MODEL,
-        apiKey,
-        signal: abortCtrl.signal,
-      });
+      } else {
+        intentParsed = await parseChatIntent({
+          message, history, language,
+          groupCatalog,
+          projectCatalog,
+          model: INTENT_MODEL,
+          apiKey,
+          signal: abortCtrl.signal,
+        });
+      }
     }
     trace.models.planner = intentParsed?.usage?.routing_model || INTENT_MODEL;
+    trace.native_v2 = {
+      mode: nativeV2Mode,
+      served: intentParsed?.decision?._router === 'native-v2',
+      schema_version: intentParsed?.plan?.schema_version || null,
+      validation_status: intentParsed?.validation?.status || null,
+      deterministic_repairs: intentParsed?.validation?.repairs || [],
+      planned_steps: intentParsed?.plan?.steps?.length || null,
+    };
     _pt('intent_parse_ms', _ps);
     let intentDecision = collapseNativeOnlyCompoundDecision(intentParsed.decision, message);
+    if (intentDecision._native_v2_fallback) {
+      trace.warnings.push(`native_v2_planner_fallback:${intentDecision._native_v2_fallback}`);
+    }
     // `use_tools` is an authority boundary, not a prompt hint. A legacy or
     // malformed router decision therefore cannot disclose or execute an
     // external capability unless the API caller opted in for this turn.
@@ -3198,7 +3267,8 @@ export async function runReactAgentV2({
     let plan = intentDecisionToPlan(intentDecision, message);
     // Suppress legacy retry/escalation seams only for the single-call native
     // planner. Tool-enabled/Composio turns retain their existing orchestration.
-    plan._native_single_call = useTools !== true && intentDecision._router === 'progressive';
+    plan._native_single_call = useTools !== true
+      && ['progressive', 'native-v2'].includes(intentDecision._router);
     if (hasBrowserContext && !plan.sub_queries.length && plan.operation !== 'direct') {
       plan.sub_queries = [message];
     }

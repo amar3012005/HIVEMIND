@@ -1,0 +1,47 @@
+import { NATIVE_OPERATION_TO_TOOL } from './capability-registry.js';
+
+function temporalDecision(plan) {
+  const t = plan.time;
+  if (plan.operation === 'event_range') return { kind: 'event_range', start: t.start, end: t.end, axis: 'event_time' };
+  if (plan.operation === 'snapshot') return { valid_at: t.valid_at, known_at: t.known_at };
+  if (plan.operation === 'diff') return { range: { start: t.start, end: t.end }, axis: t.axis || 'valid_time' };
+  if (plan.operation === 'timeline') return { axis: t.axis || 'valid_time' };
+  if (t.semantics === 'latest') return { kind: 'latest', axis: t.axis || 'known_time' };
+  return null;
+}
+
+export function compileNativePlan(plan, message) {
+  const step = plan.steps[0];
+  const operation = plan.operation === 'event_range' ? 'recall'
+    : ['snapshot', 'diff', 'timeline'].includes(plan.operation) ? 'timeline'
+      : plan.operation;
+  return {
+    version: plan.schema_version, _router: 'native-v2', operation,
+    response_language: plan.response.language,
+    queries: step.query ? [step.query] : [], query_original: message, query_canonical_en: step.query,
+    named_entities: plan.references.entities,
+    native_tool: NATIVE_OPERATION_TO_TOOL[plan.operation],
+    answer_type: plan.response.type, answer_scope: plan.response.scope,
+    response_depth: plan.response.depth, retrieval_shape: plan.response.shape,
+    answer_objective: plan.response.objective,
+    recall_mode: plan.response.scope === 'bounded' ? 'fact' : 'explain',
+    tool_groups: ['save', 'update_profile'].includes(operation) ? ['hivemind-memory-write']
+      : operation === 'projects' ? ['hivemind-projects'] : ['hivemind-recall'],
+    side_effect_policy: plan.completion.approval_required ? 'approval_required' : 'read_only',
+    source: plan.references.source,
+    time: temporalDecision(plan), aggregate: plan.aggregate,
+    relation: operation === 'relation_between' ? { entities: plan.relation_entities, source: plan.references.source, time: temporalDecision(plan) } : null,
+    save: operation === 'save' ? {
+      title: plan.memory.title, content: plan.memory.content, memory_type: plan.memory.memory_type || 'fact',
+      scope: plan.memory.scope || undefined, project_id: plan.memory.project_id || undefined,
+      tags: plan.memory.tags, entities: plan.memory.entities, event_time: plan.memory.event_time || undefined,
+      confidence: 1, admission_class: 'user_assertion',
+    } : null,
+    profile_update: operation === 'update_profile' ? { fields: plan.memory?.profile_fields || {}, preferences: plan.memory?.preferences || [] } : null,
+    direct_response: operation === 'direct' ? plan.direct_response : null,
+    direct_context_free: operation === 'direct',
+    project_prompt: operation === 'projects' ? step.query || message : null,
+    completion: plan.completion,
+    planned_steps: plan.steps,
+  };
+}

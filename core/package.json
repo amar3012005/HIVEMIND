@@ -25,6 +25,7 @@
     "lint": "eslint src/**/*.ts || echo 'No ESLint configured'",
     "check": "find src -name '*.js' -exec node --check {} \\;",
     "check:whatsapp-runtime": "node scripts/check-whatsapp-runtime.mjs",
+    "eval:chat-v2": "node scripts/eval-native-chat-v2-golden.mjs",
     "build": "tsc"
   },
   "dependencies": {

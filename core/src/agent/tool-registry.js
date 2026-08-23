@@ -68,6 +68,12 @@ export const TOOL_SCHEMAS = [
           source_type: { type: 'string', enum: ['text', 'code', 'conversation', 'documentation', 'decision'] },
           source_document_id: { type: 'string', description: 'Known KnowledgeDocument id. Hard-filters evidence in explain/full.' },
           source_title: { type: 'string', description: 'Exact or partial source filename/title. Resolves to a hard document filter in explain/full.' },
+          // Ordered direct uploads (for example the latest image) are memory
+          // provenance sources, not necessarily KnowledgeDocument rows.
+          // Keep these declared so the tool validator preserves the planner's
+          // source contract through to RecallRouter.
+          source_kind: { type: 'string', enum: ['document', 'image', 'conversation', 'connector'] },
+          temporal_selector: { type: 'string', enum: ['latest', 'earliest'], description: 'Order an authorized direct source by stored event/created time; not snapshot time travel.' },
           valid_at: { type: 'string', description: 'ISO timestamp for bi-temporal time-travel.' },
           known_at: { type: 'string', description: 'ISO timestamp for what the workspace had learned by that time.' },
           date_range: {

@@ -300,7 +300,10 @@ export async function resolveEntityRecallCandidates({
         matchedTokens: hop0QueryTokens(name),
       }))
       .filter((entity) => entity.slug);
-    const tenantTagRegistry = orgIsRemote(org_id) && !plannedRegistry.length
+    // Remote tenant tags are an additive authority, not a fallback for the
+    // central registry. A weak central match (for example a generic company
+    // entity) must not suppress an exact tenant-local person/product tag.
+    const tenantTagRegistry = orgIsRemote(org_id)
       ? remoteQueryEntityRegistry(query)
       : [];
     const tagRegistry = [

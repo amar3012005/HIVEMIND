@@ -53,6 +53,9 @@ export const PLANS = {
     price: 0,
     currency: 'EUR',
     limits: {
+      // Customer-facing allowance. It is shown in the admin credit ledger and
+      // is intentionally separate from raw provider-token accounting.
+      monthlyCredits: 500,
       maxMemories: 1_000,
       llmTokensPerDay: 100_000,
       llmTokensPerMonth: 1_000_000,
@@ -91,6 +94,7 @@ export const PLANS = {
     price: 39,
     currency: 'EUR',
     limits: {
+      monthlyCredits: 5_000,
       maxMemories: 10_000,
       llmTokensPerDay: 500_000,
       llmTokensPerMonth: 5_000_000,
@@ -129,6 +133,7 @@ export const PLANS = {
     price: 79,
     currency: 'EUR',
     limits: {
+      monthlyCredits: 100_000,
       maxMemories: 25_000,
       llmTokensPerDay: 1_000_000,
       llmTokensPerMonth: 10_000_000,
@@ -140,7 +145,7 @@ export const PLANS = {
       maxUsers: 5,
       maxProjects: 20,
       maxConnectors: 10,
-      knowledgeBasePagesPerMonth: 1_000,
+      knowledgeBasePagesPerMonth: 5_000,
       knowledgeBasePagesPerDay: 250,
       maxHyperRooms: 5,
       // Meeting notes: 100 minutes per month.
@@ -169,6 +174,7 @@ export const PLANS = {
     price: 239,
     currency: 'EUR',
     limits: {
+      monthlyCredits: 1_000_000,
       maxMemories: 250_000,
       llmTokensPerDay: 10_000_000,
       llmTokensPerMonth: 100_000_000,
@@ -214,6 +220,9 @@ export const PLANS = {
     price: null, // custom
     currency: 'EUR',
     limits: {
+      // Enterprise allocations are contract-specific and set through the
+      // catalog/entitlement overlay rather than a fake universal allowance.
+      monthlyCredits: -1,
       maxMemories: -1,
       llmTokensPerDay: -1,
       llmTokensPerMonth: -1,

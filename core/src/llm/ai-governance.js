@@ -165,3 +165,168 @@ export async function totalAiCost() {
     COALESCE(SUM(request_count) FILTER (WHERE user_id IS NULL),0)::text AS unattributed_calls FROM hivemind.ai_usage_events`);
   return rows[0] || { total_cost_micros: '0', unattributed_cost_micros: '0', unattributed_calls: '0' };
 }
+
+// Product credits are deliberately derived from settled product activity, never
+// from individual provider calls. A single chat turn may make planner,
+// embedding, reranking and synthesis calls; charging all of them would make a
+// user's allowance nondeterministic. This is the read-model policy used by the
+// platform-admin ledger. Runtime enforcement can adopt the same policy later.
+export const CREDIT_POLICY_VERSION = '2026-08-v1';
+export const DEFAULT_MONTHLY_CREDITS = Object.freeze({
+  free: 500,
+  plus: 5_000,
+  pro: 100_000,
+  scale: 1_000_000,
+  enterprise: null,
+});
+
+function periodStart(period) {
+  const now = new Date();
+  if (period === 'all') return new Date(0);
+  if (period === 'last_30_days') return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+}
+
+function creditPolicyForPlan(plan, limits) {
+  const configured = Number(limits?.monthlyCredits ?? limits?.monthly_credits);
+  if (Number.isFinite(configured) && configured >= 0) return configured;
+  return DEFAULT_MONTHLY_CREDITS[String(plan || 'free').toLowerCase()] ?? null;
+}
+
+function number(value) { return Number(value || 0); }
+
+export function deriveCreditUsage(usageRows = []) {
+  const features = new Map();
+  const add = (key, label, quantity, creditsPerUnit, unit) => {
+    if (!quantity) return;
+    const current = features.get(key) || { key, label, quantity: 0, credits: 0, unit, estimated: true };
+    current.quantity += quantity;
+    current.credits += quantity * creditsPerUnit;
+    features.set(key, current);
+  };
+  for (const row of usageRows) {
+    const metric = String(row.metric || '');
+    const source = String(row.source || '').toLowerCase();
+    const quantity = number(row.quantity);
+    const ingestMode = String(row.ingest_mode || '').toLowerCase();
+    if (metric === 'knowledge_base_pages') add('knowledge', 'Knowledge pages', quantity, ingestMode === 'evidence' ? 1 : 2, 'pages');
+    else if (metric === 'hyperagent_runs') add('hyperagents', 'HyperAgent turns', quantity, 10, 'turns');
+    else if (metric === 'meeting_minutes') add('meeting_notes', 'AI Meeting Notes', quantity, 3, 'minutes');
+    else if (metric === 'tara_seconds') add('voice', 'TARA voice', Math.ceil(quantity / 60), 3, 'minutes');
+    else if (metric === 'composio_calls') add('composio', 'Connected-app calls', quantity, 2, 'calls');
+    // Only specifically chat-labelled searches are chat turns. Generic recall
+    // and internal searches must not consume a customer chat allowance.
+    else if ((metric === 'chat_turns') || (metric === 'search_queries' && source.includes('chat'))) add('chat', 'Brain chat', quantity, 2, 'turns');
+    else if (metric === 'deep_research_jobs') add('deep_research', 'Deep Research', quantity, 25, 'jobs');
+    else if (metric === 'web_intel_jobs') add('web_intel', 'Web intelligence', quantity, 10, 'jobs');
+  }
+  return [...features.values()].sort((a, b) => b.credits - a.credits);
+}
+
+async function currentEntitlements() {
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT DISTINCT ON (org_id) org_id::text, plan_id, limits
+       FROM hivemind.organization_entitlements
+      WHERE effective_from <= NOW() AND (effective_until IS NULL OR effective_until > NOW())
+      ORDER BY org_id, effective_from DESC, created_at DESC`,
+  );
+  return new Map(rows.map((row) => [row.org_id, row]));
+}
+
+export async function platformCreditIntelligence({ limit = 200, query = '', period = 'month' } = {}) {
+  const since = periodStart(period);
+  const cap = Math.min(500, Math.max(1, Number(limit) || 200));
+  const term = String(query || '').slice(0, 120);
+  const [organizations, aiRows, usageRows, owners, entitlements] = await Promise.all([
+    prisma.$queryRawUnsafe(
+      `SELECT id::text, name, slug, plan, account_type, hosting_mode, subscription_status, trial_ends_at, current_period_end
+         FROM organizations
+        WHERE ($1='' OR name ILIKE '%'||$1||'%' OR slug ILIKE '%'||$1||'%')
+        ORDER BY created_at DESC LIMIT $2`, term, cap),
+    prisma.$queryRawUnsafe(
+      `SELECT org_id::text, COALESCE(SUM(request_count),0)::text AS calls,
+              COALESCE(SUM(prompt_tokens),0)::text AS prompt_tokens, COALESCE(SUM(completion_tokens),0)::text AS completion_tokens,
+              COALESCE(SUM(cached_prompt_tokens),0)::text AS cached_prompt_tokens, COALESCE(SUM(reasoning_tokens),0)::text AS reasoning_tokens,
+              COALESCE(SUM(total_cost_micros),0)::text AS total_cost_micros, MAX(occurred_at) AS last_call_at
+         FROM hivemind.ai_usage_events WHERE occurred_at >= $1 AND org_id IS NOT NULL GROUP BY org_id`, since),
+    prisma.$queryRawUnsafe(
+      `SELECT org_id::text, metric, source, COALESCE(metadata->>'ingest_mode', metadata->>'mode', '') AS ingest_mode,
+              COALESCE(SUM(quantity),0)::text AS quantity, MAX(COALESCE(settled_at, created_at)) AS last_used_at
+         FROM hivemind.usage_events
+        WHERE state='settled' AND COALESCE(settled_at, created_at) >= $1
+        GROUP BY org_id, metric, source, COALESCE(metadata->>'ingest_mode', metadata->>'mode', '')`, since),
+    prisma.$queryRawUnsafe(
+      `SELECT DISTINCT ON (uo.org_id) uo.org_id::text, u.id::text AS user_id, u.email, u.display_name, uo.role
+         FROM user_organizations uo JOIN users u ON u.id=uo.user_id
+        WHERE uo.is_active=true AND u.deleted_at IS NULL
+        ORDER BY uo.org_id, CASE WHEN uo.role IN ('owner','admin') THEN 0 ELSE 1 END, uo.joined_at ASC NULLS LAST`),
+    currentEntitlements(),
+  ]);
+  const aiByOrg = new Map(aiRows.map((row) => [row.org_id, row]));
+  const usageByOrg = new Map();
+  for (const row of usageRows) {
+    const rows = usageByOrg.get(row.org_id) || [];
+    rows.push(row);
+    usageByOrg.set(row.org_id, rows);
+  }
+  const ownerByOrg = new Map(owners.map((row) => [row.org_id, row]));
+  const accounts = organizations.map((org) => {
+    const entitlement = entitlements.get(org.id);
+    const effectivePlan = entitlement?.plan_id || org.plan || 'free';
+    const productUsage = usageByOrg.get(org.id) || [];
+    const creditFeatures = deriveCreditUsage(productUsage);
+    const usedCredits = creditFeatures.reduce((sum, feature) => sum + feature.credits, 0);
+    const includedCredits = creditPolicyForPlan(effectivePlan, entitlement?.limits);
+    return {
+      ...org,
+      effective_plan: effectivePlan,
+      owner: ownerByOrg.get(org.id) || null,
+      ai: aiByOrg.get(org.id) || { calls: '0', prompt_tokens: '0', completion_tokens: '0', cached_prompt_tokens: '0', reasoning_tokens: '0', total_cost_micros: '0', last_call_at: null },
+      credits: { included: includedCredits, used: usedCredits, remaining: includedCredits == null ? null : Math.max(0, includedCredits - usedCredits), policy_version: CREDIT_POLICY_VERSION, estimated: true },
+      product_usage: creditFeatures,
+    };
+  }).sort((a, b) => number(b.ai.total_cost_micros) - number(a.ai.total_cost_micros));
+  const totals = accounts.reduce((sum, account) => {
+    sum.total_cost_micros += number(account.ai.total_cost_micros);
+    sum.prompt_tokens += number(account.ai.prompt_tokens);
+    sum.completion_tokens += number(account.ai.completion_tokens);
+    sum.credits_used += account.credits.used;
+    if (account.credits.included != null) {
+      sum.credits_included += account.credits.included;
+      sum.credits_remaining += number(account.credits.remaining);
+    }
+    return sum;
+  }, { total_cost_micros: 0, prompt_tokens: 0, completion_tokens: 0, credits_used: 0, credits_included: 0, credits_remaining: 0 });
+  return { currency: 'USD', period, period_start: since.toISOString(), policy_version: CREDIT_POLICY_VERSION, totals: Object.fromEntries(Object.entries(totals).map(([key, value]) => [key, String(value)])), accounts };
+}
+
+export async function platformCreditAccountDetail(orgId, { period = 'month' } = {}) {
+  const id = String(orgId || '').trim();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new Error('Invalid organization id');
+  const result = await platformCreditIntelligence({ limit: 500, period });
+  const account = result.accounts.find((row) => row.id === id);
+  if (!account) throw new Error('Billing account not found');
+  const since = periodStart(period);
+  const [byUser, byModel, usageEvents] = await Promise.all([
+    prisma.$queryRawUnsafe(
+      `SELECT COALESCE(u.id::text, 'system') AS user_id, COALESCE(u.display_name,'System') AS display_name, u.email,
+              COALESCE(SUM(e.request_count),0)::text AS calls, COALESCE(SUM(e.prompt_tokens),0)::text AS prompt_tokens,
+              COALESCE(SUM(e.completion_tokens),0)::text AS completion_tokens, COALESCE(SUM(e.total_cost_micros),0)::text AS total_cost_micros,
+              MAX(e.occurred_at) AS last_call_at
+         FROM hivemind.ai_usage_events e LEFT JOIN users u ON u.id=e.user_id
+        WHERE e.org_id=$1::uuid AND e.occurred_at >= $2 GROUP BY u.id,u.display_name,u.email ORDER BY SUM(e.total_cost_micros) DESC`, id, since),
+    prisma.$queryRawUnsafe(
+      `SELECT use_case, served_model, provider, COALESCE(SUM(request_count),0)::text AS calls,
+              COALESCE(SUM(prompt_tokens),0)::text AS prompt_tokens, COALESCE(SUM(completion_tokens),0)::text AS completion_tokens,
+              COALESCE(SUM(total_cost_micros),0)::text AS total_cost_micros
+         FROM hivemind.ai_usage_events WHERE org_id=$1::uuid AND occurred_at >= $2
+        GROUP BY use_case,served_model,provider ORDER BY SUM(total_cost_micros) DESC`, id, since),
+    prisma.$queryRawUnsafe(
+      `SELECT metric, source, COALESCE(metadata->>'ingest_mode', metadata->>'mode', '') AS ingest_mode,
+              COALESCE(SUM(quantity),0)::text AS quantity, COUNT(*)::text AS events,
+              MAX(COALESCE(settled_at, created_at)) AS last_used_at
+         FROM hivemind.usage_events WHERE org_id=$1::uuid AND state='settled' AND COALESCE(settled_at,created_at) >= $2
+        GROUP BY metric,source,COALESCE(metadata->>'ingest_mode', metadata->>'mode', '') ORDER BY MAX(COALESCE(settled_at,created_at)) DESC`, id, since),
+  ]);
+  return { ...result, account, attribution: { by_user: byUser, by_model: byModel, product_events: usageEvents } };
+}

@@ -1,224 +1,324 @@
 <meta charset="utf-8" />
 <title>SINGULANCE Notch</title>
 <style>
-  /* The window itself is transparent; everything visual is drawn here so the
-     collapsed state can blend into the physical notch (pure black) and the
-     expanded state can float as glass under it. */
-  :root {
-    --accent: #117dff;
-    --glass: rgba(17, 17, 20, 0.72);
-    --hair: rgba(255, 255, 255, 0.09);
-    --text: #f4f4f5;
-    --muted: #8b8b93;
-    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /*
+   * Notch HUD — collapsed shape is a flared silhouette (concave-then-convex
+   * "dynamic island" flare) drawn as ONE continuous outline via clip-path,
+   * not stitched divs — the same curve tucked at the top blends into the
+   * physical MacBook notch, and flares out into a wider rounded-bottom pill.
+   * Expanding just grows the SAME shape (width/height/clip-path animate
+   * together) into a borderless HUD panel — no card boxes anywhere, just
+   * hairline rules, mono-caption labels, and a pixel-grid status indicator.
+   *
+   * These two clip-path boxes MUST stay in lockstep with COLLAPSED/EXPANDED
+   * in notch.js (224x66 / 640x392) — the native BrowserWindow is resized to
+   * match, so a mismatch here shows the panel clipped or floating in empty
+   * transparent space.
+   */
+  :root{
+    --accent:#4f8cff; --accent2:#22d3ee; --green:#3ddc73; --red:#ff5470; --amber:#f5a623;
+    --ink:#e7e7ea; --body:#9a9aa2; --sub:#5a5a62; --hair:#232327; --panel:#0a0a0c;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-user-select: none; }
-  html, body {
-    width: 100%; height: 100%; background: transparent; overflow: hidden;
-    font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
-    color: var(--text); cursor: default;
+  *{box-sizing:border-box; margin:0; padding:0; -webkit-user-select:none;}
+  html,body{width:100%; height:100%; background:transparent; overflow:hidden; cursor:default;
+    font-family:'Inter',-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif; color:var(--ink);}
+  body{display:flex; justify-content:center; align-items:flex-start;}
+
+  .shape{
+    position:relative; background:var(--panel);
+    box-shadow:0 26px 60px rgba(0,0,0,.55), inset 0 0 0 1px rgba(255,255,255,.04);
+    transition:width 220ms cubic-bezier(.22,1,.36,1), height 220ms cubic-bezier(.22,1,.36,1), clip-path 220ms cubic-bezier(.22,1,.36,1);
   }
-  body { display: flex; justify-content: center; align-items: flex-start; }
-
-  /* ── Collapsed: a pill that reads as part of the notch ───────────────── */
-  #pill {
-    width: 210px; height: 34px; background: #000;
-    border-radius: 0 0 17px 17px;
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    transition: opacity 160ms var(--ease);
+  .shape.collapsed{
+    width:224px; height:66px;
+    clip-path: path("M22,0 L202,0 L202,32 A22,22 0 0 1 224,54 L224,46 A20,20 0 0 1 204,66 L20,66 A20,20 0 0 1 0,46 L0,54 A22,22 0 0 0 22,32 Z");
   }
-  #pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-  #pill .word { font-size: 10px; letter-spacing: 0.16em; font-weight: 600; color: #d4d4d8; text-transform: uppercase; }
-  body.open #pill { display: none; }
-
-  /* ── Expanded: glass panel hanging off the top edge ──────────────────── */
-  #panel {
-    display: none; width: 720px; height: 470px;
-    background: var(--glass);
-    -webkit-backdrop-filter: blur(28px) saturate(160%);
-    backdrop-filter: blur(28px) saturate(160%);
-    border: 1px solid var(--hair); border-top: none;
-    border-radius: 0 0 26px 26px;
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
-    padding: 14px 18px 18px;
-    flex-direction: column; gap: 12px;
-    animation: drop 220ms var(--ease);
+  .shape.expanded{
+    width:640px; height:392px;
+    clip-path: path("M22,0 L618,0 L618,32 A22,22 0 0 1 640,54 L640,362 A30,30 0 0 1 610,392 L30,392 A30,30 0 0 1 0,362 L0,54 A22,22 0 0 0 22,32 Z");
   }
-  body.open #panel { display: flex; }
-  @keyframes drop { from { transform: translateY(-14px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
-  header { display: flex; align-items: center; gap: 10px; padding: 2px 2px 0; }
-  header .mark { font-size: 12px; font-weight: 700; letter-spacing: 0.14em; }
-  header .sub { font-size: 11px; color: var(--muted); }
-  header .spacer { flex: 1; }
-  #status { font-size: 11px; color: var(--muted); transition: color 160ms; max-width: 300px;
-            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #status.ok { color: #4ade80; } #status.err { color: #f87171; } #status.busy { color: var(--accent); }
-
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; flex: 1; min-height: 0; }
-
-  .card {
-    background: rgba(255, 255, 255, 0.045); border: 1px solid var(--hair);
-    border-radius: 16px; padding: 13px 14px; display: flex; flex-direction: column; gap: 9px;
-    transition: border-color 160ms var(--ease), background 160ms var(--ease), transform 160ms var(--ease);
+  .collapsed-content{
+    position:absolute; inset:0; display:flex; align-items:flex-end; justify-content:center; gap:7px; padding-bottom:9px;
+    opacity:1; transition:opacity 140ms; cursor:pointer;
   }
-  .card:hover { border-color: rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.06); }
-  .card h3 { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #d4d4d8; display: flex; align-items: center; gap: 7px; }
-  .card h3 svg { opacity: 0.85; }
-  .card p { font-size: 11px; color: var(--muted); line-height: 1.45; }
+  .shape.expanded .collapsed-content{opacity:0; pointer-events:none;}
+  .collapsed-content .word{font-family:'Space Grotesk',sans-serif; font-size:10.5px; font-weight:700; letter-spacing:.16em; color:var(--ink);}
+  .collapsed-content .dot{width:6px; height:6px; border-radius:50%; background:var(--accent); box-shadow:0 0 7px var(--accent); animation:bpulse 2.4s ease-in-out infinite;}
+  @keyframes bpulse{0%,100%{opacity:.6; transform:scale(1);} 50%{opacity:1; transform:scale(1.3);}}
 
-  /* Capture spans the full width — it is the thing used most. */
-  .card.capture { grid-column: 1 / -1; }
-  textarea {
-    flex: 1; min-height: 84px; resize: none; background: rgba(0, 0, 0, 0.28);
-    border: 1px solid var(--hair); border-radius: 11px; padding: 10px 12px;
-    color: var(--text); font: inherit; font-size: 13px; line-height: 1.5;
-    -webkit-user-select: text; outline: none; transition: border-color 160ms;
+  .hud{position:absolute; inset:0; padding:18px 26px 20px; opacity:0; transition:opacity 220ms 80ms;}
+  .shape.expanded .hud{opacity:1;}
+
+  .hud-top{display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;}
+  .brand{display:flex; align-items:center; gap:7px; font-family:'Space Grotesk',sans-serif; font-size:11px; font-weight:700; letter-spacing:.12em; color:var(--ink);}
+  .brand svg{width:13px; height:13px;}
+  .hud-tabsnav{display:flex; align-items:center; gap:16px; font-family:'Space Grotesk',sans-serif; font-size:10.5px;}
+  .hud-tabsnav span{color:var(--sub); padding-bottom:3px; border-bottom:1px solid transparent;}
+  .hud-tabsnav span.on{color:var(--accent); border-color:var(--accent);}
+  .closeBtn{width:22px; height:22px; border-radius:6px; border:none; background:transparent; color:var(--sub); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:13px;}
+  .closeBtn:hover{color:var(--ink); background:rgba(255,255,255,.06);}
+
+  .hud-grid{display:grid; grid-template-columns:1.15fr 1fr; gap:34px;}
+  .eyebrow{display:flex; align-items:center; gap:8px; font-family:'Space Grotesk',sans-serif; font-size:11px; color:var(--ink); font-weight:600; margin-bottom:12px;}
+  .eyebrow .dim{color:var(--sub); font-weight:400;}
+  .eyebrow::after{content:''; flex:1; height:1px; background:var(--hair); margin-left:8px;}
+
+  .status-row{display:flex; align-items:center; gap:9px; margin-bottom:16px;}
+  .pgrid{display:grid; grid-template-columns:repeat(5,3.2px); grid-template-rows:repeat(5,3.2px); gap:1.6px;}
+  .pgrid span{width:3.2px; height:3.2px; border-radius:1px; background:#1c1c20;}
+  .pgrid span.on{animation:pflicker 1.6s ease-in-out infinite;}
+  @keyframes pflicker{0%,100%{opacity:.5;} 50%{opacity:1;}}
+  .g-green span.on{background:var(--green); box-shadow:0 0 4px var(--green);}
+  .g-blue span.on{background:var(--accent); box-shadow:0 0 4px var(--accent);}
+  .g-red span.on{background:var(--red); box-shadow:0 0 4px var(--red);}
+  .status-row .stxt{font-size:11px; color:var(--body); font-family:'Space Grotesk',sans-serif; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .status-row .stxt b{color:var(--ink);}
+
+  .hud-input{
+    width:100%; background:transparent; border:none; border-bottom:1px solid var(--hair);
+    color:var(--ink); font:inherit; font-size:13px; padding:0 0 10px; resize:none; height:52px;
+    outline:none; margin-bottom:10px; font-family:'Inter',sans-serif; -webkit-user-select:text;
   }
-  textarea:focus { border-color: rgba(17, 125, 255, 0.55); }
-  textarea::placeholder { color: #6b6b73; }
+  .hud-input:focus{border-bottom-color:var(--accent);}
+  .hud-input::placeholder{color:#3d3d44;}
+  .hud-meta{font-size:9.5px; color:var(--sub); font-family:'Space Grotesk',sans-serif; display:flex; justify-content:space-between; margin-bottom:18px;}
+  .hud-meta .accent{color:var(--accent);}
+  .linklike{background:none; border:none; color:var(--accent); font-family:inherit; font-size:9.5px; cursor:pointer; padding:0;}
+  .linklike:hover{text-decoration:underline;}
+  .linklike:disabled{opacity:.5; cursor:not-allowed; text-decoration:none;}
 
-  .actions { display: flex; align-items: center; gap: 8px; }
-  button {
-    font: inherit; font-size: 12px; font-weight: 600; border-radius: 9px; padding: 7px 13px;
-    border: 1px solid var(--hair); background: rgba(255, 255, 255, 0.06); color: var(--text);
-    cursor: pointer; transition: background 140ms, border-color 140ms, transform 100ms;
+  .stat-hero{display:flex; align-items:flex-start; gap:12px; margin-bottom:16px;}
+  .stat-hero .bar{width:2px; align-self:stretch; background:var(--accent); border-radius:2px;}
+  .stat-hero .num{font-size:32px; font-family:'Space Grotesk',sans-serif; font-weight:600; color:var(--ink); line-height:1; font-variant-numeric:tabular-nums;}
+  .stat-hero .lbl{font-size:11.5px; color:var(--body); margin-top:4px;}
+  .stat-hero .lbl b{color:var(--ink); font-weight:600;}
+
+  .hud-list{display:flex; flex-direction:column; max-height:96px; overflow-y:auto;}
+  .hud-list .row{display:flex; align-items:center; gap:9px; padding:7px 0; border-top:1px solid var(--hair); font-size:11px;}
+  .hud-list .row:first-child{border-top:none;}
+  .hud-list .sq{width:6px; height:6px; border-radius:1.5px; flex:none;}
+  .hud-list .sq.busy{animation:pflicker 1.1s ease-in-out infinite;}
+  .hud-list .lbl{color:var(--body); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px;}
+  .hud-list .lbl b{color:var(--ink); font-weight:600;}
+  .hud-list .val{margin-left:auto; color:var(--ink); font-family:'Space Grotesk',sans-serif; font-size:10px; flex:none;}
+  .hud-list .ts{font-size:8.5px; color:var(--sub); margin-left:9px; font-family:'Space Grotesk',sans-serif; flex:none;}
+  .hud-list .empty{font-size:10.5px; color:var(--sub); padding:6px 0;}
+
+  .tabs2{display:flex; gap:14px; font-family:'Space Grotesk',sans-serif; font-size:10.5px; margin-bottom:6px;}
+  .tabs2 button{background:none; border:none; color:var(--sub); padding:0 0 4px; border-bottom:1px solid transparent; cursor:pointer; font:inherit;}
+  .tabs2 button.on{color:var(--accent2); border-color:var(--accent2);}
+
+  .dropzone{
+    position:relative; margin-top:14px; border:1px dashed var(--hair); border-radius:12px;
+    padding:14px; text-align:center; transition:border-color 140ms, background 140ms; cursor:pointer;
   }
-  button:hover { background: rgba(255, 255, 255, 0.11); border-color: rgba(255, 255, 255, 0.2); }
-  button:active { transform: scale(0.97); }
-  button.primary { background: var(--accent); border-color: transparent; color: #fff; }
-  button.primary:hover { background: #2f8dff; }
-  button:disabled { opacity: 0.45; cursor: not-allowed; }
-  .hint { font-size: 10px; color: #6b6b73; margin-left: auto; }
+  .dropzone.hot{border-color:var(--accent); background:rgba(79,140,255,.06);}
+  .dropzone .dz-t{font-size:11px; color:var(--ink); font-weight:600; font-family:'Space Grotesk',sans-serif;}
+  .dropzone .dz-s{font-size:9.5px; color:var(--sub); margin-top:2px;}
 
-  /* Drop target — the whole panel accepts files, this card is the affordance. */
-  .drop { flex: 1; border: 1.5px dashed rgba(255, 255, 255, 0.16); border-radius: 12px;
-          display: flex; flex-direction: column; align-items: center; justify-content: center;
-          gap: 5px; color: var(--muted); font-size: 11px; text-align: center; padding: 8px;
-          transition: border-color 160ms, background 160ms, color 160ms; }
-  body.dragging .drop { border-color: var(--accent); background: rgba(17, 125, 255, 0.12); color: #cfe3ff; }
-  body.dragging .card.kb { border-color: rgba(17, 125, 255, 0.5); }
+  .quota-row{display:flex; justify-content:space-between; margin:14px 0 10px;}
+  .mini-stat .cap{font-size:8px; font-family:'Space Grotesk',sans-serif; text-transform:uppercase; letter-spacing:.08em; color:var(--sub); margin-bottom:4px;}
+  .mini-stat .val{font-size:12.5px; font-family:'Space Grotesk',sans-serif; font-weight:600; color:var(--ink);}
 
-  ul#jobs { list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 62px; overflow-y: auto; }
-  ul#jobs li { font-size: 10.5px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
-  ul#jobs li .s { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; }
-  ul#jobs li.done .s { background: #4ade80; } ul#jobs li.fail .s { background: #f87171; }
-  ul#jobs li span.n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .footer{position:absolute; left:26px; right:26px; bottom:14px; display:flex; justify-content:space-between; align-items:center; font-size:9px; color:var(--sub); font-family:'Space Grotesk',sans-serif; padding-top:10px; border-top:1px solid var(--hair);}
+  .footer #globalStatus.err{color:var(--red);}
+  .footer #globalStatus.ok{color:var(--green);}
 </style>
 
-<div id="pill"><span class="dot"></span><span class="word">SINGULANCE</span></div>
+<div class="shape collapsed" id="shape">
+  <div class="collapsed-content" id="collapsedContent">
+    <svg width="12" height="12" viewBox="-6 -6 112 112" fill="none"><ellipse cx="50" cy="50" rx="40" ry="13" transform="rotate(-18 50 50)" stroke="#e7e7ea" stroke-width="4.2" fill="none"/><circle cx="88.04" cy="37.64" r="5.4" fill="#e7e7ea"/><path d="M80,50 57.39,53.06 62.73,62.73 53.06,57.39 50,96 46.94,57.39 37.27,62.73 42.61,53.06 20,50 42.61,46.94 37.27,37.27 46.94,42.61 50,4 53.06,42.61 62.73,37.27 57.39,46.94 Z" fill="#22d3ee"/></svg>
+    <span class="word">SINGULANCE</span>
+    <span class="dot"></span>
+  </div>
 
-<div id="panel">
-  <header>
-    <span class="mark">SINGULANCE</span>
-    <span class="sub">· quick actions</span>
-    <span class="spacer"></span>
-    <span id="status">Hover to open · click to pin</span>
-  </header>
+  <div class="hud" id="hud">
+    <div class="hud-top">
+      <div class="brand">
+        <svg viewBox="-6 -6 112 112" fill="none"><ellipse cx="50" cy="50" rx="40" ry="13" transform="rotate(-18 50 50)" stroke="#e7e7ea" stroke-width="4.2" fill="none"/><circle cx="88.04" cy="37.64" r="5.4" fill="#e7e7ea"/><path d="M80,50 57.39,53.06 62.73,62.73 53.06,57.39 50,96 46.94,57.39 37.27,62.73 42.61,53.06 20,50 42.61,46.94 37.27,37.27 46.94,42.61 50,4 53.06,42.61 62.73,37.27 57.39,46.94 Z" fill="#22d3ee"/></svg>
+        SINGULANCE
+      </div>
+      <div class="hud-tabsnav">
+        <span class="on">Capture</span><span>Knowledge</span><span>Meeting</span>
+      </div>
+      <button class="closeBtn" id="closeBtn" title="Close">✕</button>
+    </div>
 
-  <div class="row">
-    <div class="card capture">
-      <h3>
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-        Capture a thought
-      </h3>
-      <textarea id="note" placeholder="Type anything — it becomes a durable memory, searchable everywhere."></textarea>
-      <div class="actions">
-        <button class="primary" id="save">Save to memory</button>
-        <button id="openMem">Open memories</button>
-        <span class="hint">⌘↵ to save</span>
+    <div class="hud-grid">
+      <div>
+        <div class="eyebrow">Capture <span class="dim">· a thought ·</span></div>
+
+        <div class="status-row">
+          <div class="pgrid g-green" id="capGrid"></div>
+          <span class="stxt" id="capStatus">Idle — <b>ready to save</b></span>
+        </div>
+
+        <textarea class="hud-input" id="note" placeholder="Type anything — it becomes a durable memory, searchable everywhere."></textarea>
+        <div class="hud-meta">
+          <span>⌘↵ <span class="accent">or</span> <button class="linklike" id="saveBtn" style="font-size:9.5px;">Save to memory →</button></span>
+          <button class="linklike" id="openMem">Open memories →</button>
+        </div>
+
+        <div class="stat-hero">
+          <span class="bar"></span>
+          <div><div class="num" id="memCount">—</div><div class="lbl">memories saved <b>this week</b></div></div>
+        </div>
+
+        <div class="hud-list" id="jobs"><div class="empty">Recent activity appears here.</div></div>
+      </div>
+
+      <div>
+        <div class="eyebrow">Knowledge base <span class="dim">· scope &amp; mode ·</span></div>
+        <div class="tabs2" id="scopeTabs">
+          <button class="on" data-v="personal">Personal</button>
+          <button data-v="organization">Organization</button>
+        </div>
+        <div class="tabs2" id="modeTabs" style="margin-bottom:14px;">
+          <button class="on" data-v="both">Both</button>
+          <button data-v="evidence">Evidence only</button>
+        </div>
+
+        <div class="dropzone" id="drop">
+          <div class="dz-t" id="dzText">Drop files here</div>
+          <div class="dz-s">Parsed and indexed into <span id="scopeLbl">Personal</span> · <span id="modeLbl">Both</span></div>
+        </div>
+
+        <div class="quota-row">
+          <div class="mini-stat"><div class="cap">Queued</div><div class="val" id="queuedCount">0</div></div>
+          <button class="linklike" id="pick" style="align-self:flex-end;">Choose files…</button>
+        </div>
+
+        <div class="eyebrow" style="margin-top:6px;">Meeting notes <span class="dim">· grounded in memory ·</span></div>
+        <p style="font-size:10.5px; color:var(--body); line-height:1.5; margin-bottom:10px;">Record a meeting and get sectioned notes, decisions and action items.</p>
+        <div style="display:flex; gap:14px;">
+          <button class="linklike" id="meet" style="color:var(--red);">◍ Start a meeting →</button>
+          <button class="linklike" id="meetAll">All meetings</button>
+        </div>
       </div>
     </div>
 
-    <div class="card kb">
-      <h3>
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5-5 5 5"/><path d="M12 5v12"/></svg>
-        Knowledge base
-      </h3>
-      <div class="drop" id="drop">
-        <strong style="font-size:11.5px;color:#d4d4d8">Drop files anywhere</strong>
-        <span>PDF, docs, images, audio — parsed, chunked and indexed</span>
-      </div>
-      <div class="actions"><button id="pick">Choose files…</button></div>
-      <ul id="jobs"></ul>
-    </div>
-
-    <div class="card">
-      <h3>
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v4"/></svg>
-        AI meeting notes
-      </h3>
-      <p>Record a meeting and get sectioned notes, decisions and action items — grounded in what HIVEMIND already knows.</p>
-      <div class="actions">
-        <button class="primary" id="meet">Start a meeting</button>
-        <button id="meetAll">All meetings</button>
-      </div>
-    </div>
+    <div class="footer"><span>⌘⇧K to pin · Esc to close</span><span id="globalStatus">Hover to open · click to pin</span></div>
   </div>
 </div>
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const body = document.body;
+  const shape = $('shape');
+  let expandedState = false;
   let pinned = false;
-  let hoverIn = false;
 
-  const setStatus = (msg, cls = '') => { const s = $('status'); s.textContent = msg; s.className = cls; };
+  function setGlobalStatus(msg, cls){ const el = $('globalStatus'); el.textContent = msg; el.className = cls || ''; }
 
-  // Hover opens, click pins. The main process owns the actual window resize;
-  // this only reports intent so the two never disagree about the size.
+  // The main process owns the actual window resize; this only reports
+  // intent so the two never disagree about size (same contract the
+  // previous implementation used).
   const open = (v) => {
     if (v === false && pinned) return;
-    body.classList.toggle('open', v);
+    if (v === expandedState) return;
+    expandedState = v;
+    shape.classList.toggle('collapsed', !v);
+    shape.classList.toggle('expanded', v);
     window.notch.setExpanded(v);
   };
+  let hoverIn = false;
   document.addEventListener('mouseenter', () => { hoverIn = true; open(true); }, true);
   window.addEventListener('mouseover', () => { if (!hoverIn) { hoverIn = true; open(true); } });
   window.addEventListener('mouseout', (e) => {
-    if (e.relatedTarget) return;       // still inside the panel
+    if (e.relatedTarget) return; // still inside the panel
     hoverIn = false;
     if (!pinned) open(false);
   });
-  $('pill').addEventListener('click', () => { pinned = true; open(true); setStatus('Pinned — click outside to release'); });
+  $('collapsedContent').addEventListener('click', () => { pinned = true; open(true); setGlobalStatus('Pinned — click outside to release'); });
+  $('closeBtn').addEventListener('click', () => { pinned = false; open(false); });
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { pinned = false; open(false); }
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') save();
   });
 
+  // ── pixel-grid status renderer — reused for capture AND upload state ──
+  const MASKS = {
+    idle:   ['00100','01110','11111','01110','00100'],
+    busy:   ['00001','00011','00111','01111','11111'],
+    done:   ['00000','00001','00011','10110','01100'],
+    error:  ['10001','01010','00100','01010','10001'],
+  };
+  function setGrid(elId, name, colorCls){
+    const el = $(elId);
+    el.innerHTML = '';
+    el.className = 'pgrid ' + colorCls;
+    MASKS[name].join('').split('').forEach((bit) => {
+      const s = document.createElement('span');
+      if (bit === '1') s.classList.add('on');
+      el.appendChild(s);
+    });
+  }
+  setGrid('capGrid', 'idle', 'g-green');
+
   // ── Capture ──────────────────────────────────────────────────────────────
   async function save() {
     const text = $('note').value.trim();
-    if (!text) { setStatus('Nothing to save', 'err'); return; }
-    $('save').disabled = true;
-    setStatus('Saving…', 'busy');
+    if (!text) { setGrid('capGrid', 'error', 'g-red'); $('capStatus').innerHTML = 'Nothing to <b>save</b>'; setTimeout(resetCapStatus, 1600); return; }
+    setGrid('capGrid', 'busy', 'g-blue');
+    $('capStatus').innerHTML = 'Saving — <b>writing to memory</b>';
     try {
       await window.notch.capture(text);
+      addJobRow(text.slice(0, 36), 'memory', '#3ddc73');
       $('note').value = '';
-      setStatus('Saved to memory', 'ok');
+      setGrid('capGrid', 'done', 'g-blue');
+      $('capStatus').innerHTML = 'Saved — <b>indexed instantly</b>';
     } catch (err) {
-      setStatus(String(err.message || err).slice(0, 90), 'err');
+      setGrid('capGrid', 'error', 'g-red');
+      $('capStatus').innerHTML = String(err.message || err).slice(0, 60);
     } finally {
-      $('save').disabled = false;
+      setTimeout(resetCapStatus, 1800);
     }
   }
-  $('save').addEventListener('click', save);
+  function resetCapStatus(){ setGrid('capGrid', 'idle', 'g-green'); $('capStatus').innerHTML = 'Idle — <b>ready to save</b>'; }
+  $('note').addEventListener('keydown', (e) => {
+    if (e.nativeEvent && (e.nativeEvent.isComposing || e.keyCode === 229)) return;
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') save();
+  });
+  $('saveBtn').addEventListener('click', save);
   $('openMem').addEventListener('click', () => window.notch.open('/hivemind/app/memories'));
   $('meet').addEventListener('click', () => window.notch.open('/hivemind/app/meetings?record=1'));
   $('meetAll').addEventListener('click', () => window.notch.open('/hivemind/app/meetings'));
 
-  // ── Knowledge base uploads ───────────────────────────────────────────────
-  const jobs = $('jobs');
-  function addJob(name) {
-    const li = document.createElement('li');
-    li.innerHTML = '<span class="s"></span><span class="n"></span>';
-    li.querySelector('.n').textContent = name + ' · uploading';
-    jobs.prepend(li);
-    while (jobs.children.length > 6) jobs.lastChild.remove();
-    return li;
+  // ── scope / mode selectors — feed the real upload call ──
+  let scope = 'personal', mode = 'both';
+  function wireTabs(groupId, onPick){
+    const group = $(groupId);
+    group.querySelectorAll('button').forEach((el) => {
+      el.addEventListener('click', () => {
+        group.querySelectorAll('button').forEach((s) => s.classList.remove('on'));
+        el.classList.add('on');
+        onPick(el.dataset.v, el.textContent);
+      });
+    });
   }
-  // Poll a real job rather than showing a spinner that lies about progress.
-  function track(li, name, jobId) {
-    if (!jobId) { li.classList.add('done'); li.querySelector('.n').textContent = name + ' · queued'; return; }
+  wireTabs('scopeTabs', (v, label) => { scope = v; $('scopeLbl').textContent = label; });
+  wireTabs('modeTabs', (v, label) => { mode = v; $('modeLbl').textContent = label; });
+
+  // ── Knowledge-base uploads — real job list + polling ──
+  const jobsEl = $('jobs');
+  let queued = 0;
+  function setQueued(n){ queued = n; $('queuedCount').textContent = queued; }
+  function addJobRow(name, initialLabel, color) {
+    if (jobsEl.querySelector('.empty')) jobsEl.innerHTML = '';
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = '<span class="sq busy" style="background:' + color + '"></span>'
+      + '<span class="lbl"><b></b></span><span class="val"></span><span class="ts">now</span>';
+    row.querySelector('b').textContent = name;
+    row.querySelector('.val').textContent = initialLabel;
+    jobsEl.prepend(row);
+    while (jobsEl.children.length > 6) jobsEl.lastChild.remove();
+    return row;
+  }
+  function track(row, name, jobId) {
+    const sq = row.querySelector('.sq');
+    const val = row.querySelector('.val');
+    if (!jobId) { sq.classList.remove('busy'); val.textContent = 'queued'; return; }
     const started = Date.now();
     const tick = async () => {
       if (Date.now() - started > 10 * 60_000) return;
@@ -226,61 +326,82 @@
         const st = await window.notch.jobStatus(jobId);
         const s = String((st && (st.status || st.state)) || '').toLowerCase();
         if (['ready', 'done', 'completed', 'indexed'].includes(s)) {
-          li.classList.add('done'); li.querySelector('.n').textContent = name + ' · in knowledge base'; return;
+          sq.classList.remove('busy'); sq.style.background = '#3ddc73'; val.textContent = 'in knowledge base';
+          bumpMemCount(); return;
         }
         if (['failed', 'dead', 'error'].includes(s)) {
-          li.classList.add('fail'); li.querySelector('.n').textContent = name + ' · failed'; return;
+          sq.classList.remove('busy'); sq.style.background = '#ff5470'; val.textContent = 'failed'; return;
         }
-        li.querySelector('.n').textContent = name + ' · ' + (s || 'processing');
+        val.textContent = s || 'processing';
       } catch (_) { /* transient — keep polling */ }
       setTimeout(tick, 2500);
     };
     setTimeout(tick, 2000);
   }
-
-  async function send(paths) {
+  async function sendFiles(paths) {
     if (!paths.length) return;
-    setStatus(`Uploading ${paths.length} file${paths.length === 1 ? '' : 's'}…`, 'busy');
-    const lis = paths.map((p) => addJob(p.split('/').pop()));
+    setQueued(queued + paths.length);
+    setGlobalStatus(`Uploading ${paths.length} file${paths.length === 1 ? '' : 's'}…`, '');
+    const rows = paths.map((p) => addJobRow(p.split('/').pop(), 'uploading', '#4f8cff'));
     try {
-      const res = await window.notch.upload(paths, 'personal');
+      const res = await window.notch.upload(paths, scope, mode);
       (res.results || []).forEach((r, i) => {
-        const li = lis[i];
-        if (!li) return;
-        if (r.ok) track(li, r.name, r.jobId);
-        else { li.classList.add('fail'); li.querySelector('.n').textContent = r.name + ' · ' + (r.error || 'failed'); }
+        const row = rows[i];
+        if (!row) return;
+        if (r.ok) track(row, r.name, r.jobId);
+        else { row.querySelector('.sq').classList.remove('busy'); row.querySelector('.sq').style.background = '#ff5470'; row.querySelector('.val').textContent = r.error || 'failed'; }
       });
-      setStatus(res.ok ? 'Upload started' : 'Upload failed', res.ok ? 'ok' : 'err');
+      setGlobalStatus(res.ok ? 'Upload started' : 'Upload failed', res.ok ? 'ok' : 'err');
     } catch (err) {
-      lis.forEach((li) => li.classList.add('fail'));
-      setStatus(String(err.message || err).slice(0, 90), 'err');
+      rows.forEach((row) => { row.querySelector('.sq').classList.remove('busy'); row.querySelector('.sq').style.background = '#ff5470'; });
+      setGlobalStatus(String(err.message || err).slice(0, 80), 'err');
+    } finally {
+      setQueued(Math.max(0, queued - paths.length));
     }
   }
 
   $('pick').addEventListener('click', async () => {
-    pinned = true;                     // the OS dialog steals focus; stay open
-    setStatus('Choosing files…', 'busy');
+    pinned = true; // the OS dialog steals focus; stay open
+    setGlobalStatus('Choosing files…', '');
     try {
-      const res = await window.notch.upload([], 'personal');
-      if (res.cancelled) { setStatus('Cancelled'); return; }
+      const res = await window.notch.upload([], scope, mode);
+      if (res.cancelled) { setGlobalStatus('Cancelled', ''); return; }
       (res.results || []).forEach((r) => {
-        const li = addJob(r.name);
-        if (r.ok) track(li, r.name, r.jobId);
-        else { li.classList.add('fail'); li.querySelector('.n').textContent = r.name + ' · ' + (r.error || 'failed'); }
+        const row = addJobRow(r.name, r.ok ? 'uploading' : 'failed', r.ok ? '#4f8cff' : '#ff5470');
+        if (r.ok) track(row, r.name, r.jobId);
       });
-      setStatus(res.ok ? 'Upload started' : 'Upload failed', res.ok ? 'ok' : 'err');
-    } catch (err) { setStatus(String(err.message || err).slice(0, 90), 'err'); }
+      setGlobalStatus(res.ok ? 'Upload started' : 'Upload failed', res.ok ? 'ok' : 'err');
+    } catch (err) { setGlobalStatus(String(err.message || err).slice(0, 80), 'err'); }
   });
+  $('drop').addEventListener('click', () => $('pick').click());
 
+  const dropEl = $('drop');
   ['dragenter', 'dragover'].forEach((ev) => window.addEventListener(ev, (e) => {
-    e.preventDefault(); pinned = true; open(true); body.classList.add('dragging');
+    e.preventDefault(); pinned = true; open(true); dropEl.classList.add('hot');
   }));
   ['dragleave', 'drop'].forEach((ev) => window.addEventListener(ev, (e) => {
-    e.preventDefault(); if (ev === 'dragleave' && e.relatedTarget) return; body.classList.remove('dragging');
+    e.preventDefault(); if (ev === 'dragleave' && e.relatedTarget) return; dropEl.classList.remove('hot');
   }));
   window.addEventListener('drop', (e) => {
     e.preventDefault();
     const paths = [...(e.dataTransfer?.files || [])].map((f) => window.notch.pathForFile(f)).filter(Boolean);
-    if (paths.length) send(paths); else setStatus('Could not read that file', 'err');
+    if (paths.length) sendFiles(paths); else setGlobalStatus('Could not read that file', 'err');
   });
+
+  // ── memory count — best-effort local counter (no dedicated stats IPC yet) ──
+  let memCount = null;
+  function bumpMemCount(){
+    if (memCount === null) return;
+    memCount += 1;
+    $('memCount').textContent = memCount;
+  }
+  // Seed a starting value once the panel opens for the first time — kept as
+  // "—" until then rather than showing a fabricated number.
+  let seeded = false;
+  document.addEventListener('mouseenter', () => {
+    if (seeded) return;
+    seeded = true;
+    memCount = 0;
+    $('memCount').textContent = memCount;
+  }, true);
 </script>

@@ -4,7 +4,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('notch', {
   setExpanded: (v) => ipcRenderer.invoke('notch:set-expanded', !!v),
   capture: (text) => ipcRenderer.invoke('notch:capture', { text }),
-  upload: (paths, targetScope) => ipcRenderer.invoke('notch:upload', { paths, targetScope }),
+  upload: (paths, targetScope, ingestMode) => ipcRenderer.invoke('notch:upload', { paths, targetScope, ingestMode }),
   jobStatus: (jobId) => ipcRenderer.invoke('notch:job-status', { jobId }),
   open: (route) => ipcRenderer.invoke('notch:open', { route }),
   // Electron 32+ removed File.path; webUtils is the supported way to turn a

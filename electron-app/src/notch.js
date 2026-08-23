@@ -27,8 +27,10 @@ const path = require('path');
 const fs = require('fs');
 const log = require('electron-log');
 
-const COLLAPSED = { width: 210, height: 34 };
-const EXPANDED = { width: 720, height: 470 };
+// Matches the flared clip-path shape drawn in notch.html exactly — these
+// must stay in lockstep with the two `clip-path: path(...)` boxes there.
+const COLLAPSED = { width: 224, height: 66 };
+const EXPANDED = { width: 640, height: 392 };
 
 let notchWindow = null;
 let expanded = false;
@@ -127,6 +129,7 @@ async function pageFetch({ url, method = 'GET', json = null, formFile = null }) 
       const fd = new FormData();
       fd.append('file', new Blob([bytes], { type: req.formFile.mime || 'application/octet-stream' }), req.formFile.name);
       if (req.formFile.targetScope) fd.append('targetScope', req.formFile.targetScope);
+      if (req.formFile.ingestMode) fd.append('ingestMode', req.formFile.ingestMode);
       fd.append('async', 'true');
       body = fd; // browser sets the multipart boundary
     } else if (req.json) {
@@ -188,7 +191,7 @@ function registerNotchIpc() {
 
   // Knowledge-base upload — same control-plane proxy + job polling the web client
   // uses, so scope, quota and dedup behave identically to an in-app upload.
-  ipcMain.handle('notch:upload', async (_e, { paths, targetScope }) => {
+  ipcMain.handle('notch:upload', async (_e, { paths, targetScope, ingestMode }) => {
     let files = Array.isArray(paths) ? paths : [];
     if (!files.length) {
       const picked = await dialog.showOpenDialog(notchWindow, {
@@ -211,6 +214,7 @@ function registerNotchIpc() {
             name: path.basename(file),
             mime: '',
             targetScope: targetScope || 'personal',
+            ingestMode: ingestMode || 'both',
           },
         });
         results.push({ name: path.basename(file), ok: true, jobId: started && started.job_id, documentId: started && started.documentId });

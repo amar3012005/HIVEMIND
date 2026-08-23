@@ -1748,6 +1748,12 @@ const TOOL_HANDLERS = {
       edgeKeys.add(key);
       return true;
     });
+    // The two snapshots are the evidence for a diff.  Returning only
+    // `added` made a stable or unchanged fact look unsupported downstream,
+    // even though both dated recall results had already retrieved it.
+    const uniqueById = (rows = []) => [...new Map(rows.filter(Boolean).map((row) => [row.id || `${row.document_id || ''}:${row.segment_id || ''}:${row.content || ''}`, row])).values()];
+    const snapshotMemories = uniqueById([...(a.memories || []), ...(b.memories || [])]);
+    const snapshotEvidence = uniqueById([...(a.evidence || []), ...(b.evidence || [])]);
     return {
       query: args.query,
       from_date: args.from,
@@ -1759,6 +1765,9 @@ const TOOL_HANDLERS = {
       removed,
       persisted,
       changes,
+      memories: snapshotMemories,
+      evidence: snapshotEvidence,
+      evidence_packets: [a.evidence_packet, b.evidence_packet].filter(Boolean),
       from: a,
       to: b,
     };

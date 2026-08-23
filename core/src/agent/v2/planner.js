@@ -3,7 +3,7 @@ import { getStaticPromptArtifact } from '../chat-static-prompt-cache.js';
 import { NATIVE_PLAN_TOOL_NAME, createNativePlanTool } from './planner-schema.js';
 import { buildNativePlannerDynamicContext, buildNativePlannerPrompt, NATIVE_PLANNER_PROMPT_VERSION } from './planner-prompt.js';
 
-const PRIMARY = process.env.NATIVE_CHAT_V2_PLANNER_MODEL || 'google/gemini-2.5-flash-lite';
+const PRIMARY = process.env.NATIVE_CHAT_V2_PLANNER_MODEL || 'google/gemini-2.5-flash';
 const FALLBACK = process.env.NATIVE_CHAT_V2_PLANNER_FALLBACK_MODEL || 'openai/gpt-oss-20b:nitro';
 
 export async function planNativeTurn({ context, apiKey, signal, fetchImpl } = {}) {

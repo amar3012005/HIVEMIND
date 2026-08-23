@@ -84,6 +84,14 @@ function normalizePlanShape(input) {
   return { input: out, repairs };
 }
 
+function deriveMemoryTitle(memory) {
+  const entity = Array.isArray(memory?.entities) ? memory.entities.find(Boolean) : null;
+  const type = String(memory?.memory_type || 'memory').replace(/[_-]+/g, ' ').trim();
+  if (entity) return `${entity} ${type}`.trim().slice(0, 120);
+  const content = String(memory?.content || '').replace(/\s+/g, ' ').trim();
+  return content ? content.replace(/[.!?]+$/, '').slice(0, 120) : null;
+}
+
 function validateSemantics(plan) {
   const query = plan.steps[0].query;
   const readOps = new Set(['recall', 'source_read', 'event_range', 'snapshot', 'diff', 'timeline', 'relation_between', 'aggregate']);
@@ -107,10 +115,27 @@ export function validateNativePlanResult(input) {
   try {
     const normalized = normalizePlanShape(input);
     const plan = schema.parse(normalized.input);
+    const semanticRepairs = [];
+    if (plan.operation === 'save' && !plan.memory?.title && plan.memory?.content) {
+      plan.memory.title = deriveMemoryTitle(plan.memory);
+      semanticRepairs.push('memory.title');
+    }
+    if (plan.operation === 'aggregate' && !plan.aggregate?.parent && plan.references.entities.length === 1) {
+      plan.aggregate.parent = plan.references.entities[0];
+      semanticRepairs.push('aggregate.parent');
+    }
+    if (plan.operation === 'snapshot') {
+      if (plan.time.axis === 'valid_time' && !plan.time.valid_at && plan.time.start) {
+        plan.time.valid_at = plan.time.start; semanticRepairs.push('time.valid_at');
+      }
+      if (plan.time.axis === 'known_time' && !plan.time.known_at && plan.time.start) {
+        plan.time.known_at = plan.time.start; semanticRepairs.push('time.known_at');
+      }
+    }
     validateSemantics(plan);
     const expectedCapability = capabilityForOperation(plan.operation);
     const expectedTool = NATIVE_OPERATION_TO_TOOL[plan.operation];
-    const repairs = [...normalized.repairs];
+    const repairs = [...normalized.repairs, ...semanticRepairs];
     if (plan.capability !== expectedCapability) { plan.capability = expectedCapability; repairs.push('capability'); }
     if (plan.steps[0].capability !== expectedCapability) { plan.steps[0].capability = expectedCapability; repairs.push('step.capability'); }
     if (plan.steps[0].tool !== expectedTool) { plan.steps[0].tool = expectedTool; repairs.push('step.tool'); }

@@ -4464,6 +4464,7 @@ async def _orchestrate_single_agent(
             _journal_entry = await make_journal_entry(
                 req.user_message, final_text, transcript=transcript, participants=participants,
                 turn_id=req.turn_id, status=status,
+                verdict=_gv if isinstance(_gv, dict) else None,
             )
             if _journal_entry:
                 _journal_ok = await append_room_journal_entry(

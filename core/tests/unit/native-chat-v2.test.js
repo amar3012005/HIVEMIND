@@ -83,6 +83,15 @@ test('validator canonicalizes provider-omitted nullable source members', () => {
   assert.ok(result.repairs.includes('references.source.nullables'));
 });
 
+test('validator safely derives structural save, aggregate and snapshot fields', () => {
+  const savePlan = makePlan({ operation: 'save', query: null, entities: ['Kruti'], memory: { title: null, content: 'Kruti joined marketing.', memory_type: 'fact', scope: null, project_id: null, tags: [], entities: ['Kruti'], event_time: null, profile_fields: {}, preferences: [] } });
+  assert.equal(validateNativePlanResult(savePlan).plan.memory.title, 'Kruti fact');
+  const aggregatePlan = makePlan({ operation: 'aggregate', query: 'documents mentioning SolvisPia', entities: ['SolvisPia'], aggregate: { parent: null, kind: 'source' } });
+  assert.equal(validateNativePlanResult(aggregatePlan).plan.aggregate.parent, 'SolvisPia');
+  const snapshotPlan = makePlan({ operation: 'snapshot', time: { semantics: 'snapshot', axis: 'valid_time', start: '2026-08-01T00:00:00Z' } });
+  assert.equal(validateNativePlanResult(snapshotPlan).plan.time.valid_at, '2026-08-01T00:00:00Z');
+});
+
 test('LangGraph trajectory performs one planner call after deterministic context/catalog nodes', async () => {
   let calls = 0;
   const graph = createNativePlannerGraph({ planner: async ({ context, capabilityCatalog }) => { calls += 1; assert.equal(context.message, 'Who is Kruti?'); assert.match(capabilityCatalog, /workspace_read/); return { rawPlan: makePlan(), usage: { total_tokens: 42 } }; } });

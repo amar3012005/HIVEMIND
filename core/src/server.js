@@ -19723,7 +19723,18 @@ exit \$RC
             // Tier switcher (ALL / Org / Project / Personal): an explicit
             // tier:* scope narrows the list to ONE hierarchy tier; absent →
             // the merged visible set (access_context) as before.
-            const tierScope = url.searchParams.get('scope');
+            const requestedScope = url.searchParams.get('scope');
+            // The public UI and older clients use the simple scope names while
+            // the store uses its explicit tier:* vocabulary.  Treat both as the
+            // same narrow request.  Falling through to undefined here widens a
+            // personal list to the caller's complete visible workspace, which
+            // can expose another member's personal records in an organisation.
+            const tierScopeAliases = {
+              personal: 'tier:personal',
+              organization: 'tier:organization',
+              project: 'tier:project',
+            };
+            const tierScope = tierScopeAliases[requestedScope] || requestedScope;
             const scopeArg = ['tier:personal', 'tier:organization', 'tier:project'].includes(tierScope)
               ? tierScope
               : undefined;

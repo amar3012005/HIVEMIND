@@ -1078,6 +1078,10 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     ...(plan.time?.range ? { date_range: plan.time.range } : {}),
     ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
     ...(plan.source?.title ? { source_title: plan.source.title } : {}),
+    ...(plan.source?.kind ? { source_kind: plan.source.kind } : {}),
+    ...(plan.time?.kind === 'latest' || plan.time?.kind === 'earliest'
+      ? { temporal_selector: plan.time.kind }
+      : {}),
     // Scope: an EXPLICIT request scope (the chat's personal/organization/project selector,
     // ctx.scopeFilter) WINS over the planner's inferred scope — the user's chosen lens is
     // authoritative. 'organization'/none → no filter (everything accessible in the org).

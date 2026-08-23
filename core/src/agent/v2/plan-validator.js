@@ -39,6 +39,51 @@ const schema = z.object({
 
 function requireValue(value, code) { if (!value) throw new Error(code); }
 
+function normalizeNullableObject(value, keys) {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (!keys.some((key) => value[key] != null && value[key] !== '')) return null;
+  return Object.fromEntries(keys.map((key) => [key, value[key] ?? null]));
+}
+
+// Some OpenAI-compatible providers honor the outer required tool schema but
+// omit nullable members inside an object (for example source={}). Missing and
+// explicit null mean the same thing for these optional fields, so canonicalize
+// that transport variation before strict validation. This repairs shape only;
+// semantic requirements below remain fail-closed.
+function normalizePlanShape(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { input, repairs: [] };
+  const out = structuredClone(input);
+  const repairs = [];
+  if (out.references && typeof out.references === 'object') {
+    const source = normalizeNullableObject(out.references.source, ['title', 'document_id', 'kind', 'selection']);
+    if (JSON.stringify(source) !== JSON.stringify(out.references.source ?? null)) repairs.push('references.source.nullables');
+    out.references.source = source;
+  }
+  if (out.time && typeof out.time === 'object') {
+    for (const key of ['axis', 'start', 'end', 'valid_at', 'known_at']) {
+      if (!(key in out.time)) { out.time[key] = null; repairs.push(`time.${key}`); }
+    }
+  }
+  const aggregate = normalizeNullableObject(out.aggregate, ['parent', 'kind']);
+  if (JSON.stringify(aggregate) !== JSON.stringify(out.aggregate ?? null)) repairs.push('aggregate.nullables');
+  out.aggregate = aggregate;
+  if (out.memory && typeof out.memory === 'object' && !Array.isArray(out.memory)) {
+    for (const key of ['title', 'content', 'memory_type', 'scope', 'project_id', 'event_time']) {
+      if (!(key in out.memory)) { out.memory[key] = null; repairs.push(`memory.${key}`); }
+    }
+    for (const key of ['tags', 'entities', 'preferences']) {
+      if (!Array.isArray(out.memory[key])) { out.memory[key] = []; repairs.push(`memory.${key}`); }
+    }
+    if (!out.memory.profile_fields || typeof out.memory.profile_fields !== 'object' || Array.isArray(out.memory.profile_fields)) {
+      out.memory.profile_fields = {}; repairs.push('memory.profile_fields');
+    }
+  } else if (out.memory === undefined) {
+    out.memory = null; repairs.push('memory');
+  }
+  if (out.direct_response === undefined) { out.direct_response = null; repairs.push('direct_response'); }
+  return { input: out, repairs };
+}
+
 function validateSemantics(plan) {
   const query = plan.steps[0].query;
   const readOps = new Set(['recall', 'source_read', 'event_range', 'snapshot', 'diff', 'timeline', 'relation_between', 'aggregate']);
@@ -60,11 +105,12 @@ function validateSemantics(plan) {
 
 export function validateNativePlanResult(input) {
   try {
-    const plan = schema.parse(input);
+    const normalized = normalizePlanShape(input);
+    const plan = schema.parse(normalized.input);
     validateSemantics(plan);
     const expectedCapability = capabilityForOperation(plan.operation);
     const expectedTool = NATIVE_OPERATION_TO_TOOL[plan.operation];
-    const repairs = [];
+    const repairs = [...normalized.repairs];
     if (plan.capability !== expectedCapability) { plan.capability = expectedCapability; repairs.push('capability'); }
     if (plan.steps[0].capability !== expectedCapability) { plan.steps[0].capability = expectedCapability; repairs.push('step.capability'); }
     if (plan.steps[0].tool !== expectedTool) { plan.steps[0].tool = expectedTool; repairs.push('step.tool'); }

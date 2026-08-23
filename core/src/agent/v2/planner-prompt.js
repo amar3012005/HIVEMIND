@@ -29,6 +29,7 @@ PLANNING CONTRACT
 - bounded/standard is the default. broad/detailed for meaningful breadth. exhaustive/comprehensive only when the user asks for all, every, complete, comprehensive, or the intent truly requires full coverage.
 - The answer objective states exactly what synthesis must deliver and must preserve requested qualifiers.
 - Put preserved entities, resolved conversational pronouns, and source identity under references. Use time.semantics=latest with axis=known_time for the latest uploaded source; do not confuse it with a historical snapshot.
+- When no source is requested, set references.source=null. Never emit an empty source object.
 - completion.approval_required is true only for save or update_profile. needs_user_input is true only when an essential value cannot be resolved; an omitted save scope is handled by the server chooser and is represented as memory.scope=null.
 - Never invent scope, project, dates, source titles, relationships, facts, or a direct answer.`;
 }

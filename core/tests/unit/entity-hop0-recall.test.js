@@ -19,6 +19,11 @@ test('remote tenant tag registry extracts bounded entity phrases without an LLM'
 
   const lowercase = remoteQueryEntityRegistry('tell me about kruti');
   assert.ok(lowercase.some((entry) => entry.slug === 'kruti'));
+
+  const lateLowercase = remoteQueryEntityRegistry(
+    'ehrlich gesagt wollte ich einfach alles erfahren was wir ueber kruti wissen',
+  );
+  assert.ok(lateLowercase.some((entry) => entry.slug === 'kruti'));
 });
 
 const REGISTRY = [

@@ -1,11 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canonicalEntityLexicalQuery,
   RecallRouter,
   isLiveExpansionEligible,
   resolveCanonicalEntities,
   resolveRecallPlan,
 } from '../../src/memory/recall-router.js';
+
+test('canonical entity lexical lane protects exact entity phrases without rewriting the semantic query', () => {
+  assert.equal(canonicalEntityLexicalQuery(['Kruti']), 'Kruti');
+  assert.equal(
+    canonicalEntityLexicalQuery(['Kruti', 'marketing team', 'Kruti', '  ']),
+    'Kruti marketing team',
+  );
+  assert.equal(canonicalEntityLexicalQuery([]), null);
+});
 
 test('legacy recall modes preserve their existing event-driven behavior', () => {
   const plan = resolveRecallPlan({ mode: 'auto' });

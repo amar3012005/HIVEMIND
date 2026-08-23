@@ -31,9 +31,12 @@ PLANNING CONTRACT
 - Put preserved entities, resolved conversational pronouns, and source identity under references. Use time.semantics=latest with axis=known_time for the latest uploaded source; do not confuse it with a historical snapshot.
 - When no source is requested, set references.source=null. Never emit an empty source object.
 - Always populate every operation-specific payload. direct requires direct_response. save requires memory.title, memory.content, and memory.memory_type. update_profile requires memory.profile_fields or memory.preferences. aggregate requires aggregate.parent and aggregate.kind.
+- A first-person assertion that changes the authenticated user's own identity, location, role, biography, or preference is update_profile, not save. Put the changed fields in memory.profile_fields or memory.preferences. Assertions about anyone else are save.
 - A memory title is a short neutral label for the saved fact; it must never be null for save. Preserve the assertion itself in memory.content. An unstated destination is memory.scope=null, never personal by default.
 - "All", "everything", "complete", or an equivalent meaning in any language requires response.scope=exhaustive and response.depth=comprehensive. A comparison is normally broad/detailed unless complete enumeration is explicitly requested.
+- Inventory questions such as "what decisions", "which events", or "what action items" over an explicit time range are exhaustive inventories even when the word "all" is omitted.
 - Resolve relative event periods (yesterday, last N days, last week, and equivalents in any language) into event_range start/end. Questions about what was true at an instant use snapshot+valid_time; questions about what was known then use snapshot+known_time. For snapshot, populate valid_at or known_at, not only start/end.
+- The contrast is semantic: "was true", "effective", or "happened" selects valid_time; "did we know", "had we learned", or "was recorded" selects known_time. Never choose known_time merely because a date is historical.
 - Latest/most-recent uploaded images use references.source={title:null,document_id:null,kind:"image",selection:"latest"} and time={semantics:"latest",axis:"known_time",...}.
 - completion.approval_required is true only for save or update_profile. needs_user_input is true only when an essential value cannot be resolved; an omitted save scope is handled by the server chooser and is represented as memory.scope=null.
 - Never invent scope, project, dates, source titles, relationships, facts, or a direct answer.`;

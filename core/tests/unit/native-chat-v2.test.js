@@ -83,6 +83,14 @@ test('validator canonicalizes provider-omitted nullable source members', () => {
   assert.ok(result.repairs.includes('references.source.nullables'));
 });
 
+test('validator canonicalizes an empty provider result binding', () => {
+  const plan = makePlan();
+  plan.steps[0].result_binding = '';
+  const result = validateNativePlanResult(plan);
+  assert.equal(result.plan.steps[0].result_binding, 'result_1');
+  assert.ok(result.repairs.includes('steps.0.result_binding'));
+});
+
 test('validator safely derives structural save, aggregate and snapshot fields', () => {
   const savePlan = makePlan({ operation: 'save', query: null, entities: ['Kruti'], memory: { title: null, content: 'Kruti joined marketing.', memory_type: 'fact', scope: null, project_id: null, tags: [], entities: ['Kruti'], event_time: null, profile_fields: {}, preferences: [] } });
   assert.equal(validateNativePlanResult(savePlan).plan.memory.title, 'Kruti fact');

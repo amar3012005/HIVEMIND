@@ -81,6 +81,14 @@ function normalizePlanShape(input) {
     out.memory = null; repairs.push('memory');
   }
   if (out.direct_response === undefined) { out.direct_response = null; repairs.push('direct_response'); }
+  if (Array.isArray(out.steps)) {
+    out.steps.forEach((step, index) => {
+      if (step && typeof step === 'object' && !String(step.result_binding || '').trim()) {
+        step.result_binding = `result_${index + 1}`;
+        repairs.push(`steps.${index}.result_binding`);
+      }
+    });
+  }
   return { input: out, repairs };
 }
 

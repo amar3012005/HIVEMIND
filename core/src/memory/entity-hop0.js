@@ -28,6 +28,7 @@ import { normalizeEntity } from './entity-normalize.js';
 import { orgIsRemote, amrFindByTags } from '../vector/mneme/driver.js';
 
 export const HOP0_MAX_QUERY_TOKENS = 8;
+export const HOP0_MAX_REMOTE_QUERY_WORDS = 24;
 export const HOP0_MAX_ENTITIES = 12;
 export const HOP0_MAX_LINKS_PER_ENTITY = 10;
 export const HOP0_MAX_CANDIDATES = 40;
@@ -84,16 +85,22 @@ export function remoteQueryEntityRegistry(query = '') {
       if (!seg.isWordLike) continue;
       const value = seg.segment.normalize('NFKC').trim();
       if (value.length >= 3) words.push(value);
-      if (words.length >= HOP0_MAX_QUERY_TOKENS) break;
+      if (words.length >= HOP0_MAX_REMOTE_QUERY_WORDS) break;
     }
   } else {
-    words.push(...raw.split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 3).slice(0, HOP0_MAX_QUERY_TOKENS));
+    words.push(...raw.split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 3).slice(0, HOP0_MAX_REMOTE_QUERY_WORDS));
   }
   if (!words.length) return [];
 
   const capitalized = words.filter((word) => /^\p{Lu}/u.test(word));
-  const basis = capitalized.length ? capitalized : words;
+  // Every bounded word remains an exact entity-tag candidate. This keeps a
+  // lowercase entity near the end of a natural-language request visible
+  // without issuing per-word searches. Capitalized spans are additive rather
+  // than replacing the full word set.
+  const basis = words;
   const phrases = [];
+  phrases.push(...words);
+  if (capitalized.length > 1) phrases.push(capitalized.join(' '));
   for (let size = Math.min(4, basis.length); size >= 1; size -= 1) {
     for (let start = 0; start + size <= basis.length; start += 1) {
       phrases.push(basis.slice(start, start + size).join(' '));

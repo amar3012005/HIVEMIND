@@ -74,6 +74,15 @@ test('validator repairs model-owned tool mapping but rejects semantic invalidity
   assert.equal(validateNativePlanResult(invalid).status, 'invalid');
 });
 
+test('validator canonicalizes provider-omitted nullable source members', () => {
+  const providerPlan = makePlan();
+  providerPlan.references.source = {};
+  const result = validateNativePlanResult(providerPlan);
+  assert.equal(result.status, 'repairable');
+  assert.equal(result.plan.references.source, null);
+  assert.ok(result.repairs.includes('references.source.nullables'));
+});
+
 test('LangGraph trajectory performs one planner call after deterministic context/catalog nodes', async () => {
   let calls = 0;
   const graph = createNativePlannerGraph({ planner: async ({ context, capabilityCatalog }) => { calls += 1; assert.equal(context.message, 'Who is Kruti?'); assert.match(capabilityCatalog, /workspace_read/); return { rawPlan: makePlan(), usage: { total_tokens: 42 } }; } });

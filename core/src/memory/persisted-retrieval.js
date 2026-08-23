@@ -558,7 +558,10 @@ export function boundedLaneFusion(lanes, ceiling = RECALL_POOL_CEILING) {
 // phrasings / translations that preserve entities + numbers, then we re-fetch
 // on those with a relaxed floor and merge. Gated on thin-recall so the rich-
 // corpus happy path never pays the LLM cost. Cached, timeout-bounded, graceful.
-const QUERY_EXPANSION_ENABLED = process.env.RECALL_QUERY_EXPANSION !== 'false';
+// Raw recall is a deterministic retrieval primitive. Query understanding belongs
+// to /chat's planner; recall-time LLM rewrites are opt-in for controlled
+// evaluation only. BGE-M3 already supplies multilingual semantic retrieval.
+const QUERY_EXPANSION_ENABLED = process.env.RECALL_QUERY_EXPANSION === 'true';
 const EXPAND_MIN_CANDIDATES = Number(process.env.RECALL_EXPAND_MIN || 12);
 const _expansionCache = new Map(); // queryKey → string[] variants (bounded)
 const _entityLlmCache = new Map(); // queryKey → string[] entity tags (bounded)
@@ -615,7 +618,10 @@ async function expandQueryMultilingual(query, orgId) {
 // singular, full term) → `entity:<name>` tags that actually match the corpus.
 // Gated by ENTITY_LLM_EXTRACT; cached + metered + graceful.
 async function extractQueryEntitiesLLM(query, orgId) {
-  if (process.env.ENTITY_LLM_EXTRACT === 'false') return []; // global default ON (opt-out)
+  // Canonical entities are resolved from the tenant registry before retrieval.
+  // Keep the older LLM extractor available only as an explicit experiment; it
+  // must not create a hidden model call inside ordinary /api/recall requests.
+  if (process.env.ENTITY_LLM_EXTRACT !== 'true') return [];
   if (!query || typeof query !== 'string' || query.trim().length < 3) return [];
   const key = query.trim().toLowerCase();
   if (_entityLlmCache.has(key)) return _entityLlmCache.get(key);
@@ -1453,8 +1459,9 @@ async function _recallPersistedMemoriesImpl(store, {
   // GLOBAL entity recall (all tenants, no per-tenant config): always run BOTH
   // paths — the unfiltered wide search AND an entity-tag-filtered wide search —
   // then fuse + rerank down to the delivered set ("search wide, rank narrow").
-  // Default 'should' (additive, never narrows the main set). LLM entity
-  // extraction runs IN PARALLEL with the main vector fetch so latency stays low.
+  // Default 'should' (additive, never narrows the main set). Tenant-registry
+  // canonical entities and deterministic query tokens feed this lane. The
+  // legacy LLM extractor is disabled unless explicitly enabled for an eval.
   const ENTITY_FILTER_MODE = (entity_filter_mode || process.env.ENTITY_FILTER_MODE || 'should').toLowerCase();
   const _entityTagsPromise = ENTITY_FILTER_MODE !== 'off'
     ? (async () => {

@@ -201,6 +201,13 @@ export async function resolveCanonicalEntities({ prisma, orgId, query } = {}) {
   return [...new Set(entities.map((entity) => entity.canonicalName).filter(Boolean))];
 }
 
+export function canonicalEntityLexicalQuery(entities = []) {
+  const canonical = [...new Set((Array.isArray(entities) ? entities : [])
+    .map((entity) => String(entity || '').trim())
+    .filter(Boolean))].slice(0, 12);
+  return canonical.length ? canonical.join(' ') : null;
+}
+
 async function resolveImplicitSource({ evidence, query, ctx, timeoutMs, requireFilename = false }) {
   if (!evidence?.resolveSourceFromQuery || !query) return null;
   const resolved = await withTimeout(
@@ -1665,6 +1672,14 @@ export class RecallRouter {
     const plannedEntities = Array.isArray(options.named_entities) ? options.named_entities : [];
     const mergedCanonicalEntities = [...new Set([...plannedEntities, ...canonicalEntities]
       .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
+    // Preserve the user's full natural-language question for the semantic lane,
+    // while giving the lexical lane the exact tenant-registry entity phrase as
+    // an additive query. This is deliberately deterministic: a conversational
+    // question such as "What do you know about Kruti?" must have the same
+    // entity-candidate floor as the terse query "Kruti", without another
+    // embedding or an LLM rewrite. The lexical searches run in parallel and
+    // merge by memory id before the single mixed memory/evidence rerank.
+    const exactEntityLexicalQuery = canonicalEntityLexicalQuery(mergedCanonicalEntities);
     recallPlan = {
       ...recallPlan,
       entities: mergedCanonicalEntities,
@@ -1683,6 +1698,7 @@ export class RecallRouter {
         || Boolean(recallPlan.time.valid_at)
         || options.include_superseded === true,
       canonical_entities: mergedCanonicalEntities,
+      alternate_lexical_query: options.alternate_lexical_query || exactEntityLexicalQuery,
       query_vector: queryVector,
     };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));

@@ -18,12 +18,17 @@ const FAILURE_COOLDOWN_MS = Number(process.env.MNEME_REMOTE_FAILURE_COOLDOWN_MS 
 // isolated on its separate one-slot transport class.
 const MAX_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INFLIGHT_PER_ORG || 4));
 const MAX_MAINTENANCE_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_MAINTENANCE_INFLIGHT_PER_ORG || 1));
+// Graph walks are neither hybrid retrieval nor maintenance. They can fan out
+// through background cognition, so isolate and serialize them per tenant.
+const MAX_GRAPH_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_GRAPH_INFLIGHT_PER_ORG || 1));
 const MAX_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_QUEUED_PER_ORG || 32));
+const MAX_GRAPH_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_GRAPH_QUEUED_PER_ORG || 128));
 const _failureCircuitUntil = new Map();
 const _inflightByCircuit = new Map();
 const _waitersByCircuit = new Map();
 const _capabilityCache = new Map();
 const _coalescedReads = new Map();
+const _coalescedGraphReads = new Map();
 const _lastRemoteLogAt = new Map();
 const REMOTE_LOG_DEDUPE_MS = Math.max(1000, Number(process.env.MNEME_REMOTE_LOG_DEDUPE_MS || 30000));
 
@@ -56,7 +61,9 @@ export function isRemoteMemoryUnavailableError(error) {
 }
 
 function _transportClass(options = {}) {
-  return options?.transportClass === 'maintenance' ? 'maintenance' : 'interactive';
+  if (options?.transportClass === 'maintenance') return 'maintenance';
+  if (options?.transportClass === 'graph') return 'graph';
+  return 'interactive';
 }
 
 function _circuitKey(orgId, path, options = {}) {
@@ -88,6 +95,8 @@ async function _acquireSlot(orgId, path, signal, options = {}) {
   const circuitKey = _circuitKey(orgId, path, options);
   const maxInflight = _transportClass(options) === 'maintenance'
     ? MAX_MAINTENANCE_INFLIGHT_PER_ORG
+    : _transportClass(options) === 'graph'
+      ? MAX_GRAPH_INFLIGHT_PER_ORG
     : MAX_INFLIGHT_PER_ORG;
   const current = _inflightByCircuit.get(circuitKey) || 0;
   if (current < maxInflight) {
@@ -95,7 +104,10 @@ async function _acquireSlot(orgId, path, signal, options = {}) {
     return circuitKey;
   }
   const queue = _waitersByCircuit.get(circuitKey) || [];
-  if (queue.length >= MAX_QUEUED_PER_ORG) {
+  const maxQueued = _transportClass(options) === 'graph'
+    ? MAX_GRAPH_QUEUED_PER_ORG
+    : MAX_QUEUED_PER_ORG;
+  if (queue.length >= maxQueued) {
     throw new RemoteMemoryUnavailableError(orgId, path, new Error('tenant transport queue full'));
   }
   await new Promise((resolve, reject) => {
@@ -368,6 +380,26 @@ function _coalescedInteractiveRead(orgId, path, body) {
         _coalescedReads.delete(key);
       });
     _coalescedReads.set(key, entry);
+  }
+  return _awaitSharedRead(entry, currentStageSignal());
+}
+
+// Relationship expansion is optional context, never a reason to compete with
+// the four-lane hybrid recall. Coalesce identical frontiers and use its own
+// one-slot transport class so resident/background traversals cannot turn into
+// an interactive tenant-queue failure.
+function _coalescedGraphRead(orgId, path, body) {
+  const key = _readKey(orgId, path, body);
+  let entry = _coalescedGraphReads.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    entry = { controller, consumers: 0, settled: false, promise: null };
+    entry.promise = _call(orgId, path, body, { signal: controller.signal, transportClass: 'graph' })
+      .finally(() => {
+        entry.settled = true;
+        _coalescedGraphReads.delete(key);
+      });
+    _coalescedGraphReads.set(key, entry);
   }
   return _awaitSharedRead(entry, currentStageSignal());
 }
@@ -655,8 +687,13 @@ export async function remoteMemEdges(orgId, ids) {
 
 // Per-memory relationships for remote org — returns central-shaped relationship object or null.
 export async function remoteMemRelationships(orgId, memoryId) {
-  try { const out = await _call(orgId, '/v1/mem-relationships', { memoryId }); return out?.error ? null : out; }
-  catch (e) { console.warn(`[mneme/remote] mem-relationships failed org=${orgId} id=${memoryId}: ${e.message}`); return null; }
+  try {
+    const out = await _coalescedGraphRead(orgId, '/v1/mem-relationships', { memoryId });
+    return out?.error ? null : out;
+  } catch (e) {
+    _logRemoteOnce('warn', 'mem-relationships', orgId, e, ` id=${memoryId}`);
+    return null;
+  }
 }
 
 // Fetch relationship neighbourhoods for one bounded frontier in one transport
@@ -668,12 +705,12 @@ export async function remoteMemRelationshipsBatch(orgId, ids) {
   const memoryIds = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))].slice(0, 25);
   if (!memoryIds.length) return {};
   try {
-    const out = await _call(orgId, '/v1/mem-relationships-batch', { ids: memoryIds });
+    const out = await _coalescedGraphRead(orgId, '/v1/mem-relationships-batch', { ids: memoryIds });
     return out?.relationships && typeof out.relationships === 'object' ? out.relationships : {};
   } catch (e) {
     const message = String(e?.message || '');
     if (/mem-relationships-batch.*(?:404|not found)|agent .*404/i.test(message)) return null;
-    console.warn(`[mneme/remote] mem-relationships-batch failed org=${orgId}: ${message}`);
+    _logRemoteOnce('warn', 'mem-relationships-batch', orgId, message);
     return {};
   }
 }

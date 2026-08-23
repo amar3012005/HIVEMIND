@@ -806,15 +806,37 @@ def _journal_positions(transcript: Optional[List[Dict[str, Any]]]) -> str:
     return f"\n\nWHAT EACH AGENT ARGUED:\n{rows}"
 
 
+def _journal_verdict_slice(verdict: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Real gap (2026-08-23): the journal recorded a coarse `status` but threw
+    away WHAT was wrong — gaps, unsupported claims, whether the verifier even
+    ran. Two rooms in a row can invent the same unbacked numbers because the
+    next turn's Director only ever saw the PRIOR DRAFT, never the prior
+    critique. Keep this small and additive — capped, optional, never blocks
+    journal writes when verdict is missing/malformed."""
+    if not isinstance(verdict, dict) or not verdict:
+        return None
+    slice_ = {
+        "grounded_ok": bool(verdict.get("grounded_ok", True)),
+        "verification_available": bool(verdict.get("verification_available", True)),
+        "gaps": [str(g)[:200] for g in (verdict.get("gaps") or [])][:5],
+        "unsupported_claims": [str(c)[:200] for c in (verdict.get("unsupported_claims") or [])][:5],
+    }
+    if not slice_["gaps"] and not slice_["unsupported_claims"] and slice_["grounded_ok"] and slice_["verification_available"]:
+        return None  # nothing wrong last time — no need to carry an empty block forward
+    return slice_
+
+
 async def make_journal_entry(user_message: str, final_text: str, *,
                              transcript: Optional[List[Dict[str, Any]]] = None,
                              participants: Optional[List[Dict[str, Any]]] = None,
                              turn_id: str = "", status: str = "complete",
-                             model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                             model: Optional[str] = None,
+                             verdict: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Distill one run into structured episodic memory: each agent's contribution and
     the swarm result. It is intentionally separate from reusable operating lessons."""
     if not _JOURNAL_ENABLED:
         return None
+    _verification = _journal_verdict_slice(verdict)
     def _fallback() -> Optional[Dict[str, Any]]:
         latest: Dict[str, str] = {}
         for item in (transcript or []):
@@ -832,7 +854,7 @@ async def make_journal_entry(user_message: str, final_text: str, *,
         summary = re.sub(r"\s+", " ", str(final_text or "")).strip()[:520]
         if not summary:
             return None
-        return {
+        entry = {
             "turn_id": str(turn_id or ""),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": str(status or "complete"),
@@ -841,6 +863,9 @@ async def make_journal_entry(user_message: str, final_text: str, *,
             "agents": agents,
             "final_report_excerpt": str(final_text or "").strip()[:1800],
         }
+        if _verification:
+            entry["verification"] = _verification
+        return entry
     try:
         pos = _journal_positions(transcript)
         names = [str(p.get("name") or p.get("slug") or "") for p in (participants or []) if p]
@@ -885,6 +910,8 @@ async def make_journal_entry(user_message: str, final_text: str, *,
             "agents": agents[:5],
             "final_report_excerpt": str(final_text or "").strip()[:1800],
         }
+        if _verification:
+            entry["verification"] = _verification
         return entry if len(entry["swarm_summary"]) >= 15 else _fallback()
     except Exception as exc:  # noqa: BLE001
         log.warning("[hyper-engine] journal entry failed (non-fatal): %s", exc)
@@ -5478,7 +5505,30 @@ class Director:
             row = (f"- Asked: {entry.get('asked', '')} | Swarm: {entry.get('swarm_summary', '')}"
                    + (f" | Agents: {agent_notes}" if agent_notes else ""))
             rows.append(row[:900])
-        latest = str(self.room_journal[-1].get("final_report_excerpt") or "").strip()[:1800]
+        latest_entry = self.room_journal[-1]
+        latest = str(latest_entry.get("final_report_excerpt") or "").strip()[:1800]
+        # Real gap (2026-08-23): this journal used to carry only what the room SAID
+        # last time, never what was WRONG with it — so a fresh turn on the same
+        # topic repeated the same unbacked numbers and hit the same dead verifier.
+        # Surfacing the last verdict explicitly turns "what did we say" into "what
+        # must this turn actually fix."
+        _last_verification = latest_entry.get("verification") if isinstance(latest_entry.get("verification"), dict) else None
+        verification_block = ""
+        if _last_verification:
+            _bits = []
+            if not _last_verification.get("verification_available", True):
+                _bits.append("quality verification could NOT run last turn (verifier failure) — treat its output as unconfirmed")
+            if not _last_verification.get("grounded_ok", True):
+                _bits.append("the last turn's claims were flagged as NOT grounded")
+            for g in _last_verification.get("gaps") or []:
+                _bits.append(f"gap: {g}")
+            for c in _last_verification.get("unsupported_claims") or []:
+                _bits.append(f"unsupported claim: {c}")
+            if _bits:
+                verification_block = (
+                    "\n\nWHAT WAS WRONG LAST TURN (fix this, do not repeat it):\n"
+                    + "\n".join(f"- {b}" for b in _bits[:8])
+                )
         return (
             "\nROOM JOURNAL — this room's actual prior turns, most recent last. These are "
             "REAL decisions this room already made, not background color: if the current "
@@ -5487,7 +5537,8 @@ class Director:
             "settled here. Only gather fresh evidence for what this journal does NOT cover. "
             f"If this window doesn't go back far enough, call load_room_history for more:\n"
             + "\n".join(rows)
-            + (f"\n\nLATEST FINAL REPORT EXCERPT:\n{latest}" if latest else "") + "\n"
+            + (f"\n\nLATEST FINAL REPORT EXCERPT:\n{latest}" if latest else "")
+            + verification_block + "\n"
         )
 
     async def _load_room_history(self, turns_back: int) -> str:

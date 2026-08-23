@@ -93,6 +93,57 @@ function boundedString(value, maxLength) {
   return normalized ? normalized.slice(0, maxLength) : null;
 }
 
+function normalizeSourceLabel(value) {
+  return String(value || '').trim().toLocaleLowerCase();
+}
+
+function memoryMatchesSourceContract(memory, { title = null, kind = null } = {}) {
+  const wantedTitle = normalizeSourceLabel(title);
+  const wantedKind = normalizeSourceLabel(kind);
+  const tags = Array.isArray(memory?.tags) ? memory.tags.map((tag) => String(tag)) : [];
+  const sourceMetadata = memory?.source_metadata || memory?.sourceMetadata || {};
+  const titles = [memory?.title, sourceMetadata.filename, sourceMetadata.file_name, sourceMetadata.document_title]
+    .map(normalizeSourceLabel).filter(Boolean);
+  const filenames = tags.filter((tag) => tag.startsWith('filename:'))
+    .map((tag) => normalizeSourceLabel(tag.slice('filename:'.length)));
+  const titleMatches = !wantedTitle || [...titles, ...filenames].includes(wantedTitle);
+  const kindMatches = !wantedKind || tags.includes(`kind:${wantedKind}`)
+    || normalizeSourceLabel(sourceMetadata.kind) === wantedKind
+    || normalizeSourceLabel(sourceMetadata.source_kind) === wantedKind;
+  return titleMatches && kindMatches;
+}
+
+function sourceMemoryTimestamp(memory) {
+  const metadata = memory?.source_metadata || memory?.sourceMetadata || {};
+  const candidates = [metadata.event_time, metadata.eventTime, memory?.event_time, memory?.eventTime,
+    memory?.document_date, memory?.created_at, memory?.createdAt];
+  for (const value of candidates) {
+    const ts = new Date(value || '').getTime();
+    if (Number.isFinite(ts)) return ts;
+  }
+  return 0;
+}
+
+async function resolveSourceMemoryAnchors(store, ctx, { title = null, kind = null, selector = null } = {}, timeoutMs = 350) {
+  if (!store?.listMemories || (!title && !kind)) return [];
+  const listed = await withTimeout(store.listMemories({
+    user_id: ctx.userId,
+    org_id: ctx.orgId,
+    project: ctx.projectId || undefined,
+    is_latest: true,
+    limit: 500,
+    access_context: ctx.accessContext,
+  }), timeoutMs, { memories: [] });
+  const matches = (listed?.memories || []).filter((memory) => memoryMatchesSourceContract(memory, { title, kind }));
+  if (selector === 'latest' || selector === 'earliest') {
+    matches.sort((a, b) => selector === 'latest'
+      ? sourceMemoryTimestamp(b) - sourceMemoryTimestamp(a)
+      : sourceMemoryTimestamp(a) - sourceMemoryTimestamp(b));
+    return matches.slice(0, 1);
+  }
+  return matches;
+}
+
 function entityQueryForms(query) {
   if (!query) return [];
   const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
@@ -220,6 +271,10 @@ export function resolveRecallPlan(input = {}) {
   // inferred/structured values during the additive migration.
   const sourceDocumentId = boundedString(input.source_document_id || structuredSource.document_id, 128);
   const sourceTitle = boundedString(input.source_title || structuredSource.title, 512);
+  const sourceKind = boundedString(input.source_kind || structuredSource.kind, 64);
+  const temporalSelector = ['latest', 'earliest'].includes(String(input.temporal_selector || structuredTime.kind || ''))
+    ? String(input.temporal_selector || structuredTime.kind)
+    : null;
   const validAt = normalizedIso(input.valid_at || structuredTime.valid_at);
   const knownAt = normalizedIso(input.known_at || structuredTime.known_at);
   const range = normalizeTemporalRange(input.date_range || structuredTime.range);
@@ -229,7 +284,9 @@ export function resolveRecallPlan(input = {}) {
       ? 'valid_at'
       : range
         ? 'range'
-        : input.temporal === 'known_at'
+        : temporalSelector
+          ? temporalSelector
+          : input.temporal === 'known_at'
           ? 'known_at'
           : 'current';
   const budget = mode === 'full' ? 24_000 : mode === 'explain' ? 8_000 : 2_000;
@@ -242,15 +299,17 @@ export function resolveRecallPlan(input = {}) {
     mode_downgraded: requested === 'full' && !fullAllowed ? 'full_requires_explicit_caller' : null,
     temporal,
     source: {
-      requested: !!(sourceDocumentId || sourceTitle),
+      requested: !!(sourceDocumentId || sourceTitle || (sourceKind && temporalSelector)),
       document_id: sourceDocumentId,
       title: sourceTitle,
+      kind: sourceKind,
     },
     time: {
       mode: temporal,
       valid_at: validAt,
       known_at: knownAt,
       range,
+      selector: temporalSelector,
     },
     max_graph_hops: mode === 'fact' ? 0 : 1,
     max_memories: operation === 'timeline'
@@ -1568,6 +1627,8 @@ export class RecallRouter {
       ...options,
       source_document_id: recallPlan.source.document_id,
       source_title: recallPlan.source.title,
+      source_kind: recallPlan.source.kind,
+      temporal_selector: recallPlan.time.selector,
       valid_at: recallPlan.time.valid_at,
       known_at: recallPlan.time.known_at,
       date_range: recallPlan.time.range,
@@ -1599,9 +1660,15 @@ export class RecallRouter {
     const RERANK_RESERVE_MS = Number(process.env.RERANK_RESERVE_MS || 450);
     let cutoffReason = null;
     let explicitSourceDocuments = [];
+    let explicitSourceMemoryAnchors = [];
     let explicitSourceHydration = null;
     const explicitSourceRequested = recallPlan.source.requested;
-    if (this.evidence?.resolveSourceDocuments && explicitSourceRequested) {
+    // A source class alone (for example "the latest image") has no document
+    // title or id. Do not send that broad selector to the document resolver:
+    // it may be interpreted as an unconstrained document search. Images and
+    // other direct uploads resolve through their scoped memory provenance.
+    const explicitDocumentSourceRequested = !!(recallPlan.source.document_id || recallPlan.source.title);
+    if (this.evidence?.resolveSourceDocuments && explicitDocumentSourceRequested) {
       explicitSourceDocuments = await withTimeout(
         this.evidence.resolveSourceDocuments({
           userId: ctx.userId,
@@ -1648,9 +1715,21 @@ export class RecallRouter {
         });
       }
     }
+    // A file/image can be recalled before it has evidence segments or a
+    // document row: direct image uploads are durable memory records carrying
+    // filename:<name> and kind:image provenance. Resolve those records under
+    // the same caller scope instead of incorrectly declaring a named image
+    // absent just because it is not a document-evidence source.
+    if (explicitSourceRequested) {
+      explicitSourceMemoryAnchors = await resolveSourceMemoryAnchors(this.store, ctx, {
+        title: recallPlan.source.title,
+        kind: recallPlan.source.kind,
+        selector: recallPlan.time.selector,
+      }, Math.min(350, remainingBudget()));
+    }
     // A requested source is an authorization boundary, not a ranking hint.
     // Never replace an unresolved source request with tenant-wide memories.
-    if (explicitSourceRequested && explicitSourceDocuments.length === 0) {
+    if (explicitSourceRequested && explicitSourceDocuments.length === 0 && explicitSourceMemoryAnchors.length === 0) {
       return {
         memories: [], evidence: [], live: [],
         trace: {
@@ -1673,7 +1752,7 @@ export class RecallRouter {
     const evidenceStartedAt = Date.now();
     const sourceFirstEvidence = recallPlan.expand_evidence
       ? (explicitSourceRequested && explicitSourceDocuments.length === 0
-        ? Promise.resolve({ items: [], reason: 'source-not-found', docIds: [] })
+        ? Promise.resolve({ items: [], reason: explicitSourceMemoryAnchors.length ? 'memory-source-only' : 'source-not-found', docIds: [] })
         : hop2Evidence({
           evidenceService: this.evidence,
           query,
@@ -1777,10 +1856,23 @@ export class RecallRouter {
       }
     }
     if (explicitSourceRequested) {
-      memories = filterMemoriesByDocumentIds(
-        memories,
-        explicitSourceDocuments.map((document) => document.id),
-      );
+      const sourceDocumentIds = explicitSourceDocuments.map((document) => document.id);
+      const sourceMemoryIds = new Set(explicitSourceMemoryAnchors.map((memory) => memory?.id).filter(Boolean));
+      const documentMatched = sourceDocumentIds.length
+        ? filterMemoriesByDocumentIds(memories, sourceDocumentIds)
+        : [];
+      // Direct source-memory anchors are authoritative for a named upload or
+      // latest/earliest source request. Keep full content for downstream
+      // projection and give the selected source a stable relevance floor.
+      const sourceAnchors = explicitSourceMemoryAnchors.map((memory) => ({
+        ...memory,
+        score: Math.max(Number(memory.score) || 0, 0.99),
+        _source_anchor: true,
+      }));
+      const byId = new Map([...documentMatched, ...sourceAnchors]
+        .filter((memory) => memory?.id)
+        .map((memory) => [memory.id, memory]));
+      memories = [...byId.values()].filter((memory) => sourceMemoryIds.size === 0 || sourceMemoryIds.has(memory.id) || sourceDocumentIds.length > 0);
     }
     traceLatency.memory = Date.now() - t1;
 

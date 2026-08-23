@@ -145,8 +145,25 @@ const NATIVE_CONTEXT_TOOL = (() => {
             description: 'For hivemind_at only: valid_time means what was true/effective; known_time means what was known/recorded. none for all other tools.',
           },
           ...context.function.parameters.properties,
+          // These fields are deliberately native-only. use_tools:true keeps
+          // the established compound/Composio schema unchanged.
+          temporal_semantics: {
+            type: 'string',
+            enum: ['none', 'latest', 'earliest', 'event_window', 'snapshot_at', 'snapshot_diff', 'version_history'],
+            description: 'Semantic temporal contract independent of language. latest/earliest select an authorized record by stored event time; event_window means records/activity occurring during a range; snapshot_at means workspace truth at one instant; snapshot_diff compares truth at two instants; version_history walks revisions.',
+          },
+          referent_kind: {
+            type: 'string',
+            enum: ['person', 'organization', 'file', 'image', 'project', 'event', 'unknown'],
+            description: 'What the request is about, classified semantically in the user language. A filename is file or image, not an entity aggregate.',
+          },
+          source_kind: {
+            type: ['string', 'null'],
+            enum: ['document', 'image', 'conversation', 'connector', null],
+            description: 'Constrain a named or recency-selected source to this stored source class when applicable.',
+          },
         },
-        required: ['native_tool', 'temporal_axis', ...context.function.parameters.required],
+        required: ['native_tool', 'temporal_axis', 'referent_kind', 'source_kind', ...context.function.parameters.required],
       },
     },
   };
@@ -258,7 +275,7 @@ Never invent workspace facts. Never bypass approval. Preserve exact entities, fi
 const NATIVE_POLICY = `You are HIVE, the grounded organizational brain. You MUST call exactly one supplied high-level tool. Perform planning, semantic query optimization, tool selection, temporal normalization, answer-depth selection, and answer-shape selection in this ONE call.
 Choose one minimal native route; never request every native tool and never create speculative hops.
 - hivemind_profile: maintained identity/profile facts belonging to the authenticated user or organization profile, such as name, role, company, preferences, goals, language, or location. Use it only when the semantic subject is the caller or the caller's maintained organization profile. A third-person pronoun resolved from conversation history still refers to that other person and must never become a caller-profile read or write. It is caller-scoped by the server and takes no identifiers. Do not substitute a generic recall merely because profile facts may be absent; profile must run first. General company knowledge, products, documents, decisions, meetings, and history that are not maintained profile facts belong to recall.
-For a grounded read, use hivemind_context and follow the native_tool catalog attached to that field; its descriptions are authoritative. Set operation to recall/source_read/temporal_range for hivemind_recall, temporal for hivemind_at, diff for hivemind_diff, timeline for hivemind_timeline, aggregate for hivemind_aggregate_entities, and relation_between for hivemind_relation_between. For a named file, preserve its closest recognizable title in source_title and use operation=source_read. Set temporal_axis=valid_time or known_time only for hivemind_at and none otherwise.
+For a grounded read, use hivemind_context and follow the native_tool catalog attached to that field; its descriptions are authoritative. Set operation to recall/source_read/temporal_range for hivemind_recall, temporal for hivemind_at, diff for hivemind_diff, timeline for hivemind_timeline, aggregate for hivemind_aggregate_entities, and relation_between for hivemind_relation_between. For a named file, preserve its closest recognizable title in source_title and use operation=source_read. For the latest/recent/first uploaded record, use hivemind_recall with temporal_semantics latest/earliest plus source_kind (image when it is an image); this is ordered retrieval, never a snapshot time-travel call. Set temporal_axis=valid_time or known_time only for hivemind_at and none otherwise.
 query_canonical_en is the sole model-authored retrieval query. Make it a compact semantic expression that preserves the subject, requested attribute, qualifiers, negation, relationship direction, temporal boundary, and source title. Expand only the requested facets; never add guessed facts. For a multi-facet overview of exactly one named entity, use that exact entity or alias as the retrieval query and carry the requested facets in answer_objective; this maximizes coverage without losing what the final answer must cover. The server will not call a second query-rewrite model.
 Select answer_completion_requirement and answer_scope before response_depth from semantic breadth, in any language. complete_set/exhaustive is required when the answer must collect every retained member or every relevant claim of a category about a subject; multi_facet/broad is required for a multi-aspect explanation, overview, comparison, or informative inventory; single_answer/bounded is only for one answerable point. If uncertain between levels, choose the broader level: omitting a supported member is worse than giving the synthesis more grounded context. The minimum response_depth is bounded => standard, broad => detailed, exhaustive => comprehensive. Standard exposes the unified top 5; detailed and comprehensive expose the unified top 15. Retrieval itself retains the top 15 in one pass. There is no later 5-to-10-to-15 hop.
 Use hivemind_memory for explicit memory writes and for a stable declarative assertion the user contributes, even without words asking to save it. Resolve ellipsis and pronouns from conversation history and write a self-contained statement with the exact subject; never store an unresolved pronoun. Facts the user can authoritatively establish about themselves or their organization use admission_class=trusted_fact. A description, opinion, or factual claim about another person uses admission_class=user_assertion so it remains attributable to the user rather than becoming independently verified background. For memory writes, set scope only when the user explicitly names a destination. If the user says their personal memory, their organization/company memory, a team memory, or a named project, preserve that semantic destination in scope (and project_hint for a named project). Otherwise set scope=null; the server will ask the user where it belongs. Never infer a destination from active UI context, profile, content topic, or the project catalog. This semantic rule applies in every language. Questions and transient conversational reactions are not writes. Use hivemind_projects only to list or resolve authorized projects. Use web_research only for current public-internet information. Use respond_directly only for greetings, arithmetic, harmless general conversation, a necessary clarification, or a safety refusal; never use it for workspace knowledge. Mark context_free=true only when that direct response is fully determined by the message/history and general knowledge. Any question that could be answered from workspace context — including a named person, organization, product, file, project, event, decision, record, or prior work — must use hivemind_context with context_free=false.
@@ -539,7 +556,7 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
     query_original: args?.query_original || message,
     query_canonical_en: canonicalQuery,
     named_entities: namedEntities,
-    recall_mode: 'fact', source: null, aggregate: null, relation: null,
+    recall_mode: 'fact', source: null, referent: null, aggregate: null, relation: null,
     answer_scope: answerScope,
     response_depth: responseDepth,
     retrieval_shape: retrievalShape,
@@ -561,6 +578,8 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
       }
       const declaredOp = String(args?.operation || 'recall');
       const semanticOp = ({
+        latest: 'recall',
+        earliest: 'recall',
         event_window: 'temporal_range',
         snapshot_at: 'temporal',
         snapshot_diff: 'diff',
@@ -604,6 +623,19 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
       }
       if (rawOp === 'temporal_range' && time?.range) {
         time = { ...time, valid_at: null, known_at: null, range: eventRange(time.range.start, time.range.end) };
+      }
+      // latest/earliest are retrieval-order contracts, not historical
+      // snapshots. They deliberately carry no ISO instant: RecallRouter
+      // resolves the newest/oldest authorized record by event/created time.
+      if (['latest', 'earliest'].includes(String(args?.temporal_semantics || ''))) {
+        time = {
+          valid_at: null,
+          known_at: null,
+          range: null,
+          kind: String(args.temporal_semantics),
+          axis: 'event_time',
+          order: args.temporal_semantics === 'latest' ? 'desc' : 'asc',
+        };
       }
       // A temporal-range model response may provide one resolved ISO instant
       // instead of duplicating it into start/end. Treat that as the inclusive
@@ -657,10 +689,17 @@ export function adaptToDecision(tool, args, message, language, { useTools = fals
         // Both are structured model output, so compile either representation
         // into the same source-isolated recall contract without keyword rules.
         source: s(args?.source_title, 512)
-          ? { title: s(args.source_title, 512) }
+          ? { title: s(args.source_title, 512), kind: args?.source_kind || null }
           : rawOp === 'source_read' && s(base.named_entities[0], 512)
-            ? { title: s(base.named_entities[0], 512) }
-            : null,
+            ? { title: s(base.named_entities[0], 512), kind: args?.source_kind || null }
+            : args?.source_kind
+              ? { title: null, kind: args.source_kind }
+              : null,
+        referent: {
+          kind: ['person', 'organization', 'file', 'image', 'project', 'event', 'unknown'].includes(args?.referent_kind)
+            ? args.referent_kind : 'unknown',
+          value: s(args?.source_title, 512) || s(base.named_entities[0], 512) || null,
+        },
         aggregate: rawOp === 'aggregate'
           ? { parent: s(base.named_entities[0] || base.query_canonical_en, 256), kind: s(args?.aggregate_kind, 128) || 'entity', requires_complete_coverage: true }
           : null,

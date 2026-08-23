@@ -584,6 +584,10 @@ async function execRelationBetween(bus, plan, ctx, { beforeDeadline, remaining, 
     mode: 'explain',
     ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
     ...(plan.source?.title ? { source_title: plan.source.title } : {}),
+    ...(plan.source?.kind ? { source_kind: plan.source.kind } : {}),
+    ...(plan.time?.kind === 'latest' || plan.time?.kind === 'earliest'
+      ? { temporal_selector: plan.time.kind }
+      : {}),
     ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
     ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
   };

@@ -1,0 +1,89 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { compileNativePlan } from '../../src/agent/v2/plan-compiler.js';
+import { validateNativePlan, validateNativePlanResult } from '../../src/agent/v2/plan-validator.js';
+import { createNativePlannerGraph, nativeV2RoutingMode } from '../../src/agent/v2/orchestrator.js';
+import { buildTurnContext } from '../../src/agent/v2/turn-context-builder.js';
+import { intentDecisionToPlan } from '../../src/agent/chat-intent-decision.js';
+
+function makePlan({ operation = 'recall', query = 'Kruti', entities = ['Kruti'], response = {}, source = null, time = {}, relation = [], aggregate = null, memory = null, direct = null, certified = false, capability } = {}) {
+  const family = capability || (['save'].includes(operation) ? 'memory_write' : ['profile', 'update_profile'].includes(operation) ? 'profile' : operation === 'direct' ? 'direct' : 'workspace_read');
+  const tool = ({ recall: 'hivemind_recall', source_read: 'hivemind_recall', event_range: 'hivemind_recall', snapshot: 'hivemind_at', diff: 'hivemind_diff', timeline: 'hivemind_timeline', relation_between: 'hivemind_relation_between', aggregate: 'hivemind_aggregate_entities', projects: 'hivemind_list_projects', profile: 'get_user_profile', update_profile: 'update_user_profile', save: 'hivemind_save_memory', direct: null })[operation];
+  return {
+    schema_version: 'native-turn-plan.v2', capability: family, operation,
+    response: { language: 'en', type: 'fact', scope: 'broad', depth: 'detailed', shape: 'overview', objective: 'Answer exactly from authorized context.', ...response },
+    references: { resolved_pronouns: [], entities, source },
+    time: { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null, ...time },
+    steps: [{ id: 'step_1', capability: family, tool, query, entities, depends_on: [], result_binding: 'result' }],
+    completion: { needs_user_input: false, approval_required: ['save', 'update_profile'].includes(operation) },
+    relation_entities: relation, aggregate, memory, direct_response: direct, context_free_certificate: certified,
+  };
+}
+
+test('TurnContextBuilder bounds history, profile and authorized projects', () => {
+  const context = buildTurnContext({ message: ' hello ', history: Array.from({ length: 8 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `t${i}` })), profileContext: 'x'.repeat(3000), projectCatalog: Array.from({ length: 30 }, (_, i) => ({ id: `${i}`, name: `P${i}` })) });
+  assert.equal(context.message, 'hello'); assert.equal(context.history.length, 4);
+  assert.equal(context.compact_profile.length, 1800); assert.equal(context.authorized_projects.length, 24);
+});
+
+test('person overview preserves entity and compiles one canonical recall', () => {
+  const decision = compileNativePlan(validateNativePlan(makePlan()), 'What do you know about Kruti?');
+  assert.equal(decision.operation, 'recall'); assert.deepEqual(decision.queries, ['Kruti']);
+  assert.deepEqual(decision.named_entities, ['Kruti']); assert.equal(decision.planned_steps.length, 1);
+});
+
+test('named source and latest upload preserve source/time semantics', () => {
+  const named = compileNativePlan(validateNativePlan(makePlan({ operation: 'source_read', query: 'Solvis products', source: { title: 'Whitepaper_Transformation.pdf', document_id: null, kind: 'pdf', selection: null } })), 'file');
+  assert.equal(named.source.title, 'Whitepaper_Transformation.pdf');
+  const latest = compileNativePlan(validateNativePlan(makePlan({ query: 'latest uploaded image visual contents', source: { title: null, document_id: null, kind: 'image', selection: 'latest' }, time: { semantics: 'latest', axis: 'known_time' } })), 'recent image');
+  assert.equal(latest.time.kind, 'latest'); assert.equal(latest.source.kind, 'image');
+});
+
+test('event range is bounded recall while snapshot/diff/timeline select temporal tools', () => {
+  const range = compileNativePlan(validateNativePlan(makePlan({ operation: 'event_range', query: 'pricing decisions', response: { type: 'decision', scope: 'exhaustive', shape: 'inventory' }, time: { semantics: 'event_range', axis: 'event_time', start: '2026-08-17T00:00:00+02:00', end: '2026-08-23T23:59:59+02:00' } })), 'last week');
+  const executable = intentDecisionToPlan(range, 'last week');
+  assert.equal(executable.needs_time_travel, false); assert.equal(executable.time.kind, 'event_range'); assert.equal(range.response_depth, 'comprehensive');
+  const snapshot = compileNativePlan(validateNativePlan(makePlan({ operation: 'snapshot', time: { semantics: 'snapshot', axis: 'valid_time', valid_at: '2026-08-01T00:00:00Z' } })), 'snapshot');
+  assert.equal(snapshot.native_tool, 'hivemind_at'); assert.equal(intentDecisionToPlan(snapshot, 'snapshot').needs_time_travel, true);
+  const diff = compileNativePlan(validateNativePlan(makePlan({ operation: 'diff', time: { semantics: 'diff', axis: 'valid_time', start: '2026-07-01T00:00:00Z', end: '2026-08-01T00:00:00Z' } })), 'diff');
+  assert.equal(diff.native_tool, 'hivemind_diff');
+  assert.equal(compileNativePlan(validateNativePlan(makePlan({ operation: 'timeline', time: { semantics: 'timeline', axis: 'valid_time' } })), 'history').native_tool, 'hivemind_timeline');
+});
+
+test('relation, aggregate and projects have dedicated exact operations', () => {
+  assert.equal(compileNativePlan(validateNativePlan(makePlan({ operation: 'relation_between', query: 'Kruti marketing relationship', relation: ['Kruti', 'marketing team'], response: { type: 'relationship' } })), 'relation').native_tool, 'hivemind_relation_between');
+  assert.equal(compileNativePlan(validateNativePlan(makePlan({ operation: 'aggregate', query: 'all Solvis products', aggregate: { parent: 'Solvis', kind: 'product' }, response: { scope: 'exhaustive', shape: 'inventory' } })), 'aggregate').native_tool, 'hivemind_aggregate_entities');
+  const projects = compileNativePlan(validateNativePlan(makePlan({ operation: 'projects', query: 'authorized projects', entities: [] })), 'projects');
+  assert.equal(projects.native_tool, 'hivemind_list_projects'); assert.deepEqual(projects.tool_groups, ['hivemind-projects']);
+});
+
+test('unscoped save stays null and profile update stays caller scoped', () => {
+  const memory = { title: 'Kruti location', content: 'Kruti was born in India.', memory_type: 'fact', scope: null, project_id: null, tags: [], entities: ['Kruti'], event_time: null, profile_fields: {}, preferences: [] };
+  const saved = compileNativePlan(validateNativePlan(makePlan({ operation: 'save', query: null, memory, response: { type: 'acknowledgement', scope: 'bounded', depth: 'standard', shape: 'fact' } })), 'save');
+  assert.equal(saved.save.scope, undefined);
+  const profileMemory = { ...memory, title: null, content: null, entities: [], profile_fields: { location: 'India' } };
+  const profile = compileNativePlan(validateNativePlan(makePlan({ operation: 'update_profile', query: null, entities: [], memory: profileMemory, response: { type: 'acknowledgement', scope: 'bounded', depth: 'standard', shape: 'fact' } })), 'profile');
+  assert.deepEqual(profile.profile_update.fields, { location: 'India' });
+});
+
+test('validator repairs model-owned tool mapping but rejects semantic invalidity', () => {
+  const mismatched = makePlan(); mismatched.capability = 'direct'; mismatched.steps[0].capability = 'direct'; mismatched.steps[0].tool = 'hivemind_diff';
+  const repaired = validateNativePlanResult(mismatched);
+  assert.equal(repaired.status, 'repairable'); assert.equal(repaired.plan.steps[0].tool, 'hivemind_recall');
+  const invalid = makePlan({ operation: 'direct', query: null, entities: [], direct: 'Hello', certified: false, response: { type: 'acknowledgement', scope: 'bounded', depth: 'standard', shape: 'fact' } });
+  assert.equal(validateNativePlanResult(invalid).status, 'invalid');
+});
+
+test('LangGraph trajectory performs one planner call after deterministic context/catalog nodes', async () => {
+  let calls = 0;
+  const graph = createNativePlannerGraph({ planner: async ({ context, capabilityCatalog }) => { calls += 1; assert.equal(context.message, 'Who is Kruti?'); assert.match(capabilityCatalog, /workspace_read/); return { rawPlan: makePlan(), usage: { total_tokens: 42 } }; } });
+  const result = await graph.invoke({ input: { message: 'Who is Kruti?' } });
+  assert.equal(calls, 1); assert.equal(result.decision.operation, 'recall'); assert.equal(result.validation.status, 'valid');
+});
+
+test('routing flags never capture use_tools:true and canary is stable', () => {
+  const prior = { e: process.env.CHAT_ORCHESTRATOR_V2_ENABLED, s: process.env.CHAT_ORCHESTRATOR_V2_SHADOW, c: process.env.CHAT_ORCHESTRATOR_V2_CANARY_PERCENT };
+  process.env.CHAT_ORCHESTRATOR_V2_ENABLED = 'true';
+  try { assert.equal(nativeV2RoutingMode({ useTools: false, seed: 'u' }), 'serve'); assert.equal(nativeV2RoutingMode({ useTools: true, seed: 'u' }), 'off'); }
+  finally { for (const [key, value] of [['CHAT_ORCHESTRATOR_V2_ENABLED', prior.e], ['CHAT_ORCHESTRATOR_V2_SHADOW', prior.s], ['CHAT_ORCHESTRATOR_V2_CANARY_PERCENT', prior.c]]) value === undefined ? delete process.env[key] : process.env[key] = value; }
+});

@@ -6218,7 +6218,10 @@ exit \$RC
   }
 
   // API Routes
-  if (pathname.startsWith('/api/')) {
+  // /v2/chat is an isolated native-orchestrator acceptance route. It enters
+  // the exact same auth/body/tenant/quota/streaming lifecycle as /api/chat;
+  // only the planner selection differs inside runReactAgentV2.
+  if (pathname.startsWith('/api/') || pathname === '/v2/chat') {
     try {
       // Skip JSON body parsing for multipart + raw audio upload endpoints
       const _ct = req.headers['content-type'] || '';
@@ -11535,7 +11538,7 @@ exit \$RC
           // that actually creates memories.
           meters.push({ type: 'memories', amount: 1 });
           meters.push({ type: 'tokens', amount: charTokens(body?.content, 100) });
-        } else if (req.method === 'POST' && (pathname === '/api/chat' || pathname === '/api/chat/stream')) {
+        } else if (req.method === 'POST' && (pathname === '/api/chat' || pathname === '/api/chat/stream' || pathname === '/v2/chat')) {
           // Talk to HIVE. This was UNMETERED: the fallthrough below keys off
           // body.content, but chat sends body.message, so the most expensive
           // surface in the product charged nothing. A chat turn also runs recall
@@ -23626,10 +23629,18 @@ exit \$RC
         // CHAT — Talk to HIVE (memory-augmented LLM)
         // ==========================================
         case '/api/chat':
+        case '/v2/chat':
           if (req.method === 'POST') {
+            const forceNativeV2 = pathname === '/v2/chat';
+            if (forceNativeV2 && body?.use_tools === true) {
+              return jsonResponse(res, {
+                error: 'native_v2_tools_not_supported',
+                message: '/v2/chat is currently an isolated use_tools:false acceptance route. Use /api/chat for connector turns.',
+              }, 400);
+            }
             try {
               const { acquireTenantRequestSlot } = await import('./memory/tenant-gate.js');
-              await acquireTenantRequestSlot(req, res, orgId || userId || 'anon', '/api/chat', {
+              await acquireTenantRequestSlot(req, res, orgId || userId || 'anon', pathname, {
                 maxInflight: Number(process.env.CHAT_MAX_INFLIGHT_PER_ORG || 2),
                 queueTimeoutMs: Number(process.env.CHAT_ADMISSION_WAIT_MS || 8000),
                 requestTimeoutMs: Number(process.env.CHAT_ADMISSION_LEASE_MS || 180000),
@@ -23858,6 +23869,7 @@ exit \$RC
                       language,
                       router: body?.router,
                       useTools,
+                      nativeOrchestrator: forceNativeV2 ? 'v2' : null,
                       recallMode: body?.recall_mode,
                       recallSource: body?.source || {
                         document_id: body?.source_document_id,
@@ -23911,6 +23923,7 @@ exit \$RC
                   language,
                   router: body?.router,
                   useTools,
+                  nativeOrchestrator: forceNativeV2 ? 'v2' : null,
                   recallMode: body?.recall_mode,
                   recallSource: body?.source || {
                     document_id: body?.source_document_id,

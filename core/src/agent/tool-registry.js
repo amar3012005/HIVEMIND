@@ -907,7 +907,15 @@ const TOOL_HANDLERS = {
 
     let graph = [];
     const graphBudget = effectivePlan.latency_budget_ms - (Date.now() - recallStartedAt);
-    if (effectivePlan.max_graph_hops > 0 && result.memories.length > 0 && graphBudget > 1) {
+    // Graph hydration is a distinct capability, not a mandatory appendage to
+    // every hybrid recall.  The old default ran it for each ordinary recall
+    // and for both snapshots of a diff, generating avoidable remote work and
+    // filling an .amr tenant's relationship queue.  Relation and timeline
+    // executors request their one graph read explicitly; callers may opt in
+    // with include_graph for the documented raw-tool use case.
+    const graphRequested = args.include_graph === true
+      || ['relation_between', 'timeline'].includes(String(effectivePlan.operation || ''));
+    if (graphRequested && effectivePlan.max_graph_hops > 0 && result.memories.length > 0 && graphBudget > 1) {
       const loaded = await Promise.race([
         loadTypedGraphEvidence({
           prisma: ctx.prisma,

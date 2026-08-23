@@ -825,6 +825,11 @@ const TOOL_HANDLERS = {
       source_type:    args.source_type,
       source:         recallPlan.source,
       time:           recallPlan.time,
+      // Keep the flat trusted planner fields as well as the normalized
+      // structured objects. RecallRouter accepts both forms; the flat fields
+      // preserve ordered direct-source selectors after the first normalization.
+      source_kind:    args.source_kind,
+      temporal_selector: args.temporal_selector,
       operation:      recallPlan.operation,
       include_superseded: recallPlan.operation === 'timeline' || args.include_superseded === true,
       // Date range — { start, end } ISO timestamps. Filters memories whose

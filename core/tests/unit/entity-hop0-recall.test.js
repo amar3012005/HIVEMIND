@@ -3,10 +3,23 @@ import assert from 'node:assert/strict';
 import {
   matchEntitiesLexical,
   hop0QueryTokens,
+  remoteQueryEntityRegistry,
   resolveEntityRecallCandidates,
   HOP0_MAX_ENTITIES,
   HOP0_MAX_CANDIDATES,
 } from '../../src/memory/entity-hop0.js';
+
+test('remote tenant tag registry extracts bounded entity phrases without an LLM', () => {
+  const conversational = remoteQueryEntityRegistry('What do you know about Kruti?');
+  assert.ok(conversational.some((entry) => entry.slug === 'kruti'));
+  assert.ok(conversational.length <= 24);
+
+  const multiword = remoteQueryEntityRegistry('Tell me about Amar Sai Gadde');
+  assert.ok(multiword.some((entry) => entry.slug === 'amar-sai-gadde'));
+
+  const lowercase = remoteQueryEntityRegistry('tell me about kruti');
+  assert.ok(lowercase.some((entry) => entry.slug === 'kruti'));
+});
 
 const REGISTRY = [
   { id: 'e-davinci', canonicalName: 'Davinci AI', aliases: ['DaVinci'], mentionCount: 36 },

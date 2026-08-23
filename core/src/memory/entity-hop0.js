@@ -71,6 +71,53 @@ export function hop0QueryTokens(query = '') {
   return out;
 }
 
+// Build bounded exact-tag anchors for sovereign/.amr tenants whose entity
+// registry is not mirrored centrally yet. The complete set is submitted to the
+// tenant tag index in one request; this does not fan out retrieval per word.
+// Capitalized spans are preferred, with Unicode n-grams covering lowercase
+// input. Non-entities simply miss the exact tag index and add no candidates.
+export function remoteQueryEntityRegistry(query = '') {
+  const raw = String(query || '');
+  const words = [];
+  if (_segmenter) {
+    for (const seg of _segmenter.segment(raw)) {
+      if (!seg.isWordLike) continue;
+      const value = seg.segment.normalize('NFKC').trim();
+      if (value.length >= 3) words.push(value);
+      if (words.length >= HOP0_MAX_QUERY_TOKENS) break;
+    }
+  } else {
+    words.push(...raw.split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 3).slice(0, HOP0_MAX_QUERY_TOKENS));
+  }
+  if (!words.length) return [];
+
+  const capitalized = words.filter((word) => /^\p{Lu}/u.test(word));
+  const basis = capitalized.length ? capitalized : words;
+  const phrases = [];
+  for (let size = Math.min(4, basis.length); size >= 1; size -= 1) {
+    for (let start = 0; start + size <= basis.length; start += 1) {
+      phrases.push(basis.slice(start, start + size).join(' '));
+    }
+  }
+
+  const seen = new Set();
+  const registry = [];
+  for (const phrase of phrases) {
+    const slug = normalizeEntity(phrase);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    registry.push({
+      id: `tenant-tag:${slug}`,
+      name: phrase,
+      slug,
+      matchScore: SCORE_TOKEN,
+      matchedTokens: hop0QueryTokens(phrase),
+    });
+    if (registry.length >= 24) break;
+  }
+  return registry;
+}
+
 // Contiguous word n-grams of the query, as normalizeEntity slugs — lets a
 // multi-word canonical name ("Solvis Lea", "Davinci AI") match exactly even
 // when embedded in a longer question.
@@ -253,8 +300,12 @@ export async function resolveEntityRecallCandidates({
         matchedTokens: hop0QueryTokens(name),
       }))
       .filter((entity) => entity.slug);
+    const tenantTagRegistry = orgIsRemote(org_id) && !plannedRegistry.length
+      ? remoteQueryEntityRegistry(query)
+      : [];
     const tagRegistry = [
       ...plannedRegistry,
+      ...tenantTagRegistry,
       ...matchEntitiesLexical(entityRows, query),
     ].filter((entity, index, rows) => rows.findIndex((row) => row.slug === entity.slug) === index);
     const linkRegistry = matchEntitiesLexical(canonicalRows, query);

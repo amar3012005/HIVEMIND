@@ -3921,8 +3921,12 @@ export async function runReactAgentV2({
         },
       };
     });
+    // A precision source request may resolve to a direct upload represented by
+    // a memory (for example a knowledge-upload image) rather than a document
+    // evidence segment. Keep the source boundary, but surface that selected
+    // memory when there is no document citation packet.
     const sourcePool = evidence.coverage?.source_requested
-      ? citationSources
+      ? (citationSources.length ? citationSources : memorySources)
       : [...citationSources, ...memorySources];
     const publicSources = [...new Map(sourcePool.map((source) => [
       source?.segment_id || source?.id || source?.citation_id,

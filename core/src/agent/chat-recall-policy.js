@@ -17,6 +17,17 @@ function documentIdentity(item) {
   };
 }
 
+function sourceKindMatches(item, expectedKind) {
+  const wanted = normalized(expectedKind);
+  if (!wanted) return false;
+  const tags = Array.isArray(item?.tags) ? item.tags.map((tag) => normalized(tag)) : [];
+  const metadata = item?.source_metadata || item?.sourceMetadata || {};
+  return tags.includes(`kind:${wanted}`)
+    || normalized(metadata.kind) === wanted
+    || normalized(metadata.source_kind) === wanted
+    || normalized(item?.source_kind) === wanted;
+}
+
 export function resolveDocumentArtifact(memories = []) {
   for (const memory of memories) {
     const identity = documentIdentity(memory);
@@ -34,9 +45,14 @@ export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], 
   const evidenceFound = memories.length > 0 || evidence.length > 0;
   const sourceIds = new Set(evidence.map((item) => documentIdentity(item).document_id).filter(Boolean));
   const sourceTitles = new Set(evidence.map((item) => normalized(documentIdentity(item).title)).filter(Boolean));
+  // A source boundary can name a stored document, or refer to a direct upload
+  // such as "the latest image". The latter is represented by its promoted
+  // memory before it has a KnowledgeDocument row, so document identity alone
+  // would wrongly discard the exact retrieved memory as "not covered".
   const sourceCovered = !source || (
     (source.document_id && sourceIds.has(source.document_id))
     || (source.title && sourceTitles.has(normalized(source.title)))
+    || (source.kind && [...memories, ...evidence].some((item) => sourceKindMatches(item, source.kind)))
   );
 
   const entities = Array.isArray(plan.named_entities) ? plan.named_entities.filter(Boolean) : [];

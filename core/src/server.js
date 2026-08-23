@@ -17676,8 +17676,10 @@ exit \$RC
                     },
                   });
                   if (planEnforcer && orgId) {
-                    planEnforcer.recordUsage(orgId, 'kbPages', Math.max(1, Number(r.pages) || 1));
-                    planEnforcer.recordUsage(orgId, 'uploads', 1);
+                    planEnforcer.recordUsage(orgId, 'kbPages', Math.max(1, Number(r.pages) || 1), {
+                      source: 'knowledge_upload', feature: 'knowledge', metadata: { ingest_mode: smartFlag ? 'both' : 'evidence' },
+                    });
+                    planEnforcer.recordUsage(orgId, 'uploads', 1, { source: 'knowledge_upload', feature: 'knowledge' });
                   }
                   results[idx] = {
                     filename: fp.filename, status: 'ingested',
@@ -23905,7 +23907,7 @@ exit \$RC
                       result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
                     }
                     try {
-                      planEnforcer?.recordUsage(orgId, 'searches', 1);
+                      planEnforcer?.recordUsage(orgId, 'searches', 1, { source: 'chat', feature: 'brain_chat', metadata: { use_tools: useTools } });
                       const tot = Number(result?.usage?.total_tokens) || 0;
                       if (tot > 0) planEnforcer?.recordUsage(orgId, 'tokens', tot);
                     } catch { /* metering never breaks the stream */ }
@@ -23959,7 +23961,7 @@ exit \$RC
                 // updates both the in-memory counters (checkLimit + the usage page
                 // read these) and durable OrgUsage. Fire-and-forget.
                 try {
-                  planEnforcer?.recordUsage(orgId, 'searches', 1);
+                  planEnforcer?.recordUsage(orgId, 'searches', 1, { source: 'chat', feature: 'brain_chat', metadata: { use_tools: useTools } });
                   const tot = Number(result?.usage?.total_tokens) || 0;
                   if (tot > 0) planEnforcer?.recordUsage(orgId, 'tokens', tot);
                 } catch { /* metering never breaks the response */ }

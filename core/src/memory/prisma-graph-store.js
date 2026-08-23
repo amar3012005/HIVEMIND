@@ -3,7 +3,7 @@ import { computeTokenSimilarity } from './conflict-detector.js';
 import { normalizeRelationshipType } from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
-import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrGraph } from '../vector/mneme/driver.js';
+import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrMemRelationshipsBatch, amrGraph } from '../vector/mneme/driver.js';
 import { pgUrlFor, remoteHydrate, remoteList, isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { currentOrg } from '../db/prisma.js';
 import { buildTrigramFallbackForms, buildWideTsQuery, shouldRunTrigramFallback } from './lexical-query.js';
@@ -1468,9 +1468,22 @@ export class PrismaGraphStore {
       const next = [];
       // Bounded fan-out: a hub memory can have hundreds of edges, and each hop is an
       // agent round trip. Cap the frontier so one dense node cannot stall a recall.
-      for (const id of frontier.slice(0, 25)) {
-        let res = null;
-        try { res = await amrMemRelationships(org_id, id); } catch { res = null; }
+      const frontierIds = frontier.slice(0, 25);
+      // One bounded batch per graph depth.  This keeps a wide recall from
+      // multiplying remote queue entries by the number of anchors.
+      let batched = await amrMemRelationshipsBatch(org_id, frontierIds).catch(() => null);
+      if (batched === null) {
+        // Compatibility for an older self-hosted agent.  Keep this fallback
+        // bounded rather than returning to a 25-request serial fan-out.
+        batched = {};
+        for (let offset = 0; offset < frontierIds.length; offset += 4) {
+          const ids = frontierIds.slice(offset, offset + 4);
+          const rows = await Promise.all(ids.map(async (id) => [id, await amrMemRelationships(org_id, id).catch(() => null)]));
+          for (const [id, row] of rows) batched[id] = row;
+        }
+      }
+      for (const id of frontierIds) {
+        const res = batched?.[id] || null;
         if (!res) continue;
         const edges = [
           ...(res.out || []).map((e) => ({ ...e, from_id: id, to_id: e.target_id })),

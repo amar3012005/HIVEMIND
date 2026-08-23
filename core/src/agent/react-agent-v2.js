@@ -604,7 +604,7 @@ async function execRelationBetween(bus, plan, ctx, { beforeDeadline, remaining, 
     bus.mergeEdges(relationResult?.relationships, { overwrite: true });
     bus.addCoMentions(relationResult?.co_mentions);
     bus.addPackets(relationResult?.evidence_packets);
-    return { relationChecked: true };
+    return { relationChecked: true, relationResult };
   } catch (error) {
     recordTool('hivemind_relation_between', relationArgs, `error: ${error.message}`, null);
   }
@@ -693,6 +693,7 @@ async function execTimeline(bus, plan, ctx, { beforeDeadline, remaining, startTo
     bus.mergeMemories(temporalResult?.removed, { flags: { _diff_removed: true }, absentOnly: true, cloneOnFlag: true });
     bus.mergeEvidence(temporalResult?.evidence, { keyMode: 'noPage' });
     bus.addPacket(temporalResult?.evidence_packet);
+    for (const packet of temporalResult?.evidence_packets || []) bus.addPacket(packet);
 
     // fix #2 — this capability OWNS version-history end-to-end. The temporal tool
     // ranks the LATEST memory but the superseded predecessor (isLatest=false,
@@ -706,8 +707,16 @@ async function execTimeline(bus, plan, ctx, { beforeDeadline, remaining, startTo
     // WINS over any prior unflagged base entry (bus contract, R2). This makes
     // "over time" and "before it changed" answer identically.
     await hydrateSupersededPredecessors(bus, ctx, { anchorMemories: tMems, plan });
+    return {
+      temporalCoverage: {
+        tool: temporalTool,
+        complete: (tMems?.length || 0) > 0 || (temporalResult?.evidence?.length || 0) > 0,
+        reason: (tMems?.length || 0) || (temporalResult?.evidence?.length || 0) ? null : 'no_verified_temporal_material',
+      },
+    };
   } catch (error) {
     recordTool(temporalTool, temporalArgs, `error: ${error.message}`, null);
+    return { temporalCoverage: { tool: temporalTool, complete: false, reason: 'temporal_tool_error' } };
   }
 }
 
@@ -971,9 +980,9 @@ async function execBaseRecall(bus, plan, ctx, { beforeDeadline, startTool, recor
 // profile are mutually exclusive by operation; timeline may co-fire — matching
 // the original guards exactly. Each executor internally re-checks remaining().
 const OP_STAGE = [
-  { name: 'relation', predicate: (p) => p.operation === 'relation_between' && p.relation_intent?.entities?.length >= 2, exec: execRelationBetween, scalar: 'relationChecked' },
+  { name: 'relation', predicate: (p) => p.operation === 'relation_between' && p.relation_intent?.entities?.length >= 2, exec: execRelationBetween, scalar: 'relationResult' },
   { name: 'aggregate', predicate: (p) => !!(p.aggregate?.parent && p.aggregate?.kind), exec: execAggregate, scalar: 'aggregateResult' },
-  { name: 'timeline', predicate: (p) => p.operation === 'timeline' || p.needs_time_travel, exec: execTimeline, scalar: null },
+  { name: 'timeline', predicate: (p) => p.operation === 'timeline' || p.needs_time_travel, exec: execTimeline, scalar: 'temporalCoverage' },
   { name: 'profile', predicate: (p) => p.operation === 'profile', exec: execProfile, scalar: 'profileContext' },
 ];
 
@@ -1013,6 +1022,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // through the bus.merge* methods one accumulator at a time.
   const { memoriesById, liveItems, evidenceItems, edgesByKey, synthesisChains, recallPackets, coMentions, rankedCandidates, recallTelemetry } = bus;
   let relationChecked = false;
+  let relationResult = null;
   let activeDeadlineAt = deadlineAt;
   const remaining = () => Math.max(0, activeDeadlineAt - Date.now());
   const beforeDeadline = (task) => {
@@ -1132,12 +1142,17 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // blocks (relation/aggregate/timeline/profile) with one predicate-routed loop.
   let aggregateResult = null;
   let profileContext = '';
+  let temporalCoverage = null;
   for (const cap of OP_STAGE) {
     if (!cap.predicate(plan)) continue;
     const patch = await cap.exec(bus, plan, ctx, helpers);
-    if (cap.scalar === 'relationChecked' && patch?.relationChecked) relationChecked = true;
+    if (cap.name === 'relation' && patch?.relationChecked) {
+      relationChecked = true;
+      relationResult = patch?.relationResult || relationResult;
+    }
     else if (cap.scalar === 'aggregateResult') aggregateResult = patch?.aggregateResult ?? aggregateResult;
     else if (cap.scalar === 'profileContext') profileContext = patch?.profileContext || profileContext;
+    else if (cap.scalar === 'temporalCoverage') temporalCoverage = patch?.temporalCoverage ?? temporalCoverage;
   }
 
   let coverage = assessRecallCoverage({
@@ -1161,6 +1176,16 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     ...coverage,
     ...retrievalHealth(),
   };
+  if (temporalCoverage && temporalCoverage.complete !== true) {
+    coverage = {
+      ...coverage,
+      temporal_requested: true,
+      temporal_covered: false,
+      temporal_tool: temporalCoverage.tool,
+      cutoff_reason: temporalCoverage.reason,
+      complete: false,
+    };
+  }
   if (plan.operation === 'relation_between' && relationChecked) {
     coverage = {
       ...coverage,
@@ -1237,6 +1262,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     recall_telemetry: recallTelemetry,
     profile_context: profileContext,
     aggregate: aggregateResult,
+    relation: relationResult,
     coverage: {
       ...coverage,
       // Escalation recomputes semantic coverage. Reapply transport health from
@@ -1250,6 +1276,13 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
         ...(aggregateResult?.coverage?.complete === true
           ? {}
           : { cutoff_reason: aggregateResult?.coverage?.reason || 'aggregate_coverage_incomplete' }),
+      } : {}),
+      ...(temporalCoverage && temporalCoverage.complete !== true ? {
+        temporal_requested: true,
+        temporal_covered: false,
+        temporal_tool: temporalCoverage.tool,
+        cutoff_reason: temporalCoverage.reason,
+        complete: false,
       } : {}),
     },
     escalation_count: escalationCount,
@@ -1592,6 +1625,40 @@ function sourceUnavailableResponse({ evidence, language }) {
   return responses[lang] || responses.en;
 }
 
+function temporalUnavailableResponse({ evidence, language }) {
+  const lang = String(language || 'en').slice(0, 2).toLowerCase();
+  const tool = evidence?.coverage?.temporal_tool;
+  const isDiff = tool === 'hivemind_diff';
+  const responses = {
+    de: isDiff
+      ? 'Ich konnte für diesen Zeitraum keine verifizierten zeitlich eingeordneten Datensätze vergleichen. Ich ersetze sie nicht durch aktuelle oder benachbarte Informationen.'
+      : 'Ich konnte für diesen Zeitpunkt keinen verifizierten, zeitlich eingeordneten Datensatz finden. Ich ersetze ihn nicht durch aktuelle oder benachbarte Informationen.',
+    fr: isDiff
+      ? 'Je n’ai pas pu comparer de documents vérifiés et datés pour cette période. Je ne les remplace pas par des informations actuelles ou voisines.'
+      : 'Je n’ai pas trouvé de document vérifié et daté pour ce moment précis. Je ne le remplace pas par des informations actuelles ou voisines.',
+    es: isDiff
+      ? 'No pude comparar registros verificados y fechados para ese periodo. No los sustituiré por información actual o cercana.'
+      : 'No pude encontrar un registro verificado y fechado para ese momento concreto. No lo sustituiré por información actual o cercana.',
+    en: isDiff
+      ? 'I could not compare verified, time-qualified records for that period, so I will not substitute a current or nearby record.'
+      : 'I could not find a verified, time-qualified record for that point in time, so I will not substitute a current or nearby record.',
+  };
+  return responses[lang] || responses.en;
+}
+
+function noVerifiedRelationResponse({ evidence, language }) {
+  const lang = String(language || 'en').slice(0, 2).toLowerCase();
+  const entities = evidence?.relation?.entities || [];
+  const subject = entities.length >= 2 ? `${entities[0]} and ${entities[1]}` : 'those two subjects';
+  const responses = {
+    de: `Ich habe keine verifizierte Beziehung zwischen ${subject} im gespeicherten Graphen gefunden. Ich werde keine Beziehung aus lediglich ähnlichen oder benachbarten Notizen ableiten.`,
+    fr: `Je n’ai trouvé aucune relation vérifiée entre ${subject} dans le graphe mémorisé. Je n’en déduirai pas une à partir de notes seulement similaires ou voisines.`,
+    es: `No encontré una relación verificada entre ${subject} en el grafo almacenado. No inferiré una relación a partir de notas solo similares o cercanas.`,
+    en: `I found no verified relationship between ${subject} in the stored graph, so I will not infer one from merely nearby or similar notes.`,
+  };
+  return responses[lang] || responses.en;
+}
+
 export async function answerStep({ message, history, evidence, plan, language, assistantName, orgName, model, apiKey, signal, ctx, allowGeneralKnowledge = false, preloadedProfileContext = '', streamValidated = false, onEvent = null }) {
   const synthesisPrompt = buildSynthesisPromptArtifact({
     language,
@@ -1664,6 +1731,18 @@ export async function answerStep({ message, history, evidence, plan, language, a
       usage: null,
     };
   }
+  if (plan.operation === 'relation_between' && evidence.relation?.verified_relation_found !== true) {
+    return {
+      response: noVerifiedRelationResponse({ evidence, language }),
+      claims: [],
+      rejected_claims: [],
+      grounded: false,
+      evidence_used: [],
+      confidence: 0,
+      gaps: ['No direct typed relationship was verified between the requested entities.'],
+      usage: null,
+    };
+  }
   if (evidence.coverage?.source_requested && !evidence.coverage.source_covered) {
     // A named source is a precision boundary. Do not substitute neighboring
     // documents when its own evidence was not recovered.
@@ -1675,6 +1754,18 @@ export async function answerStep({ message, history, evidence, plan, language, a
       evidence_used: [],
       confidence: 0,
       gaps: ['The requested source was not covered by retrieved source evidence.'],
+      usage: null,
+    };
+  }
+  if (evidence.coverage?.temporal_requested && evidence.coverage?.temporal_covered === false) {
+    return {
+      response: temporalUnavailableResponse({ evidence, language }),
+      claims: [],
+      rejected_claims: [],
+      grounded: false,
+      evidence_used: [],
+      confidence: 0,
+      gaps: ['No verified temporal material was retrieved for the requested point or range.'],
       usage: null,
     };
   }
@@ -3766,7 +3857,10 @@ export async function runReactAgentV2({
             // fall through to the independent safety model.
             if (index === attemptModels.length - 1
                 && isFailClosedSynthesisResponse(candidateAnswer)) {
-              trace.warnings.push('synthesis_degraded:no_citation_valid_claim');
+              // This is an expected grounded-absence outcome, not a provider
+              // degradation.  Preserve it for telemetry without surfacing a
+              // misleading error-like warning to users or operations.
+              trace.synthesis_outcome = 'insufficient_grounded_evidence';
               return candidateAnswer;
             }
             if (streamAnswer) onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'candidate_validation_fallback' });

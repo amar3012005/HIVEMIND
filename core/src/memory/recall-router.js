@@ -32,7 +32,7 @@ import { buildEvidencePacket } from './recall-packet.js';
 import { isDurableKbPromotionAdmitted } from './durable-content.js';
 import { isMemoryInDateRange, selectEventRangeCandidates } from './temporal-range.js';
 import { getRetrievalConfig, logTaskOutcome } from './retrieval-config.js';
-import { orgIsRemote, amrKbDocs, memoryBackend } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDocs, amrMemRelationshipsBatch, memoryBackend } from '../vector/mneme/driver.js';
 import { scopedMemoryWhere } from './prisma-graph-store.js';
 import { dedupeMemoriesById } from './recall-dedup.js';
 import { filterMemoriesByDocumentIds } from './recall-source-filter.js';
@@ -1495,7 +1495,56 @@ export async function recallEnhance({
 }
 
 export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId, accessContext = {}, time = {} }) {
-  if (!prisma?.relationship || !memoryIds.length || !orgId) return { items: [], reason: null };
+  if (!memoryIds.length || !orgId) return { items: [], reason: null };
+  const projectIds = new Set(accessContext?.projectIds || []);
+  const teamIds = new Set(accessContext?.teamIds || []);
+  const visible = (m) => {
+    if (!m) return false;
+    if (m.scope === 'personal') return m.userId === userId;
+    if (m.scope === 'project') {
+      const ids = [m.projectId, ...(m.projectIds || [])].filter(Boolean);
+      return ids.some((id) => projectIds.has(id));
+    }
+    if (m.scope === 'team') return !!m.primaryTeamId && teamIds.has(m.primaryTeamId);
+    if (m.scope === 'organization') return accessContext?.orgRole !== 'guest';
+    return false;
+  };
+  // .amr tenants store their relationship graph inside the Memory Box, not in
+  // central Prisma.  Use the same typed-edge shape as the managed path, with
+  // one bounded batch and caller-side ACL filtering of both edge endpoints.
+  if (orgIsRemote(orgId)) {
+    const relationships = await amrMemRelationshipsBatch(orgId, memoryIds.slice(0, 24)).catch(() => ({}));
+    if (relationships === null) return { items: [], reason: 'remote-graph-batch-unavailable' };
+    const items = [];
+    for (const memoryId of memoryIds.slice(0, 24)) {
+      const result = relationships?.[memoryId];
+      if (!result) continue;
+      for (const edge of result.out || []) {
+        const peer = {
+          id: edge.target_id, title: edge.target_title || '(untitled)', content: '',
+          userId: edge.target_user_id, scope: edge.target_scope,
+          projectId: edge.target_project, projectIds: edge.target_project_ids || [],
+          primaryTeamId: edge.target_primary_team_id, isLatest: edge.target_is_latest,
+        };
+        if (!edge.target_id || !visible(peer)) continue;
+        items.push({ type: edge.type, from_id: memoryId, to_id: edge.target_id, confidence: edge.confidence,
+          created_at: edge.created_at || null, metadata: edge.metadata || {}, related: [peer] });
+      }
+      for (const edge of result.in || []) {
+        const peer = {
+          id: edge.source_id, title: edge.source_title || '(untitled)', content: '',
+          userId: edge.source_user_id, scope: edge.source_scope,
+          projectId: edge.source_project, projectIds: edge.source_project_ids || [],
+          primaryTeamId: edge.source_primary_team_id, isLatest: edge.source_is_latest,
+        };
+        if (!edge.source_id || !visible(peer)) continue;
+        items.push({ type: edge.type, from_id: edge.source_id, to_id: memoryId, confidence: edge.confidence,
+          created_at: edge.created_at || null, metadata: edge.metadata || {}, related: [peer] });
+      }
+    }
+    return { reason: items.length ? 'typed-one-hop-remote' : null, items };
+  }
+  if (!prisma?.relationship) return { items: [], reason: null };
   const knownAt = normalizedIso(time.known_at);
   const memoryTimeWhere = {
     ...(knownAt ? { createdAt: { lte: new Date(knownAt) } } : {}),
@@ -1514,22 +1563,13 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
     },
     take: 24,
   });
-  const projectIds = new Set(accessContext?.projectIds || []);
-  const teamIds = new Set(accessContext?.teamIds || []);
-  const visible = (m) => {
-    if (!m) return false;
-    if (m.scope === 'personal') return m.userId === userId;
-    if (m.scope === 'project') {
-      const ids = [m.projectId, ...(m.memoryProjects || []).map((p) => p.projectId)].filter(Boolean);
-      return ids.some((id) => projectIds.has(id));
-    }
-    if (m.scope === 'team') return !!m.primaryTeamId && teamIds.has(m.primaryTeamId);
-    if (m.scope === 'organization') return accessContext?.orgRole !== 'guest';
-    return false;
-  };
+  const visibleCentral = (m) => visible({
+    ...m,
+    projectIds: (m.memoryProjects || []).map((p) => p.projectId),
+  });
   return {
     reason: rows.length ? 'typed-one-hop' : null,
-    items: rows.filter((r) => visible(r.fromMemory) && visible(r.toMemory)).map((r) => ({
+    items: rows.filter((r) => visibleCentral(r.fromMemory) && visibleCentral(r.toMemory)).map((r) => ({
       type: r.type,
       from_id: r.fromId,
       to_id: r.toId,

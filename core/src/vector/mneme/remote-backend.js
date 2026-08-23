@@ -659,6 +659,25 @@ export async function remoteMemRelationships(orgId, memoryId) {
   catch (e) { console.warn(`[mneme/remote] mem-relationships failed org=${orgId} id=${memoryId}: ${e.message}`); return null; }
 }
 
+// Fetch relationship neighbourhoods for one bounded frontier in one transport
+// request.  A recall graph walk previously made one remote request per memory;
+// a dense or concurrent tenant could therefore fill its own transport queue.
+// `null` means an older agent does not yet implement the batch route, allowing
+// callers to retain a deliberately bounded compatibility fallback.
+export async function remoteMemRelationshipsBatch(orgId, ids) {
+  const memoryIds = [...new Set((Array.isArray(ids) ? ids : []).filter(Boolean))].slice(0, 25);
+  if (!memoryIds.length) return {};
+  try {
+    const out = await _call(orgId, '/v1/mem-relationships-batch', { ids: memoryIds });
+    return out?.relationships && typeof out.relationships === 'object' ? out.relationships : {};
+  } catch (e) {
+    const message = String(e?.message || '');
+    if (/mem-relationships-batch.*(?:404|not found)|agent .*404/i.test(message)) return null;
+    console.warn(`[mneme/remote] mem-relationships-batch failed org=${orgId}: ${message}`);
+    return {};
+  }
+}
+
 // GDPR erasure: purge the ENTIRE org's data on the agent (all rows + vectors + edges). Returns
 // { ok, deleted } from the agent, or null on failure (account-delete records the failure but proceeds
 // to sever the central link; the saga can be retried). Self-host: physical destruction of the box is

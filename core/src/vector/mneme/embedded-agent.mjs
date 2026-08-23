@@ -1336,6 +1336,48 @@ function routesFor(ctx) {
       }
       return result;
     },
+    // Relationship expansion is a graph operation, not N independent network
+    // operations.  Return a bounded set of neighbourhoods in one request per
+    // BFS depth so concurrent recalls cannot fill the tenant transport queue.
+    '/v1/mem-relationships-batch': async (b) => {
+      const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).filter(Boolean))].slice(0, 25);
+      const peerTitle = (rec) => rec?.title || (rec?.content || '').slice(0, 60) || '(untitled)';
+      const peerAccess = (rec, prefix) => ({
+        [`${prefix}_user_id`]: rec?.user_id || null,
+        [`${prefix}_scope`]: rec?.scope || null,
+        [`${prefix}_project`]: rec?.project || null,
+        [`${prefix}_project_ids`]: Array.isArray(rec?.project_ids) ? rec.project_ids : [],
+        [`${prefix}_primary_team_id`]: rec?.primary_team_id || null,
+      });
+      const relationships = {};
+      for (const memId of ids) {
+        const { out: outE, in: inE } = amr.edgesOf(memId);
+        const out = outE.slice(0, 200).map((e) => ({
+          id: `e:${memId}:${e.toId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
+          created_by: null, created_at: null, metadata: {}, direction: 'out',
+          target_id: e.toId, target_title: peerTitle(e.peer), target_memory_type: e.peer?.memory_type || null,
+          target_is_latest: e.peer?.is_latest ?? null, target_deleted: !!(e.peer?.deleted_at),
+          ...peerAccess(e.peer, 'target'),
+        }));
+        const inn = inE.slice(0, 200).map((e) => ({
+          id: `e:${e.fromId}:${memId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
+          created_by: null, created_at: null, metadata: {}, direction: 'in',
+          source_id: e.fromId, source_title: peerTitle(e.peer), source_memory_type: e.peer?.memory_type || null,
+          source_is_latest: e.peer?.is_latest ?? null, source_deleted: !!(e.peer?.deleted_at),
+          ...peerAccess(e.peer, 'source'),
+        }));
+        const by_type = {};
+        for (const e of [...out, ...inn]) {
+          const t = e.type || 'Other';
+          (by_type[t] = by_type[t] || []).push(e);
+        }
+        relationships[memId] = {
+          memory_id: memId, out, in: inn, by_type,
+          counts: { out: out.length, in: inn.length, total: out.length + inn.length },
+        };
+      }
+      return { relationships };
+    },
     '/v1/mem-relationships': async (b) => {
       if (!b.memoryId) return { error: 'memoryId required' };
       const memId = b.memoryId;
@@ -1346,12 +1388,18 @@ function routesFor(ctx) {
         created_by: null, created_at: null, metadata: {}, direction: 'out',
         target_id: e.toId, target_title: peerTitle(e.peer), target_memory_type: e.peer?.memory_type || null,
         target_is_latest: e.peer?.is_latest ?? null, target_deleted: !!(e.peer?.deleted_at),
+        target_user_id: e.peer?.user_id || null, target_scope: e.peer?.scope || null,
+        target_project: e.peer?.project || null, target_project_ids: Array.isArray(e.peer?.project_ids) ? e.peer.project_ids : [],
+        target_primary_team_id: e.peer?.primary_team_id || null,
       }));
       const enrichIn = inE.slice(0, 200).map((e) => ({
         id: `e:${e.fromId}:${memId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
         created_by: null, created_at: null, metadata: {}, direction: 'in',
         source_id: e.fromId, source_title: peerTitle(e.peer), source_memory_type: e.peer?.memory_type || null,
         source_is_latest: e.peer?.is_latest ?? null, source_deleted: !!(e.peer?.deleted_at),
+        source_user_id: e.peer?.user_id || null, source_scope: e.peer?.scope || null,
+        source_project: e.peer?.project || null, source_project_ids: Array.isArray(e.peer?.project_ids) ? e.peer.project_ids : [],
+        source_primary_team_id: e.peer?.primary_team_id || null,
       }));
       const by_type = {};
       for (const e of [...enrichOut, ...enrichIn]) {

@@ -124,14 +124,21 @@ function sourceMemoryTimestamp(memory) {
   return 0;
 }
 
-async function resolveSourceMemoryAnchors(store, ctx, { title = null, kind = null, selector = null } = {}, timeoutMs = 350) {
+async function resolveSourceMemoryAnchors(store, ctx, { title = null, kind = null, selector = null } = {}, timeoutMs = 2500) {
   if (!store?.listMemories || (!title && !kind)) return [];
+  const tags = [];
+  if (kind) tags.push(`kind:${kind}`);
+  if (title) tags.push(`filename:${title}`);
   const listed = await withTimeout(store.listMemories({
     user_id: ctx.userId,
     org_id: ctx.orgId,
-    project: ctx.projectId || undefined,
+    // Source references are authorization-scoped, not silently bound to the
+    // UI's active project. A caller asking for a named/recent upload expects
+    // an authorized personal or organization source to remain findable.
+    project: undefined,
+    ...(tags.length ? { tags } : {}),
     is_latest: true,
-    limit: 500,
+    limit: selector ? 100 : 20,
     access_context: ctx.accessContext,
   }), timeoutMs, { memories: [] });
   const matches = (listed?.memories || []).filter((memory) => memoryMatchesSourceContract(memory, { title, kind }));
@@ -1725,7 +1732,7 @@ export class RecallRouter {
         title: recallPlan.source.title,
         kind: recallPlan.source.kind,
         selector: recallPlan.time.selector,
-      }, Math.min(350, remainingBudget()));
+      }, 2500);
     }
     // A requested source is an authorization boundary, not a ranking hint.
     // Never replace an unresolved source request with tenant-wide memories.

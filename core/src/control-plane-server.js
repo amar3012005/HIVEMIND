@@ -216,7 +216,7 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
-const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, replaceModelPrice, totalAiCost, upsertModelPolicy, userCostSummary } = await import('./llm/ai-governance.js');
+const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, platformCreditAccountDetail, platformCreditIntelligence, replaceModelPrice, upsertModelPolicy } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 const signupWelcome = createSignupWelcomeDispatcher({ prisma, sendEmail: sendSystemEmail });
 async function taraProviderFor(orgId) {
@@ -3071,9 +3071,22 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/admin/api/platform/ai-costs' && req.method === 'GET') {
     if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
     if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
-    const users = await userCostSummary({ query: url.searchParams.get('q') || '', limit: url.searchParams.get('limit') || 200 });
-    const total = await totalAiCost();
-    return jsonResponse(res, { currency: 'USD', ...total, users });
+    try {
+      const intelligence = await platformCreditIntelligence({
+        query: url.searchParams.get('q') || '', limit: url.searchParams.get('limit') || 200,
+        period: url.searchParams.get('period') || 'month',
+      });
+      return jsonResponse(res, intelligence);
+    } catch (error) { return jsonResponse(res, { error: error.message }, 500); }
+  }
+
+  const aiCostDetailMatch = pathname.match(/^\/admin\/api\/platform\/ai-costs\/([0-9a-f-]+)$/i);
+  if (aiCostDetailMatch && req.method === 'GET') {
+    if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!prisma) return jsonResponse(res, { error: 'Database unavailable' }, 503);
+    try {
+      return jsonResponse(res, await platformCreditAccountDetail(aiCostDetailMatch[1], { period: url.searchParams.get('period') || 'month' }));
+    } catch (error) { return jsonResponse(res, { error: error.message }, error.message === 'Billing account not found' ? 404 : 400); }
   }
 
   if (pathname === '/admin/api/platform/logs' && req.method === 'GET') {

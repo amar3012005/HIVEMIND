@@ -16,7 +16,7 @@ import { amrBumpRecall, orgIsRemote } from '../vector/mneme/driver.js';
 import { remoteHydrate } from '../vector/mneme/remote-backend.js';
 import { scopedMemoryWhere } from '../memory/prisma-graph-store.js';
 import { applyProjectScopeFilter } from '../routes/recall.js';
-import { loadTypedGraphEvidence } from '../memory/recall-router.js';
+import { loadTypedGraphEvidence, buildEvidencePacket } from '../memory/recall-router.js';
 import { isStageDeadlineError, runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { normalizeEntity } from '../memory/entity-normalize.js';
 
@@ -30,6 +30,37 @@ export function findDirectEntityEdges(edges, entities, memoryIdsByEntity) {
         || (leftIds.has(edge.to_id) && rightIds.has(edge.from_id));
     }));
   });
+}
+
+// Evidence is eligible for an as-of answer only when it carries explicit
+// temporal provenance.  A semantically relevant document uploaded today is
+// not proof of what was true at an earlier snapshot.  Memories already enforce
+// valid/known time inside persisted retrieval; this closes the equivalent gap
+// for raw evidence segments and rebuilds the packet from the filtered set.
+function restrictEvidenceToTemporalSnapshot(result, { validAt = null, knownAt = null } = {}) {
+  const cutoff = validAt || knownAt;
+  if (!result || !cutoff || Number.isNaN(new Date(cutoff).getTime())) return result;
+  const cutoffMs = new Date(cutoff).getTime();
+  const temporalEvidence = (result.evidence || []).filter((row) => {
+    const metadata = row?.metadata || {};
+    const start = row?.valid_from || row?.valid_at || row?.document_date || row?.documentDate
+      || metadata.valid_from || metadata.valid_at || metadata.document_date
+      || (knownAt ? (row?.created_at || row?.createdAt || metadata.created_at) : null);
+    const end = row?.valid_to || metadata.valid_to || null;
+    const startMs = start ? new Date(start).getTime() : Number.NaN;
+    const endMs = end ? new Date(end).getTime() : Number.NaN;
+    return Number.isFinite(startMs) && startMs <= cutoffMs
+      && (!Number.isFinite(endMs) || endMs > cutoffMs);
+  });
+  result.evidence = temporalEvidence;
+  result.evidence_count = temporalEvidence.length;
+  result.evidence_packet = buildEvidencePacket({
+    memories: result.memories || [], evidence: temporalEvidence,
+    graph: result.relationships || [], live: result.live || [],
+    plan: result.trace?.recall_plan || {}, trace: result.trace || {},
+    cutoffReason: result.trace?.cutoff_reason || null,
+  });
+  return result;
 }
 
 // ── Tool schemas (LLM-visible) ───────────────────────────────────────────────
@@ -1704,7 +1735,7 @@ const TOOL_HANDLERS = {
       throw new Error('hivemind_at requires a valid valid_at and/or known_at date');
     }
     if (args.memory_query && !args.query) args.query = args.memory_query;
-    return TOOL_HANDLERS.hivemind_recall(
+    const result = await TOOL_HANDLERS.hivemind_recall(
       {
         query: args.query,
         time: {
@@ -1717,6 +1748,10 @@ const TOOL_HANDLERS = {
       },
       ctx
     );
+    return restrictEvidenceToTemporalSnapshot(result, {
+      validAt: validAt?.toISOString() || null,
+      knownAt: knownAt?.toISOString() || null,
+    });
   },
 
   async hivemind_diff(args, ctx) {
@@ -1728,8 +1763,8 @@ const TOOL_HANDLERS = {
     const tags = Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined;
     const mode = 'explain';
     const [a, b] = await Promise.all([
-      TOOL_HANDLERS.hivemind_recall({ query: args.query, time: { valid_at: from.toISOString() }, tags, limit: 10, mode }, ctx),
-      TOOL_HANDLERS.hivemind_recall({ query: args.query, time: { valid_at: to.toISOString() }, tags, limit: 10, mode }, ctx),
+      TOOL_HANDLERS.hivemind_at({ query: args.query, valid_at: from.toISOString(), tags, limit: 10, mode }, ctx),
+      TOOL_HANDLERS.hivemind_at({ query: args.query, valid_at: to.toISOString(), tags, limit: 10, mode }, ctx),
     ]);
     // Compute structured delta — added/removed/persisted by memory id.
     const fromIds = new Set((a.memories || []).map(m => m.id));

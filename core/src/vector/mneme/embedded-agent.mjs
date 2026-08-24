@@ -1181,7 +1181,24 @@ function routesFor(ctx) {
     // Hydrate full rows by id (content stays on-box until requested).
     '/v1/hydrate': async (b) => ({ memories: Array.isArray(b.ids) && b.ids.length ? amr.hydrate(b.ids) : [] }),
     '/v1/list': async (b) => amr.list(b.filter || {}, b.cursor, b.limit || 100, Number(b.offset) || 0),
-    '/v1/stats': async (b) => amr.stats(b.filter || {}),
+    '/v1/stats': async (b) => {
+      const filter = b.filter || {};
+      const base = amr.stats(filter);
+      const args = [];
+      const userClause = filter.user_id ? ' WHERE user_id=$1::uuid' : '';
+      if (filter.user_id) args.push(filter.user_id);
+      try {
+        const [docs, segments] = await Promise.all([
+          db().query(`SELECT COUNT(*)::int AS n FROM knowledge_documents${userClause}`, args),
+          db().query(`SELECT COUNT(*)::int AS n FROM knowledge_segments${userClause}`, args),
+        ]);
+        return { ...base, documents: Number(docs.rows?.[0]?.n || 0),
+          evidence: Number(segments.rows?.[0]?.n || 0) };
+      } catch (error) {
+        console.warn(`[amr/stats] knowledge-layer counts unavailable: ${error.message}`);
+        return { ...base, documents: 0, evidence: 0, knowledge_counts_degraded: true };
+      }
+    },
     '/v1/graph': async (b) => amr.graph(b.filter || {}, b.limit || 500),
     '/v1/edge': async (b) => {
       const rel = b.rel;
@@ -1903,7 +1920,24 @@ function routesFor(ctx) {
     '/v1/kb-provenance': async (b) => {
       const links = Array.isArray(b.evidence_links) ? b.evidence_links : [];
       const ders = Array.isArray(b.derivations) ? b.derivations : [];
-      let linked = 0, derived = 0;
+      const segmentMetadata = Array.isArray(b.segment_metadata) ? b.segment_metadata : [];
+      let linked = 0, derived = 0, segmentsUpdated = 0;
+      for (const segment of segmentMetadata) {
+        if (!segment?.segment_id) continue;
+        try {
+          const patch = {
+            memory_types: Array.isArray(segment.memory_types) ? segment.memory_types : [],
+            claim_kinds: Array.isArray(segment.claim_kinds) ? segment.claim_kinds : [],
+            entities: Array.isArray(segment.entities) ? segment.entities : [],
+          };
+          const result = await db().query(
+            `UPDATE knowledge_segments
+                SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+              WHERE id=$1::uuid AND org_id=$2::uuid`,
+            [segment.segment_id, org, JSON.stringify(patch)]);
+          segmentsUpdated += Number(result.rowCount || 0);
+        } catch (e) { console.warn(`[kb-provenance] segment metadata failed segment=${segment.segment_id}: ${e.message}`); }
+      }
       for (const l of links) {
         if (!l?.memory_id) continue;
         try {
@@ -1954,7 +1988,7 @@ function routesFor(ctx) {
         }
         if (edged || skipped) console.log(`[kb-provenance] org=${String(org).slice(0, 8)} shard_derives_edges=${edged} skipped_no_slot=${skipped}`);
       }
-      return { ok: true, linked, derived };
+      return { ok: true, linked, derived, segments_updated: segmentsUpdated };
     },
 
     // Read back the evidence for ONE memory, shaped like the central getMemoryEvidence result so the

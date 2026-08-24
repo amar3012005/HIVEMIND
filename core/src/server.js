@@ -19673,10 +19673,13 @@ exit \$RC
                 if (rs) {
                   return jsonResponse(res, {
                     memories: rs.memories || 0,
+                    evidence: rs.evidence || 0,
+                    documents: rs.documents || 0,
                     relations: rs.relationships || 0,
                     scope: 'all',
                     storage_mode: 'amr',
                     noise_filtered: false,
+                    knowledge_counts_degraded: rs.knowledge_counts_degraded === true,
                   });
                 }
                 console.warn(`[memory/stats] amr stats unavailable for org ${orgId} — falling through to central (will read 0)`);

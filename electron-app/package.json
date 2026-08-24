@@ -1,7 +1,7 @@
 {
   "name": "singulance",
-  "version": "2.1.1",
-  "description": "SINGULANCE \u2014 the sovereign AI memory workspace (HIVEMIND desktop)",
+  "version": "2.1.2",
+  "description": "SINGULANCE — the sovereign AI memory workspace (HIVEMIND desktop)",
   "main": "src/main.js",
   "author": "amarsai3012005",
   "license": "MIT",
@@ -14,12 +14,14 @@
     "build:arm64": "electron-builder build --mac --arm64",
     "build:x64": "electron-builder build --mac --x64",
     "build:universal": "electron-builder build --mac --universal",
-    "dist": "electron-builder build --mac --publish=never"
+    "build:win": "electron-builder build --win",
+    "dist": "electron-builder build --mac --publish=never",
+    "dist:win": "electron-builder build --win --publish=never"
   },
   "build": {
     "appId": "com.singulancelabs.desktop",
     "productName": "SINGULANCE",
-    "copyright": "Copyright \u00a9 2026 SINGULANCE",
+    "copyright": "Copyright © 2026 SINGULANCE",
     "afterSign": "scripts/notarize.js",
     "protocols": [
       {
@@ -51,6 +53,24 @@
       "gatekeeperAssess": false,
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist"
+    },
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SINGULANCE"
     },
     "dmg": {
       "title": "SINGULANCE",

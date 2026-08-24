@@ -217,7 +217,9 @@ function registerNotchIpc() {
             ingestMode: ingestMode || 'both',
           },
         });
-        results.push({ name: path.basename(file), ok: true, jobId: started && started.job_id, documentId: started && started.documentId });
+        // Response is KnowledgeUploadJobStore.response() — job_id + document_id
+        // are both snake_case on the wire (core/src/knowledge/upload-job-store.js).
+        results.push({ name: path.basename(file), ok: true, jobId: started && started.job_id, documentId: started && started.document_id });
       } catch (err) {
         log.warn('[notch] upload failed', file, err.message);
         results.push({ name: path.basename(file), ok: false, error: err.message });

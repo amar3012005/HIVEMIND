@@ -3002,15 +3002,19 @@ model OrgSsoConfig {
 
 enum MemoryType {
   fact
-  preference
-  decision
-  lesson
-  goal
   event
-  relationship
-  synthesis
+  decision
+  preference
+  goal
+  commitment
+  policy
+  procedure
+  lesson
   summary
+  synthesis
   conversation
+  // Legacy compatibility only. New relationships are graph edges.
+  relationship
 }
 
 enum RelationshipType {

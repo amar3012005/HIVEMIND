@@ -42,8 +42,18 @@ import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-i
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 import { countPages } from './page-count.js';
 import { isValidEmbeddingVector } from '../embeddings/vector-contract.js';
+import { normalizeKbMemoryType } from '../memory/memory-taxonomy.js';
+import {
+  buildEvidenceMetadata,
+  buildEvidenceVectorPayload,
+  assertEvidenceVectorPayload,
+  buildMemoryProvenance,
+  memoryTitle as provenanceMemoryTitle,
+} from './provenance-metadata.js';
 
-const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
+const DURABLE_EXTRACT_TYPES = ['fact', 'event'];
+const KB_CURATED_TYPES = ['fact', 'event', 'summary', 'synthesis'];
+const KB_CLAIM_KINDS = new Set(['fact', 'event', 'decision', 'preference', 'policy', 'goal', 'commitment', 'procedure', 'lesson']);
 const CLAIM_ENTITY_KINDS = new Set(['person', 'organization', 'product', 'place', 'technology', 'standard']);
 
 // qwen3-ingest is schema-led: plain JSON mode can return a valid but unrelated
@@ -64,6 +74,7 @@ const QWEN_UNIFIED_FACTS_RESPONSE_FORMAT = {
             properties: {
               t: { type: 'string' }, f: { type: 'string' },
               memory_type: { type: 'string' }, importance: { type: 'number' },
+              claim_kind: { type: 'string' },
               extraction_confidence: { type: 'number' }, source_quote: { type: 'string' },
               subject: { type: 'object' }, predicate: { type: 'string' }, object: { type: 'object' },
               qualifiers: { type: 'object' }, entities: { type: 'array', items: { type: 'object' } },
@@ -74,7 +85,7 @@ const QWEN_UNIFIED_FACTS_RESPONSE_FORMAT = {
             // optional made Qwen's otherwise valid schema response look like
             // a successful extraction while every candidate was discarded.
             // Require the minimal persistence contract at generation time.
-            required: ['t', 'f', 'memory_type', 'source_quote'],
+            required: ['t', 'f', 'memory_type', 'claim_kind', 'source_quote'],
             additionalProperties: true,
           },
         },
@@ -578,7 +589,8 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   for (let _i = 0; _i < arr.length; _i += 1) {
     const item = arr[_i];
     if (!item || typeof item.f !== 'string' || item.f.trim().length < 4) { drop.shape += 1; continue; }
-    if (!DURABLE_EXTRACT_TYPES.includes(item.memory_type)) { drop.type += 1; continue; }
+    const kbMemoryType = normalizeKbMemoryType(item.memory_type);
+    if (!DURABLE_EXTRACT_TYPES.includes(kbMemoryType)) { drop.type += 1; continue; }
     if (typeof item.source_quote !== 'string' || item.source_quote.length < 4) { drop.short_quote += 1; continue; }
     if (isStructuredSourceNoise(item.f) || isStructuredSourceNoise(item.source_quote)) { drop.noise += 1; continue; }
     const loc = locateSourceQuote(content, item.source_quote);
@@ -590,7 +602,10 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
       _oldIdx: _i,
       t: durableTitle(item.t, item.f),
       f: item.f.trim(),
-      memory_type: item.memory_type,
+      memory_type: kbMemoryType,
+      claim_kind: KB_CLAIM_KINDS.has(String(item.claim_kind || '').toLowerCase())
+        ? String(item.claim_kind).toLowerCase()
+        : kbMemoryType,
       source_quote: loc.quote,
       source_start: loc.start,
       source_end: loc.start + loc.quote.length,
@@ -730,7 +745,9 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
   for (const memory of (Array.isArray(rawMemories) ? rawMemories : []).slice(0, cap)) {
     const indices = [...new Set((memory?.support_indices || []).map(Number))]
       .filter((index) => Number.isInteger(index) && index >= 0 && index < pool.length);
-    if (!indices.length || !DURABLE_EXTRACT_TYPES.includes(memory?.memory_type)) continue;
+    if (!indices.length) continue;
+    const kbMemoryType = normalizeKbMemoryType(memory?.memory_type);
+    if (!KB_CURATED_TYPES.includes(kbMemoryType)) continue;
     const supports = indices.map((index) => pool[index]).filter((item) => item?.segmentId && item?.source_quote);
     if (!supports.length) continue;
     const primary = supports[0];
@@ -741,7 +758,10 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
     output.push({
       t: durableTitle(memory.title || primary.t, content),
       f: content,
-      memory_type: memory.memory_type,
+      memory_type: kbMemoryType,
+      claim_kind: KB_CLAIM_KINDS.has(String(memory.claim_kind || primary.claim_kind || '').toLowerCase())
+        ? String(memory.claim_kind || primary.claim_kind).toLowerCase()
+        : kbMemoryType,
       importance: Math.max(0.65, Math.min(1, importance)),
       // Canonical entities come only from exact-span extraction. The curator
       // may merge claims but cannot introduce a new graph identity.
@@ -1377,6 +1397,7 @@ Output the JSON object and nothing else.`;
       const enrichRecs = [];
       const factObjs = []; // created fact memories (id+content+tags) — facts-only mode links them post-distill
       const canonicalItems = []; // {memoryId, entities:[raw names]} — post-commit canonical registry pass
+      const evidenceLinks = [];
 
       // Only sections with enough prose to distill.
       const eligible = targets.filter((t) => (t.content || '').split(/\s+/).filter(Boolean).length >= 25);
@@ -1385,7 +1406,21 @@ Output the JSON object and nothing else.`;
       let created = 0, failed = 0, bidx = 0;
 
       const ingestFact = async (t, fact, entityTags, factTitle) => {
+        const plannedMemoryId = crypto.randomUUID();
+        const contentHash = crypto.createHash('sha256').update(fact.trim()).digest('hex');
+        const provenance = buildMemoryProvenance({
+          existing: { source_platform: 'knowledge_base', source_type: 'knowledge_fact',
+            source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
+          memoryId: plannedMemoryId, documentId, sourceId: metadata.source_id || documentId,
+          sourceTitle: docTitle, segmentIds: t.segmentId ? [t.segmentId] : [],
+          userId, orgId, scope: t.scope, projectIds: t.project_ids,
+          teamId: t.primary_team_id, documentDate: metadata.document_date,
+          eventTime: metadata.event_time, validFrom: metadata.valid_from,
+          validTo: metadata.valid_to, knownAt: metadata.known_at,
+          claimKind: 'fact', language: metadata.language, contentHash,
+        });
         const res = await this.memoryGraphEngine.ingestMemory({
+          id: plannedMemoryId,
           user_id: userId,
           org_id: orgId,
           scope: t.scope,
@@ -1395,7 +1430,12 @@ Output the JSON object and nothing else.`;
           content: fact.trim(),
           // LLM-emitted concise title (its subject/topic), not the whole
           // sentence. Falls back to the first-clause heuristic if absent.
-          title: (factTitle && factTitle.trim() && !isGarbageTitle(factTitle)) ? factTitle.trim().slice(0, 80) : cleanTitleFrom(fact),
+          title: provenanceMemoryTitle(
+            docTitle,
+            (factTitle && factTitle.trim() && !isGarbageTitle(factTitle))
+              ? factTitle.trim().slice(0, 80)
+              : cleanTitleFrom(fact),
+          ),
           memory_type: 'fact',
           source_type: 'knowledge_fact',
           // Event date of the source document (connector occurredAt / meeting
@@ -1413,8 +1453,8 @@ Output the JSON object and nothing else.`;
             ...(t.heading ? [`heading:${String(t.heading).toLowerCase().replace(/\s+/g, '-').slice(0, 50)}`] : []),
             ...(t.page ? [`page:${t.page}`] : []),
           ],
-          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null },
-          metadata: { document_id: documentId, segment_memory_id: t.memoryId || null, segment_id: t.segmentId || null, distill_agent: 'kb_distill_v2' },
+          source_metadata: provenance,
+          metadata: { ...provenance, segment_memory_id: t.memoryId || null, distill_agent: 'kb_distill_v2' },
           skip_fact_extraction: true,
           defer_entity_linking: true,   // entities already extracted in the batch pass
           // KB distilled facts are append-only with explicit Derives-to-segment
@@ -1453,7 +1493,10 @@ Output the JSON object and nothing else.`;
         // — one bge-m3 call per ≤20 facts instead of a network round-trip per fact,
         // which was the dominant per-fact latency in distill.
         const ctxInput = `${docTitle}${t.heading ? ` — ${t.heading}` : ''}\n${fact.trim()}`;
-        return { factId, ctxInput, fact: fact.trim(), entityTags, t };
+        return { factId, ctxInput, fact: fact.trim(), title: provenanceMemoryTitle(docTitle,
+          (factTitle && factTitle.trim() && !isGarbageTitle(factTitle))
+            ? factTitle.trim().slice(0, 80) : cleanTitleFrom(fact)),
+          entityTags, t, provenance: { ...provenance, memory_id: factId }, contentHash };
       };
 
       // Batch the contextual embeds for a set of just-ingested facts: one embed
@@ -1477,10 +1520,13 @@ Output the JSON object and nothing else.`;
             enrichRecs.push({ factId: p.factId, vec });
             await vs?.storeMemory({
               id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
-              memory_type: 'fact', is_latest: true, tags: p.entityTags,
+              title: p.title, memory_type: 'fact', is_latest: true, tags: p.entityTags,
               project_ids: Array.isArray(p.t.project_ids) ? p.t.project_ids : [],
               primary_team_id: p.t.primary_team_id || null, visibility: p.t.visibility || 'private',
-              created_at: new Date().toISOString(),
+              created_at: new Date().toISOString(), source_metadata: p.provenance,
+              metadata: p.provenance, document_date: metadata.document_date || null,
+              valid_from: metadata.valid_from || null, valid_to: metadata.valid_to || null,
+              content_hash: p.contentHash,
             }, { vector: vec, embeddingWorkload: 'ingestion' });
           } catch (vecErr) {
             this.logger.warn?.(`[kb-distill] vector index failed for ${p.factId}: ${vecErr.message}`);
@@ -1566,14 +1612,17 @@ Output the JSON object and nothing else.`;
                 if (_entityPairs.length) canonicalItems.push({ memoryId: p.factId, entities: _entityPairs });
                 factObjs.push({
                   id: p.factId, user_id: userId, org_id: orgId, content: p.fact,
-                  title: (p.fact || '').slice(0, 80), memory_type: 'fact',
+                  title: p.title, memory_type: 'fact',
                   tags: [
                     ...p.entityTags,
                     ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
                     ...(documentId ? [`doc-id:${documentId}`] : []),
                   ],
                   project: Array.isArray(p.t.project_ids) ? p.t.project_ids[0] : null,
+                  support_segment_ids: p.t.segmentId ? [p.t.segmentId] : [],
                 });
+                if (p.t.segmentId) evidenceLinks.push({ memoryId: p.factId, documentId,
+                  segmentId: p.t.segmentId, linkType: 'supports', confidence: 1 });
               }
             } catch (err) { failed++; this.logger.warn?.(`[kb-distill] fact ingest failed: ${err.message}`); }
           }
@@ -1590,6 +1639,16 @@ Output the JSON object and nothing else.`;
         }
       });
       await Promise.all(workers);
+      if (evidenceLinks.length) {
+        if (orgIsRemote(orgId)) {
+          await amrKbProvenance(orgId, { evidence_links: evidenceLinks.map((link) => ({
+            memory_id: link.memoryId, document_id: link.documentId, segment_id: link.segmentId,
+            link_type: link.linkType, confidence: link.confidence,
+          })), derivations: [] });
+        } else {
+          await this.db.memoryEvidenceLink.createMany({ data: evidenceLinks, skipDuplicates: true });
+        }
+      }
       this.logger.info?.(`[kb-distill] doc ${String(documentId).slice(0, 8)}: ${created} facts from ${eligible.length} sections in ${batches.length} LLM calls (failed=${failed})`);
       // Canonical-entity registry pass — AFTER all facts committed, off the hot
       // path (fire-and-forget). Creates org-scoped CanonicalEntity rows +
@@ -1656,7 +1715,7 @@ Output the JSON object and nothing else.`;
     const sys = `Extract only high-value durable workspace memory from the SECTION.
 LANGUAGE: infer the SECTION's language semantically and write every "t" and "f" in that same language. Do not translate. These instructions are not a language sample. For mixed-language sources, preserve the language of each supported claim. Only JSON keys, memory_type and the canonical predicate use English.
 Return ONLY valid JSON:
-{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"extraction_confidence":0.0,"source_quote":"exact verbatim substring from SECTION","subject":{"n":"exact canonical subject","k":"person|organization|product|place|technology|standard"},"predicate":"canonical_english_relation","object":{"value":"exact source-language value","type":"semantic category or empty"},"qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}],"relationships":[{"from":{"n":"Canonical Name","k":"allowed kind"},"type":"semantic_relation","to":{"n":"Canonical Name","k":"allowed kind"}}]}]}
+{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|event","claim_kind":"fact|event|decision|preference|policy|goal|commitment|procedure|lesson","importance":0.0,"extraction_confidence":0.0,"source_quote":"exact verbatim substring from SECTION","subject":{"n":"exact canonical subject","k":"person|organization|product|place|technology|standard"},"predicate":"canonical_english_relation","object":{"value":"exact source-language value","type":"semantic category or empty"},"qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}],"relationships":[{"from":{"n":"Canonical Name","k":"allowed kind"},"type":"semantic_relation","to":{"n":"Canonical Name","k":"allowed kind"}}]}]}
 
 SUBJECT RULE — the single most important rule. Every claim must NAME WHAT IT IS ABOUT, inside the claim text, so it still makes sense with the document gone. The memory is stored alone and retrieved by meaning; a reader who never saw this document must be able to tell what it concerns.
 Judge each claim by SHAPE, not by wording — these patterns are abstract and carry no example text:
@@ -1669,7 +1728,7 @@ Rules: up to ${factCap} facts. Capture every distinct durable claim (decision, c
 MERGE LINE ITEMS OF ONE CATEGORY INTO ONE MEMORY, CARRYING EVERY FIGURE. A price list, budget table, cost breakdown, schedule or feature list under one heading is ONE durable fact stating the whole set with all its numbers and labels, not one fact per line. Measured failure to avoid: a 5-page budget produced 30 separate memories averaging 154 characters — "The cost for 1 brand strategy is EUR 8,000.", "The cost for identity development is EUR 24,500.", "The cost for consulting and project management is ...", each a table row stored alone. Correct output is a single memory naming the section and listing every item with its amount, so a reader who retrieves only that memory can answer any question about the breakdown. Splitting it loses the comparison AND wastes the budget above.
 Emit a separate fact only when a claim stands on a DIFFERENT subject or decision, not when it is another row of the same table. Do NOT drop a distinct high-value claim to keep the count low — merge related ones instead. A memory is a durable contextual unit, not a line-item: preserve the subject plus the decision, requirement, scope, owner, rationale, constraints, numbers, dates, and outcome when those details belong together in the source. Do not split one coherent decision or plan into separate mini-facts, and merge only genuine restatements of the same claim. Prefer 1-3 concise sentences (about 180-700 characters) when the section supports that context; keep a shorter claim only when the source fact is truly indivisible. Never repeat wording just to reach a length.
 
-Promote only decisions, commitments, requirements, metrics, named parties, dates, concrete specifications, products and their exact categories or variants, roles, responsibilities, status changes, risks, constraints, dependencies, policies and durable organization or customer facts. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, repeated descriptions and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. Use fact when no other memory_type fits. Preserve exact names, dates, quantities, units, categorical nouns, negation and uncertainty. Never broaden or guess a category. The subject, predicate and object must express the same complete claim as "f"; prefer one complete claim over fragments. Relationships are structured claim metadata only and must be explicitly supported by the same source_quote; do not invent causal or organizational links. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. CAPITALISATION IS NOT EVIDENCE: a generic kind is not an entity. Give each entity a "k" from the listed kinds; if none fits, omit it. Never emit source filenames, document titles, file extensions, part numbers, fonts, colours, format sizes, URLs or asset identifiers as entities.
+Promote only decisions, commitments, requirements, metrics, named parties, dates, concrete specifications, products and their exact categories or variants, roles, responsibilities, status changes, risks, constraints, dependencies, policies and durable organization or customer facts. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, repeated descriptions and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. memory_type is only fact or event; preserve the narrower enterprise meaning in claim_kind. Preserve exact names, dates, quantities, units, categorical nouns, negation and uncertainty. Never broaden or guess a category. The subject, predicate and object must express the same complete claim as "f"; prefer one complete claim over fragments. Relationships are structured claim metadata only and must be explicitly supported by the same source_quote; do not invent causal or organizational links. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. CAPITALISATION IS NOT EVIDENCE: a generic kind is not an entity. Give each entity a "k" from the listed kinds; if none fits, omit it. Never emit source filenames, document titles, file extensions, part numbers, fonts, colours, format sizes, URLs or asset identifiers as entities.
 FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.
 "t" and "f" MUST be in the same language as each other: "f" is a verbatim substring of the SECTION, so if "t" is in a different language from its own "f" you have translated, and that is wrong. Keep the SECTION's own names and number formats as written (not 1.240 -> 1,240, not Hannover -> Hanover).`;
 // REVERTED, DO NOT REINTRODUCE: an earlier version of this paragraph also said every "t" must be
@@ -1996,6 +2055,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       const _tsDay = `ts:${_tsd.toISOString().slice(0, 10)}`;
       const tags = normalizeTagsArray([
         ...(metadata.tags || []), 'promoted-memory', `memory-type:${fact.memory_type}`, 'distilled-from-kb', _tsDay, ...entityTags,
+        `claim-kind:${fact.claim_kind || fact.memory_type}`,
         ...(metadata.document_type ? [`document-type:${safeDocumentType(metadata.document_type)}`] : []),
         ...(fact.memory_type === 'fact' ? ['extracted-fact'] : []),
         ...(metadata.filename ? [`filename:${metadata.filename}`] : []),
@@ -2004,12 +2064,21 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       try {
         const claimStructure = normalizeClaimStructure(fact);
         const claimKey = stableClaimKey(claimStructure);
+        const plannedMemoryId = crypto.randomUUID();
+        const memoryContentHash = crypto.createHash('sha256').update(fact.f).digest('hex');
+        const eventTime = claimStructure.qualifiers?.event_time || claimStructure.qualifiers?.eventTime
+          || metadata.event_time || null;
+        const validFrom = claimStructure.qualifiers?.valid_from || claimStructure.qualifiers?.validFrom
+          || metadata.valid_from || null;
+        const validTo = claimStructure.qualifiers?.valid_to || claimStructure.qualifiers?.validTo
+          || metadata.valid_to || null;
         const res = await this.memoryGraphEngine.ingestMemory({
+          id: plannedMemoryId,
           user_id: userId, org_id: orgId,
           scope: metadata.scope, visibility: metadata.visibility || 'private',
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-          content: fact.f, title: fact.t, memory_type: fact.memory_type, tags,
+          content: fact.f, title: provenanceMemoryTitle(docTitle, fact.t), memory_type: normalizeKbMemoryType(fact.memory_type), tags,
           importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
           ...(claimKey ? { claim_key: claimKey } : {}),
           ...(claimStructure.subject?.name ? { claim_subject: claimStructure.subject.name } : {}),
@@ -2017,8 +2086,18 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           ...(Object.keys(claimStructure.qualifiers || {}).length ? { claim_qualifiers: claimStructure.qualifiers } : {}),
           extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
           document_date: metadata.document_date || null,
-          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
-          metadata: {
+          source_metadata: buildMemoryProvenance({
+            existing: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
+            memoryId: plannedMemoryId,
+            documentId, sourceId: metadata.source_id || documentId, sourceTitle: docTitle,
+            segmentIds: fact.support_segment_ids || [window.segmentId], userId, orgId,
+            scope: metadata.scope, projectIds: metadata.project_ids, teamId: metadata.primary_team_id,
+            documentDate: metadata.document_date, eventTime, validFrom, validTo,
+            knownAt: metadata.known_at, claimKind: fact.claim_kind,
+            language: metadata.language, contentHash: memoryContentHash,
+          }),
+          metadata: buildMemoryProvenance({
+            existing: {
             document_id: documentId,
             document_type: metadata.document_type || 'general',
             document_type_confidence: metadata.document_type_confidence ?? null,
@@ -2037,7 +2116,15 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
               extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
             },
             distill_agent: 'kb_unified_v2',
-          },
+            },
+            memoryId: plannedMemoryId,
+            documentId, sourceId: metadata.source_id || documentId, sourceTitle: docTitle,
+            segmentIds: fact.support_segment_ids || [window.segmentId], userId, orgId,
+            scope: metadata.scope, projectIds: metadata.project_ids, teamId: metadata.primary_team_id,
+            documentDate: metadata.document_date, eventTime, validFrom, validTo,
+            knownAt: metadata.known_at, claimKind: fact.claim_kind,
+            language: metadata.language, contentHash: memoryContentHash,
+          }),
           skip_fact_extraction: true, defer_entity_linking: true,
           // Memories carry their authoritative document/event time as the
           // canonical suffix. Evidence remains verbatim in knowledge_segments;
@@ -2049,9 +2136,20 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         const id = res?.memoryId || res?.id || null;
         if (!id || (res?.operation || '').startsWith('skipped')) continue;
         idByIdx[i] = id;
+        const memoryVectorProvenance = buildMemoryProvenance({
+          existing: { source_platform: 'knowledge_base', source_type: 'knowledge_fact',
+            document_type: metadata.document_type || 'general' },
+          memoryId: id, documentId, sourceId: metadata.source_id || documentId,
+          sourceTitle: docTitle, segmentIds: fact.support_segment_ids || [window.segmentId],
+          userId, orgId, scope: metadata.scope, projectIds: metadata.project_ids,
+          teamId: metadata.primary_team_id, documentDate: metadata.document_date,
+          eventTime, validFrom, validTo, knownAt: metadata.known_at,
+          claimKind: fact.claim_kind, language: metadata.language,
+          contentHash: memoryContentHash,
+        });
         factObjs.push({
-          id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t,
-          memory_type: fact.memory_type, tags,
+          id, user_id: userId, org_id: orgId, content: fact.f, title: provenanceMemoryTitle(docTitle, fact.t),
+          memory_type: normalizeKbMemoryType(fact.memory_type), tags,
           claim_key: claimKey,
           claim_subject: claimStructure.subject?.name || null,
           claim_predicate: claimStructure.predicate || null,
@@ -2061,7 +2159,13 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           support_segment_ids: fact.support_segment_ids,
           support_quotes: fact.support_quotes,
         });
-        embedPending.push({ id, fact: fact.f, memory_type: fact.memory_type, ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`, tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id, visibility: metadata.visibility });
+        embedPending.push({ id, fact: fact.f, title: provenanceMemoryTitle(docTitle, fact.t),
+          memory_type: normalizeKbMemoryType(fact.memory_type),
+          ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`,
+          tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id,
+          visibility: metadata.visibility, source_metadata: memoryVectorProvenance,
+          metadata: memoryVectorProvenance, document_date: metadata.document_date,
+          valid_from: validFrom, valid_to: validTo, content_hash: memoryContentHash });
         // Collected for EVERY storage mode now. These used to be gathered only for central orgs
         // because the tables were central-only and hard-FK'd to hivemind.memories; the .amr agents
         // now carry the same two tables in their own schema, so the rows are written next to the
@@ -2069,6 +2173,56 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         evidenceLinks.push({ memoryId: id, documentId, segmentId: window.segmentId || null, linkType: 'supports', confidence: fact.importance, excerpt: fact.source_quote });
         derivations.push({ memoryId: id, derivationMethod: 'llm_extract', derivationAgent: String(extractionModel).slice(0, 100), confidence: fact.importance, metadata: { document_id: documentId, segment_id: window.segmentId, source_start: fact.source_start, source_end: fact.source_end } });
       } catch (e) { this.logger.warn?.(`[kb-unified] fact ingest failed: ${e.message}`); }
+    }
+    // Enrich the authoritative evidence rows with the semantic metadata learned
+    // by this same extraction pass. Content remains verbatim; only filterable
+    // metadata changes. This lets entity/type/temporal recall constrain evidence
+    // and memory lanes symmetrically after hydration.
+    try {
+      const semanticBySegment = new Map();
+      for (const fact of facts) {
+        const ids = fact.support_segment_ids?.length ? fact.support_segment_ids : [window.segmentId];
+        for (const segmentId of ids.filter(Boolean)) {
+          const entry = semanticBySegment.get(segmentId) || { memoryTypes: new Set(), claimKinds: new Set(), entities: new Set() };
+          entry.memoryTypes.add(normalizeKbMemoryType(fact.memory_type));
+          entry.claimKinds.add(fact.claim_kind || fact.memory_type);
+          for (const entity of fact.entities || []) {
+            const name = typeof entity === 'string' ? entity : (entity?.name || entity?.n);
+            if (name) entry.entities.add(String(name));
+          }
+          semanticBySegment.set(segmentId, entry);
+        }
+      }
+      if (orgIsRemote(orgId)) {
+        await amrKbProvenance(orgId, {
+          evidence_links: [], derivations: [],
+          segment_metadata: [...semanticBySegment.entries()].map(([segmentId, semantic]) => ({
+            segment_id: segmentId,
+            memory_types: [...semantic.memoryTypes],
+            claim_kinds: [...semantic.claimKinds],
+            entities: [...semantic.entities],
+          })),
+        });
+      } else {
+        const rows = await this.db.knowledgeSegment.findMany({
+          where: { id: { in: [...semanticBySegment.keys()] }, orgId },
+          select: { id: true, metadata: true },
+        });
+        await Promise.all(rows.map((row) => {
+          const semantic = semanticBySegment.get(row.id);
+          return this.db.knowledgeSegment.update({
+            where: { id: row.id },
+            data: { metadata: {
+              ...(row.metadata && typeof row.metadata === 'object' ? row.metadata : {}),
+              memory_types: [...semantic.memoryTypes],
+              claim_kinds: [...semantic.claimKinds],
+              entities: [...semantic.entities],
+            } },
+          });
+        }));
+      }
+    } catch (metadataError) {
+      this.logger.warn?.(`[kb-unified] evidence metadata enrichment failed: ${metadataError.message}`);
     }
     // Contextual embeds (one batched call) so the facts are vector-recallable.
     if (embedPending.length && vs) {
@@ -2084,7 +2238,14 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             // Store the CLEAN fact as content; the contextual ctxInput (docTitle+heading+fact) is the
             // EMBEDDING input only (vec), never the stored content — else the filename/title leaks into
             // every fact ("loi.txt Every second…"). Mirrors the distill's flushEmbeds contract.
-            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact, memory_type: p.memory_type, is_latest: true, tags: p.tags, project_ids: Array.isArray(p.project_ids) ? p.project_ids : [], primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private', created_at: new Date().toISOString() }, { vector: vec, embeddingWorkload: 'ingestion' });
+            await vs.storeMemory({ id: p.id, user_id: userId, org_id: orgId, content: p.fact,
+              title: p.title, memory_type: p.memory_type, is_latest: true, tags: p.tags,
+              project_ids: Array.isArray(p.project_ids) ? p.project_ids : [],
+              primary_team_id: p.primary_team_id || null, visibility: p.visibility || 'private',
+              created_at: new Date().toISOString(), source_metadata: p.source_metadata,
+              metadata: p.metadata, document_date: p.document_date, valid_from: p.valid_from,
+              valid_to: p.valid_to, content_hash: p.content_hash },
+            { vector: vec, embeddingWorkload: 'ingestion' });
           } catch (ve) { this.logger.warn?.(`[kb-unified] embed failed: ${ve.message}`); }
         }));
         if (deferredVectors) {
@@ -2443,6 +2604,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     const input = pool.map((candidate, index) => ({
       i: index,
       type: candidate.memory_type,
+      claim_kind: candidate.claim_kind || candidate.memory_type,
       claim: String(candidate.f).slice(0, 500),
       importance: Number(candidate.importance || 0.5),
       // Names only for the curator's eyes; it reasons about text, not our internal shape.
@@ -2456,7 +2618,7 @@ Merge compatible candidates into one complete, information-dense memory. Never m
 Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source. Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Merge ONLY genuine duplicates (the same claim restated); never merge or drop two DISTINCT claims to reduce the count.
 
 Return ONLY valid JSON. Do not add prose, markdown, or an explanation before or after the JSON. The complete response must exactly match this shape:
-{"memories":[{"title":"short descriptive title","memory_type":"fact|decision|preference|goal|event|lesson|summary|synthesis","content":"1-3 source-grounded sentences","claim_subject":{"n":"canonical subject","k":"person|organization|product|place|technology|standard"},"claim_predicate":"canonical_english_relation","claim_object":{"value":"exact source-language value","type":"semantic category or empty"},"claim_qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"support_indices":[0,1]}]}
+{"memories":[{"title":"short descriptive title","memory_type":"fact|event|summary|synthesis","claim_kind":"fact|event|decision|preference|policy|goal|commitment|procedure|lesson|summary|synthesis","content":"1-3 source-grounded sentences","claim_subject":{"n":"canonical subject","k":"person|organization|product|place|technology|standard"},"claim_predicate":"canonical_english_relation","claim_object":{"value":"exact source-language value","type":"semantic category or empty"},"claim_qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"support_indices":[0,1]}]}
 Every item must include a non-empty content field and one or more valid support_indices from the supplied candidate list.`;
     // Model fallback + headroom (rosemary Bug C): the curator previously used a
     // bare chatCompletion with max_tokens:1400, so a single provider hiccup
@@ -2661,7 +2823,29 @@ Every item must include a non-empty content field and one or more valid support_
         docSummary = `${docTitle} was ingested but produced no durable facts.`;
       }
       const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
+      const parentContent = (() => {
+        const _fn = (metadata.filename || docTitle || '').toString().slice(0, 80);
+        const _day = _tsd.toISOString().slice(0, 10);
+        let out = String(docSummary || '');
+        if (_fn && !out.startsWith('\u00ab')) out = `\u00ab${_fn} : summary\u00bb ${out}`;
+        if (!/\(recorded \d{4}-\d{2}-\d{2}\)\s*$/.test(out)) out = `${out.replace(/\s+$/, '')} (recorded ${_day})`;
+        return out;
+      })();
+      const parentMemoryId = crypto.randomUUID();
+      const supportSegmentIds = [...new Set((memories || []).flatMap((memory) => memory?.support_segment_ids || []).filter(Boolean))];
+      const parentProvenance = buildMemoryProvenance({
+        existing: { source_platform: 'knowledge_base', source_type: 'document_summary',
+          semantic_role: 'document', ingest_tree_role: 'parent', document_type: metadata.document_type || 'general' },
+        memoryId: parentMemoryId, documentId, sourceId: metadata.source_id || documentId,
+        sourceTitle: docTitle, segmentIds: supportSegmentIds, userId, orgId,
+        scope: metadata.scope, projectIds: metadata.project_ids, teamId: metadata.primary_team_id,
+        documentDate: metadata.document_date, eventTime: metadata.event_time,
+        validFrom: metadata.valid_from, validTo: metadata.valid_to, knownAt: metadata.known_at,
+        claimKind: 'summary', language: metadata.language,
+        contentHash: crypto.createHash('sha256').update(parentContent).digest('hex'),
+      });
       const parentRes = await this.memoryGraphEngine.ingestMemory({
+        id: parentMemoryId,
         user_id: userId, org_id: orgId,
         scope: metadata.scope || (Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0 ? 'project' : metadata.primary_team_id ? 'team' : undefined),
         visibility: metadata.visibility || 'private',
@@ -2672,15 +2856,8 @@ Every item must include a non-empty content field and one or more valid support_
         // measured 24 of 25 memories compliant and the summary the lone exception. A summary is the
         // memory most likely to be read on its own, so it is the one that can least afford to omit
         // which file it describes or when it was recorded.
-        content: (() => {
-          const _fn = (metadata.filename || docTitle || '').toString().slice(0, 80);
-          const _day = _tsd.toISOString().slice(0, 10);
-          let out = String(docSummary || '');
-          if (_fn && !out.startsWith('\u00ab')) out = `\u00ab${_fn} : summary\u00bb ${out}`;
-          if (!/\(recorded \d{4}-\d{2}-\d{2}\)\s*$/.test(out)) out = `${out.replace(/\s+$/, '')} (recorded ${_day})`;
-          return out;
-        })(),
-        title: docTitle, memory_type: 'summary',
+        content: parentContent,
+        title: provenanceMemoryTitle(docTitle, 'Summary'), memory_type: 'summary',
         // The parent is source-local navigation context, not a durable claim.
         importance_score: 0.45,
         document_date: metadata.document_date || null,
@@ -2691,14 +2868,29 @@ Every item must include a non-empty content field and one or more valid support_
           ...(documentId ? [`doc-id:${documentId}`] : []),
           ...(metadata.document_type ? [`document-type:${safeDocumentType(metadata.document_type)}`] : []),
         ]),
-        source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'document', document_id: documentId, source_id: metadata.source_id || documentId, filename: metadata.filename || null, document_type: metadata.document_type || 'general' },
-        metadata: { semantic_role: 'document', ingest_tree_role: 'parent', document_id: documentId, document_type: metadata.document_type || 'general', document_type_confidence: metadata.document_type_confidence ?? null, child_count: childIds.length, total_facts: totalFacts },
+        source_metadata: parentProvenance,
+        metadata: { ...parentProvenance, document_type_confidence: metadata.document_type_confidence ?? null,
+          child_count: childIds.length, total_facts: totalFacts },
         skip_fact_extraction: true, skipPredictCalibrate: true, skip_contradiction_detection: true,
         append_timestamp_to_content: true,
         skip_relationship_classification: true, smartIngest: false, skipAdvisoryLock: true, defer_entity_linking: true,
       });
       docParentId = parentRes?.memoryId || parentRes?.id || null;
       if (docParentId) {
+        if (supportSegmentIds.length) {
+          const summaryLinks = supportSegmentIds.map((segmentId) => ({
+            memoryId: docParentId, documentId, segmentId, linkType: 'supports', confidence: 1,
+          }));
+          if (orgIsRemote(orgId)) {
+            await amrKbProvenance(orgId, {
+              evidence_links: summaryLinks.map((link) => ({ memory_id: link.memoryId,
+                document_id: link.documentId, segment_id: link.segmentId,
+                link_type: link.linkType, confidence: link.confidence })), derivations: [],
+            });
+          } else {
+            await this.db.memoryEvidenceLink.createMany({ data: summaryLinks, skipDuplicates: true });
+          }
+        }
         const createPartOf = async (childId) => {
           const base = { id: crypto.randomUUID(), from_id: childId, to_id: docParentId, confidence: 1.0, created_by: 'document_first_ingestion', created_at: new Date().toISOString() };
           try {
@@ -3180,8 +3372,18 @@ Every item must include a non-empty content field and one or more valid support_
       scopeKey: _scopeKey,
       scopeTag: _scopeTag,
       projectId: metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]) || null,
+      projectIds: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
       teamId: metadata.primary_team_id || null,
       documentTitle: metadata.documentTitle || metadata.filename || null,
+      sourceId: metadata.source_id || _scopedSourceId || knowledgeDoc.id,
+      sourceKind: metadata.source_kind || metadata.source_platform || 'document',
+      sourceType: metadata.source_type || 'upload',
+      // All uploaded documents share one canonical retrieval platform. Preserve
+      // the parser/connector origin separately in source_kind/source_id.
+      sourcePlatform: 'knowledge_base',
+      language: metadata.language || parseResult.metadata?.language || null,
+      documentDate: metadata.document_date || knowledgeDoc.documentDate || null,
+      knownAt: knowledgeDoc.createdAt || new Date().toISOString(),
     };
     const _tSeg = Date.now();
     let segments;
@@ -3219,14 +3421,26 @@ Every item must include a non-empty content field and one or more valid support_
     for (const _s of (segments || [])) {
       if (_s && typeof _s === 'object') {
         const md = (_s.metadata && typeof _s.metadata === 'object') ? _s.metadata : {};
-        if (md.scope == null) {
-          _s.metadata = {
-            ...md,
-            scope: _segDocScope.scope, scope_key: _segDocScope.scopeKey,
-            project_id: _segDocScope.projectId, team_id: _segDocScope.teamId,
-            document_title: _segDocScope.documentTitle,
-          };
-        }
+        _s.metadata = buildEvidenceMetadata({
+          existing: { ...md, scope_key: md.scope_key || _segDocScope.scopeKey },
+          documentId: _s.documentId || knowledgeDoc.id,
+          sourceId: md.source_id || _segDocScope.sourceId,
+          sourceTitle: md.source_title || _segDocScope.documentTitle,
+          sourceKind: md.source_kind || _segDocScope.sourceKind,
+          segmentId: _s.id, segmentIndex: _s.segmentIndex, segmentType: _s.segmentType,
+          userId: _s.userId || userId, orgId: _s.orgId || orgId,
+          scope: md.scope || _segDocScope.scope,
+          projectId: md.project_id || _segDocScope.projectId,
+          projectIds: md.project_ids || _segDocScope.projectIds,
+          teamId: md.team_id || _segDocScope.teamId,
+          startPage: _s.startPage, endPage: _s.endPage, headingPath: md.heading_path,
+          createdAt: _s.createdAt, documentDate: md.document_date || _segDocScope.documentDate,
+          eventTime: md.event_time, validFrom: md.valid_from, validTo: md.valid_to,
+          knownAt: md.known_at || _segDocScope.knownAt,
+          language: md.language || _segDocScope.language, contentHash: _s.contentHash,
+          sourceType: md.source_type || _segDocScope.sourceType,
+          sourcePlatform: md.source_platform || _segDocScope.sourcePlatform,
+        });
       }
     }
     let _msEmbed = 0;
@@ -4417,10 +4631,17 @@ Every item must include a non-empty content field and one or more valid support_
               segmentIndex, previousSegmentId, depth: _hstack.length, startOffset, endOffset,
               startPage, endPage,
               wordCount: text.split(/\s+/).length,
-              metadata: { heading, heading_path: headingPath, page: startPage, source: 'semantic_chunk',
-                scope: docScope.scope || null, scope_key: docScope.scopeKey || null,
-                project_id: docScope.projectId || null, team_id: docScope.teamId || null,
-                document_title: docScope.documentTitle || null },
+              metadata: buildEvidenceMetadata({
+                existing: { heading, heading_path: headingPath, page: startPage, source: 'semantic_chunk', scope_key: docScope.scopeKey || null },
+                documentId, sourceId: docScope.sourceId || documentId,
+                sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document',
+                segmentIndex, segmentType, userId, orgId,
+                scope: docScope.scope, projectId: docScope.projectId, projectIds: docScope.projectIds,
+                teamId: docScope.teamId, startPage, endPage, headingPath,
+                documentDate: docScope.documentDate, knownAt: docScope.knownAt,
+                language: docScope.language, contentHash, sourceType: docScope.sourceType,
+                sourcePlatform: docScope.sourcePlatform,
+              }),
             };
             if (remote) {
               const segment = { id: crypto.randomUUID(), ...base, createdAt: new Date().toISOString() };
@@ -4469,7 +4690,7 @@ Every item must include a non-empty content field and one or more valid support_
             depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
             startOffset: null, endOffset: null,
             wordCount: text.split(/\s+/).length,
-            metadata: { heading, page: hc.page || null, source: 'docling_hybrid' },
+            metadata: buildEvidenceMetadata({ existing: { heading, page: hc.page || null, source: 'docling_hybrid' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'structured', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, projectIds: docScope.projectIds, teamId: docScope.teamId, startPage: hc.page || null, endPage: hc.page || null, headingPath: hc.headings, documentDate: docScope.documentDate, knownAt: docScope.knownAt, language: docScope.language, contentHash, sourceType: docScope.sourceType, sourcePlatform: docScope.sourcePlatform }),
             createdAt: new Date().toISOString(),
           };
           segments.push(segment);
@@ -4488,7 +4709,7 @@ Every item must include a non-empty content field and one or more valid support_
                 depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
                 startOffset: null, endOffset: null,
                 wordCount: text.split(/\s+/).length,
-                metadata: { heading, page: hc.page || null, source: 'docling_hybrid' },
+                metadata: buildEvidenceMetadata({ existing: { heading, page: hc.page || null, source: 'docling_hybrid' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'structured', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, projectIds: docScope.projectIds, teamId: docScope.teamId, startPage: hc.page || null, endPage: hc.page || null, headingPath: hc.headings, documentDate: docScope.documentDate, knownAt: docScope.knownAt, language: docScope.language, contentHash, sourceType: docScope.sourceType, sourcePlatform: docScope.sourcePlatform }),
               },
             });
             segments.push(segment);
@@ -4560,7 +4781,7 @@ Every item must include a non-empty content field and one or more valid support_
           startOffset: null,
           endOffset: null,
           wordCount: chunk.split(/\s+/).length,
-          metadata: { source: 'paragraph_fallback' },
+          metadata: buildEvidenceMetadata({ existing: { source: 'paragraph_fallback' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'chunk', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, projectIds: docScope.projectIds, teamId: docScope.teamId, documentDate: docScope.documentDate, knownAt: docScope.knownAt, language: docScope.language, contentHash, sourceType: docScope.sourceType, sourcePlatform: docScope.sourcePlatform }),
           createdAt: new Date().toISOString(),
         };
         segments.push(segment);
@@ -4581,7 +4802,7 @@ Every item must include a non-empty content field and one or more valid support_
             startOffset: null,
             endOffset: null,
             wordCount: chunk.split(/\s+/).length,
-            metadata: { source: 'paragraph_fallback' }
+            metadata: buildEvidenceMetadata({ existing: { source: 'paragraph_fallback' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'chunk', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, projectIds: docScope.projectIds, teamId: docScope.teamId, documentDate: docScope.documentDate, knownAt: docScope.knownAt, language: docScope.language, contentHash, sourceType: docScope.sourceType, sourcePlatform: docScope.sourcePlatform })
           }
         });
         segments.push(segment);
@@ -4635,6 +4856,10 @@ Every item must include a non-empty content field and one or more valid support_
     const _vectorRows = [];       // central: collected for one batched upsert
     const _embeddedIds = [];      // central: for one updateMany
     let _failed = 0;
+    const _embeddingModel = process.env.SINGULANCE_EMBED_MODEL
+      || process.env.EMBEDDING_MODEL_NAME || process.env.BLAIQ_EMBED_MODEL
+      || process.env.OPENROUTER_EMBED_MODEL || 'bge-m3';
+    const _embeddingVersion = String(process.env.EMBEDDING_VERSION || process.env.EMBEDDING_MODEL_VERSION || '1');
     const _remotePayload = (segment) => ({
       id: segment.id, userId: segment.userId, documentId: segment.documentId,
       content: segment.content, contentHash: segment.contentHash,
@@ -4681,6 +4906,10 @@ Every item must include a non-empty content field and one or more valid support_
           }
           if (_isRemote) {
             try {
+              segment.embeddingModel = _embeddingModel;
+              segment.embeddingVersion = _embeddingVersion;
+              segment.metadata = buildEvidenceVectorPayload(segment);
+              assertEvidenceVectorPayload(segment.metadata);
               const _ok = await amrKbSegment(segOrgId, _remotePayload(segment), embedding);
               if (!_ok) _failed += 1;
             } catch (error) {
@@ -4688,18 +4917,23 @@ Every item must include a non-empty content field and one or more valid support_
               console.error(`[DocumentFirstIngestion] Failed to store remote segment ${segment.id}:`, error.message);
             }
           } else {
+            let payload;
+            try {
+              segment.embeddingModel = _embeddingModel;
+              segment.embeddingVersion = _embeddingVersion;
+              payload = assertEvidenceVectorPayload(buildEvidenceVectorPayload(segment));
+            } catch (metadataError) {
+              _failed += 1;
+              console.error(`[DocumentFirstIngestion] Invalid vector metadata for segment ${segment.id}; deferring to reconciliation: ${metadataError.message}`);
+              continue;
+            }
             _vectorRows.push({
               orgId: segment.orgId,
               segment,
               segOrgId,
               point: {
                 id: segment.id, vector: embedding,
-                payload: {
-                  segment_id: segment.id, document_id: segment.documentId,
-                  user_id: segment.userId, org_id: segment.orgId,
-                  segment_type: segment.segmentType, layer: 'evidence',
-                  content_preview: segment.content.slice(0, 200),
-                },
+                payload,
               },
             });
           }
@@ -4834,7 +5068,7 @@ Every item must include a non-empty content field and one or more valid support_
       return Array.from(picked.values());
     })();
 
-    // ── FACTS-ONLY memory creation (default; reversible via KB_FACTS_ONLY=false) ──────────────────────
+    // ── FACTS-ONLY memory creation (canonical) ───────────────────────────────────────────────────────
     // Segments are EVIDENCE (hop-2). Memories = the LLM-distilled atomic FACTS only. We do NOT promote
     // raw segments as "section" memories — those duplicated evidence, carried mid-word chunk text, and
     // spawned a fact→section Derives edge per fact (the bulk of the "Derives noise"). Instead: distill the
@@ -4843,7 +5077,9 @@ Every item must include a non-empty content field and one or more valid support_
     // Mentions via shared entities) + intra-doc cohesion (batch peers). Result: fewer, richer, fully
     // attributable memories — uniform for central/managed/self-host (the distill + linker both route by
     // org type at their own seams).
-    if (String(process.env.KB_FACTS_ONLY ?? 'true').toLowerCase() !== 'false') {
+    // Raw segment promotion is intentionally no longer feature-flag reversible:
+    // KnowledgeSegment is the evidence authority; Memory is distilled knowledge.
+    {
       // Window the content for distillation so fact yield tracks CONTENT VOLUME, not the (highly
       // variable) evidence-chunk size — a doc that the chunker split into one giant segment OR many tiny
       // fragments both produce a sensible fact set. Merge adjacent segments up to ~WIN chars; set the

@@ -19673,19 +19673,33 @@ exit \$RC
                 if (rs) {
                   return jsonResponse(res, {
                     memories: rs.memories || 0,
+                    evidence: rs.evidence || 0,
+                    documents: rs.documents || 0,
                     relations: rs.relationships || 0,
                     scope: 'all',
                     storage_mode: 'amr',
                     noise_filtered: false,
+                    knowledge_counts_degraded: rs.knowledge_counts_degraded === true,
                   });
                 }
                 console.warn(`[memory/stats] amr stats unavailable for org ${orgId} — falling through to central (will read 0)`);
               }
-              const [memTotal, relTotal] = await Promise.all([
+              const documentAccessWhere = evidenceRetrieval?._accessibleDocumentWhere
+                ? evidenceRetrieval._accessibleDocumentWhere({ userId, orgId, accessContext: statsCtx })
+                : { orgId, userId };
+              const [memTotal, relTotal, documentTotal, evidenceTotal] = await Promise.all([
                 prisma.memory.count({ where: memWhere }),
                 prisma.relationship.count({ where: { OR: [{ fromMemory: relMemScope }, { toMemory: relMemScope }] } }),
+                prisma.knowledgeDocument.count({ where: documentAccessWhere }),
+                prisma.knowledgeSegment.count({ where: { orgId, document: documentAccessWhere } }),
               ]);
-              return jsonResponse(res, { memories: memTotal, relations: relTotal, scope: 'all' });
+              return jsonResponse(res, {
+                memories: memTotal,
+                evidence: evidenceTotal,
+                documents: documentTotal,
+                relations: relTotal,
+                scope: 'all',
+              });
             } catch (statsErr) {
               console.warn('[memory/stats] failed:', statsErr.message);
               return jsonResponse(res, { error: statsErr.message }, 500);

@@ -14,6 +14,7 @@ import { ContentNormalizer } from './content-normalizer.js';
 import { detectContentType, CHUNK_STRATEGY_MAP } from './content-type-detector.js';
 import { buildSemanticMetadata, inferMemorySemanticRole, normalizeRelationshipDescriptor } from './relationship-semantics.js';
 import { getNormalizer, detectBucket as detectIngestBucket } from './normalizers/index.js';
+import { normalizeMemoryType } from './memory-taxonomy.js';
 
 // Re-export so callers (and future bucket-aware code paths) can import
 // the same helpers from one place.
@@ -117,12 +118,19 @@ export class SmartIngestRouter {
       // intentionally do NOT get the operator (they're co-ingested as
       // sections of the same doc, not standalone facts) — only the
       // parent is checked against existing memories for Updates/Extends.
-      const enrichedParent = await this._enrichWithTripleOperator(result.parent);
+      const enrichedParent = await this._enrichWithTripleOperator({
+        ...result.parent,
+        memory_type: normalizeMemoryType(result.parent.memory_type, { allowLegacy: false }),
+      });
       // Stamp _smart_routed on every payload so the engine gateway
       // (graph-engine.ingestMemory) does NOT re-route — prevents an
       // infinite loop when the engine itself calls route → engine.
       enrichedParent._smart_routed = true;
-      const stampedChildren = (result.children || []).map((c) => ({ ...c, _smart_routed: true }));
+      const stampedChildren = (result.children || []).map((c) => ({
+        ...c,
+        memory_type: normalizeMemoryType(c.memory_type, { allowLegacy: false }),
+        _smart_routed: true,
+      }));
       return {
         parent: enrichedParent,
         children: stampedChildren,
@@ -133,7 +141,10 @@ export class SmartIngestRouter {
 
     // Flat array path (unchanged from before).
     const payloads = Array.isArray(result) ? result : [result];
-    const enriched = await Promise.all(payloads.map(p => this._enrichWithTripleOperator(p)));
+    const enriched = await Promise.all(payloads.map((p) => this._enrichWithTripleOperator({
+      ...p,
+      memory_type: normalizeMemoryType(p.memory_type, { allowLegacy: false }),
+    })));
     return enriched.map((p) => ({ ...p, _smart_routed: true }));
   }
 
@@ -1314,4 +1325,3 @@ function _extractTemporalAnchors(content, _tz) {
   }
   return { tags: Array.from(new Set(tags)), refs };
 }
-

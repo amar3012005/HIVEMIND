@@ -10,6 +10,7 @@
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
+import { evidenceTitle } from './provenance-metadata.js';
 
 export function fuseRemoteEvidenceHits(vectorHits = [], lexicalHits = [], { rankConstant = 60 } = {}) {
   const byId = new Map();
@@ -98,8 +99,7 @@ export function evidenceMetadata(row = {}) {
   const segmentMeta = objectValue(row.metadata);
   const documentMeta = objectValue(document.parseMetadata || document.parse_metadata);
   const eventTime = segmentMeta.event_time || segmentMeta.eventTime
-    || documentMeta.event_time || documentMeta.eventTime
-    || document.documentDate || document.document_date || null;
+    || documentMeta.event_time || documentMeta.eventTime || null;
   const validFrom = segmentMeta.valid_from || segmentMeta.validFrom
     || documentMeta.valid_from || documentMeta.validFrom || eventTime;
   const validTo = segmentMeta.valid_to || segmentMeta.validTo
@@ -109,6 +109,9 @@ export function evidenceMetadata(row = {}) {
     || row.createdAt || row.created_at || document.createdAt || document.created_at || null;
   const tags = Array.isArray(document.tags) ? document.tags : [];
   const sourceKinds = normalizedValues([
+    segmentMeta.source_kind, segmentMeta.sourceKind,
+    segmentMeta.source_type, segmentMeta.sourceType,
+    segmentMeta.source_platform, segmentMeta.sourcePlatform,
     document.documentType, document.document_type,
     document.sourcePlatform, document.source_platform,
     documentMeta.source_kind, documentMeta.sourceKind, documentMeta.kind,
@@ -118,9 +121,11 @@ export function evidenceMetadata(row = {}) {
   const memoryTypes = normalizedValues([
     row.segmentType, row.segment_type,
     segmentMeta.segmentType, segmentMeta.segment_type,
+    segmentMeta.memory_types, segmentMeta.memoryTypes,
     segmentMeta.memory_type, segmentMeta.memoryType, segmentMeta.claim_type, segmentMeta.claimType,
+    segmentMeta.claim_kinds, segmentMeta.claimKinds, segmentMeta.claim_kind, segmentMeta.claimKind,
     documentMeta.memory_type, documentMeta.memoryType,
-    ...tags.filter((tag) => /^(memory-type|memory_type|claim-type|claim_type):/i.test(String(tag)))
+    ...tags.filter((tag) => /^(memory-type|memory_type|claim-type|claim_type|claim-kind|claim_kind):/i.test(String(tag)))
       .map((tag) => String(tag).split(':').slice(1).join(':')),
     ...(row.memoryLinks || []).map((link) => link?.memory?.memoryType || link?.memory?.memory_type),
   ]);
@@ -135,7 +140,12 @@ export function evidenceMetadata(row = {}) {
     ...tags.filter((tag) => /^entity:/i.test(String(tag)))
       .map((tag) => String(tag).split(':').slice(1).join(':')),
   ]);
-  return { eventTime, validFrom, validTo, knownAt, sourceKinds, memoryTypes, entities };
+  return {
+    eventTime, validFrom, validTo, knownAt, sourceKinds, memoryTypes, entities,
+    citationId: segmentMeta.citation_id || row.citation_id || null,
+    sourceTitle: segmentMeta.source_title || segmentMeta.document_title || document.title || null,
+    projectIds: normalizedValues([segmentMeta.project_ids, segmentMeta.project_id]),
+  };
 }
 
 export function filterEvidenceByMetadata(rows = [], {
@@ -144,10 +154,16 @@ export function filterEvidenceByMetadata(rows = [], {
   time = null,
   memoryTypes = [],
   entities = [],
+  citationId = null,
+  sourceTitle = null,
+  projectIds = [],
 } = {}) {
   const wantedKind = String(sourceKind || '').normalize('NFKC').trim().toLocaleLowerCase();
   const wantedTypes = normalizedValues(memoryTypes);
   const wantedEntities = normalizedValues(entities);
+  const wantedProjects = normalizedValues(projectIds);
+  const wantedCitation = String(citationId || '').trim();
+  const wantedSourceTitle = String(sourceTitle || '').normalize('NFKC').trim().toLocaleLowerCase();
   const rangeStart = timestamp(time?.range?.start || time?.range?.from);
   const rangeEnd = timestamp(time?.range?.end || time?.range?.to);
   const validAt = timestamp(time?.valid_at);
@@ -155,6 +171,9 @@ export function filterEvidenceByMetadata(rows = [], {
 
   let filtered = rows.filter((row) => {
     const meta = evidenceMetadata(row);
+    if (wantedCitation && meta.citationId !== wantedCitation) return false;
+    if (wantedSourceTitle && !String(meta.sourceTitle || '').normalize('NFKC').toLocaleLowerCase().includes(wantedSourceTitle)) return false;
+    if (wantedProjects.size && ![...wantedProjects].some((project) => meta.projectIds.has(project))) return false;
     if (wantedKind && ![...meta.sourceKinds].some((kind) => kind === wantedKind
       || kind.startsWith(`${wantedKind}/`))) return false;
     if (wantedTypes.size && ![...wantedTypes].some((type) => meta.memoryTypes.has(type))) return false;
@@ -382,6 +401,8 @@ export class EvidenceRetrievalService {
     time = null,
     memoryTypes = [],
     entities = [],
+    citationId = null,
+    sourceTitle = null,
   }) {
     // Per-tenant: evidence lives in the org container (layer=evidence). Legacy:
     // a dedicated hivemind_evidence collection. Must mirror _embedSegments.
@@ -451,6 +472,8 @@ export class EvidenceRetrievalService {
               type: 'evidence_segment',
               segmentId: s.id,
               documentId: s.document_id,
+              title: s.metadata?.evidence_title || evidenceTitle(s.title || h.title, s.segment_index),
+              citation_id: s.metadata?.citation_id || s.id,
               content: s.content,
               snippet: this._extractSnippet(s.content, query),
               score: h.score,
@@ -482,7 +505,8 @@ export class EvidenceRetrievalService {
           })
           .filter(Boolean);
         return this._orderAndSlice(filterEvidenceByMetadata(remoteResults, {
-          sourceKind, temporalSelector, time, memoryTypes, entities,
+          sourceKind, temporalSelector, time, memoryTypes, entities, citationId, sourceTitle,
+          projectIds: projectId ? [projectId] : [],
         }), _deliver);
       }
 
@@ -686,6 +710,9 @@ export class EvidenceRetrievalService {
         type: 'evidence_segment',
         segmentId: segment.id,
         documentId: segment.documentId,
+        title: segment.metadata?.evidence_title
+          || evidenceTitle(segment.document?.title, segment.segmentIndex),
+        citation_id: segment.metadata?.citation_id || segment.id,
         content: segment.content,
         snippet: this._extractSnippet(segment.content, query),
         score,
@@ -717,6 +744,11 @@ export class EvidenceRetrievalService {
           memory_type: segment.metadata?.memory_type ?? segment.metadata?.memoryType ?? segment.metadata?.claim_type ?? null,
           entities: [...evidenceMetadata(segment).entities],
           memory_types: [...evidenceMetadata(segment).memoryTypes],
+          source_id: segment.metadata?.source_id || segment.documentId,
+          source_title: segment.metadata?.source_title || segment.document?.title || null,
+          source_kind: segment.metadata?.source_kind || segment.document?.sourcePlatform || 'document',
+          uploader_user_id: segment.metadata?.uploader_user_id || segment.userId || null,
+          org_id: segment.metadata?.org_id || segment.orgId || null,
         },
         };
       };
@@ -765,7 +797,8 @@ export class EvidenceRetrievalService {
       }
 
       return this._orderAndSlice(filterEvidenceByMetadata(results, {
-        sourceKind, temporalSelector, time, memoryTypes, entities,
+        sourceKind, temporalSelector, time, memoryTypes, entities, citationId, sourceTitle,
+        projectIds: projectId ? [projectId] : [],
       }), _deliver);
     } catch (error) {
       console.error('[EvidenceRetrieval] Retrieval failed:', error);
@@ -995,6 +1028,8 @@ export class EvidenceRetrievalService {
           type: 'evidence_segment',
           segmentId: segment.id,
           documentId: segment.documentId,
+          title: segment.metadata?.evidence_title || evidenceTitle(document.title, segment.segmentIndex),
+          citation_id: segment.metadata?.citation_id || segment.id,
           content: segment.content,
           snippet: this._extractSnippet(segment.content, query, 520),
           score: scoreById.get(segment.id) ?? null,
@@ -1125,6 +1160,8 @@ export class EvidenceRetrievalService {
       type: 'evidence_segment',
       segmentId: segment.id,
       documentId: segment.documentId,
+      title: segment.metadata?.evidence_title || evidenceTitle(segment.document?.title, segment.segmentIndex),
+      citation_id: segment.metadata?.citation_id || segment.id,
       content: segment.content,
       snippet: segment.content,
       score: scoreByDocument.get(segment.documentId),

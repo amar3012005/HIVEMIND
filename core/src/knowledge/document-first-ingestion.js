@@ -42,8 +42,16 @@ import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-i
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 import { countPages } from './page-count.js';
 import { isValidEmbeddingVector } from '../embeddings/vector-contract.js';
+import { normalizeKbMemoryType } from '../memory/memory-taxonomy.js';
+import {
+  buildEvidenceMetadata,
+  buildEvidenceVectorPayload,
+  buildMemoryProvenance,
+  memoryTitle as provenanceMemoryTitle,
+} from './provenance-metadata.js';
 
-const DURABLE_EXTRACT_TYPES = ['fact', 'preference', 'decision', 'lesson', 'goal', 'event'];
+const DURABLE_EXTRACT_TYPES = ['fact', 'event'];
+const KB_CURATED_TYPES = ['fact', 'event', 'summary', 'synthesis'];
 const CLAIM_ENTITY_KINDS = new Set(['person', 'organization', 'product', 'place', 'technology', 'standard']);
 
 // qwen3-ingest is schema-led: plain JSON mode can return a valid but unrelated
@@ -578,7 +586,8 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   for (let _i = 0; _i < arr.length; _i += 1) {
     const item = arr[_i];
     if (!item || typeof item.f !== 'string' || item.f.trim().length < 4) { drop.shape += 1; continue; }
-    if (!DURABLE_EXTRACT_TYPES.includes(item.memory_type)) { drop.type += 1; continue; }
+    const kbMemoryType = normalizeKbMemoryType(item.memory_type);
+    if (!DURABLE_EXTRACT_TYPES.includes(kbMemoryType)) { drop.type += 1; continue; }
     if (typeof item.source_quote !== 'string' || item.source_quote.length < 4) { drop.short_quote += 1; continue; }
     if (isStructuredSourceNoise(item.f) || isStructuredSourceNoise(item.source_quote)) { drop.noise += 1; continue; }
     const loc = locateSourceQuote(content, item.source_quote);
@@ -590,7 +599,7 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
       _oldIdx: _i,
       t: durableTitle(item.t, item.f),
       f: item.f.trim(),
-      memory_type: item.memory_type,
+      memory_type: kbMemoryType,
       source_quote: loc.quote,
       source_start: loc.start,
       source_end: loc.start + loc.quote.length,
@@ -730,7 +739,9 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
   for (const memory of (Array.isArray(rawMemories) ? rawMemories : []).slice(0, cap)) {
     const indices = [...new Set((memory?.support_indices || []).map(Number))]
       .filter((index) => Number.isInteger(index) && index >= 0 && index < pool.length);
-    if (!indices.length || !DURABLE_EXTRACT_TYPES.includes(memory?.memory_type)) continue;
+    if (!indices.length) continue;
+    const kbMemoryType = normalizeKbMemoryType(memory?.memory_type);
+    if (!KB_CURATED_TYPES.includes(kbMemoryType)) continue;
     const supports = indices.map((index) => pool[index]).filter((item) => item?.segmentId && item?.source_quote);
     if (!supports.length) continue;
     const primary = supports[0];
@@ -741,7 +752,7 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
     output.push({
       t: durableTitle(memory.title || primary.t, content),
       f: content,
-      memory_type: memory.memory_type,
+      memory_type: kbMemoryType,
       importance: Math.max(0.65, Math.min(1, importance)),
       // Canonical entities come only from exact-span extraction. The curator
       // may merge claims but cannot introduce a new graph identity.
@@ -1395,7 +1406,12 @@ Output the JSON object and nothing else.`;
           content: fact.trim(),
           // LLM-emitted concise title (its subject/topic), not the whole
           // sentence. Falls back to the first-clause heuristic if absent.
-          title: (factTitle && factTitle.trim() && !isGarbageTitle(factTitle)) ? factTitle.trim().slice(0, 80) : cleanTitleFrom(fact),
+          title: provenanceMemoryTitle(
+            docTitle,
+            (factTitle && factTitle.trim() && !isGarbageTitle(factTitle))
+              ? factTitle.trim().slice(0, 80)
+              : cleanTitleFrom(fact),
+          ),
           memory_type: 'fact',
           source_type: 'knowledge_fact',
           // Event date of the source document (connector occurredAt / meeting
@@ -1656,7 +1672,7 @@ Output the JSON object and nothing else.`;
     const sys = `Extract only high-value durable workspace memory from the SECTION.
 LANGUAGE: infer the SECTION's language semantically and write every "t" and "f" in that same language. Do not translate. These instructions are not a language sample. For mixed-language sources, preserve the language of each supported claim. Only JSON keys, memory_type and the canonical predicate use English.
 Return ONLY valid JSON:
-{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|decision|preference|goal|event|lesson","importance":0.0,"extraction_confidence":0.0,"source_quote":"exact verbatim substring from SECTION","subject":{"n":"exact canonical subject","k":"person|organization|product|place|technology|standard"},"predicate":"canonical_english_relation","object":{"value":"exact source-language value","type":"semantic category or empty"},"qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}],"relationships":[{"from":{"n":"Canonical Name","k":"allowed kind"},"type":"semantic_relation","to":{"n":"Canonical Name","k":"allowed kind"}}]}]}
+{"facts":[{"t":"short topic","f":"one complete standalone contextual claim","memory_type":"fact|event","importance":0.0,"extraction_confidence":0.0,"source_quote":"exact verbatim substring from SECTION","subject":{"n":"exact canonical subject","k":"person|organization|product|place|technology|standard"},"predicate":"canonical_english_relation","object":{"value":"exact source-language value","type":"semantic category or empty"},"qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"entities":[{"n":"Canonical Name","k":"person|organization|product|place|technology|standard"}],"relationships":[{"from":{"n":"Canonical Name","k":"allowed kind"},"type":"semantic_relation","to":{"n":"Canonical Name","k":"allowed kind"}}]}]}
 
 SUBJECT RULE — the single most important rule. Every claim must NAME WHAT IT IS ABOUT, inside the claim text, so it still makes sense with the document gone. The memory is stored alone and retrieved by meaning; a reader who never saw this document must be able to tell what it concerns.
 Judge each claim by SHAPE, not by wording — these patterns are abstract and carry no example text:
@@ -2009,7 +2025,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           scope: metadata.scope, visibility: metadata.visibility || 'private',
           primary_team_id: metadata.primary_team_id || null,
           project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
-          content: fact.f, title: fact.t, memory_type: fact.memory_type, tags,
+          content: fact.f, title: provenanceMemoryTitle(docTitle, fact.t), memory_type: normalizeKbMemoryType(fact.memory_type), tags,
           importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
           ...(claimKey ? { claim_key: claimKey } : {}),
           ...(claimStructure.subject?.name ? { claim_subject: claimStructure.subject.name } : {}),
@@ -2017,8 +2033,15 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           ...(Object.keys(claimStructure.qualifiers || {}).length ? { claim_qualifiers: claimStructure.qualifiers } : {}),
           extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
           document_date: metadata.document_date || null,
-          source_metadata: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', document_id: documentId, source_id: metadata.source_id || documentId, source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
-          metadata: {
+          source_metadata: buildMemoryProvenance({
+            existing: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
+            documentId, sourceId: metadata.source_id || documentId, sourceTitle: docTitle,
+            segmentIds: fact.support_segment_ids || [window.segmentId], userId, orgId,
+            scope: metadata.scope, projectIds: metadata.project_ids, teamId: metadata.primary_team_id,
+            documentDate: metadata.document_date, knownAt: metadata.known_at,
+          }),
+          metadata: buildMemoryProvenance({
+            existing: {
             document_id: documentId,
             document_type: metadata.document_type || 'general',
             document_type_confidence: metadata.document_type_confidence ?? null,
@@ -2037,7 +2060,12 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
               extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
             },
             distill_agent: 'kb_unified_v2',
-          },
+            },
+            documentId, sourceId: metadata.source_id || documentId, sourceTitle: docTitle,
+            segmentIds: fact.support_segment_ids || [window.segmentId], userId, orgId,
+            scope: metadata.scope, projectIds: metadata.project_ids, teamId: metadata.primary_team_id,
+            documentDate: metadata.document_date, knownAt: metadata.known_at,
+          }),
           skip_fact_extraction: true, defer_entity_linking: true,
           // Memories carry their authoritative document/event time as the
           // canonical suffix. Evidence remains verbatim in knowledge_segments;
@@ -2050,8 +2078,8 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         if (!id || (res?.operation || '').startsWith('skipped')) continue;
         idByIdx[i] = id;
         factObjs.push({
-          id, user_id: userId, org_id: orgId, content: fact.f, title: fact.t,
-          memory_type: fact.memory_type, tags,
+          id, user_id: userId, org_id: orgId, content: fact.f, title: provenanceMemoryTitle(docTitle, fact.t),
+          memory_type: normalizeKbMemoryType(fact.memory_type), tags,
           claim_key: claimKey,
           claim_subject: claimStructure.subject?.name || null,
           claim_predicate: claimStructure.predicate || null,
@@ -2069,6 +2097,44 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         evidenceLinks.push({ memoryId: id, documentId, segmentId: window.segmentId || null, linkType: 'supports', confidence: fact.importance, excerpt: fact.source_quote });
         derivations.push({ memoryId: id, derivationMethod: 'llm_extract', derivationAgent: String(extractionModel).slice(0, 100), confidence: fact.importance, metadata: { document_id: documentId, segment_id: window.segmentId, source_start: fact.source_start, source_end: fact.source_end } });
       } catch (e) { this.logger.warn?.(`[kb-unified] fact ingest failed: ${e.message}`); }
+    }
+    // Enrich the authoritative evidence rows with the semantic metadata learned
+    // by this same extraction pass. Content remains verbatim; only filterable
+    // metadata changes. This lets entity/type/temporal recall constrain evidence
+    // and memory lanes symmetrically after hydration.
+    if (!orgIsRemote(orgId)) {
+      try {
+        const semanticBySegment = new Map();
+        for (const fact of facts) {
+          const ids = fact.support_segment_ids?.length ? fact.support_segment_ids : [window.segmentId];
+          for (const segmentId of ids.filter(Boolean)) {
+            const entry = semanticBySegment.get(segmentId) || { memoryTypes: new Set(), entities: new Set() };
+            entry.memoryTypes.add(normalizeKbMemoryType(fact.memory_type));
+            for (const entity of fact.entities || []) {
+              const name = typeof entity === 'string' ? entity : (entity?.name || entity?.n);
+              if (name) entry.entities.add(String(name));
+            }
+            semanticBySegment.set(segmentId, entry);
+          }
+        }
+        const rows = await this.db.knowledgeSegment.findMany({
+          where: { id: { in: [...semanticBySegment.keys()] }, orgId },
+          select: { id: true, metadata: true },
+        });
+        await Promise.all(rows.map((row) => {
+          const semantic = semanticBySegment.get(row.id);
+          return this.db.knowledgeSegment.update({
+            where: { id: row.id },
+            data: { metadata: {
+              ...(row.metadata && typeof row.metadata === 'object' ? row.metadata : {}),
+              memory_types: [...semantic.memoryTypes],
+              entities: [...semantic.entities],
+            } },
+          });
+        }));
+      } catch (metadataError) {
+        this.logger.warn?.(`[kb-unified] evidence metadata enrichment failed: ${metadataError.message}`);
+      }
     }
     // Contextual embeds (one batched call) so the facts are vector-recallable.
     if (embedPending.length && vs) {
@@ -2456,7 +2522,7 @@ Merge compatible candidates into one complete, information-dense memory. Never m
 Omit slogans, generic descriptions, contact-directory trivia, repeated examples, and details useful only when reading the raw source. Every memory MUST be fully supported by its support_indices. Do not invent, infer, or add facts. Preserve names, numbers, dates, conditions, owners, and outcomes. A memory may cite multiple candidates. Use the source language. Merge ONLY genuine duplicates (the same claim restated); never merge or drop two DISTINCT claims to reduce the count.
 
 Return ONLY valid JSON. Do not add prose, markdown, or an explanation before or after the JSON. The complete response must exactly match this shape:
-{"memories":[{"title":"short descriptive title","memory_type":"fact|decision|preference|goal|event|lesson|summary|synthesis","content":"1-3 source-grounded sentences","claim_subject":{"n":"canonical subject","k":"person|organization|product|place|technology|standard"},"claim_predicate":"canonical_english_relation","claim_object":{"value":"exact source-language value","type":"semantic category or empty"},"claim_qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"support_indices":[0,1]}]}
+{"memories":[{"title":"short descriptive title","memory_type":"fact|event|summary|synthesis","content":"1-3 source-grounded sentences","claim_subject":{"n":"canonical subject","k":"person|organization|product|place|technology|standard"},"claim_predicate":"canonical_english_relation","claim_object":{"value":"exact source-language value","type":"semantic category or empty"},"claim_qualifiers":{"scope":"only material conditions, dates, units, negation, uncertainty or rationale"},"support_indices":[0,1]}]}
 Every item must include a non-empty content field and one or more valid support_indices from the supplied candidate list.`;
     // Model fallback + headroom (rosemary Bug C): the curator previously used a
     // bare chatCompletion with max_tokens:1400, so a single provider hiccup
@@ -2680,7 +2746,7 @@ Every item must include a non-empty content field and one or more valid support_
           if (!/\(recorded \d{4}-\d{2}-\d{2}\)\s*$/.test(out)) out = `${out.replace(/\s+$/, '')} (recorded ${_day})`;
           return out;
         })(),
-        title: docTitle, memory_type: 'summary',
+        title: provenanceMemoryTitle(docTitle, 'Summary'), memory_type: 'summary',
         // The parent is source-local navigation context, not a durable claim.
         importance_score: 0.45,
         document_date: metadata.document_date || null,
@@ -3182,6 +3248,10 @@ Every item must include a non-empty content field and one or more valid support_
       projectId: metadata.project_id || (Array.isArray(metadata.project_ids) && metadata.project_ids[0]) || null,
       teamId: metadata.primary_team_id || null,
       documentTitle: metadata.documentTitle || metadata.filename || null,
+      sourceId: metadata.source_id || _scopedSourceId || knowledgeDoc.id,
+      sourceKind: metadata.source_kind || metadata.source_platform || 'document',
+      documentDate: metadata.document_date || knowledgeDoc.documentDate || null,
+      knownAt: knowledgeDoc.createdAt || new Date().toISOString(),
     };
     const _tSeg = Date.now();
     let segments;
@@ -4417,10 +4487,14 @@ Every item must include a non-empty content field and one or more valid support_
               segmentIndex, previousSegmentId, depth: _hstack.length, startOffset, endOffset,
               startPage, endPage,
               wordCount: text.split(/\s+/).length,
-              metadata: { heading, heading_path: headingPath, page: startPage, source: 'semantic_chunk',
-                scope: docScope.scope || null, scope_key: docScope.scopeKey || null,
-                project_id: docScope.projectId || null, team_id: docScope.teamId || null,
-                document_title: docScope.documentTitle || null },
+              metadata: buildEvidenceMetadata({
+                existing: { heading, heading_path: headingPath, page: startPage, source: 'semantic_chunk', scope_key: docScope.scopeKey || null },
+                documentId, sourceId: docScope.sourceId || documentId,
+                sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document',
+                segmentIndex, segmentType, userId, orgId,
+                scope: docScope.scope, projectId: docScope.projectId, teamId: docScope.teamId,
+                startPage, endPage, documentDate: docScope.documentDate, knownAt: docScope.knownAt,
+              }),
             };
             if (remote) {
               const segment = { id: crypto.randomUUID(), ...base, createdAt: new Date().toISOString() };
@@ -4469,7 +4543,7 @@ Every item must include a non-empty content field and one or more valid support_
             depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
             startOffset: null, endOffset: null,
             wordCount: text.split(/\s+/).length,
-            metadata: { heading, page: hc.page || null, source: 'docling_hybrid' },
+            metadata: buildEvidenceMetadata({ existing: { heading, page: hc.page || null, source: 'docling_hybrid' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'structured', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, teamId: docScope.teamId, startPage: hc.page || null, endPage: hc.page || null, documentDate: docScope.documentDate, knownAt: docScope.knownAt }),
             createdAt: new Date().toISOString(),
           };
           segments.push(segment);
@@ -4488,7 +4562,7 @@ Every item must include a non-empty content field and one or more valid support_
                 depth: Array.isArray(hc.headings) ? hc.headings.length : 0,
                 startOffset: null, endOffset: null,
                 wordCount: text.split(/\s+/).length,
-                metadata: { heading, page: hc.page || null, source: 'docling_hybrid' },
+                metadata: buildEvidenceMetadata({ existing: { heading, page: hc.page || null, source: 'docling_hybrid' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'structured', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, teamId: docScope.teamId, startPage: hc.page || null, endPage: hc.page || null, documentDate: docScope.documentDate, knownAt: docScope.knownAt }),
               },
             });
             segments.push(segment);
@@ -4560,7 +4634,7 @@ Every item must include a non-empty content field and one or more valid support_
           startOffset: null,
           endOffset: null,
           wordCount: chunk.split(/\s+/).length,
-          metadata: { source: 'paragraph_fallback' },
+          metadata: buildEvidenceMetadata({ existing: { source: 'paragraph_fallback' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'chunk', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, teamId: docScope.teamId, documentDate: docScope.documentDate, knownAt: docScope.knownAt }),
           createdAt: new Date().toISOString(),
         };
         segments.push(segment);
@@ -4581,7 +4655,7 @@ Every item must include a non-empty content field and one or more valid support_
             startOffset: null,
             endOffset: null,
             wordCount: chunk.split(/\s+/).length,
-            metadata: { source: 'paragraph_fallback' }
+            metadata: buildEvidenceMetadata({ existing: { source: 'paragraph_fallback' }, documentId, sourceId: docScope.sourceId || documentId, sourceTitle: docScope.documentTitle, sourceKind: docScope.sourceKind || 'document', segmentIndex, segmentType: 'chunk', userId, orgId, scope: docScope.scope, projectId: docScope.projectId, teamId: docScope.teamId, documentDate: docScope.documentDate, knownAt: docScope.knownAt })
           }
         });
         segments.push(segment);
@@ -4694,12 +4768,7 @@ Every item must include a non-empty content field and one or more valid support_
               segOrgId,
               point: {
                 id: segment.id, vector: embedding,
-                payload: {
-                  segment_id: segment.id, document_id: segment.documentId,
-                  user_id: segment.userId, org_id: segment.orgId,
-                  segment_type: segment.segmentType, layer: 'evidence',
-                  content_preview: segment.content.slice(0, 200),
-                },
+                payload: buildEvidenceVectorPayload(segment),
               },
             });
           }
@@ -4834,7 +4903,7 @@ Every item must include a non-empty content field and one or more valid support_
       return Array.from(picked.values());
     })();
 
-    // ── FACTS-ONLY memory creation (default; reversible via KB_FACTS_ONLY=false) ──────────────────────
+    // ── FACTS-ONLY memory creation (canonical) ───────────────────────────────────────────────────────
     // Segments are EVIDENCE (hop-2). Memories = the LLM-distilled atomic FACTS only. We do NOT promote
     // raw segments as "section" memories — those duplicated evidence, carried mid-word chunk text, and
     // spawned a fact→section Derives edge per fact (the bulk of the "Derives noise"). Instead: distill the
@@ -4843,7 +4912,9 @@ Every item must include a non-empty content field and one or more valid support_
     // Mentions via shared entities) + intra-doc cohesion (batch peers). Result: fewer, richer, fully
     // attributable memories — uniform for central/managed/self-host (the distill + linker both route by
     // org type at their own seams).
-    if (String(process.env.KB_FACTS_ONLY ?? 'true').toLowerCase() !== 'false') {
+    // Raw segment promotion is intentionally no longer feature-flag reversible:
+    // KnowledgeSegment is the evidence authority; Memory is distilled knowledge.
+    {
       // Window the content for distillation so fact yield tracks CONTENT VOLUME, not the (highly
       // variable) evidence-chunk size — a doc that the chunker split into one giant segment OR many tiny
       // fragments both produce a sensible fact set. Merge adjacent segments up to ~WIN chars; set the

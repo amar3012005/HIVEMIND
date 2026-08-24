@@ -23,6 +23,10 @@ import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity, normalizeTagsArray } from './entity-normalize.js';
 import { getEntityLinkQueue } from './entity-link-queue.js';
 import { persistCanonicalLinks } from './canonical-entity-persister.js';
+import {
+  CANONICAL_MEMORY_TYPES,
+  normalizeMemoryType,
+} from './memory-taxonomy.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -68,7 +72,7 @@ function _sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const ENTITY_MEMORY_TYPES = new Set(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'relationship']);
+const ENTITY_MEMORY_TYPES = new Set(CANONICAL_MEMORY_TYPES);
 
 // qwen3-ingest needs a shape contract, not merely JSON mode. This mirrors the
 // linker parser below: required arrays keep a single extracted entity from
@@ -2887,12 +2891,12 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
     // supplied (caller likely defaulted to 'fact'), upgrade it. Only
     // upgrade in the fact→specific direction; never downgrade a caller
     // who explicitly set 'decision'/'preference'/etc.
-    const VALID_TYPES = new Set(['fact', 'preference', 'decision', 'lesson', 'goal', 'event', 'relationship']);
-    if (inferredType && VALID_TYPES.has(inferredType) && baseMemory.memory_type === 'fact' && inferredType !== 'fact') {
+    const normalizedInferredType = normalizeMemoryType(inferredType, { fallback: null, allowLegacy: false });
+    if (normalizedInferredType && baseMemory.memory_type === 'fact' && normalizedInferredType !== 'fact') {
       try {
-        await store.updateMemory(baseMemory.id, { memoryType: inferredType });
-        baseMemory.memory_type = inferredType; // keep local copy in sync
-        console.log(`[entity-co-mention] upgraded memory_type: fact → ${inferredType}`);
+        await store.updateMemory(baseMemory.id, { memoryType: normalizedInferredType });
+        baseMemory.memory_type = normalizedInferredType; // keep local copy in sync
+        console.log(`[entity-co-mention] upgraded memory_type: fact → ${normalizedInferredType}`);
       } catch (typeErr) {
         console.warn('[entity-co-mention] type upgrade failed:', typeErr.message);
       }
@@ -3642,6 +3646,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
   _buildMemoryRecord(input) {
     const timestamp = nowIso();
     const documentDate = deriveDocumentDate(input);
+    const memoryType = normalizeMemoryType(input.memory_type, { allowLegacy: false });
 
     // Derive scope: explicit input.scope wins; else infer from inputs.
     //   - explicit project_ids[]   → scope=project
@@ -3666,7 +3671,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       project_ids: Array.isArray(input.project_ids) ? input.project_ids : [],
       project: input.project || null,
       content: input.content,
-      memory_type: input.memory_type || 'fact',
+      memory_type: memoryType,
       title: input.title || null,
       tags: input.tags || [],
       // P2 salience: explicit caller value wins; else derive from memory_type
@@ -3675,7 +3680,7 @@ If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "link
       // meaningful type-based score instead of the flat 0.5 default.
       importance_score: Number.isFinite(input.importance_score)
         ? input.importance_score
-        : computeImportanceScore({ memory_type: input.memory_type, priority: input.priority }),
+        : computeImportanceScore({ memory_type: memoryType, priority: input.priority }),
       is_latest: true,
       version: 1,
       created_at: timestamp,

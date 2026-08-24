@@ -122,8 +122,20 @@ export function evidenceMetadata(row = {}) {
     documentMeta.memory_type, documentMeta.memoryType,
     ...tags.filter((tag) => /^(memory-type|memory_type|claim-type|claim_type):/i.test(String(tag)))
       .map((tag) => String(tag).split(':').slice(1).join(':')),
+    ...(row.memoryLinks || []).map((link) => link?.memory?.memoryType || link?.memory?.memory_type),
   ]);
-  return { eventTime, validFrom, validTo, knownAt, sourceKinds, memoryTypes };
+  const entities = normalizedValues([
+    segmentMeta.entities, segmentMeta.entity_names, segmentMeta.entityNames,
+    documentMeta.entities, documentMeta.entity_names, documentMeta.entityNames,
+    ...(row.entityMentions || []).flatMap((mention) => [
+      mention?.mentionText, mention?.mention_text,
+      mention?.entity?.canonicalName, mention?.entity?.canonical_name,
+      mention?.entity?.aliases,
+    ]),
+    ...tags.filter((tag) => /^entity:/i.test(String(tag)))
+      .map((tag) => String(tag).split(':').slice(1).join(':')),
+  ]);
+  return { eventTime, validFrom, validTo, knownAt, sourceKinds, memoryTypes, entities };
 }
 
 export function filterEvidenceByMetadata(rows = [], {
@@ -131,9 +143,11 @@ export function filterEvidenceByMetadata(rows = [], {
   temporalSelector = null,
   time = null,
   memoryTypes = [],
+  entities = [],
 } = {}) {
   const wantedKind = String(sourceKind || '').normalize('NFKC').trim().toLocaleLowerCase();
   const wantedTypes = normalizedValues(memoryTypes);
+  const wantedEntities = normalizedValues(entities);
   const rangeStart = timestamp(time?.range?.start || time?.range?.from);
   const rangeEnd = timestamp(time?.range?.end || time?.range?.to);
   const validAt = timestamp(time?.valid_at);
@@ -144,6 +158,16 @@ export function filterEvidenceByMetadata(rows = [], {
     if (wantedKind && ![...meta.sourceKinds].some((kind) => kind === wantedKind
       || kind.startsWith(`${wantedKind}/`))) return false;
     if (wantedTypes.size && ![...wantedTypes].some((type) => meta.memoryTypes.has(type))) return false;
+    if (wantedEntities.size) {
+      const searchable = `${row.content || row.snippet || ''} ${row.document?.title || ''}`
+        .normalize('NFKC').toLocaleLowerCase();
+      const matched = [...wantedEntities].every((entity) => meta.entities.has(entity)
+        || [...meta.entities].some((candidate) => candidate.includes(entity) || entity.includes(candidate))
+        // Historical rows may pre-date entity metadata. Content matching is a
+        // deterministic compatibility fallback, never a source of scope widening.
+        || searchable.includes(entity));
+      if (!matched) return false;
+    }
     if (rangeStart != null || rangeEnd != null) {
       const event = timestamp(meta.eventTime);
       if (event == null || (rangeStart != null && event < rangeStart) || (rangeEnd != null && event > rangeEnd)) return false;
@@ -357,6 +381,7 @@ export class EvidenceRetrievalService {
     temporalSelector = null,
     time = null,
     memoryTypes = [],
+    entities = [],
   }) {
     // Per-tenant: evidence lives in the org container (layer=evidence). Legacy:
     // a dedicated hivemind_evidence collection. Must mirror _embedSegments.
@@ -457,7 +482,7 @@ export class EvidenceRetrievalService {
           })
           .filter(Boolean);
         return this._orderAndSlice(filterEvidenceByMetadata(remoteResults, {
-          sourceKind, temporalSelector, time, memoryTypes,
+          sourceKind, temporalSelector, time, memoryTypes, entities,
         }), _deliver);
       }
 
@@ -525,6 +550,8 @@ export class EvidenceRetrievalService {
       };
       const lexicalInclude = {
         document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true, createdAt: true, updatedAt: true } },
+        entityMentions: { include: { entity: { select: { id: true, canonicalName: true, aliases: true } } } },
+        memoryLinks: { include: { memory: { select: { id: true, memoryType: true } } } },
       };
       const lexicalPromise = (lexTokens.length || lexicalPhrases.length)
         ? Promise.all([
@@ -551,6 +578,33 @@ export class EvidenceRetrievalService {
           return [];
         })
         : Promise.resolve([]);
+      // Entity mentions are a third candidate-generation lane over canonical
+      // relational metadata. It runs beside lexical/vector retrieval and does
+      // not add an embedding, LLM call, or rerank pass.
+      const entityNames = [...normalizedValues(entities)];
+      const entityPromise = entityNames.length ? this.db.knowledgeSegment.findMany({
+        where: {
+          ...lexicalWhere,
+          entityMentions: {
+            some: {
+              entity: {
+                orgId,
+                isActive: true,
+                OR: entityNames.flatMap((name) => [
+                  { canonicalName: { equals: name, mode: 'insensitive' } },
+                  { canonicalName: { contains: name, mode: 'insensitive' } },
+                  { aliases: { has: name } },
+                ]),
+              },
+            },
+          },
+        },
+        include: lexicalInclude,
+        take: Math.min(_depth, 150),
+      }).catch((error) => {
+        console.warn('[EvidenceRetrieval] entity lane failed:', error.message);
+        return [];
+      }) : Promise.resolve([]);
       const vectorPromise = this.qdrantClient.searchMemories({
         collectionName,
         query,
@@ -571,7 +625,9 @@ export class EvidenceRetrievalService {
         // Per-tenant: constrain to evidence layer within the shared org container.
         layer: PER_TENANT ? 'evidence' : undefined,
       });
-      const [boundedVectorResults, lexicalSegments] = await Promise.all([vectorPromise, lexicalPromise]);
+      const [boundedVectorResults, lexicalSegments, entitySegments] = await Promise.all([
+        vectorPromise, lexicalPromise, entityPromise,
+      ]);
       if (boundedVectorResults === null) {
         console.warn(`[EvidenceRetrieval] CENTRAL VECTOR LANE TIMEOUT org=${orgId}; delivering bounded lexical evidence`);
       }
@@ -612,7 +668,9 @@ export class EvidenceRetrievalService {
               // this the delivered evidence could not say which tier answered.
               tags: true
             }
-          }
+          },
+          entityMentions: { include: { entity: { select: { id: true, canonicalName: true, aliases: true } } } },
+          memoryLinks: { include: { memory: { select: { id: true, memoryType: true } } } },
         }
       });
 
@@ -657,6 +715,8 @@ export class EvidenceRetrievalService {
           valid_to: segment.metadata?.valid_to ?? segment.metadata?.validTo ?? null,
           known_at: segment.metadata?.known_at ?? segment.metadata?.knownAt ?? segment.createdAt ?? segment.document?.createdAt ?? null,
           memory_type: segment.metadata?.memory_type ?? segment.metadata?.memoryType ?? segment.metadata?.claim_type ?? null,
+          entities: [...evidenceMetadata(segment).entities],
+          memory_types: [...evidenceMetadata(segment).memoryTypes],
         },
         };
       };
@@ -693,8 +753,19 @@ export class EvidenceRetrievalService {
         }
       }
 
+      for (const segment of entitySegments || []) {
+        const existing = haveIds.has(segment.id)
+          ? results.find((row) => row.segmentId === segment.id)
+          : null;
+        if (existing) existing._entity = true;
+        else {
+          results.push({ ...fmt(segment, 0.72), _entity: true });
+          haveIds.add(segment.id);
+        }
+      }
+
       return this._orderAndSlice(filterEvidenceByMetadata(results, {
-        sourceKind, temporalSelector, time, memoryTypes,
+        sourceKind, temporalSelector, time, memoryTypes, entities,
       }), _deliver);
     } catch (error) {
       console.error('[EvidenceRetrieval] Retrieval failed:', error);

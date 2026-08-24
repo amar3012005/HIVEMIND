@@ -1234,6 +1234,7 @@ export async function hop2Evidence({ evidenceService, query, queryVector = null,
       known_at: filters.known_at || null,
     },
     memoryTypes: filters.memory_types || [],
+    entities: filters.canonical_entities || filters.named_entities || [],
     depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
   });
   return {

@@ -240,6 +240,50 @@ const controlCreditService = new CreditService({
 });
 planEnforcer.setCreditService(controlCreditService);
 
+// One accounting boundary for every executed HyperAgent turn. Turn creation has
+// several legitimate entry points (manual chat, task kickoff, HQ routing,
+// resume, and scheduled runtime), but every execution reports a seal event to
+// Control. The turn id is therefore the canonical idempotency key for both the
+// credit ledger and the established Usage-page projection.
+async function meterHyperAgentTurn(turnId) {
+  if (!turnId) return { metered: false, reason: 'missing_turn_id' };
+  const turn = await prisma.hyperTurn.findUnique({
+    where: { id: turnId },
+    select: { room: { select: { orgId: true, userId: true } } },
+  });
+  const orgId = turn?.room?.orgId;
+  const userId = turn?.room?.userId;
+  if (!orgId) return { metered: false, reason: 'turn_not_found' };
+
+  // The execution already happened, so the established Usage projection must
+  // reflect it even if the account exhausted its credit allowance while an
+  // autonomous kickoff was running. The next admission is then blocked by the
+  // updated projection instead of silently losing this run.
+  await controlUsageService.record({
+    orgId,
+    userId,
+    type: 'hyperAgentRuns',
+    quantity: 1,
+    source: 'hyperagents',
+    idempotencyKey: `hyperagent-run:${turnId}`,
+    metadata: { turn_id: turnId },
+  });
+
+  const creditKey = `hyperagent:turn:${turnId}`;
+  const credit = await controlCreditService.reserve({
+    orgId,
+    userId,
+    service: 'hyperagent_turn',
+    units: 1,
+    source: 'hyperagents',
+    idempotencyKey: creditKey,
+    metadata: { turn_id: turnId },
+  });
+  if (!credit.admitted) return { metered: true, creditSettled: false, reason: 'credits_exhausted', check: credit.check };
+  await controlCreditService.settle({ orgId, idempotencyKey: creditKey });
+  return { metered: true, creditSettled: true, duplicate: Boolean(credit.duplicate) };
+}
+
 function dummyCheckoutAllowed(orgId) {
   if (process.env.BILLING_DUMMY_CHECKOUT_ENABLED !== 'true') return false;
   if (process.env.NODE_ENV !== 'production') return true;
@@ -12302,7 +12346,8 @@ Write the persona now.`;
       const pre = preflightTurn({ room, userMessage });
       if (pre) return jsonResponse(res, pre, 400);
 
-      const hyperCreditKey = `hyperagent:${String(body.idempotency_key || requestedTurnId || crypto.createHash('sha256').update(`${roomId}:${userMessage}`).digest('hex')).slice(0, 150)}`;
+      const meteredTurnId = requestedTurnId || crypto.randomUUID();
+      const hyperCreditKey = `hyperagent:turn:${meteredTurnId}`;
       const hyperCredit = await controlCreditService.reserve({
         orgId: current.session.orgId, userId: current.session.userId,
         service: 'hyperagent_turn', units: 1, source: 'hyperagents',
@@ -12339,7 +12384,7 @@ Write the persona now.`;
 
           const created = await tx.hyperTurn.create({
             data: {
-              ...(requestedTurnId ? { id: requestedTurnId } : {}),
+              id: meteredTurnId,
               roomId,
               seq: nextSeq,
               userMessage,
@@ -12357,7 +12402,15 @@ Write the persona now.`;
         });
 
         if (createdNew) {
-          planEnforcer.recordUsage(current.session.orgId, 'hyperAgentRuns', 1);
+          await controlUsageService.record({
+            orgId: current.session.orgId,
+            userId: current.session.userId,
+            type: 'hyperAgentRuns',
+            quantity: 1,
+            source: 'hyperagents',
+            idempotencyKey: `hyperagent-run:${turn.id}`,
+            metadata: { turn_id: turn.id, room_id: roomId },
+          });
           if (!hyperCredit.duplicate) await controlCreditService.settle({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey });
         } else if (!hyperCredit.duplicate) {
           await controlCreditService.release({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey });
@@ -12561,6 +12614,16 @@ Write the persona now.`;
         const { handleCampaignRoomEvent } = await import('./campaigns/pipeline.js');
         await handleCampaignRoomEvent({ prisma, turnId: body.turn_id, event: body.event });
         if (body.event.t === 'seal') {
+          // Reconcile product usage at the one lifecycle boundary shared by
+          // every execution path. This is idempotent with the manual-turn
+          // admission path and covers task/HQ/runtime-created turns that never
+          // pass through POST /v1/hyper-rooms/:id/turns.
+          try {
+            const metering = await meterHyperAgentTurn(body.turn_id);
+            if (!metering.metered) console.warn('[hyper-meter] turn not metered', body.turn_id, metering.reason);
+          } catch (meterError) {
+            console.warn('[hyper-meter] reconciliation failed:', body.turn_id, meterError.message);
+          }
           // METER the turn's LLM token cost against the org's plan. HyperAgents was a billing dead-end
           // (cost_tokens stored on hyperTurn but never billed). Resolve org from the turn's room → record.
           try {

@@ -74,7 +74,13 @@ function normalizePlanShape(input) {
     for (const key of ['tags', 'entities', 'preferences']) {
       if (!Array.isArray(out.memory[key])) { out.memory[key] = []; repairs.push(`memory.${key}`); }
     }
-    if (!out.memory.profile_fields || typeof out.memory.profile_fields !== 'object' || Array.isArray(out.memory.profile_fields)) {
+    if (Array.isArray(out.memory.profile_fields)) {
+      out.memory.profile_fields = Object.fromEntries(out.memory.profile_fields
+        .filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry))
+        .map((entry) => [String(entry.field || '').trim(), String(entry.value || '').trim()])
+        .filter(([field, value]) => field && value));
+      repairs.push('memory.profile_fields.entries');
+    } else if (!out.memory.profile_fields || typeof out.memory.profile_fields !== 'object') {
       out.memory.profile_fields = {}; repairs.push('memory.profile_fields');
     }
   } else if (out.memory === undefined) {

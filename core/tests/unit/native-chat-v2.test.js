@@ -66,6 +66,17 @@ test('unscoped save stays null and profile update stays caller scoped', () => {
   assert.deepEqual(profile.profile_update.fields, { location: 'India' });
 });
 
+test('validator canonicalizes provider-safe profile field entries', () => {
+  const plan = makePlan({ operation: 'update_profile', query: null, entities: [], memory: {
+    title: null, content: null, memory_type: null, scope: null, project_id: null, tags: [], entities: [], event_time: null,
+    profile_fields: [{ field: 'location', value: 'India' }], preferences: [],
+  } });
+  const result = validateNativePlanResult(plan);
+  assert.equal(result.status, 'repairable');
+  assert.deepEqual(result.plan.memory.profile_fields, { location: 'India' });
+  assert.ok(result.repairs.includes('memory.profile_fields.entries'));
+});
+
 test('validator repairs model-owned tool mapping but rejects semantic invalidity', () => {
   const mismatched = makePlan(); mismatched.capability = 'direct'; mismatched.steps[0].capability = 'direct'; mismatched.steps[0].tool = 'hivemind_diff';
   const repaired = validateNativePlanResult(mismatched);

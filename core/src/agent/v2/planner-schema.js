@@ -13,7 +13,7 @@ export function createNativePlanTool() {
       operation: { type: 'string', enum: NATIVE_OPERATIONS },
       response: { type: 'object', additionalProperties: false, properties: {
         language: { type: 'string' }, type: { type: 'string', enum: ['fact', 'decision', 'event', 'relationship', 'profile', 'acknowledgement'] },
-        scope: { type: 'string', enum: ['bounded', 'broad', 'exhaustive'] }, depth: { type: 'string', enum: ['standard', 'detailed', 'comprehensive'] },
+        scope: { type: 'string', enum: ['bounded', 'broad', 'exhaustive'], description: 'Requested answer coverage. Use bounded for ordinary fact/entity questions, broad only for meaningful multi-aspect breadth, exhaustive only for complete inventories.' }, depth: { type: 'string', enum: ['standard', 'detailed', 'comprehensive'] },
         shape: { type: 'string', enum: ['fact', 'overview', 'inventory', 'timeline', 'comparison', 'explanation'] }, objective: { type: 'string' },
       }, required: ['language', 'type', 'scope', 'depth', 'shape', 'objective'] },
       references: { type: 'object', additionalProperties: false, properties: {
@@ -40,9 +40,11 @@ export function createNativePlanTool() {
       aggregate: { type: ['object', 'null'], additionalProperties: false, properties: { parent: nullableString, kind: nullableString } },
       memory: { type: ['object', 'null'], additionalProperties: false, properties: {
         title: nullableString, content: nullableString, memory_type: nullableString,
-        scope: { type: ['string', 'null'], enum: ['personal', 'project', 'team', 'organization', null] }, project_id: nullableString,
+        scope: { type: ['string', 'null'], enum: ['personal', 'project', 'team', 'organization', null], description: 'Explicit destination stated by the user. MUST be null when the user did not state a destination; the server owns the scope chooser.' }, project_id: nullableString,
         tags: { type: 'array', items: { type: 'string' }, maxItems: 12 }, entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
-        event_time: nullableString, profile_fields: { type: 'object', additionalProperties: { type: 'string' } },
+        event_time: nullableString, profile_fields: { type: 'array', maxItems: 12, description: 'For update_profile, every changed caller-owned identity field. A location, role, name or biography change MUST appear here.', items: {
+          type: 'object', additionalProperties: false, properties: { field: { type: 'string' }, value: { type: 'string' } }, required: ['field', 'value'],
+        } },
         preferences: { type: 'array', items: { type: 'string' }, maxItems: 12 },
       } },
       direct_response: nullableString, context_free_certificate: { type: 'boolean' },

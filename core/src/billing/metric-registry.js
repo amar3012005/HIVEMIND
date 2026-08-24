@@ -14,8 +14,8 @@ export const USAGE_METRICS = Object.freeze({
   taraSeconds: { metric: 'tara_seconds', month: 'taraSeconds', daily: 'taraSeconds', cumulative: 'tara_seconds' },
   hyperAgentRuns: { metric: 'hyperagent_runs', month: 'hyperAgentRuns', daily: 'hyperAgentRuns', cumulative: 'hyper_agent_runs' },
   emailSends: { metric: 'email_sends', month: 'emailSends', daily: 'emailSends', cumulative: null },
-  // Credits are the commercial allowance. They intentionally have no legacy
-  // OrgUsage projection: usage_events is their authoritative ledger.
+  // Credit events provide reservation/idempotency receipts. Settled usage is
+  // priced from the canonical OrgUsage/service counters by CreditService.
   credits: { metric: 'credits_consumed', month: null, daily: null, cumulative: null },
 });
 

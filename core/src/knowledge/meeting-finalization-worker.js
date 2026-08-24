@@ -118,7 +118,7 @@ async function settleFailure(prisma, identity, attempts, error, { terminal = fal
   return { claimed: true, ok: false, terminal: !retryAt, retryAt, error: String(error?.message || error) };
 }
 
-export async function processMeetingFinalization(prisma, identity) {
+export async function processMeetingFinalization(prisma, identity, { creditService = null } = {}) {
   const state = await readiness(prisma, identity);
   if (state.missing) return { claimed: false, missing: true };
   if (state.row.status === 'ready' && state.row.finalized_meeting_id) return { claimed: false, ok: true, existing: true, meetingId: state.row.finalized_meeting_id };
@@ -151,6 +151,17 @@ export async function processMeetingFinalization(prisma, identity) {
     const transcript = (segments || []).map((segment) => segment.text).filter(Boolean).join('\n').trim();
     if (!transcript) throw new Error('no transcript available for finalization');
     const payload = job.finalization_payload && typeof job.finalization_payload === 'object' ? job.finalization_payload : {};
+    const inferredDurationSec = Math.max(0, ...segments.map((segment) => Number(segment.end_ms || 0))) / 1000;
+    const meetingMinutes = Math.max(1, Math.ceil((Number(payload.duration_sec) || inferredDurationSec || 60) / 60));
+    const meetingCreditKey = `meeting:${identity.sessionId}`;
+    const meetingCredit = creditService ? await creditService.reserve({
+      orgId: identity.orgId, userId: identity.userId, service: 'meeting_minute', units: meetingMinutes,
+      source: 'meeting_notes', idempotencyKey: meetingCreditKey,
+      metadata: { session_id: identity.sessionId, minutes: meetingMinutes },
+    }) : { admitted: true, duplicate: true };
+    if (!meetingCredit.admitted) {
+      return settleFailure(prisma, identity, Number(job.finalization_attempts), new Error('monthly credits exhausted'), { terminal: true, code: 'credits_exhausted' });
+    }
     const speakerTranscript = segments.some((segment) => Array.isArray(segment.speakers) && segment.speakers.length)
       ? segments.flatMap((segment) => segment.speakers || []).map((item) => `${item.speaker || 'Speaker'}: ${item.text || ''}`).join('\n')
       : transcript;
@@ -203,13 +214,15 @@ export async function processMeetingFinalization(prisma, identity) {
       );
       return { id: meetingId, createdAt: rows[0].created_at };
     });
+    if (creditService && !meetingCredit.duplicate) await creditService.settle({ orgId: identity.orgId, idempotencyKey: meetingCreditKey });
     return { claimed: true, ok: true, meetingId: result.id, existing: Boolean(result.existing) };
   } catch (error) {
+    if (creditService) await creditService.release({ orgId: identity.orgId, idempotencyKey: `meeting:${identity.sessionId}` }).catch(() => {});
     return settleFailure(prisma, identity, Number(job.finalization_attempts), error);
   }
 }
 
-export async function reconcileMeetingFinalizations(prisma, { limit = 5 } = {}) {
+export async function reconcileMeetingFinalizations(prisma, { limit = 5, creditService = null } = {}) {
   const recovered = await queueAbandonedMeetingSessions(prisma, { limit });
   const rows = await prisma.$queryRawUnsafe(
     `SELECT s.id,s.org_id,s.user_id FROM hivemind.meeting_sessions s
@@ -225,7 +238,7 @@ export async function reconcileMeetingFinalizations(prisma, { limit = 5 } = {}) 
       ORDER BY s.updated_at ASC LIMIT $2`, MAX_ATTEMPTS, Math.max(1, Math.min(20, Number(limit) || 5)),
   );
   const results = [];
-  for (const row of rows || []) results.push(await processMeetingFinalization(prisma, { sessionId: row.id, orgId: row.org_id, userId: row.user_id }));
+  for (const row of rows || []) results.push(await processMeetingFinalization(prisma, { sessionId: row.id, orgId: row.org_id, userId: row.user_id }, { creditService }));
   return { recovered: recovered.length, scanned: rows?.length || 0, completed: results.filter((result) => result.ok).length, failed: results.filter((result) => result.claimed && !result.ok).length };
 }
 

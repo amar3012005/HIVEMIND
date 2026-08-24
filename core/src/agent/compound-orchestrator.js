@@ -19,7 +19,7 @@
  * Flag-gated by COMPOUND_ORCHESTRATOR_ENABLED (default false) in the caller.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chatCompletionFetch } from '../llm/chat-provider.js';
 
 // Model used for the per-subtask tool-selection step. Reuses the hardened
@@ -1266,8 +1266,27 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
 
   if (!isWrite) {
     // Read — execute immediately via Composio.
+    let providerCall = 0;
+    const executeMetered = async (callArgs) => {
+      providerCall += 1;
+      const key = `composio:${ctx?._trace?.traceId || randomUUID()}:${subtask?.id || composioSlug}:${providerCall}`.slice(0, 180);
+      const credit = ctx?.creditService ? await ctx.creditService.reserve({
+        orgId, userId: ctx?.userId || null, service: 'composio_tool_call', units: 1,
+        source: 'composio', idempotencyKey: key,
+        metadata: { slug: composioSlug, authority: selectedAuthority, step: subtask?.id || null },
+      }) : { admitted: true, duplicate: true };
+      if (!credit.admitted) return { successful: false, error: 'Monthly credits exhausted', code: 'credits_exhausted' };
+      try {
+        const output = await composioExecute(orgId, composioSlug, callArgs);
+        if (ctx?.creditService && !credit.duplicate) await ctx.creditService.settle({ orgId, idempotencyKey: key });
+        return output;
+      } catch (error) {
+        if (ctx?.creditService && !credit.duplicate) await ctx.creditService.settle({ orgId, idempotencyKey: key });
+        throw error;
+      }
+    };
     let executedArgs = args;
-    let rawResult = await composioExecute(orgId, composioSlug, executedArgs);
+    let rawResult = await executeMetered(executedArgs);
     // Query Mode occasionally lags a provider enum/schema revision. Repair one
     // failed READ from the provider's concrete validation message. This is
     // toolkit-agnostic and bounded; writes are never auto-retried.
@@ -1281,7 +1300,7 @@ async function runSubtask({ subtask, context, ctx, apiKey, signal, priorOutputs,
         const repairedDependencies = injectDependencies(repaired, priorOutputs, manifestSchema);
         executedArgs = applyConnectorRetrievalPolicy(repairedDependencies, manifestSchema, subtask.retrieval);
         emit({ type: 'tool_call', name: toolName, retry: 'provider_schema_repair', arguments: JSON.stringify(executedArgs) });
-        rawResult = await composioExecute(orgId, composioSlug, executedArgs);
+        rawResult = await executeMetered(executedArgs);
       } catch { /* original provider failure remains authoritative */ }
     }
     const result = rawResult?.data && typeof rawResult.data === 'object'

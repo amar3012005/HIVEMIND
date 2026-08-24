@@ -243,6 +243,7 @@ const { UsageTracker, setUsageTracker } = await import('./billing/usage-tracker.
 const { PlanStore } = await import('./billing/plan-store.js');
 const { PlanEnforcer, planLimitBody } = await import('./billing/plan-enforcer.js');
 const { UsageService } = await import('./billing/usage-service.js');
+const { CreditService } = await import('./billing/credit-service.js');
 
 // Audit logging (Scale / Enterprise plans)
 const { AuditLogger } = await import('./audit/audit-logger.js');
@@ -392,6 +393,8 @@ const planStore = prisma ? new PlanStore(prisma) : null;
 const planEnforcer = (prisma && planStore && usageTracker) ? new PlanEnforcer(prisma, planStore, usageTracker) : null;
 const usageService = (prisma && planEnforcer && usageTracker) ? new UsageService({ prisma, planEnforcer, usageTracker }) : null;
 planEnforcer?.setUsageService(usageService);
+const creditService = (prisma && planStore && usageService) ? new CreditService({ prisma, planStore, usageService }) : null;
+planEnforcer?.setCreditService(creditService);
 
 // One durable settlement marker prevents a completed/retried/polled Web job
 // from being billed twice. Provider receipts remain on the job attempt manifest;
@@ -587,7 +590,7 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     initialDelayMs: 20_000,
     intervalMs: Math.max(15_000, Number(process.env.MEETING_FINALIZATION_RECONCILE_INTERVAL_MS || 30_000)),
     run: async () => {
-      const result = await reconcileMeetingFinalizations(prisma, { limit: Number(process.env.MEETING_FINALIZATION_RECONCILE_LIMIT || 5) });
+      const result = await reconcileMeetingFinalizations(prisma, { limit: Number(process.env.MEETING_FINALIZATION_RECONCILE_LIMIT || 5), creditService });
       if (result.scanned) console.info('[meeting-finalization-reconciler]', result);
     },
   });
@@ -2437,7 +2440,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
     // pipeline above — worker calls documentFirstIngestion unchanged.
     try {
       const { KbIngestQueue } = await import('./knowledge/kb-ingest-queue.js');
-      knowledgeUploadJobStore = new KnowledgeUploadJobStore({ prisma, planEnforcer, logger: console });
+      knowledgeUploadJobStore = new KnowledgeUploadJobStore({ prisma, planEnforcer, creditService, logger: console });
       kbIngestQueue = new KbIngestQueue({
         documentFirstIngestion,
         ingestTracker,
@@ -2482,7 +2485,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
       });
       knowledgeUploadService = new KnowledgeUploadService({
         prisma, queue: kbIngestQueue, jobStore: knowledgeUploadJobStore,
-        planEnforcer, storageReady: isMemoryStorageReady,
+        planEnforcer, creditService, storageReady: isMemoryStorageReady,
       });
       process.once('SIGTERM', () => { kbIngestQueue?.close().catch(() => {}); });
     } catch (err) {
@@ -7148,7 +7151,7 @@ exit \$RC
             if (queued.status === 'ready' && queued.finalized_meeting_id) {
               return jsonResponse(res, { ok: true, status: 'ready', meeting_id: queued.finalized_meeting_id, session_id: sid }, 200);
             }
-            void processMeetingFinalization(prisma, { sessionId: sid, orgId: mOrg, userId: mUser })
+            void processMeetingFinalization(prisma, { sessionId: sid, orgId: mOrg, userId: mUser }, { creditService })
               .catch((error) => console.warn('[meeting-finalization] start failed:', error?.message || error));
             return jsonResponse(res, { ok: true, status: 'queued', session_id: sid, durable: true }, 202);
           } catch (error) {
@@ -9964,6 +9967,16 @@ exit \$RC
               if (cancelled.count !== 1) return jsonResponse(res, { error: 'draft state changed' }, 409);
               return jsonResponse(res, { ok: true, status: 'cancelled', id: draftId });
             }
+            let approvalCredit = null;
+            const approvalCreditKey = `composio-approval:${draftId}`;
+            if (row.provider === 'composio' && creditService) {
+              approvalCredit = await creditService.reserve({
+                orgId, userId, service: 'composio_tool_call', units: 1,
+                source: 'composio_approval', idempotencyKey: approvalCreditKey,
+                metadata: { draft_id: draftId, slug: row.toolName || row.toolArgs?._composio_slug },
+              });
+              if (!approvalCredit.admitted) return jsonResponse(res, planLimitBody(approvalCredit.check, 'credits'), 402);
+            }
             // Approve → mark approved, then re-dispatch tool with
             // _approval_token. Middleware verifies + flips to sent.
             const approved = await prisma.pendingWrite.updateMany({
@@ -9983,6 +9996,7 @@ exit \$RC
                 const args = { ...(row.toolArgs || {}) };
                 delete args._composio_slug;
                 const result = await composioExecute(orgId, slug, args);
+                if (creditService && !approvalCredit?.duplicate) await creditService.settle({ orgId, idempotencyKey: approvalCreditKey });
                 const ok = Boolean(result?.successful);
                 const final = await prisma.pendingWrite.update({
                   where: { id: draftId },
@@ -10013,6 +10027,9 @@ exit \$RC
                 draft: final,
               });
             } catch (execErr) {
+              if (row.provider === 'composio' && creditService && !approvalCredit?.duplicate) {
+                await creditService.settle({ orgId, idempotencyKey: approvalCreditKey }).catch(() => {});
+              }
               await prisma.pendingWrite.update({
                 where: { id: draftId },
                 data: { status: 'failed', errorMsg: execErr.message },
@@ -11428,6 +11445,7 @@ exit \$RC
                     accessContext: accessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
                     webJobStore,
+                    creditService,
                     browserRuntime,
                     runWebCrawlJob,
                     runWebSearchJob,
@@ -12299,6 +12317,7 @@ exit \$RC
             return handleKnowledgeUploadRoute({
               req, res, userId, orgId, readBoundedBuffer, MULTIPART_MAX_BYTES,
               parseMultipart, normalizeScopeIds, jsonResponse, knowledgeUploadService,
+              creditService, planLimitBody,
             });
             if (!persistentMemoryEngine) {
               return jsonResponse(res, { error: 'Memory engine unavailable' }, 503);
@@ -17724,6 +17743,7 @@ exit \$RC
               buildAccessContext,
               jsonResponse,
               knowledgeUploadService,
+              creditService,
             });
           }
           break;
@@ -23006,6 +23026,7 @@ exit \$RC
               organization_ai_usage: organizationAiUsage,
               member_ai_usage: memberAiUsage,
               usage_contract: 'usage-event-ledger-v1',
+              credit_contract: 'monthly-credit-ledger-v1',
             });
           }
           break;
@@ -23694,10 +23715,35 @@ exit \$RC
               return jsonResponse(res, { error: 'message is required' }, 400);
             }
 
+            // Reserve the commercial allowance before any retrieval or model
+            // work. This is separate from the existing token/search rate
+            // limits, which remain in force as anti-abuse guardrails.
+            const chatCreditKey = `chat:${String(
+              req.headers['x-idempotency-key'] || body?.idempotency_key || body?.request_id || crypto.randomUUID(),
+            ).slice(0, 150)}`;
+            const chatCredit = creditService
+              ? await creditService.reserve({
+                  orgId, userId, service: 'chat_turn', units: 1,
+                  source: useTools ? 'chat_tools' : 'chat_native',
+                  idempotencyKey: chatCreditKey,
+                  metadata: { route: pathname, use_tools: useTools },
+                })
+              : { admitted: true, idempotencyKey: chatCreditKey };
+            if (!chatCredit.admitted) {
+              return jsonResponse(res, planLimitBody(chatCredit.check, 'credits'), 402);
+            }
+            const settleChatCredit = async () => {
+              if (creditService && !chatCredit.duplicate) await creditService.settle({ orgId, idempotencyKey: chatCreditKey });
+            };
+            const releaseChatCredit = async () => {
+              if (creditService && !chatCredit.duplicate) await creditService.release({ orgId, idempotencyKey: chatCreditKey });
+            };
+
             // Authorize the complete chat scope before any working-set tap,
             // parser call, retrieval, connector discovery, or memory write.
             const agentAccessCtx = await buildAccessContext(userId, orgId);
             if (requestProjectId && !(agentAccessCtx.projectIds || []).includes(requestProjectId)) {
+              await releaseChatCredit();
               return jsonResponse(res, { error: 'project_access_denied' }, 403);
             }
 
@@ -23720,6 +23766,7 @@ exit \$RC
 
             const groqKey = process.env.GROQ_API_KEY || null;
             if (!groqKey && !process.env.OPENROUTER_API_KEY && !process.env.CEREBRAS_API_KEY) {
+              await releaseChatCredit();
               return jsonResponse(res, { error: 'Chat not available — no LLM API key configured' }, 503);
             }
 
@@ -23730,11 +23777,11 @@ exit \$RC
             if (body?.continuation_token) {
               const { consumeChatContinuation, createChatContinuation } = await import('./agent/chat-continuation-store.js');
               const stored = await consumeChatContinuation(body.continuation_token, { userId, orgId });
-              if (!stored) return jsonResponse(res, { error: 'continuation_expired_or_invalid' }, 409);
+              if (!stored) { await releaseChatCredit(); return jsonResponse(res, { error: 'continuation_expired_or_invalid' }, 409); }
               const choice = body?.continuation_response || {};
               const stepIndex = Number(choice.step_index);
               const pending = stored.resumeState?.results?.[stepIndex]?.inputRequest;
-              if (!pending) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
+              if (!pending) { await releaseChatCredit(); return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400); }
               const allowed = pending?.options?.find((option) => option.id === choice.option_id || option.value === choice.value);
               const declaredFields = Array.isArray(pending?.fields) ? pending.fields : [];
               const submittedValues = choice?.values && typeof choice.values === 'object' && !Array.isArray(choice.values)
@@ -23746,7 +23793,7 @@ exit \$RC
               const validFields = declaredFields.length > 0 && declaredFields.every((field) => (
                 !field.required || (fieldValues[field.name] != null && String(fieldValues[field.name]).trim() !== '')
               ));
-              if (!allowed && !validFields) return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
+              if (!allowed && !validFields) { await releaseChatCredit(); return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400); }
 
               const execute = async (emit) => {
                 const { runCompoundOrchestrator } = await import('./agent/compound-orchestrator.js');
@@ -23795,12 +23842,19 @@ exit \$RC
               if (wantStream) {
                 res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
                 const emit = (evt) => { try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {} };
-                try { emit({ type: 'done', ...(await execute(emit)) }); }
-                catch (error) { emit({ type: 'error', error: error.message }); }
+                try { emit({ type: 'done', ...(await execute(emit)) }); await settleChatCredit(); }
+                catch (error) { await releaseChatCredit(); emit({ type: 'error', error: error.message }); }
                 try { res.end(); } catch {}
                 return;
               }
-              return jsonResponse(res, await execute(null));
+              try {
+                const continued = await execute(null);
+                await settleChatCredit();
+                return jsonResponse(res, continued);
+              } catch (error) {
+                await releaseChatCredit();
+                throw error;
+              }
             }
 
             // ─── Two-Loop ReAct Agent (default path) ─────────────────────
@@ -23896,6 +23950,7 @@ exit \$RC
                         accessContext: agentAccessCtx,
                         webIntelligence: globalThis.webIntelligence || null,
                         webJobStore,
+                        creditService,
                         browserRuntime,
                         runWebCrawlJob,
                         runWebSearchJob,
@@ -23912,7 +23967,9 @@ exit \$RC
                       if (tot > 0) planEnforcer?.recordUsage(orgId, 'tokens', tot);
                     } catch { /* metering never breaks the stream */ }
                     emit({ type: 'done', ...result });
+                    await settleChatCredit();
                   } catch (agentErr) {
+                    await releaseChatCredit();
                     emit({ type: 'error', error: agentErr.message });
                   }
                   try { res.end(); } catch {}
@@ -23950,6 +24007,7 @@ exit \$RC
                     accessContext: agentAccessCtx,
                     webIntelligence: globalThis.webIntelligence || null,
                     webJobStore,
+                    creditService,
                     browserRuntime,
                     runWebCrawlJob,
                     runWebSearchJob,
@@ -23979,8 +24037,10 @@ exit \$RC
                 if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
                   result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
                 }
+                await settleChatCredit();
                 return jsonResponse(res, result);
               } catch (agentErr) {
+                await releaseChatCredit();
                 console.error('[chat:orchestrator] failed:', agentErr.message);
                 return jsonResponse(res, { error: 'chat_orchestration_failed', traceable: true }, 502);
               }

@@ -57,14 +57,16 @@ export function planLimitBody(check, resource) {
   const suggested = Object.prototype.hasOwnProperty.call(PLAN_LADDER, plan)
     ? PLAN_LADDER[plan]
     : 'pro';
+  const credits = resource === 'credits';
   return {
-    error: 'plan_limit_exceeded',   // stable string (machine + legacy display)
-    code: 'plan_limit_exceeded',    // stable machine code the FE keys off
+    error: credits ? 'credits_exhausted' : 'plan_limit_exceeded',
+    code: credits ? 'credits_exhausted' : 'plan_limit_exceeded',
     message: c.reason || 'Plan limit exceeded',
     resource,
     plan,
     limit: c.limit ?? null,
     current: c.current ?? null,
+    remaining: c.remaining ?? null,
     suggested_plan: suggested,      // next tier up, or null at enterprise
     upgrade_url: '/hivemind/app/billing',
   };
@@ -102,9 +104,11 @@ export class PlanEnforcer {
     // In-memory counters: orgId -> billable usage counters for the current month.
     this._counters = new Map();
     this.usageService = null;
+    this.creditService = null;
   }
 
   setUsageService(service) { this.usageService = service; }
+  setCreditService(service) { this.creditService = service; }
 
   // ── helpers ──────────────────────────────────────────────────────────
 
@@ -547,9 +551,11 @@ export class PlanEnforcer {
       meetingSecondsUsed = Math.max(0, Number(rows?.[0]?.secs || 0));
     } catch { /* display zero; admission still performs its own authoritative check */ }
 
+    const credits = this.creditService ? await this.creditService.getSummary(orgId).catch(() => null) : null;
     const summary = {
       plan: planDef?.id || 'free',
       planName: planDef?.name || 'Free',
+      credits,
       period: { month, day: new Date().toISOString().slice(0, 10) },
       tokens: { used: Number(dbUsage.tokensProcessed) || 0, limit: limits.llmTokensPerMonth ?? -1 },
       searches: { used: Number(dbUsage.searchQueries) || 0, limit: limits.searchQueriesPerMonth ?? -1 },
@@ -594,6 +600,10 @@ export class PlanEnforcer {
     for (const resource of monthlyResources) {
       const reminder = buildReminder(resource, summary[resource].used, summary[resource].limit, resource === 'memories' ? 'total' : 'monthly');
       if (reminder) reminders.push(reminder);
+    }
+    if (credits && !credits.unlimited) {
+      const reminder = buildReminder('credits', credits.used + credits.reserved, credits.included, 'monthly');
+      if (reminder) reminders.unshift(reminder);
     }
     for (const [resource, value] of Object.entries(summary.daily)) {
       const reminder = buildReminder(resource, value.used, value.limit, 'daily');

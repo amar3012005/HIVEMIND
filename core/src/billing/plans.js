@@ -94,7 +94,7 @@ export const PLANS = {
     price: 39,
     currency: 'EUR',
     limits: {
-      monthlyCredits: 5_000,
+      monthlyCredits: 10_000,
       maxMemories: 10_000,
       llmTokensPerDay: 500_000,
       llmTokensPerMonth: 5_000_000,
@@ -142,7 +142,7 @@ export const PLANS = {
       deepResearchPerDay: 5,
       webIntelPerDay: 50,
       searchQueriesPerMonth: 100_000,
-      maxUsers: 5,
+      maxUsers: 1,
       maxProjects: 20,
       maxConnectors: 10,
       knowledgeBasePagesPerMonth: 5_000,
@@ -183,7 +183,7 @@ export const PLANS = {
       deepResearchPerDay: 100,
       webIntelPerDay: 500,
       searchQueriesPerMonth: 2_000_000,
-      maxUsers: 25,
+      maxUsers: 1,
       maxProjects: 100,
       maxConnectors: -1, // unlimited
       knowledgeBasePagesPerMonth: 10_000,

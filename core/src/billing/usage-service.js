@@ -80,7 +80,7 @@ export class UsageService {
 
   async _applyProjection(orgId, metric, quantity, event = {}) {
     const entry = Object.entries((await import('./metric-registry.js')).USAGE_METRICS).find(([, value]) => value.metric === metric)?.[1];
-    if (!entry) return;
+    if (!entry || !entry.month || !entry.daily) return;
     const month = new Date().toISOString().slice(0, 7);
     const day = new Date().toISOString().slice(0, 10);
     const m = entry.month, d = entry.daily, c = entry.cumulative;

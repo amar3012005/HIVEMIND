@@ -74,6 +74,7 @@ import { isValidEnterpriseAccessCode, normalizeEnterpriseAccessCode } from './bi
 import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
 import { UsageService } from './billing/usage-service.js';
+import { CreditService } from './billing/credit-service.js';
 import { countQuotaHyperRooms, DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
 import {
   installConsoleCapture,
@@ -232,6 +233,12 @@ const planEnforcer = new PlanEnforcer(
 );
 const controlUsageService = new UsageService({ prisma, planEnforcer, usageTracker: controlUsageTracker });
 planEnforcer.setUsageService(controlUsageService);
+const controlCreditService = new CreditService({
+  prisma,
+  planStore: { getOrgPlan: async (orgId) => (await getEffectivePlan(prisma, orgId)).plan },
+  usageService: controlUsageService,
+});
+planEnforcer.setCreditService(controlCreditService);
 
 function dummyCheckoutAllowed(orgId) {
   if (process.env.BILLING_DUMMY_CHECKOUT_ENABLED !== 'true') return false;
@@ -12302,8 +12309,17 @@ Write the persona now.`;
       const pre = preflightTurn({ room, userMessage });
       if (pre) return jsonResponse(res, pre, 400);
 
+      const hyperCreditKey = `hyperagent:${String(body.idempotency_key || requestedTurnId || crypto.createHash('sha256').update(`${roomId}:${userMessage}`).digest('hex')).slice(0, 150)}`;
+      const hyperCredit = await controlCreditService.reserve({
+        orgId: current.session.orgId, userId: current.session.userId,
+        service: 'hyperagent_turn', units: 1, source: 'hyperagents',
+        idempotencyKey: hyperCreditKey, metadata: { room_id: roomId },
+      });
+      if (!hyperCredit.admitted) return jsonResponse(res, planLimitBody(hyperCredit.check, 'credits'), 402);
+
       const runLimit = await planEnforcer.checkLimit(current.session.orgId, 'hyperAgentRuns', 1);
       if (!runLimit.allowed) {
+        if (!hyperCredit.duplicate) await controlCreditService.release({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey });
         return jsonResponse(res, planLimitBody(runLimit, 'hyperAgentRuns'), runLimit.status || 429);
       }
 
@@ -12347,7 +12363,12 @@ Write the persona now.`;
           return created;
         });
 
-        if (createdNew) planEnforcer.recordUsage(current.session.orgId, 'hyperAgentRuns', 1);
+        if (createdNew) {
+          planEnforcer.recordUsage(current.session.orgId, 'hyperAgentRuns', 1);
+          if (!hyperCredit.duplicate) await controlCreditService.settle({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey });
+        } else if (!hyperCredit.duplicate) {
+          await controlCreditService.release({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey });
+        }
 
         const isIndependentGrowthRun = room.agentConnectors?._domain_home === true
           && String(room.roomTag || room.room_tag || 'general') === 'general'
@@ -12455,6 +12476,7 @@ Write the persona now.`;
 
         return jsonResponse(res, { turn_id: turn.id, status: turn.status }, 202);
       } catch (err) {
+        if (!hyperCredit.duplicate) await controlCreditService.release({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey }).catch(() => {});
         console.warn('[hyper-rooms] turn create failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
       }
@@ -12845,12 +12867,7 @@ Write the persona now.`;
       const { knowledgeBaseUploads: _uploadTelemetry, ...usage } = await usageTracker.getUsage(orgId);
       const { knowledgeBaseUploads: _cumulativeUploadTelemetry, ...cumulative } = await usageTracker.getCumulativeUsage(orgId);
       const limitCheck = await usageTracker.checkLimits(orgId, plan);
-      const { PlanEnforcer } = await import('./billing/plan-enforcer.js');
-      const usageSummary = await new PlanEnforcer(
-        prisma,
-        { getOrgPlan: async () => plan },
-        usageTracker,
-      ).getUsageSummary(orgId);
+      const usageSummary = await planEnforcer.getUsageSummary(orgId);
       return jsonResponse(res, {
         plan: {
           id: plan.id,
@@ -12891,6 +12908,7 @@ Write the persona now.`;
         cumulative_usage: cumulative,
         warnings: limitCheck.warnings || [],
         reminders: usageSummary.reminders || [],
+        credit_contract: 'monthly-credit-ledger-v1',
         exceeded: limitCheck.exceeded || [],
         stripe_enabled: billingMod.isEnabled(),
         all_plans: catalogPlans.map(p => ({

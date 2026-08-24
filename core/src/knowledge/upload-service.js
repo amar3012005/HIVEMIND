@@ -5,11 +5,12 @@ import { countPages } from './page-count.js';
 import { orgIsRemote } from '../vector/mneme/driver.js';
 
 export class KnowledgeUploadService {
-  constructor({ prisma, queue, jobStore, planEnforcer, storageReady, isRemoteOrg = orgIsRemote }) {
+  constructor({ prisma, queue, jobStore, planEnforcer, creditService = null, storageReady, isRemoteOrg = orgIsRemote }) {
     this.prisma = prisma;
     this.queue = queue;
     this.jobStore = jobStore;
     this.planEnforcer = planEnforcer;
+    this.creditService = creditService;
     this.storageReady = storageReady;
     this.isRemoteOrg = isRemoteOrg;
   }
@@ -47,8 +48,8 @@ export class KnowledgeUploadService {
       return { ok: false, status: 503, body: { error: 'queue_unavailable', message: 'Durable ingestion is temporarily unavailable.' } };
     }
 
+    const estimatedPages = await this._estimatePages(file, validation);
     if (this.planEnforcer) {
-      const estimatedPages = await this._estimatePages(file, validation);
       const limit = await this.planEnforcer.checkLimit(orgId, 'kbPages', estimatedPages);
       if (!limit.allowed) return { ok: false, status: limit.status || 402, body: {
         error: 'quota_reached', metric: 'kbPages', estimated_pages: estimatedPages,
@@ -164,23 +165,41 @@ export class KnowledgeUploadService {
       });
     }
 
-    const filePath = this.queue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
-    const queued = await this.queue.enqueue({
-      userId, orgId, filename, contentType: file.contentType, checksum, filePath,
-      trackerJobId: job.id, processingVersion,
-      metadata: {
-        ...metadata, media_kind: validation.kind, scope_type: scope.scopeType,
-        scope_id: scope.scopeId, project_ids: projectIds, primary_team_id: primaryTeamId,
-        force_reprocess: !!force,
-        ...(force && job.documentId ? { reprocess_document_id: job.documentId } : {}),
-      },
-    });
-    if (queued.backpressure) {
-      await this.jobStore.fail(job.id, orgId, Object.assign(new Error('Ingestion queue is saturated.'), { code: 'QUEUE_SATURATED' }));
-      return { ok: false, status: 429, body: { error: 'queue_saturated', retry_after: 30 } };
+    if (this.creditService) {
+      const service = ingestMode === 'evidence' ? 'knowledge_page_evidence' : 'knowledge_page_both';
+      const credit = await this.creditService.reserve({
+        orgId, userId, service, units: estimatedPages, source: 'knowledge_upload',
+        idempotencyKey: `knowledge-credit:${job.id}:${processingVersion}`,
+        metadata: { job_id: job.id, ingest_mode: ingestMode, estimated_pages: estimatedPages },
+      });
+      if (!credit.admitted) {
+        await this.jobStore.fail(job.id, orgId, Object.assign(new Error('Monthly credits exhausted.'), { code: 'CREDITS_EXHAUSTED' }));
+        return { ok: false, status: 402, body: { error: 'credits_exhausted', code: 'credits_exhausted', resource: 'credits', ...credit.check, upgrade_url: '/hivemind/app/billing' } };
+      }
     }
-    await this.jobStore.updateOwned(job.id, orgId, { queueJobId: queued.queue_job_id });
-    return { ok: true, job: await this.jobStore.findOwned(job.id, { orgId, userId }) };
+
+    try {
+      const filePath = this.queue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
+      const queued = await this.queue.enqueue({
+        userId, orgId, filename, contentType: file.contentType, checksum, filePath,
+        trackerJobId: job.id, processingVersion,
+        metadata: {
+          ...metadata, media_kind: validation.kind, scope_type: scope.scopeType,
+          scope_id: scope.scopeId, project_ids: projectIds, primary_team_id: primaryTeamId,
+          force_reprocess: !!force,
+          ...(force && job.documentId ? { reprocess_document_id: job.documentId } : {}),
+        },
+      });
+      if (queued.backpressure) {
+        await this.jobStore.fail(job.id, orgId, Object.assign(new Error('Ingestion queue is saturated.'), { code: 'QUEUE_SATURATED' }));
+        return { ok: false, status: 429, body: { error: 'queue_saturated', retry_after: 30 } };
+      }
+      await this.jobStore.updateOwned(job.id, orgId, { queueJobId: queued.queue_job_id });
+      return { ok: true, job: await this.jobStore.findOwned(job.id, { orgId, userId }) };
+    } catch (error) {
+      await this.jobStore.fail(job.id, orgId, error).catch(() => {});
+      throw error;
+    }
   }
 
   /**

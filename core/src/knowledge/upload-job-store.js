@@ -1,9 +1,10 @@
 const TERMINAL = new Set(['ready', 'failed', 'dead', 'cancelled']);
 
 export class KnowledgeUploadJobStore {
-  constructor({ prisma, planEnforcer = null, logger = console }) {
+  constructor({ prisma, planEnforcer = null, creditService = null, logger = console }) {
     this.prisma = prisma;
     this.planEnforcer = planEnforcer;
+    this.creditService = creditService;
     this.logger = logger;
   }
 
@@ -151,15 +152,28 @@ export class KnowledgeUploadJobStore {
   }
 
   async fail(jobId, orgId, error) {
+    const before = await this.findOwned(jobId, { orgId });
     await this._model().updateMany({
       where: { id: jobId, orgId, status: { notIn: [...TERMINAL] } }, data: {
       status: 'failed', stage: 'failed', progress: 100,
       errorCode: error?.code || 'INGEST_FAILED', errorMessage: String(error?.message || error || 'Ingestion failed').slice(0, 2000),
       completedAt: new Date(),
     } });
+    if (this.creditService) await this.creditService.release({ orgId, idempotencyKey: `knowledge-credit:${jobId}:${before?.processingVersion || 1}` }).catch(() => {});
   }
 
   async complete(jobId, orgId, userId, result) {
+    const jobBefore = await this.findOwned(jobId, { orgId, userId });
+    if (jobBefore?.status === 'ready' && jobBefore.usageSettledAt) return false;
+    if (this.creditService) {
+      const pages = Math.max(1, Number(result.pages) || 1);
+      const service = jobBefore?.ingestMode === 'evidence' ? 'knowledge_page_evidence' : 'knowledge_page_both';
+      const creditKey = `knowledge-credit:${jobId}:${jobBefore?.processingVersion || 1}`;
+      const adjusted = await this.creditService.adjustReservation({ orgId, idempotencyKey: creditKey, service, units: pages });
+      if (!adjusted.admitted && adjusted.admitted !== undefined) {
+        throw Object.assign(new Error('Monthly credits exhausted before upload settlement.'), { code: 'CREDITS_EXHAUSTED' });
+      }
+    }
     const updated = await this._model().updateMany({
       where: { id: jobId, orgId, userId, status: { notIn: [...TERMINAL] } },
       data: {
@@ -178,6 +192,7 @@ export class KnowledgeUploadJobStore {
     await this.settle(jobId, orgId, userId, 'uploads', 1);
     await this.settle(jobId, orgId, userId, 'kbPages', Math.max(1, Number(result.pages) || 1));
     await this.settle(jobId, orgId, userId, 'memories', Math.max(0, Number(result.promotedCount) || 0));
+    if (this.creditService) await this.creditService.settle({ orgId, idempotencyKey: `knowledge-credit:${jobId}:${jobBefore?.processingVersion || 1}` });
     await this.updateOwned(jobId, orgId, { usageSettledAt: new Date() });
     return true;
   }

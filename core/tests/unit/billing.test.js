@@ -56,6 +56,6 @@ describe('Plans', () => {
 
   it('returns canonical limit fields', () => {
     assert.equal(getLimit('free', 'llmTokensPerMonth'), 1_000_000);
-    assert.equal(getLimit('scale', 'maxUsers'), 25);
+    assert.equal(getLimit('scale', 'maxUsers'), 1);
   });
 });

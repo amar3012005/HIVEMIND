@@ -7,7 +7,7 @@ function field(parts, name, fallback = '') {
 
 export async function handleKnowledgeUploadRoute(ctx = {}) {
   const { req, res, userId, orgId, readBoundedBuffer, MULTIPART_MAX_BYTES,
-    parseMultipart, normalizeScopeIds, jsonResponse, knowledgeUploadService } = ctx;
+    parseMultipart, normalizeScopeIds, jsonResponse, knowledgeUploadService, creditService, planLimitBody } = ctx;
   if (!knowledgeUploadService) return jsonResponse(res, { error: 'canonical_ingest_unavailable' }, 503);
   try {
     const contentType = String(req.headers['content-type'] || '');
@@ -38,6 +38,16 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
         error: 'invalid_ingest_mode',
         message: 'ingestMode must be both or evidence.',
       }, 400);
+    }
+    if (creditService) {
+      const credits = await creditService.getSummary(orgId);
+      const minimum = ingestMode.value === 'evidence' ? 1 : 2;
+      if (!credits.unlimited && credits.remaining < minimum) {
+        return jsonResponse(res, planLimitBody({
+          allowed: false, status: 402, reason: 'Monthly credits exhausted', plan: credits.plan,
+          limit: credits.included, current: credits.used + credits.reserved, remaining: credits.remaining,
+        }, 'credits'), 402);
+      }
     }
     const admitted = await knowledgeUploadService.admit({
       userId, orgId, file, targetScope, projectIds, primaryTeamId,

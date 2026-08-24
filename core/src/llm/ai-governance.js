@@ -216,7 +216,7 @@ export function deriveCreditUsage(usageRows = []) {
     else if (metric === 'composio_calls') add('composio', 'Connected-app calls', quantity, 2, 'calls');
     // Only specifically chat-labelled searches are chat turns. Generic recall
     // and internal searches must not consume a customer chat allowance.
-    else if ((metric === 'chat_turns') || (metric === 'search_queries' && source.includes('chat'))) add('chat', 'Brain chat', quantity, 2, 'turns');
+    else if ((metric === 'chat_turns') || (metric === 'search_queries' && source.includes('chat'))) add('chat', 'Brain chat', quantity, 1, 'turns');
     else if (metric === 'deep_research_jobs') add('deep_research', 'Deep Research', quantity, 25, 'jobs');
     else if (metric === 'web_intel_jobs') add('web_intel', 'Web intelligence', quantity, 10, 'jobs');
   }

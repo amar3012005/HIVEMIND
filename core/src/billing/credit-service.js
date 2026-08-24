@@ -72,7 +72,12 @@ export class CreditService {
 
     const bothPageUnits = Math.min(kbPages, ledger.knowledge_page_both?.units || 0);
     const breakdown = {
-      chat_turn: Math.max(searches * creditCost('chat_turn', 1), ledger.chat_turn?.credits || 0),
+      // OrgUsage is the canonical turn counter. Do not preserve a historical
+      // ledger price after the catalog rate changes: that would keep charging
+      // old turns at the retired rate and make the displayed balance wrong.
+      chat_turn: canonicalRows.length
+        ? searches * creditCost('chat_turn', 1)
+        : (ledger.chat_turn?.credits || 0),
       composio_tool_call: ledger.composio_tool_call?.credits || 0,
       knowledge_page_evidence: Math.max(0, kbPages - bothPageUnits),
       knowledge_page_both: Math.max(bothPageUnits * creditCost('knowledge_page_both', 1), ledger.knowledge_page_both?.credits || 0),

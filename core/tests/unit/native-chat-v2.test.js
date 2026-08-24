@@ -85,8 +85,10 @@ test('validator repairs model-owned tool mapping but rejects semantic invalidity
   const certifiedGreeting = validateNativePlanResult(greeting);
   assert.equal(certifiedGreeting.status, 'repairable');
   assert.equal(certifiedGreeting.plan.context_free_certificate, true);
-  assert.ok(certifiedGreeting.repairs.includes('context_free_certificate.acknowledgement'));
+  assert.ok(certifiedGreeting.repairs.includes('context_free_certificate.structural'));
   const factualDirect = makePlan({ operation: 'direct', query: null, entities: [], direct: 'Kruti works in marketing.', certified: false, response: { type: 'fact', scope: 'bounded', depth: 'standard', shape: 'fact' } });
+  assert.equal(validateNativePlanResult(factualDirect).status, 'repairable');
+  factualDirect.references.entities = ['Kruti'];
   assert.equal(validateNativePlanResult(factualDirect).status, 'invalid');
 });
 

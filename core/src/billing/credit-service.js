@@ -54,7 +54,7 @@ export class CreditService {
     const key = String(idempotencyKey || crypto.randomUUID()).slice(0, 180);
     if (quantity === 0) return { admitted: true, idempotencyKey: key, quantity: 0 };
     return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, `credits:${orgId}:${monthWindow().key}`);
+      await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked`, `credits:${orgId}:${monthWindow().key}`);
       const existing = await tx.$queryRawUnsafe(
         `SELECT id,state,quantity,metadata FROM hivemind.usage_events WHERE org_id=$1::uuid AND idempotency_key=$2 LIMIT 1`, orgId, key,
       );
@@ -93,7 +93,7 @@ export class CreditService {
   async adjustReservation({ orgId, idempotencyKey, service, units }) {
     const quantity = creditCost(service, units);
     return this.prisma.$transaction(async (tx) => {
-      await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))`, `credits:${orgId}:${monthWindow().key}`);
+      await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked`, `credits:${orgId}:${monthWindow().key}`);
       const rows = await tx.$queryRawUnsafe(
         `SELECT id,state,quantity,metadata FROM hivemind.usage_events WHERE org_id=$1::uuid AND idempotency_key=$2 FOR UPDATE`, orgId, idempotencyKey,
       );

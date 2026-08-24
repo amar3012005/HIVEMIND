@@ -151,7 +151,6 @@ function reconcileSemanticOperation(plan, repairs) {
   // answer to bypass grounded recall.
   const structurallyContextFree = plan.operation === 'direct'
     && Boolean(plan.direct_response)
-    && !plan.steps[0].query
     && !plan.steps[0].tool
     && plan.references.entities.length === 0
     && !plan.references.source
@@ -165,6 +164,10 @@ function reconcileSemanticOperation(plan, repairs) {
   if (structurallyContextFree && !plan.context_free_certificate) {
     plan.context_free_certificate = true;
     repairs.push('context_free_certificate.structural');
+  }
+  if (structurallyContextFree && plan.steps[0].query) {
+    plan.steps[0].query = null;
+    repairs.push('steps.0.query.direct');
   }
 }
 

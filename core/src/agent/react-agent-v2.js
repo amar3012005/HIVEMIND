@@ -3118,7 +3118,6 @@ export async function runReactAgentV2({
           .then((shadow) => console.info(`[chat:native-v2-shadow] trace=${trace.traceId} operation=${shadow.decision.operation} tool=${shadow.decision.native_tool || 'none'} validation=${shadow.validation?.status || 'unknown'}`))
           .catch((error) => console.warn(`[chat:native-v2-shadow] trace=${trace.traceId} failed=${error.message}`));
       }
-      if (process.env.CHAT_ROUTER === 'progressive') {
       if (useTools && process.env.HOSTED_COMPOSIO_PLANNER_ENABLED === 'true') {
         try {
           const { planHostedComposioWorkflow } = await import('./hosted-composio-planner.js');
@@ -3155,11 +3154,10 @@ export async function runReactAgentV2({
             _hosted_planner_fallback: hostedPlannerError.message,
           };
         }
-      } else {
+      } else if (process.env.CHAT_ROUTER === 'progressive') {
         intentParsed = await (await import('./chat-progressive-router.js')).parseChatIntentProgressive({
           message, history, language, apiKey, signal: abortCtrl.signal, useTools,
         });
-      }
       } else {
         intentParsed = await parseChatIntent({
           message, history, language,
@@ -3358,7 +3356,7 @@ export async function runReactAgentV2({
             const boundedResults = JSON.stringify(payload).slice(0, 28000);
             const synthesized = await callJsonLLM({
               messages: [
-                { role: 'system', content: `Return strict JSON {"response":string,"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Answer naturally as HIVE using only the completed HIVE-MIND recall and live connector results supplied. Answer every requested part and include useful closely related grounded details when they add context. If ranked recall context is relevant but insufficient and more ranked rows may exist, set context_status="relevant_but_incomplete"; the server will reveal the next page without recalling. If one detail remains missing after the final page, first explain what the results establish, then identify only the missing part and invite specificity. Preserve exact counts, dates, names, relationships, and uncertainty. Do not claim an action occurred unless the result says so. Output in ${language || 'en'}.` },
+                { role: 'system', content: `Return strict JSON {"response":string,"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Answer naturally as HIVE using only the completed HIVE-MIND recall and live Composio connector results supplied. Each connector result carries the exact step instruction and selected tool: use those fields to map returned data to every part of the user's request. Prefer live connector data for connector questions; never replace it with unrelated recall context. For lists, enumerate the actual returned items and preserve their names, dates, senders, identifiers, links and counts. Distinguish an empty successful result from a failed or missing result. If ranked recall context is relevant but insufficient and more ranked rows may exist, set context_status="relevant_but_incomplete"; the server will reveal the next page without recalling. If one requested detail remains missing after the final page, explain what the completed results establish, then identify only that missing part. Do not claim an action occurred unless the governed result says so. Output in ${language || 'en'}.` },
                 { role: 'user', content: `USER REQUEST:\n${message}\n\n${compoundSynthesisResultsLabel({ recallResults: compound.recallResults || [], visibleLimit })}:\n${boundedResults}` },
               ],
               model: requestedAnswerModel,
@@ -3425,9 +3423,22 @@ export async function runReactAgentV2({
       };
     }
 
-    // The planner classifies direct turns, but user-facing prose always comes
-    // from the synthesis model so every chat surface follows one model policy.
+    // Native V2 owns context-free prose inside its single typed planner call.
+    // Serving that validated draft directly removes a redundant synthesis call
+    // for greetings, thanks and other friendly turns. Legacy routers keep their
+    // existing answerDirectly compatibility path.
     if (intentDecision.operation === 'direct' && plan._direct_answer) {
+      if (intentDecision._router === 'native-v2') {
+        const response = String(plan._direct_answer).trim();
+        onEvent?.({ type: 'finish', text: response });
+        onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct' });
+        return {
+          response,
+          sources: [], steps, evidence_used: [], confidence: 0.95, gaps: [],
+          usage: sumUsage(usages), trace: finalizeTrace(trace, usages),
+          assistant_name: assistantName || null,
+        };
+      }
       const { response, usage } = await answerDirectly({
         message, gateKind: 'general', language, assistantName, orgName,
         model: answerModel, apiKey, signal: abortCtrl.signal,

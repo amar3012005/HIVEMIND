@@ -81,8 +81,13 @@ test('validator repairs model-owned tool mapping but rejects semantic invalidity
   const mismatched = makePlan(); mismatched.capability = 'direct'; mismatched.steps[0].capability = 'direct'; mismatched.steps[0].tool = 'hivemind_diff';
   const repaired = validateNativePlanResult(mismatched);
   assert.equal(repaired.status, 'repairable'); assert.equal(repaired.plan.steps[0].tool, 'hivemind_recall');
-  const invalid = makePlan({ operation: 'direct', query: null, entities: [], direct: 'Hello', certified: false, response: { type: 'acknowledgement', scope: 'bounded', depth: 'standard', shape: 'fact' } });
-  assert.equal(validateNativePlanResult(invalid).status, 'invalid');
+  const greeting = makePlan({ operation: 'direct', query: null, entities: [], direct: 'Hello', certified: false, response: { type: 'acknowledgement', scope: 'bounded', depth: 'standard', shape: 'fact' } });
+  const certifiedGreeting = validateNativePlanResult(greeting);
+  assert.equal(certifiedGreeting.status, 'repairable');
+  assert.equal(certifiedGreeting.plan.context_free_certificate, true);
+  assert.ok(certifiedGreeting.repairs.includes('context_free_certificate.acknowledgement'));
+  const factualDirect = makePlan({ operation: 'direct', query: null, entities: [], direct: 'Kruti works in marketing.', certified: false, response: { type: 'fact', scope: 'bounded', depth: 'standard', shape: 'fact' } });
+  assert.equal(validateNativePlanResult(factualDirect).status, 'invalid');
 });
 
 test('validator canonicalizes provider-omitted nullable source members', () => {

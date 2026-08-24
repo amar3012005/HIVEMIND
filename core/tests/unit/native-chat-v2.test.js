@@ -145,6 +145,30 @@ test('validator derives a missing read query from the required answer objective'
   assert.ok(result.repairs.includes('steps.0.query'));
 });
 
+test('validator does not turn unbounded meeting reads or incomplete write-shaped reads into legacy fallbacks', () => {
+  const unboundedMeeting = makePlan({
+    operation: 'event_range',
+    query: 'pricing meeting decisions',
+    time: { semantics: 'event_range', axis: 'event_time' },
+  });
+  const meeting = validateNativePlanResult(unboundedMeeting);
+  assert.equal(meeting.plan.operation, 'recall');
+  assert.equal(meeting.plan.time.semantics, 'none');
+  assert.ok(meeting.repairs.includes('time.incomplete_range'));
+
+  const searchMiscastAsSave = makePlan({
+    operation: 'save',
+    query: 'personal travel preferences',
+    response: { type: 'fact' },
+    memory: { title: null, content: null, memory_type: null, scope: 'personal', project_id: null, tags: [], entities: [], event_time: null, profile_fields: {}, preferences: [] },
+  });
+  const search = validateNativePlanResult(searchMiscastAsSave);
+  assert.equal(search.plan.operation, 'recall');
+  assert.equal(search.plan.memory, null);
+  assert.equal(search.plan.completion.approval_required, false);
+  assert.ok(search.repairs.includes('operation.incomplete_write'));
+});
+
 test('LangGraph trajectory performs one planner call after deterministic context/catalog nodes', async () => {
   let calls = 0;
   const graph = createNativePlannerGraph({ planner: async ({ context, capabilityCatalog }) => { calls += 1; assert.equal(context.message, 'Who is Kruti?'); assert.match(capabilityCatalog, /workspace_read/); return { rawPlan: makePlan(), usage: { total_tokens: 42 } }; } });

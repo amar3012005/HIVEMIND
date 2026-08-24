@@ -169,6 +169,20 @@ test('validator does not turn unbounded meeting reads or incomplete write-shaped
   assert.ok(search.repairs.includes('operation.incomplete_write'));
 });
 
+test('validator keeps latest unnamed sources on recall instead of requiring an exact document id', () => {
+  const plan = makePlan({
+    operation: 'source_read',
+    query: 'latest uploaded image',
+    source: { title: null, document_id: null, kind: 'image', selection: 'latest' },
+    time: { semantics: 'latest', axis: 'known_time' },
+  });
+  const result = validateNativePlanResult(plan);
+  assert.equal(result.plan.operation, 'recall');
+  assert.equal(result.plan.references.source.selection, 'latest');
+  assert.equal(result.plan.references.source.kind, 'image');
+  assert.ok(result.repairs.includes('operation.selected_source'));
+});
+
 test('LangGraph trajectory performs one planner call after deterministic context/catalog nodes', async () => {
   let calls = 0;
   const graph = createNativePlannerGraph({ planner: async ({ context, capabilityCatalog }) => { calls += 1; assert.equal(context.message, 'Who is Kruti?'); assert.match(capabilityCatalog, /workspace_read/); return { rawPlan: makePlan(), usage: { total_tokens: 42 } }; } });

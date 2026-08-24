@@ -141,6 +141,32 @@ function reconcileSemanticOperation(plan, repairs) {
     plan.steps[0].query = plan.response.objective;
     repairs.push('steps.0.query');
   }
+
+  // The context-free certificate is a server-owned safety decision, not a
+  // second opinion the planner model must remember to assert. A conversational
+  // acknowledgement is safe to serve directly only when its complete plan is
+  // structurally context-free: no retrieval query, entities, source, temporal
+  // selector, relationship/aggregate payload, memory write, or user input.
+  // This repairs greetings and thanks without allowing an uncertified factual
+  // answer to bypass grounded recall.
+  const contextFreeAcknowledgement = plan.operation === 'direct'
+    && plan.response.type === 'acknowledgement'
+    && Boolean(plan.direct_response)
+    && !plan.steps[0].query
+    && !plan.steps[0].tool
+    && plan.references.entities.length === 0
+    && !plan.references.source
+    && plan.time.semantics === 'none'
+    && plan.time.axis == null
+    && plan.relation_entities.length === 0
+    && !plan.aggregate
+    && !plan.memory
+    && !plan.completion.needs_user_input
+    && !plan.completion.approval_required;
+  if (contextFreeAcknowledgement && !plan.context_free_certificate) {
+    plan.context_free_certificate = true;
+    repairs.push('context_free_certificate.acknowledgement');
+  }
 }
 
 function validateSemantics(plan) {

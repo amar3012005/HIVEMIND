@@ -1,5 +1,5 @@
 export const CREDIT_COSTS = Object.freeze({
-  chat_turn: { credits: 2, unit: 'turn', label: 'BRAIN chat' },
+  chat_turn: { credits: 1, unit: 'turn', label: 'BRAIN chat' },
   composio_tool_call: { credits: 2, unit: 'tool call', label: 'Connected-app action' },
   knowledge_page_evidence: { credits: 1, unit: 'page', label: 'Evidence-only page' },
   knowledge_page_both: { credits: 2, unit: 'page', label: 'Memory + evidence page' },

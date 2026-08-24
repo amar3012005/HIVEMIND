@@ -14,7 +14,6 @@
 import crypto from 'node:crypto';
 import { currentApiKey, currentUser } from '../db/prisma.js';
 import { getOrgCounts } from '../memory/org-counts.js';
-import { countQuotaHyperRooms } from '../employees/domain-rooms.js';
 
 /**
  * Plan-tier ladder for upgrade suggestions.
@@ -39,7 +38,7 @@ const DAILY_LIMITS = {
  *
  * @param {{allowed:boolean, reason?:string, limit?:number, current?:number, plan?:string}} check
  *        The object returned by PlanEnforcer.checkLimit().
- * @param {'kbPages'|'memories'|'webIntel'|'deepResearch'|'searches'|'tokens'|'connectors'|'hyperRooms'|'users'} resource
+ * @param {'kbPages'|'memories'|'webIntel'|'deepResearch'|'searches'|'tokens'|'connectors'|'users'|'credits'} resource
  * @returns {object} Contract body to send with HTTP 402.
  */
 export function planLimitBody(check, resource) {
@@ -384,25 +383,6 @@ export class PlanEnforcer {
       }
     }
 
-    if (type === 'hyperRooms') {
-      const limit = limits.maxHyperRooms;
-      if (!limit || limit === -1) return { allowed: true };
-      try {
-        const count = await countQuotaHyperRooms(this.prisma, orgId);
-        if (count + amount > limit) {
-          return {
-            allowed: false,
-            reason: `HyperAgents room limit reached (${planDef.name} plan: ${limit} rooms). Archive a room or upgrade.`,
-            limit,
-            current: count,
-            plan: planDef.id,
-          };
-        }
-      } catch {
-        return { allowed: false, reason: 'Room capacity verification is temporarily unavailable.', plan: planDef.id, status: 503 };
-      }
-    }
-
     if (type === 'users') {
       const limit = limits.maxUsers;
       if (!limit || limit === -1) return { allowed: true };
@@ -523,9 +503,8 @@ export class PlanEnforcer {
     const safeDailyUsage = dailyUsage || {};
 
     // Live entity counts (not monthly counters) — connectors, hyper rooms, seats are point-in-time.
-    let connectorsUsed = 0, hyperRoomsUsed = 0, usersUsed = 0;
+    let connectorsUsed = 0, usersUsed = 0;
     try { connectorsUsed = await this.prisma.platformIntegration.count({ where: { user: { organizations: { some: { orgId, isActive: true } } }, isActive: true } }); } catch { /* display zero */ }
-    try { hyperRoomsUsed = await countQuotaHyperRooms(this.prisma, orgId); } catch { /* display zero */ }
     try { usersUsed = await this.prisma.userOrganization.count({ where: { orgId, isActive: true } }); } catch { /* display zero */ }
 
     // memories = TOTAL live memory count for the org (lifetime cap vs maxMemories),
@@ -573,7 +552,6 @@ export class PlanEnforcer {
         limit: limits.meetingMinutesPerMonth ?? -1,
       },
       connectors: { used: connectorsUsed, limit: limits.maxConnectors ?? -1 },
-      hyperRooms: { used: hyperRoomsUsed, limit: limits.maxHyperRooms ?? -1 },
       users: { used: usersUsed, limit: limits.maxUsers ?? -1 },
       daily: {
         tokens: { used: Number(safeDailyUsage.tokens) || 0, limit: limits.llmTokensPerDay ?? -1 },

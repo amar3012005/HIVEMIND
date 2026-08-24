@@ -206,9 +206,24 @@ const GROUNDED_SYNTHESIS_RESPONSE_FORMAT = {
         evidence_used: { type: 'array', items: { type: 'string' } },
         confidence: { type: 'number' },
         gaps: { type: 'array', items: { type: 'string' } },
+        coverage: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 12,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              request: { type: 'string' },
+              status: { type: 'string', enum: ['supported', 'unsupported'] },
+              citation_ids: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['request', 'status', 'citation_ids'],
+          },
+        },
         context_status: { type: 'string', enum: ['sufficient', 'relevant_but_incomplete', 'query_mismatch'] },
       },
-      required: ['response', 'claims', 'evidence_used', 'confidence', 'gaps', 'context_status'],
+      required: ['response', 'claims', 'evidence_used', 'confidence', 'gaps', 'coverage', 'context_status'],
     },
   },
 };
@@ -248,7 +263,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
 
 async function callValidatedClaimStream({ messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, allowGeneralKnowledge, onEvent }) {
   const streamInstruction = `STREAMING OUTPUT CONTRACT: Return newline-delimited JSON (NDJSON), one complete object per line and no markdown.
-For every factual sentence emit {"type":"claim","text":"a complete natural sentence","citation_ids":["P1-C1"]}. Each claim must use only delivered evidence and include valid delivered citation IDs. Emit claims in the order the user should read them. Then emit exactly one final {"type":"meta","confidence":0.0,"gaps":[],"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Never emit uncited prose.`;
+For every factual sentence emit {"type":"claim","text":"a complete natural sentence","citation_ids":["P1-C1"]}. Each claim must use only delivered evidence and include valid delivered citation IDs. Emit claims in the order the user should read them. Decompose every independent part of the user request and then emit exactly one final {"type":"meta","confidence":0.0,"gaps":[],"coverage":[{"request":"independent requested detail","status":"supported|unsupported","citation_ids":["P1-C1"]}],"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Never emit uncited prose. Never mark the response sufficient while an independent requested detail is absent from coverage.`;
   const streamedClaims = [];
   const rejectedClaims = [];
   let meta = {};
@@ -2375,6 +2390,18 @@ ${message}`;
     claims: parsed.claims,
   }, evidence.recall_packets || [], { allowGeneralKnowledge });
   const initialContextStatus = deriveAnswerContextStatus(answerPayload);
+  const initialCoverage = normalizeAnswerCoverage(answerPayload?.coverage);
+  const supportedCoverageCount = initialCoverage.filter((item) => item.status === 'supported').length;
+  const completionRequirement = plan.answer_completion_requirement || 'single_answer';
+  // The planner already made the language-independent breadth decision. Enforce
+  // that contract here so citation-valid prose cannot silently answer only one
+  // clause of a compound request. This never triggers another retrieval pass;
+  // one bounded synthesis repair sees the same ranked packet.
+  const coverageIncomplete = initialCoverage.length === 0
+    || (completionRequirement === 'multi_facet' && supportedCoverageCount < 2)
+    || (completionRequirement === 'complete_set'
+      && initialContextStatus === 'sufficient'
+      && supportedCoverageCount < 1);
   if (initialContextStatus === 'query_mismatch') {
     validated = {
       ...validated,
@@ -2388,8 +2415,9 @@ ${message}`;
   // contract despite a non-empty packet, give it one bounded repair pass over
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
-  if (!validated.claims.length && initialContextStatus !== 'query_mismatch' && hasGroundedPacketEvidence(evidence)) {
-    const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation contract. Use the same final evidence only. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
+  if ((!validated.claims.length || coverageIncomplete)
+      && initialContextStatus !== 'query_mismatch' && hasGroundedPacketEvidence(evidence)) {
+    const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation or request-completion contract. Use the same final evidence only; do not retrieve again. The planner classified this request as ${completionRequirement}. Decompose every independent requested detail, cover every supported detail, and explicitly mark unsupported details in coverage and gaps. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
     // stateless API call — it must still see the full evidence in userBlock
     // (already shrunk by the combined budget above) or it has nothing left to

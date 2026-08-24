@@ -20,6 +20,59 @@ import { loadTypedGraphEvidence, buildEvidencePacket } from '../memory/recall-ro
 import { isStageDeadlineError, runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { normalizeEntity } from '../memory/entity-normalize.js';
 
+function temporalClaimKey(row = {}) {
+  const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const claim = metadata.claim && typeof metadata.claim === 'object' ? metadata.claim : {};
+  const explicit = metadata.claim_key || metadata.fact_key || row.claim_key || row.fact_key;
+  if (explicit) return `claim:${String(explicit).normalize('NFKC').toLocaleLowerCase()}`;
+  const subject = row.claimSubject || row.claim_subject || claim.subject?.name || claim.subject;
+  const predicate = row.claimPredicate || row.claim_predicate || claim.predicate;
+  if (subject && predicate) return `sp:${normalizeEntity(subject)}|${normalizeEntity(predicate)}`;
+  const entityTags = (row.tags || []).filter((tag) => /^entity:/i.test(String(tag))).sort().join('|');
+  const title = row.title || row.document_title || row.document?.title || '';
+  if (entityTags || title) return `topic:${normalizeEntity(`${entityTags}|${title}`)}`;
+  return `text:${normalizeEntity(String(row.content || row.snippet || '').slice(0, 240))}`;
+}
+
+function temporalRowIdentity(row = {}) {
+  return row.id || row.segmentId || row.segment_id
+    || `${row.documentId || row.document_id || row.document?.id || ''}:${row.segmentIndex || row.segment_index || ''}:${temporalClaimKey(row)}`;
+}
+
+function groupTemporalRows(rows = [], relationships = []) {
+  const byId = new Map(rows.filter(Boolean).map((row) => [row.id, row]));
+  const parent = new Map([...byId.keys()].map((id) => [id, id]));
+  const find = (id) => {
+    let root = parent.get(id);
+    while (root && root !== parent.get(root)) root = parent.get(root);
+    return root || id;
+  };
+  const union = (left, right) => {
+    if (!parent.has(left) || !parent.has(right)) return;
+    const a = find(left); const b = find(right);
+    if (a !== b) parent.set(b, a);
+  };
+  for (const edge of relationships) {
+    if (['updates', 'contradicts'].includes(String(edge.type || '').toLowerCase())) union(edge.from_id, edge.to_id);
+  }
+  const groups = new Map();
+  for (const row of rows.filter(Boolean)) {
+    const key = row.id && parent.has(row.id) ? `chain:${find(row.id)}` : temporalClaimKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return [...groups.entries()].map(([claim_key, versions]) => ({
+    claim_key,
+    versions: versions.sort((a, b) => new Date(a.valid_from || a.known_at || a.created_at || a.createdAt || 0)
+      - new Date(b.valid_from || b.known_at || b.created_at || b.createdAt || 0))
+      .map((row) => ({
+        ...row,
+        temporal_status: row.is_latest === false || row.isLatest === false || row._superseded_predecessor
+          ? 'superseded' : 'current',
+      })),
+  }));
+}
+
 export function findDirectEntityEdges(edges, entities, memoryIdsByEntity) {
   return edges.filter((edge) => {
     if (!edge?.from_id || !edge?.to_id || edge.from_id === edge.to_id) return false;
@@ -1774,7 +1827,9 @@ const TOOL_HANDLERS = {
       TOOL_HANDLERS.hivemind_at({ query: args.query, valid_at: from.toISOString(), tags, limit: 10, mode }, ctx),
       TOOL_HANDLERS.hivemind_at({ query: args.query, valid_at: to.toISOString(), tags, limit: 10, mode }, ctx),
     ]);
-    // Compute structured delta — added/removed/persisted by memory id.
+    // Compute stable identity delta first, then pair changed claims by typed
+    // supersession edges or normalized claim identity. IDs alone cannot express
+    // a new version of the same fact.
     const fromIds = new Set((a.memories || []).map(m => m.id));
     const toIds   = new Set((b.memories || []).map(m => m.id));
     const added    = (b.memories || []).filter(m => !fromIds.has(m.id));
@@ -1791,12 +1846,24 @@ const TOOL_HANDLERS = {
       edgeKeys.add(key);
       return true;
     });
+    const removedByClaim = new Map(removed.map((row) => [temporalClaimKey(row), row]));
+    const addedByClaim = new Map(added.map((row) => [temporalClaimKey(row), row]));
+    const changed = [];
+    for (const [key, before] of removedByClaim) {
+      const after = addedByClaim.get(key);
+      if (!after) continue;
+      changed.push({ claim_key: key, before, after, reason: 'normalized_claim_changed' });
+    }
     // The two snapshots are the evidence for a diff.  Returning only
     // `added` made a stable or unchanged fact look unsupported downstream,
     // even though both dated recall results had already retrieved it.
     const uniqueById = (rows = []) => [...new Map(rows.filter(Boolean).map((row) => [row.id || `${row.document_id || ''}:${row.segment_id || ''}:${row.content || ''}`, row])).values()];
     const snapshotMemories = uniqueById([...(a.memories || []), ...(b.memories || [])]);
     const snapshotEvidence = uniqueById([...(a.evidence || []), ...(b.evidence || [])]);
+    const fromEvidence = new Map((a.evidence || []).map((row) => [temporalRowIdentity(row), row]));
+    const toEvidence = new Map((b.evidence || []).map((row) => [temporalRowIdentity(row), row]));
+    const evidenceAdded = [...toEvidence].filter(([key]) => !fromEvidence.has(key)).map(([, row]) => row);
+    const evidenceRemoved = [...fromEvidence].filter(([key]) => !toEvidence.has(key)).map(([, row]) => row);
     return {
       query: args.query,
       from_date: args.from,
@@ -1808,6 +1875,8 @@ const TOOL_HANDLERS = {
       removed,
       persisted,
       changes,
+      changed,
+      evidence_delta: { added: evidenceAdded, removed: evidenceRemoved },
       memories: snapshotMemories,
       evidence: snapshotEvidence,
       evidence_packets: [a.evidence_packet, b.evidence_packet].filter(Boolean),
@@ -1902,6 +1971,9 @@ const TOOL_HANDLERS = {
         }
       }
     } catch { /* traversal is additive — never break the timeline on it */ }
+    recalled.timeline_groups = groupTemporalRows(
+      recalled.memories || [], recalled.relationships || [],
+    );
     return recalled;
   },
 

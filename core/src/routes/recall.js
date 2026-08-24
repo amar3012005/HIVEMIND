@@ -251,6 +251,8 @@ export async function handleRecallRoute(ctx = {}) {
           source: recallPlan.source,
           time: recallPlan.time,
           operation: recallPlan.operation,
+          memory_types: recallPlan.memory_types,
+          boost_memory_type: recallPlan.memory_types?.[0] || null,
           named_entities: Array.isArray(recallPlan.entities)
             ? recallPlan.entities
             : (Array.isArray(body.entities) ? body.entities : []),

@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import { usageMetric } from './metric-registry.js';
 
-// Canonical append-only usage writer. Legacy counters remain projections for
-// fast UI reads, but only a successful settlement advances them after cutover.
+// Canonical append-only operation writer. OrgUsage remains the settled usage
+// projection used by the Usage page and by commercial credit calculation.
 export class UsageService {
   constructor({ prisma, planEnforcer, usageTracker }) {
     this.prisma = prisma;

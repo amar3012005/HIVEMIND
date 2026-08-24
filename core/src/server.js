@@ -23026,7 +23026,7 @@ exit \$RC
               organization_ai_usage: organizationAiUsage,
               member_ai_usage: memberAiUsage,
               usage_contract: 'usage-event-ledger-v1',
-              credit_contract: 'monthly-credit-ledger-v1',
+              credit_contract: 'monthly-credit-canonical-projection-v2',
             });
           }
           break;

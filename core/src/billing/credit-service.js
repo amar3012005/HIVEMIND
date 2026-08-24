@@ -29,13 +29,57 @@ export class CreditService {
     );
     const byState = Object.fromEntries(rows.map((r) => [r.state, Number(r.quantity || 0)]));
     const breakdownRows = await tx.$queryRawUnsafe(
-      `SELECT COALESCE(metadata->>'service','other') AS service, COALESCE(SUM(quantity),0)::text AS quantity
+      `SELECT COALESCE(metadata->>'service','other') AS service,
+              COALESCE(SUM(quantity),0)::text AS quantity,
+              COALESCE(SUM(CASE WHEN (metadata->>'units') ~ '^[0-9]+$' THEN (metadata->>'units')::bigint ELSE 0 END),0)::text AS units
          FROM hivemind.usage_events
         WHERE org_id=$1::uuid AND metric='credits_consumed' AND state='settled'
           AND created_at >= $2::timestamptz AND created_at < $3::timestamptz${userClause}
         GROUP BY 1 ORDER BY 2 DESC`, ...params,
     );
-    const used = byState.settled || 0;
+    const ledger = Object.fromEntries(breakdownRows.map((r) => [r.service, {
+      credits: Number(r.quantity || 0), units: Number(r.units || 0),
+    }]));
+
+    // Credits are a price projection of the established Usage page counters.
+    // The credit ledger remains responsible for reservations/idempotency, but
+    // it must not become a second usage truth that starts at rollout time.
+    const canonicalRows = await tx.$queryRawUnsafe(
+      `SELECT COALESCE("searchQueries",0)::text AS searches,
+              COALESCE("knowledgeBasePages",0)::text AS kb_pages,
+              COALESCE("hyperAgentRuns",0)::text AS hyperagent_runs
+         FROM "OrgUsage"
+        WHERE "orgId"=$1::uuid AND "month"=$2 LIMIT 1`, orgId, key,
+    );
+    const canonical = canonicalRows[0] || {};
+    const searches = Number(canonical.searches || 0);
+    const kbPages = Number(canonical.kb_pages || 0);
+    const hyperAgentRuns = Number(canonical.hyperagent_runs || 0);
+    let meetingSeconds = 0;
+    try {
+      const meetingRows = await tx.$queryRawUnsafe(
+        `SELECT COALESCE(SUM("duration_sec"),0)::text AS seconds
+           FROM hivemind.meetings
+          WHERE "org_id"=$1::uuid AND "deleted_at" IS NULL
+            AND "created_at">=$2::timestamptz AND "created_at"<$3::timestamptz`,
+        orgId, start, end,
+      );
+      meetingSeconds = Number(meetingRows[0]?.seconds || 0);
+    } catch {
+      // Rolling deployments may briefly precede the meetings migration. The
+      // settled ledger is retained below as a no-loss fallback.
+    }
+
+    const bothPageUnits = Math.min(kbPages, ledger.knowledge_page_both?.units || 0);
+    const breakdown = {
+      chat_turn: Math.max(searches * creditCost('chat_turn', 1), ledger.chat_turn?.credits || 0),
+      composio_tool_call: ledger.composio_tool_call?.credits || 0,
+      knowledge_page_evidence: Math.max(0, kbPages - bothPageUnits),
+      knowledge_page_both: Math.max(bothPageUnits * creditCost('knowledge_page_both', 1), ledger.knowledge_page_both?.credits || 0),
+      meeting_minute: Math.max(Math.ceil(meetingSeconds / 60) * creditCost('meeting_minute', 1), ledger.meeting_minute?.credits || 0),
+      hyperagent_turn: Math.max(hyperAgentRuns * creditCost('hyperagent_turn', 1), ledger.hyperagent_turn?.credits || 0),
+    };
+    const used = Object.values(breakdown).reduce((sum, value) => sum + Number(value || 0), 0);
     const reserved = byState.reserved || 0;
     const unlimited = included < 0;
     const remaining = unlimited ? -1 : Math.max(0, included - used - reserved);
@@ -44,7 +88,19 @@ export class CreditService {
       percent_used: unlimited || included === 0 ? 0 : Math.min(100, Math.round(((used + reserved) / included) * 100)),
       percent_remaining: unlimited || included === 0 ? 100 : Math.max(0, 100 - Math.min(100, Math.round(((used + reserved) / included) * 100))),
       period: key, period_start: start.toISOString(), period_end: end.toISOString(), reset_at: end.toISOString(),
-      breakdown: Object.fromEntries(breakdownRows.map((r) => [r.service, Number(r.quantity || 0)])),
+      breakdown,
+      calculation: {
+        source: 'canonical_usage_projection',
+        units: {
+          recall_chat_turns: searches,
+          knowledge_pages: kbPages,
+          knowledge_both_pages_identified: bothPageUnits,
+          meeting_seconds: meetingSeconds,
+          meeting_minutes: Math.ceil(meetingSeconds / 60),
+          hyperagent_turns: hyperAgentRuns,
+          composio_tool_calls: ledger.composio_tool_call?.units || 0,
+        },
+      },
       catalog: publicCreditCatalog(),
     };
   }

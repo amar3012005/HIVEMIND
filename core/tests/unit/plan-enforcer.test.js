@@ -27,12 +27,10 @@ function makeEnforcer({ plan = getPlan('free'), usage = {}, daily = {}, memoryCo
 }
 
 describe('PlanEnforcer B2C limits', () => {
-  it('blocks the free daily token cap', async () => {
+  it('does not block chat on the legacy daily token cap', async () => {
     const enforcer = makeEnforcer({ daily: { tokens: 99_900 } });
     const result = await enforcer.checkLimit(ORG_ID, 'tokens', 101);
-    assert.equal(result.allowed, false);
-    assert.equal(result.period, 'day');
-    assert.equal(result.limit, 100_000);
+    assert.equal(result.allowed, true);
   });
 
   it('blocks Pro at its monthly token allocation without overage bypass', async () => {
@@ -90,17 +88,16 @@ describe('PlanEnforcer B2C limits', () => {
     assert.equal(getPlan('enterprise').limits.meetingMinutesPerMonth, -1);
   });
 
-  it('enforces entitlement-overridden limits', async () => {
+  it('does not enforce entitlement-overridden daily token limits', async () => {
     const plan = { ...getPlan('pro'), limits: { ...getPlan('pro').limits, llmTokensPerDay: 500 } };
     const enforcer = makeEnforcer({ plan, daily: { tokens: 500 } });
     const result = await enforcer.checkLimit(ORG_ID, 'tokens', 1);
-    assert.equal(result.allowed, false);
-    assert.equal(result.limit, 500);
+    assert.equal(result.allowed, true);
   });
 
-  it('fails closed when the daily ledger cannot be verified', async () => {
+  it('fails closed for enforced daily limits when the ledger cannot be verified', async () => {
     const enforcer = makeEnforcer({ daily: null });
-    const result = await enforcer.checkLimit(ORG_ID, 'tokens', 1);
+    const result = await enforcer.checkLimit(ORG_ID, 'searches', 1);
     assert.equal(result.allowed, false);
     assert.equal(result.status, 503);
   });

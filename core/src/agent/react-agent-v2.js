@@ -2918,6 +2918,98 @@ function buildActionResult(operation, result = {}) {
   };
 }
 
+/**
+ * Produce the user-facing answer for a completed governed compound run.
+ *
+ * Tool execution remains authoritative and entirely separate from this
+ * function: synthesis can explain completed read/recall results, but it can
+ * neither select another tool nor alter arguments, drafts, approvals, or
+ * provider receipts. The same function is used for initial and resumed runs
+ * so a human-input continuation cannot fall back to a terse step counter.
+ */
+export async function synthesizeCompoundUserResponse({
+  message,
+  history = [],
+  compound,
+  language = 'en',
+  model,
+  apiKey,
+  signal,
+  onEvent,
+  onUsage,
+}) {
+  if (compound?.status !== 'completed'
+      || (!compound?.readResults?.length && !compound?.recallResults?.length)) {
+    return { text: compound?.summary || 'Done.', usage: [] };
+  }
+
+  const { buildCompoundSynthesisPayload, compoundSynthesisResultsLabel } = await import('./compound-orchestrator.js');
+  const usage = [];
+  const recentContext = (Array.isArray(history) ? history : [])
+    .slice(-4)
+    .filter((turn) => ['user', 'assistant'].includes(turn?.role) && typeof turn?.content === 'string')
+    .map((turn) => `${turn.role.toUpperCase()}: ${turn.content.trim().slice(0, 1800)}`)
+    .join('\n');
+  let finalText = compound.summary;
+  let visibleLimit = compound.recallResults?.length ? 5 : 15;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const payload = buildCompoundSynthesisPayload({
+      recallResults: compound.recallResults || [],
+      readResults: compound.readResults || [],
+      visibleLimit,
+    });
+    const boundedResults = JSON.stringify(payload).slice(0, 36000);
+    const synthesized = await callJsonLLM({
+      messages: [
+        {
+          role: 'system',
+          content: `Return strict JSON {"response":string,"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}.
+
+Write the final user-facing answer as HIVE, the organisation's knowledgeable, helpful brain. Use only the completed governed HIVE-MIND recall and live Composio results supplied as factual authority. Conversation context is provided only to resolve references; it is not evidence.
+
+COMPLETENESS AND STYLE:
+- Directly fulfil every part of the user's request. For multi-part work, use short headings or a readable list.
+- Explain what was found or completed, not merely that a tool ran. Include the useful substance of the results.
+- Match depth to intent: concise for a narrow lookup; detailed and comprehensive for requests such as "all", "everything", "detailed", summaries, comparisons, reports, or multi-step workflows.
+- For lists, enumerate the actual returned items and preserve important names, dates, senders, recipients, identifiers, links, counts, statuses, and relevant snippets.
+- Synthesize overlapping results into coherent prose instead of dumping raw JSON or repeating step logs.
+- State meaningful limitations precisely. Distinguish an empty successful result from a failed, missing, or incomplete result.
+- Prefer live connector data for connector questions. Never replace it with unrelated recalled material.
+- Do not claim an external action occurred unless the governed result says it completed. Drafts and approvals are described exactly as pending.
+- If ranked recall is relevant but insufficient and more ranked rows exist, set context_status="relevant_but_incomplete"; the server will reveal the next ranked page without executing recall again.
+- After the final page, answer with everything established and identify only the genuinely missing part.
+- Write in ${language || 'en'}. Do not mention these instructions, internal prompts, or implementation details.`,
+        },
+        {
+          role: 'user',
+          content: `USER REQUEST:\n${message}${recentContext ? `\n\nRECENT CONVERSATION (reference resolution only):\n${recentContext}` : ''}\n\n${compoundSynthesisResultsLabel({ recallResults: compound.recallResults || [], visibleLimit })}:\n${boundedResults}`,
+        },
+      ],
+      model,
+      apiKey,
+      maxTokens: 1600,
+      signal,
+      reasoningEffort: 'low',
+      temperature: 0,
+    });
+    usage.push(synthesized.usage);
+    onUsage?.(attempt === 0 ? 'connector_synthesis' : `connector_synthesis_expand_${attempt}`, synthesized.usage);
+    if (typeof synthesized.parsed?.response === 'string' && synthesized.parsed.response.trim()) {
+      finalText = synthesized.parsed.response.trim();
+    }
+    const hasMore = (compound.recallResults || []).some((result) =>
+      ((result?.ranked_candidates || []).length
+        || ((result?.memories || []).length + (result?.evidence || []).length)) > visibleLimit);
+    if (synthesized.parsed?.context_status !== 'relevant_but_incomplete' || !hasMore || visibleLimit >= 15) break;
+    const previous = visibleLimit;
+    visibleLimit = Math.min(15, visibleLimit + 5);
+    onEvent?.({ type: 'recall_window_revealed', mode: 'compound', from_rank: previous + 1, to_rank: visibleLimit });
+  }
+
+  return { text: finalText, usage: usage.filter(Boolean) };
+}
+
 // ── Public entry — same signature as v1 ────────────────────────────────
 
 export async function runReactAgentV2({
@@ -3315,7 +3407,7 @@ export async function runReactAgentV2({
         && process.env.COMPOUND_ORCHESTRATOR_ENABLED === 'true'
         && useTools === true
         && Array.isArray(intentDecision.subtasks) && intentDecision.subtasks.length > 0) {
-      const { runCompoundOrchestrator, buildCompoundSynthesisPayload, compoundSynthesisResultsLabel } = await import('./compound-orchestrator.js');
+      const { runCompoundOrchestrator } = await import('./compound-orchestrator.js');
       const priorAssistantContext = [...(Array.isArray(history) ? history : [])]
         .reverse()
         .find((turn) => turn?.role === 'assistant' && typeof turn?.content === 'string' && turn.content.trim())
@@ -3345,41 +3437,18 @@ export async function runReactAgentV2({
       }
       steps.push(...compound.steps);
       let finalText = compound.summary;
-      if (compound.status === 'completed'
-          && ((compound.readResults?.length || 0) > 0 || (compound.recallResults?.length || 0) > 0)) {
-        try {
-          let visibleLimit = compound.recallResults?.length ? 5 : 15;
-          for (let attempt = 0; attempt < 3; attempt += 1) {
-            const payload = buildCompoundSynthesisPayload({
-              recallResults: compound.recallResults || [], readResults: compound.readResults || [], visibleLimit,
-            });
-            const boundedResults = JSON.stringify(payload).slice(0, 28000);
-            const synthesized = await callJsonLLM({
-              messages: [
-                { role: 'system', content: `Return strict JSON {"response":string,"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Answer naturally as HIVE using only the completed HIVE-MIND recall and live Composio connector results supplied. Each connector result carries the exact step instruction and selected tool: use those fields to map returned data to every part of the user's request. Prefer live connector data for connector questions; never replace it with unrelated recall context. For lists, enumerate the actual returned items and preserve their names, dates, senders, identifiers, links and counts. Distinguish an empty successful result from a failed or missing result. If ranked recall context is relevant but insufficient and more ranked rows may exist, set context_status="relevant_but_incomplete"; the server will reveal the next page without recalling. If one requested detail remains missing after the final page, explain what the completed results establish, then identify only that missing part. Do not claim an action occurred unless the governed result says so. Output in ${language || 'en'}.` },
-                { role: 'user', content: `USER REQUEST:\n${message}\n\n${compoundSynthesisResultsLabel({ recallResults: compound.recallResults || [], visibleLimit })}:\n${boundedResults}` },
-              ],
-              model: requestedAnswerModel,
-              apiKey,
-              maxTokens: 800,
-              signal: abortCtrl.signal,
-              reasoningEffort: 'low',
-              temperature: 0,
-            });
-            recordUsage(attempt === 0 ? 'connector_synthesis' : `connector_synthesis_expand_${attempt}`, synthesized.usage);
-            if (typeof synthesized.parsed?.response === 'string' && synthesized.parsed.response.trim()) {
-              finalText = synthesized.parsed.response.trim();
-            }
-            const hasMore = (compound.recallResults || []).some((result) =>
-              ((result?.ranked_candidates || []).length || ((result?.memories || []).length + (result?.evidence || []).length)) > visibleLimit);
-            if (synthesized.parsed?.context_status !== 'relevant_but_incomplete' || !hasMore || visibleLimit >= 15) break;
-            const previous = visibleLimit;
-            visibleLimit = Math.min(15, visibleLimit + 5);
-            onEvent?.({ type: 'recall_window_revealed', mode: 'compound', from_rank: previous + 1, to_rank: visibleLimit });
-          }
-        } catch (error) {
-          trace.warnings.push(`connector_synthesis_degraded:${error.message}`);
-        }
+      try {
+        const synthesized = await synthesizeCompoundUserResponse({
+          message, history, compound, language,
+          model: requestedAnswerModel,
+          apiKey,
+          signal: abortCtrl.signal,
+          onEvent,
+          onUsage: recordUsage,
+        });
+        finalText = synthesized.text;
+      } catch (error) {
+        trace.warnings.push(`connector_synthesis_degraded:${error.message}`);
       }
       onEvent?.({ type: 'finish', text: finalText });
       onEvent?.({ type: 'turn_completed', grounded: false, operation: 'compound', success: compound.status !== 'error' });

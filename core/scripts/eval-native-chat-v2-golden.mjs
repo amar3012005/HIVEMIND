@@ -47,7 +47,10 @@ async function httpCase(testCase) {
   if (!response.ok) failures.push(`http=${response.status}:${result.error || 'unknown'}`);
   if (response.ok && result.trace?.native_v2?.served !== true) failures.push('native_v2_not_served');
   if (response.ok && !String(result.response || '').trim()) failures.push('empty_answer');
-  if (response.ok && !testCase.operations.includes(result.trace?.intent?.operation)) failures.push(`operation=${result.trace?.intent?.operation}`);
+  const compiledOperations = new Set(testCase.operations.map((operation) => ({
+    event_range: 'recall', snapshot: 'timeline', diff: 'timeline', timeline: 'timeline',
+  })[operation] || operation));
+  if (response.ok && !compiledOperations.has(result.trace?.intent?.operation)) failures.push(`operation=${result.trace?.intent?.operation}`);
   const expectedTools = new Set(testCase.operations.flatMap((operation) => ({
     profile: ['get_user_profile'], recall: ['hivemind_recall'], source_read: ['hivemind_recall'], event_range: ['hivemind_recall'],
     snapshot: ['hivemind_at'], diff: ['hivemind_diff'], timeline: ['hivemind_timeline'], relation_between: ['hivemind_relation_between'],

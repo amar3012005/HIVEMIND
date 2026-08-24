@@ -17,14 +17,14 @@ PLANNING CONTRACT
 - profile: questions about the current user's or current organization's maintained profile.
 - update_profile: explicit changes to the current user's own identity/profile. Never update another person through this operation.
 - save: a user-authored statement intended as durable context. Resolve pronouns using conversation and compact profile context. If destination scope is not explicit, memory.scope must be null so the server asks.
-- source_read: a specifically named file/source. Preserve its exact title. A request for the latest/recent upload is recall with source.selection=latest unless an exact title is known.
+- source_read: a specifically named file/source. Preserve its exact title. A request for the latest/recent upload is recall with source.selection=latest unless an exact title is known. Words such as recent/latest describe source selection, not an event range, unless the user explicitly asks what happened during a period.
 - event_range: events or decisions that occurred within a bounded period. Resolve relative time to ISO start/end using the supplied clock.
 - snapshot: what was true as of a point in valid or known time. diff: what changed between two points. timeline: version/history across time.
-- relation_between: how at least two named entities relate.
-- aggregate: only for an exact complete count or canonical registry enumeration. Ordinary lists and broad overviews use recall with exhaustive scope.
+- relation_between: retrieve a stored graph relationship/path between at least two named entities. A comparison of their attributes, products, compatibility, performance, or differences is recall with comparison shape, not relation_between.
+- aggregate: only for an exact complete count or canonical registry enumeration whose correctness requires scanning and deduplicating the full entity registry beneath a named parent. It is never arithmetic, calculation, filtering by an attribute, comparison, a list requested from documents, or a broad overview. Those are direct when fully answerable from the current turn, otherwise recall with inventory/comparison shape.
 - projects: list or identify the authenticated user's authorized projects.
 - recall: all other workspace knowledge questions, including people, products, projects, meetings and evidence-only uploads.
-- direct: greetings, thanks, conversational acknowledgements, or transformations fully answerable from text supplied in this turn. Set context_free_certificate=true only when no tenant/profile/history lookup could change the answer.
+- direct: greetings, thanks, arithmetic/calculation, or transformations fully answerable from text supplied in this turn. Set context_free_certificate=true only when no tenant/profile/history lookup could change the answer.
 - Follow-ups inherit explicit subjects from recent history. The canonical query must be a compact retrieval expression, not an answer.
 - bounded/standard is the default. broad/detailed for meaningful breadth. exhaustive/comprehensive only when the user asks for all, every, complete, comprehensive, or the intent truly requires full coverage.
 - The answer objective states exactly what synthesis must deliver and must preserve requested qualifiers.
@@ -38,6 +38,8 @@ PLANNING CONTRACT
 - An ordinary identity or single-attribute question about a person, product, project, or source is bounded/standard. Do not widen it merely because recall may contain multiple facts. Use broad/detailed only when the user requests an overview or the answer objective genuinely spans multiple aspects.
 - Inventory questions such as "what decisions", "which events", or "what action items" over an explicit time range are exhaustive inventories even when the word "all" is omitted.
 - Resolve relative event periods (yesterday, last N days, last week, and equivalents in any language) into event_range start/end. Questions about what was true at an instant use snapshot+valid_time; questions about what was known then use snapshot+known_time. For snapshot, populate valid_at or known_at, not only start/end.
+- Temporal payload completeness is mandatory: event_range and diff always contain exact ISO start and end; snapshot always contains exactly one of valid_at or known_at; timeline uses timeline semantics. Never emit a temporal operation with missing required timestamps. If a meeting, decision, or action-item question has no requested time boundary, use recall rather than inventing snapshot/range semantics.
+- Requests to search, show, find, recall, or list existing memories remain read operations even when they name a scope such as personal or organization. They are never save/update operations unless the user is asserting new durable information or explicitly asks to remember it.
 - The contrast is semantic: "was true", "effective", or "happened" selects valid_time; "did we know", "had we learned", or "was recorded" selects known_time. Never choose known_time merely because a date is historical.
 - Latest/most-recent uploaded images use references.source={title:null,document_id:null,kind:"image",selection:"latest"} and time={semantics:"latest",axis:"known_time",...}.
 - completion.approval_required is true only for save or update_profile. needs_user_input is true only when an essential value cannot be resolved; an omitted save scope is handled by the server chooser and is represented as memory.scope=null.

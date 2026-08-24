@@ -412,16 +412,17 @@ export const TOOL_SCHEMAS = [
     function: {
       name: 'hivemind_at',
       description:
-        'Bi-temporal snapshot: what did we know about X on date Y? Filters to memories whose document_date ≤ valid_at AND were already ingested by then.\n\nFor connector-scoped time-travel pass tags. Examples:\n  • Slack: tags=["slack"] (+ optional channel:NAME, from:USER)\n  • Notion: tags=["notion"] (+ optional page:NAME)\n  • Gmail: tags=["gmail"] (+ optional from:EMAIL, thread:ID)',
+        'Bi-temporal snapshot over unified filtered recall. Use valid_at for “what was true then”; use known_at for “what did HIVEMIND know then”; provide both when both constraints matter.\n\nFor connector-scoped time-travel pass tags. Examples:\n  • Slack: tags=["slack"] (+ optional channel:NAME, from:USER)\n  • Notion: tags=["notion"] (+ optional page:NAME)\n  • Gmail: tags=["gmail"] (+ optional from:EMAIL, thread:ID)',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string' },
           valid_at: { type: 'string', description: 'ISO timestamp.' },
+          known_at: { type: 'string', description: 'ISO timestamp: upper bound on when HIVEMIND learned the fact.' },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filter (connector + marker tags).' },
           mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], default: 'quick' },
         },
-        required: ['query', 'valid_at'],
+        required: ['query'],
       },
     },
   },

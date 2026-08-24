@@ -106,6 +106,28 @@ function deriveMemoryTitle(memory) {
   return content ? content.replace(/[.!?]+$/, '').slice(0, 120) : null;
 }
 
+function reconcileSemanticOperation(plan, repairs) {
+  const exactSource = plan.references.source?.title || plan.references.source?.document_id;
+  const temporalOperation = {
+    event_range: 'event_range',
+    snapshot: 'snapshot',
+    diff: 'diff',
+    timeline: 'timeline',
+  }[plan.time.semantics];
+  if (temporalOperation && plan.operation === 'recall') {
+    plan.operation = temporalOperation;
+    repairs.push('operation.time_semantics');
+  } else if (exactSource && plan.operation === 'recall') {
+    plan.operation = 'source_read';
+    repairs.push('operation.exact_source');
+  }
+  const readOps = new Set(['recall', 'source_read', 'event_range', 'snapshot', 'diff', 'timeline', 'relation_between', 'aggregate']);
+  if (readOps.has(plan.operation) && !plan.steps[0].query) {
+    plan.steps[0].query = plan.response.objective;
+    repairs.push('steps.0.query');
+  }
+}
+
 function validateSemantics(plan) {
   const query = plan.steps[0].query;
   const readOps = new Set(['recall', 'source_read', 'event_range', 'snapshot', 'diff', 'timeline', 'relation_between', 'aggregate']);
@@ -146,6 +168,7 @@ export function validateNativePlanResult(input) {
         plan.time.known_at = plan.time.start; semanticRepairs.push('time.known_at');
       }
     }
+    reconcileSemanticOperation(plan, semanticRepairs);
     validateSemantics(plan);
     const expectedCapability = capabilityForOperation(plan.operation);
     const expectedTool = NATIVE_OPERATION_TO_TOOL[plan.operation];

@@ -42,7 +42,7 @@ export async function planNativeTurn({ context, apiKey, signal, fetchImpl } = {}
       const rawPlan = JSON.parse(call.function.arguments);
       const validation = validateNativePlanResult(rawPlan);
       if (validation.status === 'invalid') {
-        validationFeedback = validation.error;
+        validationFeedback = `${validation.error}. Reconsider the selected operation from the user's actual intent. If required semantic fields are absent, correct the operation instead of inventing write content or unrelated values`;
         throw new Error(`native_v2_invalid_plan:${validation.error}`);
       }
       return { rawPlan, usage: { ...(data.usage || {}), routing_model: model, routing_fallback_used: attempt > 0, routing_attempts: attempt + 1 } };

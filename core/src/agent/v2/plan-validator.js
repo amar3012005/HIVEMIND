@@ -108,6 +108,17 @@ function deriveMemoryTitle(memory) {
 
 function reconcileSemanticOperation(plan, repairs) {
   const exactSource = plan.references.source?.title || plan.references.source?.document_id;
+  if (plan.time.semantics === 'event_range' && (!plan.time.start || !plan.time.end)) {
+    plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
+    if (plan.operation === 'event_range') plan.operation = 'recall';
+    repairs.push('time.incomplete_range');
+  }
+  if (plan.operation === 'save' && !plan.memory?.content && plan.response.type !== 'acknowledgement' && plan.steps[0].query) {
+    plan.operation = 'recall';
+    plan.memory = null;
+    plan.completion = { needs_user_input: false, approval_required: false };
+    repairs.push('operation.incomplete_write');
+  }
   const temporalOperation = {
     event_range: 'event_range',
     snapshot: 'snapshot',

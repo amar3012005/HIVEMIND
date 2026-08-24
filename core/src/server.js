@@ -23871,7 +23871,7 @@ exit \$RC
                       language,
                       router: body?.router,
                       useTools,
-                      nativeOrchestrator: forceNativeV2 ? 'v2' : null,
+                      nativeOrchestrator: !useTools ? 'v2' : null,
                       recallMode: body?.recall_mode,
                       recallSource: body?.source || {
                         document_id: body?.source_document_id,
@@ -23925,7 +23925,7 @@ exit \$RC
                   language,
                   router: body?.router,
                   useTools,
-                  nativeOrchestrator: forceNativeV2 ? 'v2' : null,
+                  nativeOrchestrator: !useTools ? 'v2' : null,
                   recallMode: body?.recall_mode,
                   recallSource: body?.source || {
                     document_id: body?.source_document_id,

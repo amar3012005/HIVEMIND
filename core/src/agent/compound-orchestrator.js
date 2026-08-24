@@ -24,7 +24,7 @@ import { chatCompletionFetch } from '../llm/chat-provider.js';
 
 // Model used for the per-subtask tool-selection step. Reuses the hardened
 // synthesis path by default; env-overridable for A/B.
-const SUBTASK_MODEL = process.env.COMPOUND_SUBTASK_MODEL || process.env.HIVEMIND_AGENT_MODEL || 'cerebras/gpt-oss-120b';
+const SUBTASK_MODEL = process.env.COMPOUND_SUBTASK_MODEL || process.env.HIVEMIND_AGENT_MODEL || 'openai/gpt-oss-20b:nitro';
 
 // Max tool-calling rounds per subtask (a subtask is a small, scoped step).
 const SUBTASK_MAX_ROUNDS = 3;
@@ -1613,6 +1613,7 @@ export async function runCompoundOrchestrator({ subtasks, ctx, apiKey, signal, s
     return [{
       index,
       operation: subtasks[index]?.operation || 'read',
+      instruction: subtasks[index]?.message || null,
       tool: result.toolName || null,
       data: result.result?.data ?? result.outputFields ?? null,
     }];

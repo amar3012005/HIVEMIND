@@ -23819,6 +23819,26 @@ exit \$RC
                   apiKey: groqKey, onEvent: emit,
                   resumeState,
                 });
+                let finalText = compound.summary;
+                let synthesisUsage = [];
+                if (compound.status === 'completed') {
+                  try {
+                    const { synthesizeCompoundUserResponse, resolveAnswerModel } = await import('./agent/react-agent-v2.js');
+                    const synthesized = await synthesizeCompoundUserResponse({
+                      message: stored.message,
+                      history,
+                      compound,
+                      language: stored.language || language || 'en',
+                      model: resolveAnswerModel(model),
+                      apiKey: groqKey,
+                      onEvent: emit,
+                    });
+                    finalText = synthesized.text;
+                    synthesisUsage = synthesized.usage || [];
+                  } catch (error) {
+                    console.warn(`[compound-continuation] synthesis degraded org=${orgId}: ${error.message}`);
+                  }
+                }
                 let continuation = null;
                 if (compound.status === 'needs_input' && compound.resumeState && compound.inputRequests?.length) {
                   const next = await createChatContinuation({
@@ -23829,7 +23849,7 @@ exit \$RC
                   emit?.({ type: 'orchestration_input_required', ...continuation });
                 }
                 return {
-                  response: compound.summary, answer_mode: 'compound', sources: [], citations: [],
+                  response: finalText, answer_mode: 'compound', sources: [], citations: [],
                   steps: compound.steps, grounded: compound.status === 'completed',
                   confidence: compound.status === 'completed' ? 1 : 0.5,
                   gaps: compound.status === 'error' ? ['compound_step_failed'] : [], scopes_found: [],
@@ -23837,6 +23857,11 @@ exit \$RC
                   pending_actions: compound.pendingActions || [],
                   execution: { status: compound.status, steps: compound.steps, draft_ids: compound.draftIds, pending_actions: compound.pendingActions || [] },
                   continuation,
+                  usage: synthesisUsage.reduce((total, item) => ({
+                    prompt_tokens: total.prompt_tokens + Number(item?.prompt_tokens || 0),
+                    completion_tokens: total.completion_tokens + Number(item?.completion_tokens || 0),
+                    total_tokens: total.total_tokens + Number(item?.total_tokens || 0),
+                  }), { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }),
                 };
               };
               if (wantStream) {

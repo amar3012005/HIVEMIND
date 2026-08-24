@@ -111,6 +111,40 @@ test('validator safely derives structural save, aggregate and snapshot fields', 
   assert.equal(validateNativePlanResult(snapshotPlan).plan.time.valid_at, '2026-08-01T00:00:00Z');
 });
 
+test('validator reconciles exact-source and temporal semantics before tool compilation', () => {
+  const sourcePlan = makePlan({
+    operation: 'recall',
+    query: 'products',
+    source: { title: 'Whitepaper_Transformation.pdf', document_id: null, kind: 'pdf', selection: null },
+  });
+  const source = validateNativePlanResult(sourcePlan);
+  assert.equal(source.plan.operation, 'source_read');
+  assert.ok(source.repairs.includes('operation.exact_source'));
+  assert.equal(source.plan.steps[0].tool, 'hivemind_recall');
+
+  const historyPlan = makePlan({
+    operation: 'recall',
+    query: 'Orion launch date history',
+    time: { semantics: 'timeline', axis: 'valid_time' },
+  });
+  const history = validateNativePlanResult(historyPlan);
+  assert.equal(history.plan.operation, 'timeline');
+  assert.ok(history.repairs.includes('operation.time_semantics'));
+  assert.equal(history.plan.steps[0].tool, 'hivemind_timeline');
+});
+
+test('validator derives a missing read query from the required answer objective', () => {
+  const plan = makePlan({
+    operation: 'recall',
+    query: null,
+    source: { title: null, document_id: null, kind: 'image', selection: 'latest' },
+    time: { semantics: 'latest', axis: 'known_time' },
+  });
+  const result = validateNativePlanResult(plan);
+  assert.equal(result.plan.steps[0].query, 'Answer exactly from authorized context.');
+  assert.ok(result.repairs.includes('steps.0.query'));
+});
+
 test('LangGraph trajectory performs one planner call after deterministic context/catalog nodes', async () => {
   let calls = 0;
   const graph = createNativePlannerGraph({ planner: async ({ context, capabilityCatalog }) => { calls += 1; assert.equal(context.message, 'Who is Kruti?'); assert.match(capabilityCatalog, /workspace_read/); return { rawPlan: makePlan(), usage: { total_tokens: 42 } }; } });

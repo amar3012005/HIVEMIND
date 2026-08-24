@@ -22,7 +22,6 @@ import { getOrgCounts } from '../memory/org-counts.js';
 const PLAN_LADDER = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise: null };
 
 const DAILY_LIMITS = {
-  tokens: ['llmTokensPerDay', 'tokens', 'tokens'],
   searches: ['searchQueriesPerDay', 'searches', 'queries'],
   graphQueries: ['searchQueriesPerDay', 'graphQueries', 'queries'],
   kbPages: ['knowledgeBasePagesPerDay', 'kbPages', 'pages'],

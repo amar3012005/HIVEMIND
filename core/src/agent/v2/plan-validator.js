@@ -98,6 +98,36 @@ function normalizePlanShape(input) {
   return { input: out, repairs };
 }
 
+// Live production bug (2026-08-25): the model routinely emits a
+// schema-VALID but not-quite-null shape for a genuine direct turn —
+// steps[0].tool = the capability name ("direct") instead of null,
+// time.axis set to an enum value even when time.semantics is "none", and
+// memory as a full object with every field null/empty instead of the
+// literal `null` the schema also allows. When the model ALSO sets
+// context_free_certificate itself these don't matter (validateSemantics
+// only checks the certificate, it doesn't re-derive it) — but when the
+// model forgets to self-certify, this structural check is the ONLY safety
+// net (that's the whole point of PR #566: certification must not depend on
+// the model remembering to assert it), and it was failing on exactly the
+// model's normal output shape. Observed live: a plain "HELLO" produced
+// object.memory = {title:null, content:null, ...all-null...} — a real,
+// non-null OBJECT — so `!plan.memory` was false, structurallyContextFree
+// was false, the auto-repair never ran, and the turn fell back to the
+// legacy recall router with a nonsense "I couldn't find HELLO" answer.
+// Fixed by checking MEANINGFUL emptiness instead of raw truthiness/null.
+function isMemoryEmpty(memory) {
+  if (memory == null) return true;
+  if (typeof memory !== 'object' || Array.isArray(memory)) return false;
+  const scalarsEmpty = !memory.title && !memory.content && !memory.memory_type
+    && !memory.scope && !memory.project_id && !memory.event_time;
+  const arraysEmpty = (!memory.tags || memory.tags.length === 0)
+    && (!memory.entities || memory.entities.length === 0)
+    && (!memory.preferences || memory.preferences.length === 0);
+  const profileFieldsEmpty = !memory.profile_fields
+    || (typeof memory.profile_fields === 'object' && Object.keys(memory.profile_fields).length === 0);
+  return scalarsEmpty && arraysEmpty && profileFieldsEmpty;
+}
+
 function deriveMemoryTitle(memory) {
   const entity = Array.isArray(memory?.entities) ? memory.entities.find(Boolean) : null;
   const type = String(memory?.memory_type || 'memory').replace(/[_-]+/g, ' ').trim();
@@ -149,16 +179,28 @@ function reconcileSemanticOperation(plan, repairs) {
   // selector, relationship/aggregate payload, memory write, or user input.
   // This repairs greetings and thanks without allowing an uncertified factual
   // answer to bypass grounded recall.
+  // Tolerant, not strict-null, on the three fields the model routinely
+  // fills with a schema-valid placeholder instead of the literal null a
+  // naive check would require — see isMemoryEmpty's comment for the live
+  // incident this fixes. A real tool selection or a real time axis is
+  // still disqualifying; only the specific "direct" self-reference and an
+  // axis with no accompanying semantics are treated as no-ops.
+  // 'direct' is never a real tool name (no entry in NATIVE_OPERATION_TO_TOOL's
+  // value list equals it) — the model emits the CAPABILITY/OPERATION name
+  // here, not the correct value (null), so compare against that literal
+  // string, not against NATIVE_OPERATION_TO_TOOL.direct (which IS null and
+  // therefore never equals what a confused model actually sends).
+  const noRealTool = !plan.steps[0].tool || plan.steps[0].tool === 'direct';
+  const noRealTimeAxis = plan.time.semantics === 'none';
   const structurallyContextFree = plan.operation === 'direct'
     && Boolean(plan.direct_response)
-    && !plan.steps[0].tool
+    && noRealTool
     && plan.references.entities.length === 0
     && !plan.references.source
-    && plan.time.semantics === 'none'
-    && plan.time.axis == null
+    && noRealTimeAxis
     && plan.relation_entities.length === 0
     && !plan.aggregate
-    && !plan.memory
+    && isMemoryEmpty(plan.memory)
     && !plan.completion.needs_user_input
     && !plan.completion.approval_required;
   if (structurallyContextFree && !plan.context_free_certificate) {

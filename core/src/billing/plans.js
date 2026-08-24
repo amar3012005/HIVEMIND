@@ -69,7 +69,7 @@ export const PLANS = {
       maxConnectors: 3,
       knowledgeBasePagesPerMonth: 100,
       knowledgeBasePagesPerDay: 25,
-      maxHyperRooms: 1,
+      maxHyperRooms: -1, // legacy room-count quota retired; turns consume credits
       // Meeting notes: 30 minutes of transcription per month.
       meetingMinutesPerMonth: 30,
       hyperAgentRunsPerDay: 5,
@@ -108,7 +108,7 @@ export const PLANS = {
       maxConnectors: 10,
       knowledgeBasePagesPerMonth: 1_000,
       knowledgeBasePagesPerDay: 100,
-      maxHyperRooms: 0,
+      maxHyperRooms: -1, // legacy room-count quota retired; turns consume credits
       meetingMinutesPerMonth: 100,
       hyperAgentRunsPerDay: 0,
       hyperAgentRunsPerMonth: 0,
@@ -147,7 +147,7 @@ export const PLANS = {
       maxConnectors: 10,
       knowledgeBasePagesPerMonth: 5_000,
       knowledgeBasePagesPerDay: 250,
-      maxHyperRooms: 5,
+      maxHyperRooms: -1, // legacy room-count quota retired; turns consume credits
       // Meeting notes: 100 minutes per month.
       meetingMinutesPerMonth: 100,
       hyperAgentRunsPerDay: 50,
@@ -188,7 +188,7 @@ export const PLANS = {
       maxConnectors: -1, // unlimited
       knowledgeBasePagesPerMonth: 10_000,
       knowledgeBasePagesPerDay: 2_500,
-      maxHyperRooms: 25,
+      maxHyperRooms: -1, // legacy room-count quota retired; turns consume credits
       // Meeting notes: 500 minutes per month.
       meetingMinutesPerMonth: 500,
       hyperAgentRunsPerDay: 500,

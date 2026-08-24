@@ -75,7 +75,7 @@ import { PlanEnforcer, planLimitBody } from './billing/plan-enforcer.js';
 import { UsageTracker } from './billing/usage-tracker.js';
 import { UsageService } from './billing/usage-service.js';
 import { CreditService } from './billing/credit-service.js';
-import { countQuotaHyperRooms, DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
+import { DOMAIN_ROOM_DEFINITIONS, ensureDomainRooms } from './employees/domain-rooms.js';
 import {
   installConsoleCapture,
   getRecentLogs,
@@ -291,17 +291,11 @@ class PlanCapacityError extends Error {
   }
 }
 
-async function createHyperRoomWithinPlan(data) {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:rooms:${data.orgId}`);
-    const { plan } = await getEffectivePlan(tx, data.orgId);
-    const limit = plan.limits?.maxHyperRooms ?? -1;
-    if (limit > 0) {
-      const current = await countQuotaHyperRooms(tx, data.orgId);
-      if (current >= limit) throw new PlanCapacityError('HyperAgents room', plan, limit, current);
-    }
-    return tx.hyperRoom.create({ data });
-  });
+async function createHyperRoom(data) {
+  // Room count is no longer a billable capacity. HyperAgent work is governed
+  // by the canonical monthly credit ledger when turns execute, so creating a
+  // durable room must not consume or be blocked by a legacy plan allowance.
+  return prisma.hyperRoom.create({ data });
 }
 
 // ── HQ dispatcher (P4) ─────────────────────────────────────────────────────
@@ -353,7 +347,7 @@ async function findOrCreateKindRoom(session, hqRoom, kind, message) {
     participantIds = emps.map((e) => e.id);
   }
   const name = `${_HQ_KIND_LABEL[kind] || 'Work'} desk`;
-  const room = await createHyperRoomWithinPlan({
+  const room = await createHyperRoom({
     orgId, userId: session.userId, name, template: 'auto',
     participantIds, goal: `${_HQ_KIND_LABEL[kind]} work routed from HQ`,
     agentConnectors: { _kind: kind }, roomMode: 'runtime',
@@ -433,7 +427,6 @@ async function upsertConnectorWithinPlan(orgId, connectorInput) {
 // Map the internal resource label + plan id to the FE plan-limit contract so the global
 // <PlanLimitModal> (shared/planLimit.js) fires instead of the caller seeing a raw 402.
 const _PLAN_LIMIT_RESOURCE_KEY = {
-  'HyperAgents room': 'hyperRooms',
   'user': 'users',
   'connector': 'connectors',
   'project': 'projects',
@@ -1016,7 +1009,7 @@ if (prisma && HYPER_CYCLE_ENABLED && shouldRunRecurringMaintenanceJobs()) {
         }
         if (!roomId) {
           const participantIds = (state.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
-          const taskRoom = await createHyperRoomWithinPlan({
+          const taskRoom = await createHyperRoom({
               userId: hq.user_id, orgId: hq.org_id,
               name: task.title.slice(0, 120), participantIds,
               template: 'auto', permanentLeadId: participantIds.slice().sort()[0] || null,
@@ -9549,7 +9542,7 @@ Write the persona now.`;
           projectId = proj.id;
         }
         if (!await requirePrivilegedAgentAccess(req, res, current, projectId)) return;
-        const room = await createHyperRoomWithinPlan({
+        const room = await createHyperRoom({
             userId: current.session.userId,
             orgId: current.session.orgId,
             name,
@@ -10310,7 +10303,7 @@ Write the persona now.`;
           // Marketplace specialists take the room seats ahead of legacy generics.
           const rankedTeam = [...team].sort((a, b) => Number(_isSpecialist(b)) - Number(_isSpecialist(a)));
           const participantIds = rankedTeam.map((t) => t.id).slice(0, 5);
-          const room = await createHyperRoomWithinPlan({
+          const room = await createHyperRoom({
               userId, orgId,
               name: `${companyName} — HQ`,
               participantIds,
@@ -11011,7 +11004,7 @@ Write the persona now.`;
           task.room_id = null;
         }
         const participantIds = (company.team || []).map((x) => x.id).filter(Boolean).slice(0, 5);
-        const taskRoom = await createHyperRoomWithinPlan({
+        const taskRoom = await createHyperRoom({
             userId: current.session.userId,
             orgId: current.session.orgId,
             name: task.title.slice(0, 120),

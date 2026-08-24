@@ -19,6 +19,10 @@ import { applyProjectScopeFilter } from '../routes/recall.js';
 import { loadTypedGraphEvidence, buildEvidencePacket } from '../memory/recall-router.js';
 import { isStageDeadlineError, runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { normalizeEntity } from '../memory/entity-normalize.js';
+import {
+  CANONICAL_MEMORY_TYPES,
+  normalizeMemoryType,
+} from '../memory/memory-taxonomy.js';
 
 function temporalClaimKey(row = {}) {
   const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata : {};
@@ -247,7 +251,7 @@ export const TOOL_SCHEMAS = [
           },
           memory_type: {
             type: 'string',
-            enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson', 'summary', 'synthesis', 'conversation'],
+            enum: [...CANONICAL_MEMORY_TYPES],
           },
           source_platform: { type: 'string', description: 'Restrict to one ingestion source.' },
           created_after: { type: 'string', description: 'ISO-8601 lower bound on creation time.' },
@@ -267,14 +271,14 @@ export const TOOL_SCHEMAS = [
     function: {
       name: 'hivemind_save_memory',
       description:
-        'Save a durable fact, preference, decision, goal, person, or event to HIVEMIND. Call when the user reveals something durable. ALWAYS tag (≥2 tags). NEVER save chitchat or secrets.\n\nDESTINATION: pass scope when the user explicitly states personal, organization, team, or project destination. For a named project, pass project_id (UUID) or project (name/slug; the server resolves it). Chat-originated saves with no stated destination return an explicit scope choice; do not silently pick a destination from the current page, profile, or project catalog.',
+        'Save one durable fact, event, decision, preference, goal, commitment, policy, procedure, or lesson to HIVEMIND. Use summary/synthesis only for genuinely aggregated knowledge and conversation only for a transcript-like record. Relationships belong in graph edges, not memory_type. Call when the user reveals durable information. ALWAYS tag (≥2 tags). NEVER save chitchat or secrets.\n\nDESTINATION: pass scope when the user explicitly states personal, organization, team, or project destination. For a named project, pass project_id (UUID) or project (name/slug; the server resolves it). Chat-originated saves with no stated destination return an explicit scope choice; do not silently pick a destination from the current page, profile, or project catalog.',
       parameters: {
         type: 'object',
         properties: {
           title: { type: 'string', description: '3-8 words, searchable.' },
           content: { type: 'string', description: 'The fact, one claim per memory.' },
           tags: { type: 'array', items: { type: 'string' }, minItems: 2 },
-          memory_type: { type: 'string', enum: ['fact', 'preference', 'decision', 'goal', 'event', 'lesson'] },
+          memory_type: { type: 'string', enum: [...CANONICAL_MEMORY_TYPES] },
           project_id: {
             type: 'string',
             description: 'Project UUID. Use when you already know it (e.g. from a prior hivemind_list_projects call).',
@@ -1203,18 +1207,10 @@ const TOOL_HANDLERS = {
     // Coerce memory_type to a valid Prisma enum value. Models routinely
     // emit 'note', 'observation', 'todo' etc — they're sensible English
     // but not in our locked enum. Map known synonyms; fall back to 'fact'.
-    const ALLOWED = new Set(['fact', 'preference', 'decision', 'goal', 'event', 'lesson']);
-    const TYPE_ALIAS = {
-      note: 'fact', observation: 'fact', todo: 'goal', task: 'goal',
-      reminder: 'goal', insight: 'lesson', learning: 'lesson',
-      idea: 'fact', knowledge: 'fact', context: 'fact',
-      contact: 'fact', person: 'fact', user: 'fact', relationship: 'fact',
-      meeting: 'event', appointment: 'event',
-      synthesis: 'fact', summary: 'fact', // canonical-summary cognition rows
-    };
-    let memType = (args.memory_type || 'fact').toString().toLowerCase().trim();
-    if (TYPE_ALIAS[memType]) memType = TYPE_ALIAS[memType];
-    if (!ALLOWED.has(memType)) memType = 'fact';
+    // One shared taxonomy is used by REST, chat saves and the graph engine.
+    // `relationship` is accepted for old callers but normalized to `fact` for
+    // new writes because relationships belong in the graph edge store.
+    let memType = normalizeMemoryType(args.memory_type, { allowLegacy: false });
 
     // Resolve project scoping. The agent may pass:
     //   • project_id (UUID — direct)

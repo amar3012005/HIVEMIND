@@ -10,6 +10,7 @@
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
+import { evidenceTitle } from './provenance-metadata.js';
 
 export function fuseRemoteEvidenceHits(vectorHits = [], lexicalHits = [], { rankConstant = 60 } = {}) {
   const byId = new Map();
@@ -118,6 +119,7 @@ export function evidenceMetadata(row = {}) {
   const memoryTypes = normalizedValues([
     row.segmentType, row.segment_type,
     segmentMeta.segmentType, segmentMeta.segment_type,
+    segmentMeta.memory_types, segmentMeta.memoryTypes,
     segmentMeta.memory_type, segmentMeta.memoryType, segmentMeta.claim_type, segmentMeta.claimType,
     documentMeta.memory_type, documentMeta.memoryType,
     ...tags.filter((tag) => /^(memory-type|memory_type|claim-type|claim_type):/i.test(String(tag)))
@@ -451,6 +453,8 @@ export class EvidenceRetrievalService {
               type: 'evidence_segment',
               segmentId: s.id,
               documentId: s.document_id,
+              title: s.metadata?.evidence_title || evidenceTitle(s.title || h.title, s.segment_index),
+              citation_id: s.metadata?.citation_id || s.id,
               content: s.content,
               snippet: this._extractSnippet(s.content, query),
               score: h.score,
@@ -686,6 +690,9 @@ export class EvidenceRetrievalService {
         type: 'evidence_segment',
         segmentId: segment.id,
         documentId: segment.documentId,
+        title: segment.metadata?.evidence_title
+          || evidenceTitle(segment.document?.title, segment.segmentIndex),
+        citation_id: segment.metadata?.citation_id || segment.id,
         content: segment.content,
         snippet: this._extractSnippet(segment.content, query),
         score,
@@ -717,6 +724,11 @@ export class EvidenceRetrievalService {
           memory_type: segment.metadata?.memory_type ?? segment.metadata?.memoryType ?? segment.metadata?.claim_type ?? null,
           entities: [...evidenceMetadata(segment).entities],
           memory_types: [...evidenceMetadata(segment).memoryTypes],
+          source_id: segment.metadata?.source_id || segment.documentId,
+          source_title: segment.metadata?.source_title || segment.document?.title || null,
+          source_kind: segment.metadata?.source_kind || segment.document?.sourcePlatform || 'document',
+          uploader_user_id: segment.metadata?.uploader_user_id || segment.userId || null,
+          org_id: segment.metadata?.org_id || segment.orgId || null,
         },
         };
       };
@@ -995,6 +1007,8 @@ export class EvidenceRetrievalService {
           type: 'evidence_segment',
           segmentId: segment.id,
           documentId: segment.documentId,
+          title: segment.metadata?.evidence_title || evidenceTitle(document.title, segment.segmentIndex),
+          citation_id: segment.metadata?.citation_id || segment.id,
           content: segment.content,
           snippet: this._extractSnippet(segment.content, query, 520),
           score: scoreById.get(segment.id) ?? null,
@@ -1125,6 +1139,8 @@ export class EvidenceRetrievalService {
       type: 'evidence_segment',
       segmentId: segment.id,
       documentId: segment.documentId,
+      title: segment.metadata?.evidence_title || evidenceTitle(segment.document?.title, segment.segmentIndex),
+      citation_id: segment.metadata?.citation_id || segment.id,
       content: segment.content,
       snippet: segment.content,
       score: scoreByDocument.get(segment.documentId),

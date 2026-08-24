@@ -7,6 +7,10 @@
  */
 
 import { z } from 'zod';
+import {
+  ACCEPTED_MEMORY_TYPES,
+  MEMORY_TYPE_ALIASES,
+} from '../../memory/memory-taxonomy.js';
 
 /**
  * Memory type enumeration matching database schema.
@@ -18,44 +22,13 @@ import { z } from 'zod';
  * the validator just smooths the API surface for direct REST callers
  * (Chrome extension, MCP tool, SDK adapters).
  */
-const MEMORY_TYPE_ALIASES = {
-  note: 'fact',
-  observation: 'fact',
-  idea: 'fact',
-  knowledge: 'fact',
-  context: 'fact',
-  insight: 'lesson',
-  learning: 'lesson',
-  todo: 'goal',
-  task: 'goal',
-  reminder: 'goal',
-  contact: 'fact',
-  person: 'fact',
-  user: 'fact',
-  meeting: 'event',
-  appointment: 'event',
-  deadline: 'event',
-};
-
 export const memoryTypeEnum = z.preprocess(
   (val) => {
     if (typeof val !== 'string') return val;
     const lower = val.toLowerCase().trim();
     return MEMORY_TYPE_ALIASES[lower] || lower;
   },
-  z.enum([
-    'fact',
-    'preference',
-    'decision',
-    'lesson',
-    'goal',
-    'event',
-    // Cognition-loop outputs ("dreams") — written with these memory_types by the
-    // synthesis layer. They must be valid FILTER values so the Memories page
-    // "🌙 Dreams" filter (memory_type=synthesis) doesn't 400.
-    'synthesis',
-    'summary',
-  ])
+  z.enum(ACCEPTED_MEMORY_TYPES)
 );
 
 /**

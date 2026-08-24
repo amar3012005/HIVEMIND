@@ -97,6 +97,12 @@ function normalizeSourceLabel(value) {
   return String(value || '').trim().toLocaleLowerCase();
 }
 
+function normalizeMemoryTypes(...values) {
+  return [...new Set(values.flatMap((value) => Array.isArray(value) ? value : [value])
+    .map((value) => String(value || '').trim().toLocaleLowerCase())
+    .filter(Boolean))].slice(0, 12);
+}
+
 function memoryMatchesSourceContract(memory, { title = null, kind = null } = {}) {
   const wantedTitle = normalizeSourceLabel(title);
   const wantedKind = normalizeSourceLabel(kind);
@@ -286,9 +292,11 @@ export function resolveRecallPlan(input = {}) {
   const sourceDocumentId = boundedString(input.source_document_id || structuredSource.document_id, 128);
   const sourceTitle = boundedString(input.source_title || structuredSource.title, 512);
   const sourceKind = boundedString(input.source_kind || structuredSource.kind, 64);
-  const temporalSelector = ['latest', 'earliest'].includes(String(input.temporal_selector || structuredTime.kind || ''))
-    ? String(input.temporal_selector || structuredTime.kind)
+  const temporalSelectorValue = String(input.temporal_selector || structuredTime.kind || structuredTime.selector || '');
+  const temporalSelector = ['latest', 'earliest'].includes(temporalSelectorValue)
+    ? temporalSelectorValue
     : null;
+  const memoryTypes = normalizeMemoryTypes(input.memory_types, input.memory_type);
   const validAt = normalizedIso(input.valid_at || structuredTime.valid_at);
   const knownAt = normalizedIso(input.known_at || structuredTime.known_at);
   const range = normalizeTemporalRange(input.date_range || structuredTime.range);
@@ -313,7 +321,7 @@ export function resolveRecallPlan(input = {}) {
     mode_downgraded: requested === 'full' && !fullAllowed ? 'full_requires_explicit_caller' : null,
     temporal,
     source: {
-      requested: !!(sourceDocumentId || sourceTitle || (sourceKind && temporalSelector)),
+      requested: !!(sourceDocumentId || sourceTitle || sourceKind),
       document_id: sourceDocumentId,
       title: sourceTitle,
       kind: sourceKind,
@@ -325,6 +333,7 @@ export function resolveRecallPlan(input = {}) {
       range,
       selector: temporalSelector,
     },
+    memory_types: memoryTypes,
     max_graph_hops: mode === 'fact' ? 0 : 1,
     max_memories: operation === 'timeline'
       ? Math.min(Math.max(Number(input.limit) || 20, 1), 50)
@@ -509,8 +518,12 @@ export function serializeRecallMemory(m, { includeFullContent = false } = {}) {
     memory_type: m.memory_type || stored.memory_type,
     tags: m.tags || stored.tags,
     score: typeof m.score === 'number' ? Number(m.score.toFixed(3)) : null,
-    created_at: m.created_at,
-    valid_at: m.valid_at,
+    created_at: m.created_at || m.createdAt || stored.created_at || stored.createdAt || null,
+    event_time: m.event_time || m.eventTime || stored.event_time || stored.eventTime || null,
+    valid_at: m.valid_at || m.validAt || stored.valid_at || stored.validAt || null,
+    valid_from: m.valid_from || m.validFrom || stored.valid_from || stored.validFrom || null,
+    valid_to: m.valid_to || m.validTo || stored.valid_to || stored.validTo || null,
+    known_at: m.known_at || m.knownAt || stored.known_at || stored.knownAt || m.created_at || m.createdAt || null,
     ...(m.source_metadata?.source_type
       ? { source_metadata: { source_type: m.source_metadata.source_type } }
       : {}),
@@ -538,7 +551,26 @@ export function serializeRecallEvidence(e = {}) {
     score:            typeof e.score === 'number' ? Number(e.score.toFixed(3)) : null,
     page:             e.metadata?.startPage || e.page || null,
     linked_memory_id: e.linked_memory_id,
+    source_kind:      e.document?.documentType || e.document?.sourcePlatform || e.source_kind || null,
+    memory_type:      e.metadata?.memory_type || e.memory_type || null,
+    event_time:       e.metadata?.event_time || e.event_time || e.document?.documentDate || null,
+    valid_from:       e.metadata?.valid_from || e.valid_from || null,
+    valid_to:         e.metadata?.valid_to || e.valid_to || null,
+    known_at:         e.metadata?.known_at || e.known_at || e.document?.createdAt || null,
   };
+}
+
+function recallItemTime(item = {}) {
+  const stored = item.memory || {};
+  const raw = item.event_time || item.eventTime || stored.event_time || stored.eventTime
+    || item.valid_from || item.validFrom || stored.valid_from || stored.validFrom
+    || item.valid_at || item.validAt || stored.valid_at || stored.validAt
+    || item.metadata?.event_time || item.metadata?.valid_from
+    || item.document?.documentDate
+    || item.known_at || item.knownAt || item.metadata?.known_at
+    || item.created_at || item.createdAt || stored.created_at || stored.createdAt;
+  const parsed = raw ? new Date(raw).getTime() : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
 }
 
 // Legacy KB promotions can receive a strong retrieval score even when their
@@ -1120,7 +1152,7 @@ async function resolveProjectDocIds({ prisma, projectId, orgId }) {
 // backstop, and hop-1 returning *some* memories doesn't mean it answered the
 // query (the competitor footnote case). retrieveEvidence runs vector + the
 // lexical fallback, so buried exact terms surface regardless of cosine rank.
-export async function hop2Evidence({ evidenceService, query, queryVector = null, ctx, inspection, prisma }) {
+export async function hop2Evidence({ evidenceService, query, queryVector = null, ctx, inspection, prisma, filters = {} }) {
   if (!evidenceService) return { items: [], reason: null };
 
   let docIds = [...inspection.docIds];
@@ -1194,6 +1226,14 @@ export async function hop2Evidence({ evidenceService, query, queryVector = null,
     projectId: ctx.projectId || null, accessContext: ctx.accessContext || null,
     scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
     ...(docIds.length > 0 ? { documentIds: docIds } : {}),
+    sourceKind: filters.source_kind || null,
+    temporalSelector: filters.temporal_selector || null,
+    time: {
+      range: filters.date_range || null,
+      valid_at: filters.valid_at || null,
+      known_at: filters.known_at || null,
+    },
+    memoryTypes: filters.memory_types || [],
     depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
   });
   return {
@@ -1694,6 +1734,9 @@ export class RecallRouter {
       valid_at: recallPlan.time.valid_at,
       known_at: recallPlan.time.known_at,
       date_range: recallPlan.time.range,
+      event_range: Boolean(recallPlan.time.range),
+      memory_types: recallPlan.memory_types,
+      boost_memory_type: options.boost_memory_type || recallPlan.memory_types[0] || null,
       include_superseded: recallPlan.operation === 'timeline'
         || Boolean(recallPlan.time.valid_at)
         || options.include_superseded === true,
@@ -1792,7 +1835,7 @@ export class RecallRouter {
     }
     // A requested source is an authorization boundary, not a ranking hint.
     // Never replace an unresolved source request with tenant-wide memories.
-    if (explicitSourceRequested && explicitSourceDocuments.length === 0 && explicitSourceMemoryAnchors.length === 0) {
+    if (explicitDocumentSourceRequested && explicitSourceDocuments.length === 0 && explicitSourceMemoryAnchors.length === 0) {
       return {
         memories: [], evidence: [], live: [],
         trace: {
@@ -1814,7 +1857,7 @@ export class RecallRouter {
     // waiting for asynchronous fact promotion to provide an anchor.
     const evidenceStartedAt = Date.now();
     const sourceFirstEvidence = recallPlan.expand_evidence
-      ? (explicitSourceRequested && explicitSourceDocuments.length === 0
+      ? (explicitDocumentSourceRequested && explicitSourceDocuments.length === 0
         ? Promise.resolve({ items: [], reason: explicitSourceMemoryAnchors.length ? 'memory-source-only' : 'source-not-found', docIds: [] })
         : hop2Evidence({
           evidenceService: this.evidence,
@@ -1825,6 +1868,7 @@ export class RecallRouter {
             ? { ...inspectMemories([]), docIds: explicitSourceDocuments.map((document) => document.id) }
             : inspectMemories([]),
           prisma: this.prisma,
+          filters: options,
         }))
       : null;
     const measuredSourceFirstEvidence = sourceFirstEvidence && stageTiming
@@ -1939,6 +1983,13 @@ export class RecallRouter {
     }
     traceLatency.memory = Date.now() - t1;
 
+    if (recallPlan.memory_types.length) {
+      const requestedTypes = new Set(recallPlan.memory_types);
+      memories = memories.filter((memory) => requestedTypes.has(String(
+        memory.memory_type || memory.memoryType || memory.memory?.memory_type || '',
+      ).toLocaleLowerCase()));
+    }
+
     const inspection = inspectMemories(memories);
 
     // ── HOP 2 + HOP 3 (parallel, both keyed on inspection) ────────────────
@@ -1948,6 +1999,7 @@ export class RecallRouter {
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : measuredSourceFirstEvidence || hop2Evidence({
           evidenceService: this.evidence, query, queryVector, ctx, inspection, prisma: this.prisma,
+          filters: options,
         }),
       !isLiveExpansionEligible({
         includeLive: recallPlan.include_live,
@@ -2144,13 +2196,6 @@ export class RecallRouter {
     // ordering is immediately discarded.
     let deliverMemories = rankedMemories.slice(0, deliverN);
     deliverMemories = dedupeMemoriesById(deliverMemories).slice(0, deliverN);
-    if (recallPlan.operation === 'timeline') {
-      deliverMemories = [...deliverMemories].sort((left, right) => {
-        const leftTime = new Date(left.valid_from || left.valid_at || left.created_at || 0).getTime();
-        const rightTime = new Date(right.valid_from || right.valid_at || right.created_at || 0).getTime();
-        return leftTime - rightTime;
-      });
-    }
     if (remainingBudget() <= 1 && recallPlan.mode !== 'fact') cutoffReason ||= 'latency_budget';
 
     // RECALL_HYBRID_DELIVERY_ALWAYS_ON: replace the delivered memory/evidence order with one
@@ -2163,7 +2208,7 @@ export class RecallRouter {
     let hybridRankingMode = 'not_applicable';
     let hybridRerankPasses = 0;
     let hybridRerankMs = 0;
-    if (recallPlan.operation !== 'timeline') {
+    {
       const v2 = await deliverHybrid({
         query,
         memories: rankedMemories,          // wide pre-slice pool (rerank window)
@@ -2183,6 +2228,17 @@ export class RecallRouter {
       }
     }
 
+    let timeline = [];
+    if (recallPlan.operation === 'timeline') {
+      deliverMemories = [...deliverMemories].sort((left, right) => recallItemTime(left) - recallItemTime(right));
+      finalEvidence = [...finalEvidence].sort((left, right) => recallItemTime(left) - recallItemTime(right));
+      timeline = [
+        ...deliverMemories.map((item) => ({ kind: 'memory', time: recallItemTime(item), item: serializeRecallMemory(item, { includeFullContent: options.include_full_memory_content === true }) })),
+        ...finalEvidence.map((item) => ({ kind: 'evidence', time: recallItemTime(item), item: serializeRecallEvidence(item) })),
+      ].sort((left, right) => left.time - right.time)
+        .map(({ time, ...entry }) => ({ ...entry, timestamp: Number.isFinite(time) ? new Date(time).toISOString() : null }));
+    }
+
     // Phase 2 (B3): fire-and-forget TaskOutcome signal for the evolution loop.
     logTaskOutcome({
       orgId: ctx.orgId, userId: ctx.userId, query,
@@ -2196,6 +2252,7 @@ export class RecallRouter {
       })),
       evidence: finalEvidence.slice(0, options.structured_intent === true ? 15 : HOP2_DOC_LIMIT).map(serializeRecallEvidence),
       ranked_candidates: rankedCandidates,
+      timeline,
       live: hop3.items,
       trace: {
         recall_plan:     recallPlan,

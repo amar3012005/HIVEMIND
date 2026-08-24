@@ -75,6 +75,115 @@ export function matchSourceDocuments(documents = [], { documentId = null, title 
     }));
 }
 
+function objectValue(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return {};
+  try { return JSON.parse(value); } catch { return {}; }
+}
+
+function timestamp(value) {
+  if (!value) return null;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizedValues(values = []) {
+  return new Set(values.flatMap((value) => Array.isArray(value) ? value : [value])
+    .map((value) => String(value || '').normalize('NFKC').trim().toLocaleLowerCase())
+    .filter(Boolean));
+}
+
+export function evidenceMetadata(row = {}) {
+  const document = row.document || {};
+  const segmentMeta = objectValue(row.metadata);
+  const documentMeta = objectValue(document.parseMetadata || document.parse_metadata);
+  const eventTime = segmentMeta.event_time || segmentMeta.eventTime
+    || documentMeta.event_time || documentMeta.eventTime
+    || document.documentDate || document.document_date || null;
+  const validFrom = segmentMeta.valid_from || segmentMeta.validFrom
+    || documentMeta.valid_from || documentMeta.validFrom || eventTime;
+  const validTo = segmentMeta.valid_to || segmentMeta.validTo
+    || documentMeta.valid_to || documentMeta.validTo || null;
+  const knownAt = segmentMeta.known_at || segmentMeta.knownAt
+    || documentMeta.known_at || documentMeta.knownAt
+    || row.createdAt || row.created_at || document.createdAt || document.created_at || null;
+  const tags = Array.isArray(document.tags) ? document.tags : [];
+  const sourceKinds = normalizedValues([
+    document.documentType, document.document_type,
+    document.sourcePlatform, document.source_platform,
+    documentMeta.source_kind, documentMeta.sourceKind, documentMeta.kind,
+    ...tags.filter((tag) => /^(source-kind|source_kind|document-type|document_type|kind):/i.test(String(tag)))
+      .map((tag) => String(tag).split(':').slice(1).join(':')),
+  ]);
+  const memoryTypes = normalizedValues([
+    row.segmentType, row.segment_type,
+    segmentMeta.segmentType, segmentMeta.segment_type,
+    segmentMeta.memory_type, segmentMeta.memoryType, segmentMeta.claim_type, segmentMeta.claimType,
+    documentMeta.memory_type, documentMeta.memoryType,
+    ...tags.filter((tag) => /^(memory-type|memory_type|claim-type|claim_type):/i.test(String(tag)))
+      .map((tag) => String(tag).split(':').slice(1).join(':')),
+  ]);
+  return { eventTime, validFrom, validTo, knownAt, sourceKinds, memoryTypes };
+}
+
+export function filterEvidenceByMetadata(rows = [], {
+  sourceKind = null,
+  temporalSelector = null,
+  time = null,
+  memoryTypes = [],
+} = {}) {
+  const wantedKind = String(sourceKind || '').normalize('NFKC').trim().toLocaleLowerCase();
+  const wantedTypes = normalizedValues(memoryTypes);
+  const rangeStart = timestamp(time?.range?.start || time?.range?.from);
+  const rangeEnd = timestamp(time?.range?.end || time?.range?.to);
+  const validAt = timestamp(time?.valid_at);
+  const knownAt = timestamp(time?.known_at);
+
+  let filtered = rows.filter((row) => {
+    const meta = evidenceMetadata(row);
+    if (wantedKind && ![...meta.sourceKinds].some((kind) => kind === wantedKind
+      || kind.startsWith(`${wantedKind}/`))) return false;
+    if (wantedTypes.size && ![...wantedTypes].some((type) => meta.memoryTypes.has(type))) return false;
+    if (rangeStart != null || rangeEnd != null) {
+      const event = timestamp(meta.eventTime);
+      if (event == null || (rangeStart != null && event < rangeStart) || (rangeEnd != null && event > rangeEnd)) return false;
+    }
+    if (validAt != null) {
+      const from = timestamp(meta.validFrom);
+      const to = timestamp(meta.validTo);
+      if (from == null || from > validAt || (to != null && validAt >= to)) return false;
+    }
+    if (knownAt != null) {
+      const known = timestamp(meta.knownAt);
+      if (known == null || known > knownAt) return false;
+    }
+    return true;
+  });
+
+  if (['latest', 'earliest'].includes(temporalSelector) && filtered.length) {
+    const byDocument = new Map();
+    for (const row of filtered) {
+      const documentId = row.documentId || row.document_id || row.document?.id;
+      if (!documentId) continue;
+      const meta = evidenceMetadata(row);
+      const order = timestamp(meta.eventTime) ?? timestamp(meta.knownAt);
+      const current = byDocument.get(documentId);
+      if (!current || (order != null && (current.order == null
+        || (temporalSelector === 'latest' ? order > current.order : order < current.order)))) {
+        byDocument.set(documentId, { order });
+      }
+    }
+    const ordered = [...byDocument.entries()].filter(([, value]) => value.order != null)
+      .sort((left, right) => temporalSelector === 'latest'
+        ? right[1].order - left[1].order
+        : left[1].order - right[1].order);
+    if (!ordered.length) return [];
+    const selectedDocumentId = ordered[0][0];
+    filtered = filtered.filter((row) => (row.documentId || row.document_id || row.document?.id) === selectedDocumentId);
+  }
+  return filtered;
+}
+
 /**
  * Which SCOPE TIER does a document belong to, for display?
  *
@@ -244,6 +353,10 @@ export class EvidenceRetrievalService {
     documentId = null,        // legacy single-doc filter (kept for backwards compat)
     documentIds = null,       // NEW: multi-doc filter — used by RecallRouter for tag-anchored evidence
     scoreThreshold = null,    // override default 0.5; lower for doc-filtered search where we want most chunks
+    sourceKind = null,
+    temporalSelector = null,
+    time = null,
+    memoryTypes = [],
   }) {
     // Per-tenant: evidence lives in the org container (layer=evidence). Legacy:
     // a dedicated hivemind_evidence collection. Must mirror _embedSegments.
@@ -252,7 +365,7 @@ export class EvidenceRetrievalService {
       : (process.env.EVIDENCE_QDRANT_COLLECTION || 'hivemind_evidence');
     const _depth = Math.max(1, Number(depth ?? limit) || 10);
     const _deliver = Math.max(1, Number(deliver ?? limit) || 10);
-    const docIdSet = Array.isArray(documentIds) && documentIds.length
+    let docIdSet = Array.isArray(documentIds) && documentIds.length
       ? [...new Set(documentIds.filter(Boolean))]
       : (documentId ? [documentId] : null);
 
@@ -321,18 +434,52 @@ export class EvidenceRetrievalService {
               lexical_score: h.lexical_score ?? null,
               ...(h._semantic ? { _semantic: true } : {}),
               ...(h._lexical ? { _lexical: true } : {}),
-              document: { id: s.document_id, title: s.title || h.title || null },
+              document: {
+                id: s.document_id,
+                title: s.title || h.title || null,
+                documentType: s.document_type || s.document?.documentType || h.document_type || null,
+                sourcePlatform: s.source_platform || s.document?.sourcePlatform || h.source_platform || null,
+                documentDate: s.document_date || s.document?.documentDate || h.document_date || null,
+                parseMetadata: s.document_metadata || s.document?.parseMetadata || h.document_metadata || null,
+                tags: s.document_tags || s.document?.tags || h.document_tags || [],
+                createdAt: s.document_created_at || s.document?.createdAt || h.document_created_at || null,
+              },
               metadata: {
+                ...objectValue(s.metadata),
                 segmentType: s.segment_type,
                 segmentIndex: s.segment_index,
                 wordCount: s.word_count ?? h.word_count ?? null,
                 startPage: s.start_page ?? h.start_page ?? null,
                 endPage: s.end_page ?? h.end_page ?? null,
+                known_at: s.known_at || s.created_at || h.known_at || null,
               },
             };
           })
           .filter(Boolean);
-        return this._orderAndSlice(remoteResults, _deliver);
+        return this._orderAndSlice(filterEvidenceByMetadata(remoteResults, {
+          sourceKind, temporalSelector, time, memoryTypes,
+        }), _deliver);
+      }
+
+      // Source and temporal constraints are candidate-generation predicates,
+      // not post-ranking hints. Resolve the authorized document set first so
+      // both the vector and lexical lanes search the same bounded corpus. This
+      // query is local metadata lookup only; it adds no embedding or model call.
+      if (!docIdSet && (sourceKind || temporalSelector || time?.range || time?.valid_at || time?.known_at)) {
+        const documents = await this.db.knowledgeDocument.findMany({
+          where: this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
+          select: {
+            id: true, title: true, documentType: true, sourcePlatform: true,
+            sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
+            createdAt: true, updatedAt: true,
+          },
+        });
+        const selected = filterEvidenceByMetadata(
+          documents.map((document) => ({ documentId: document.id, document, metadata: {} })),
+          { sourceKind, temporalSelector, time },
+        );
+        docIdSet = selected.map((row) => row.documentId);
+        if (!docIdSet.length) return [];
       }
 
       // Step 1: Vector search in evidence collection.
@@ -377,7 +524,7 @@ export class EvidenceRetrievalService {
         ...(docIdSet ? { documentId: { in: docIdSet } } : {}),
       };
       const lexicalInclude = {
-        document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true } },
+        document: { select: { id: true, title: true, documentType: true, sourcePlatform: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true, createdAt: true, updatedAt: true } },
       };
       const lexicalPromise = (lexTokens.length || lexicalPhrases.length)
         ? Promise.all([
@@ -458,6 +605,9 @@ export class EvidenceRetrievalService {
               sourcePlatform: true,
               sourceUrl: true,
               documentDate: true,
+              parseMetadata: true,
+              createdAt: true,
+              updatedAt: true,
               // Scope lives ONLY in tags (segments have no scope column), so without
               // this the delivered evidence could not say which tier answered.
               tags: true
@@ -502,6 +652,11 @@ export class EvidenceRetrievalService {
           heading: segment.metadata?.heading ?? null,
           heading_path: segment.metadata?.heading_path ?? null,
           depth: segment.depth ?? null,
+          event_time: segment.metadata?.event_time ?? segment.metadata?.eventTime ?? segment.document?.documentDate ?? null,
+          valid_from: segment.metadata?.valid_from ?? segment.metadata?.validFrom ?? null,
+          valid_to: segment.metadata?.valid_to ?? segment.metadata?.validTo ?? null,
+          known_at: segment.metadata?.known_at ?? segment.metadata?.knownAt ?? segment.createdAt ?? segment.document?.createdAt ?? null,
+          memory_type: segment.metadata?.memory_type ?? segment.metadata?.memoryType ?? segment.metadata?.claim_type ?? null,
         },
         };
       };
@@ -538,7 +693,9 @@ export class EvidenceRetrievalService {
         }
       }
 
-      return this._orderAndSlice(results, _deliver);
+      return this._orderAndSlice(filterEvidenceByMetadata(results, {
+        sourceKind, temporalSelector, time, memoryTypes,
+      }), _deliver);
     } catch (error) {
       console.error('[EvidenceRetrieval] Retrieval failed:', error);
       return [];

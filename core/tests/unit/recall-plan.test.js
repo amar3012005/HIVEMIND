@@ -91,6 +91,17 @@ test('timeline is a bounded version-history operation on the shared plan', () =>
   assert.equal(plan.max_memories, 50);
 });
 
+test('typed selectors and memory types survive plan recompilation', () => {
+  const first = resolveRecallPlan({
+    mode: 'explain',
+    time: { selector: 'latest' },
+    memory_types: ['Decision', 'event', 'decision'],
+  });
+  const second = resolveRecallPlan({ mode: first.mode, time: first.time, memory_types: first.memory_types });
+  assert.equal(second.time.selector, 'latest');
+  assert.deepEqual(second.memory_types, ['decision', 'event']);
+});
+
 test('typed source and time blocks normalize legacy arguments with explicit precedence', () => {
   const plan = resolveRecallPlan({
     mode: 'explain',

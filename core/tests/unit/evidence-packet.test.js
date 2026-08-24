@@ -1,7 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildEvidencePacket, deliverHybrid, hop2Evidence, loadTypedGraphEvidence, projectInventoryAbsentIsAuthoritative, recallEnhance } from '../../src/memory/recall-router.js';
-import { buildLexicalPhrases, EvidenceRetrievalService, fuseRemoteEvidenceHits, matchSourceDocuments } from '../../src/knowledge/evidence-retrieval.js';
+import { buildLexicalPhrases, EvidenceRetrievalService, filterEvidenceByMetadata, fuseRemoteEvidenceHits, matchSourceDocuments } from '../../src/knowledge/evidence-retrieval.js';
+
+test('evidence metadata filters source, type, and three temporal contracts deterministically', () => {
+  const rows = [
+    {
+      documentId: 'old', segmentType: 'decision', createdAt: '2026-08-05T00:00:00Z',
+      document: { id: 'old', documentType: 'image/jpeg', documentDate: '2026-08-01T00:00:00Z' },
+      metadata: { valid_from: '2026-08-01T00:00:00Z', valid_to: '2026-08-10T00:00:00Z' },
+    },
+    {
+      documentId: 'new', segmentType: 'decision', createdAt: '2026-08-20T00:00:00Z',
+      document: { id: 'new', documentType: 'image/png', documentDate: '2026-08-15T00:00:00Z' },
+      metadata: { valid_from: '2026-08-10T00:00:00Z' },
+    },
+    {
+      documentId: 'noise', segmentType: 'fact', createdAt: '2026-08-03T00:00:00Z',
+      document: { id: 'noise', documentType: 'application/pdf', documentDate: '2026-08-02T00:00:00Z' },
+      metadata: {},
+    },
+  ];
+  assert.deepEqual(filterEvidenceByMetadata(rows, {
+    sourceKind: 'image', memoryTypes: ['decision'], temporalSelector: 'latest',
+  }).map((row) => row.documentId), ['new']);
+  assert.deepEqual(filterEvidenceByMetadata(rows, {
+    time: { range: { start: '2026-08-01T00:00:00Z', end: '2026-08-03T00:00:00Z' } },
+  }).map((row) => row.documentId), ['old', 'noise']);
+  assert.deepEqual(filterEvidenceByMetadata(rows, {
+    time: { valid_at: '2026-08-07T00:00:00Z' }, memoryTypes: ['decision'],
+  }).map((row) => row.documentId), ['old']);
+  assert.deepEqual(filterEvidenceByMetadata(rows, {
+    time: { known_at: '2026-08-10T00:00:00Z' }, memoryTypes: ['decision'],
+  }).map((row) => row.documentId), ['old']);
+});
 
 test('lexical phrase planning is language-independent and preserves query order', () => {
   assert.deepEqual(buildLexicalPhrases(['alpha', 'beta', 'gamma', 'delta'], { max: 5 }), [

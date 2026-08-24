@@ -119,6 +119,10 @@ function reconcileSemanticOperation(plan, repairs) {
     plan.completion = { needs_user_input: false, approval_required: false };
     repairs.push('operation.incomplete_write');
   }
+  if (plan.operation === 'source_read' && !exactSource && plan.references.source?.selection) {
+    plan.operation = 'recall';
+    repairs.push('operation.selected_source');
+  }
   const temporalOperation = {
     event_range: 'event_range',
     snapshot: 'snapshot',

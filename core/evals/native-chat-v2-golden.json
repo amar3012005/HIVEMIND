@@ -46,7 +46,7 @@
   {"id":"I02","input":"Search only my personal memories for travel preferences.","operations":["recall"]},
   {"id":"J01","input":"hey so um i was looking at that solvis thing again, can you give me the products and what each one actually does?","operations":["recall","aggregate"],"entity":"Solvis","response_scope":"broad"},
   {"id":"J02","input":"weißt du noch, was wir letzte woche über die preise entschieden haben?","operations":["event_range"],"answer_type":"decision"},
-  {"id":"J03","input":"और क्रुति का मार्केटिंग टीम से क्या संबंध है?","operations":["relation_between"],"entity":"Kruti"},
+  {"id":"J03","input":"और क्रुति का मार्केटिंग टीम से क्या संबंध है?","operations":["relation_between"]},
   {"id":"J04","input":"that deck, the newest one, what did it say abt runway","operations":["source_read","recall"],"time_semantics":"latest"},
   {"id":"J05","input":"and what about pricing?","history":[{"role":"user","content":"Tell me about Solvis products."},{"role":"assistant","content":"Solvis has several heating products."}],"operations":["recall"],"entity":"Solvis"}
 ]

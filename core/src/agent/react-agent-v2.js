@@ -3987,7 +3987,12 @@ export async function runReactAgentV2({
     // STEP 4 — Answer with the caller-selected user-facing model.
     _ps = Date.now();
     const answerInput = {
-      message, history, evidence, plan, language, assistantName, orgName,
+      message, history, evidence, plan,
+      // The structured planner detects the language of this turn. A stored UI
+      // preference is only a fallback; otherwise a German question can be
+      // correctly planned as German and still synthesized in English.
+      language: intentDecision.response_language || language,
+      assistantName, orgName,
       apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge, preloadedProfileContext,
       streamValidated: streamAnswer, onEvent,
     };

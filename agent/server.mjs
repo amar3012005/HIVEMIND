@@ -660,10 +660,11 @@ const routes = {
   // Filtered enumeration (cognition / derivation / profile-dreamer working set). Keyset by created_at.
   '/v1/list': async (b) => {
     const f = b.filter || {};
-    const conds = ['org_id=$1', 'deleted_at IS NULL'];
+    // This endpoint enumerates memories. Evidence belongs to knowledge_segments
+    // and is exposed through `/v1/kb-evidence`, never as a memory row.
+    const conds = ["org_id=$1", 'deleted_at IS NULL', "layer IN ('memory','cognitive')"];
     const args = [ORG];
     if (Array.isArray(f.memory_type) && f.memory_type.length) { args.push(f.memory_type); conds.push(`memory_type = ANY($${args.length})`); }
-    if (f.layer) { args.push(f.layer); conds.push(`layer=$${args.length}`); }
     if (f.cognitive_layer_role === null) conds.push('cognitive_layer_role IS NULL');
     if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
     if (f.user_id) { args.push(f.user_id); conds.push(`user_id=$${args.length}`); }
@@ -1703,7 +1704,7 @@ const routes = {
       const detailArgs = [b.documentId, ORG];
       appendDocumentAccess(detailConds, detailArgs, 'd', b.access);
       const { rows: docRows } = await pg.query(
-      `SELECT d.id, d.filename, d.content_type, d.status, d.metadata, d.created_at FROM knowledge_documents d WHERE ${detailConds.join(' AND ')}`,
+      `SELECT d.id, d.user_id, d.filename, d.content_type, d.status, d.metadata, d.created_at FROM knowledge_documents d WHERE ${detailConds.join(' AND ')}`,
       detailArgs,
     );
     if (!docRows.length) return { error: 'not found' };
@@ -1749,6 +1750,7 @@ const routes = {
     }
     const document = {
       id: d.id,
+      userId: d.user_id,
       title: d.metadata?.title || d.filename || d.id,
       documentType: d.content_type || d.metadata?.document_type || null,
       sourcePlatform: d.metadata?.source_platform || null,

@@ -125,6 +125,7 @@ const listedWithoutAccess = await call('/v1/kb-docs', { limit: 5 });
 assert.equal(listedWithoutAccess.payload.documents.length, 0);
 const listed = await call('/v1/kb-docs', { limit: 5, access });
 assert.equal(listed.payload.documents[0].id, ids.document);
+assert.equal(listed.payload.documents[0].ingestMode, 'both');
 const relationships = await call('/v1/mem-relationships', { memoryId: ids.claim });
 assert.equal(relationships.payload.out[0].type, 'PartOf');
 const stats = await call('/v1/stats', {});

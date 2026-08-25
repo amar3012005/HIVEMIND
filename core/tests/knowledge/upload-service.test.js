@@ -20,6 +20,11 @@ function dependencies({ storageMode = 'hybrid', ready = true, duplicate = null, 
     findDuplicate: async () => duplicate,
     findOwned: async () => created.at(-1) || duplicate,
     create: async (data) => { const job = { id: ids.job, ...data, memoryIds: [], createdAt: new Date(), updatedAt: new Date() }; created.push(job); return job; },
+    createOrReuse: async (data) => {
+      const job = { id: ids.job, ...data, memoryIds: [], createdAt: new Date(), updatedAt: new Date() };
+      created.push(job);
+      return { job, created: true };
+    },
     updateOwned: async (...args) => { updates.push(args); return { count: 1 }; }, fail: async () => {},
   };
   const queue = {
@@ -148,4 +153,50 @@ test('image uploads reject evidence mode before authorization or enqueue', async
   assert.equal(result.status, 400);
   assert.equal(result.body.error, 'evidence_mode_unsupported_for_image');
   assert.equal(deps.created.length, 0);
+});
+
+test('page quota rejection keeps limits intact and returns the canonical contract', async () => {
+  const deps = dependencies();
+  deps.planEnforcer = { checkLimit: async () => ({
+    allowed: false, reason: 'Monthly KB pages limit exceeded', limit: 20, current: 19, plan: 'free',
+  }) };
+  const result = await new KnowledgeUploadService(deps).admit(request());
+  assert.equal(result.status, 402);
+  assert.deepEqual(result.body, {
+    error: 'plan_limit_exceeded', code: 'plan_limit_exceeded', message: 'Monthly KB pages limit exceeded',
+    resource: 'kbPages', plan: 'free', limit: 20, current: 19, remaining: null,
+    suggested_plan: 'pro', upgrade_url: '/hivemind/app/billing', metric: 'kbPages', estimated_pages: 1,
+  });
+  assert.equal(deps.created.length, 0);
+});
+
+test('concurrent same-user admission reuses the durable winner without enqueueing or reserving credits', async () => {
+  const deps = dependencies();
+  const winner = { id: ids.job, userId: ids.user, status: 'queued', processingVersion: 1 };
+  deps.jobStore.createOrReuse = async () => ({ job: winner, created: false });
+  let queued = false;
+  deps.queue.enqueue = async () => { queued = true; return { queue_job_id: 'queue-1' }; };
+  const result = await new KnowledgeUploadService(deps).admit(request());
+  assert.equal(result.ok, true);
+  assert.equal(result.existing, true);
+  assert.equal(result.job, winner);
+  assert.equal(queued, false);
+});
+
+test('credit exhaustion returns the canonical quota contract without changing the configured credit limit', async () => {
+  const deps = dependencies();
+  deps.creditService = {
+    reserve: async () => ({
+      admitted: false,
+      check: { reason: 'Monthly credits exhausted', limit: 100, current: 100, remaining: 0, plan: 'pro' },
+    }),
+  };
+  const result = await new KnowledgeUploadService(deps).admit(request());
+  assert.equal(result.status, 402);
+  assert.deepEqual(result.body, {
+    error: 'credits_exhausted', code: 'credits_exhausted', message: 'Monthly credits exhausted',
+    resource: 'credits', plan: 'pro', limit: 100, current: 100, remaining: 0,
+    suggested_plan: 'scale', upgrade_url: '/hivemind/app/billing',
+  });
+  assert.equal(deps.created.length, 1);
 });

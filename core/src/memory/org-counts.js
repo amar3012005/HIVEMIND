@@ -30,7 +30,7 @@ export async function getOrgCounts(prisma, orgId, userId = null) {
   let memories = 0;
   let relationships = 0;
   try {
-    const where = { orgId, deletedAt: null, isLatest: true };
+    const where = { orgId, deletedAt: null, isLatest: true, layer: { in: ['memory', 'cognitive'] } };
     if (userId) where.userId = userId;
     memories = await prisma.memory.count({ where });
   } catch { /* keep 0 */ }

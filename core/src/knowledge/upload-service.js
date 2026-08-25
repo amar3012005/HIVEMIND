@@ -3,6 +3,7 @@ import { authorizeKnowledgeScope } from './upload-authorization.js';
 import { safeUploadFilename, uploadError, validateKnowledgeFile } from './upload-contract.js';
 import { countPages } from './page-count.js';
 import { orgIsRemote } from '../vector/mneme/driver.js';
+import { planLimitBody } from '../billing/limit-response.js';
 
 export class KnowledgeUploadService {
   constructor({ prisma, queue, jobStore, planEnforcer, creditService = null, storageReady, isRemoteOrg = orgIsRemote }) {
@@ -52,7 +53,7 @@ export class KnowledgeUploadService {
     if (this.planEnforcer) {
       const limit = await this.planEnforcer.checkLimit(orgId, 'kbPages', estimatedPages);
       if (!limit.allowed) return { ok: false, status: limit.status || 402, body: {
-        error: 'quota_reached', metric: 'kbPages', estimated_pages: estimatedPages,
+        ...planLimitBody(limit, 'kbPages'), metric: 'kbPages', estimated_pages: estimatedPages,
       } };
     }
 
@@ -156,13 +157,23 @@ export class KnowledgeUploadService {
       });
       job = await this.jobStore.findOwned(job.id, { orgId, userId });
     } else {
-      job = await this.jobStore.create({
+      const admitted = await this.jobStore.createOrReuse({
         orgId, userId, scopeType: scope.scopeType, scopeId: scope.scopeId,
         scopeKey: scope.scopeKey, storageMode, filename,
         contentType: file.contentType || 'application/octet-stream', mediaKind: validation.kind,
         checksum, ingestMode, status: 'queued', stage: 'queued', progress: 0, processingVersion,
         metadata: { ...metadata, project_ids: projectIds, primary_team_id: primaryTeamId },
       });
+      job = admitted.job;
+      // A concurrent identical request won the durable insert. It owns the
+      // queue operation; returning its job is idempotent and prevents a second
+      // persisted file, reservation, and enqueue.
+      if (!admitted.created) {
+        if (job.userId !== userId) {
+          return { ok: false, status: 409, body: { error: 'upload_already_processing', status: 'processing' } };
+        }
+        return { ok: true, existing: true, job };
+      }
     }
 
     if (this.creditService) {
@@ -174,7 +185,7 @@ export class KnowledgeUploadService {
       });
       if (!credit.admitted) {
         await this.jobStore.fail(job.id, orgId, Object.assign(new Error('Monthly credits exhausted.'), { code: 'CREDITS_EXHAUSTED' }));
-        return { ok: false, status: 402, body: { error: 'credits_exhausted', code: 'credits_exhausted', resource: 'credits', ...credit.check, upgrade_url: '/hivemind/app/billing' } };
+        return { ok: false, status: 402, body: planLimitBody(credit.check, 'credits') };
       }
     }
 

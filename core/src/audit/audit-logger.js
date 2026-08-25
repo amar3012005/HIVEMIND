@@ -7,10 +7,45 @@
  * as the rest of the server.
  */
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_AUDIT_FIELDS = ['userId', 'organizationId', 'resourceId', 'actorApiKeyId', 'sessionId'];
+
+function normalizeUuid(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return UUID_RE.test(normalized) ? normalized : null;
+}
+
+function auditData(event = {}) {
+  const metadata = event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+    ? { ...event.metadata }
+    : {};
+  const rawIdentifiers = {};
+  const ids = {};
+
+  for (const field of UUID_AUDIT_FIELDS) {
+    const raw = event[field];
+    ids[field] = normalizeUuid(raw);
+    if (raw != null && !ids[field]) rawIdentifiers[field] = String(raw).slice(0, 1024);
+  }
+  if (Object.keys(rawIdentifiers).length) {
+    metadata.audit_raw_identifiers = {
+      ...(metadata.audit_raw_identifiers && typeof metadata.audit_raw_identifiers === 'object'
+        ? metadata.audit_raw_identifiers
+        : {}),
+      ...rawIdentifiers,
+    };
+  }
+
+  return { ids, metadata };
+}
+
 export class AuditLogger {
-  constructor(prisma) {
+  constructor(prisma, { logger = console } = {}) {
     this.prisma = prisma;
+    this.logger = logger;
     this._enabled = true;
+    this._reportedFailures = new Set();
   }
 
   /**
@@ -34,25 +69,29 @@ export class AuditLogger {
     if (!this._enabled || !this.prisma) return;
     try {
       const retentionDays = parseInt(process.env.AUDIT_RETENTION_DAYS || '2555', 10);
+      // Prisma maps these fields to UUID columns. Non-UUID identifiers still
+      // matter for forensics, but must live in JSON metadata rather than causing
+      // an audit write failure (and a noisy warning on every request).
+      const { ids, metadata } = auditData(event);
       const created = await this.prisma.auditLog.create({
         select: { id: true, createdAt: true },
         data: {
-          userId: event.userId || null,
-          organizationId: event.organizationId || null,
+          userId: ids.userId,
+          organizationId: ids.organizationId,
           eventType: event.eventType,
           eventCategory: event.eventCategory || 'system',
           action: event.action || 'read',
           resourceType: event.resourceType || null,
-          resourceId: event.resourceId || null,
+          resourceId: ids.resourceId,
           actorType: event.actorType || 'user',
-          actorApiKeyId: event.actorApiKeyId || null,
-          metadata: event.metadata || {},
+          actorApiKeyId: ids.actorApiKeyId,
+          metadata,
           oldValue: event.oldValue || undefined,
           newValue: event.newValue || undefined,
           ipAddress: event.ipAddress || null,
           userAgent: event.userAgent ? String(event.userAgent).slice(0, 500) : null,
           platformType: event.platformType || null,
-          sessionId: event.sessionId || null,
+          sessionId: ids.sessionId,
           processingBasis: event.processingBasis || null,
           requestId: event.requestId || null,
           retentionUntil: new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000),
@@ -61,10 +100,14 @@ export class AuditLogger {
       // PQC tamper-evidence (FIPS 205 SLH-DSA), hash-chained. Fire-and-forget:
       // SLH-DSA signing is slow, so it must not add latency to the audited
       // request. Chain = sha256(prev_hash + payload), signed.
-      this._signAudit(created, event);
+      this._signAudit(created, { ...event, ...ids });
     } catch (err) {
       // Never let audit logging break the main flow
-      console.warn('[audit] Log failed:', err.message);
+      const key = `${err?.name || 'Error'}:${err?.code || ''}:${err?.message || ''}`;
+      if (!this._reportedFailures.has(key)) {
+        this._reportedFailures.add(key);
+        this.logger?.warn?.('[audit] Log failed:', err.message);
+      }
     }
   }
 

@@ -22,6 +22,17 @@ test('usage is emitted only when the idempotency ledger inserts', async () => {
   assert.equal(calls.length, 1);
 });
 
+test('unique active-upload race reuses the durable winning job', async () => {
+  const winner = { id: 'job-winner', status: 'queued' };
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    updateMany: async () => ({ count: 0 }),
+    create: async () => { throw Object.assign(new Error('unique'), { code: 'P2002' }); },
+    findFirst: async () => winner,
+  } } });
+  const result = await store.createOrReuse({ orgId: 'org', scopeKey: 'personal:user', checksum: 'a'.repeat(64) });
+  assert.deepEqual(result, { job: winner, created: false });
+});
+
 test('ready responses always expose an authoritative terminal lifecycle', () => {
   const response = KnowledgeUploadJobStore.response({
     id: 'job', status: 'ready', stage: 'promoted', progress: 95,

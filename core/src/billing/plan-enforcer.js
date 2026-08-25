@@ -14,13 +14,12 @@
 import crypto from 'node:crypto';
 import { currentApiKey, currentUser } from '../db/prisma.js';
 import { getOrgCounts } from '../memory/org-counts.js';
+export { planLimitBody } from './limit-response.js';
 
 /**
  * Plan-tier ladder for upgrade suggestions.
  * free → pro → scale → enterprise → null (top).
  */
-const PLAN_LADDER = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise_onboarding: 'enterprise', enterprise: null };
-
 const DAILY_LIMITS = {
   searches: ['searchQueriesPerDay', 'searches', 'queries'],
   graphQueries: ['searchQueriesPerDay', 'graphQueries', 'queries'],
@@ -40,36 +39,6 @@ const DAILY_LIMITS = {
  * @param {'kbPages'|'memories'|'webIntel'|'deepResearch'|'searches'|'tokens'|'connectors'|'users'|'credits'} resource
  * @returns {object} Contract body to send with HTTP 402.
  */
-export function planLimitBody(check, resource) {
-  const c = check || {};
-  if (c.status === 503) {
-    return {
-      error: 'usage_verification_unavailable',
-      code: 'usage_verification_unavailable',
-      message: c.reason || 'Usage verification is temporarily unavailable',
-      resource,
-      retryable: true,
-    };
-  }
-  const plan = c.plan || 'free';
-  const suggested = Object.prototype.hasOwnProperty.call(PLAN_LADDER, plan)
-    ? PLAN_LADDER[plan]
-    : 'pro';
-  const credits = resource === 'credits';
-  return {
-    error: credits ? 'credits_exhausted' : 'plan_limit_exceeded',
-    code: credits ? 'credits_exhausted' : 'plan_limit_exceeded',
-    message: c.reason || 'Plan limit exceeded',
-    resource,
-    plan,
-    limit: c.limit ?? null,
-    current: c.current ?? null,
-    remaining: c.remaining ?? null,
-    suggested_plan: suggested,      // next tier up, or null at enterprise
-    upgrade_url: '/hivemind/app/billing',
-  };
-}
-
 function buildReminder(resource, used, limit, period) {
   if (!(limit > 0)) return null;
   const ratio = used / limit;

@@ -3181,7 +3181,10 @@ const server = http.createServer(async (req, res) => {
       employees = (snapshot.logs || []).map((entry) =>
         `[${entry.timestamp}] [${String(entry.type || 'info').toUpperCase()}] ${entry.line || ''}`);
     } catch (error) {
-      employees = [`[${new Date().toISOString()}] [WARN] Employees logs unavailable: ${error.message}`];
+      // Log aggregation is an optional read surface. A missing Employees log
+      // endpoint must not manufacture a fresh warning on every dashboard poll.
+      // Runtime health owns component availability; the log feed stays empty.
+      employees = [];
     }
     const mixed = [
       ...core.map((line) => ({ line, source: 'core' })),

@@ -55,6 +55,7 @@ const DURABLE_EXTRACT_TYPES = ['fact', 'event'];
 const KB_CURATED_TYPES = ['fact', 'event', 'summary', 'synthesis'];
 const KB_CLAIM_KINDS = new Set(['fact', 'event', 'decision', 'preference', 'policy', 'goal', 'commitment', 'procedure', 'lesson']);
 const CLAIM_ENTITY_KINDS = new Set(['person', 'organization', 'product', 'place', 'technology', 'standard']);
+const KB_INGEST_VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
 
 // qwen3-ingest is schema-led: plain JSON mode can return a valid but unrelated
 // shape. Keep required fields deliberately small so the existing normalization
@@ -3473,7 +3474,7 @@ Every item must include a non-empty content field and one or more valid support_
       // document that had none — the same blind spot this codebase keeps
       // producing (a hardcoded `remaining: 0`, an inert thin-extraction warning).
       if (!_tables.length) {
-        console.log(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: parser returned no tables `
+        if (KB_INGEST_VERBOSE) console.log(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: parser returned no tables `
           + `(engine=${parseResult?.engine || '?'}) — nothing to persist`);
       } else if (!this.db?.documentTable) {
         console.warn('[kb-tables] db.documentTable missing — prisma client lacks the model; grid NOT persisted');
@@ -3495,7 +3496,7 @@ Every item must include a non-empty content field and one or more valid support_
           this.logger.warn?.(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)} not present on the agent — `
             + `grids skipped. Expected on a re-ingest pass; on a FIRST ingest it means the document write did not land.`);
         } else if (_tr) {
-          console.log(`[kb-tables] remote doc ${String(knowledgeDoc.id).slice(0, 8)}: tables=${_tr.tables} rows=${_tr.rows}`);
+          if (KB_INGEST_VERBOSE) console.log(`[kb-tables] remote doc ${String(knowledgeDoc.id).slice(0, 8)}: tables=${_tr.tables} rows=${_tr.rows}`);
         } else {
           this.logger.warn?.(`[kb-tables] remote write FAILED for doc ${knowledgeDoc.id} — grids not stored`);
         }
@@ -3532,7 +3533,7 @@ Every item must include a non-empty content field and one or more valid support_
           _rowsTotal += rows.length;
         }
         if (_rowsTotal) {
-          console.log(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: persisted `
+          if (KB_INGEST_VERBOSE) console.log(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: persisted `
             + `${_tables.length} table(s), ${_rowsTotal} rows — now exactly queryable`);
         }
       }
@@ -3576,7 +3577,7 @@ Every item must include a non-empty content field and one or more valid support_
         evidence_embed: _evEmbedCov,
         evidence_lexical: { total: segments.length, indexed: segments.length, failed: 0 },
       };
-      this.logger.info?.(`[kb-unified] EVIDENCE-ONLY doc=${String(knowledgeDoc.id).slice(0, 8)} `
+      if (KB_INGEST_VERBOSE) this.logger.info?.(`[kb-unified] EVIDENCE-ONLY doc=${String(knowledgeDoc.id).slice(0, 8)} `
         + `segments=${segments.length} semantic=${_evEmbedCov.embedded} lexical=${segments.length}; memory pipeline skipped`);
       return {
         documentId: knowledgeDoc.id,
@@ -4404,7 +4405,7 @@ Every item must include a non-empty content field and one or more valid support_
     if ((!parseResult.success || !parseResult.text) && !hasChunks) {
       return [];
     }
-    console.log(`[segments] hybridChunks=${hasChunks ? hybridChunks.length : 'none'} parseText=${(parseResult?.text || '').length}ch for doc ${documentId}`);
+    if (KB_INGEST_VERBOSE) console.log(`[segments] hybridChunks=${hasChunks ? hybridChunks.length : 'none'} parseText=${(parseResult?.text || '').length}ch for doc ${documentId}`);
 
     // SEMANTIC SEGMENTS (default; reversible via KB_SEMANTIC_SEGMENTS=false). Docling's HybridChunker
     // text can start/end MID-WORD (token-window artifacts: "...doc" | "ents to share…"), poisoning the
@@ -4500,7 +4501,7 @@ Every item must include a non-empty content field and one or more valid support_
               }
               _pageMarks.sort((a, b) => a.at - b.at);
               if (_pageMarks.length) {
-                console.log(`[segments] page map from parser chunks: ${_pageMarks.length} anchors across ${_pages.size} pages`);
+                if (KB_INGEST_VERBOSE) console.log(`[segments] page map from parser chunks: ${_pageMarks.length} anchors across ${_pages.size} pages`);
               }
             }
           }
@@ -4658,7 +4659,7 @@ Every item must include a non-empty content field and one or more valid support_
             const _withPage = segments.filter((sg) => sg.startPage != null).length;
             const _withOffset = segments.filter((sg) => sg.startOffset != null).length;
             const _withHeading = segments.filter((sg) => sg.metadata?.heading_path?.length).length;
-            console.log(`[segments] semantic: ${segments.length} clean segments for doc ${documentId} (no mid-word) `
+            if (KB_INGEST_VERBOSE) console.log(`[segments] semantic: ${segments.length} clean segments for doc ${documentId} (no mid-word) `
               + `types=${JSON.stringify(_types)} with_offset=${_withOffset}/${segments.length} with_page=${_withPage}/${segments.length} with_heading_path=${_withHeading}/${segments.length}`);
             if (!_withPage) console.warn('[segments] no start_page on ANY segment — citations cannot name a page. Docling <!-- page N --> markers absent from this parse tier.');
             return segments;
@@ -4983,7 +4984,7 @@ Every item must include a non-empty content field and one or more valid support_
     // This protects interactive recall and avoids repeating a provider outage.
     const _healed = 0;
     const _finalFailed = _failed;
-    console.log(`[kb-embed] n=${segments.length} concurrency=${_conc} remote=${_isRemote} `
+    if (KB_INGEST_VERBOSE) console.log(`[kb-embed] n=${segments.length} concurrency=${_conc} remote=${_isRemote} `
       + `failed=${_finalFailed} healed=${_healed} ms=${Date.now() - _tEmb} ms_per_segment=${segments.length ? Math.round((Date.now() - _tEmb) / segments.length) : 0}`);
     return { total: segments.length, embedded: segments.length - _finalFailed, failed: _finalFailed, healed: _healed };
   }

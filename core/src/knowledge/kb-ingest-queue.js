@@ -46,6 +46,15 @@ const MAX_DEPTH = Number(process.env.KB_QUEUE_MAX_DEPTH || 2000);
 const ORG_PENDING_CAP = Number(process.env.KB_QUEUE_ORG_PENDING_CAP || 500);
 const VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
 
+function taskEvent(event, fields = {}) {
+  return JSON.stringify({
+    event,
+    task: 'knowledge.ingest',
+    ts: new Date().toISOString(),
+    ...fields,
+  });
+}
+
 export function durableQueueJobId(trackerJobId, processingVersion = 1) {
   return `${String(trackerJobId).replace(/:/g, '-')}-v${Number(processingVersion) || 1}`;
 }
@@ -201,7 +210,17 @@ export class KbIngestQueue {
       const final = job && job.attemptsMade >= (job.opts?.attempts || ATTEMPTS);
       if (final) {
         this._counters.dead++;
-        this.logger.error?.(`[kb-queue] DLQ: job ${job?.id} (${job?.data?.filename}) dead after ${job?.attemptsMade} attempts: ${err?.message}`);
+        this.logger.error?.(taskEvent('task.failed', {
+          job_id: job?.data?.trackerJobId || job?.id || null,
+          org_id: job?.data?.orgId || null,
+          file: job?.data?.filename || null,
+          mode: job?.data?.metadata?.ingest_mode || 'both',
+          error_code: err?.code || 'INGEST_FAILED',
+          message: String(err?.message || 'ingestion failed').slice(0, 500),
+          retryable: false,
+          attempts: job?.attemptsMade || 0,
+          duration_ms: Math.max(0, Date.now() - Number(job?.timestamp || Date.now())),
+        }));
         try { this.tracker?.updateJob(job.data.trackerJobId, { status: 'dead', error: err?.message }); } catch { /* noop */ }
         this._setStatus(job?.data?.trackerJobId, { status: 'dead', error: err?.message, filename: job?.data?.filename });
       }
@@ -460,7 +479,13 @@ export class KbIngestQueue {
       removeOnFail: 5000, // failed set IS the DLQ — keep for inspection/replay
     });
     this._orgPending.set(orgId, (this._orgPending.get(orgId) || 0) + 1);
-    this.logger.info?.(`[kb-ingest] accepted file=${filename} org=${orgId.slice(0, 8)} job=${trackerJobId}`);
+    this.logger.info?.(taskEvent('task.started', {
+      job_id: trackerJobId,
+      org_id: orgId,
+      user_id: userId,
+      file: filename,
+      mode: metadata?.ingest_mode || 'both',
+    }));
     return { job_id: trackerJobId, queue_job_id: job.id };
   }
 
@@ -537,13 +562,12 @@ export class KbIngestQueue {
         } catch { /* noop */ }
         this._setStatus(trackerJobId, { status: 'failed', progress: 100, error: reason });
         this._counters.failed = (this._counters.failed || 0) + 1;
-        this.logger.warn?.(`[kb-queue] ✗ ${filename} org=${orgId.slice(0, 8)} doc=${result?.documentId || 'none'} — ${reason}`);
         const failed = Object.assign(new Error(reason), { code: 'NO_RECALLABLE_CONTENT' });
         await this.jobStore?.fail(trackerJobId, orgId, failed);
         // Retain for replay (see the terminal-failure path below) — a document that
         // produced no recallable content is exactly the case a user wants to retry
         // after a parser or model fix. Bounded by _sweepRawFiles().
-        return { documentId: result?.documentId || null, segmentCount: _segs, promotedCount: 0, error: reason };
+        throw failed;
       }
       const _evidenceOnly = _promoted === 0 && _segs > 0;
       const _evidenceOnlyReason = result?.evidenceOnlyReason
@@ -569,11 +593,37 @@ export class KbIngestQueue {
       // ingest-time heal, say so LOUD. The doc still indexes (evidence-only stays a
       // success), but a partial-embed must never be reported as fully clean.
       const _ee = result?.coverage?.evidence_embed;
-      const _eeStr = _ee ? ` embed=${_ee.embedded}/${_ee.total}${_ee.healed ? ` healed=${_ee.healed}` : ''}${_ee.failed ? ` FAILED=${_ee.failed}` : ''}` : '';
+      const _embedding = {
+        route: String(process.env.CLOUDFLARE_AI_GATEWAY_ENABLED || '').toLowerCase() === 'true'
+          ? 'cloudflare/openrouter' : (process.env.EMBEDDING_PROVIDER || 'openrouter'),
+        model: process.env.OPENROUTER_EMBED_MODEL || process.env.EMBEDDING_MODEL || 'baai/bge-m3',
+        total: Number(_ee?.total || result?.segmentCount || 0),
+        succeeded: Number(_ee?.embedded || 0),
+        healed: Number(_ee?.healed || 0),
+        failed: Number(_ee?.failed || 0),
+      };
+      const _terminal = {
+        job_id: trackerJobId,
+        org_id: orgId,
+        user_id: userId,
+        file: filename,
+        mode: metadata?.ingest_mode || 'both',
+        document_id: result.documentId,
+        evidence: Number(result.segmentCount || 0),
+        memories: Number(result.promotedCount || 0),
+        embedding: _embedding,
+        warnings: Array.isArray(result?.coverage?.warnings) ? result.coverage.warnings : [],
+        duration_ms: Math.max(0, Date.now() - Number(job.timestamp || Date.now())),
+      };
       if (_ee && Number(_ee.failed) > 0) {
-        this.logger.error?.(`[kb-ingest] failed file=${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} reason=partial-embedding ${_ee.failed}/${_ee.total}`);
+        this.logger.error?.(taskEvent('task.failed', {
+          ..._terminal,
+          error_code: 'PARTIAL_EMBEDDING',
+          message: `${_ee.failed}/${_ee.total} evidence segments were not embedded`,
+          retryable: true,
+        }));
       } else {
-        this.logger.info?.(`[kb-ingest] completed file=${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} evidence=${result.segmentCount} memories=${result.promotedCount}${_eeStr}${_evidenceOnly ? ' mode=evidence-only' : ''}`);
+        this.logger.info?.(taskEvent('task.completed', _terminal));
       }
       try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };

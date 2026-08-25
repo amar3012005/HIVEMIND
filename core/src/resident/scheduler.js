@@ -288,7 +288,9 @@ export class ResidentAgentScheduler {
         const claimed = await this._claimEarlyDream(o.id);
         this._lastEarlyDream.set(o.id, now);
         if (!claimed) continue; // another replica already fired within the window
-        this.logger?.log?.(`[gov-scheduler] early dream org=${o.id.slice(0,8)} — ${hot.length} hot cluster(s)`);
+        if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+          this.logger?.log?.(`[gov-scheduler] early dream org=${o.id.slice(0,8)} — ${hot.length} hot cluster(s)`);
+        }
         try {
           await this.runManager.runFullCycle({
             orgId: o.id,

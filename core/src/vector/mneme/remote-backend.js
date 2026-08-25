@@ -30,14 +30,17 @@ const _capabilityCache = new Map();
 const _coalescedReads = new Map();
 const _coalescedGraphReads = new Map();
 const _lastRemoteLogAt = new Map();
-const REMOTE_LOG_DEDUPE_MS = Math.max(1000, Number(process.env.MNEME_REMOTE_LOG_DEDUPE_MS || 30000));
+const REMOTE_LOG_DEDUPE_MS = Math.max(1000, Number(process.env.MNEME_REMOTE_LOG_DEDUPE_MS || 300000));
 
 function _logRemoteOnce(level, operation, orgId, error, suffix = '') {
   const message = String(error?.message || error || 'unknown');
   const errorClass = /circuit open/i.test(message) ? 'circuit_open'
     : /timeout|aborted/i.test(message) ? 'timeout'
       : message.slice(0, 80);
-  const key = `${level}:${operation}:${orgId}:${errorClass}`;
+  const transportUnavailable = errorClass === 'circuit_open' || errorClass === 'timeout';
+  const keyOperation = transportUnavailable ? 'transport-unavailable' : operation;
+  const keyErrorClass = transportUnavailable ? 'transport_unavailable' : errorClass;
+  const key = `${level}:${keyOperation}:${orgId}:${keyErrorClass}`;
   const now = Date.now();
   if (now - (_lastRemoteLogAt.get(key) || 0) < REMOTE_LOG_DEDUPE_MS) return;
   _lastRemoteLogAt.set(key, now);
@@ -523,7 +526,7 @@ export async function remoteVectorPending(orgId, { kind = 'memory', cursor = nul
     const out = await _call(orgId, '/v1/vector-pending', { kind, cursor, limit }, { transportClass });
     return { items: Array.isArray(out?.items) ? out.items : [], cursor: out?.cursor || null };
   } catch (e) {
-    console.warn(`[mneme/remote] vector-pending unavailable org=${orgId} kind=${kind}: ${e.message}`);
+    _logRemoteOnce('warn', 'vector-pending', orgId, e, ` kind=${kind}`);
     return null;
   }
 }
@@ -629,6 +632,20 @@ export async function remoteMemoryEvidence(orgId, memoryId) {
 export async function remoteKbDocs(orgId, opts = {}) {
   try { return await _call(orgId, '/v1/kb-docs', { limit: opts.limit, offset: opts.offset, access: opts.access }); }
   catch (e) { console.warn(`[mneme/remote] kb-docs failed org=${orgId}: ${e.message}`); return null; }
+}
+
+export async function remoteKbEvidence(orgId, opts = {}) {
+  try {
+    return await _call(orgId, '/v1/kb-segments', {
+      limit: opts.limit,
+      offset: opts.offset,
+      documentId: opts.documentId || null,
+      access: opts.access,
+    });
+  } catch (e) {
+    _logRemoteOnce('warn', 'kb-segments', orgId, e);
+    return null;
+  }
 }
 
 // KB doc DELETE for remote org — the agent runs the FULL cascade (fact memories from the active
@@ -765,7 +782,7 @@ export async function remoteMeetingSessionStatus(orgId, filter) {
 }
 export async function remoteMeetingSessionPending(orgId, limit = 5) {
   try { const out = await _call(orgId, '/v1/meeting-session-pending', { limit }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS, transportClass: 'maintenance' }); return out?.sessions || []; }
-  catch (e) { console.warn(`[mneme/remote] meeting-session-pending failed org=${orgId}: ${e.message}`); return []; }
+  catch (e) { _logRemoteOnce('warn', 'meeting-session-pending', orgId, e); return []; }
 }
 export async function remoteMeetingSessionClaim(orgId, filter) {
   try { return await _call(orgId, '/v1/meeting-session-claim', { filter }, { timeoutMs: MEETING_AUDIO_TIMEOUT_MS, transportClass: 'maintenance' }); }

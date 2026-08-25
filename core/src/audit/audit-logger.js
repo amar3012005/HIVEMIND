@@ -147,7 +147,9 @@ export class AuditLogger {
       for (const o of orgs || []) {
         try { if (await this._writeCheckpoint(o.org_id)) n++; } catch { /* per-org best-effort */ }
       }
-      if (n) console.log(`[audit-checkpoint] wrote ${n} checkpoint(s)`);
+      if (n && String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+        console.log(`[audit-checkpoint] wrote ${n} checkpoint(s)`);
+      }
     } catch (e) { console.warn('[audit-checkpoint] sweep failed:', e.message); }
   }
 

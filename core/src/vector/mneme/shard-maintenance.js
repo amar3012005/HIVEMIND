@@ -33,6 +33,8 @@
  * @module src/vector/mneme/shard-maintenance
  */
 import fs from 'node:fs';
+
+const RUNTIME_PROGRESS_VERBOSE = String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -245,11 +247,13 @@ export function snapshotShardsOnce({
     } catch (e) {
       try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
       stats.failed += 1;
-      logger.warn?.(`[shard-backup] slot ${String(org).slice(0, 8)} failed: ${e.message}`);
+      if (RUNTIME_PROGRESS_VERBOSE) {
+        logger.warn?.(`[shard-backup] slot ${String(org).slice(0, 8)} failed: ${e.message}`);
+      }
     }
   }
 
-  if (stats.snapped || stats.failed) {
+  if (RUNTIME_PROGRESS_VERBOSE && (stats.snapped || stats.failed)) {
     logger.info?.(`[shard-backup] slots=${stats.slots} snapped=${stats.snapped} pruned=${stats.pruned} `
       + `failed=${stats.failed} bytes=${stats.bytes}`);
   }
@@ -292,12 +296,12 @@ export async function runShardMaintenanceOnce({ logger = console } = {}) {
         out.mirror.orgs += 1;
         out.mirror.inserted += r.inserted;
         out.mirror.failed += r.failed;
-        if (r.inserted || r.failed) {
+        if (RUNTIME_PROGRESS_VERBOSE && (r.inserted || r.failed)) {
           logger.info?.(`[mirror-backfill] org=${String(org).slice(0, 8)} shard=${r.shard} `
             + `existing=${r.existing} inserted=${r.inserted} failed=${r.failed}`);
         }
       }
-      if (out.mirror.inserted || out.mirror.failed) {
+      if (RUNTIME_PROGRESS_VERBOSE && (out.mirror.inserted || out.mirror.failed)) {
         logger.info?.(`[mirror-backfill] orgs=${out.mirror.orgs} inserted=${out.mirror.inserted} `
           + `failed=${out.mirror.failed} — lexical recall restored for backfilled rows`);
       }
@@ -322,7 +326,9 @@ export async function runShardMaintenanceOnce({ logger = console } = {}) {
         }
         out.docs = dc;
         if (dc.written || dc.failed) {
-          logger.info?.(`[doc-backfill] docs=${dc.pg} written=${dc.written} failed=${dc.failed}`);
+          if (RUNTIME_PROGRESS_VERBOSE) {
+            logger.info?.(`[doc-backfill] docs=${dc.pg} written=${dc.written} failed=${dc.failed}`);
+          }
         }
       }
 

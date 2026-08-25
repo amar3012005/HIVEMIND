@@ -901,14 +901,17 @@ export class QdrantClient {
    */
   async testConnection() {
     try {
-      console.log('🔍 Testing Qdrant connection...');
+      const verbose = String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true';
+      if (verbose) console.log('🔍 Testing Qdrant connection...');
       const response = await fetch(`${qbase()}/`, {
         headers,
         signal: currentStageSignal() || undefined,
       });
       if (response.ok) {
-        console.log('✅ Qdrant connection successful');
-        console.log(`   URL: ${qbase()}, Collection: ${this.collectionName}`);
+        if (verbose) {
+          console.log('✅ Qdrant connection successful');
+          console.log(`   URL: ${qbase()}, Collection: ${this.collectionName}`);
+        }
         return true;
       } else {
         console.error('❌ Qdrant responded with status:', response.status);

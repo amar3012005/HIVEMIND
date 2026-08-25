@@ -13,7 +13,7 @@
 import { makeMnemeAdapter } from './prisma-adapter.js';
 import { makeMnemePrisma } from './prisma-proxy.js';
 import { mnemeSearch as amrVectorSearch } from './mneme-recall.js';
-import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteAgentOrgIds, meetingAgentOrgIds, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteMeetingAudioWrite, remoteMeetingAudioClaim, remoteMeetingAudioSettle, remoteMeetingAudioPending, remoteMeetingSessionWrite, remoteMeetingSessionStatus, remoteMeetingSessionPending, remoteMeetingSessionClaim, remoteMeetingSessionSettle, remoteTaraCall, remoteKbDocs, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteMemRelationshipsBatch, remoteFindByTags, remoteClearMemories, remotePurge, remoteKbProvenance, remoteMemoryEvidence, remoteKbTables } from './remote-backend.js';
+import { remoteRecall, remoteWrite, remoteAddEdge, remoteUpdateTags, remoteUpdate, remoteDelete, remoteBumpRecall, remoteList, remoteStats, remoteGraph, remoteKbDoc, remoteKbSegment, remoteKbRecall, remoteKbLexical, remoteKbHydrate, remoteLexical, hasRemoteAgent, remoteAgentOrgIds, meetingAgentOrgIds, remoteMeetingWrite, remoteMeetingList, remoteMeetingGet, remoteMeetingDelete, remoteMeetingPatch, remoteMeetingSegmentWrite, remoteMeetingSegmentList, remoteMeetingAudioWrite, remoteMeetingAudioClaim, remoteMeetingAudioSettle, remoteMeetingAudioPending, remoteMeetingSessionWrite, remoteMeetingSessionStatus, remoteMeetingSessionPending, remoteMeetingSessionClaim, remoteMeetingSessionSettle, remoteTaraCall, remoteKbDocs, remoteKbEvidence, remoteKbDocDetail, remoteKbDocDelete, remoteMemEdges, remoteMemRelationships, remoteMemRelationshipsBatch, remoteFindByTags, remoteClearMemories, remotePurge, remoteKbProvenance, remoteMemoryEvidence, remoteKbTables } from './remote-backend.js';
 
 // Durable outbox for remote org pushes (Phase 4). Lazy-imported so the module
 // loads cleanly even when the outbox has not been initialised yet (e.g. in tests
@@ -297,6 +297,7 @@ export function amrKbHydrate(orgId, ids, access) { return orgIsRemote(orgId) ? r
 // KB doc LIST for remote org — returns the central-shaped { documents, pagination } response from the
 // agent's /v1/kb-docs route. null for non-remote (caller uses central Prisma). Async.
 export function amrKbDocs(orgId, opts) { return orgIsRemote(orgId) ? remoteKbDocs(orgId, opts) : null; }
+export function amrKbEvidence(orgId, opts) { return orgIsRemote(orgId) ? remoteKbEvidence(orgId, opts) : null; }
 
 // KB doc DETAIL for remote org — returns { document, segments, promotedMemories, segmentCount, promotedCount }
 // from the agent. null for non-remote (caller uses central Prisma). Async.

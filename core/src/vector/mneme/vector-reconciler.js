@@ -209,8 +209,11 @@ export function startRemoteVectorReconciler() {
         }
       } catch (error) {
         const state = recordRemoteMaintenanceFailure(orgId);
-        console.warn(`[remote-vector-reconcile] org=${orgId} failed: ${error.message}`
-          + (state.quarantined_until ? `; maintenance quarantined until ${new Date(state.quarantined_until).toISOString()}` : ''));
+        // The transport layer already emits one deduplicated circuit transition.
+        // Only add a reconciler event when maintenance actually changes state.
+        if (state.quarantined_until && state.failures === MAINTENANCE_FAILURE_THRESHOLD) {
+          console.warn(`[remote-vector-reconcile] org=${orgId} maintenance quarantined until ${new Date(state.quarantined_until).toISOString()}`);
+        }
       }
     }
   };

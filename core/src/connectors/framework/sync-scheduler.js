@@ -93,7 +93,9 @@ export class SyncScheduler {
         return; // nothing to do this tick
       }
 
-      console.log(`[sync-scheduler] ${due.length}/${connectors.length} connectors due`);
+      if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+        console.log(`[sync-scheduler] ${due.length}/${connectors.length} connectors due`);
+      }
 
       // Provider → adapter path mapping. New per-service Google adapters
       // live under providers/google/{service}-adapter.js with different

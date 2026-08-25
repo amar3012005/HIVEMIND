@@ -419,7 +419,9 @@ export function getEnterpriseQueue(pipeline) {
       console.warn('[enterprise-queue] Redis probe failed — staying on in-memory queue');
       return;
     }
-    console.log(`[enterprise-queue] Redis probe OK on ${host} — upgrading to BullMQ mode`);
+    if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+      console.log(`[enterprise-queue] Redis probe OK on ${host} — upgrading to BullMQ mode`);
+    }
     const bq = new BullMQEnterpriseQueue({ concurrency, pipeline, host });
     // Replay any in-memory pending jobs into Bull.
     const prev = __enterpriseQueue.impl;

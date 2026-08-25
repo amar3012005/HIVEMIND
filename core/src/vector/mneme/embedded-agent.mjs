@@ -32,6 +32,7 @@ const DIM = Number(process.env.EMBEDDING_DIMENSION || 1024);
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
 const MAX_OPEN = Number(process.env.MNEME_EMBEDDED_MAX_OPEN || 64);
 const DATA_ROOT = process.env.MNEME_DATA_ROOT || '/app/data/mneme';
+const RUNTIME_PROGRESS_VERBOSE = String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true';
 
 let ready = false;
 export function isEmbeddedReady() { return ready; }
@@ -690,7 +691,7 @@ export async function backfillProvenanceToShard(orgId, { max = 5000, logger = co
       else out.skipped += 1;
     } catch { out.skipped += 1; }
   }
-  if (out.written || out.skipped) {
+  if (RUNTIME_PROGRESS_VERBOSE && (out.written || out.skipped)) {
     logger.info?.(`[provenance-backfill] org=${String(ctx.org).slice(0, 8)} pg=${out.pg} `
       + `written=${out.written} skipped_no_slot=${out.skipped}`);
   }
@@ -742,7 +743,7 @@ export async function backfillEntitiesToShard(orgId, { max = 5000, logger = cons
       }
     } catch { /* links are best-effort; the entity record still landed */ }
   }
-  if (out.written || out.edges) {
+  if (RUNTIME_PROGRESS_VERBOSE && (out.written || out.edges)) {
     logger.info?.(`[entity-backfill] org=${String(ctx.org).slice(0, 8)} entities=${out.entities} `
       + `written=${out.written} mentions_edges=${out.edges} skipped=${out.skipped}`);
   }
@@ -903,9 +904,11 @@ export async function readCompareEvidence(orgId, { samples = 5, topK = 10, logge
 
   if (!compared) return null;
   const result = { samples: compared, qdrant: qTotal, shard: sTotal, overlap: Number((overlapSum / compared).toFixed(3)) };
-  logger.info?.(`[evidence-read-compare] org=${String(orgId).slice(0, 8)} samples=${result.samples} `
-    + `qdrant_hits=${result.qdrant} shard_hits=${result.shard} top${topK}_overlap=${result.overlap}`
-    + `${result.overlap < 0.9 ? '  ← BELOW 0.9, do NOT cut over' : ''}`);
+  if (RUNTIME_PROGRESS_VERBOSE) {
+    logger.info?.(`[evidence-read-compare] org=${String(orgId).slice(0, 8)} samples=${result.samples} `
+      + `qdrant_hits=${result.qdrant} shard_hits=${result.shard} top${topK}_overlap=${result.overlap}`
+      + `${result.overlap < 0.9 ? '  ← BELOW 0.9, do NOT cut over' : ''}`);
+  }
   return result;
 }
 
@@ -1003,7 +1006,9 @@ async function openCtx(orgId) {
   ctx.routes = routesFor(ctx);
   ctxCache.set(orgId, ctx);
   ready = true;
-  console.log(`[embedded-agent] shard open org=${org} live=${amr.liveCount()}`);
+  if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+    console.log(`[embedded-agent] shard open org=${org} live=${amr.liveCount()}`);
+  }
   if (ctxCache.size > MAX_OPEN) {
     const oldestKey = ctxCache.keys().next().value;
     const oldest = ctxCache.get(oldestKey);
@@ -1767,11 +1772,67 @@ function routesFor(ctx) {
       return { segments: rows };
     },
 
+    '/v1/kb-segments': async (b) => {
+      const limit = Math.min(Number(b.limit) || 40, 200);
+      const offset = Math.max(Number(b.offset) || 0, 0);
+      const conds = ['s.org_id=$1', 'd.org_id=$1', 'd.deleted_at IS NULL'];
+      const args = [org];
+      if (b.documentId) { args.push(b.documentId); conds.push(`s.document_id=$${args.length}::uuid`); }
+      appendDocumentAccess(conds, args, 'd', org, b.access);
+      args.push(limit); const limitArg = `$${args.length}`;
+      args.push(offset); const offsetArg = `$${args.length}`;
+      const { rows } = await db().query(
+        `SELECT s.id, s.document_id, s.user_id, s.content, s.content_hash, s.segment_type,
+                s.segment_index, s.start_page, s.end_page, s.word_count, s.vector_synced,
+                s.metadata, s.created_at, d.filename, d.content_type, d.metadata AS document_metadata
+           FROM knowledge_segments s JOIN knowledge_documents d ON d.id=s.document_id
+          WHERE ${conds.join(' AND ')}
+          ORDER BY s.created_at DESC, s.segment_index ASC LIMIT ${limitArg} OFFSET ${offsetArg}`,
+        args,
+      );
+      const { rows: countRows } = await db().query(
+        `SELECT count(*)::int AS c FROM knowledge_segments s JOIN knowledge_documents d ON d.id=s.document_id
+          WHERE ${conds.join(' AND ')}`,
+        args.slice(0, -2),
+      );
+      const evidence = rows.map((s) => {
+        const documentTitle = s.document_metadata?.title || s.filename || String(s.document_id);
+        const segmentNumber = Number(s.segment_index || 0) + 1;
+        return {
+          id: s.id,
+          segmentId: s.id,
+          type: 'evidence_segment',
+          documentId: s.document_id,
+          title: `${documentTitle} : ${String(segmentNumber).padStart(2, '0')}`,
+          content: s.content,
+          createdAt: s.created_at,
+          document: { id: s.document_id, title: documentTitle, contentType: s.content_type },
+          metadata: {
+            ...(s.metadata || {}),
+            segmentType: s.segment_type,
+            segmentIndex: s.segment_index,
+            startPage: s.start_page,
+            endPage: s.end_page,
+            wordCount: s.word_count,
+            contentHash: s.content_hash,
+            vectorStored: Boolean(s.vector_synced),
+            uploader_user_id: s.user_id,
+            org_id: org,
+            document_id: s.document_id,
+            source_title: documentTitle,
+            source_kind: 'knowledge_base',
+          },
+        };
+      });
+      const total = countRows[0]?.c || 0;
+      return { evidence, pagination: { total, limit, offset, hasMore: offset + limit < total } };
+    },
+
     // KB doc LIST (READ) — amr branch only (countByTags path; no pg-qdrant fallback here).
     '/v1/kb-docs': async (b) => {
       const limit = Math.min(Number(b.limit) || 20, 200);
       const offset = Math.max(Number(b.offset) || 0, 0);
-      const conds = ['d.org_id=$1', 'd.deleted_at IS NULL'];
+      const conds = ['d.org_id=$1', 'd.deleted_at IS NULL', 'EXISTS (SELECT 1 FROM knowledge_segments sx WHERE sx.document_id=d.id AND sx.org_id=d.org_id)'];
       const args = [org];
       appendDocumentAccess(conds, args, 'd', org, b.access);
       args.push(limit); const limitArg = `$${args.length}`;

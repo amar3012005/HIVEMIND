@@ -1211,7 +1211,9 @@ export class ResidentRunManager {
     // (the dashboard reads those, not memory rows). Set
     // GOV_PERSIST_EMPTY_REFLECTION=true to restore the old chatty behaviour.
     if ((proposalsPersisted || 0) === 0 && process.env.GOV_PERSIST_EMPTY_REFLECTION !== 'true') {
-      this.logger?.info?.(`[reflection] skip no-proposal cycle batch=${batchId.slice(0, 8)} obs=${observationsTotal} latency=${latencyMs}ms`);
+      if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+        this.logger?.info?.(`[reflection] skip no-proposal cycle batch=${batchId.slice(0, 8)} obs=${observationsTotal} latency=${latencyMs}ms`);
+      }
       return;
     }
 

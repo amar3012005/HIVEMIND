@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { createRequire } from 'module';
@@ -1189,7 +1189,9 @@ if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma
       globalThis.__hmMetrics = globalThis.__hmMetrics || {};
       globalThis.__hmMetrics.profile_dream_runs_total = (globalThis.__hmMetrics.profile_dream_runs_total || 0) + 1;
       globalThis.__hmMetrics.profile_dream_users_dreamed_total = (globalThis.__hmMetrics.profile_dream_users_dreamed_total || 0) + dreamed;
-      console.log(`[profile-dream-cron] ${orgsRun}/${orgs.length} orgs, ${members} members → ${dreamed} dreamed, ${skipped} skipped (dirty-gate)`);
+      if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+        console.log(`[profile-dream-cron] ${orgsRun}/${orgs.length} orgs, ${members} members → ${dreamed} dreamed, ${skipped} skipped (dirty-gate)`);
+      }
     } catch (err) {
       console.error('[profile-dream-cron] tick failed:', err.message);
     }
@@ -1203,7 +1205,9 @@ if (process.env.ENABLE_PROFILE_DREAM_CRON === 'true' && profileDreamer && prisma
     intervalMs: PROFILE_DREAM_INTERVAL_MS,
     run: runProfileDreamCron,
   });
-  console.log(`[profile-dream-cron] scheduled — every ${PROFILE_DREAM_INTERVAL_MS / 3600000}h, top ${PROFILE_DREAM_ORG_LIMIT} orgs`);
+  if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+    console.log(`[profile-dream-cron] scheduled — every ${PROFILE_DREAM_INTERVAL_MS / 3600000}h, top ${PROFILE_DREAM_ORG_LIMIT} orgs`);
+  }
 }
 
 // ─── Audit logging helper ────────────────────────────────────────────────────
@@ -1687,6 +1691,7 @@ if (schedulerSyncEngine) {
 // ─── Phase 1: Document-Backed Memory Services ───────────────────────────────────
 // Feature-flagged: enabled via ENABLE_DOCUMENT_FIRST_INGEST and ENABLE_EVIDENCE_RECALL env vars
 let evidenceRetrieval = null;
+const KB_INGEST_VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
 
 // Docling adapter wrapper: converts buffer→file→parse→cleanup
 let doclingAdapter = null;
@@ -1811,7 +1816,7 @@ if (process.env.DOCLING_URL) {
                   page: 1,
                 }))
               : [{ text: transcript.trim(), headings: [filename], page: 1 }];
-            console.log(`[docling-adapter] tier=whisper file=${filename} chars=${transcript.length} segs=${hybridChunks.length} ms=${Date.now() - tParse}`);
+            if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=whisper file=${filename} chars=${transcript.length} segs=${hybridChunks.length} ms=${Date.now() - tParse}`);
             return {
               // whisper transcript — prose, no structure
               text: transcript, markdown: null, json: { segments, language: t.language },
@@ -1853,7 +1858,7 @@ if (process.env.DOCLING_URL) {
                   hybridChunks.push({ text: raw.trim(), headings: [filename], page: 1 });
                 }
               }
-              console.log(`[docling-adapter] tier=plain-text file=${filename} chars=${raw.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
+              if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=plain-text file=${filename} chars=${raw.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
               return {
                 // plain text / md passthrough — markdown only if it has #
                 text: raw, markdown: /(^|\n)#{1,6}\s/.test(raw) ? raw : null, json: null,
@@ -1874,7 +1879,7 @@ if (process.env.DOCLING_URL) {
             if (typeof ocrSingleImage === 'function') {
               const out = await ocrSingleImage(tempPath);
               if (!out.error && out.text.length > 20) {
-                console.log(`[docling-adapter] tier=image-vision file=${filename} chars=${out.text.length} ms=${Date.now() - tParse}`);
+                if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=image-vision file=${filename} chars=${out.text.length} ms=${Date.now() - tParse}`);
                 return {
                   text: out.text, markdown: out.markdown || out.text, json: null,
                   tables: [], pages: 1, confidence: null, error: null,
@@ -1921,7 +1926,7 @@ if (process.env.DOCLING_URL) {
             }
             if (tables.length) {
               const md = mdParts.join('\n\n');
-              console.log(`[docling-adapter] tier=sheet-direct file=${filename} sheets=${tables.length} `
+              if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=sheet-direct file=${filename} sheets=${tables.length} `
                 + `rows=${tables.reduce((n, t) => n + t.rows.length, 0)} ms=${Date.now() - tParse}`);
               return {
                 // sheet-direct — builds real markdown tables
@@ -1951,7 +1956,7 @@ if (process.env.DOCLING_URL) {
                   page: 1,
                 });
               }
-              console.log(`[docling-adapter] tier=csv file=${filename} rows=${hybridChunks.length} ms=${Date.now() - tParse}`);
+              if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=csv file=${filename} rows=${hybridChunks.length} ms=${Date.now() - tParse}`);
               return {
                 // csv — pipe rows, not markdown headings
                 text: raw, markdown: null, json: { headers, rowCount: hybridChunks.length },
@@ -2000,7 +2005,7 @@ if (process.env.DOCLING_URL) {
               const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
               const vision = await parsePdfWithGroqVision(tempPath);
               if (!vision.error && vision.text.length > 200) {
-                console.log(`[docling-adapter] tier=groq-vision file=${filename} smart=${smart} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
+                if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=groq-vision file=${filename} smart=${smart} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
                 return {
                   text: vision.text, markdown: vision.markdown, json: null,
                   tables: [], pages: vision.pages, confidence: null, error: null,
@@ -2072,7 +2077,7 @@ if (process.env.DOCLING_URL) {
               } catch (chkErr) {
                 console.warn(`[fast-pdf] page-chunk failed: ${chkErr.message}`);
               }
-              console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
+              if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=fast-pdf file=${filename} pages=${fast.pages} chars=${fast.text.length} chunks=${hybridChunks.length} ms=${Date.now() - tParse}`);
               // COLLAPSE LETTER-SPACING. collapseLetterSpacing() has always existed in
               // docling-adapter.js and was applied ONLY to Docling's own responses — never
               // to fast-pdf. Measured consequence on a 46 MB PDF that fell back here:
@@ -2119,7 +2124,7 @@ if (process.env.DOCLING_URL) {
             const _seam = await _normalize(fileBuffer, { mime: '', filename });  // mime is not in scope here; the seam keys off the extension, which IS (`ext`).
             if (_seam.ok && (_seam.markdown || _seam.text)) {
               const _body = _seam.markdown || _seam.text;
-              console.log(`[docling-adapter] tier=seam:${_seam.tier} file=${filename} chars=${_body.length} `
+              if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=seam:${_seam.tier} file=${filename} chars=${_body.length} `
                 + `markdown=${_seam.markdown ? 'yes' : 'no'} ms=${Date.now() - tParse}`);
               return {
                 text: _seam.text, markdown: _seam.markdown, json: null,
@@ -2154,7 +2159,7 @@ if (process.env.DOCLING_URL) {
             const _hmx = await _parseWithHmExtract(fileBuffer, filename);
             if (_hmx.ok && (_hmx.markdown || _hmx.text)) {
               const _body = _hmx.markdown || _hmx.text;
-              console.log(`[docling-adapter] tier=${_hmx.tier} file=${filename} chars=${_body.length} `
+              if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=${_hmx.tier} file=${filename} chars=${_body.length} `
                 + `segments=${_hmx.meta?.segments || 0} ms=${Date.now() - tParse}`);
               return {
                 text: _hmx.text, markdown: _hmx.markdown, json: null,
@@ -2207,7 +2212,7 @@ if (process.env.DOCLING_URL) {
           // KB_SEMANTIC_SEGMENTS=false fallback path.
           Promise.resolve({ chunks: [], skipped: 'single-conversion' }),
         ]);
-        console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
+        if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=docling file=${filename} smart=${useSmart} chunks=${chunkResult?.chunks?.length || 0} ms=${Date.now() - tParse} parseError=${parseResult?.error || 'none'} chunkerError=${chunkResult?.error || 'none'}`);
         // Smart-mode timeout fallback: if the PARSE failed AND we still have a
         // PDF, try Tier 1 fast-pdf so the upload isn't lost.
         //
@@ -24725,6 +24730,88 @@ ${injectionText}`;
           }
           break;
 
+        case '/api/evidence':
+          if (req.method === 'GET') {
+            if (!ensurePersistedMemoryOrFail(res, '/api/evidence')) return;
+            const limit = Math.min(parseInt(url.searchParams.get('limit') || '40'), 200);
+            const offset = Math.max(parseInt(url.searchParams.get('offset') || '0'), 0);
+            const documentId = url.searchParams.get('document_id') || null;
+            const scopeFilter = url.searchParams.get('scope') || null;
+            try {
+              const accessContext = await buildAccessContext(userId, orgId).catch(() => null);
+              if (orgIsRemote(orgId)) {
+                const remote = await amrKbEvidence(orgId, {
+                  limit, offset, documentId,
+                  access: { userId, accessContext },
+                });
+                if (remote) return jsonResponse(res, remote);
+                return jsonResponse(res, { error: 'Evidence store unavailable' }, 503);
+              }
+
+              const documentWhere = evidenceRetrieval?._accessibleDocumentWhere
+                ? evidenceRetrieval._accessibleDocumentWhere({ userId, orgId, accessContext, scopeFilter })
+                : { orgId, userId };
+              const where = { orgId, ...(documentId ? { documentId } : {}), document: documentWhere };
+              const [segments, total] = await Promise.all([
+                prisma.knowledgeSegment.findMany({
+                  where,
+                  orderBy: [{ createdAt: 'desc' }, { segmentIndex: 'asc' }],
+                  take: limit,
+                  skip: offset,
+                  select: {
+                    id: true, documentId: true, userId: true, orgId: true,
+                    content: true, contentHash: true, segmentType: true, segmentIndex: true,
+                    startOffset: true, endOffset: true, startPage: true, endPage: true,
+                    wordCount: true, embeddingModel: true, embeddingDimension: true,
+                    vectorStored: true, metadata: true, createdAt: true,
+                    document: {
+                      select: {
+                        id: true, title: true, documentType: true, sourcePlatform: true,
+                        sourceId: true, sourceUrl: true, documentDate: true, author: true,
+                        language: true, tags: true, parseEngine: true, parseMetadata: true,
+                      },
+                    },
+                  },
+                }),
+                prisma.knowledgeSegment.count({ where }),
+              ]);
+              const evidence = segments.map((segment) => {
+                const documentTitle = segment.document?.title || String(segment.documentId);
+                const segmentNumber = Number(segment.segmentIndex || 0) + 1;
+                return {
+                  id: segment.id, segmentId: segment.id, type: 'evidence_segment',
+                  documentId: segment.documentId,
+                  title: `${documentTitle} : ${String(segmentNumber).padStart(2, '0')}`,
+                  content: segment.content, createdAt: segment.createdAt, document: segment.document,
+                  metadata: {
+                    ...(segment.metadata || {}),
+                    segmentType: segment.segmentType, segmentIndex: segment.segmentIndex,
+                    startOffset: segment.startOffset, endOffset: segment.endOffset,
+                    startPage: segment.startPage, endPage: segment.endPage,
+                    wordCount: segment.wordCount, contentHash: segment.contentHash,
+                    embeddingModel: segment.embeddingModel,
+                    embeddingDimension: segment.embeddingDimension,
+                    vectorStored: segment.vectorStored,
+                    uploader_user_id: segment.userId, org_id: segment.orgId,
+                    document_id: segment.documentId,
+                    source_id: segment.document?.sourceId || segment.documentId,
+                    source_title: documentTitle,
+                    source_kind: segment.document?.sourcePlatform || 'knowledge_base',
+                    document_date: segment.document?.documentDate || null,
+                  },
+                };
+              });
+              return jsonResponse(res, {
+                evidence,
+                pagination: { total, limit, offset, hasMore: offset + limit < total },
+              });
+            } catch (err) {
+              console.error('[evidence] List failed:', err.message);
+              return jsonResponse(res, { error: err.message }, 500);
+            }
+          }
+          break;
+
         case '/api/evidence/search':
           if (req.method === 'POST') {
             if (!ensurePersistedMemoryOrFail(res, '/api/evidence/search')) return;
@@ -24878,6 +24965,11 @@ ${injectionText}`;
                 : { orgId, userId };
               const where = {
                 ...documentAccessWhere,
+                // The Documents browser is an inventory of completed,
+                // recallable source artifacts. Pending/failed legacy rows with
+                // zero segments stay in job history instead of duplicating a
+                // filename as a misleading empty document card.
+                segments: { some: {} },
                 ...(documentType ? { documentType } : {}),
                 ...(tags ? { tags: { hasSome: tags.split(',').map(t => t.trim()) } } : {})
               };
@@ -24991,6 +25083,7 @@ ${injectionText}`;
                 where: {
                   userId,
                   orgId,
+                  segments: { some: {} },
                   OR: [
                     { title: { contains: query, mode: 'insensitive' } },
                     { tags: { hasSome: [query] } },
@@ -25240,7 +25333,9 @@ async function ensureQdrantSearchIndexes() {
 
   try {
     await qdrantCollections.createAllCollections();
-    console.log('✅ Qdrant collections verified');
+    if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+      console.log('✅ Qdrant collections verified');
+    }
   } catch (error) {
     console.error('⚠️  Failed to verify Qdrant collections:', error.message);
   }
@@ -25305,7 +25400,7 @@ function startAppSidecars() {
 
 if (shouldStartHttpServer()) {
   server.listen(PORT, () => {
-  console.log(`
+  if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║                                                            ║
 ║   🧠 HIVE-MIND Server Running                              ║
@@ -25415,7 +25510,9 @@ if (shouldStartHttpServer()) {
     };
     setInterval(_runReconcile, _reconEveryMs).unref();
     setTimeout(_runReconcile, 90000).unref(); // first pass ~90s post-boot (after warm-up)
-    console.log(`[embed-reconciler] drift-guard worker mounted (every ${_reconEveryMs / 60000}min, full sweep every 20 ticks)`);
+    if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+      console.log(`[embed-reconciler] drift-guard worker mounted (every ${_reconEveryMs / 60000}min, full sweep every 20 ticks)`);
+    }
   }
 
   // `.amr` shard maintenance (ICARUS Phase A). The shard is the SOLE copy of an
@@ -25440,8 +25537,10 @@ if (shouldStartHttpServer()) {
     };
     setInterval(_runMaint, _maintEveryMs).unref();
     setTimeout(_runMaint, 120000).unref(); // first pass ~2min post-boot
-    console.log(`[shard-maintenance] worker mounted (every ${_maintEveryMs / 60000}min, `
-      + `backup=${process.env.MNEME_BACKUP_ENABLED ?? 'true'} compact=${process.env.MNEME_COMPACT_ENABLED ?? 'false'})`);
+    if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+      console.log(`[shard-maintenance] worker mounted (every ${_maintEveryMs / 60000}min, `
+        + `backup=${process.env.MNEME_BACKUP_ENABLED ?? 'true'} compact=${process.env.MNEME_COMPACT_ENABLED ?? 'false'})`);
+    }
   }
   });
 } else {

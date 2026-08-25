@@ -222,7 +222,9 @@ function createIngestionQueue(options = {}) {
     const queue = new bullmq.Queue(options.queueName || DEFAULT_QUEUE_NAME, { connection });
     const dlq = new bullmq.Queue(options.dlqName || DEFAULT_DLQ_NAME, { connection });
 
-    console.log(`[ingestion-queue] Redis probe OK on ${workingHost} — using BullMQ mode`);
+    if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+      console.log(`[ingestion-queue] Redis probe OK on ${workingHost} — using BullMQ mode`);
+    }
 
     resolvedSystem = {
       mode: 'bullmq',

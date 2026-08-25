@@ -385,6 +385,8 @@ export function startGmailWatcherScheduler({ prisma, logger = console, intervalM
   const timer = setInterval(() => tick().catch((error) => logger.warn?.('[gmail-watcher] tick failed:', error.message)), every);
   timer.unref?.();
   setTimeout(() => tick().catch((error) => logger.warn?.('[gmail-watcher] initial tick failed:', error.message)), 30000).unref?.();
-  logger.log?.(`[gmail-watcher] scheduler active every ${Math.round(every / 60000)}min`);
+  if (String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true') {
+    logger.log?.(`[gmail-watcher] scheduler active every ${Math.round(every / 60000)}min`);
+  }
   return { enabled: true, tick, stop: () => clearInterval(timer) };
 }

@@ -13,6 +13,8 @@ import { meterTokens } from '../../billing/usage-tracker.js';
 import { currentOrg, currentApiKey } from '../../db/prisma.js';
 import { recordAiUsage, resolveAiModelPolicy } from '../../llm/ai-governance.js';
 
+const KB_INGEST_VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
+
 // Recover every COMPLETE top-level JSON object from a (possibly truncated)
 // array-bearing string. Brace-counted and string/escape aware so braces or
 // brackets inside string values never miscount. Used to salvage facts from a
@@ -354,7 +356,9 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
   const msg = json.choices?.[0]?.message || {};
   const content = msg.content || msg.reasoning_content || '';
 
-  console.log(`[enterprise-extract] provider=${route.provider} model=${model} tokens=${usage?.total_tokens} completion=${usage?.completion_tokens} finish=${json.choices?.[0]?.finish_reason || 'unknown'}`);
+  if (String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true') {
+    console.log(`[enterprise-extract] provider=${route.provider} model=${model} tokens=${usage?.total_tokens} completion=${usage?.completion_tokens} finish=${json.choices?.[0]?.finish_reason || 'unknown'}`);
+  }
   // METER AT THE GATEWAY — every org-context LLM call (cognition, dreamer, synthesizer, KB distill,
   // recall expansion, …) routes through here, so this single meter captures the platform's background
   // token spend that per-endpoint metering misses. orgId from AsyncLocalStorage (callers run inside
@@ -448,7 +452,9 @@ export async function chatCompletionWithFallback({
         bestTruncated = err;
       }
       const next = i + 1 < list.length ? `falling back to ${list[i + 1]}` : 'no more models';
-      console.warn(`[llm-fallback] model ${list[i]} failed (${String(err.message).slice(0, 120)}) — ${next}`);
+      if (KB_INGEST_VERBOSE) {
+        console.warn(`[llm-fallback] model ${list[i]} failed (${String(err.message).slice(0, 120)}) — ${next}`);
+      }
     }
   }
   if (bestTruncated) throw bestTruncated;

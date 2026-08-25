@@ -30,7 +30,7 @@ import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js'
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectRankedMemoryFallback } from './memory-evidence-projector.js';
-import { appendGapClarification, buildSynthesisPromptArtifact, normalizeSuggestedFollowUps } from './chat-synthesis-prompt.js';
+import { appendGapClarification, buildSynthesisPromptArtifact, normalizeSearchableFollowUps, normalizeSuggestedFollowUps } from './chat-synthesis-prompt.js';
 import { deriveAnswerContextStatus, normalizeAnswerCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
@@ -272,6 +272,14 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
   let meta = {};
   let pending = '';
   let started = false;
+  const searchableFollowUps = () => normalizeSearchableFollowUps(meta.follow_ups, {
+    context: JSON.stringify(recallPackets),
+    sourceTitles: recallPackets.flatMap((packet) => [
+      ...(packet?.citations || []).map((citation) => citation.source_label || citation.title),
+      ...(packet?.sourceSections || []).map((section) => section.source_label || section.title),
+    ]).filter(Boolean),
+    language,
+  });
   const consumeConcatenatedJson = (raw) => {
     let depth = 0;
     let start = -1;
@@ -407,7 +415,7 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
       onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
       return {
         response: recalled.response,
-        follow_ups: normalizeSuggestedFollowUps(meta.follow_ups),
+        follow_ups: searchableFollowUps(),
         claims: recalled.claims,
         rejected_claims: rejectedClaims,
         grounded: true,
@@ -445,7 +453,7 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
   onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
   return {
     response: streamedClaims.map((claim) => claim.text).join(' '),
-    follow_ups: normalizeSuggestedFollowUps(meta.follow_ups),
+    follow_ups: searchableFollowUps(),
     claims: streamedClaims,
     rejected_claims: rejectedClaims,
     grounded: true,
@@ -2569,7 +2577,14 @@ ${message}`;
     // drops non-factual clarification questions. Re-attach only the bounded
     // gap question after claims have passed the fail-closed citation check.
     response: appendGapClarification(validated.answer, answerPayload.gaps, language),
-    follow_ups: normalizeSuggestedFollowUps(answerPayload.follow_ups),
+    follow_ups: normalizeSearchableFollowUps(answerPayload.follow_ups, {
+      context: JSON.stringify(evidence.recall_packets || []),
+      sourceTitles: (evidence.recall_packets || []).flatMap((packet) => [
+        ...(packet?.citations || []).map((citation) => citation.source_label || citation.title),
+        ...(packet?.sourceSections || []).map((section) => section.source_label || section.title),
+      ]).filter(Boolean),
+      language,
+    }),
     claims: validated.claims,
     rejected_claims: validated.rejected_claims,
     grounded: validated.grounded,

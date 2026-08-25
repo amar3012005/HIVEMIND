@@ -42,6 +42,31 @@ export function normalizeSuggestedFollowUps(followUps) {
     .filter(Boolean))].slice(0, 3);
 }
 
+export function normalizeSearchableFollowUps(followUps, { context = '', sourceTitles = [], language = 'en' } = {}) {
+  const corpus = String(context || '').toLocaleLowerCase();
+  const conversational = /\b(would you like|do you need|do you want|want me to|could you provide|can you provide|which competitors would|search the web|search online)\b/i;
+  const anchored = normalizeSuggestedFollowUps(followUps).filter((question) => {
+    if (conversational.test(question)) return false;
+    const tokens = question.toLocaleLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}_-]{3,}/gu) || [];
+    return tokens.some((token) => corpus.includes(token));
+  });
+  const templates = {
+    de: (title) => `Was sagt ${title} außerdem zu diesem Thema?`,
+    es: (title) => `¿Qué más dice ${title} sobre este tema?`,
+    fr: (title) => `Que dit encore ${title} à ce sujet ?`,
+    en: (title) => `What else does ${title} say about this topic?`,
+  };
+  const template = templates[String(language || 'en').slice(0, 2).toLowerCase()] || templates.en;
+  for (const rawTitle of sourceTitles) {
+    if (anchored.length >= 3) break;
+    const title = String(rawTitle || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!title) continue;
+    const question = template(title);
+    if (!anchored.includes(question)) anchored.push(question);
+  }
+  return anchored.slice(0, 3);
+}
+
 export function buildSynthesisPromptArtifact({
   language, operation = 'recall', recallMode = 'fact', responseDepth = 'standard', answerObjective = '',
 } = {}) {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { appendGapClarification, appendSuggestedFollowUps, buildSynthesisPromptArtifact, buildSynthesisSystemPrompt, normalizeSuggestedFollowUps } from '../../src/agent/chat-synthesis-prompt.js';
+import { appendGapClarification, appendSuggestedFollowUps, buildSynthesisPromptArtifact, buildSynthesisSystemPrompt, normalizeSearchableFollowUps, normalizeSuggestedFollowUps } from '../../src/agent/chat-synthesis-prompt.js';
 import { resetStaticPromptCacheForTests } from '../../src/agent/chat-static-prompt-cache.js';
 
 test('fact synthesis loads only the compact grounding and citation contract', () => {
@@ -117,4 +117,11 @@ test('grounded follow-up suggestions are appended in deterministic order and lan
     'Die Antwort.\n\nMögliche nächste Fragen:\n- Was änderte sich?\n- Wer stimmte zu?',
   );
   assert.equal(appendSuggestedFollowUps('Short.', ['Only one?'], 'en'), 'Short.');
+  assert.deepEqual(
+    normalizeSearchableFollowUps(
+      ['Would you like a competitor comparison?', 'How does cost-saving pricing work?'],
+      { context: 'cost-saving pricing', sourceTitles: ['business_sales.pdf'] },
+    ),
+    ['How does cost-saving pricing work?', 'What else does business_sales.pdf say about this topic?'],
+  );
 });

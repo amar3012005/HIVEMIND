@@ -7,7 +7,7 @@ const schema = z.object({
   capability: z.enum(['profile', 'memory_write', 'workspace_read', 'direct']),
   operation: z.enum(NATIVE_OPERATIONS),
   response: z.object({
-    language: z.string().trim().min(1).max(32), type: z.enum(['fact', 'decision', 'event', 'relationship', 'profile', 'acknowledgement']),
+    language: z.string().trim().min(1).max(32), type: z.enum(['fact', 'decision', 'event', 'goal', 'preference', 'lesson', 'relationship', 'profile', 'acknowledgement']),
     scope: z.enum(['bounded', 'broad', 'exhaustive']), depth: z.enum(['standard', 'detailed', 'comprehensive']),
     shape: z.enum(['fact', 'overview', 'inventory', 'timeline', 'comparison', 'explanation']), objective: z.string().trim().min(1).max(1000),
   }).strict(),

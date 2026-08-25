@@ -14,8 +14,8 @@ export class CreditService {
     this.usageService = usageService;
   }
 
-  async getSummary(orgId, userId = null, tx = this.prisma) {
-    const plan = await this.planStore.getOrgPlan(orgId);
+  async getSummary(orgId, userId = null, tx = this.prisma, prefetchedPlan = null) {
+    const plan = prefetchedPlan || await this.planStore.getOrgPlan(orgId);
     const included = Number(plan?.limits?.monthlyCredits ?? 0);
     const { start, end, key } = monthWindow();
     const userClause = userId ? ' AND initiating_user_id = $4::uuid' : '';
@@ -114,6 +114,10 @@ export class CreditService {
     const quantity = creditCost(service, units);
     const key = String(idempotencyKey || crypto.randomUUID()).slice(0, 180);
     if (quantity === 0) return { admitted: true, idempotencyKey: key, quantity: 0 };
+    // Resolve entitlement outside the interactive transaction. It performs its
+    // own Prisma reads and previously consumed most of the default five-second
+    // transaction lifetime before the reservation SQL ran.
+    const plan = await this.planStore.getOrgPlan(orgId);
     return this.prisma.$transaction(async (tx) => {
       await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked`, `credits:${orgId}:${monthWindow().key}`);
       const existing = await tx.$queryRawUnsafe(
@@ -122,7 +126,7 @@ export class CreditService {
       if (existing[0]) {
         if (Number(existing[0].quantity) !== quantity || existing[0].metadata?.service !== service) throw new Error('credit idempotency key does not match original operation');
         if (existing[0].state === 'released') {
-          const summary = await this.getSummary(orgId, null, tx);
+          const summary = await this.getSummary(orgId, null, tx, plan);
           if (!summary.unlimited && quantity > summary.remaining) {
             return { admitted: false, check: { allowed: false, status: 402, reason: 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining } };
           }
@@ -135,7 +139,7 @@ export class CreditService {
         }
         return { admitted: true, duplicate: true, event: existing[0], idempotencyKey: key, quantity };
       }
-      const summary = await this.getSummary(orgId, null, tx);
+      const summary = await this.getSummary(orgId, null, tx, plan);
       if (!summary.unlimited && quantity > summary.remaining) {
         return { admitted: false, check: { allowed: false, status: 402, reason: 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining } };
       }
@@ -146,6 +150,12 @@ export class CreditService {
         JSON.stringify({ ...metadata, service, units: Math.max(0, Math.ceil(Number(units) || 0)) }),
       );
       return { admitted: true, event: rows[0], idempotencyKey: key, quantity, summary };
+    }, {
+      // The callback now contains database work only. Keep a bounded margin for
+      // transient Postgres contention instead of inheriting Prisma's 5s default
+      // and failing a chat before planning/recall can begin.
+      maxWait: Number(process.env.CREDIT_TRANSACTION_MAX_WAIT_MS || 5_000),
+      timeout: Number(process.env.CREDIT_TRANSACTION_TIMEOUT_MS || 20_000),
     });
   }
 
@@ -153,6 +163,7 @@ export class CreditService {
   release(args) { return this.usageService.release(args); }
   async adjustReservation({ orgId, idempotencyKey, service, units }) {
     const quantity = creditCost(service, units);
+    const plan = await this.planStore.getOrgPlan(orgId);
     return this.prisma.$transaction(async (tx) => {
       await tx.$queryRawUnsafe(`SELECT pg_advisory_xact_lock(hashtext($1))::text AS locked`, `credits:${orgId}:${monthWindow().key}`);
       const rows = await tx.$queryRawUnsafe(
@@ -162,7 +173,7 @@ export class CreditService {
       if (!event) throw new Error('credit reservation not found');
       if (event.state === 'settled') return { adjusted: false, duplicate: true, quantity: Number(event.quantity) };
       if (event.state !== 'reserved' || event.metadata?.service !== service) throw new Error('credit reservation is not adjustable');
-      const summary = await this.getSummary(orgId, null, tx);
+      const summary = await this.getSummary(orgId, null, tx, plan);
       const available = summary.unlimited ? Number.MAX_SAFE_INTEGER : summary.remaining + Number(event.quantity || 0);
       if (quantity > available) return { adjusted: false, admitted: false, check: { allowed: false, status: 402, reason: 'Monthly credits exhausted', plan: summary.plan, limit: summary.included, current: summary.used + summary.reserved, remaining: summary.remaining } };
       await tx.$executeRawUnsafe(
@@ -170,6 +181,9 @@ export class CreditService {
         orgId, idempotencyKey, quantity, JSON.stringify({ units: Math.max(0, Math.ceil(Number(units) || 0)) }),
       );
       return { adjusted: true, admitted: true, quantity };
+    }, {
+      maxWait: Number(process.env.CREDIT_TRANSACTION_MAX_WAIT_MS || 5_000),
+      timeout: Number(process.env.CREDIT_TRANSACTION_TIMEOUT_MS || 20_000),
     });
   }
   async charge(args) {

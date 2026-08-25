@@ -76,6 +76,43 @@ export function matchSourceDocuments(documents = [], { documentId = null, title 
     }));
 }
 
+const SOURCE_EXTENSION_RE = /\.(?:pdf|docx?|xlsx?|pptx?|txt|md|html?|csv|json|png|jpe?g|webp)$/i;
+
+function sourceIdentity(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(SOURCE_EXTENSION_RE, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+function sourceIdentityTokens(value) {
+  return sourceIdentity(value).split(/\s+/).filter((token) => (
+    token.length >= 3 && !['pdf', 'doc', 'docx', 'file', 'document'].includes(token)
+  ));
+}
+
+function fuzzySourceScore(document, requested) {
+  const wanted = sourceIdentity(requested);
+  const wantedTokens = [...new Set(sourceIdentityTokens(requested))];
+  if (!wanted || !wantedTokens.length) return 0;
+  const identities = [document.title, document.filename, document.sourceId, document.source_id]
+    .filter(Boolean).map(sourceIdentity).filter(Boolean);
+  if (identities.some((identity) => identity === wanted)) return 1;
+  let best = 0;
+  for (const identity of identities) {
+    const candidateTokens = new Set(sourceIdentityTokens(identity));
+    const matched = wantedTokens.filter((token) => candidateTokens.has(token));
+    const coverage = matched.length / wantedTokens.length;
+    const precision = matched.length / Math.max(1, candidateTokens.size);
+    const identifierMatch = wantedTokens.some((token) => /\d/.test(token) && token.length >= 6 && candidateTokens.has(token));
+    const score = (coverage * 0.72) + (precision * 0.28) + (identifierMatch ? 0.08 : 0);
+    best = Math.max(best, Math.min(1, score));
+  }
+  return best;
+}
+
 function objectValue(value) {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value;
   if (typeof value !== 'string') return {};
@@ -842,7 +879,10 @@ export class EvidenceRetrievalService {
   }
 
   /** Resolve an explicitly requested source without trusting a model-supplied id. */
-  async resolveSourceDocuments({ userId, orgId, projectId = null, documentId = null, title = null, limit = 3 }) {
+  async resolveSourceDocuments({
+    userId, orgId, projectId = null, accessContext = null, scopeFilter = null,
+    documentId = null, title = null, limit = 3,
+  }) {
     if (orgIsRemote(orgId)) {
       // The remote list endpoint is the authoritative tenant-scoped document
       // inventory. Validate both inferred and caller-supplied source IDs against
@@ -861,10 +901,13 @@ export class EvidenceRetrievalService {
 
     return this.db.knowledgeDocument.findMany({
       where: {
-        ...(!projectId ? { userId } : {}),
-        orgId,
-        archivedAt: null,
-        ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
+        // Resolve the filename inside the exact same authorization envelope as
+        // evidence retrieval. The previous owner-only `{ userId }` condition
+        // made organization, team, and authorized-project uploads impossible
+        // to resolve by title even though their segments were readable.
+        ...this._accessibleDocumentWhere({
+          userId, orgId, projectId, accessContext, scopeFilter,
+        }),
         ...(documentId ? { id: documentId } : {}),
         ...(!documentId && title ? {
           OR: [
@@ -891,12 +934,17 @@ export class EvidenceRetrievalService {
    * This is metadata-only: source eligibility never depends on vector scores or
    * an LLM extracting an English filename.
    */
-  async resolveSourceFromQuery({ userId, orgId, projectId = null, query, limit = 1 }) {
+  async resolveSourceFromQuery({
+    userId, orgId, projectId = null, accessContext = null, scopeFilter = null,
+    query, limit = 1,
+  }) {
     const filenameMatch = String(query || '').normalize('NFKC').match(
       /([^\n"'()[\]{}]{1,220}\.(?:pdf|docx?|xlsx?|pptx?|txt|md|html?|csv|json|png|jpe?g|webp))/i,
     );
     const filename = filenameMatch
-      ? filenameMatch[1].trim().replace(/^(?:what\s+(?:exactly\s+)?does|what\s+is\s+in|tell\s+me\s+what|send|share|email|open|read)\s+/i, '')
+      ? filenameMatch[1].trim()
+        .replace(/^.*?\b(?:about|named|called)\s+/i, '')
+        .replace(/^(?:what\s+(?:exactly\s+)?does|what\s+is\s+in|tell\s+me\s+what|send|share|email|open|read)\s+/i, '')
       : null;
     const sourceMatch = filename ? 'filename' : 'metadata_tokens';
     const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
@@ -907,11 +955,18 @@ export class EvidenceRetrievalService {
     )].slice(0, 12);
     if (!tokens.length) return [];
 
-    const score = (document) => {
-      const haystack = [document.title, document.sourceId, document.filename]
-        .filter(Boolean).join(' ').normalize('NFKC').toLocaleLowerCase();
-      const hits = tokens.filter((token) => haystack.includes(token)).length;
-      return hits / tokens.length;
+    const requestedSource = filename || query;
+    const score = (document) => fuzzySourceScore(document, requestedSource);
+    const acceptUnambiguous = (documents) => {
+      const ranked = documents
+        .map((document) => ({ ...document, _sourceScore: score(document), _sourceMatch: sourceMatch }))
+        .sort((a, b) => b._sourceScore - a._sourceScore
+          || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime());
+      const best = ranked[0];
+      const runnerUp = ranked[1];
+      if (!best || best._sourceScore < 0.72) return [];
+      if (runnerUp && best._sourceScore < 0.98 && best._sourceScore - runnerUp._sourceScore < 0.12) return [];
+      return ranked.slice(0, Math.max(1, Math.min(limit, 3)));
     };
 
     if (orgIsRemote(orgId)) {
@@ -920,21 +975,15 @@ export class EvidenceRetrievalService {
       // org-wide same-name file.
       if (projectId) return [];
       const listed = await amrKbDocs(orgId, { limit: 200, offset: 0, access: { userId, projectId } });
-      return (listed?.documents || [])
-        .filter((document) => !document.userId || document.userId === userId)
-        .map((document) => ({ ...document, _sourceScore: score(document), _sourceMatch: sourceMatch }))
-        .filter((document) => document._sourceScore >= 0.34)
-        .sort((a, b) => b._sourceScore - a._sourceScore || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
-        .slice(0, Math.max(1, Math.min(limit, 3)));
+      return acceptUnambiguous(listed?.documents || []);
     }
 
     if (!this.db?.knowledgeDocument) return [];
     const documents = await this.db.knowledgeDocument.findMany({
       where: {
-        ...(!projectId ? { userId } : {}),
-        orgId,
-        archivedAt: null,
-        ...(projectId ? { tags: { has: `scope-key:project:${projectId}` } } : {}),
+        ...this._accessibleDocumentWhere({
+          userId, orgId, projectId, accessContext, scopeFilter,
+        }),
         OR: tokens.flatMap((token) => [
           { title: { contains: token, mode: 'insensitive' } },
           { sourceId: { contains: token, mode: 'insensitive' } },
@@ -946,12 +995,7 @@ export class EvidenceRetrievalService {
       },
       take: 30,
     });
-    return documents
-      .map((document) => ({ ...document, _sourceScore: score(document), _sourceMatch: sourceMatch }))
-      .filter((document) => document._sourceScore >= 0.34)
-      .sort((a, b) => b._sourceScore - a._sourceScore
-        || new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
-      .slice(0, Math.max(1, Math.min(limit, 3)));
+    return acceptUnambiguous(documents);
   }
 
   /**

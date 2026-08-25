@@ -1596,6 +1596,53 @@ function hasGroundedPacketEvidence(evidence) {
   );
 }
 
+function groundedRecallFallback(evidence, language) {
+  const rows = [];
+  const seen = new Set();
+  for (const [packetIndex, packet] of (evidence?.recall_packets || []).entries()) {
+    const sections = new Map((packet?.sourceSections || [])
+      .filter((section) => section?.segment_id)
+      .map((section) => [section.segment_id, section]));
+    const facts = new Map((packet?.facts || [])
+      .filter((fact) => fact?.id || fact?.memory_id || fact?.memoryId)
+      .map((fact) => [fact.id || fact.memory_id || fact.memoryId, fact]));
+    for (const citation of (packet?.citations || [])) {
+      if (!citation?.id) continue;
+      const section = sections.get(citation.segment_id) || {};
+      const fact = facts.get(citation.memory_id) || {};
+      const text = String(
+        section.snippet || section.content || fact.content || citation.snippet || '',
+      ).replace(/\s+/g, ' ').trim().slice(0, 600);
+      const fingerprint = text.toLocaleLowerCase();
+      if (!text || seen.has(fingerprint)) continue;
+      seen.add(fingerprint);
+      rows.push({
+        text,
+        citation_id: `P${packetIndex + 1}-${citation.id}`,
+      });
+      if (rows.length >= 5) break;
+    }
+    if (rows.length >= 5) break;
+  }
+  if (!rows.length) return null;
+  const lang = String(language || 'en').slice(0, 2).toLowerCase();
+  const headings = {
+    de: 'Das ist der verifizierte Inhalt, den ich dazu gefunden habe:',
+    fr: 'Voici le contenu vérifié que j’ai trouvé à ce sujet :',
+    es: 'Este es el contenido verificado que encontré al respecto:',
+    en: 'Here is the verified information I found:',
+  };
+  return {
+    response: `${headings[lang] || headings.en}\n${rows.map((row) => `- ${row.text}`).join('\n')}`,
+    claims: rows.map((row) => ({
+      text: row.text,
+      grounded: true,
+      citation_ids: [row.citation_id],
+      provenance: 'deterministic_recall_fallback',
+    })),
+  };
+}
+
 function unavailableEvidenceResponse({ message, evidence, language }) {
   const lang = String(language || 'en').slice(0, 2).toLowerCase();
   const memoryCount = evidence?.memories?.length || 0;
@@ -2366,14 +2413,13 @@ ${message}`;
     || (completionRequirement === 'complete_set'
       && initialContextStatus === 'sufficient'
       && supportedCoverageCount < 1);
-  if (initialContextStatus === 'query_mismatch') {
-    validated = {
-      ...validated,
-      rejected_claims: [...(validated.rejected_claims || []), ...(validated.claims || [])],
-      claims: [],
-      grounded: false,
-    };
-  }
+  // `context_status` is model telemetry, not a second retrieval policy. A
+  // model can conservatively label the packet query_mismatch while still
+  // producing citation-valid claims that directly answer the objective. The
+  // citation validator is the factual authority: keep its valid claims and
+  // expose the context label only as telemetry. This prevents useful recalled
+  // material from being replaced by the generic "I found related context"
+  // response without weakening grounding or accepting uncited prose.
 
   // The validator remains fail-closed. If the model ignored the citation
   // contract despite a non-empty packet, give it one bounded repair pass over
@@ -2381,7 +2427,7 @@ ${message}`;
   let repairUsage = null;
   if (String(process.env.HIVEMIND_SYNTHESIS_REPAIR_ENABLED || 'false').toLowerCase() === 'true'
       && (!validated.claims.length || coverageIncomplete)
-      && initialContextStatus !== 'query_mismatch' && hasGroundedPacketEvidence(evidence)) {
+      && hasGroundedPacketEvidence(evidence)) {
     const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation or request-completion contract. Use the same final evidence only; do not retrieve again. The planner classified this request as ${completionRequirement}. Decompose every independent requested detail, cover every supported detail, and explicitly mark unsupported details in coverage and gaps. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
     // stateless API call — it must still see the full evidence in userBlock
@@ -2416,6 +2462,28 @@ ${message}`;
   }
 
   if (!validated.claims.length) {
+    // A failed model formatting/relevance judgment must not erase authorized,
+    // citable recall. Fall back to a deterministic extractive answer over the
+    // already-ranked packet. This introduces no new facts and no extra model
+    // or retrieval call; the generic absence response remains reserved for an
+    // actually empty or uncitable packet.
+    const recalled = groundedRecallFallback(evidence, language);
+    if (recalled) {
+      return {
+        response: recalled.response,
+        claims: recalled.claims,
+        rejected_claims: validated.rejected_claims,
+        grounded: true,
+        evidence_used: recalled.claims.flatMap((claim) => claim.citation_ids),
+        confidence: 0.7,
+        gaps: Array.isArray(answerPayload?.gaps) ? answerPayload.gaps : [],
+        context_status: deriveAnswerContextStatus(answerPayload),
+        answer_coverage: normalizeAnswerCoverage(answerPayload?.coverage),
+        recall_packets: evidence.recall_packets || [],
+        usage: repairUsage || usage,
+        usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
+      };
+    }
     return {
       response: unavailableEvidenceResponse({ message, evidence, language }),
       claims: [],

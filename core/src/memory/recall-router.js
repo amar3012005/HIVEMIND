@@ -133,8 +133,12 @@ function sourceMemoryTimestamp(memory) {
 async function resolveSourceMemoryAnchors(store, ctx, { title = null, kind = null, selector = null } = {}, timeoutMs = 2500) {
   if (!store?.listMemories || (!title && !kind)) return [];
   const tags = [];
-  if (kind) tags.push(`kind:${kind}`);
-  if (title) tags.push(`filename:${title}`);
+  // A title may live in source_metadata/document_title without a filename tag,
+  // especially on historical promotions. Do not pre-filter the storage query
+  // by an optional denormalized tag and thereby hide an otherwise exact source
+  // anchor. Authorization is still applied by listMemories; the exact source
+  // contract is enforced client-side below.
+  if (kind && !title) tags.push(`kind:${kind}`);
   const listed = await withTimeout(store.listMemories({
     user_id: ctx.userId,
     org_id: ctx.orgId,
@@ -144,7 +148,7 @@ async function resolveSourceMemoryAnchors(store, ctx, { title = null, kind = nul
     project: undefined,
     ...(tags.length ? { tags } : {}),
     is_latest: true,
-    limit: selector ? 100 : 20,
+    limit: title ? 500 : (selector ? 100 : 20),
     access_context: ctx.accessContext,
   }), timeoutMs, { memories: [] });
   const matches = (listed?.memories || []).filter((memory) => memoryMatchesSourceContract(memory, { title, kind }));
@@ -1776,17 +1780,52 @@ export class RecallRouter {
     // other direct uploads resolve through their scoped memory provenance.
     const explicitDocumentSourceRequested = !!(recallPlan.source.document_id || recallPlan.source.title);
     if (this.evidence?.resolveSourceDocuments && explicitDocumentSourceRequested) {
-      explicitSourceDocuments = await withTimeout(
+      const sourceResolution = await withTimeout(
         this.evidence.resolveSourceDocuments({
           userId: ctx.userId,
           orgId: ctx.orgId,
           projectId: ctx.projectId || null,
+          accessContext: ctx.accessContext || null,
+          scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
           documentId: options.source_document_id || null,
           title: options.source_title || null,
         }),
-        Math.min(350, remainingBudget()),
-        [],
+        Math.max(750, Math.min(
+          Number(process.env.RECALL_SOURCE_RESOLVE_TIMEOUT_MS || 2_000),
+          remainingBudget(),
+        )),
+        { _source_resolution_timeout: true },
+        'recall-explicit-source-resolution',
       );
+      if (sourceResolution?._source_resolution_timeout) {
+        // A metadata lookup timeout is not proof that a named file is absent.
+        // Surface an operational failure so chat asks for a retry instead of
+        // telling the user to re-upload a document that may already exist.
+        throw new Error('explicit source resolution timed out');
+      }
+      explicitSourceDocuments = Array.isArray(sourceResolution) ? sourceResolution : [];
+      // Exact metadata is authoritative. If a human supplied a slightly wrong
+      // filename, make one bounded lexical identity pass over the same
+      // authorized document inventory. Never fall back to tenant-wide semantic
+      // results: a source boundary may only be recovered from a strong,
+      // unambiguous title/provenance match.
+      if (explicitSourceDocuments.length === 0 && this.evidence?.resolveSourceFromQuery) {
+        const fuzzyResolution = await withTimeout(
+          this.evidence.resolveSourceFromQuery({
+            userId: ctx.userId,
+            orgId: ctx.orgId,
+            projectId: ctx.projectId || null,
+            accessContext: ctx.accessContext || null,
+            scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
+            query: options.source_title || query,
+            limit: 1,
+          }),
+          Math.max(750, Math.min(2_000, remainingBudget())),
+          [],
+          'recall-fuzzy-source-resolution',
+        );
+        explicitSourceDocuments = Array.isArray(fuzzyResolution) ? fuzzyResolution : [];
+      }
       if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
         const fullSource = recallPlan.mode === 'full';
         // Anchor the source windows on the ENTITY, not the raw NL query. The

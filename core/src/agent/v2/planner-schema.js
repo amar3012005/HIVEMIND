@@ -12,7 +12,7 @@ export function createNativePlanTool() {
       capability: { type: 'string', enum: ['profile', 'memory_write', 'workspace_read', 'direct'] },
       operation: { type: 'string', enum: NATIVE_OPERATIONS, description: 'Semantic operation. aggregate is only complete deduplicated registry count/enumeration, never arithmetic, attribute filtering, comparison, or a document-derived list. relation_between is only a stored relationship/path, never an attribute comparison. Time-bounded events use event_range with resolved ISO bounds.' },
       response: { type: 'object', additionalProperties: false, properties: {
-        language: { type: 'string' }, type: { type: 'string', enum: ['fact', 'decision', 'event', 'relationship', 'profile', 'acknowledgement'] },
+        language: { type: 'string' }, type: { type: 'string', enum: ['fact', 'decision', 'event', 'goal', 'preference', 'lesson', 'relationship', 'profile', 'acknowledgement'] },
         scope: { type: 'string', enum: ['bounded', 'broad', 'exhaustive'], description: 'Requested answer coverage. Use bounded for ordinary fact/entity questions, broad only for meaningful multi-aspect breadth, exhaustive only for complete inventories.' }, depth: { type: 'string', enum: ['standard', 'detailed', 'comprehensive'] },
         shape: { type: 'string', enum: ['fact', 'overview', 'inventory', 'timeline', 'comparison', 'explanation'] }, objective: { type: 'string' },
       }, required: ['language', 'type', 'scope', 'depth', 'shape', 'objective'] },

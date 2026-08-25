@@ -2778,7 +2778,16 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     const coreUrl = new URL(path, CONFIG.coreApiBaseUrl);
     if (query) coreUrl.search = query;
 
-    const headers = {};
+    const headers = {
+      // Core is replaced in-place during canonical releases. Do not reuse a
+      // pooled socket that may still point at the retired container.
+      Connection: 'close',
+      // A proxy retry must preserve one commercial/request identity. Core uses
+      // this value for its chat credit reservation idempotency contract.
+      'X-Idempotency-Key': String(
+        req.headers['x-idempotency-key'] || req.headers['x-request-id'] || crypto.randomUUID(),
+      ).slice(0, 180),
+    };
 
     // Forward content-type for POST/multipart
     if (req.headers['content-type']) {
@@ -2793,6 +2802,7 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     // tracked separately.) Upload is POST so it is never retried below, and the
     // pipeline is checksum-idempotent regardless.
     const isSlowIngest = /\/knowledge\/(upload|document|ingest)/i.test(path) || /\/ingest(\/|$)/i.test(path);
+    const isNativeChat = method === 'POST' && /^\/api\/chat(?:\?|$)/i.test(path) && !rawBody;
     const coreResp = await internalFetch(coreUrl.toString(), {
       service: 'hm-core',
       method,
@@ -2802,6 +2812,9 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
       userId: session.userId || '',
       orgId: session.orgId || '',
       timeoutMs: isSlowIngest ? 300_000 : 90_000,
+      // Retry only errors that prove the TCP connection was never established.
+      // Never retry a timeout/reset after Core may have started a model call.
+      retryOnConnectFailure: isNativeChat,
     });
     const contentType = coreResp.headers.get('content-type') || 'application/json';
 
@@ -2839,8 +2852,13 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     res.writeHead(coreResp.status, { 'Content-Type': contentType });
     res.end(respBody);
   } catch (err) {
-    console.error('[proxy] Error forwarding to core:', err.message);
-    jsonResponse(res, { error: 'Proxy error', detail: err.message }, 502);
+    const causeCode = err?.cause?.code || err?.code || null;
+    console.error('[proxy] Error forwarding to core:', err.message, causeCode ? `cause=${causeCode}` : '');
+    jsonResponse(res, {
+      error: 'core_temporarily_unavailable',
+      message: 'HIVEMIND is briefly unavailable. Please retry this request.',
+      retry_after_seconds: 2,
+    }, 503);
   }
 }
 

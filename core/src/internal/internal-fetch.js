@@ -5,6 +5,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function connectionWasNeverEstablished(error) {
+  const code = String(error?.cause?.code || error?.code || '').toUpperCase();
+  return ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(code);
+}
+
 export function buildInternalHeaders({ userId, orgId, headers = {}, allowDevFallback } = {}) {
   return {
     'X-API-Key': getInternalApiKey({ allowDevFallback }),
@@ -26,6 +31,8 @@ export async function internalFetch(url, options = {}) {
     orgId,
     rawBody = false,
     allowGetRetry = method === 'GET',
+    retryOnConnectFailure = false,
+    connectRetryDelaysMs = [200, 400, 800, 1200, 1600],
   } = options;
 
   const finalHeaders = buildInternalHeaders({ userId, orgId, headers, allowDevFallback: options.allowDevFallback });
@@ -46,11 +53,20 @@ export async function internalFetch(url, options = {}) {
     }
   }
 
-  try {
-    return await fetch(url, request);
-  } catch (error) {
-    if (!allowGetRetry) throw error;
-    await sleep(500);
-    return fetch(url, { ...request, signal: AbortSignal.timeout(timeoutMs) });
+  const delays = retryOnConnectFailure && method !== 'GET' && method !== 'HEAD'
+    ? connectRetryDelaysMs
+    : (allowGetRetry ? [500] : []);
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fetch(url, { ...request, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (error) {
+      const mayRetry = attempt < delays.length && (
+        allowGetRetry || (retryOnConnectFailure && connectionWasNeverEstablished(error))
+      );
+      if (!mayRetry) throw error;
+      await sleep(delays[attempt]);
+      attempt += 1;
+    }
   }
 }

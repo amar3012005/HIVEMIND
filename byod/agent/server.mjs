@@ -138,10 +138,13 @@ async function ensureSchema() {
       content_type text,
       status text DEFAULT 'ready',
       checksum text,
+      ingest_mode varchar(16) NOT NULL DEFAULT 'both',
       metadata jsonb NOT NULL DEFAULT '{}',
       created_at timestamptz NOT NULL DEFAULT now(),
       deleted_at timestamptz
     );
+    ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS ingest_mode varchar(16) NOT NULL DEFAULT 'both';
+    CREATE INDEX IF NOT EXISTS kbdoc_org_mode_idx ON knowledge_documents(org_id, ingest_mode);
     CREATE INDEX IF NOT EXISTS kbdoc_org_idx ON knowledge_documents(org_id) WHERE deleted_at IS NULL;
     CREATE TABLE IF NOT EXISTS knowledge_segments (
       id uuid PRIMARY KEY,
@@ -1026,12 +1029,14 @@ const routes = {
     const d = sanitizeJson(b.doc || {});
     if (!d.id) return { ok: false, error: 'doc.id required' };
     await pg.query(
-      `INSERT INTO knowledge_documents (id, org_id, user_id, filename, content_type, status, checksum, metadata, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,coalesce($9::timestamptz,now()))
+      `INSERT INTO knowledge_documents (id, org_id, user_id, filename, content_type, status, checksum, metadata, created_at, ingest_mode)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,coalesce($9::timestamptz,now()),coalesce($10,'both'))
        ON CONFLICT (id) DO UPDATE SET filename=EXCLUDED.filename, content_type=EXCLUDED.content_type,
-         status=EXCLUDED.status, checksum=EXCLUDED.checksum, metadata=EXCLUDED.metadata, deleted_at=NULL`,
+         status=EXCLUDED.status, checksum=EXCLUDED.checksum, metadata=EXCLUDED.metadata,
+         ingest_mode=EXCLUDED.ingest_mode, deleted_at=NULL`,
       [d.id, ORG, d.userId || null, d.filename || null, d.contentType || null, d.status || 'ready',
-       d.checksum || null, JSON.stringify({ ...(d.metadata || {}), title: d.title || d.filename || null, tags: d.tags || d.metadata?.tags || [] }), d.createdAt || null]);
+       d.checksum || null, JSON.stringify({ ...(d.metadata || {}), title: d.title || d.filename || null, tags: d.tags || d.metadata?.tags || [] }), d.createdAt || null,
+       (d.ingestMode || d.metadata?.ingest_mode) === 'evidence' ? 'evidence' : 'both']);
     return { ok: true };
   },
 

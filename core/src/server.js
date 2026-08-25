@@ -25202,11 +25202,15 @@ ${injectionText}`;
                 }
               });
 
-              const promotionFailures = await promotionFailureMapByDocumentIds(documents.map((doc) => doc.id), orgId);
+              const documentIds = documents.map((doc) => doc.id);
+              const [promotionFailures, derivedCountMap] = await Promise.all([
+                promotionFailureMapByDocumentIds(documentIds, orgId),
+                countDerivedMemoriesByDocumentIds(documentIds, orgId),
+              ]);
               const enriched = documents.map(doc => ({
                 ...doc,
                 segmentCount: doc._count.segments,
-                promotedCount: doc._count.memoryLinks,
+                promotedCount: derivedCountMap[doc.id] ?? doc._count.memoryLinks,
                 memoryGenerationFailed: promotionFailures[doc.id] === true,
                 _count: undefined
               }));

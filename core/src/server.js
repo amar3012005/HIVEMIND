@@ -13148,6 +13148,28 @@ exit \$RC
               const documentId = typeof body.document_id === 'string' ? body.document_id : null;
               const promoteEvidence = body.promote_evidence === true;
               if (documentId) {
+                // Evidence -> both is a state transition, not a raw promotion
+                // helper call. Reuse the canonical no-reparse operation used by
+                // duplicate-upload upgrades so the document mode, provenance,
+                // and promoted-memory result change atomically across central,
+                // embedded AMR, and remote/BYOD stores.
+                if (promoteEvidence) {
+                  const result = await documentFirstIngestion.promoteStoredEvidence({
+                    documentId,
+                    userId,
+                    orgId,
+                    promotionStrategy: 'explicit_evidence_promotion',
+                  });
+                  return jsonResponse(res, {
+                    success: true,
+                    document_id: result.documentId,
+                    scanned: result.segmentCount,
+                    promoted: result.promotedCount,
+                    promoted_memory_ids: result.promotedMemoryIds,
+                    promotion_mode: result.promotionMode,
+                    ingest_mode: 'both',
+                  });
+                }
                 // Promotion is intentionally a read-from-evidence operation. It
                 // never reparses an upload or changes the original ingest-mode
                 // choice; an explicit flag is required to promote a document
@@ -13191,12 +13213,12 @@ exit \$RC
                     document_date: documentData.documentDate, tags: documentData.tags || [],
                     ...(documentData.parseMetadata || documentData.metadata || {}),
                   },
-                  promotionStrategy: promoteEvidence ? 'explicit_evidence_promotion' : 'admin_document_repair',
+                  promotionStrategy: 'admin_document_repair',
                 });
                 return jsonResponse(res, {
                   success: true, document_id: documentData.id, scanned: unpromoted.length,
                   promoted: (result?.memories || []).filter((memory) => memory?.id).length,
-                  promotion_mode: promoteEvidence ? 'from_existing_evidence' : 'repair',
+                  promotion_mode: 'repair',
                 });
               }
               const since = body.since ? new Date(body.since) : new Date(Date.now() - 30 * 86400000);

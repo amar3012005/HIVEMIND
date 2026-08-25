@@ -335,6 +335,14 @@ class PlanCapacityError extends Error {
   }
 }
 
+function teamSeatCapacityError(plan, limit, current) {
+  const error = new PlanCapacityError('Seat', plan, limit, current);
+  // All self-serve plans currently have one seat. Do not send someone through
+  // a chain of one-seat upgrades when the requested action is team invitation.
+  error.suggestedPlan = plan.id === 'enterprise' ? null : 'enterprise';
+  return error;
+}
+
 async function createHyperRoom(data) {
   // Room count is no longer a billable capacity. HyperAgent work is governed
   // by the canonical monthly credit ledger when turns execute, so creating a
@@ -415,7 +423,7 @@ async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles,
       const limit = plan.limits?.maxUsers ?? -1;
       if (limit > 0) {
         const current = await tx.userOrganization.count({ where: { orgId, isActive: true } });
-        if (current >= limit) throw new PlanCapacityError('Seat', plan, limit, current);
+        if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
       }
     }
     const membership = await tx.userOrganization.upsert({
@@ -437,13 +445,50 @@ async function createMembershipWithinPlan(data) {
     const limit = plan.limits?.maxUsers ?? -1;
     if (limit > 0) {
       const current = await tx.userOrganization.count({ where: { orgId: data.orgId, isActive: true } });
-      if (current >= limit) throw new PlanCapacityError('Seat', plan, limit, current);
+      if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
     }
     return tx.userOrganization.upsert({
       where: { userId_orgId: { userId: data.userId, orgId: data.orgId } },
       update: { ...data, isActive: true, deactivatedAt: null },
       create: { ...data, isActive: true },
     });
+  });
+}
+
+// Pending invitations reserve a seat as well as accepted memberships. Without
+// that reservation a one-seat workspace could issue unlimited invitations and
+// only reject people after they had accepted an email. The advisory lock makes
+// concurrent browser tabs and bulk requests observe one capacity boundary.
+async function assertInviteCapacityWithinPlan({ orgId, additionalSeats = 1, now = new Date() }) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${orgId}`);
+    const { plan } = await getEffectivePlan(tx, orgId);
+    const limit = plan.limits?.maxUsers ?? -1;
+    if (limit <= 0) return { plan, limit, current: 0 };
+    const [activeMembers, pendingInvites] = await Promise.all([
+      tx.userOrganization.count({ where: { orgId, isActive: true } }),
+      tx.orgInvite.count({ where: { orgId, usedAt: null, revokedAt: null, expiresAt: { gt: now } } }),
+    ]);
+    const current = activeMembers + pendingInvites;
+    if (current + additionalSeats > limit) throw teamSeatCapacityError(plan, limit, current);
+    return { plan, limit, current };
+  });
+}
+
+async function createOrgInviteWithinPlan(data, now = new Date()) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${data.orgId}`);
+    const { plan } = await getEffectivePlan(tx, data.orgId);
+    const limit = plan.limits?.maxUsers ?? -1;
+    if (limit > 0) {
+      const [activeMembers, pendingInvites] = await Promise.all([
+        tx.userOrganization.count({ where: { orgId: data.orgId, isActive: true } }),
+        tx.orgInvite.count({ where: { orgId: data.orgId, usedAt: null, revokedAt: null, expiresAt: { gt: now } } }),
+      ]);
+      const current = activeMembers + pendingInvites;
+      if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
+    }
+    return tx.orgInvite.create({ data });
   });
 }
 
@@ -472,6 +517,8 @@ async function upsertConnectorWithinPlan(orgId, connectorInput) {
 // <PlanLimitModal> (shared/planLimit.js) fires instead of the caller seeing a raw 402.
 const _PLAN_LIMIT_RESOURCE_KEY = {
   'user': 'users',
+  'seat': 'users',
+  'Seat': 'users',
   'connector': 'connectors',
   'project': 'projects',
 };
@@ -492,7 +539,7 @@ function capacityErrorResponse(res, error) {
     plan: planId,
     limit: error.limit,
     current: error.current,
-    suggested_plan: Object.prototype.hasOwnProperty.call(_PLAN_LIMIT_NEXT, planId) ? _PLAN_LIMIT_NEXT[planId] : null,
+    suggested_plan: error.suggestedPlan ?? (Object.prototype.hasOwnProperty.call(_PLAN_LIMIT_NEXT, planId) ? _PLAN_LIMIT_NEXT[planId] : null),
     upgrade_url: '/hivemind/app/billing',
   }, 402);
 }
@@ -5105,6 +5152,13 @@ const server = http.createServer(async (req, res) => {
     const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
     if (!membership) return;
 
+    try {
+      await assertInviteCapacityWithinPlan({ orgId });
+    } catch (error) {
+      if (error instanceof PlanCapacityError) return capacityErrorResponse(res, error);
+      throw error;
+    }
+
     const body = await parseBody(req);
     const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const rawEmails = Array.isArray(body.emails) ? body.emails : [];
@@ -5157,15 +5211,13 @@ const server = http.createServer(async (req, res) => {
           }
         }
         const token = crypto.randomBytes(24).toString('hex');
-        const invite = await prisma.orgInvite.create({
-          data: {
-            orgId, email, role: bulkRole, roles: bulkRoles,
-            teamIds: [], projectIds: bulkProjectIds, token, expiresAt,
-            createdBy: current.session.userId,
-            // Delivery is accounted for only after the recipient provider has
-            // accepted the message. A created invite is not necessarily sent.
-            sendCount: 0,
-          },
+        const invite = await createOrgInviteWithinPlan({
+          orgId, email, role: bulkRole, roles: bulkRoles,
+          teamIds: [], projectIds: bulkProjectIds, token, expiresAt,
+          createdBy: current.session.userId,
+          // Delivery is accounted for only after the recipient provider has
+          // accepted the message. A created invite is not necessarily sent.
+          sendCount: 0,
         });
         const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
         queueWorkspaceInvitationDelivery({
@@ -5250,23 +5302,22 @@ const server = http.createServer(async (req, res) => {
     let reusedInvite = Boolean(invite);
     if (!invite) {
       try {
-        invite = await prisma.orgInvite.create({
-          data: {
-            orgId,
-            email: inviteEmail,
-            role: legacyRoleReverse,
-            roles: inviteRoles,
-            teamIds,
-            projectIds,
-            token,
-            expiresAt,
-            createdBy: current.session.userId,
-            idempotencyKey,
-            // Do not make the list claim delivery before the provider confirms it.
-            sendCount: 0,
-          },
+        invite = await createOrgInviteWithinPlan({
+          orgId,
+          email: inviteEmail,
+          role: legacyRoleReverse,
+          roles: inviteRoles,
+          teamIds,
+          projectIds,
+          token,
+          expiresAt,
+          createdBy: current.session.userId,
+          idempotencyKey,
+          // Do not make the list claim delivery before the provider confirms it.
+          sendCount: 0,
         });
       } catch (err) {
+        if (err instanceof PlanCapacityError) return capacityErrorResponse(res, err);
         // Parallel clicks with the same idempotency key race at the database
         // boundary. Resolve the winner instead of returning a false failure.
         if (idempotencyKey && err?.code === 'P2002') {

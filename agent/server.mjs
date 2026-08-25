@@ -32,6 +32,12 @@ const DIM = Number(process.env.MNEME_DIM || 1024);
 const SCHEMA_VERSION = 2; // v2 adds valid_to and indexed bi-temporal eligibility.
 const PROTOCOL_VERSION = 'memory-box.v1';
 const AGENT_RELEASE = process.env.AGENT_RELEASE || 'unknown';
+const AGENT_CAPABILITIES = Object.freeze([
+  'memory.recall', 'memory.lexical', 'memory.hydrate', 'memory.inventory', 'memory.inventory.total',
+  'evidence.recall', 'evidence.lexical', 'evidence.hydrate', 'evidence.inventory',
+  'graph.read', 'relationship.read', 'provenance.read', 'document.ingest-mode',
+  'vector.status', 'vector.pending', 'vector.repair',
+]);
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
 const QCOLL = `org_${ORG}`.replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -614,20 +620,7 @@ const routes = {
     agent_release: AGENT_RELEASE,
     storage_mode: 'byod_postgres_qdrant',
     vector_dimension: DIM,
-    capabilities: [
-      'memory.recall',
-      'memory.lexical',
-      'memory.hydrate',
-      'memory.list.total',
-      'evidence.recall',
-      'evidence.lexical',
-      'evidence.hydrate',
-      'graph.read',
-      'relationship.read',
-      'vector.status',
-      'vector.pending',
-      'vector.repair',
-    ],
+    capabilities: AGENT_CAPABILITIES,
   }),
 
   // Upsert one finished memory: row (idempotent by id) + vector. Atomic-ish: insert row synced=false,

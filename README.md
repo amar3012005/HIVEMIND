@@ -7,12 +7,13 @@ stays on the customer box; only ranked recall results and explicitly requested r
 
 ## Setup (one command)
 ```bash
-git clone --branch byod --single-branch <repo-url> hivemind-byod
-cd hivemind-byod
-./setup.sh
+curl -fsSL https://get.singulancelabs.com/memory-box | sudo bash
 ```
-`setup.sh` asks for your **API key** (dashboard → Settings → BYOD), starts the local data plane,
-and registers a reachable HTTPS or private-network endpoint. Then use the dashboard normally.
+The bootstrap verifies the signed stable release, installs governed host tools under
+`/opt/hivemind-memory-box`, stores protected configuration in `/etc/hivemind-memory-box`, and stores
+signed receipts in `/var/lib/hivemind-memory-box`. It then asks for your **API key** (dashboard →
+Settings → BYOD), starts the local data plane, and registers it. Existing `.env`, data, and backups
+are adopted in place; PostgreSQL and Qdrant are never recreated by an agent update.
 
 ## What runs here
 | container | what |
@@ -63,30 +64,29 @@ repair backlog is reported without printing row content or credentials.
 storage, restores the exact PostgreSQL and Qdrant image IDs recorded in the manifest, exercises
 memory and evidence recall through a restored agent, then removes the disposable environment.
 
-## Updating
-This bundle is a self-contained branch; `git pull` to get a newer agent, then `./setup.sh`.
-The HIVEMIND engine/features upgrade independently on their side — this bundle is unaffected.
+## Governed updates
 
-### Signed agent upgrades
-
-Never upgrade the Memory Box agent from `latest` or another mutable tag. Obtain
-`release.json`, `release.sig`, and the pinned Singulance Ed25519 public key through
-the governed release channel, then run:
+Stable signed updates are checked every six hours with up to 30 minutes of randomized delay. The
+same transaction can be run manually:
 
 ```bash
-BYOD_RELEASE_PUBLIC_KEY=/secure/singulance-byod-release.pub \
-  ./upgrade.sh release.json release.sig
+sudo hivemind-memory-box update
 ```
 
-The updater verifies the signature, rejects non-digest image references, retains
-the current local image under a timestamped rollback tag, deploys only the agent,
-and verifies the authenticated capability response reports the signed release.
-Any failed upgrade automatically restores the prior image. A later manual
-rollback uses the locally protected receipt:
+The updater verifies the Ed25519 signature, channel, validity window, anti-downgrade order, bundle
+hash, and digest-pinned image. It retains the current local image, replaces only `hm-agent` with
+Compose `--no-deps`, then verifies health, release identity, protocol/schema versions, required
+capabilities, exact memory/evidence inventory access, and authenticated recall. Any failure restores
+the previous local image automatically and leaves the current receipt unchanged.
 
 ```bash
-./rollback.sh
+sudo hivemind-memory-box rollback
+sudo hivemind-memory-box channel canary   # explicit opt-in
+sudo hivemind-memory-box channel stable
+hivemind-memory-box status
+sudo hivemind-memory-box doctor
 ```
 
-Release signing is performed in CI/offline release infrastructure with
-`sign-release.mjs`; the private key must never be placed on a customer Memory Box.
+`install`, `update`, and `rollback` share a host lock and cannot overlap. The signing private key is
+never distributed to a customer box; only the pinned public key is installed. The box requires only
+outbound HTTPS to the release channel, GHCR, and the SINGULANCE registration API.

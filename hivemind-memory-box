@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -f "$SELF_DIR/memory-box-common.sh" ]] || SELF_DIR="${HIVEMIND_MEMORY_BOX_INSTALL_DIR:-/opt/hivemind-memory-box}"
+. "$SELF_DIR/memory-box-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: hivemind-memory-box COMMAND
+  install                 configure and register this Memory Box
+  update                  install the newest signed release for the selected channel
+  status                  show containers, channel, and verified release receipt
+  doctor                  run read-only health and recoverability checks
+  rollback                restore the prior locally retained agent image
+  channel [stable|canary] show or change the update channel
+EOF
+}
+
+report_release() {
+  local result="$1" env_file="$HM_CONFIG_DIR/memory-box.env"
+  [[ -f "$env_file" ]] || return 0
+  set -a; . "$env_file"; set +a
+  [[ -n "${HIVEMIND_API_KEY:-}" && -f "$HM_CURRENT_RECEIPT" ]] || return 0
+  local central="${HIVEMIND_CENTRAL_URL:-https://api.singulancelabs.com}" payload
+  payload="$(RECEIPT="$HM_CURRENT_RECEIPT" RESULT="$result" HIVEMIND_API_KEY="$HIVEMIND_API_KEY" node -e 'const r=require(process.env.RECEIPT);process.stdout.write(JSON.stringify({apiKey:process.env.HIVEMIND_API_KEY,release:r.release||null,protocol_version:r.protocol_version||null,schema_version:r.schema_version||null,capabilities:r.required_capabilities||[],last_success_at:r.verified_at||null,rollback_available:Boolean(r.rollback_image),rollback_release:r.previous_release||null,state:process.env.RESULT}))')"
+  curl -fsS --proto '=https' --tlsv1.2 --max-time 15 -H 'content-type: application/json' -d "$payload" "$central/v1/selfhost/report" >/dev/null 2>&1 || true
+}
+
+command_name="${1:-}"; shift || true
+case "$command_name" in
+  install)
+    hm_require_root; hm_lock
+    HIVEMIND_MEMORY_BOX_LOCK_HELD=true exec "$HM_INSTALL_DIR/setup.sh" "$@"
+    ;;
+  update)
+    hm_require_root; hm_lock
+    channel="$(hm_channel)"; work="$(mktemp -d "$HM_STATE_DIR/.update.XXXXXX")"
+    trap 'rm -rf -- "$work"' EXIT
+    hm_download "$HM_CHANNEL_BASE/releases/$channel/release.json" "$work/release.json"
+    hm_download "$HM_CHANNEL_BASE/releases/$channel/release.sig" "$work/release.sig"
+    BYOD_EXPECTED_CHANNEL="$channel" BYOD_REQUIRE_MANIFEST_V2=true HIVEMIND_MEMORY_BOX_LOCK_HELD=true \
+      "$HM_INSTALL_DIR/upgrade.sh" "$work/release.json" "$work/release.sig"
+    report_release healthy
+    ;;
+  status)
+    printf 'channel: %s\n' "$(hm_channel)"
+    if [[ -f "$HM_CURRENT_RECEIPT" ]]; then node -e 'const r=require(process.argv[1]);console.log(`release: ${r.release||"unknown"}\nimage: ${r.image||"unknown"}\nverified: ${r.verified_at||"unknown"}\nrollback: ${r.rollback_state||"ready"}`)' "$HM_CURRENT_RECEIPT"; else echo 'release: unmanaged'; fi
+    for container in hm-byod-postgres hm-byod-qdrant hm-byod-agent; do
+      state="$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || true)"; printf '%s: %s\n' "$container" "${state:-missing}"
+    done
+    ;;
+  doctor)
+    BYOD_RELEASE_STATE_DIR="$HM_STATE_DIR" BYOD_BACKUP_DIR="${BYOD_BACKUP_DIR:-$HM_INSTALL_DIR/backups}" exec "$HM_INSTALL_DIR/doctor.sh" "$@"
+    ;;
+  rollback)
+    hm_require_root; hm_lock
+    HIVEMIND_MEMORY_BOX_LOCK_HELD=true "$HM_INSTALL_DIR/rollback.sh" "$@"; report_release rolled_back
+    ;;
+  channel)
+    if [[ $# -eq 0 ]]; then hm_channel; exit 0; fi
+    hm_require_root; [[ $# -eq 1 ]] || hm_die 'channel accepts exactly one value'
+    case "$1" in stable|canary) printf '%s\n' "$1" | hm_atomic_write "$HM_CHANNEL_FILE" 644 ;; *) hm_die 'channel must be stable or canary' ;; esac
+    hm_log "update channel set to $1"
+    ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

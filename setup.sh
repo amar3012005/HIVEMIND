@@ -10,7 +10,13 @@
 # already warmed and the agent comes up instantly. No second run needed.
 set -euo pipefail
 cd "$(dirname "$0")"
-COMPOSE="docker compose -f docker-compose.byod.yml"
+INSTALL_DIR="${HIVEMIND_MEMORY_BOX_INSTALL_DIR:-$(pwd)}"
+CONFIG_DIR="${HIVEMIND_MEMORY_BOX_CONFIG_DIR:-/etc/hivemind-memory-box}"
+STATE_DIR="${HIVEMIND_MEMORY_BOX_STATE_DIR:-/var/lib/hivemind-memory-box}"
+ENV_FILE="${HIVEMIND_MEMORY_BOX_ENV_FILE:-$CONFIG_DIR/memory-box.env}"
+mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$INSTALL_DIR/data" "$INSTALL_DIR/backups"
+chmod 700 "$STATE_DIR"
+COMPOSE="docker compose --env-file $ENV_FILE -f docker-compose.byod.yml"
 CENTRAL="${HIVEMIND_CENTRAL_URL:-https://api.singulancelabs.com}"   # control-plane (where you minted the key)
 log(){ printf '\033[1;36m[byod]\033[0m %s\n' "$*"; }
 die(){ printf '\033[1;31m[byod] %s\033[0m\n' "$*" >&2; exit 1; }
@@ -32,8 +38,8 @@ ${C}  ███████╗██╗███╗   ██╗ █████�
 banner
 
 # Idempotent re-run: .env already exists → just bring everything up and re-register.
-if [ -f .env ]; then
-  log "existing .env found — bringing up + re-registering…"
+if [ -f "$ENV_FILE" ]; then
+  log "existing configuration found — bringing up + re-registering…"
 else
   # ── 1. WARM IN BACKGROUND ──────────────────────────────────────────────────────────────────────
   # Build the agent image + pull Postgres while you fetch/paste your key. This is the slow part; doing
@@ -72,7 +78,8 @@ else
   log "warm-up done — box is primed."
 
   # ── 5. WRITE .env ──────────────────────────────────────────────────────────────────────────────
-  cat > .env <<EOF
+  umask 077
+  cat > "$ENV_FILE" <<EOF
 HIVEMIND_API_KEY=$API_KEY
 HIVEMIND_ORG_ID=$ORG
 EMBEDDING_DIMENSION=1024
@@ -88,10 +95,11 @@ AGENT_PUBLIC_URL=$PUBURL
 TS_AUTHKEY=
 TS_HOSTNAME=hivemind-byod
 EOF
-  log ".env written."
+  chmod 600 "$ENV_FILE"
+  log "protected configuration written."
 fi
 
-set -a; . ./.env; set +a
+set -a; . "$ENV_FILE"; set +a
 
 # ── 6. BRING UP (fast — image already built + Postgres/Qdrant pulled during warm) ────────────────────
 if [ -n "${TS_AUTHKEY:-}" ]; then

@@ -3,10 +3,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/memory-box-common.sh"
 MANIFEST_TOOL="$HERE/storage-manifest.mjs"
 [[ -f "$MANIFEST_TOOL" ]] || MANIFEST_TOOL="$HERE/../scripts/storage-manifest.mjs"
 [[ -f "$MANIFEST_TOOL" ]] || { echo "storage-manifest.mjs is missing; reinstall the Memory Box bundle" >&2; exit 1; }
-BACKUP_ROOT="${BYOD_BACKUP_DIR:-$HERE/backups}"
+BACKUP_ROOT="${BYOD_BACKUP_DIR:-$HM_INSTALL_DIR/backups}"
 MAX_BACKUP_AGE_HOURS="${BYOD_BACKUP_MAX_AGE_HOURS:-26}"
 MIN_FREE_GIB="${BYOD_MIN_FREE_GIB:-5}"
 REQUIRE_OFFSITE="${BYOD_REQUIRE_OFFSITE:-false}"
@@ -16,7 +17,8 @@ fail() { echo "FAIL  $*" >&2; FAILURES=$((FAILURES + 1)); }
 pass() { echo "PASS  $*"; }
 warn() { echo "WARN  $*" >&2; }
 
-for container in hm-byod-postgres hm-byod-qdrant hm-byod-agent; do
+AGENT_CONTAINER="${BYOD_AGENT_CONTAINER:-hm-byod-agent}"
+for container in "${BYOD_POSTGRES_CONTAINER:-hm-byod-postgres}" "${BYOD_QDRANT_CONTAINER:-hm-byod-qdrant}" "$AGENT_CONTAINER"; do
   state="$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || true)"
   health="$(docker inspect "$container" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' 2>/dev/null || true)"
   if [[ "$state" != "running" || "$health" == "unhealthy" ]]; then
@@ -34,7 +36,7 @@ else
   pass "disk headroom $((FREE_KIB / 1024 / 1024)) GiB"
 fi
 
-PROBE="$(docker exec hm-byod-agent node -e '
+PROBE="$(docker exec "$AGENT_CONTAINER" node -e '
 const headers={"content-type":"application/json",authorization:`Bearer ${process.env.AGENT_TOKEN}`,"x-org-id":process.env.ORG_ID};
 Promise.all([
   fetch("http://127.0.0.1:8787/health").then(r=>r.json()),
@@ -61,6 +63,19 @@ process.stdout.write(JSON.stringify({ok,pending,protocol:p.capabilities?.protoco
     PENDING="$(PROBE_RESULT="$PROBE_RESULT" node -e 'process.stdout.write(String(JSON.parse(process.env.PROBE_RESULT).pending))')"
     if [[ "$PENDING" -gt 0 ]]; then warn "$PENDING vector item(s) pending durable repair"; fi
   fi
+fi
+
+if [[ -f "$HM_CURRENT_RECEIPT" ]]; then
+  if node -e 'const r=require(process.argv[1]);process.exit(r.complete===true&&r.release&&r.image&&r.verified_at?0:1)' "$HM_CURRENT_RECEIPT"; then
+    pass "verified release receipt $(node -e 'process.stdout.write(require(process.argv[1]).release)' "$HM_CURRENT_RECEIPT")"
+  else
+    fail "current release receipt is incomplete"
+  fi
+else
+  warn "agent is not yet managed by a signed release receipt"
+fi
+if command -v systemctl >/dev/null 2>&1 && [[ -f /etc/systemd/system/hivemind-memory-box-update.timer ]]; then
+  systemctl is-enabled --quiet hivemind-memory-box-update.timer && pass "automatic signed updates enabled" || fail "automatic update timer is disabled"
 fi
 
 LATEST="$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name '.*.partial' -print 2>/dev/null | sort | tail -1)"

@@ -34,3 +34,35 @@ test('remote list preserves the agent-filtered total and never invents one', asy
     unregisterAgent(orgId);
   }
 });
+
+test('legacy inventory scans are coalesced across concurrent page sizes', async () => {
+  const orgId = '00000000-0000-4000-8000-00000000f002';
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  registerAgent(orgId, 'http://memory-box.test', 'test-token');
+  globalThis.fetch = async (_url, options) => {
+    requests += 1;
+    const body = JSON.parse(options.body);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const memories = body.limit === 500
+      ? [{ id: 'm-legacy', layer: 'memory' }, { id: 'e-legacy', layer: 'evidence_segment' }]
+      : [{ id: `probe-${body.limit}`, layer: 'memory' }];
+    return new Response(JSON.stringify({ memories, cursor: null }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const [small, large] = await Promise.all([
+      remoteList(orgId, { is_latest: true }, null, 1, 0),
+      remoteList(orgId, { is_latest: true }, null, 20, 0),
+    ]);
+    assert.equal(small.total, 1);
+    assert.equal(large.total, 1);
+    assert.equal(requests, 3, 'two probes must share one full legacy inventory scan');
+  } finally {
+    globalThis.fetch = originalFetch;
+    unregisterAgent(orgId);
+  }
+});

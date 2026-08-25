@@ -1252,6 +1252,12 @@ const SIGNUP_ADMISSION_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 const signupAdmissionAttempts = new Map();
 const PERSONAL_SIGNUP_INVITATION_CODE = String(process.env.PERSONAL_INVITATION_CODE || '').trim();
 const SIGNUP_ADMISSION_SECRET = process.env.HIVEMIND_SIGNUP_ADMISSION_SECRET || CONFIG.sessionSecret || ADMIN_SECRET;
+// Runtime beta waitlist — public, unauthenticated form (marketing site), so it
+// gets its own modest per-IP throttle rather than reusing the auth attempt
+// limiters above (this endpoint never grants access, it only queues an email).
+const RUNTIME_WAITLIST_ATTEMPT_MAX = 5;
+const RUNTIME_WAITLIST_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
+const runtimeWaitlistAttempts = new Map();
 
 const { WhatsAppLifecycleManager } = await import('./connectors/providers/whatsapp/manager.js');
 
@@ -1621,6 +1627,20 @@ function recordSignupAdmissionAttempt(req, accepted) {
   if (accepted) return signupAdmissionAttempts.delete(key);
   const now = Date.now(); const previous = signupAdmissionAttempts.get(key);
   signupAdmissionAttempts.set(key, previous && previous.startedAt + SIGNUP_ADMISSION_ATTEMPT_WINDOW_MS > now
+    ? { ...previous, count: previous.count + 1 }
+    : { startedAt: now, count: 1 });
+}
+
+function runtimeWaitlistLimited(req) {
+  const attempt = runtimeWaitlistAttempts.get(platformUnlockClient(req));
+  return Boolean(attempt && attempt.startedAt + RUNTIME_WAITLIST_ATTEMPT_WINDOW_MS > Date.now()
+    && attempt.count >= RUNTIME_WAITLIST_ATTEMPT_MAX);
+}
+
+function recordRuntimeWaitlistAttempt(req) {
+  const key = platformUnlockClient(req);
+  const now = Date.now(); const previous = runtimeWaitlistAttempts.get(key);
+  runtimeWaitlistAttempts.set(key, previous && previous.startedAt + RUNTIME_WAITLIST_ATTEMPT_WINDOW_MS > now
     ? { ...previous, count: previous.count + 1 }
     : { startedAt: now, count: 1 });
 }
@@ -4221,6 +4241,42 @@ const server = http.createServer(async (req, res) => {
     recordSignupAdmissionAttempt(req, Boolean(admission));
     if (!admission) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 404);
     return jsonResponse(res, { invitation: { account_type: 'personal', invitation_expires_at: new Date(admission.expiresAt * 1000).toISOString() } });
+  }
+
+  // ─── Runtime beta waitlist — public, unauthenticated ───────────────
+  // Fire-and-forget confirmation email only; there is no durable store for
+  // this list yet (see decision-docs if one gets added — a queryable
+  // waitlist would need its own Prisma model + migration, which is a real
+  // schema decision, not something to slip in silently here).
+  if (pathname === '/auth/runtime-waitlist' && req.method === 'POST') {
+    if (runtimeWaitlistLimited(req)) {
+      return jsonResponse(res, { error: 'Too many requests, try again later.', code: 'rate_limited' }, 429);
+    }
+    recordRuntimeWaitlistAttempt(req);
+    const body = await parseBody(req).catch(() => ({}));
+    const email = String(body.email || '').trim().toLowerCase();
+    const name = String(body.name || '').trim().slice(0, 120);
+    const useCase = String(body.use_case || body.useCase || '').trim().slice(0, 600);
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!EMAIL_RE.test(email)) {
+      return jsonResponse(res, { error: 'A valid email address is required.', code: 'invalid_email' }, 400);
+    }
+    const delivery = await sendSystemEmail({
+      templateId: 'runtime_waitlist_confirmation',
+      to: email,
+      from: process.env.CLOUDFLARE_EMAIL_FROM || process.env.SYSTEM_EMAIL_FROM || 'Singulance <welcome@admin.singulancelabs.com>',
+      vars: {
+        email,
+        nameSuffix: name ? `, ${name}` : '',
+        useCase: useCase || 'Not specified yet — no worries, tell us when your seat opens up.',
+      },
+    });
+    // Never expose provider/delivery detail to the caller — a slow or
+    // misconfigured mail provider must not read as "the waitlist failed."
+    if (!delivery.ok && !delivery.skipped) {
+      console.warn('[runtime-waitlist] confirmation email failed:', delivery.error);
+    }
+    return jsonResponse(res, { ok: true });
   }
 
   if (pathname === '/auth/signup-admission' && req.method === 'POST') {

@@ -8,7 +8,7 @@ import {
 import { resolveAnswerModel } from '../../src/agent/react-agent-v2.js';
 import { answerStep, buildChatCitationSources } from '../../src/agent/react-agent-v2.js';
 
-test('explicit document anchor with no exact source evidence produces one explain escalation', () => {
+test('explicit document anchor accepts exact document-backed memory coverage', () => {
   const plan = { named_entities: [], source: { document_id: 'doc-1', title: 'HIVEMIND Brochure.pdf' } };
   const memories = [{
     id: 'm1',
@@ -17,16 +17,9 @@ test('explicit document anchor with no exact source evidence produces one explai
   }];
   const coverage = assessRecallCoverage({ plan, memories, evidence: [] });
   const escalation = chooseRecallEscalation({ plan, coverage, query: 'What does it say about approval?' });
-  assert.equal(coverage.source_covered, false);
-  assert.deepEqual(escalation, {
-    reason: 'source_coverage',
-    args: {
-      query: 'What does it say about approval?',
-      mode: 'explain',
-      limit: 12,
-      source_document_id: 'doc-1',
-    },
-  });
+  assert.equal(coverage.source_covered, true);
+  assert.equal(coverage.complete, true);
+  assert.equal(escalation, null);
 });
 
 test('broad entity recall does not narrow to the first retrieved document', () => {

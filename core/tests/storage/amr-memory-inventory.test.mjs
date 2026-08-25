@@ -22,6 +22,7 @@ test('AMR memory inventory filter excludes evidence from list and stats', (t) =>
   write('memory-1', 'memory');
   write('cognitive-1', 'cognitive');
   write('evidence-1', 'evidence');
+  amr.addEdge({ fromId: 'memory-1', toId: 'evidence-1', type: 'Supports', confidence: 1 });
 
   const filter = { layers: ['memory', 'cognitive'] };
   const listed = amr.list(filter, null, 10);
@@ -29,6 +30,11 @@ test('AMR memory inventory filter excludes evidence from list and stats', (t) =>
   assert.equal(listed.total, 2, 'inventory total excludes evidence as well as the visible page');
   assert.equal(amr.stats(filter).memories, 2);
   assert.equal(amr.stats({}).memories, 3, 'the store remains able to report all live content when an internal caller explicitly asks');
+
+  const graph = amr.graph({}, 10);
+  assert.deepEqual(graph.nodes.map((row) => row.id).sort(), ['cognitive-1', 'memory-1']);
+  assert.equal(graph.nodes.some((row) => row.layer === 'evidence'), false, 'memory graph never projects evidence as a memory node');
+  assert.equal(graph.edges.some((edge) => edge.to_id === 'evidence-1'), false, 'memory graph never leaks an evidence-only edge endpoint');
 });
 
 test('AMR inventory totals honor access tiers, project/team grants, and hidden tags', (t) => {

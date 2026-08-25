@@ -1829,6 +1829,8 @@ export class RecallRouter {
       // results: a source boundary may only be recovered from a strong,
       // unambiguous title/provenance match.
       if (explicitSourceDocuments.length === 0 && this.evidence?.resolveSourceFromQuery) {
+        const sourceHint = String(options.source_title || '').trim();
+        const sourceLooksLikeFilename = /\.[a-z0-9]{1,12}$/i.test(sourceHint);
         const fuzzyResolution = await withTimeout(
           this.evidence.resolveSourceFromQuery({
             userId: ctx.userId,
@@ -1836,7 +1838,11 @@ export class RecallRouter {
             projectId: ctx.projectId || null,
             accessContext: ctx.accessContext || null,
             scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
-            query: options.source_title || query,
+            // A human may refer to a document by function ("the pitch deck")
+            // rather than its stored filename ("business_sales.pdf"). Use the
+            // complete semantic question for that bounded source-resolution
+            // pass; preserve literal filename matching when a filename exists.
+            query: sourceLooksLikeFilename ? sourceHint : query,
             limit: 1,
           }),
           Math.max(750, Math.min(2_000, remainingBudget())),

@@ -2906,7 +2906,12 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
     res.end(respBody);
   } catch (err) {
     const causeCode = err?.cause?.code || err?.code || null;
-    console.error('[proxy] Error forwarding to core:', err.message, causeCode ? `cause=${causeCode}` : '');
+    // Core restarts create a short expected connect-refused window. The caller
+    // still receives an explicit retryable 503, but routine health/read polls
+    // must not flood production logs during that bounded deployment window.
+    if (causeCode !== 'ECONNREFUSED' || process.env.PROXY_VERBOSE === '1') {
+      console.error('[proxy] Error forwarding to core:', err.message, causeCode ? `cause=${causeCode}` : '');
+    }
     jsonResponse(res, {
       error: 'core_temporarily_unavailable',
       message: 'HIVEMIND is briefly unavailable. Please retry this request.',

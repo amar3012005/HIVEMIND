@@ -143,8 +143,11 @@ function recoverCanonicalProfileUpdate(plan, repairs) {
   // The planner already performs the language-dependent interpretation and
   // emits a canonical English mutation query. Recover only that structured
   // field/value pair; never infer profile data from arbitrary user prose.
-  const query = String(plan.steps?.[0]?.query || '').trim();
-  const match = query.match(/^update (?:the )?user(?:'s)?\s+([a-z][a-z0-9_.-]{0,63})\s+to\s+(.+)$/i);
+  const candidates = [plan.steps?.[0]?.query, plan.response?.objective]
+    .map((value) => String(value || '').trim()).filter(Boolean);
+  const match = candidates.map((candidate) => candidate.match(
+    /^(?:update|set|change)\s+(?:(?:the\s+)?user(?:'s)?|my)\s+([a-z][a-z0-9_.-]{0,63})\s+(?:to|as)\s+(.+)$/i,
+  )).find(Boolean);
   if (!match) return;
   const field = match[1].toLowerCase();
   const value = match[2].trim().replace(/[.!?]+$/, '').trim();

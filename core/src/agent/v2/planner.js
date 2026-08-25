@@ -42,7 +42,9 @@ export async function planNativeTurn({ context, apiKey, signal, fetchImpl } = {}
       const rawPlan = JSON.parse(call.function.arguments);
       const validation = validateNativePlanResult(rawPlan);
       if (validation.status === 'invalid') {
-        validationFeedback = `${validation.error}. Reconsider the selected operation from the user's actual intent. If required semantic fields are absent, correct the operation instead of inventing write content or unrelated values`;
+        validationFeedback = validation.error === 'native_plan_missing_profile_update'
+          ? 'native_plan_missing_profile_update. Keep operation=update_profile and copy every changed caller-owned field into memory.profile_fields as field/value entries; do not leave it empty'
+          : `${validation.error}. Reconsider the selected operation from the user's actual intent. If required semantic fields are absent, correct the operation instead of inventing write content or unrelated values`;
         throw new Error(`native_v2_invalid_plan:${validation.error}`);
       }
       return { rawPlan, usage: { ...(data.usage || {}), routing_model: model, routing_fallback_used: attempt > 0, routing_attempts: attempt + 1 } };

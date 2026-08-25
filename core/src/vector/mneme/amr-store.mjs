@@ -37,12 +37,85 @@ const REL_NAME = [null, 'Mentions', 'Updates', 'Derives', 'Contradicts', 'PartOf
 // Layer ids + the document-layer recall exclusion live in their own binding-free module so the
 // rule that decides what a caller may see stays unit-testable. See layers.mjs.
 import { layerIdOf, isNonRecallable, DOCUMENT_LAYER } from './layers.mjs';
+import { matchesMemoryAccess } from '../../memory/memory-access.js';
 export { DOCUMENT_LAYER, isNonRecallable };
 const PAGE = 2000; // records per native scan page — bounds the JS working set
 const DONE = 0xFFFFFFFF; // recordsPage sentinel
 // Plain number (not BigInt): napi coerces JS number → i64; BigInt throws. ns from ms×1e6 exceeds
 // 2^53 so the low microseconds round — acceptable for valid_from anchors.
 const dateToNs = (d) => (d ? new Date(d).getTime() * 1e6 : 0);
+
+function inventoryScope(rec) {
+  // Resident Prisma rows default this field to personal. Preserve that
+  // conservative meaning for older AMR records written before scope existed.
+  return rec.scope || 'personal';
+}
+
+function inventoryProjectIds(rec) {
+  if (Array.isArray(rec.project_ids)) return rec.project_ids;
+  if (Array.isArray(rec.projectIds)) return rec.projectIds;
+  return rec.project_id ? [rec.project_id] : [];
+}
+
+function inventoryTags(rec) {
+  return Array.isArray(rec.tags) ? rec.tags : [];
+}
+
+function hasEvery(values, expected) {
+  return expected.every((value) => values.includes(value));
+}
+
+function memoryInventoryAccessMatches(rec, filter, org) {
+  const userId = filter.user_id || null;
+  const scope = inventoryScope(rec);
+  const projectIds = inventoryProjectIds(rec);
+  const access = filter.access_context || null;
+
+  if (filter.owner_only) {
+    if (!userId || rec.user_id !== userId) return false;
+  }
+  if (filter.project && rec.project !== filter.project) return false;
+  if (filter.project_id && !projectIds.includes(filter.project_id)) return false;
+
+  // The scope switcher asks for one hierarchy tier and therefore takes
+  // precedence over the merged access context, like scopedMemoryWhere.
+  if (filter.scope === 'tier:personal') return !!userId && rec.user_id === userId && scope === 'personal';
+  if (filter.scope === 'tier:organization') return access?.orgRole !== 'guest' && scope === 'organization';
+  if (filter.scope === 'tier:project') {
+    const allowed = Array.isArray(access?.projectIds) ? access.projectIds : [];
+    return scope === 'project' && projectIds.some((id) => allowed.includes(id));
+  }
+
+  if (access && (Array.isArray(access.projectIds) || Array.isArray(access.teamIds))) {
+    return matchesMemoryAccess(
+      { ...rec, org_id: rec.org_id || org, scope },
+      { userId, orgId: org, accessContext: access },
+    );
+  }
+
+  // Legacy store callers did not carry a TeamStore-derived access context.
+  // Match the central fallback instead of widening a user-scoped read.
+  if (filter.scope === 'organization') return scope === 'organization';
+  if (filter.scope === 'all') return (rec.user_id === userId && scope === 'personal') || scope === 'organization';
+  return !userId || rec.user_id === userId;
+}
+
+function memoryInventoryMatches(rec, filter, org) {
+  if (rec.deleted_at) return false;
+  if (Array.isArray(filter.memory_type) && filter.memory_type.length && !filter.memory_type.includes(rec.memory_type)) return false;
+  if (Array.isArray(filter.layers) && filter.layers.length && !filter.layers.includes(rec.layer || 'memory')) return false;
+  if (filter.layer && rec.layer !== filter.layer) return false;
+  if (filter.cognitive_layer_role === null && rec.cognitive_layer_role) return false;
+  if (filter.is_latest !== undefined && !!rec.is_latest !== !!filter.is_latest) return false;
+  if (Array.isArray(filter.tags) && filter.tags.length && !hasEvery(inventoryTags(rec), filter.tags)) return false;
+  if (Array.isArray(filter.exclude_tags) && filter.exclude_tags.length) {
+    const role = rec.cognitive_layer_role || null;
+    const isVisibleSynthesis = role === 'canonical' || role === 'bridge' || role === 'principle';
+    if (!isVisibleSynthesis && filter.exclude_tags.some((tag) => inventoryTags(rec).includes(tag))) return false;
+  }
+  if (filter.created_after && new Date(rec.created_at) < new Date(filter.created_after)) return false;
+  return memoryInventoryAccessMatches(rec, filter, org);
+}
 
 /**
  * Fold + tokenize text for the in-shard lexical lane.
@@ -428,15 +501,10 @@ export class AmrMemoryStore {
     const windowSize = Math.min(offset + limit, 100000);
     const cursorTs = cursor ? new Date(cursor).getTime() : Infinity;
     const win = []; // ascending by created_at; keep newest `windowSize`
+    let total = 0;
     for (const { rec } of this._scan()) {
-      if (rec.deleted_at) continue;
-      if (Array.isArray(filter.memory_type) && filter.memory_type.length && !filter.memory_type.includes(rec.memory_type)) continue;
-      if (Array.isArray(filter.layers) && filter.layers.length && !filter.layers.includes(rec.layer || 'memory')) continue;
-      if (filter.layer && rec.layer !== filter.layer) continue;
-      if (filter.cognitive_layer_role === null && rec.cognitive_layer_role) continue;
-      if (filter.is_latest !== undefined && !!rec.is_latest !== !!filter.is_latest) continue;
-      if (filter.user_id && rec.user_id !== filter.user_id) continue;
-      if (filter.created_after && new Date(rec.created_at) < new Date(filter.created_after)) continue;
+      if (!memoryInventoryMatches(rec, filter, this.org)) continue;
+      total++;
       const ts = new Date(rec.created_at).getTime();
       if (ts >= cursorTs) continue;
       if (win.length < windowSize) {
@@ -447,16 +515,15 @@ export class AmrMemoryStore {
     }
     win.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)); // newest first
     const rows = win.slice(offset, offset + limit);
-    return { memories: rows, cursor: rows.length ? rows[rows.length - 1].created_at : null };
+    return { memories: rows, cursor: rows.length ? rows[rows.length - 1].created_at : null, total };
   }
 
   stats(filter = {}) {
     let memories = 0;
     for (const { rec } of this._scan()) {
-      if (rec.deleted_at || rec.is_latest === false) continue;
-      if (filter.user_id && rec.user_id !== filter.user_id) continue;
-      if (Array.isArray(filter.layers) && filter.layers.length && !filter.layers.includes(rec.layer || 'memory')) continue;
-      if (filter.layer && rec.layer !== filter.layer) continue;
+      // Stats are an inventory count, so historic revisions never inflate it.
+      if (rec.is_latest === false) continue;
+      if (!memoryInventoryMatches(rec, { ...filter, is_latest: true }, this.org)) continue;
       memories++;
     }
     this._ensureRevEdges();

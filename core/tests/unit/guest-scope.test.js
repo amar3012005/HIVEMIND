@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scopedMemoryWhere } from '../../src/memory/prisma-graph-store.js';
+import { PrismaGraphStore, scopedMemoryWhere } from '../../src/memory/prisma-graph-store.js';
 
 const USER = 'u-1', ORG = 'o-1', PROJ = 'p-1';
 
@@ -75,4 +75,44 @@ test('guest with no projects sees only personal', () => {
     access_context: { projectIds: [], teamIds: [], orgRole: 'guest' },
   });
   assert.deepEqual(tierScopes(w), ['personal'], 'guest with no project = personal only');
+});
+
+test('missing access context falls back to caller-owned personal rows', () => {
+  const w = scopedMemoryWhere({ user_id: USER, org_id: ORG });
+  assert.equal(w.userId, USER);
+  assert.equal(w.OR, undefined);
+});
+
+test('guest cannot widen an explicit organization tier request', () => {
+  const w = scopedMemoryWhere({
+    user_id: USER, org_id: ORG, scope: 'tier:organization',
+    access_context: { projectIds: [PROJ], teamIds: [], orgRole: 'guest' },
+  });
+  assert.deepEqual(w.id, { in: [] }, 'the tier selector is not an authorization grant');
+});
+
+test('central inventory combines access tiers and hidden-tag visibility instead of replacing either OR', async () => {
+  let listWhere = null;
+  let countWhere = null;
+  const store = new PrismaGraphStore({
+    memory: {
+      async findMany({ where }) { listWhere = where; return []; },
+      async count({ where }) { countWhere = where; return 0; },
+    },
+  });
+
+  await store.listMemories({
+    user_id: USER,
+    org_id: ORG,
+    access_context: { projectIds: [PROJ], teamIds: [], orgRole: 'guest' },
+  });
+
+  for (const where of [listWhere, countWhere]) {
+    assert.ok(where.OR.some((tier) => tier.scope === 'personal'));
+    assert.ok(where.OR.some((tier) => tier.scope === 'project'));
+    assert.ok(!where.OR.some((tier) => tier.scope === 'organization'));
+    assert.ok(where.AND?.[0]?.OR?.some((condition) => condition.NOT?.tags?.hasSome?.includes('tara-turn')),
+      'hidden tag exclusion must narrow, not overwrite, the access tiers');
+    assert.equal(Object.hasOwn(where, 'layer'), false, 'Prisma Memory has no layer field');
+  }
 });

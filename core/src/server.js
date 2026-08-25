@@ -19693,7 +19693,7 @@ exit \$RC
               const pIds = Array.isArray(statsCtx?.projectIds) ? statsCtx.projectIds : [];
               const tIds = Array.isArray(statsCtx?.teamIds) ? statsCtx.teamIds : [];
               const tiers = [{ userId, scope: 'personal' }];
-              if (statsCtx?.orgRole !== 'guest') tiers.push({ scope: 'organization', orgId });
+              if (statsCtx && statsCtx.orgRole !== 'guest') tiers.push({ scope: 'organization', orgId });
               if (pIds.length) tiers.push({ scope: 'project', memoryProjects: { some: { projectId: { in: pIds } } } });
               if (tIds.length) tiers.push({ scope: 'team', primaryTeamId: { in: tIds } });
               // Same noise exclusion as listMemories — canonical count is
@@ -19705,19 +19705,35 @@ exit \$RC
                 'room-decision', 'hyper-rooms', 'hyper-room',
                 'tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill',
               ];
-              const statsNoise = { NOT: { tags: { hasSome: statsHiddenTags } } };
-              const memWhere = { orgId, deletedAt: null, isLatest: true, layer: { in: ['memory', 'cognitive'] }, OR: tiers, ...statsNoise };
-              const relMemScope = { orgId, deletedAt: null, OR: tiers, ...statsNoise };
+              const statsNoise = {
+                OR: [
+                  { cognitiveLayerRole: { in: ['canonical', 'bridge', 'principle'] } },
+                  { NOT: { tags: { hasSome: statsHiddenTags } } },
+                ],
+              };
+              const memWhere = {
+                orgId,
+                deletedAt: null,
+                isLatest: true,
+                AND: [{ OR: tiers }, statsNoise],
+              };
+              const relMemScope = {
+                orgId,
+                deletedAt: null,
+                AND: [{ OR: tiers }, statsNoise],
+              };
               // REMOTE: central memories/relationships hold nothing for .amr orgs, so these counts
               // read 0 and the FE showed empty counters. The agent's /v1/stats counts its OWN
               // memories + relationships tables — which only became populated for amr_embedded once
               // the embedded agent started writing the SQL mirror.
-              // KNOWN DIFFERENCE, stated rather than hidden: the agent has no tag-exclusion filter,
-              // so the remote count does NOT subtract the noise tags central excludes
-              // (tara-*, governance, hyper-room, ...). Remote totals can therefore read slightly
-              // higher than the Memories page. Fixing that means teaching /v1/stats a tag filter.
               if (orgIsRemote(orgId)) {
-                const rs = await amrStats(orgId, statsCtx?.orgRole === 'guest' ? { user_id: userId } : {});
+                const rs = await amrStats(orgId, {
+                  user_id: userId,
+                  scope: statsCtx ? 'personal' : 'tier:personal',
+                  access_context: statsCtx,
+                  exclude_tags: statsHiddenTags,
+                  document_access: { userId, accessContext: statsCtx },
+                });
                 if (rs) {
                   return jsonResponse(res, {
                     memories: rs.memories || 0,
@@ -19726,11 +19742,16 @@ exit \$RC
                     relations: rs.relationships || 0,
                     scope: 'all',
                     storage_mode: 'amr',
-                    noise_filtered: false,
+                    noise_filtered: true,
                     knowledge_counts_degraded: rs.knowledge_counts_degraded === true,
                   });
                 }
-                console.warn(`[memory/stats] amr stats unavailable for org ${orgId} — falling through to central (will read 0)`);
+                return jsonResponse(res, {
+                  error: 'memory_storage_unavailable',
+                  code: 'MEMORY_STORAGE_UNAVAILABLE',
+                  storage_mode: 'amr',
+                  retryable: true,
+                }, 503);
               }
               const documentAccessWhere = evidenceRetrieval?._accessibleDocumentWhere
                 ? evidenceRetrieval._accessibleDocumentWhere({ userId, orgId, accessContext: statsCtx })
@@ -19850,21 +19871,10 @@ exit \$RC
               access_context: listAccessCtx,
             });
 
-            // UNIFORM total: the headline "N memories" must be the org-wide count regardless of backend.
-            // listMemories' own total is only the returned PAGE size for the agent (BYOD) backend — which
-            // showed "20" instead of the real org total. For the default (unfiltered) view, source the
-            // total from getOrgCounts — THE single seam that routes central-count vs agent-/v1/stats by org
-            // type (same source /api/profile uses). Filtered/narrowed views keep the list's own total so
-            // the count still reflects the active filter.
-            const _narrowed = (Array.isArray(parsedTags) && parsedTags.length > 0)
-              || filters.memory_type || project || project_id || ownerOnlyQ;
-            let total = (typeof listTotal === 'number') ? listTotal : memories.length;
-            if (!_narrowed) {
-              try {
-                const c = await getOrgCounts(prisma, orgId, userId);
-                if (c && typeof c.memories === 'number') total = c.memories;
-              } catch { /* keep page-based fallback */ }
-            }
+            // The store applies every visibility/scope predicate before
+            // counting. Replacing this with an org-wide profile count makes a
+            // guest or project page claim rows it is not allowed to list.
+            const total = Number.isFinite(listTotal) ? listTotal : memories.length;
 
             return jsonResponse(res, {
               memories,

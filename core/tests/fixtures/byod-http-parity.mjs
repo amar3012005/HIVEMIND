@@ -132,6 +132,7 @@ assert.equal(stats.payload.memories, 3);
 assert.equal(stats.payload.relationships, 1);
 const inventory = await call('/v1/list', { limit: 10 });
 assert.equal(inventory.payload.memories.some((row) => row.id === ids.evidenceMemory), false);
+assert.equal(inventory.payload.total, 3, 'BYOD inventory total excludes evidence and is independent of page length');
 assertCanonicalBackendContract({
   backend: 'byod',
   memories: stats.payload.memories,

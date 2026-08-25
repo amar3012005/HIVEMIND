@@ -17,5 +17,6 @@ test('central org counts use the same memory lane as the inventory', async () =>
 
   const counts = await getOrgCounts(prisma, 'central-org');
   assert.equal(counts.memories, 2);
-  assert.deepEqual(memoryWhere.layer, { in: ['memory', 'cognitive'] });
+  assert.deepEqual(memoryWhere, { orgId: 'central-org', deletedAt: null, isLatest: true });
+  assert.equal(Object.hasOwn(memoryWhere, 'layer'), false, 'Memory has no layer column; evidence is counted separately');
 });

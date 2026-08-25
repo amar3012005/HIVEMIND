@@ -254,6 +254,9 @@ export function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal'
     return { ...base, userId: user_id, scope: 'personal' };
   }
   if (scope === 'tier:organization') {
+    // A guest is project-scoped even when they select the organization tab by
+    // hand. The visible-tier UI is not an authorization grant.
+    if (access_context?.orgRole === 'guest') return { ...base, id: { in: [] } };
     return { ...base, scope: 'organization' };
   }
   if (scope === 'tier:project') {
@@ -315,6 +318,29 @@ export function scopedMemoryWhere({ user_id, org_id, project, scope = 'personal'
     ...base,
     userId: user_id,
   };
+}
+
+// Keep the public memory inventory consistent across resident Postgres and the
+// remote AMR agent.  These tags are operational activity, not user-facing
+// memories; cognitive syntheses remain visible even when they inherit one.
+function memoryInventoryHiddenTags(tags, hideNoise) {
+  const requestedTags = Array.isArray(tags) ? tags : [];
+  const hidden = [];
+  if (!requestedTags.includes('internal-audit')) hidden.push('internal-audit', 'governance', 'reflection');
+  if (!requestedTags.includes('room-decision') && !requestedTags.includes('hyper-rooms')) {
+    hidden.push('room-decision', 'hyper-rooms', 'hyper-room');
+  }
+  if (!requestedTags.some((tag) => typeof tag === 'string' && tag.startsWith('tara-'))) {
+    hidden.push('tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill');
+  }
+  if (hideNoise) hidden.push(
+    'updates', 'label:updates',
+    'promotions', 'label:promotions',
+    'social', 'label:social',
+    'forums', 'label:forums',
+    'newsletter', 'notification', 'automated', 'no-reply',
+  );
+  return hidden;
 }
 
 export class PrismaGraphStore {
@@ -828,8 +854,9 @@ export class PrismaGraphStore {
     // rows (recency-biased, matching how conflictDetector ranks candidates) to keep the save hot path cheap.
     const _org = org_id || currentOrg();
     if (_org && orgIsRemote(_org)) {
-      const filter = { is_latest: true };
+      const filter = { is_latest: true, scope, access_context };
       if (user_id) filter.user_id = user_id;
+      if (project) filter.project = project;
       const REMOTE_LATEST_CAP = Number(process.env.REMOTE_LATEST_CAP || 500);
       const { memories } = await remoteList(_org, filter, null, REMOTE_LATEST_CAP, 0);
       return (memories || []).map(mapAgentRow);
@@ -854,16 +881,26 @@ export class PrismaGraphStore {
     // RESIDENCY: agent-org memory rows live on the org's agent, not central → enumerate from the agent.
     const _org = org_id || currentOrg();
     if (_org && orgIsRemote(_org)) {
-      const filter = {};
+      const filter = {
+        // The central inventory defaults to latest records.  Make the agent
+        // contract explicit so it cannot accidentally count old revisions.
+        is_latest: is_latest === false ? false : true,
+        scope,
+        access_context,
+        owner_only: !!owner_only,
+      };
       if (memory_type) filter.memory_type = Array.isArray(memory_type) ? memory_type : [memory_type];
-      if (is_latest !== undefined) filter.is_latest = is_latest;
       if (user_id) filter.user_id = user_id;
+      if (project) filter.project = project;
+      if (project_id) filter.project_id = project_id;
       // Tags MUST reach the agent: tara-config / skills / any tag-scoped lookup
       // otherwise returns the newest arbitrary memories (config-as-session-junk bug).
       if (Array.isArray(tags) && tags.length) filter.tags = tags;
+      const hiddenTags = memoryInventoryHiddenTags(tags, hide_noise);
+      if (hiddenTags.length) filter.exclude_tags = hiddenTags;
       // Pass offset so the FE's offset-based "load more" actually pages through the agent (was stuck on
       // page 1 — agent ignored offset and the FE doesn't use cursors).
-      const { memories } = await remoteList(_org, filter, null, limit, offset);
+      const { memories, total } = await remoteList(_org, filter, null, limit, offset);
       const mapped = memories.map(mapAgentRow);
       // Enrich with edge counts (in/out) in a single batched call so the FE "linked N" chip is correct.
       // Central orgs compute edges_in_count / edges_out_count via Prisma _count; remote orgs query the
@@ -879,7 +916,10 @@ export class PrismaGraphStore {
           }
         } catch { /* degrade gracefully — FE uses || 0 fallback */ }
       }
-      return { memories: mapped, total: mapped.length };
+      // A remote agent has already applied the same filters to its count. Do
+      // not turn its exact pagination total back into the page length.
+      if (!Number.isFinite(total)) throw new Error(`memory inventory total unavailable for org ${_org}`);
+      return { memories: mapped, total };
     }
     // Phase P.3: prefer formal projectId FK when caller passes it; falls back
     // to legacy free-text `project` string.
@@ -902,26 +942,7 @@ export class PrismaGraphStore {
     // Internal-audit suppression: governance reflection rows etc. are
     // operational noise — drop from default listing. Caller opts in by
     // passing tags=['internal-audit'].
-    const callerWantsAudit = Array.isArray(tags) && tags.includes('internal-audit');
-    const callerWantsRoomDecisions = Array.isArray(tags) && (tags.includes('room-decision') || tags.includes('hyper-rooms'));
-    // Build exclusion clause: drop internal-audit AND hyper-room decisions
-    // by default. Caller opts in via tags=['internal-audit'] or
-    // tags=['room-decision']/['hyper-rooms'].
-    const hiddenTags = [];
-    // Governance audit-reflection noise — the cron's "Faraday scanned N memories"
-    // rows. All four tags co-occur; hide the whole class. Cognitive-layer OUTPUTS
-    // (canonical-summary / synthesis:* / principle / bridge) carry none of these,
-    // so they stay visible.
-    if (!callerWantsAudit) hiddenTags.push('internal-audit', 'governance', 'reflection');
-    if (!callerWantsRoomDecisions) hiddenTags.push('room-decision', 'hyper-rooms', 'hyper-room');
-    // TARA voice activity belongs in Call History, NOT the memory list — hide
-    // ALL of it including the per-call `tara-call-log` summary. Caller opts in
-    // by passing any tara-* tag.
-    // TARA voice activity + config/skills belong in /tara Call History, not the
-    // memory list. Exclude by TAG (tara-*) — NOT by `NOT project startsWith
-    // 'tara/'`, which drops every project=NULL memory (SQL NULL LIKE semantics).
-    const callerWantsTara = Array.isArray(tags) && tags.some((t) => typeof t === 'string' && t.startsWith('tara-'));
-    if (!callerWantsTara) hiddenTags.push('tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill');
+    const hiddenTags = memoryInventoryHiddenTags(tags, hide_noise);
     // Distilled KB facts (extracted-fact) are first-class memories — counted +
     // listed everywhere, never hidden as "children". Only genuine noise
     // (audit/governance/tara/room) is hidden above. (include_children retained
@@ -931,13 +952,6 @@ export class PrismaGraphStore {
     // Newsletters / promotions / social / forums / notifications get
     // hidden from the default Memories list. Recall-side score demotion
     // (persisted-retrieval) still applies regardless.
-    if (hide_noise) hiddenTags.push(
-      'updates', 'label:updates',
-      'promotions', 'label:promotions',
-      'social', 'label:social',
-      'forums', 'label:forums',
-      'newsletter', 'notification', 'automated', 'no-reply',
-    );
     // Cognitive-layer DREAMS (canonical/bridge/principle syntheses) inherit ALL
     // their cluster members' tags — including 'extracted-fact' — but they are NOT
     // child sub-units; they're first-class synthesized memories the user should
@@ -952,6 +966,10 @@ export class PrismaGraphStore {
           ],
         }
       : {};
+    // `baseWhere` can already contain an OR for personal/org/project/team
+    // visibility. Keep the hidden-tag OR as an AND clause; spreading it into
+    // the root would replace that access predicate and widen the result set.
+    const auditExclusionAnd = hiddenTags.length ? { AND: [auditExclusion] } : {};
     // Default to current memories only (is_latest=true) unless the caller
     // explicitly asks for superseded versions. Was undefined → counted every
     // historical version, inflating the list total vs the graph/overview.
@@ -959,8 +977,7 @@ export class PrismaGraphStore {
     const records = await this.client.memory.findMany({
       where: {
         ...baseWhere,
-        ...auditExclusion,
-        layer: { in: ['memory', 'cognitive'] },
+        ...auditExclusionAnd,
         memoryType: memory_type || undefined,
         isLatest: isLatestFilter,
         tags: tags?.length ? { hasEvery: tags } : undefined,
@@ -993,8 +1010,7 @@ export class PrismaGraphStore {
     const total = await this.client.memory.count({
       where: {
         ...countWhere,
-        ...auditExclusion,
-        layer: { in: ['memory', 'cognitive'] },
+        ...auditExclusionAnd,
         memoryType: memory_type || undefined,
         isLatest: isLatestFilter,
         tags: tags?.length ? { hasEvery: tags } : undefined

@@ -40,7 +40,13 @@ const MEMORY_INVENTORY_LAYERS = ['memory', 'cognitive'];
 // passing a permissive layer filter to these generic-looking storage routes.
 function memoryInventoryFilter(filter = {}) {
   const { layer: _ignoredLayer, layers: _ignoredLayers, ...rest } = filter || {};
-  return { ...rest, layers: MEMORY_INVENTORY_LAYERS };
+  return {
+    ...rest,
+    // The inventory is the current visible memory set unless a maintenance
+    // caller deliberately requests historical revisions.
+    is_latest: rest.is_latest === false ? false : true,
+    layers: MEMORY_INVENTORY_LAYERS,
+  };
 }
 
 let ready = false;
@@ -1208,15 +1214,21 @@ function routesFor(ctx) {
     '/v1/hydrate': async (b) => ({ memories: Array.isArray(b.ids) && b.ids.length ? amr.hydrate(b.ids) : [] }),
     '/v1/list': async (b) => amr.list(memoryInventoryFilter(b.filter), b.cursor, b.limit || 100, Number(b.offset) || 0),
     '/v1/stats': async (b) => {
-      const filter = memoryInventoryFilter(b.filter);
+      const filter = { ...memoryInventoryFilter(b.filter), is_latest: true };
       const base = amr.stats(filter);
-      const args = [];
-      const userClause = filter.user_id ? ' WHERE user_id=$1::uuid' : '';
-      if (filter.user_id) args.push(filter.user_id);
+      const documentAccess = filter.document_access || filter.access || null;
+      const documentConds = ['d.org_id=$1::uuid', 'd.deleted_at IS NULL'];
+      const documentArgs = [org];
+      if (documentAccess) appendDocumentAccess(documentConds, documentArgs, 'd', org, documentAccess);
       try {
         const [docs, segments] = await Promise.all([
-          db().query(`SELECT COUNT(*)::int AS n FROM knowledge_documents${userClause}`, args),
-          db().query(`SELECT COUNT(*)::int AS n FROM knowledge_segments${userClause}`, args),
+          db().query(`SELECT COUNT(*)::int AS n FROM knowledge_documents d WHERE ${documentConds.join(' AND ')}`, documentArgs),
+          db().query(
+            `SELECT COUNT(*)::int AS n FROM knowledge_segments s
+               JOIN knowledge_documents d ON d.id=s.document_id
+              WHERE s.org_id=$1::uuid AND ${documentConds.join(' AND ')}`,
+            documentArgs,
+          ),
         ]);
         return { ...base, documents: Number(docs.rows?.[0]?.n || 0),
           evidence: Number(segments.rows?.[0]?.n || 0) };

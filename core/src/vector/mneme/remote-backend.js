@@ -461,9 +461,21 @@ export async function remoteHydrate(orgId, ids) {
   catch (e) { _logRemoteOnce('warn', 'hydrate', orgId, e); return []; }
 }
 
-// Filtered enumeration from the agent (listMemories for remote orgs). Returns { memories, cursor }.
+// Filtered enumeration from the agent (listMemories for remote orgs). `total`
+// is the full filtered inventory, never the current page length.
 export async function remoteList(orgId, filter, cursor, limit, offset = 0, options = {}) {
-  try { const out = await _call(orgId, '/v1/list', { filter, cursor, limit, offset }, options); return { memories: out?.memories || [], cursor: out?.cursor || null }; }
+  try {
+    const out = await _call(orgId, '/v1/list', { filter, cursor, limit, offset }, options);
+    const rawTotal = out?.total;
+    const parsedTotal = (typeof rawTotal === 'number' || (typeof rawTotal === 'string' && rawTotal.trim()))
+      ? Number(rawTotal)
+      : NaN;
+    return {
+      memories: out?.memories || [],
+      cursor: out?.cursor || null,
+      total: Number.isFinite(parsedTotal) && parsedTotal >= 0 ? parsedTotal : null,
+    };
+  }
   catch (e) {
     // NEVER TURN A FAILED READ INTO AN EMPTY ONE. This returned `{ memories: [] }` on any error, so a
     // transient shard-lock collision rendered a tenant's Memories page EMPTY — visually identical to
@@ -487,7 +499,7 @@ export async function remoteDelete(orgId, id, hard = false) {
 // Profile/Overview counts for a remote org (memory_count + relationship_count) — central holds 0.
 export async function remoteStats(orgId, filter = {}) {
   try { return await _call(orgId, '/v1/stats', { filter }); }
-  catch (e) { console.warn(`[mneme/remote] stats failed org=${orgId}: ${e.message}`); return null; }
+  catch (e) { _logRemoteOnce('warn', 'stats', orgId, e); return null; }
 }
 
 // Durable vector-sync observability for upgraded agents. Older agents return

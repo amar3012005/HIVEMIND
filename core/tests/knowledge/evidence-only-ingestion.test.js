@@ -182,8 +182,9 @@ test('default promotion curation caps atomic memories at fourteen', async () => 
   service._attachDocumentParent = async () => null;
   const previousConcurrency = process.env.KB_UNIFIED_CONCURRENCY;
   process.env.KB_UNIFIED_CONCURRENCY = '1';
+  let result;
   try {
-    await service._promoteMemories({
+    result = await service._promoteMemories({
       documentId: '33333333-3333-4333-8333-333333333333',
       userId: '11111111-1111-4111-8111-111111111111',
       orgId: '22222222-2222-4222-8222-222222222222',
@@ -198,6 +199,9 @@ test('default promotion curation caps atomic memories at fourteen', async () => 
     else process.env.KB_UNIFIED_CONCURRENCY = previousConcurrency;
   }
   assert.deepEqual(caps, [14]);
+  assert.equal(result.candidates.length, 180, 'candidate count reports grounded extracted claims, not input windows');
+  assert.equal(result.memories.length, 0);
+  assert.equal(result.coverage.promotion_failed, true, 'zero-yield both-mode promotion is an explicit failure state');
 });
 
 test('one document parent completes a fourteen-memory promotion and keeps child provenance', async () => {

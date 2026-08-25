@@ -615,6 +615,7 @@ const routes = {
       'memory.recall',
       'memory.lexical',
       'memory.hydrate',
+      'memory.list.total',
       'evidence.recall',
       'evidence.lexical',
       'evidence.hydrate',
@@ -1742,7 +1743,7 @@ const routes = {
     args.push(limit); const limitArg = `$${args.length}`;
     args.push(offset); const offsetArg = `$${args.length}`;
     const { rows: docs } = await pg.query(
-      `SELECT d.id, d.user_id, d.filename, d.content_type, d.status, d.metadata, d.created_at
+      `SELECT d.id, d.user_id, d.filename, d.content_type, d.status, d.metadata, d.created_at, d.ingest_mode
        FROM knowledge_documents d WHERE ${conds.join(' AND ')}
        ORDER BY d.created_at DESC LIMIT ${limitArg} OFFSET ${offsetArg}`,
       args,
@@ -1771,6 +1772,7 @@ const routes = {
     const documents = docs.map((d) => ({
       id: d.id,
       userId: d.user_id,
+      ingestMode: d.ingest_mode ?? d.metadata?.ingest_mode ?? null,
       // Map agent columns to the central shape the FE expects:
       title: (d.metadata?.title) || d.filename || d.id,
       documentType: d.content_type || (d.metadata?.document_type) || null,
@@ -1806,7 +1808,7 @@ const routes = {
       const detailArgs = [b.documentId, ORG];
       appendDocumentAccess(detailConds, detailArgs, 'd', b.access);
       const { rows: docRows } = await pg.query(
-      `SELECT d.id, d.user_id, d.filename, d.content_type, d.status, d.metadata, d.created_at FROM knowledge_documents d WHERE ${detailConds.join(' AND ')}`,
+      `SELECT d.id, d.user_id, d.filename, d.content_type, d.status, d.metadata, d.created_at, d.ingest_mode FROM knowledge_documents d WHERE ${detailConds.join(' AND ')}`,
       detailArgs,
     );
     if (!docRows.length) return { error: 'not found' };
@@ -1853,6 +1855,7 @@ const routes = {
     const document = {
       id: d.id,
       userId: d.user_id,
+      ingestMode: d.ingest_mode ?? d.metadata?.ingest_mode ?? null,
       title: d.metadata?.title || d.filename || d.id,
       documentType: d.content_type || d.metadata?.document_type || null,
       sourcePlatform: d.metadata?.source_platform || null,

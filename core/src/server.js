@@ -16,6 +16,7 @@ import { resolveProjectForSave } from './memory/project-classifier.js';
 import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
+import { exactMemoryListTotal } from './memory/memory-list-contract.js';
 import { createRequire } from 'module';
 import { groqFetch } from './llm/groq-fallback.js';
 import { gatewayFirstFetch, gatewayProviderForUrl } from './llm/cloudflare-gateway.js';
@@ -19874,7 +19875,11 @@ exit \$RC
             // The store applies every visibility/scope predicate before
             // counting. Replacing this with an org-wide profile count makes a
             // guest or project page claim rows it is not allowed to list.
-            const total = Number.isFinite(listTotal) ? listTotal : memories.length;
+            const totalContract = exactMemoryListTotal(listTotal);
+            if (!totalContract.ok) {
+              return jsonResponse(res, totalContract.body, totalContract.status);
+            }
+            const total = totalContract.total;
 
             return jsonResponse(res, {
               memories,
@@ -25040,6 +25045,7 @@ ${injectionText}`;
                     parseStatus: true,
                     parseEngine: true,
                     parseMetadata: true,
+                    ingestMode: true,
                     structureExtracted: true,
                     tags: true,
                     createdAt: true,
@@ -25150,6 +25156,7 @@ ${injectionText}`;
                   documentDate: true,
                   wordCount: true,
                   parseEngine: true,
+                  ingestMode: true,
                   tags: true,
                   createdAt: true,
                   _count: {

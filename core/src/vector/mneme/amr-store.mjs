@@ -627,7 +627,12 @@ export class AmrMemoryStore {
   // resolved by point reads).
   graph(filter = {}, limit = 500) {
     limit = Math.min(limit, 2000);
-    const { memories: nodes } = this.list({ is_latest: true, user_id: filter.user_id }, undefined, limit, 0);
+    const inventoryFilter = {
+      ...filter,
+      is_latest: true,
+      layers: ['memory', 'cognitive'],
+    };
+    const { memories: nodes } = this.list(inventoryFilter, undefined, limit, 0);
     const slotById = new Map();
     const edges = [];
     for (const n of nodes) {
@@ -638,7 +643,10 @@ export class AmrMemoryStore {
     const resolve = (slot) => {
       if (idBySlot.has(slot)) return idBySlot.get(slot);
       const rec = this._recAt(slot);
-      if (rec?.id && !rec.deleted_at) { idBySlot.set(slot, rec.id); return rec.id; }
+      if (rec?.id && memoryInventoryMatches(rec, inventoryFilter, this.org)) {
+        idBySlot.set(slot, rec.id);
+        return rec.id;
+      }
       return null;
     };
     for (const [id, slot] of slotById) {

@@ -12,7 +12,11 @@ function temporalDecision(plan) {
 
 export function compileNativePlan(plan, message) {
   const step = plan.steps[0];
-  const operation = plan.operation === 'event_range' ? 'recall'
+  const descriptiveSourceHint = plan.operation === 'source_read'
+    && plan.references.source?.title
+    && !plan.references.source?.document_id
+    && !/\.[a-z0-9]{1,12}$/i.test(plan.references.source.title);
+  const operation = plan.operation === 'event_range' || descriptiveSourceHint ? 'recall'
     : ['snapshot', 'diff', 'timeline'].includes(plan.operation) ? 'timeline'
       : plan.operation;
   return {
@@ -28,7 +32,7 @@ export function compileNativePlan(plan, message) {
     tool_groups: ['save', 'update_profile'].includes(operation) ? ['hivemind-memory-write']
       : operation === 'projects' ? ['hivemind-projects'] : ['hivemind-recall'],
     side_effect_policy: plan.completion.approval_required ? 'approval_required' : 'read_only',
-    source: plan.references.source,
+    source: descriptiveSourceHint ? null : plan.references.source,
     time: temporalDecision(plan), aggregate: plan.aggregate,
     relation: operation === 'relation_between' ? { entities: plan.relation_entities, source: plan.references.source, time: temporalDecision(plan) } : null,
     save: operation === 'save' ? {

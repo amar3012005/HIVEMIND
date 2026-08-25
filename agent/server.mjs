@@ -684,12 +684,21 @@ const routes = {
   // these from here for remote orgs — central holds 0 rows for a self-host org.
   '/v1/stats': async (b) => {
     const f = b.filter || {};
-    const conds = ['org_id=$1', 'deleted_at IS NULL', 'is_latest=true'];
+    const conds = ["org_id=$1", 'deleted_at IS NULL', 'is_latest=true', "layer IN ('memory','cognitive')"];
     const args = [ORG];
     if (f.user_id) { args.push(f.user_id); conds.push(`user_id=$${args.length}`); }
-    const mem = await pg.query(`SELECT count(*)::int AS c FROM memories WHERE ${conds.join(' AND ')}`, args);
-    const rel = await pg.query('SELECT count(*)::int AS c FROM relationships WHERE org_id=$1', [ORG]);
-    return { memories: mem.rows[0]?.c || 0, relationships: rel.rows[0]?.c || 0 };
+    const [mem, rel, docs, evidence] = await Promise.all([
+      pg.query(`SELECT count(*)::int AS c FROM memories WHERE ${conds.join(' AND ')}`, args),
+      pg.query('SELECT count(*)::int AS c FROM relationships WHERE org_id=$1', [ORG]),
+      pg.query(`SELECT count(*)::int AS c FROM knowledge_documents WHERE org_id=$1 AND deleted_at IS NULL${f.user_id ? ' AND user_id=$2' : ''}`, f.user_id ? [ORG, f.user_id] : [ORG]),
+      pg.query(`SELECT count(*)::int AS c FROM knowledge_segments WHERE org_id=$1${f.user_id ? ' AND user_id=$2' : ''}`, f.user_id ? [ORG, f.user_id] : [ORG]),
+    ]);
+    return {
+      memories: mem.rows[0]?.c || 0,
+      relationships: rel.rows[0]?.c || 0,
+      documents: docs.rows[0]?.c || 0,
+      evidence: evidence.rows[0]?.c || 0,
+    };
   },
 
   // Vector durability is explicit and queryable. These endpoints expose only
@@ -1577,10 +1586,54 @@ const routes = {
   // Returns the org's knowledge_documents with per-doc segment_count and promoted_count.
   // promoted_count = memories derived from the document by provenance or legacy doc-id tags.
   // Response: { documents: [...], pagination: { total, limit, offset, hasMore } }
+  '/v1/kb-segments': async (b) => {
+    const limit = Math.min(Number(b.limit) || 40, 200);
+    const offset = Math.max(Number(b.offset) || 0, 0);
+    const conds = ['s.org_id=$1', 'd.org_id=$1', 'd.deleted_at IS NULL'];
+    const args = [ORG];
+    if (b.documentId) { args.push(b.documentId); conds.push(`s.document_id=$${args.length}::uuid`); }
+    appendDocumentAccess(conds, args, 'd', b.access);
+    args.push(limit); const limitArg = `$${args.length}`;
+    args.push(offset); const offsetArg = `$${args.length}`;
+    const { rows } = await pg.query(
+      `SELECT s.id, s.document_id, s.user_id, s.content, s.content_hash, s.segment_type,
+              s.segment_index, s.start_page, s.end_page, s.word_count, s.vector_synced,
+              s.metadata, s.created_at, d.filename, d.content_type, d.metadata AS document_metadata
+         FROM knowledge_segments s JOIN knowledge_documents d ON d.id=s.document_id
+        WHERE ${conds.join(' AND ')}
+        ORDER BY s.created_at DESC, s.segment_index ASC LIMIT ${limitArg} OFFSET ${offsetArg}`,
+      args,
+    );
+    const { rows: countRows } = await pg.query(
+      `SELECT count(*)::int AS c FROM knowledge_segments s JOIN knowledge_documents d ON d.id=s.document_id
+        WHERE ${conds.join(' AND ')}`,
+      args.slice(0, -2),
+    );
+    const evidence = rows.map((s) => {
+      const documentTitle = s.document_metadata?.title || s.filename || String(s.document_id);
+      const segmentNumber = Number(s.segment_index || 0) + 1;
+      return {
+        id: s.id, segmentId: s.id, type: 'evidence_segment', documentId: s.document_id,
+        title: `${documentTitle} : ${String(segmentNumber).padStart(2, '0')}`,
+        content: s.content, createdAt: s.created_at,
+        document: { id: s.document_id, title: documentTitle, contentType: s.content_type },
+        metadata: {
+          ...(s.metadata || {}), segmentType: s.segment_type, segmentIndex: s.segment_index,
+          startPage: s.start_page, endPage: s.end_page, wordCount: s.word_count,
+          contentHash: s.content_hash, vectorStored: Boolean(s.vector_synced),
+          uploader_user_id: s.user_id, org_id: ORG, document_id: s.document_id,
+          source_title: documentTitle, source_kind: 'knowledge_base',
+        },
+      };
+    });
+    const total = countRows[0]?.c || 0;
+    return { evidence, pagination: { total, limit, offset, hasMore: offset + limit < total } };
+  },
+
   '/v1/kb-docs': async (b) => {
     const limit = Math.min(Number(b.limit) || 20, 200);
     const offset = Math.max(Number(b.offset) || 0, 0);
-    const conds = ['d.org_id=$1', 'd.deleted_at IS NULL'];
+    const conds = ['d.org_id=$1', 'd.deleted_at IS NULL', 'EXISTS (SELECT 1 FROM knowledge_segments sx WHERE sx.document_id=d.id AND sx.org_id=d.org_id)'];
     const args = [ORG];
     appendDocumentAccess(conds, args, 'd', b.access);
     args.push(limit); const limitArg = `$${args.length}`;
@@ -1599,13 +1652,17 @@ const routes = {
     // Batch segment counts and promoted counts in two queries rather than N+1.
     const ids = docs.map((d) => d.id);
     let segMap = {};
+    let evidenceBytesMap = {};
     let proMap = {};
     if (ids.length) {
       const { rows: segs } = await pg.query(
-        'SELECT document_id, count(*)::int AS c FROM knowledge_segments WHERE org_id=$1 AND document_id = ANY($2::uuid[]) GROUP BY document_id',
+        'SELECT document_id, count(*)::int AS c, COALESCE(SUM(octet_length(content)), 0)::text AS evidence_bytes FROM knowledge_segments WHERE org_id=$1 AND document_id = ANY($2::uuid[]) GROUP BY document_id',
         [ORG, ids]
       );
-      for (const r of segs) segMap[r.document_id] = r.c;
+      for (const r of segs) {
+        segMap[r.document_id] = r.c;
+        evidenceBytesMap[r.document_id] = Number(r.evidence_bytes || 0);
+      }
       proMap = await countDerivedMemoriesByDocumentIds(ids);
     }
     const documents = docs.map((d) => ({
@@ -1631,6 +1688,7 @@ const routes = {
       metadata: d.metadata || {},
       // Counts:
       segmentCount: segMap[d.id] || 0,
+      evidenceBytes: evidenceBytesMap[d.id] || 0,
       promotedCount: proMap[d.id] || 0,
     }));
     return { documents, pagination: { total, limit, offset, hasMore: offset + limit < total } };

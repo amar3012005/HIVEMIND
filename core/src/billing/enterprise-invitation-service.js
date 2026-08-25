@@ -47,8 +47,11 @@ export function enterpriseInvitationEmailDigest(value) {
   return invitationDigest('email', normalizedEmail(value));
 }
 
-export function unlimitedEnterpriseOnboardingLimits() {
-  return Object.fromEntries(Object.keys(getPlan('enterprise').limits).map((metric) => [metric, -1]));
+export function enterpriseOnboardingLimits() {
+  // Clone so an invitation remains an immutable snapshot while its active
+  // entitlement is Scale-equivalent, never an accidental unlimited Enterprise
+  // allocation.
+  return { ...getPlan('enterprise_onboarding').limits };
 }
 
 function asFutureDate(value, fallbackDays, now) {
@@ -82,7 +85,7 @@ export function normalizeEnterpriseInvitationInput(input = {}, now = new Date())
   const recipientEmail = normalizedEmail(input.recipient_email || input.recipientEmail);
   const expiresAt = asFutureDate(input.invitation_expires_at || input.invitationExpiresAt, DEFAULT_ENTERPRISE_INVITATION_DAYS, now);
   const days = onboardingDays(input.onboarding_days || input.onboardingDays);
-  const limits = unlimitedEnterpriseOnboardingLimits();
+  const limits = enterpriseOnboardingLimits();
   const workspaceName = text(input.workspace_name || input.workspaceName, 255);
   const welcomeMessage = text(input.welcome_message || input.welcomeMessage, 4_000);
   const privateNotes = text(input.private_notes || input.privateNotes, 4_000);
@@ -104,6 +107,7 @@ export function normalizeEnterpriseInvitationInput(input = {}, now = new Date())
       hosting_mode: account.hostingMode,
       storage_mode: account.storageMode,
       onboarding_days: days,
+      onboarding_plan: 'enterprise_onboarding',
       onboarding_limits: limits,
       fallback_action: 'manual_review',
     },
@@ -130,6 +134,8 @@ export function publicEnterpriseInvitation(invitation, now = new Date()) {
     hosting_mode: invitation.hostingMode,
     storage_mode: invitation.storageMode,
     onboarding_days: invitation.onboardingDays,
+    onboarding_plan: 'enterprise_onboarding',
+    onboarding_plan_name: getPlan('enterprise_onboarding').name,
     onboarding_limits: invitation.onboardingLimits,
     status: publicStatus(invitation, now),
     delivery_status: invitation.deliveryStatus,
@@ -155,6 +161,8 @@ export function publicEnterpriseInvitationPreview(invitation, now = new Date()) 
     account_type: invitation.accountType,
     hosting_mode: invitation.hostingMode,
     storage_mode: invitation.storageMode,
+    onboarding_plan: 'enterprise_onboarding',
+    onboarding_plan_name: getPlan('enterprise_onboarding').name,
     invitation_expires_at: invitation.invitationExpiresAt,
   };
 }
@@ -226,15 +234,23 @@ export async function redeemEnterpriseInvitation({ tx, invitationId, method, ver
     fallbackAction: 'manual_review',
   } });
   const entitlementVersion = await tx.entitlementVersion.create({ data: {
-    grantId: grant.id, version: 1, planId: 'enterprise', limits: invitation.onboardingLimits,
+    grantId: grant.id, version: 1, planId: 'enterprise_onboarding', limits: invitation.onboardingLimits,
     accountType: invitation.accountType, hostingMode: invitation.hostingMode, storageMode: invitation.storageMode,
     commercialTerms: { kind: 'enterprise_onboarding', invitation_id: invitation.id, onboarding_days: invitation.onboardingDays },
     effectiveFrom: now, transitionReason: 'enterprise_invitation_redemption',
   } });
-  await tx.organizationEntitlement.create({ data: {
-    orgId, source: 'enterprise_invitation', phase: 'onboarding', planId: 'enterprise', limits: invitation.onboardingLimits,
-    effectiveFrom: now, effectiveUntil: endsAt,
-  } });
+  await tx.organizationEntitlement.createMany({ data: [
+    {
+      orgId, source: 'enterprise_invitation', phase: 'onboarding', planId: 'enterprise_onboarding', limits: invitation.onboardingLimits,
+      effectiveFrom: now, effectiveUntil: endsAt,
+    },
+    // The explicit future row prevents expiry from silently falling back to
+    // Organization.plan (Enterprise, whose contract limits may be unlimited).
+    // Sales can replace this row with a contracted Enterprise entitlement.
+    {
+      orgId, source: 'enterprise_invitation', phase: 'runway', planId: 'free', limits: {}, effectiveFrom: endsAt,
+    },
+  ] });
   await tx.organization.update({ where: { id: orgId }, data: {
     plan: 'enterprise', accountType: invitation.accountType, hostingMode: invitation.hostingMode,
     memoryStorageMode: invitation.storageMode, subscriptionStatus: 'active', trialEndsAt: endsAt,

@@ -19,7 +19,7 @@ import { getOrgCounts } from '../memory/org-counts.js';
  * Plan-tier ladder for upgrade suggestions.
  * free → pro → scale → enterprise → null (top).
  */
-const PLAN_LADDER = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise: null };
+const PLAN_LADDER = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise_onboarding: 'enterprise', enterprise: null };
 
 const DAILY_LIMITS = {
   searches: ['searchQueriesPerDay', 'searches', 'queries'],

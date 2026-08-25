@@ -177,6 +177,7 @@ export const DEFAULT_MONTHLY_CREDITS = Object.freeze({
   plus: 5_000,
   pro: 100_000,
   scale: 1_000_000,
+  enterprise_onboarding: 1_000_000,
   enterprise: null,
 });
 

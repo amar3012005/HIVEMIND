@@ -475,7 +475,7 @@ const _PLAN_LIMIT_RESOURCE_KEY = {
   'connector': 'connectors',
   'project': 'projects',
 };
-const _PLAN_LIMIT_NEXT = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise: null };
+const _PLAN_LIMIT_NEXT = { free: 'pro', pro: 'scale', scale: 'enterprise', enterprise_onboarding: 'enterprise', enterprise: null };
 
 function capacityErrorResponse(res, error) {
   const planId = error.plan;
@@ -1647,7 +1647,7 @@ function recordRuntimeWaitlistAttempt(req) {
 
 function classifyPlatformUser(user) {
   const plans = (user.organizations || []).map((membership) => membership.org?.plan || 'free');
-  const b2b = plans.some((plan) => ['scale', 'enterprise', 'managed'].includes(String(plan).toLowerCase()));
+  const b2b = plans.some((plan) => ['scale', 'enterprise_onboarding', 'enterprise', 'managed'].includes(String(plan).toLowerCase()));
   const lastActiveAt = user.lastActiveAt || null;
   const active = lastActiveAt && Date.now() - new Date(lastActiveAt).getTime() <= PLATFORM_ACTIVE_WINDOW_MS;
   return { tier: b2b ? 'b2b' : 'b2c', active: Boolean(active), plans: [...new Set(plans)] };
@@ -2308,6 +2308,7 @@ async function buildAnonymousBootstrapPayload(req) {
 
 async function buildBootstrapPayload(user, req, preferredOrgId = null) {
   const { org, role } = await resolveCurrentOrg(user.id, preferredOrgId);
+  const effectivePlan = org ? (await getEffectivePlan(prisma, org.id)).plan : null;
   const apiKeys = await listPersistedApiKeys(prisma, user.id, org?.id || null);
   const core = resolveCoreTarget(req, org);
   const coreHealth = await getCoreHealth(core.internalUrl);
@@ -2325,7 +2326,8 @@ async function buildBootstrapPayload(user, req, preferredOrgId = null) {
       id: org.id,
       name: org.name,
       slug: org.slug,
-      plan: org.plan || 'free',
+      plan: effectivePlan?.id || org.plan || 'free',
+      plan_name: effectivePlan?.name || org.plan || 'Free',
       hosting_mode: org.hostingMode || 'managed',
       memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(org.plan, org.hostingMode),
       memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(org.plan, org.hostingMode)),
@@ -4926,7 +4928,12 @@ const server = http.createServer(async (req, res) => {
         id: org.id,
         name: org.name,
         slug: org.slug,
-        plan: signupPromotion?.promotion?.version?.base_plan || org.plan || provisionPlan,
+        plan: enterpriseInvitationRedemption
+          ? 'enterprise_onboarding'
+          : (signupPromotion?.promotion?.version?.base_plan || org.plan || provisionPlan),
+        plan_name: enterpriseInvitationRedemption
+          ? 'Enterprise Onboarding'
+          : null,
         hosting_mode: org.hostingMode || hostingMode,
         memory_storage_mode: org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode),
         memory_storage_label: memoryStorageLabel(org.memoryStorageMode || memoryStorageModeFor(provisionPlan, hostingMode)),
@@ -4934,6 +4941,8 @@ const server = http.createServer(async (req, res) => {
         promotion: signupPromotion?.termsSnapshot || null,
         enterprise_onboarding: enterpriseInvitationRedemption ? {
           active: true,
+          plan: 'enterprise_onboarding',
+          plan_name: 'Enterprise Onboarding',
           ends_at: enterpriseInvitationRedemption.onboardingEndsAt,
           account_type: enterpriseInvitationRedemption.invitation.account_type,
           hosting_mode: enterpriseInvitationRedemption.invitation.hosting_mode,

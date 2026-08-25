@@ -1,4 +1,4 @@
-const ENTERPRISE_PLANS = new Set(['enterprise', 'managed', 'scale']);
+const ENTERPRISE_PLANS = new Set(['enterprise_onboarding', 'enterprise', 'managed', 'scale']);
 
 export function memoryStorageModeFor(plan, hostingMode) {
   if (hostingMode === 'self_host') return 'byod_amr';

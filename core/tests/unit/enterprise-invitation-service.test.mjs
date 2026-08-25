@@ -10,8 +10,9 @@ import {
   normalizeEnterpriseInvitationInput,
   publicEnterpriseInvitationPreview,
   redeemEnterpriseInvitation,
-  unlimitedEnterpriseOnboardingLimits,
+  enterpriseOnboardingLimits,
 } from '../../src/billing/enterprise-invitation-service.js';
+import { getPlan } from '../../src/billing/plans.js';
 import { renderTemplate } from '../../src/email/email-service.js';
 
 describe('EnterpriseInvitationService', () => {
@@ -36,7 +37,7 @@ describe('EnterpriseInvitationService', () => {
     assert.equal(created.plaintextCode, 'HM-EXPLICIT1');
   });
 
-  it('creates a fixed unlimited commercial onboarding profile without accepting arbitrary caps', () => {
+  it('creates a fixed Scale-equivalent commercial onboarding profile without accepting arbitrary caps', () => {
     const input = normalizeEnterpriseInvitationInput({
       company_name: 'Example GmbH', recipient_email: 'Owner@Example.com',
       account_type: 'enterprise_managed', storage_mode: 'hybrid', onboarding_days: 14,
@@ -45,8 +46,10 @@ describe('EnterpriseInvitationService', () => {
     assert.equal(input.hostingMode, 'managed');
     assert.equal(input.storageMode, 'hybrid');
     assert.equal(input.recipientEmail, 'owner@example.com');
-    assert.deepEqual(input.onboardingLimits, unlimitedEnterpriseOnboardingLimits());
-    assert.ok(Object.values(input.onboardingLimits).every((limit) => limit === -1));
+    assert.deepEqual(input.onboardingLimits, enterpriseOnboardingLimits());
+    assert.deepEqual(input.onboardingLimits, getPlan('scale').limits);
+    assert.equal(input.onboardingLimits.monthlyCredits, 1_000_000);
+    assert.equal(input.onboardingLimits.meetingMinutesPerMonth, 500);
     assert.throws(() => normalizeEnterpriseInvitationInput({
       company_name: 'Example', recipient_email: 'owner@example.com', account_type: 'personal',
     }), /enterprise invitation requires an enterprise account type/);
@@ -83,17 +86,18 @@ describe('EnterpriseInvitationService', () => {
     assert.match(rendered.text, /invitation already applied/);
   });
 
-  it('redeems only once and binds the resulting unlimited grant to the invited owner', async () => {
+  it('redeems only once with a finite onboarding grant and an explicit post-trial fallback', async () => {
     const now = new Date('2026-08-08T00:00:00.000Z');
     const recipient = 'owner@example.com';
     const invitation = {
       id: '11111111-1111-4111-8111-111111111111', status: 'sent', accessCodeVersion: 1, linkVersion: 1,
       invitationExpiresAt: new Date('2026-08-22T00:00:00.000Z'), recipientEmailHash: enterpriseInvitationEmailDigest(recipient),
-      onboardingDays: 14, onboardingLimits: unlimitedEnterpriseOnboardingLimits(), accountType: 'enterprise_managed',
+      onboardingDays: 14, onboardingLimits: enterpriseOnboardingLimits(), accountType: 'enterprise_managed',
       hostingMode: 'managed', storageMode: 'hybrid', companyName: 'Example', workspaceName: null,
       recipientEmail: recipient, recipientEmailHint: 'ow***@example.com', deliveryStatus: 'sent', accessCodeHint: 'HM-...',
       sentAt: now, lastSentAt: now, redeemedAt: null, redeemedByUserId: null, orgId: null, revokedAt: null, createdAt: now, updatedAt: now,
     };
+    let entitlementRows = [];
     const tx = {
       enterpriseInvitation: {
         findUnique: async () => invitation,
@@ -105,12 +109,16 @@ describe('EnterpriseInvitationService', () => {
       },
       entitlementGrant: { create: async ({ data }) => ({ id: 'grant-1', ...data }) },
       entitlementVersion: { create: async ({ data }) => ({ id: 'version-1', ...data }) },
-      organizationEntitlement: { create: async ({ data }) => data },
+      organizationEntitlement: { createMany: async ({ data }) => { entitlementRows = data; return { count: data.length }; } },
       organization: { update: async ({ data }) => data },
     };
     const redeemed = await redeemEnterpriseInvitation({ tx, invitationId: invitation.id, method: 'link', version: 1, userId: '22222222-2222-4222-8222-222222222222', userEmail: recipient, orgId: '33333333-3333-4333-8333-333333333333', now });
     assert.equal(redeemed.grant.source, 'enterprise_invitation');
-    assert.equal(redeemed.entitlementVersion.limits.llmTokensPerMonth, -1);
+    assert.equal(redeemed.entitlementVersion.planId, 'enterprise_onboarding');
+    assert.equal(redeemed.entitlementVersion.limits.llmTokensPerMonth, 100_000_000);
+    assert.equal(redeemed.entitlementVersion.limits.monthlyCredits, 1_000_000);
+    assert.deepEqual(entitlementRows.map((row) => row.planId), ['enterprise_onboarding', 'free']);
+    assert.equal(entitlementRows[1].effectiveFrom.getTime(), redeemed.onboardingEndsAt.getTime());
     assert.equal(invitation.status, 'redeemed');
     await assert.rejects(() => redeemEnterpriseInvitation({ tx, invitationId: invitation.id, method: 'link', version: 1, userId: '22222222-2222-4222-8222-222222222222', userEmail: recipient, orgId: '33333333-3333-4333-8333-333333333333', now }), /invitation unavailable/);
   });

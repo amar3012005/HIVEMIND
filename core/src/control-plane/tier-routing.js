@@ -1,4 +1,4 @@
-const B2B_PLANS = new Set(['scale', 'enterprise', 'managed']);
+const B2B_PLANS = new Set(['scale', 'enterprise_onboarding', 'enterprise', 'managed']);
 
 export function parseOrigins(value = '') {
   return String(value).split(',').map((origin) => origin.trim()).filter(Boolean);

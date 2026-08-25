@@ -117,6 +117,32 @@ test('force reprocesses a ready evidence-only job as both without creating anoth
   assert.equal(queued.metadata.ingest_mode, 'both');
 });
 
+test('evidence-to-both upgrade queues stored-evidence promotion without persisting or reparsing bytes', async () => {
+  const duplicate = {
+    id: ids.job, userId: ids.user, status: 'ready', documentId: '44444444-4444-4444-8444-444444444444',
+    processingVersion: 1, ingestMode: 'evidence', metadata: { ingest_mode: 'evidence' }, memoryIds: [],
+  };
+  const deps = dependencies({ duplicate });
+  let persisted = false;
+  let queued;
+  deps.queue.persistFile = () => { persisted = true; return '/tmp/should-not-exist'; };
+  deps.queue.enqueue = async (input) => { queued = input; return { queue_job_id: 'queue-1' }; };
+  const req = request();
+  req.metadata = { ingest_mode: 'both' };
+
+  const result = await new KnowledgeUploadService(deps).admit(req);
+
+  assert.equal(result.ok, true);
+  assert.equal(persisted, false);
+  assert.equal(queued.filePath, null);
+  assert.equal(queued.metadata.promotion_existing_evidence, true);
+  assert.equal(queued.metadata.promotion_document_id, duplicate.documentId);
+  assert.equal(queued.metadata.original_ingest_mode, 'evidence');
+  const reset = deps.updates.find(([, , data]) => data?.processingVersion === 2)?.[2];
+  assert.equal(reset.ingestMode, 'both');
+  assert.equal(reset.metadata.promotion_existing_evidence, true);
+});
+
 test('accepted upload persists one durable job before enqueue', async () => {
   const deps = dependencies();
   const result = await new KnowledgeUploadService(deps).admit(request());

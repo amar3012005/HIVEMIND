@@ -108,7 +108,12 @@ export class KnowledgeUploadService {
         _readyDocLives = true;
       }
     }
-    if (job?.status === 'ready' && _readyDocLives && !force) return { ok: false, status: 409, body: {
+    // An evidence-only document already crossed the durable evidence boundary.
+    // Asking for `both` later is a promotion of those stored segments, never a
+    // second extraction of the original bytes.
+    const promoteExistingEvidence = job?.status === 'ready' && _readyDocLives
+      && job.ingestMode === 'evidence' && ingestMode === 'both';
+    if (job?.status === 'ready' && _readyDocLives && !force && !promoteExistingEvidence) return { ok: false, status: 409, body: {
       error: 'duplicate_document',
       duplicate: true,
       message: 'Already in your knowledge base — this exact file was ingested before.',
@@ -129,7 +134,7 @@ export class KnowledgeUploadService {
     // `_reingestDeleted` must bypass this guard too: 'ready' is not terminal, so
     // without it a ready-but-deleted job returns existing:true here and the
     // re-ingest never happens — the branch above would be dead code.
-    if (job && !force && !_reingestDeleted && !['failed', 'dead', 'cancelled'].includes(job.status)) {
+    if (job && !force && !_reingestDeleted && !promoteExistingEvidence && !['failed', 'dead', 'cancelled'].includes(job.status)) {
       return { ok: true, existing: true, job };
     }
 
@@ -148,6 +153,11 @@ export class KnowledgeUploadService {
         primary_team_id: primaryTeamId,
         force_reprocess: !!force,
         ...(force && job.documentId ? { reprocess_document_id: job.documentId } : {}),
+        ...(promoteExistingEvidence ? {
+          promotion_existing_evidence: true,
+          promotion_document_id: job.documentId,
+          original_ingest_mode: job.ingestMode,
+        } : {}),
       };
       await this.jobStore.updateOwned(job.id, orgId, {
         status: 'queued', stage: 'queued', progress: 0, processingVersion,
@@ -190,7 +200,8 @@ export class KnowledgeUploadService {
     }
 
     try {
-      const filePath = this.queue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
+      const promotionOnly = promoteExistingEvidence && !!job.documentId;
+      const filePath = promotionOnly ? null : this.queue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
       const queued = await this.queue.enqueue({
         userId, orgId, filename, contentType: file.contentType, checksum, filePath,
         trackerJobId: job.id, processingVersion,
@@ -199,6 +210,11 @@ export class KnowledgeUploadService {
           scope_id: scope.scopeId, project_ids: projectIds, primary_team_id: primaryTeamId,
           force_reprocess: !!force,
           ...(force && job.documentId ? { reprocess_document_id: job.documentId } : {}),
+          ...(promotionOnly ? {
+            promotion_existing_evidence: true,
+            promotion_document_id: job.documentId,
+            original_ingest_mode: 'evidence',
+          } : {}),
         },
       });
       if (queued.backpressure) {

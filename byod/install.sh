@@ -4,6 +4,7 @@ set -euo pipefail
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || { echo 'run with sudo' >&2; exit 1; }
 BASE="${HIVEMIND_MEMORY_BOX_CHANNEL_BASE:-https://get.singulancelabs.com/memory-box}"
 CHANNEL="${HIVEMIND_MEMORY_BOX_CHANNEL:-stable}"; [[ "$CHANNEL" == stable || "$CHANNEL" == canary ]] || { echo 'invalid channel' >&2; exit 1; }
+PINNED_PUBLIC_KEY_SHA256="${HIVEMIND_RELEASE_PUBLIC_KEY_SHA256:-__HIVEMIND_RELEASE_PUBLIC_KEY_SHA256__}"
 INSTALL_DIR="${HIVEMIND_MEMORY_BOX_INSTALL_DIR:-/opt/hivemind-memory-box}"
 CONFIG_DIR="${HIVEMIND_MEMORY_BOX_CONFIG_DIR:-/etc/hivemind-memory-box}"
 STATE_DIR="${HIVEMIND_MEMORY_BOX_STATE_DIR:-/var/lib/hivemind-memory-box}"
@@ -21,12 +22,9 @@ fetch(){ curl -fsSLo "$2" --proto '=https' --tlsv1.2 --retry 3 --connect-timeout
 fetch "$BASE/releases/$CHANNEL/release.json" "$WORK/release.json"
 fetch "$BASE/releases/$CHANNEL/release.sig" "$WORK/release.sig"
 if [[ -n "${HIVEMIND_RELEASE_PUBLIC_KEY_PATH:-}" ]]; then cp "${HIVEMIND_RELEASE_PUBLIC_KEY_PATH}" "$WORK/release.pub"; else fetch "$BASE/release.pub" "$WORK/release.pub"; fi
-if [[ -n "${HIVEMIND_RELEASE_PUBLIC_KEY_SHA256:-}" ]]; then
-  printf '%s  %s\n' "$HIVEMIND_RELEASE_PUBLIC_KEY_SHA256" "$WORK/release.pub" | sha256sum --check --status || die 'release public key pin mismatch'
-fi
 node -e 'const c=require("node:crypto"),f=require("node:fs"),m=f.readFileSync(process.argv[1]),k=f.readFileSync(process.argv[3]);
 const j=JSON.parse(m),pub=c.createPublicKey(k),fingerprint=c.createHash("sha256").update(pub.export({type:"spki",format:"der"})).digest("hex");
-if(pub.asymmetricKeyType!=="ed25519"||j.public_key_sha256!==fingerprint||!c.verify(null,m,k,f.readFileSync(process.argv[2])))process.exit(1)' "$WORK/release.json" "$WORK/release.sig" "$WORK/release.pub" || die 'release signature or public-key fingerprint verification failed'
+if(!/^[a-f0-9]{64}$/.test(process.argv[4])||pub.asymmetricKeyType!=="ed25519"||fingerprint!==process.argv[4]||j.public_key_sha256!==fingerprint||!c.verify(null,m,k,f.readFileSync(process.argv[2])))process.exit(1)' "$WORK/release.json" "$WORK/release.sig" "$WORK/release.pub" "$PINNED_PUBLIC_KEY_SHA256" || die 'release signature or pinned public-key verification failed'
 readarray -t RELEASE_DATA < <(node -e '
 const m=require(process.argv[1]); const u=m.bundle_url||m.bundle?.url,s=m.bundle_sha256||m.bundle?.sha256;
 if(m.version!==2||m.channel!==process.argv[2]||!u?.startsWith("https://")||!/^[a-f0-9]{64}$/.test(s||""))process.exit(1);

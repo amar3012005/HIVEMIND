@@ -4,8 +4,9 @@ import path from 'node:path';
 import { publicKeyFingerprint, signReleaseManifest } from './release-contract.mjs';
 
 const DEFAULT_CAPABILITIES = [
-  'evidence.hydrate', 'evidence.lexical', 'evidence.recall', 'graph.read',
-  'memory.hydrate', 'memory.lexical', 'memory.list.total', 'memory.recall',
+  'document.ingest-mode', 'evidence.hydrate', 'evidence.inventory', 'evidence.lexical',
+  'evidence.recall', 'graph.read', 'memory.hydrate', 'memory.inventory',
+  'memory.inventory.total', 'memory.lexical', 'memory.recall', 'provenance.read',
   'relationship.read', 'vector.pending', 'vector.repair', 'vector.status',
 ];
 

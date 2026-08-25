@@ -22,8 +22,8 @@ report_release() {
   set -a; . "$env_file"; set +a
   [[ -n "${HIVEMIND_API_KEY:-}" && -f "$HM_CURRENT_RECEIPT" ]] || return 0
   local central="${HIVEMIND_CENTRAL_URL:-https://api.singulancelabs.com}" payload
-  payload="$(RECEIPT="$HM_CURRENT_RECEIPT" RESULT="$result" node -e 'const r=require(process.env.RECEIPT);process.stdout.write(JSON.stringify({release:r.release||null,protocolVersion:r.protocol_version||null,schemaVersion:r.schema_version||null,capabilities:r.required_capabilities||[],channel:r.channel||null,lastSuccessfulCheck:r.verified_at||null,rollbackState:process.env.RESULT}))')"
-  curl -fsS --proto '=https' --tlsv1.2 --max-time 15 -H 'content-type: application/json' -H "authorization: Bearer $HIVEMIND_API_KEY" -d "$payload" "$central/v1/selfhost/release-status" >/dev/null 2>&1 || true
+  payload="$(RECEIPT="$HM_CURRENT_RECEIPT" RESULT="$result" HIVEMIND_API_KEY="$HIVEMIND_API_KEY" node -e 'const r=require(process.env.RECEIPT);process.stdout.write(JSON.stringify({apiKey:process.env.HIVEMIND_API_KEY,release:r.release||null,protocol_version:r.protocol_version||null,schema_version:r.schema_version||null,capabilities:r.required_capabilities||[],last_success_at:r.verified_at||null,rollback_available:Boolean(r.rollback_image),rollback_release:r.previous_release||null,state:process.env.RESULT}))')"
+  curl -fsS --proto '=https' --tlsv1.2 --max-time 15 -H 'content-type: application/json' -d "$payload" "$central/v1/selfhost/report" >/dev/null 2>&1 || true
 }
 
 command_name="${1:-}"; shift || true

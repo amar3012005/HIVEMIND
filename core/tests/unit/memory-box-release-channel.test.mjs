@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import worker from '../../../byod/release-channel/worker.mjs';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
 const objects = new Map([
   ['bootstrap/memory-box', '#!/bin/sh\n'],
@@ -28,4 +33,16 @@ test('release channel resolves stable pointers and immutable assets without list
 
   assert.equal((await worker.fetch(new Request('https://get.singulancelabs.com/memory-box/releases'), env)).status, 404);
   assert.equal((await worker.fetch(new Request('https://get.singulancelabs.com/memory-box', { method: 'POST' }), env)).status, 405);
+});
+
+test('release promotion requires recovery evidence and renders the bootstrap key pin', () => {
+  const publisher = fs.readFileSync(path.join(ROOT, 'scripts/publish-memory-box-release.sh'), 'utf8');
+  const installer = fs.readFileSync(path.join(ROOT, 'byod/install.sh'), 'utf8');
+  assert.match(publisher, /BYOD_RESTORE_DRILL_RECEIPT/);
+  assert.match(publisher, /BYOD_CANARY_RECEIPT/);
+  assert.match(publisher, /DOCKER_CONFIG="\$ANON_DOCKER_CONFIG" docker pull/);
+  assert.match(publisher, /__HIVEMIND_RELEASE_PUBLIC_KEY_SHA256__/);
+  assert.match(installer, /PINNED_PUBLIC_KEY_SHA256/);
+  assert.match(installer, /fingerprint!==process\.argv\[4\]/);
+  assert.ok(publisher.lastIndexOf('put "channels/$CHANNEL.json"') > publisher.lastIndexOf('put "bootstrap/memory-box"'));
 });

@@ -126,7 +126,12 @@ test('CLI defaults to stable and only accepts stable or canary', (t) => {
 test('host contract schedules persistent six-hour checks and forbids dependency restarts', () => {
   const timer = fs.readFileSync(path.join(BYOD, 'systemd/hivemind-memory-box-update.timer'), 'utf8');
   const upgrade = fs.readFileSync(UPGRADE, 'utf8');
+  const cli = fs.readFileSync(CLI, 'utf8');
   assert.match(timer, /OnUnitActiveSec=6h/); assert.match(timer, /RandomizedDelaySec=30min/); assert.match(timer, /Persistent=true/);
   assert.match(upgrade, /--no-deps --force-recreate agent/); assert.doesNotMatch(upgrade, /compose[^\n]* down|\$\{HM_COMPOSE\[@\]\}[^\n]* down/);
-  for (const command of ['install', 'update', 'status', 'doctor', 'rollback', 'channel']) assert.match(fs.readFileSync(CLI, 'utf8'), new RegExp(`\\b${command}\\)`));
+  assert.match(cli, /\/v1\/selfhost\/report/);
+  assert.match(cli, /apiKey:process\.env\.HIVEMIND_API_KEY/);
+  assert.match(cli, /protocol_version:r\.protocol_version/);
+  assert.match(cli, /last_success_at:r\.verified_at/);
+  for (const command of ['install', 'update', 'status', 'doctor', 'rollback', 'channel']) assert.match(cli, new RegExp(`\\b${command}\\)`));
 });

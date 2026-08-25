@@ -208,6 +208,12 @@ test('offline release CLI publishes only manifest v2 with signing-key identity',
   assert.equal(result.version, 2);
   const manifest = JSON.parse(fs.readFileSync(path.join(outputDir, 'release.json'), 'utf8'));
   assert.equal(manifest.version, 2);
+  assert.deepEqual(manifest.required_capabilities, [
+    'document.ingest-mode', 'evidence.hydrate', 'evidence.inventory', 'evidence.lexical',
+    'evidence.recall', 'graph.read', 'memory.hydrate', 'memory.inventory',
+    'memory.inventory.total', 'memory.lexical', 'memory.recall', 'provenance.read',
+    'relationship.read', 'vector.pending', 'vector.repair', 'vector.status',
+  ]);
   assert.equal(manifest.channel, 'stable');
   assert.equal(manifest.image, image);
   assert.equal(manifest.public_key_sha256, publicKeyFingerprint(publicKey));

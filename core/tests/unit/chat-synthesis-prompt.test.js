@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { appendGapClarification, buildSynthesisPromptArtifact, buildSynthesisSystemPrompt } from '../../src/agent/chat-synthesis-prompt.js';
+import { appendGapClarification, appendSuggestedFollowUps, buildSynthesisPromptArtifact, buildSynthesisSystemPrompt } from '../../src/agent/chat-synthesis-prompt.js';
 import { resetStaticPromptCacheForTests } from '../../src/agent/chat-static-prompt-cache.js';
 
 test('fact synthesis loads only the compact grounding and citation contract', () => {
@@ -22,6 +22,9 @@ test('fact synthesis loads only the compact grounding and citation contract', ()
   assert.match(prompt, /every independent semantic detail/i);
   assert.match(prompt, /"coverage"/i);
   assert.match(prompt, /context_status/i);
+  assert.match(prompt, /follow_ups/i);
+  assert.match(prompt, /two or three concise suggested next questions/i);
+  assert.match(prompt, /direct conclusion or concise summary/i);
   assert.match(prompt, /USER ASSERTION \/ UNVERIFIED/);
   assert.match(prompt, /Never claim that no record exists while one is delivered/);
   assert.doesNotMatch(prompt, /GRAPH EDGES/i);
@@ -36,6 +39,7 @@ test('answer objective and semantic depth shape one synthesis without encouragin
   });
   assert.match(prompt, /ANSWER OBJECTIVE: Enumerate and describe the Solvis products/);
   assert.match(prompt, /DETAILED DEPTH/);
+  assert.match(prompt, /complete delivered top-fifteen window/i);
   assert.match(prompt, /Inspect every delivered evidence item/);
   assert.match(prompt, /collect and deduplicate every distinct supported item/);
   assert.match(prompt, /multiple distinct findings/i);
@@ -48,6 +52,7 @@ test('comprehensive synthesis asks for every distinct delivered finding without 
     language: 'en', operation: 'recall', recallMode: 'explain', responseDepth: 'comprehensive',
   });
   assert.match(prompt, /COMPREHENSIVE DEPTH/);
+  assert.match(prompt, /complete delivered top-fifteen window/i);
   assert.match(prompt, /every distinct supported finding/i);
   assert.match(prompt, /Do not claim completeness outside the delivered window/);
 });
@@ -96,4 +101,16 @@ test('a clarification question emitted in gaps is visible in the final response'
     appendGapClarification('The brand is G ROCHER.', ['Exact model number'], 'en'),
     'The brand is G ROCHER.',
   );
+});
+
+test('grounded follow-up suggestions are appended in deterministic order and language', () => {
+  assert.equal(
+    appendSuggestedFollowUps('The answer.', ['What changed?', 'Who approved it?', 'What changed?'], 'en'),
+    'The answer.\n\nSuggested follow-ups:\n- What changed?\n- Who approved it?',
+  );
+  assert.equal(
+    appendSuggestedFollowUps('Die Antwort.', ['Was änderte sich?', 'Wer stimmte zu?'], 'de'),
+    'Die Antwort.\n\nMögliche nächste Fragen:\n- Was änderte sich?\n- Wer stimmte zu?',
+  );
+  assert.equal(appendSuggestedFollowUps('Short.', ['Only one?'], 'en'), 'Short.');
 });

@@ -30,7 +30,7 @@ import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js'
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectRankedMemoryFallback } from './memory-evidence-projector.js';
-import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
+import { appendGapClarification, appendSuggestedFollowUps, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
 import { deriveAnswerContextStatus, normalizeAnswerCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
@@ -203,6 +203,12 @@ const GROUNDED_SYNTHESIS_RESPONSE_FORMAT = {
         evidence_used: { type: 'array', items: { type: 'string' } },
         confidence: { type: 'number' },
         gaps: { type: 'array', items: { type: 'string' } },
+        follow_ups: {
+          type: 'array',
+          minItems: 0,
+          maxItems: 3,
+          items: { type: 'string' },
+        },
         coverage: {
           type: 'array',
           minItems: 1,
@@ -220,7 +226,7 @@ const GROUNDED_SYNTHESIS_RESPONSE_FORMAT = {
         },
         context_status: { type: 'string', enum: ['sufficient', 'relevant_but_incomplete', 'query_mismatch'] },
       },
-      required: ['response', 'claims', 'evidence_used', 'confidence', 'gaps', 'coverage', 'context_status'],
+      required: ['response', 'claims', 'evidence_used', 'confidence', 'gaps', 'follow_ups', 'coverage', 'context_status'],
     },
   },
 };
@@ -258,9 +264,9 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
   return { parsed: parseJsonObjectContent(raw), usage: data.usage };
 }
 
-async function callValidatedClaimStream({ messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, allowGeneralKnowledge, onEvent }) {
+async function callValidatedClaimStream({ messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, allowGeneralKnowledge, onEvent, language = 'en' }) {
   const streamInstruction = `STREAMING OUTPUT CONTRACT: Return newline-delimited JSON (NDJSON), one complete object per line and no markdown.
-For every factual sentence emit {"type":"claim","text":"a complete natural sentence","citation_ids":["P1-C1"]}. Each claim must use only delivered evidence and include valid delivered citation IDs. Emit claims in the order the user should read them. Decompose every independent part of the user request and then emit exactly one final {"type":"meta","confidence":0.0,"gaps":[],"coverage":[{"request":"independent requested detail","status":"supported|unsupported","citation_ids":["P1-C1"]}],"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Never emit uncited prose. Never mark the response sufficient while an independent requested detail is absent from coverage.`;
+For every factual sentence emit {"type":"claim","text":"a complete natural sentence","citation_ids":["P1-C1"]}. Each claim must use only delivered evidence and include valid delivered citation IDs. Emit claims in the order the user should read them. Decompose every independent part of the user request and then emit exactly one final {"type":"meta","confidence":0.0,"gaps":[],"follow_ups":["a grounded next question","another grounded next question"],"coverage":[{"request":"independent requested detail","status":"supported|unsupported","citation_ids":["P1-C1"]}],"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Follow-ups must obey the synthesis prompt and remain empty when clarification is required. Never emit uncited prose. Never mark the response sufficient while an independent requested detail is absent from coverage.`;
   const streamedClaims = [];
   const rejectedClaims = [];
   let meta = {};
@@ -391,7 +397,11 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
   }
   onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
   return {
-    response: streamedClaims.map((claim) => claim.text).join(' '),
+    response: appendSuggestedFollowUps(
+      streamedClaims.map((claim) => claim.text).join(' '),
+      meta.follow_ups,
+      language,
+    ),
     claims: streamedClaims,
     rejected_claims: rejectedClaims,
     grounded: true,
@@ -2387,6 +2397,7 @@ ${message}`;
       model, apiKey, maxTokens: answerCap, signal,
       promptCacheKey: synthesisPrompt.cache.key,
       recallPackets: evidence.recall_packets || [], allowGeneralKnowledge, onEvent,
+      language,
     });
   }
 
@@ -2513,7 +2524,11 @@ ${message}`;
     // Validation deliberately reconstructs prose from factual claims, which
     // drops non-factual clarification questions. Re-attach only the bounded
     // gap question after claims have passed the fail-closed citation check.
-    response: appendGapClarification(validated.answer, answerPayload.gaps, language),
+    response: appendSuggestedFollowUps(
+      appendGapClarification(validated.answer, answerPayload.gaps, language),
+      answerPayload.follow_ups,
+      language,
+    ),
     claims: validated.claims,
     rejected_claims: validated.rejected_claims,
     grounded: validated.grounded,

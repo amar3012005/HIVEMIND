@@ -465,7 +465,7 @@ export async function startPushWorker() {
     console.error(`[outbox] worker error: ${err.message}`);
   });
 
-  console.error(`[outbox] push worker ready on redis://${host}:${port}/${db} (concurrency=${PUSH_WORKER_CONCURRENCY})`);
+  console.log(`[outbox] push worker ready on redis://${host}:${port}/${db} (concurrency=${PUSH_WORKER_CONCURRENCY})`);
 
   // Initial sweep to recover any rows that survived a restart
   await sweepStuckOutbox();

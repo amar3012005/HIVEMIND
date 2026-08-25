@@ -91,3 +91,25 @@ test('promotion degradation is an explicit terminal memory-generation failure', 
   assert.equal(response.memory_generation_failed, true);
   assert.equal(response.evidence_only_reason, 'promotion_failed');
 });
+
+test('live progress persists tqdm detail in metadata and returns it to pollers', async () => {
+  let written;
+  const existing = { id: 'job', attempt: 1, metadata: { ingest_mode: 'both' } };
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    findFirst: async () => existing,
+    updateMany: async ({ data }) => { written = data; return { count: 1 }; },
+  } } });
+
+  await store.progress('job', 'org', 'embedding', 60, {
+    processed: 8, total: 16, elapsed_ms: 4200, started_at: '2026-08-25T21:46:07.232Z',
+  });
+
+  assert.equal(written.stage, 'embedding');
+  assert.equal(written.progress, 60);
+  assert.deepEqual(written.metadata.progress_detail, {
+    processed: 8, total: 16, elapsed_ms: 4200, started_at: '2026-08-25T21:46:07.232Z',
+  });
+  const response = KnowledgeUploadJobStore.response({ ...existing, status: 'processing', ...written });
+  assert.equal(response.progress_detail.processed, 8);
+  assert.equal(response.progress_detail.total, 16);
+});

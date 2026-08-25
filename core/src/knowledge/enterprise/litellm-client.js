@@ -409,7 +409,8 @@ export function buildModelFallbackChain({ requested = [], policy = null } = {}) 
 // gpt-oss-20b) so a single-model/provider issue can't drop a memory. Returns
 // the first success; throws the last error only if every model fails.
 export async function chatCompletionWithFallback({
-  models = [], model, prefer_truncated_if_more_items = false, honorModelPolicy = true, ...opts
+  models = [], model, prefer_truncated_if_more_items = false, honorModelPolicy = true,
+  fallback_budget_ms = null, ...opts
 } = {}) {
   const requested = (models.length ? models : [model]).filter(Boolean);
   const useCase = /entity|relationship/i.test(opts.feature || '') ? 'entity_linking' : 'ingestion_extraction';
@@ -425,16 +426,47 @@ export async function chatCompletionWithFallback({
   if (!list.length) throw new Error('[llm-fallback] no model(s) provided');
   let lastErr = null;
   let bestTruncated = null;
+  // One budget for the whole chain, not a fresh timeout for every provider.
+  // A fallback that eventually returns HTTP 200 after two minutes is still a
+  // failed interactive ingest dependency. Evidence remains durable, while the
+  // next model gets the remaining bounded budget.
+  const configuredBudget = fallback_budget_ms ?? (/^kb-/i.test(opts.feature || '')
+    ? Number(process.env.KB_LLM_FALLBACK_BUDGET_MS || 30_000)
+    : 0);
+  const deadline = configuredBudget > 0 ? Date.now() + configuredBudget : null;
   for (let i = 0; i < list.length; i += 1) {
     try {
       // A caller may supply the strict Qwen schema for a stable persistence
       // envelope. Do not impose that provider-specific schema on a fallback
       // family; normal json_mode remains enforced there.
       const { response_format, ...withoutSchema } = opts;
-      const completed = await chatCompletion({
+      const remaining = deadline ? deadline - Date.now() : 0;
+      if (deadline && remaining <= 0) {
+        throw new Error(`[llm-fallback] total model budget ${configuredBudget}ms exhausted`);
+      }
+      const attempt = chatCompletion({
         ...(isQwenIngestModel(list[i]) ? opts : withoutSchema),
         model: list[i], respectModelPolicy: false,
       });
+      let completed;
+      if (deadline) {
+        let budgetTimer;
+        try {
+          completed = await Promise.race([
+            attempt,
+            new Promise((_, reject) => {
+              budgetTimer = setTimeout(
+                () => reject(new Error(`[llm-fallback] model ${list[i]} exceeded remaining ${remaining}ms budget`)),
+                remaining,
+              );
+            }),
+          ]);
+        } finally {
+          clearTimeout(budgetTimer);
+        }
+      } else {
+        completed = await attempt;
+      }
       // A provider-confirmed truncated prefix can hold far more grounded items
       // than a later model's syntactically complete but nearly empty response.
       // Dense extraction opts into rejecting that thin completion so its

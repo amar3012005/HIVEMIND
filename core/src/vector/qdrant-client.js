@@ -582,7 +582,7 @@ export class QdrantClient {
         const _out = await amrRecall(_mnemeOrg, searchVector, filter, limit, effectiveScoreThreshold);
         if (timing) timing.vector_search_ms = (timing.vector_search_ms || 0) + (Date.now() - vectorStartedAt);
         if (_out) {
-        console.log('[mneme] recall backend=adapter org=' + _mnemeOrg + ' n=' + _out.length);
+        if (process.env.HM_RECALL_VERBOSE === '1') console.log('[mneme] recall backend=adapter org=' + _mnemeOrg + ' n=' + _out.length);
         return _out;
         }
       } catch (e) {
@@ -598,7 +598,7 @@ export class QdrantClient {
       });
       if (timing) timing.vector_search_ms = (timing.vector_search_ms || 0) + (Date.now() - vectorStartedAt);
       if (mres) {
-        console.log(`[mneme] recall backend=mneme org=${_mnemeOrg} coll=${resolvedCollection} n=${mres.length}`);
+        if (process.env.HM_RECALL_VERBOSE === '1') console.log(`[mneme] recall backend=mneme org=${_mnemeOrg} coll=${resolvedCollection} n=${mres.length}`);
         return mres;
       }
       console.log(`[mneme] recall fallback=qdrant org=${_mnemeOrg} coll=${resolvedCollection}`);

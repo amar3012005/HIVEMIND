@@ -2016,7 +2016,7 @@ async function requireSession(req, res) {
 }
 
 async function getOrgMembership(userId, orgId) {
-  if (!prisma || !userId || !orgId) return null;
+  if (!prisma || !isCanonicalUuid(userId) || !isCanonicalUuid(orgId)) return null;
   return prisma.userOrganization.findUnique({
     where: { userId_orgId: { userId, orgId } },
     include: {
@@ -2032,6 +2032,10 @@ async function getOrgMembership(userId, orgId) {
       },
     },
   });
+}
+
+function isCanonicalUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ''));
 }
 
 function canManageOrg(role) {
@@ -2105,7 +2109,8 @@ async function validateInviteScopes(orgId, teamIds, projectIds) {
 }
 
 async function resolveCurrentOrg(userId, preferredOrgId = null) {
-  if (preferredOrgId) {
+  if (!isCanonicalUuid(userId)) return { org: null, role: null };
+  if (preferredOrgId && isCanonicalUuid(preferredOrgId)) {
     const preferred = await prisma?.userOrganization.findUnique({
       where: { userId_orgId: { userId, orgId: preferredOrgId } },
       include: { org: true },
@@ -6538,7 +6543,8 @@ const server = http.createServer(async (req, res) => {
     }));
 
     // Overlay nango_connections so Nango-finalized OAuth shows as connected
-    console.log(`[v1/connectors] overlay start userId=${current.session.userId} orgId=${current.session.orgId}`);
+    const connectorDebug = process.env.CONNECTOR_OVERLAY_VERBOSE === '1';
+    if (connectorDebug) console.log(`[v1/connectors] overlay start userId=${current.session.userId} orgId=${current.session.orgId}`);
     try {
       if (prisma?.nangoConnection) {
         const NANGO_TO_REGISTRY = {
@@ -6559,7 +6565,7 @@ const server = http.createServer(async (req, res) => {
           where,
           select: { providerKey: true, connectionId: true, connectedAt: true },
         });
-        console.log(`[v1/connectors] overlay where=${JSON.stringify(where)} rows=${nangoRows.length} keys=${nangoRows.map(r => r.providerKey).join(',')}`);
+        if (connectorDebug) console.log(`[v1/connectors] overlay where=${JSON.stringify(where)} rows=${nangoRows.length} keys=${nangoRows.map(r => r.providerKey).join(',')}`);
         const overlayByProvider = {};
         for (const row of nangoRows) {
           const regId = NANGO_TO_REGISTRY[row.providerKey] || row.providerKey;
@@ -6597,7 +6603,7 @@ const server = http.createServer(async (req, res) => {
           });
           promoted++;
         }
-        console.log(`[v1/connectors] overlay promoted=${promoted} providers=${Object.keys(overlayByProvider).join(',')}`);
+        if (connectorDebug) console.log(`[v1/connectors] overlay promoted=${promoted} providers=${Object.keys(overlayByProvider).join(',')}`);
       }
     } catch (nangoErr) {
       console.warn('[v1/connectors] nango overlay failed:', nangoErr.message);

@@ -1826,6 +1826,19 @@ export class RecallRouter {
         );
         explicitSourceDocuments = Array.isArray(fuzzyResolution) ? fuzzyResolution : [];
       }
+      if (explicitSourceDocuments.length === 1) {
+        // Carry the authoritative resolved identity back to chat coverage. The
+        // user's misspelled title was only a lookup hint; once it resolves, the
+        // canonical document id is the source boundary. Otherwise coverage
+        // compares the typo literally, rejects valid evidence, and skips final
+        // synthesis even though recall found the correct file.
+        recallPlan.source = {
+          ...recallPlan.source,
+          document_id: explicitSourceDocuments[0].id,
+          title: explicitSourceDocuments[0].title || recallPlan.source.title,
+          requested: true,
+        };
+      }
       if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
         const fullSource = recallPlan.mode === 'full';
         // Anchor the source windows on the ENTITY, not the raw NL query. The

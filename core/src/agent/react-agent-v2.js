@@ -3395,6 +3395,7 @@ export async function runReactAgentV2({
       operation: intentDecision.operation,
       language: intentDecision.response_language,
       answer_scope: intentDecision.answer_scope || 'bounded',
+      answer_type: intentDecision.answer_type || 'fact',
       response_depth: intentDecision.response_depth || 'standard',
       retrieval_shape: intentDecision.retrieval_shape || 'fact',
       answer_objective: intentDecision.answer_objective || message,

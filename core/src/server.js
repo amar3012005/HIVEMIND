@@ -3164,6 +3164,22 @@ async function countDerivedMemoriesByDocumentIds(documentIds = [], orgId = null)
   }
 }
 
+async function promotionFailureMapByDocumentIds(documentIds = [], orgId = null) {
+  const ids = normalizeScopeIds(documentIds).filter(isUuidLike);
+  if (!ids.length || !prisma?.knowledgeIngestJob) return {};
+  const rows = await prisma.knowledgeIngestJob.findMany({
+    where: {
+      orgId,
+      documentId: { in: ids },
+      status: 'ready',
+      evidenceOnlyReason: 'promotion_failed',
+    },
+    select: { documentId: true },
+    distinct: ['documentId'],
+  });
+  return Object.fromEntries(rows.map((row) => [row.documentId, true]));
+}
+
 function countTopValues(values = [], limit = 5) {
   const counts = new Map();
   for (const value of values) {
@@ -24990,7 +25006,18 @@ ${injectionText}`;
                   offset: remOffset,
                   access: { userId, accessContext },
                 });
-                if (remResult) return jsonResponse(res, remResult);
+                if (remResult) {
+                  const failures = await promotionFailureMapByDocumentIds(
+                    (remResult.documents || []).map((doc) => doc.id), orgId,
+                  );
+                  return jsonResponse(res, {
+                    ...remResult,
+                    documents: (remResult.documents || []).map((doc) => ({
+                      ...doc,
+                      memoryGenerationFailed: failures[doc.id] === true,
+                    })),
+                  });
+                }
                 return jsonResponse(res, { documents: [], pagination: { total: 0, limit: remLimit, offset: remOffset, hasMore: false } });
               } catch (remErr) {
                 return jsonResponse(res, { error: remErr.message }, 500);
@@ -25065,6 +25092,7 @@ ${injectionText}`;
               ]);
 
               const derivedCountMap = await countDerivedMemoriesByDocumentIds(documents.map(doc => doc.id), orgId);
+              const promotionFailures = await promotionFailureMapByDocumentIds(documents.map(doc => doc.id), orgId);
               // The evidence footprint is the UTF-8 size of persisted segments,
               // not the raw upload size. Keep both values distinct for the UI.
               const evidenceByteRows = documents.length
@@ -25086,6 +25114,7 @@ ${injectionText}`;
                 pageCount: Math.max(1, Number(doc.parseMetadata?.pages || doc.parseMetadata?.page_count || 1)),
                 segmentCount: doc._count.segments,
                 promotedCount: derivedCountMap[doc.id] ?? doc._count.memoryLinks,
+                memoryGenerationFailed: promotionFailures[doc.id] === true,
                 evidenceBytes: evidenceBytesByDocumentId.get(doc.id) || 0,
                 sourceBytes: Number(doc.sourceArtifact?.sizeBytes || 0),
                 sourceArtifact: undefined,
@@ -25132,7 +25161,12 @@ ${injectionText}`;
                   || (doc.tags || []).includes(query)
                   || (doc.sourcePlatform || '').toLowerCase().includes(q)
                   || (doc.filename || '').toLowerCase().includes(q));
-                return jsonResponse(res, { results: rMatches.slice(0, limit) });
+                const limited = rMatches.slice(0, limit);
+                const failures = await promotionFailureMapByDocumentIds(limited.map((doc) => doc.id), orgId);
+                return jsonResponse(res, { results: limited.map((doc) => ({
+                  ...doc,
+                  memoryGenerationFailed: failures[doc.id] === true,
+                })) });
               }
               const documents = await prisma.knowledgeDocument.findMany({
                 where: {
@@ -25168,10 +25202,12 @@ ${injectionText}`;
                 }
               });
 
+              const promotionFailures = await promotionFailureMapByDocumentIds(documents.map((doc) => doc.id), orgId);
               const enriched = documents.map(doc => ({
                 ...doc,
                 segmentCount: doc._count.segments,
                 promotedCount: doc._count.memoryLinks,
+                memoryGenerationFailed: promotionFailures[doc.id] === true,
                 _count: undefined
               }));
 

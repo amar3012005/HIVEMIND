@@ -81,3 +81,13 @@ test('legacy response mode falls back to its persisted metadata latch', () => {
   });
   assert.equal(response.ingest_mode, 'evidence');
 });
+
+test('promotion degradation is an explicit terminal memory-generation failure', () => {
+  const response = KnowledgeUploadJobStore.response({
+    id: 'job', status: 'ready', stage: 'ready', progress: 100,
+    ingestMode: 'both', evidenceOnlyReason: 'promotion_failed',
+    segmentCount: 4, promotedCount: 0, memoryIds: [], storageMode: 'hybrid',
+  });
+  assert.equal(response.memory_generation_failed, true);
+  assert.equal(response.evidence_only_reason, 'promotion_failed');
+});

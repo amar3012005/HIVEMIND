@@ -167,6 +167,43 @@ test('evidence mode persists through the durable job and queue metadata', async 
   assert.equal(queued.metadata.ingest_mode, 'evidence');
 });
 
+test('an active upload cannot be force-mutated from evidence to both', async () => {
+  const duplicate = {
+    id: ids.job, userId: ids.user, status: 'processing', processingVersion: 1,
+    ingestMode: 'evidence', metadata: { ingest_mode: 'evidence' },
+  };
+  const deps = dependencies({ duplicate });
+  let queued = false;
+  deps.queue.enqueue = async () => { queued = true; return { queue_job_id: 'queue-1' }; };
+  const req = request();
+  req.metadata = { ingest_mode: 'both' };
+
+  const result = await new KnowledgeUploadService(deps).admit({ ...req, force: true });
+
+  assert.equal(result.status, 409);
+  assert.equal(result.body.code, 'INGEST_MODE_MISMATCH');
+  assert.equal(result.body.requested_ingest_mode, 'both');
+  assert.equal(result.body.actual_ingest_mode, 'evidence');
+  assert.equal(deps.updates.length, 0);
+  assert.equal(queued, false);
+});
+
+test('request metadata is sanitized before durable job creation and queue dispatch', async () => {
+  const deps = dependencies();
+  let queued;
+  deps.queue.enqueue = async (input) => { queued = input; return { queue_job_id: 'queue-1' }; };
+  const req = request();
+  req.metadata = { ingest_mode: 'evidence', source: { citation: 'part\u0000one' }, values: ['a\u0000b'] };
+
+  const result = await new KnowledgeUploadService(deps).admit(req);
+
+  assert.equal(result.ok, true);
+  assert.equal(deps.created[0].metadata.source.citation, 'partone');
+  assert.deepEqual(deps.created[0].metadata.values, ['ab']);
+  assert.equal(queued.metadata.source.citation, 'partone');
+  assert.deepEqual(queued.metadata.values, ['ab']);
+});
+
 test('image uploads reject evidence mode before authorization or enqueue', async () => {
   const deps = dependencies();
   const req = request();
@@ -191,7 +228,8 @@ test('page quota rejection keeps limits intact and returns the canonical contrac
   assert.deepEqual(result.body, {
     error: 'plan_limit_exceeded', code: 'plan_limit_exceeded', message: 'Monthly KB pages limit exceeded',
     resource: 'kbPages', plan: 'free', limit: 20, current: 19, remaining: null,
-    suggested_plan: 'pro', upgrade_url: '/hivemind/app/billing', metric: 'kbPages', estimated_pages: 1,
+    suggested_plan: 'pro', upgrade_url: '/hivemind/app/billing', metric: 'kbPages', current_usage: 19,
+    remaining_capacity: null, estimated_pages: 1, ingest_mode: 'both',
   });
   assert.equal(deps.created.length, 0);
 });
@@ -222,7 +260,8 @@ test('credit exhaustion returns the canonical quota contract without changing th
   assert.deepEqual(result.body, {
     error: 'credits_exhausted', code: 'credits_exhausted', message: 'Monthly credits exhausted',
     resource: 'credits', plan: 'pro', limit: 100, current: 100, remaining: 0,
-    suggested_plan: 'scale', upgrade_url: '/hivemind/app/billing',
+    suggested_plan: 'scale', upgrade_url: '/hivemind/app/billing', metric: 'credits', current_usage: 100,
+    remaining_capacity: 0, estimated_pages: 1, ingest_mode: 'both',
   });
   assert.equal(deps.created.length, 1);
 });

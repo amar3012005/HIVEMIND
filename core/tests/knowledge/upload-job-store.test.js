@@ -33,6 +33,25 @@ test('unique active-upload race reuses the durable winning job', async () => {
   assert.deepEqual(result, { job: winner, created: false });
 });
 
+test('duplicate lookup gives a live source owner priority over newer terminal duplicates', async () => {
+  const active = { id: 'active', status: 'processing' };
+  const calls = [];
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    updateMany: async () => ({ count: 0 }),
+    findFirst: async (query) => {
+      calls.push(query);
+      return query.where.status?.in ? active : { id: 'newer-failed', status: 'failed' };
+    },
+  } } });
+
+  const result = await store.findDuplicate({ orgId: 'org', scopeKey: 'personal:user', checksum: 'a'.repeat(64) });
+  assert.equal(result, active);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].where, {
+    orgId: 'org', scopeKey: 'personal:user', checksum: 'a'.repeat(64), status: { in: ['queued', 'processing'] },
+  });
+});
+
 test('ready responses always expose an authoritative terminal lifecycle', () => {
   const response = KnowledgeUploadJobStore.response({
     id: 'job', status: 'ready', stage: 'promoted', progress: 95,
@@ -53,4 +72,12 @@ test('ready evidence-only responses expose durable intent and zero memories', ()
   assert.equal(response.evidence_only, true);
   assert.equal(response.evidence_only_reason, 'user_selected');
   assert.deepEqual(response.memory_ids, []);
+});
+
+test('legacy response mode falls back to its persisted metadata latch', () => {
+  const response = KnowledgeUploadJobStore.response({
+    id: 'job', status: 'queued', stage: 'queued', progress: 0,
+    metadata: { ingest_mode: 'evidence' }, memoryIds: [], storageMode: 'hybrid',
+  });
+  assert.equal(response.ingest_mode, 'evidence');
 });

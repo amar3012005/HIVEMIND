@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyKnowledgeFile, safeUploadFilename, validateKnowledgeFile } from '../../src/knowledge/upload-contract.js';
+import {
+  classifyKnowledgeFile,
+  safeUploadFilename,
+  sanitizeKnowledgeJson,
+  validateKnowledgeFile,
+  withKnowledgeUploadQuotaDetails,
+} from '../../src/knowledge/upload-contract.js';
 
 test('normalizes hostile filenames and enforces media-specific limits', () => {
   assert.equal(safeUploadFilename('../../secret\u0000.pdf'), 'secret.pdf');
@@ -41,4 +47,33 @@ test('rejects spoofed hm-extract document signatures', () => {
   for (const ext of ['doc', 'docm', 'odt', 'rtf', 'epub']) {
     assert.equal(validateKnowledgeFile({ filename: `sample.${ext}`, bytes: fake.length, buffer: fake }).code, 'FILE_SIGNATURE_MISMATCH');
   }
+});
+
+test('recursively removes JSONB control characters before a job is persisted or queued', () => {
+  const cyclic = { value: 'one\u0000two' };
+  cyclic.self = cyclic;
+  const sanitized = sanitizeKnowledgeJson({
+    'source\u0000id': 'doc\u0000-1',
+    nested: { citation: 'line\u001fitem', binary: Buffer.from('a\u0000b') },
+    list: ['x\u0000y', undefined, Infinity],
+    cyclic,
+  });
+
+  assert.deepEqual(sanitized, {
+    sourceid: 'doc-1',
+    nested: { citation: 'lineitem', binary: 'ab' },
+    list: ['xy', null, null],
+    cyclic: { value: 'onetwo', self: '[Circular]' },
+  });
+});
+
+test('quota details add context without changing the enforced limit fields', () => {
+  const body = withKnowledgeUploadQuotaDetails({ plan: 'free', limit: 100, current: 100, remaining: 0 }, {
+    metric: 'kbPages', estimatedPages: 3, ingestMode: 'both',
+  });
+  assert.deepEqual(body, {
+    plan: 'free', limit: 100, current: 100, remaining: 0,
+    metric: 'kbPages', current_usage: 100, remaining_capacity: 0,
+    estimated_pages: 3, ingest_mode: 'both',
+  });
 });

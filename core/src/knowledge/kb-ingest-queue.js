@@ -32,6 +32,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { normalizeKnowledgeIngestMode, sanitizeKnowledgeJson } from './upload-contract.js';
 
 const require_ = createRequire(import.meta.url);
 
@@ -61,6 +62,24 @@ export function durableQueueJobId(trackerJobId, processingVersion = 1) {
 
 export function isStoredEvidencePromotion(metadata = {}) {
   return metadata?.promotion_existing_evidence === true && !!metadata?.promotion_document_id;
+}
+
+/** The durable job, not a queued JSON payload, owns the upload's mode. */
+export function latchQueuedIngestMode({ durableMode, queuedMode }) {
+  const durable = normalizeKnowledgeIngestMode(durableMode);
+  const queued = normalizeKnowledgeIngestMode(queuedMode);
+  if (!durable.ok || !queued.ok || durable.value !== queued.value) {
+    return { ok: false, expected: durable.ok ? durable.value : null, actual: queued.ok ? queued.value : null };
+  }
+  return { ok: true, value: durable.value };
+}
+
+function unrecoverable(queue, error) {
+  const UnrecoverableError = queue?._bullmq?.UnrecoverableError;
+  if (!UnrecoverableError) return error;
+  const final = new UnrecoverableError(error.message);
+  final.code = error.code;
+  return final;
 }
 
 function tryLoadBullMQ() {
@@ -449,6 +468,14 @@ export class KbIngestQueue {
   async enqueue({ userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId = null, processingVersion = 1 }) {
     await this._ready;
     if (!this.queue) throw new Error('kb-queue unavailable');
+    const normalizedMode = normalizeKnowledgeIngestMode(metadata?.ingest_mode);
+    if (!normalizedMode.ok) {
+      throw Object.assign(new Error('Queued upload has an invalid ingest mode.'), { code: 'INVALID_INGEST_MODE' });
+    }
+    metadata = sanitizeKnowledgeJson({
+      ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+      ingest_mode: normalizedMode.value,
+    });
 
     // Backpressure: global depth + per-org pending cap.
     try {
@@ -494,7 +521,11 @@ export class KbIngestQueue {
   }
 
   async _process(job, token) {
-    const { userId, orgId, filename, contentType, checksum, filePath, metadata, trackerJobId } = job.data;
+    const { userId, orgId, filename, contentType, checksum, filePath, trackerJobId,
+      processingVersion = 1, metadata: queuedMetadata } = job.data;
+    let metadata = sanitizeKnowledgeJson(
+      queuedMetadata && typeof queuedMetadata === 'object' && !Array.isArray(queuedMetadata) ? queuedMetadata : {},
+    );
 
     // Per-org fairness: cap concurrent jobs per tenant; saturated → delayed
     // requeue with jitter (does not consume an attempt).
@@ -509,6 +540,33 @@ export class KbIngestQueue {
 
     try {
       if (this.validateJob) await this.validateJob({ trackerJobId, userId, orgId, metadata });
+      // A durable retry increments processingVersion. A delayed attempt from the
+      // old version must finish harmlessly instead of creating a second document.
+      const durable = this.jobStore?.findOwned
+        ? await this.jobStore.findOwned(trackerJobId, { orgId, userId })
+        : null;
+      if (durable) {
+        if (Number(durable.processingVersion || 1) !== Number(processingVersion || 1)
+          || !['queued', 'processing'].includes(durable.status)) {
+          if (VERBOSE) this.logger.info?.(taskEvent('task.completed', {
+            job_id: trackerJobId, org_id: orgId, stale: true, processing_version: processingVersion,
+          }));
+          return { stale: true };
+        }
+        const latched = latchQueuedIngestMode({
+          durableMode: durable.ingestMode ?? durable.metadata?.ingest_mode,
+          queuedMode: metadata.ingest_mode,
+        });
+        if (!latched.ok) {
+          const error = Object.assign(
+            new Error(`Queued ingest mode ${latched.actual || 'invalid'} does not match durable mode ${latched.expected || 'invalid'}.`),
+            { code: 'INGEST_MODE_MISMATCH' },
+          );
+          await this.jobStore.fail(trackerJobId, orgId, error);
+          throw unrecoverable(this, error);
+        }
+        metadata = sanitizeKnowledgeJson({ ...metadata, ingest_mode: latched.value });
+      }
       await this.jobStore?.progress(trackerJobId, orgId, 'processing', 5, { attempt: job.attemptsMade + 1 });
       const promotionOnly = isStoredEvidencePromotion(metadata);
       const fileBuffer = promotionOnly ? null : fs.readFileSync(filePath); // durable bytes

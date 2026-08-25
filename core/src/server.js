@@ -25196,27 +25196,24 @@ async function writeAuditLog(prisma, {
   ipAddress = null,
   userAgent = null
 }) {
-  try {
-    await prisma.auditLog.create({
-      data: {
-        userId,
-        organizationId: orgId,
-        eventType,
-        action,
-        eventCategory: 'access_management',
-        resourceType,
-        resourceId,
-        metadata,
-        oldValue,
-        newValue,
-        ipAddress,
-        userAgent,
-        createdAt: new Date()
-      }
-    });
-  } catch (err) {
-    console.error('[audit] Failed to write log:', err.message);
-  }
+  // Keep legacy callers on the canonical logger: it validates UUID columns and
+  // retains non-UUID resource/actor ids under metadata.audit_raw_identifiers.
+  // The logger owns failure reporting too, so a rejected write is logged once.
+  const logger = auditLogger || new AuditLogger(prisma);
+  await logger.log({
+    userId,
+    organizationId: orgId,
+    eventType,
+    action,
+    eventCategory: 'access_management',
+    resourceType,
+    resourceId,
+    metadata,
+    oldValue,
+    newValue,
+    ipAddress,
+    userAgent,
+  });
 }
 
 function jsonResponse(res, data, status = 200) {

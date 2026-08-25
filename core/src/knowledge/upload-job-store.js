@@ -1,4 +1,5 @@
 const TERMINAL = new Set(['ready', 'failed', 'dead', 'cancelled']);
+const LIVE_UPLOAD_STATUSES = ['queued', 'processing'];
 
 function isUniqueViolation(error) {
   return error?.code === 'P2002' || error?.code === '23505';
@@ -139,9 +140,16 @@ export class KnowledgeUploadJobStore {
     // orgId is never omitted: the tenant boundary is not negotiable here.
     const where = { orgId, checksum };
     if (scopeKey !== null && scopeKey !== undefined) where.scopeKey = scopeKey;
-    return this._model().findFirst({
-      where, orderBy: { createdAt: 'desc' },
+    // Legacy retries can leave a newer failed row beside an older live row.
+    // Always find the live source owner first; otherwise a second request can
+    // miss the active work and enqueue a competing extraction.
+    const model = this._model();
+    const live = await model.findFirst({
+      where: { ...where, status: { in: LIVE_UPLOAD_STATUSES } },
+      orderBy: { createdAt: 'desc' },
     });
+    if (live) return live;
+    return model.findFirst({ where, orderBy: { createdAt: 'desc' } });
   }
 
   async updateOwned(jobId, orgId, data) {
@@ -239,10 +247,13 @@ export class KnowledgeUploadJobStore {
     if (!job) return null;
     const ready = job.status === 'ready';
     const evidenceOnly = ready && Number(job.segmentCount || 0) > 0 && Number(job.promotedCount || 0) === 0;
+    const ingestMode = job.ingestMode === 'evidence' || job.metadata?.ingest_mode === 'evidence'
+      ? 'evidence'
+      : 'both';
     return {
       job_id: job.id, status: job.status, stage: ready ? 'ready' : job.stage, progress: ready ? 100 : job.progress,
       document_id: job.documentId, memory_ids: job.memoryIds || [], storage_mode: job.storageMode,
-      ingest_mode: job.ingestMode || 'both', evidence_only: evidenceOnly,
+      ingest_mode: ingestMode, evidence_only: evidenceOnly,
       evidence_only_reason: evidenceOnly ? (job.evidenceOnlyReason || 'extraction_yield_zero') : null,
       counts: { pages: job.pageCount, segments: job.segmentCount, candidates: job.candidateCount, memories: job.promotedCount },
       error: job.errorCode ? { code: job.errorCode, message: job.errorMessage } : null,

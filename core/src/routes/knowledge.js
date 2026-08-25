@@ -1,5 +1,5 @@
 import { KnowledgeUploadJobStore } from '../knowledge/upload-job-store.js';
-import { normalizeKnowledgeIngestMode } from '../knowledge/upload-contract.js';
+import { normalizeKnowledgeIngestMode, withKnowledgeUploadQuotaDetails } from '../knowledge/upload-contract.js';
 
 function field(parts, name, fallback = '') {
   return parts.find((part) => part.name === name)?.value ?? fallback;
@@ -43,14 +43,18 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
       const credits = await creditService.getSummary(orgId);
       const minimum = ingestMode.value === 'evidence' ? 1 : 2;
       if (!credits.unlimited && credits.remaining < minimum) {
-        return jsonResponse(res, planLimitBody({
+        const estimatedPages = typeof knowledgeUploadService.estimatePages === 'function'
+          ? await knowledgeUploadService.estimatePages(file).catch(() => null)
+          : null;
+        return jsonResponse(res, withKnowledgeUploadQuotaDetails(planLimitBody({
           allowed: false, status: 402, reason: 'Monthly credits exhausted', plan: credits.plan,
           limit: credits.included, current: credits.used + credits.reserved, remaining: credits.remaining,
-        }, 'credits'), 402);
+        }, 'credits'), { metric: 'credits', estimatedPages, ingestMode: ingestMode.value }), 402);
       }
     }
     const admitted = await knowledgeUploadService.admit({
       userId, orgId, file, targetScope, projectIds, primaryTeamId,
+      ingestMode: ingestMode.value,
       // `force` is an explicit request to reprocess an already-known source
       // (for example evidence-only -> both). It must reach the durable job
       // state machine; otherwise the client receives a misleading "existing"
@@ -70,6 +74,22 @@ export async function handleKnowledgeUploadRoute(ctx = {}) {
       return jsonResponse(res, admitted.body, admitted.status);
     }
     const payload = KnowledgeUploadJobStore.response(admitted.job);
+    if (payload?.ingest_mode !== ingestMode.value) {
+      const mismatch = Object.assign(
+        new Error('The durable upload mode did not match the requested mode.'),
+        { code: 'INGEST_MODE_MISMATCH' },
+      );
+      if (!admitted.existing) {
+        await knowledgeUploadService.jobStore?.fail(admitted.job.id, orgId, mismatch).catch(() => {});
+      }
+      return jsonResponse(res, {
+        error: 'ingest_mode_mismatch', code: 'INGEST_MODE_MISMATCH',
+        message: mismatch.message,
+        requested_ingest_mode: ingestMode.value,
+        actual_ingest_mode: payload?.ingest_mode || null,
+        job_id: admitted.job?.id || null,
+      }, 409);
+    }
     res.setHeader('X-Job-Id', admitted.job.id);
     return jsonResponse(res, { ...payload, existing: !!admitted.existing }, 202);
   } catch (error) {

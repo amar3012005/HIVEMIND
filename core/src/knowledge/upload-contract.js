@@ -8,6 +8,8 @@ export const KB_UPLOAD_LIMITS = Object.freeze({
 
 export const KNOWLEDGE_INGEST_MODES = Object.freeze(['both', 'evidence']);
 
+const JSON_CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
+
 export function normalizeKnowledgeIngestMode(value) {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (!normalized) return { ok: true, value: 'both' };
@@ -15,6 +17,54 @@ export function normalizeKnowledgeIngestMode(value) {
     return { ok: false, code: 'INVALID_INGEST_MODE' };
   }
   return { ok: true, value: normalized };
+}
+
+/**
+ * JSONB and the AMR wire protocol reject C0 control characters. Keep this
+ * boundary recursive so a parser or client-provided nested metadata value
+ * cannot make an otherwise valid upload fail after its evidence is ready.
+ */
+export function sanitizeKnowledgeJson(value, seen = new WeakSet()) {
+  if (typeof value === 'string') return value.replace(JSON_CONTROL_CHARS, '');
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'bigint') return value.toString();
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return undefined;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  if (Buffer.isBuffer(value)) return value.toString('utf8').replace(JSON_CONTROL_CHARS, '');
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const sanitized = sanitizeKnowledgeJson(item, seen);
+      return sanitized === undefined ? null : sanitized;
+    });
+  }
+  if (value && typeof value === 'object') {
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    const result = {};
+    for (const [rawKey, item] of Object.entries(value)) {
+      const sanitized = sanitizeKnowledgeJson(item, seen);
+      if (sanitized !== undefined) result[String(rawKey).replace(JSON_CONTROL_CHARS, '')] = sanitized;
+    }
+    seen.delete(value);
+    return result;
+  }
+  return value;
+}
+
+/** Add upload-specific context without changing quota enforcement semantics. */
+export function withKnowledgeUploadQuotaDetails(body, {
+  metric = 'kbPages', estimatedPages = null, ingestMode = null,
+} = {}) {
+  const pageEstimate = Number(estimatedPages);
+  return {
+    ...(body || {}),
+    metric,
+    current_usage: body?.current ?? null,
+    remaining_capacity: body?.remaining ?? null,
+    estimated_pages: Number.isFinite(pageEstimate) && pageEstimate > 0 ? pageEstimate : null,
+    ingest_mode: ingestMode || null,
+  };
 }
 
 // ACCEPTED FORMATS — the single server-side allowlist. Every entry point checks

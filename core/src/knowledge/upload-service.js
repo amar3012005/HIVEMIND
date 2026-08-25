@@ -1,9 +1,37 @@
 import crypto from 'node:crypto';
 import { authorizeKnowledgeScope } from './upload-authorization.js';
-import { safeUploadFilename, uploadError, validateKnowledgeFile } from './upload-contract.js';
+import {
+  normalizeKnowledgeIngestMode,
+  safeUploadFilename,
+  sanitizeKnowledgeJson,
+  uploadError,
+  validateKnowledgeFile,
+  withKnowledgeUploadQuotaDetails,
+} from './upload-contract.js';
 import { countPages } from './page-count.js';
 import { orgIsRemote } from '../vector/mneme/driver.js';
 import { planLimitBody } from '../billing/limit-response.js';
+
+const ACTIVE_UPLOAD_STATUSES = new Set(['queued', 'processing']);
+const KB_INGEST_VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
+
+function jobIngestMode(job) {
+  const normalized = normalizeKnowledgeIngestMode(job?.ingestMode ?? job?.metadata?.ingest_mode);
+  return normalized.ok ? normalized.value : 'both';
+}
+
+function ingestModeMismatchBody({ job, requestedMode }) {
+  const actualMode = jobIngestMode(job);
+  return {
+    error: 'ingest_mode_mismatch',
+    code: 'INGEST_MODE_MISMATCH',
+    message: `This upload is already ${job?.status || 'processing'} as ${actualMode}; it cannot be changed to ${requestedMode} mid-flight.`,
+    requested_ingest_mode: requestedMode,
+    actual_ingest_mode: actualMode,
+    job_id: job?.id || null,
+    status: job?.status || 'processing',
+  };
+}
 
 export class KnowledgeUploadService {
   constructor({ prisma, queue, jobStore, planEnforcer, creditService = null, storageReady, isRemoteOrg = orgIsRemote }) {
@@ -16,13 +44,22 @@ export class KnowledgeUploadService {
     this.isRemoteOrg = isRemoteOrg;
   }
 
-  async admit({ userId, orgId, file, targetScope, projectIds, primaryTeamId, metadata, force = false }) {
+  async admit({ userId, orgId, file, targetScope, projectIds, primaryTeamId, metadata, force = false,
+    ingestMode: requestedIngestMode = undefined }) {
     const filename = safeUploadFilename(file.filename);
     const validation = validateKnowledgeFile({
       filename, contentType: file.contentType, bytes: file.data?.length, buffer: file.data,
     });
     if (!validation.ok) return { ok: false, ...uploadError(validation.code, { limits: validation.limits }) };
-    const ingestMode = metadata?.ingest_mode === 'evidence' ? 'evidence' : 'both';
+    const requested = normalizeKnowledgeIngestMode(requestedIngestMode ?? metadata?.ingest_mode);
+    if (!requested.ok) return { ok: false, status: 400, body: {
+      error: 'invalid_ingest_mode', code: 'INVALID_INGEST_MODE', message: 'ingestMode must be both or evidence.',
+    } };
+    const ingestMode = requested.value;
+    const safeMetadata = sanitizeKnowledgeJson({
+      ...(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}),
+      ingest_mode: ingestMode,
+    });
     if (validation.kind === 'image' && ingestMode === 'evidence') {
       return { ok: false, status: 400, body: {
         error: 'evidence_mode_unsupported_for_image',
@@ -53,7 +90,9 @@ export class KnowledgeUploadService {
     if (this.planEnforcer) {
       const limit = await this.planEnforcer.checkLimit(orgId, 'kbPages', estimatedPages);
       if (!limit.allowed) return { ok: false, status: limit.status || 402, body: {
-        ...planLimitBody(limit, 'kbPages'), metric: 'kbPages', estimated_pages: estimatedPages,
+        ...withKnowledgeUploadQuotaDetails(planLimitBody(limit, 'kbPages'), {
+          metric: 'kbPages', estimatedPages, ingestMode,
+        }),
       } };
     }
 
@@ -111,8 +150,9 @@ export class KnowledgeUploadService {
     // An evidence-only document already crossed the durable evidence boundary.
     // Asking for `both` later is a promotion of those stored segments, never a
     // second extraction of the original bytes.
+    const existingMode = jobIngestMode(job);
     const promoteExistingEvidence = job?.status === 'ready' && _readyDocLives
-      && job.ingestMode === 'evidence' && ingestMode === 'both';
+      && existingMode === 'evidence' && ingestMode === 'both';
     if (job?.status === 'ready' && _readyDocLives && !force && !promoteExistingEvidence) return { ok: false, status: 409, body: {
       error: 'duplicate_document',
       duplicate: true,
@@ -126,10 +166,21 @@ export class KnowledgeUploadService {
     // path and this path stay one state machine.
     const _reingestDeleted = job?.status === 'ready' && !_readyDocLives;
     if (_reingestDeleted) {
-      console.log(`[upload] re-ingesting ${file.filename}: ready job ${job.id} points at a deleted document`);
+      if (KB_INGEST_VERBOSE) {
+        console.log(`[upload] re-ingesting ${file.filename}: ready job ${job.id} points at a deleted document`);
+      }
     }
-    if (job && job.userId !== userId) {
+    if (job?.userId && job.userId !== userId) {
       return { ok: false, status: 409, body: { error: 'upload_already_processing', status: 'processing' } };
+    }
+    // The source bytes/scope identify one live upload. A second request must
+    // either observe that job or wait for it to become terminal; force cannot
+    // enqueue a second worker while the first may still create a document.
+    if (job && ACTIVE_UPLOAD_STATUSES.has(job.status)) {
+      if (existingMode !== ingestMode) {
+        return { ok: false, status: 409, body: ingestModeMismatchBody({ job, requestedMode: ingestMode }) };
+      }
+      return { ok: true, existing: true, job };
     }
     // `_reingestDeleted` must bypass this guard too: 'ready' is not terminal, so
     // without it a ready-but-deleted job returns existing:true here and the
@@ -138,7 +189,7 @@ export class KnowledgeUploadService {
       return { ok: true, existing: true, job };
     }
 
-    const processingVersion = job ? job.processingVersion + 1 : 1;
+    const processingVersion = job ? Number(job.processingVersion || 1) + 1 : 1;
     // A ready-but-deleted job is reset exactly like a failed one, so both paths
     // share one state machine (see /api/knowledge/jobs/retry).
     if (job) {
@@ -148,7 +199,7 @@ export class KnowledgeUploadService {
       // This turns evidence-only uploads into `both` without duplicate docs.
       const reprocessMetadata = {
         ...(job.metadata && typeof job.metadata === 'object' ? job.metadata : {}),
-        ...metadata,
+        ...safeMetadata,
         project_ids: projectIds,
         primary_team_id: primaryTeamId,
         force_reprocess: !!force,
@@ -156,14 +207,14 @@ export class KnowledgeUploadService {
         ...(promoteExistingEvidence ? {
           promotion_existing_evidence: true,
           promotion_document_id: job.documentId,
-          original_ingest_mode: job.ingestMode,
+          original_ingest_mode: existingMode,
         } : {}),
       };
       await this.jobStore.updateOwned(job.id, orgId, {
         status: 'queued', stage: 'queued', progress: 0, processingVersion,
         attempt: 0, errorCode: null, errorMessage: null, completedAt: null,
         ingestMode,
-        metadata: reprocessMetadata,
+        metadata: sanitizeKnowledgeJson(reprocessMetadata),
       });
       job = await this.jobStore.findOwned(job.id, { orgId, userId });
     } else {
@@ -172,15 +223,18 @@ export class KnowledgeUploadService {
         scopeKey: scope.scopeKey, storageMode, filename,
         contentType: file.contentType || 'application/octet-stream', mediaKind: validation.kind,
         checksum, ingestMode, status: 'queued', stage: 'queued', progress: 0, processingVersion,
-        metadata: { ...metadata, project_ids: projectIds, primary_team_id: primaryTeamId },
+        metadata: sanitizeKnowledgeJson({ ...safeMetadata, project_ids: projectIds, primary_team_id: primaryTeamId }),
       });
       job = admitted.job;
       // A concurrent identical request won the durable insert. It owns the
       // queue operation; returning its job is idempotent and prevents a second
       // persisted file, reservation, and enqueue.
       if (!admitted.created) {
-        if (job.userId !== userId) {
+        if (job?.userId && job.userId !== userId) {
           return { ok: false, status: 409, body: { error: 'upload_already_processing', status: 'processing' } };
+        }
+        if (jobIngestMode(job) !== ingestMode) {
+          return { ok: false, status: 409, body: ingestModeMismatchBody({ job, requestedMode: ingestMode }) };
         }
         return { ok: true, existing: true, job };
       }
@@ -195,7 +249,9 @@ export class KnowledgeUploadService {
       });
       if (!credit.admitted) {
         await this.jobStore.fail(job.id, orgId, Object.assign(new Error('Monthly credits exhausted.'), { code: 'CREDITS_EXHAUSTED' }));
-        return { ok: false, status: 402, body: planLimitBody(credit.check, 'credits') };
+        return { ok: false, status: 402, body: withKnowledgeUploadQuotaDetails(
+          planLimitBody(credit.check, 'credits'), { metric: 'credits', estimatedPages, ingestMode },
+        ) };
       }
     }
 
@@ -205,8 +261,8 @@ export class KnowledgeUploadService {
       const queued = await this.queue.enqueue({
         userId, orgId, filename, contentType: file.contentType, checksum, filePath,
         trackerJobId: job.id, processingVersion,
-        metadata: {
-          ...metadata, media_kind: validation.kind, scope_type: scope.scopeType,
+        metadata: sanitizeKnowledgeJson({
+          ...safeMetadata, media_kind: validation.kind, scope_type: scope.scopeType,
           scope_id: scope.scopeId, project_ids: projectIds, primary_team_id: primaryTeamId,
           force_reprocess: !!force,
           ...(force && job.documentId ? { reprocess_document_id: job.documentId } : {}),
@@ -215,7 +271,7 @@ export class KnowledgeUploadService {
             promotion_document_id: job.documentId,
             original_ingest_mode: 'evidence',
           } : {}),
-        },
+        }),
       });
       if (queued.backpressure) {
         await this.jobStore.fail(job.id, orgId, Object.assign(new Error('Ingestion queue is saturated.'), { code: 'QUEUE_SATURATED' }));
@@ -257,5 +313,15 @@ export class KnowledgeUploadService {
     // and 1 remains the honest floor for the admit check.
     const real = await countPages(file?.data, file?.filename);
     return Number.isFinite(real) && real > 0 ? real : 1;
+  }
+
+  /** A response-only page estimate for admission rejections before a job exists. */
+  async estimatePages(file) {
+    const filename = safeUploadFilename(file?.filename);
+    const validation = validateKnowledgeFile({
+      filename, contentType: file?.contentType, bytes: file?.data?.length, buffer: file?.data,
+    });
+    if (!validation.ok) return null;
+    return this._estimatePages({ ...file, filename }, validation);
   }
 }

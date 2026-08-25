@@ -4,7 +4,7 @@
 #   release-canonical.sh --sha <merged-singulance-main-sha> \
 #                        --services core,tara-grok,tara-deepgram,control-plane,employees \
 #                        [--canary-url https://next.singulancelabs.com/hivemind/app] \
-#                        [--skip-canary] [--dry-run] [--allow-divergence]
+#                        [--skip-canary] [--skip-migrations] [--dry-run] [--allow-divergence]
 #
 # Enforces the canonical parallel workflow:
 #   * one deploy = one canonical SHA = one release manifest
@@ -19,12 +19,13 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; DRY=0; ALLOW_DIVERGENCE=0
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; ALLOW_DIVERGENCE=0
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
   --canary-url) CANARY_URL="$2"; shift 2;;
   --skip-canary) SKIP_CANARY=1; shift;;
+  --skip-migrations) SKIP_MIGRATIONS=1; shift;;
   --dry-run) DRY=1; shift;;
   --allow-divergence) ALLOW_DIVERGENCE=1; shift;;
   *) echo "unknown arg: $1"; exit 2;;
@@ -172,12 +173,22 @@ mv "$OVERRIDE.tmp" "$OVERRIDE"
 # production remains on the previous Core image.
 if [ -n "${REQUESTED[core]:-}" ]; then
   CORE_TAG="hivemind/${IMG[core]}:sha-$SHORT"
-  echo "[migrate] guarded Prisma deploy via $CORE_TAG"
-  "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase migrating:core
-  docker run --rm \
-    --network hivemind_default \
-    --env-file "$ENVF" \
-    "$CORE_TAG" node scripts/prisma-migrate-deploy.mjs
+  if [ "$SKIP_MIGRATIONS" = 1 ]; then
+    LIVE_CORE_SHA=$(docker inspect "${CONTAINER[core]}" --format '{{ index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)
+    [ -n "$LIVE_CORE_SHA" ] || { echo "FATAL: cannot prove the live Core revision for --skip-migrations"; exit 1; }
+    git -C "$REL" cat-file -e "$LIVE_CORE_SHA^{commit}" 2>/dev/null \
+      || { echo "FATAL: live Core revision $LIVE_CORE_SHA is unavailable for schema comparison"; exit 1; }
+    git -C "$REL" diff --quiet "$LIVE_CORE_SHA" "$FULLSHA" -- core/prisma \
+      || { echo "FATAL: core/prisma changed since live Core $LIVE_CORE_SHA; migrations cannot be skipped"; exit 1; }
+    echo "[migrate] skipped after proving core/prisma unchanged since live Core ${LIVE_CORE_SHA:0:12}"
+  else
+    echo "[migrate] guarded Prisma deploy via $CORE_TAG"
+    "$PRESENCE" heartbeat --session "$RELEASE_SESSION_ID" --phase migrating:core
+    docker run --rm \
+      --network hivemind_default \
+      --env-file "$ENVF" \
+      "$CORE_TAG" node scripts/prisma-migrate-deploy.mjs
+  fi
 fi
 
 # ── deploy named hetzner services (--no-deps, override pins the sha image) ──

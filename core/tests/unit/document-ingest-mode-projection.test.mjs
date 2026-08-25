@@ -20,3 +20,10 @@ test('embedded and BYOD document projections preserve unknown mode as null', () 
     assert.match(source, /ingestMode:\s*d\.ingest_mode \?\? d\.metadata\?\.ingest_mode \?\? null/);
   }
 });
+
+test('BYOD schema migration and document upsert persist the immutable mode', () => {
+  const source = read('../../../byod/agent/server.mjs');
+  assert.match(source, /ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS ingest_mode/);
+  assert.match(source, /INSERT INTO knowledge_documents \([^)]*ingest_mode\)/);
+  assert.match(source, /ingest_mode=EXCLUDED\.ingest_mode/);
+});

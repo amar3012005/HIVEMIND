@@ -24,6 +24,53 @@ test('promotion retains complete persisted evidence provenance', () => {
   assert.equal(provenance.embedding_model, 'bge-m3');
 });
 
+test('stored evidence promotion generates memories without invoking extraction and advances document mode', async () => {
+  const documentId = '33333333-3333-4333-8333-333333333333';
+  const updates = [];
+  const service = new DocumentFirstIngestionService({
+    db: {
+      knowledgeDocument: {
+        findFirst: async () => ({
+          id: documentId, userId: '11111111-1111-4111-8111-111111111111', ingestMode: 'evidence',
+          title: 'Evidence report', documentType: 'file', sourcePlatform: 'knowledge_upload',
+          sourceId: 'report-source', sourceUrl: null, documentDate: new Date('2026-01-20T00:00:00.000Z'),
+          tags: ['scope-key:org'], parseMetadata: { scope: 'organization', citation_id: 'DOC-1:S-1' },
+          segments: [{
+            id: '55555555-5555-4555-8555-555555555555', content: 'The verified launch date is 14 September 2028.',
+            segmentIndex: 0, segmentType: 'chunk', metadata: { citation_id: 'DOC-1:S-1', scope: 'organization' },
+          }],
+        }),
+        update: async (input) => { updates.push(input); return input; },
+      },
+    },
+    memoryGraphEngine: {}, smartIngestRouter: null, embeddingService: null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  let extracted = false;
+  service._parseDocument = async () => { extracted = true; throw new Error('must not parse'); };
+  service._promoteMemories = async (input) => {
+    assert.equal(input.documentId, documentId);
+    assert.equal(input.metadata.ingest_mode, 'both');
+    assert.equal(input.metadata.original_ingest_mode, 'evidence');
+    assert.equal(input.segments.length, 1);
+    return { candidates: [{ segmentId: input.segments[0].id }], memories: [{ id: '66666666-6666-4666-8666-666666666666' }] };
+  };
+
+  const result = await service.promoteStoredEvidence({
+    documentId,
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+  });
+
+  assert.equal(extracted, false);
+  assert.equal(result.promotionMode, 'from_existing_evidence');
+  assert.equal(result.promotedCount, 1);
+  assert.deepEqual(result.promotedMemoryIds, ['66666666-6666-4666-8666-666666666666']);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].data.ingestMode, 'both');
+  assert.equal(updates[0].data.parseMetadata.original_ingest_mode, 'evidence');
+});
+
 test('intentional evidence ingest stops after hybrid indexing and never calls memory generation', async () => {
   const calls = [];
   const documentId = '33333333-3333-4333-8333-333333333333';

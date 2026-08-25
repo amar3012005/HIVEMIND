@@ -15,7 +15,7 @@ import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
 import { computeTokenSimilarity } from '../memory/conflict-detector.js';
-import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete, amrKbDocDetail } from '../vector/mneme/driver.js';
 import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
 import { redactParsedDocument } from './content-secret-redaction.js';
 import { applyClaimPatchIfLive } from './claim-structuring-write.js';
@@ -5024,6 +5024,95 @@ Every item must include a non-empty content field and one or more valid support_
    */
   // Alias kept so the guarded call site reads as intent; implementation unchanged.
   async _promoteMemoriesGuarded(args) { return this._promoteMemories(args); }
+
+  /**
+   * Upgrade an evidence-only document using its persisted segments. This is the
+   * only path for evidence -> both: source bytes are neither loaded nor parsed.
+   */
+  async promoteStoredEvidence({ documentId, userId, orgId, metadata = {}, onProgress = null,
+    promotionStrategy = 'upgrade_evidence_to_both' }) {
+    const remote = orgIsRemote(orgId);
+    const detail = remote
+      ? await amrKbDocDetail(orgId, documentId, { userId })
+      : await this.db.knowledgeDocument.findFirst({
+        where: { id: documentId, orgId },
+        select: {
+          id: true, userId: true, ingestMode: true, title: true, documentType: true, sourcePlatform: true,
+          sourceId: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
+          segments: { orderBy: { segmentIndex: 'asc' }, select: {
+            id: true, content: true, segmentIndex: true, segmentType: true, startPage: true,
+            endPage: true, metadata: true, createdAt: true,
+          } },
+        },
+      });
+    if (!detail) throw Object.assign(new Error('Stored evidence document was not found.'), { code: 'DOCUMENT_NOT_FOUND' });
+
+    const document = detail.document || detail;
+    const segments = (detail.segments || []).filter((segment) => String(segment?.content || '').trim());
+    const currentMode = document.ingestMode || document.metadata?.ingest_mode || 'both';
+    if (currentMode !== 'evidence') {
+      throw Object.assign(new Error('Stored document is not evidence-only.'), { code: 'DOCUMENT_NOT_EVIDENCE_ONLY' });
+    }
+    if (!segments.length) throw Object.assign(new Error('Stored evidence document has no promotable segments.'), { code: 'NO_EVIDENCE_SEGMENTS' });
+
+    const promotionMetadata = {
+      ...(document.parseMetadata || document.metadata || {}),
+      ...metadata,
+      filename: document.filename || document.title || metadata.filename || '',
+      documentTitle: document.title || metadata.documentTitle || document.filename || '',
+      document_type: document.documentType || metadata.document_type || null,
+      source_platform: document.sourcePlatform || metadata.source_platform || null,
+      source_id: document.sourceId || metadata.source_id || null,
+      source_url: document.sourceUrl || metadata.source_url || null,
+      document_date: document.documentDate || metadata.document_date || null,
+      tags: document.tags || metadata.tags || [],
+      ingest_mode: 'both',
+      original_ingest_mode: 'evidence',
+    };
+    onProgress?.({ stage: 'generating_memories', progress: 70 });
+    const promoted = await this._promoteMemories({
+      documentId: document.id,
+      userId: document.userId || userId,
+      orgId,
+      segments,
+      metadata: promotionMetadata,
+      promotionStrategy,
+    });
+
+    const promotedAt = new Date().toISOString();
+    if (remote) {
+      await amrKbDoc(orgId, {
+        id: document.id,
+        userId: document.userId || userId,
+        filename: document.filename || document.title || null,
+        contentType: document.contentType || document.content_type || document.documentType || null,
+        status: document.status || document.parseStatus || 'ready',
+        createdAt: document.createdAt || new Date().toISOString(),
+        ingestMode: 'both',
+        metadata: { ...(document.metadata || {}), ...promotionMetadata, promoted_from_evidence_at: promotedAt },
+      });
+    } else {
+      await this.db.knowledgeDocument.update({
+        where: { id: document.id },
+        data: {
+          ingestMode: 'both',
+          parseMetadata: { ...(document.parseMetadata || {}), original_ingest_mode: 'evidence', promoted_from_evidence_at: promotedAt },
+        },
+      });
+    }
+    const memories = (promoted?.memories || []).filter((memory) => memory?.id);
+    onProgress?.({ stage: 'linking_provenance', progress: 92 });
+    return {
+      documentId: document.id,
+      segmentCount: segments.length,
+      candidateCount: Array.isArray(promoted?.candidates) ? promoted.candidates.length : segments.length,
+      promotedCount: memories.length,
+      promotedMemoryIds: memories.map((memory) => memory.id),
+      pages: Number(document.pageCount || 1),
+      evidenceOnlyReason: memories.length ? null : 'memory_generation_yield_zero',
+      promotionMode: 'from_existing_evidence',
+    };
+  }
 
   async _promoteMemories({ documentId, segments, userId, orgId, metadata, promotionStrategy = 'kb_default' }) {
     const candidates = [];

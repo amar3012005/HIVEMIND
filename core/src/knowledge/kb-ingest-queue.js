@@ -59,6 +59,10 @@ export function durableQueueJobId(trackerJobId, processingVersion = 1) {
   return `${String(trackerJobId).replace(/:/g, '-')}-v${Number(processingVersion) || 1}`;
 }
 
+export function isStoredEvidencePromotion(metadata = {}) {
+  return metadata?.promotion_existing_evidence === true && !!metadata?.promotion_document_id;
+}
+
 function tryLoadBullMQ() {
   try {
     const bullmq = require_('bullmq');
@@ -506,7 +510,8 @@ export class KbIngestQueue {
     try {
       if (this.validateJob) await this.validateJob({ trackerJobId, userId, orgId, metadata });
       await this.jobStore?.progress(trackerJobId, orgId, 'processing', 5, { attempt: job.attemptsMade + 1 });
-      const fileBuffer = fs.readFileSync(filePath); // durable bytes
+      const promotionOnly = isStoredEvidencePromotion(metadata);
+      const fileBuffer = promotionOnly ? null : fs.readFileSync(filePath); // durable bytes
       // Canonical front door: file uploads normalize into the IngestEnvelope
       // (source.type='kb'); ingestSource routes document+file → the same
       // ingestKnowledgeDocument pipeline, adding uniform provenance.
@@ -518,7 +523,16 @@ export class KbIngestQueue {
           this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename });
           this.jobStore?.progress(trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0).catch(() => {});
         };
-      const work = this.processUpload
+      const work = promotionOnly
+        ? this.dfi.promoteStoredEvidence({
+          documentId: metadata.promotion_document_id,
+          userId,
+          orgId,
+          metadata: metadata || {},
+          onProgress,
+          promotionStrategy: 'upgrade_evidence_to_both',
+        })
+        : this.processUpload
         ? this.processUpload({ userId, orgId, filename, contentType, fileBuffer, metadata: metadata || {}, onProgress })
         : this.dfi.ingestSource({
             userId, orgId,
@@ -625,7 +639,7 @@ export class KbIngestQueue {
       } else {
         this.logger.info?.(taskEvent('task.completed', _terminal));
       }
-      try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
+      if (filePath) try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };
     } catch (error) {
       const finalAttempt = job.attemptsMade + 1 >= (job.opts?.attempts || ATTEMPTS);

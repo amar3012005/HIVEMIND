@@ -5411,12 +5411,24 @@ Every item must include a non-empty content field and one or more valid support_
         // matter" is not knowable at ingest time because the question has not been asked.
         // Keep every distinct candidate and let cross-window consolidation dedup.
         const _dynamicCap = adaptiveAtomicMemoryBudget(_docChars, extractedCandidates.length);
+        // The evidence lane preserves every searchable segment, so the memory
+        // lane should remain a compact semantic index rather than mirror the
+        // document. Keep the curator adaptive for short/thin documents, but
+        // bound the default durable output to 14 high-salience atomic memories;
+        // the canonical document-summary parent added below makes 15 total. An
+        // explicit deployment override remains available for controlled
+        // backfills; it is parsed and bounded here so a malformed value cannot
+        // accidentally create an unbounded promotion run.
+        const _configuredCuratedCap = Number(process.env.KB_CURATED_MEMORY_CAP);
+        const _curatedCap = Number.isFinite(_configuredCuratedCap) && _configuredCuratedCap > 0
+          ? Math.max(3, Math.min(30, Math.floor(_configuredCuratedCap)))
+          : Math.min(14, _dynamicCap);
         const _tCurate = Date.now();
         // `let`: the duplicate-claim collapse below narrows this list, and every downstream
         // reader (persist pool, 5b relations, counts) must see the narrowed one.
         let curated = await this._curateDocumentClaims(extractedCandidates, {
           docTitle,
-          maxMemories: Number(process.env.KB_CURATED_MEMORY_CAP || 0) || _dynamicCap,
+          maxMemories: _curatedCap,
         });
         // NOTE: a whole-document summary memory ALREADY EXISTS on this path —
         // memory_type 'summary', ~1200 chars of LLM prose, tagged `document-summary` +

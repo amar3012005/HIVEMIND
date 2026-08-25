@@ -72,6 +72,12 @@ function clientForOrg(orgId) {
 // per-call, everything else to Postgres. ONE config value (MNEME_ORGS) drives it.
 let _mnemeProxy = null;
 let _driverConfigured = false;
+// Honest engine state — separate from _driverConfigured, which only means
+// "configuration was attempted." Never conflate "documents exist" with
+// "the native engine is loaded"; getAmrEngineStatus() below is the one place
+// that draws that line, so nothing downstream has to guess.
+let _mnemeEngineLoaded = false;
+let _mnemeLoadError = null;
 
 /**
  * Append connection pool tuning to DATABASE_URL if not already specified.
@@ -120,6 +126,20 @@ async function configureMnemeDriver() {
   if (_driverConfigured) return;
   _driverConfigured = true;
   try {
+    // Forward-only by decision (2026-08-25): organizations.memory_storage_mode
+    // can say 'amr_embedded' for an org that MNEME_ORGS doesn't cover — found
+    // live for 8 existing "Personal" accounts, whose runtime routing silently
+    // fell back to Postgres/hybrid despite the DB declaring .amr. Those 8 are
+    // deliberately left as-is: retroactively flipping them risks a recall gap
+    // (their shard never got the dual-write while mis-routed, and no
+    // Postgres->shard backfill exists — shard-maintenance.js's mirror job runs
+    // the opposite direction). Explicit product decision: don't touch existing
+    // orgs/users, only guarantee correctness for orgs promoted from here on.
+    // That forward guarantee lives at the promotion call sites themselves —
+    // see registerMnemeOrg() in vector/mneme/driver.js, called from
+    // billing/promotion-service.js the instant an org's storageMode is set to
+    // 'amr_embedded' — so a brand-new org is routed immediately, in-process,
+    // with no restart and no backfill risk (it has no prior memories).
     const { loadBinding, MnemeMemoryBackend, MnemeRelationshipBackend, SidecarBackend } = await import('../vector/mneme/amr-store-backend.mjs');
     const bindingPath = process.env.MNEME_BINDING || new URL('../vector/mneme/singulance-amr.linux-x64-gnu.node', import.meta.url).pathname;
     const bind = loadBinding(bindingPath);
@@ -129,10 +149,55 @@ async function configureMnemeDriver() {
       dataRoot: process.env.MNEME_DATA_ROOT || '/app/data/mneme',
       dim: process.env.EMBEDDING_DIMENSION,
     });
+    _mnemeEngineLoaded = true;
+    _mnemeLoadError = null;
   } catch (e) {
     _driverConfigured = false; // allow retry
+    _mnemeEngineLoaded = false;
+    _mnemeLoadError = e.message;
     console.warn('[mneme] driver configure failed, all orgs on Postgres:', e.message);
   }
+}
+
+// Honest engine-state reporting (per product decision 2026-08-25): never let
+// "some .amr data exists on disk" pass for "the engine is active." Three
+// states only, no vague middle ground:
+//   READY       native .amr binding loaded AND a real embedding link is
+//               configured — full semantic .amr recall is actually possible.
+//   DEGRADED    an .amr org is configured (MNEME_ORGS non-empty / BYOD org)
+//               but the native binding failed to load, or no embedding
+//               provider key is present — traffic for that org is served
+//               from Postgres/hybrid instead of its shard, or shard writes
+//               would work but recall can't embed the query. Not a crash;
+//               just not what the org's storage mode promises.
+//   UNAVAILABLE nothing is configured at all — no .amr orgs, no engine
+//               attempted. Nothing is broken; .amr simply isn't in use.
+function hasEmbeddingKeyConfigured() {
+  return Boolean(
+    process.env.LITELLM_API_KEY || process.env.OPENAI_API_KEY
+    || process.env.OPENROUTER_API_KEY || process.env.MISTRAL_API_KEY,
+  );
+}
+export function getAmrEngineStatus() {
+  // Read the LIVE org set via anyMnemeOrg(), not a re-parse of process.env —
+  // registerMnemeOrg() (driver.js) mutates the in-memory set the instant an
+  // org is promoted, without touching MNEME_ORGS itself, so an env-string
+  // check here would keep reporting UNAVAILABLE/stale for an org this same
+  // process is already actively routing to .amr.
+  const anyOrgConfigured = anyMnemeOrg() || _driverConfigured;
+  if (!anyOrgConfigured && !_mnemeEngineLoaded) {
+    return { state: 'UNAVAILABLE', engineLoaded: false, embeddingsConfigured: hasEmbeddingKeyConfigured(), reason: 'no .amr org configured' };
+  }
+  const embeddingsConfigured = hasEmbeddingKeyConfigured();
+  if (_mnemeEngineLoaded && embeddingsConfigured) {
+    return { state: 'READY', engineLoaded: true, embeddingsConfigured: true, reason: null };
+  }
+  return {
+    state: 'DEGRADED',
+    engineLoaded: _mnemeEngineLoaded,
+    embeddingsConfigured,
+    reason: !_mnemeEngineLoaded ? (_mnemeLoadError || 'native .amr binding not loaded') : 'no embedding provider key configured',
+  };
 }
 
 // Resolve the underlying client for the CURRENT org context (per call): a self-host org → its customer

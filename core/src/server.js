@@ -165,7 +165,7 @@ loadLocalEnv(path.join(PROJECT_ROOT, '.env'));
 const { MemoryEngine } = await import('./engine.local.js');
 const { resolveAuthoritySnapshot } = await import('./icarus/authority-snapshot.js');
 const { getGroqClient } = await import('../config/groq.js');
-const { getPrismaClient, ensureTenantContext, enterOrgContext, runWithOrg } = await import('./db/prisma.js');
+const { getPrismaClient, ensureTenantContext, enterOrgContext, runWithOrg, getAmrEngineStatus } = await import('./db/prisma.js');
 const { captureLogs, streamDockerLogs, getLogBuffer } = await import('./log-streamer.js');
 
 // Start capturing logs for this container (hm-core)
@@ -4694,6 +4694,10 @@ const server = http.createServer(async (req, res) => {
         entity_extraction: process.env.ENABLE_ENTITY_EXTRACTION === 'true',
         topic_state: process.env.ENABLE_TOPIC_STATE === 'true',
       },
+      // Honest .amr/ICARUS engine status — READY/DEGRADED/UNAVAILABLE, never
+      // just "documents exist so it must be active." See getAmrEngineStatus()
+      // in db/prisma.js for what each state actually means.
+      amr_engine: getAmrEngineStatus(),
     }, criticalOk ? 200 : 503);
   }
 

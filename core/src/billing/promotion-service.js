@@ -2,6 +2,7 @@ import crypto from 'crypto';
 
 import { getPlan } from './plans.js';
 import { normalizeLimitOverrides } from './entitlements.js';
+import { registerMnemeOrg } from '../vector/mneme/driver.js';
 
 const ACCOUNT_PROFILES = {
   personal: { hostingMode: 'managed', storageMode: 'amr_embedded' },
@@ -225,7 +226,15 @@ export async function redeemPromotion({ prisma, tx: suppliedTx = null, orgId, us
       accountType: version.accountType, hostingMode: version.hostingMode, storageMode: version.storageMode,
       commercialTerms: version.commercialTerms, effectiveFrom: now, transitionReason: 'promotion_redemption' } });
     await tx.organizationEntitlement.create({ data: { orgId, source: 'promotion', phase: 'grant', planId: version.basePlan, limits: version.limits, effectiveFrom: now, effectiveUntil: endsAt } });
-    if (applyProfile) await tx.organization.update({ where: { id: orgId }, data: { plan: version.basePlan, accountType: version.accountType, hostingMode: version.hostingMode, memoryStorageMode: version.storageMode, subscriptionStatus: 'active', trialEndsAt: endsAt } });
+    if (applyProfile) {
+      await tx.organization.update({ where: { id: orgId }, data: { plan: version.basePlan, accountType: version.accountType, hostingMode: version.hostingMode, memoryStorageMode: version.storageMode, subscriptionStatus: 'active', trialEndsAt: endsAt } });
+      // Forward-only fix: route this org to .amr the moment it's promoted, not
+      // just when someone next restarts the process and re-reads MNEME_ORGS.
+      // Safe here specifically because a freshly redeemed org has no prior
+      // memories to backfill. See driver.js registerMnemeOrg() for why
+      // existing mis-routed orgs are deliberately NOT touched by this path.
+      if (version.storageMode === 'amr_embedded') registerMnemeOrg(orgId);
+    }
     const termsSnapshot = { promotion: publicPromotion(promotion, version), grant_ends_at: endsAt?.toISOString() || null };
     const redemption = await tx.promotionRedemption.create({ data: { promotionId: promotion.id, promotionVersionId: version.id, entitlementGrantId: grant.id, orgId, redeemedByUserId: userId,
       emailHash: digestPromotionValue(email), codeHint: promotion.codeHint, termsSnapshot, requestId } });
@@ -264,6 +273,7 @@ export async function grantPromotionToOrganization({ prisma, promotionId, orgId,
       commercialTerms: version.commercialTerms, effectiveFrom: now, transitionReason: 'platform_admin_grant' } });
     await tx.organizationEntitlement.create({ data: { orgId, source: 'promotion', phase: 'grant', planId: version.basePlan, limits: version.limits, effectiveFrom: now, effectiveUntil: endsAt } });
     await tx.organization.update({ where: { id: orgId }, data: { plan: version.basePlan, accountType: version.accountType, hostingMode: version.hostingMode, memoryStorageMode: version.storageMode, subscriptionStatus: 'active', trialEndsAt: endsAt } });
+    if (version.storageMode === 'amr_embedded') registerMnemeOrg(orgId);
     const redemption = await tx.promotionRedemption.create({ data: { promotionId, promotionVersionId: version.id, entitlementGrantId: grant.id, orgId,
       redeemedByUserId: owner.userId, emailHash: digestPromotionValue(`admin:${orgId}`), codeHint: promotion.codeHint,
       termsSnapshot: { promotion: publicPromotion(promotion, version), grant_ends_at: endsAt?.toISOString() || null, issued_by: 'platform_admin' }, requestId } });

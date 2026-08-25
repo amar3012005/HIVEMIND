@@ -80,6 +80,31 @@ export function isMnemeOrg(orgId) {
   if (c === '*' || c.has(orgId)) return true;
   return orgIsRemote(orgId); // BYOD orgs (agent-registered) are .amr orgs too
 }
+
+// Forward-only fix (2026-08-25): orgConfig() only ever reads MNEME_ORGS once
+// at first use, and nothing ever wrote a newly-promoted org's id back into
+// it — promotion-service.js sets organizations.memory_storage_mode =
+// 'amr_embedded' at redemption/grant time, but the routing gate never found
+// out, so every such org silently ran on Postgres/hybrid instead of the
+// .amr storage its own account profile declared. Found live: 8 real
+// accounts already affected — deliberately NOT touched here (retroactively
+// flipping them risks a recall gap, since their shard dual-write never ran
+// during the time they were mis-routed, and product decided existing
+// orgs/users are out of scope — see the comment in prisma.js's
+// configureMnemeDriver()). A BRAND NEW org promoted to amr_embedded has no
+// such risk — it has no memories yet, so registering it
+// the moment it's promoted is safe and closes the gap for every org going
+// forward. Call this from the same transaction/request that sets
+// memoryStorageMode, not from a batch job.
+export function registerMnemeOrg(orgId) {
+  if (!orgId) return;
+  const c = orgConfig();
+  if (c === '*') return; // already covers everything
+  if (c.has(orgId)) return;
+  c.add(orgId);
+  // eslint-disable-next-line no-console
+  console.log(`[mneme] registered newly-promoted amr_embedded org=${orgId} for .amr routing (in-process, this instance)`);
+}
 export function anyMnemeOrg() {
   const c = orgConfig();
   return c === '*' || c.size > 0;

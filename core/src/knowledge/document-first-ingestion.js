@@ -2086,8 +2086,10 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         // KB_EXTRACT_ESCALATION_MODEL='' (disable) — default gpt-oss-120b.
         const _escModel = process.env.KB_EXTRACT_ESCALATION_MODEL ?? 'openai/gpt-oss-120b';
         const _primaryModel = options.model || process.env.KB_UNIFIED_MODEL || process.env.MEMORY_PROCESSOR_MODEL || '';
-        if (best.length < Math.ceil(_capacity * 0.5)
-            && !_inputUnusable && _capacity >= 2 && !options._escalated
+        const _needsEscalation = best.length === 0
+          || (_capacity >= 2 && best.length < Math.ceil(_capacity * 0.5));
+        if (_needsEscalation
+            && !_inputUnusable && !options._escalated
             && _escModel && _escModel !== _primaryModel) {
           try {
             const _esc = await this._extractUnified(window, { ...options, maxFacts, compact: false, model: _escModel, _escalated: true });
@@ -5861,7 +5863,24 @@ Every item must include a non-empty content field and one or more valid support_
               + `check parse tier, segment count, and the curator cap`);
           }
         } catch { /* observability must never break ingest */ }
-        return { candidates: targets.map((t) => ({ segmentId: t.segmentId, content: t.content, reason: 'unified_source' })), memories: uFacts, documentParentId: uDocParent, coverage: { ...(curated._coverage || {}), relations_written: _docRelWritten, memories_promoted: uFacts.length } };
+        const promotionFailed = uFacts.length === 0;
+        return {
+          // Candidates are extracted, grounded claims. `targets` are merely LLM
+          // input windows and reporting them as candidates made a zero-yield
+          // extraction look like "1 candidate, 0 memories".
+          candidates: extractedCandidates,
+          memories: uFacts,
+          documentParentId: uDocParent,
+          coverage: {
+            ...(curated._coverage || {}),
+            relations_written: _docRelWritten,
+            memories_promoted: uFacts.length,
+            ...(promotionFailed ? {
+              promotion_failed: true,
+              promotion_error: 'No grounded durable claims were produced.',
+            } : {}),
+          },
+        };
       }
 
       let factObjs = [];

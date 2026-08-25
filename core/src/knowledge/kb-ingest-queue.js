@@ -58,6 +58,19 @@ export function knowledgeIngestEvent(phase, fields = {}) {
   });
 }
 
+/** Return terminal-safe warnings without leaking provider error details. */
+export function terminalIngestWarnings(coverage = {}) {
+  const warnings = Array.isArray(coverage?.warnings) ? [...coverage.warnings] : [];
+  const hasPromotionFailureWarning = warnings.some((warning) => warning?.code === 'MEMORY_PROMOTION_FAILED');
+  if (coverage?.promotion_failed && !hasPromotionFailureWarning) {
+    warnings.push({
+      code: 'MEMORY_PROMOTION_FAILED',
+      message: 'Memory generation failed; evidence is ready.',
+    });
+  }
+  return warnings;
+}
+
 export function durableQueueJobId(trackerJobId, processingVersion = 1) {
   return `${String(trackerJobId).replace(/:/g, '-')}-v${Number(processingVersion) || 1}`;
 }
@@ -688,7 +701,7 @@ export class KbIngestQueue {
         evidence: Number(result.segmentCount || 0),
         memories: Number(result.promotedCount || 0),
         embedding: _embedding,
-        warnings: Array.isArray(result?.coverage?.warnings) ? result.coverage.warnings : [],
+        warnings: terminalIngestWarnings(result?.coverage),
         duration_ms: Math.max(0, Date.now() - Number(job.timestamp || Date.now())),
       };
       if (_ee && Number(_ee.failed) > 0) {

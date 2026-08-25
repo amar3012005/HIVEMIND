@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { KbIngestQueue, durableQueueJobId, isStoredEvidencePromotion, knowledgeIngestEvent, latchQueuedIngestMode } from '../../src/knowledge/kb-ingest-queue.js';
+import {
+  KbIngestQueue,
+  durableQueueJobId,
+  isStoredEvidencePromotion,
+  knowledgeIngestEvent,
+  latchQueuedIngestMode,
+  terminalIngestWarnings,
+} from '../../src/knowledge/kb-ingest-queue.js';
 
 test('queue lifecycle events use the canonical knowledge.ingest namespace', () => {
   const event = JSON.parse(knowledgeIngestEvent('started', { job_id: 'job-1' }));
@@ -9,6 +16,22 @@ test('queue lifecycle events use the canonical knowledge.ingest namespace', () =
   assert.equal(event.task, 'knowledge.ingest');
   assert.equal(event.job_id, 'job-1');
   assert.throws(() => knowledgeIngestEvent('progress'), /Unsupported knowledge ingest lifecycle phase/);
+});
+
+test('terminal completion exposes a sanitized warning when promotion fails after evidence persists', () => {
+  const warnings = terminalIngestWarnings({
+    warnings: [{ code: 'TABLES_SKIPPED', message: 'Table extraction was skipped.' }],
+    promotion_failed: true,
+    promotion_error: 'provider rejected API key sk-private-value',
+  });
+  const terminalEvent = JSON.parse(knowledgeIngestEvent('completed', { warnings }));
+
+  assert.equal(terminalEvent.event, 'knowledge.ingest.completed');
+  assert.deepEqual(terminalEvent.warnings, [
+    { code: 'TABLES_SKIPPED', message: 'Table extraction was skipped.' },
+    { code: 'MEMORY_PROMOTION_FAILED', message: 'Memory generation failed; evidence is ready.' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(terminalEvent), /sk-private-value/);
 });
 
 test('durable BullMQ IDs never contain the forbidden colon separator', () => {

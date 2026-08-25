@@ -42,7 +42,7 @@ export function createNativePlanTool() {
         title: nullableString, content: nullableString, memory_type: nullableString,
         scope: { type: ['string', 'null'], enum: ['personal', 'project', 'team', 'organization', null], description: 'Explicit destination stated by the user. MUST be null when the user did not state a destination; the server owns the scope chooser.' }, project_id: nullableString,
         tags: { type: 'array', items: { type: 'string' }, maxItems: 12 }, entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
-        event_time: nullableString, profile_fields: { type: 'array', maxItems: 12, description: 'For update_profile, every changed caller-owned identity field. A location, role, name or biography change MUST appear here.', items: {
+        event_time: nullableString, profile_fields: { type: 'array', maxItems: 12, description: 'For update_profile, every changed caller-owned identity field. A location, role, name or biography change MUST appear here. Example: "I live in Hannover, Germany" becomes [{"field":"location","value":"Hannover, Germany"}].', items: {
           type: 'object', additionalProperties: false, properties: { field: { type: 'string' }, value: { type: 'string' } }, required: ['field', 'value'],
         } },
         preferences: { type: 'array', items: { type: 'string' }, maxItems: 12 },

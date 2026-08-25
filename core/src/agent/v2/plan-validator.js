@@ -136,6 +136,28 @@ function deriveMemoryTitle(memory) {
   return content ? content.replace(/[.!?]+$/, '').slice(0, 120) : null;
 }
 
+function recoverCanonicalProfileUpdate(plan, repairs) {
+  if (plan.operation !== 'update_profile' || Object.keys(plan.memory?.profile_fields || {}).length
+    || (plan.memory?.preferences || []).length) return;
+
+  // The planner already performs the language-dependent interpretation and
+  // emits a canonical English mutation query. Recover only that structured
+  // field/value pair; never infer profile data from arbitrary user prose.
+  const query = String(plan.steps?.[0]?.query || '').trim();
+  const match = query.match(/^update (?:the )?user(?:'s)?\s+([a-z][a-z0-9_.-]{0,63})\s+to\s+(.+)$/i);
+  if (!match) return;
+  const field = match[1].toLowerCase();
+  const value = match[2].trim().replace(/[.!?]+$/, '').trim();
+  const allowed = new Set(['name', 'location', 'role', 'company', 'language', 'timezone']);
+  if (!allowed.has(field) || !value) return;
+  plan.memory ||= {
+    title: null, content: null, memory_type: null, scope: null, project_id: null,
+    tags: [], entities: [], event_time: null, profile_fields: {}, preferences: [],
+  };
+  plan.memory.profile_fields[field] = value;
+  repairs.push(`memory.profile_fields.${field}.canonical_query`);
+}
+
 function reconcileSemanticOperation(plan, repairs) {
   const exactSource = plan.references.source?.title || plan.references.source?.document_id;
   if (plan.time.semantics === 'event_range' && (!plan.time.start || !plan.time.end)) {
@@ -254,6 +276,7 @@ export function validateNativePlanResult(input) {
       }
     }
     reconcileSemanticOperation(plan, semanticRepairs);
+    recoverCanonicalProfileUpdate(plan, semanticRepairs);
     validateSemantics(plan);
     const expectedCapability = capabilityForOperation(plan.operation);
     const expectedTool = NATIVE_OPERATION_TO_TOOL[plan.operation];

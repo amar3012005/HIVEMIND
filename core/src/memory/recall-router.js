@@ -779,7 +779,7 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   const retainedCandidates = rankedCandidates.slice(0, 15);
   const retainedMemoryIds = new Set(retainedCandidates.filter((c) => c.kind === 'memory').map((c) => c.memory_id));
   const retainedEvidenceIds = new Set(retainedCandidates.filter((c) => c.kind === 'evidence').map((c) => c.segment_id));
-  console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> retained=${retainedCandidates.length}`);
+  if (process.env.HM_RECALL_VERBOSE === '1') console.log(`[recall-hybrid] pool=${pool.length} deduped=${deduped.length} mem_in=${memories.length} ev_in=${evidence.length} -> retained=${retainedCandidates.length}`);
   return {
     // Keep backing rows for every retained mixed candidate. The progressive
     // view still exposes only ranks 1-5 initially, but can now reveal the true

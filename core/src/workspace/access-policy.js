@@ -1,5 +1,7 @@
 import { effectiveRoles, hasPermission } from '../auth/permissions.js';
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function notFound(message = 'Resource not found') {
   const error = new Error(message);
   error.status = 404;
@@ -7,7 +9,7 @@ export function notFound(message = 'Resource not found') {
 }
 
 export async function getActiveOrganizationMembership(prisma, { orgId, userId }) {
-  if (!orgId || !userId) return null;
+  if (!UUID_PATTERN.test(String(orgId || '')) || !UUID_PATTERN.test(String(userId || ''))) return null;
   return prisma.userOrganization.findUnique({
     where: { userId_orgId: { userId, orgId } },
     // Admin-facing callers need the resolved organization's canonical slug to

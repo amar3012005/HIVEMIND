@@ -1690,7 +1690,7 @@ function routesFor(ctx) {
       // widened for the access join, not to change the response contract.
       const results = emitKbResults(hits, allowed).slice(0, kbLimit);
       // The retirement evidence, recorded per real query rather than per synthetic sample.
-      console.log(`[kb-recall] org=${String(org).slice(0, 8)} pool=${poolLimit} qdrant_new=${laneA} `
+      if (process.env.HM_RECALL_VERBOSE === '1') console.log(`[kb-recall] org=${String(org).slice(0, 8)} pool=${poolLimit} qdrant_new=${laneA} `
         + `shard_new=${laneB} allowed=${allowed.size} returned=${results.length}`);
       return { results };
     },

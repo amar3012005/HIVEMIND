@@ -153,6 +153,68 @@ test('intentional evidence ingest stops after hybrid indexing and never calls me
   }
 });
 
+test('parser output is sanitized before document metadata and segment creation', async () => {
+  const captured = {};
+  const db = {
+    sourceArtifact: {
+      upsert: async () => ({ id: '44444444-4444-4444-8444-444444444444', payload: {} }),
+      update: async () => ({}),
+    },
+    knowledgeDocument: {
+      findFirst: async () => null,
+      upsert: async ({ create }) => {
+        captured.document = create;
+        return { id: '33333333-3333-4333-8333-333333333333' };
+      },
+    },
+    knowledgeSegment: { findMany: async () => [], count: async () => 1 },
+    memoryEvidenceLink: { count: async () => 0 },
+  };
+  const service = new DocumentFirstIngestionService({
+    db, memoryGraphEngine: {}, smartIngestRouter: null, embeddingService: null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  service._parseDocument = async () => ({
+    success: true,
+    text: 'Atlas\u0000 launch',
+    markdown: '# Atlas\u0000\nLaunch',
+    wordCount: 2,
+    pages: 1,
+    engine: 'test-parser',
+    metadata: { nested: { citation_id: 'cite\u0000-1' } },
+    tables: [],
+  });
+  service._createSegments = async (input) => {
+    captured.parse = input.parseResult;
+    captured.scope = input.docScope;
+    return [{
+      id: '55555555-5555-4555-8555-555555555555',
+      content: 'Atlas launch', segmentIndex: 0, startPage: 1, metadata: {},
+    }];
+  };
+  service._embedSegments = async () => ({ total: 1, embedded: 1, failed: 0, healed: 0 });
+  service._promoteMemoriesGuarded = async () => { throw new Error('promotion must not run'); };
+
+  const oldSkip = process.env.KB_SKIP_UNCHANGED;
+  process.env.KB_SKIP_UNCHANGED = '0';
+  try {
+    await service.ingestKnowledgeDocument({
+      userId: '11111111-1111-4111-8111-111111111111',
+      orgId: '22222222-2222-4222-8222-222222222222',
+      filename: 'atlas.txt', fileBuffer: Buffer.from('Atlas launch'), contentType: 'text/plain',
+      metadata: { ingest_mode: 'evidence', scope: 'organization', nested: { label: 'safe\u0000label' } },
+    });
+  } finally {
+    if (oldSkip === undefined) delete process.env.KB_SKIP_UNCHANGED;
+    else process.env.KB_SKIP_UNCHANGED = oldSkip;
+  }
+
+  assert.equal(captured.parse.text.includes('\u0000'), false);
+  assert.equal(captured.parse.metadata.nested.citation_id, 'cite-1');
+  assert.equal(captured.document.parseMetadata.nested.citation_id, 'cite-1');
+  assert.equal(captured.scope.scope, 'organization');
+});
+
 test('intentional evidence ingest fails closed when semantic indexing is incomplete', async () => {
   const db = {
     sourceArtifact: {

@@ -18,6 +18,7 @@ import { computeTokenSimilarity } from '../memory/conflict-detector.js';
 import { orgIsRemote, amrKbDoc, amrKbSegment, amrKbProvenance, amrKbTables, amrKbDocDelete, amrKbDocDetail } from '../vector/mneme/driver.js';
 import { contextualEmbedInputForSegment } from './contextual-embed-input.js';
 import { redactParsedDocument } from './content-secret-redaction.js';
+import { sanitizeKnowledgeJson } from './upload-contract.js';
 import { applyClaimPatchIfLive } from './claim-structuring-write.js';
 
 // RESIDENCY GUARD — KB ingestion persists raw document content as knowledge_segments + the document
@@ -3079,7 +3080,8 @@ Every item must include a non-empty content field and one or more valid support_
     // Remote (self-host) orgs: KB writes route to the agent — assertKbAllowedForOrg is lifted.
     // All other paths (enterprise, connector) still block via their own assertKbAllowedForOrg calls.
     if (!orgIsRemote(opts?.orgId)) assertKbAllowedForOrg(opts?.orgId);
-    const { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
+    let { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
+    metadata = sanitizeKnowledgeJson(metadata);
     const ingestMode = metadata.ingest_mode === 'evidence' ? 'evidence' : 'both';
     const forceReprocess = metadata.force_reprocess === true;
     const emit = (stage, progress, extra = {}) => { try { onProgress?.({ stage, progress, ...extra }); } catch { /* never let telemetry break ingest */ } };
@@ -3137,7 +3139,10 @@ Every item must include a non-empty content field and one or more valid support_
     // reusable authentication material once, before classification, retained
     // source text, segments, embeddings, extraction prompts, or memories see it.
     // Applying this centrally keeps evidence-only and both-mode behavior equal.
-    const parseResult = redactParsedDocument(rawParseResult);
+    // The parser is an untrusted boundary. Sanitize its complete structured
+    // result before it can reach JSONB, segment metadata, embeddings, or a
+    // remote agent. This applies identically to evidence-only and both mode.
+    const parseResult = redactParsedDocument(sanitizeKnowledgeJson(rawParseResult));
     const documentClassification = metadata.document_type
       ? { type: safeDocumentType(metadata.document_type), confidence: 1 }
       : await classifyKnowledgeDocument(parseResult.text || parseResult.markdown, filename);
@@ -3730,7 +3735,9 @@ Every item must include a non-empty content field and one or more valid support_
   async ingestEnterpriseDocument(opts) {
     if (opts?.orgId && currentOrg() !== opts.orgId) return runWithOrg(opts.orgId, () => this.ingestEnterpriseDocument(opts)); // residency
     assertKbAllowedForOrg(opts?.orgId);
-    const { userId, orgId, filename, fileBuffer, contentType, schema, metadata = {} } = opts;
+    let { userId, orgId, filename, fileBuffer, contentType, schema, metadata = {} } = opts;
+    metadata = sanitizeKnowledgeJson(metadata);
+    schema = sanitizeKnowledgeJson(schema || {});
     const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
     // Step 1: Store raw artifact
@@ -3760,7 +3767,7 @@ Every item must include a non-empty content field and one or more valid support_
     });
 
     // Step 2: Parse with Docling
-    const parseResult = await this._parseDocument(fileBuffer, contentType, filename);
+    const parseResult = sanitizeKnowledgeJson(await this._parseDocument(fileBuffer, contentType, filename));
 
     // Step 3: Create parent knowledge document
     const parentDoc = await this.db.knowledgeDocument.create({
@@ -4426,6 +4433,10 @@ Every item must include a non-empty content field and one or more valid support_
   }
 
   async _createSegments({ documentId, userId, orgId, parseResult, docScope = {} }) {
+    // Defend direct callers as well as ingestKnowledgeDocument's parser
+    // boundary. All segment writers below now receive safe content and JSONB.
+    parseResult = sanitizeKnowledgeJson(parseResult || {});
+    docScope = sanitizeKnowledgeJson(docScope || {});
     const remote = orgIsRemote(orgId);
     const hybridChunks = parseResult?.metadata?.hybridChunks;
     const hasChunks = Array.isArray(hybridChunks) && hybridChunks.length > 0;

@@ -34,6 +34,15 @@ const MAX_OPEN = Number(process.env.MNEME_EMBEDDED_MAX_OPEN || 64);
 const DATA_ROOT = process.env.MNEME_DATA_ROOT || '/app/data/mneme';
 const RUNTIME_PROGRESS_VERBOSE = String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true';
 const MEMORY_INVENTORY_LAYERS = ['memory', 'cognitive'];
+const PROTOCOL_VERSION = 'memory-box.v1';
+const SCHEMA_VERSION = 2;
+const AGENT_RELEASE = process.env.AGENT_RELEASE || process.env.RELEASE_SHA || 'embedded';
+const AGENT_CAPABILITIES = Object.freeze([
+  'memory.recall', 'memory.lexical', 'memory.hydrate', 'memory.inventory', 'memory.inventory.total',
+  'evidence.recall', 'evidence.lexical', 'evidence.hydrate', 'evidence.inventory',
+  'graph.read', 'relationship.read', 'provenance.read', 'document.ingest-mode',
+  'vector.status', 'vector.pending', 'vector.repair',
+]);
 
 // `/v1/list` and `/v1/stats` are the memory inventory contract. Evidence has
 // dedicated KB endpoints, so callers cannot turn evidence into memories by
@@ -1044,6 +1053,15 @@ function routesFor(ctx) {
 
   return {
     // ── memory + relationships (amr) ──────────────────────────────────────────────────────────
+    '/v1/capabilities': async () => ({
+      ok: true,
+      protocol_version: PROTOCOL_VERSION,
+      schema_version: SCHEMA_VERSION,
+      agent_release: AGENT_RELEASE,
+      storage_mode: 'amr_embedded',
+      vector_dimension: DIM,
+      capabilities: AGENT_CAPABILITIES,
+    }),
     '/v1/write': async (b) => {
       const r = b.record || {};
       if (!r.id) return { ok: false, error: 'record.id required' };

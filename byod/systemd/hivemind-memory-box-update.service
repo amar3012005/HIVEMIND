@@ -1,0 +1,14 @@
+[Unit]
+Description=Check and apply a signed HIVEMIND Memory Box agent release
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hivemind-memory-box update
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

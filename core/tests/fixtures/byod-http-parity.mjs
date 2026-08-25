@@ -29,6 +29,13 @@ async function call(path, body, customHeaders = headers) {
 const health = await fetch(`${base}/health`).then(async (response) => ({ status: response.status, payload: await response.json() }));
 assert.equal(health.status, 200);
 assert.equal(health.payload.org, org);
+const negotiated = await call('/v1/capabilities', {});
+assert.equal(negotiated.status, 200);
+assert.equal(negotiated.payload.protocol_version, 'memory-box.v1');
+for (const capability of [
+  'memory.inventory', 'memory.inventory.total', 'evidence.inventory', 'graph.read',
+  'provenance.read', 'document.ingest-mode', 'vector.status', 'vector.pending', 'vector.repair',
+]) assert.ok(negotiated.payload.capabilities.includes(capability), `missing capability ${capability}`);
 
 const wrongToken = await call('/v1/stats', {}, { ...headers, authorization: 'Bearer wrong-token' });
 assert.equal(wrongToken.status, 401);

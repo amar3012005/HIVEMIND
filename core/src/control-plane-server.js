@@ -3812,7 +3812,7 @@ const server = http.createServer(async (req, res) => {
   // A self-hosted DATA box validates its API key here → learns its org; then registers its tunnel
   // endpoints (Postgres + Qdrant). We record them in the shared registry file the core reads, so core
   // routes that org's memory data to the customer's box. Global user/org info stays in central PG.
-  if ((pathname === '/v1/selfhost/enroll' || pathname === '/v1/selfhost/register') && req.method === 'POST') {
+  if ((pathname === '/v1/selfhost/enroll' || pathname === '/v1/selfhost/register' || pathname === '/v1/selfhost/report') && req.method === 'POST') {
     const body = await parseBody(req).catch(() => null);
     const apiKey = (body?.apiKey || '').toString();
     if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
@@ -3822,6 +3822,48 @@ const server = http.createServer(async (req, res) => {
     const orgId = rec.orgId;
     if (pathname === '/v1/selfhost/enroll') {
       return jsonResponse(res, { ok: true, orgId });
+    }
+    if (pathname === '/v1/selfhost/report') {
+      const release = String(body.release || '').trim();
+      const protocolVersion = String(body.protocol_version || '').trim();
+      const schemaVersion = Number(body.schema_version);
+      const lastSuccessAt = new Date(body.last_success_at || '');
+      const capabilities = Array.isArray(body.capabilities)
+        ? [...new Set(body.capabilities.map((item) => String(item || '').trim()).filter(Boolean))].sort()
+        : [];
+      if (!/^[a-zA-Z0-9._-]{1,80}$/.test(release)
+          || !/^[a-zA-Z0-9._-]{1,64}$/.test(protocolVersion)
+          || !Number.isInteger(schemaVersion) || schemaVersion < 1
+          || capabilities.length > 64
+          || capabilities.some((item) => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(item))
+          || !Number.isFinite(lastSuccessAt.getTime())) {
+        return jsonResponse(res, { error: 'invalid Memory Box release report' }, 400);
+      }
+      const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+      try {
+        const fs = await import('node:fs');
+        let reg = {};
+        try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
+        const existing = reg[orgId];
+        if (!existing?.url) return jsonResponse(res, { error: 'no agent registered for this organization' }, 409);
+        reg[orgId] = {
+          ...existing,
+          releaseStatus: {
+            release,
+            protocolVersion,
+            schemaVersion,
+            capabilities,
+            lastSuccessAt: lastSuccessAt.toISOString(),
+            rollbackAvailable: body.rollback_available === true,
+            rollbackRelease: String(body.rollback_release || '').slice(0, 80) || null,
+            reportedAt: new Date().toISOString(),
+          },
+        };
+        writeJsonAtomically(regFile, reg);
+        return jsonResponse(res, { ok: true, orgId });
+      } catch (error) {
+        return jsonResponse(res, { error: `release report write failed: ${error.message}` }, 500);
+      }
     }
     // register: record the customer's tunnel endpoints into the shared registry file (defaults to the
     // shared core↔control volume — the file existing is what activates self-host; no env flip needed).
@@ -3851,12 +3893,14 @@ const server = http.createServer(async (req, res) => {
       const fs = await import('node:fs');
       let reg = {};
       try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
+      const existing = reg[orgId] || {};
       reg[orgId] = {
         url: (body.agentUrl || body.instanceUrl || '').replace(/\/$/, ''), // hm-agent http (.amr self-host, Model B); empty for hybrid
         token: body.agentToken || '',
         pgUrl: body.pgUrl || '',                          // customer Postgres (via tunnel)
         qdrantUrl: (body.qdrantUrl || '').replace(/\/$/, ''), // customer Qdrant (via tunnel)
         kind: 'selfhost',
+        ...(existing.releaseStatus ? { releaseStatus: existing.releaseStatus } : {}),
       };
       writeJsonAtomically(regFile, reg);
     } catch (e) {

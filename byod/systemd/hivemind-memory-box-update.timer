@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic signed HIVEMIND Memory Box updates
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

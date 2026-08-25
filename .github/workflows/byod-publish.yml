@@ -12,7 +12,14 @@ on:
     # stale, without /v1/kb-lexical and without any document-scope enforcement, while the
     # embedded agent (which rides core deploys) had both.
     branches: [singulance-main, main, master, feat/mneme-foundation]
-    paths: ['byod/**']
+    paths:
+      - 'byod/**'
+      - 'scripts/stage-byod-bundle.sh'
+      - 'scripts/storage-manifest.mjs'
+      - 'scripts/storage-restore-drill.sh'
+      - 'scripts/publish-byod.sh'
+      - 'scripts/check-byod-sync.sh'
+      - '.github/workflows/byod-publish.yml'
   workflow_dispatch: {}   # allow manual re-publish
 
 permissions:

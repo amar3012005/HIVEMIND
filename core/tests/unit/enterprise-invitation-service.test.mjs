@@ -37,7 +37,7 @@ describe('EnterpriseInvitationService', () => {
     assert.equal(created.plaintextCode, 'HM-EXPLICIT1');
   });
 
-  it('creates a fixed Scale-equivalent commercial onboarding profile without accepting arbitrary caps', () => {
+  it('creates a Scale-equivalent onboarding profile with an explicit, bounded invite allowance', () => {
     const input = normalizeEnterpriseInvitationInput({
       company_name: 'Example GmbH', recipient_email: 'Owner@Example.com',
       account_type: 'enterprise_managed', storage_mode: 'hybrid', onboarding_days: 14,
@@ -50,6 +50,16 @@ describe('EnterpriseInvitationService', () => {
     assert.deepEqual(input.onboardingLimits, getPlan('scale').limits);
     assert.equal(input.onboardingLimits.monthlyCredits, 1_000_000);
     assert.equal(input.onboardingLimits.meetingMinutesPerMonth, 500);
+    assert.equal(input.onboardingLimits.maxUsers, 1);
+    const teamInput = normalizeEnterpriseInvitationInput({
+      company_name: 'Example GmbH', recipient_email: 'team@example.com',
+      account_type: 'enterprise_managed', storage_mode: 'hybrid', max_invites: 7,
+    });
+    assert.equal(teamInput.onboardingLimits.maxUsers, 8);
+    assert.equal(teamInput.configSnapshot.onboarding_max_invites, 7);
+    assert.throws(() => normalizeEnterpriseInvitationInput({
+      company_name: 'Example', recipient_email: 'owner@example.com', account_type: 'enterprise_managed', storage_mode: 'hybrid', max_invites: -1,
+    }), /max_invites/);
     assert.throws(() => normalizeEnterpriseInvitationInput({
       company_name: 'Example', recipient_email: 'owner@example.com', account_type: 'personal',
     }), /enterprise invitation requires an enterprise account type/);

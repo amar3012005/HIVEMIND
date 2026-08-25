@@ -47,11 +47,23 @@ export function enterpriseInvitationEmailDigest(value) {
   return invitationDigest('email', normalizedEmail(value));
 }
 
-export function enterpriseOnboardingLimits() {
+const MAX_ENTERPRISE_ONBOARDING_INVITES = 10_000;
+
+export function normalizeEnterpriseOnboardingMaxInvites(value, { defaultValue = 0 } = {}) {
+  if (value == null || value === '') return defaultValue;
+  const maxInvites = Number(value);
+  if (!Number.isSafeInteger(maxInvites) || maxInvites < 0 || maxInvites > MAX_ENTERPRISE_ONBOARDING_INVITES) {
+    throw new Error(`max_invites must be a whole number between 0 and ${MAX_ENTERPRISE_ONBOARDING_INVITES}`);
+  }
+  return maxInvites;
+}
+
+export function enterpriseOnboardingLimits(maxInvites = 0) {
   // Clone so an invitation remains an immutable snapshot while its active
   // entitlement is Scale-equivalent, never an accidental unlimited Enterprise
-  // allocation.
-  return { ...getPlan('enterprise_onboarding').limits };
+  // allocation. maxUsers includes the owner; the admin-facing max_invites
+  // value is therefore intentionally one less than this entitlement cap.
+  return { ...getPlan('enterprise_onboarding').limits, maxUsers: maxInvites + 1 };
 }
 
 function asFutureDate(value, fallbackDays, now) {
@@ -85,7 +97,8 @@ export function normalizeEnterpriseInvitationInput(input = {}, now = new Date())
   const recipientEmail = normalizedEmail(input.recipient_email || input.recipientEmail);
   const expiresAt = asFutureDate(input.invitation_expires_at || input.invitationExpiresAt, DEFAULT_ENTERPRISE_INVITATION_DAYS, now);
   const days = onboardingDays(input.onboarding_days || input.onboardingDays);
-  const limits = enterpriseOnboardingLimits();
+  const maxInvites = normalizeEnterpriseOnboardingMaxInvites(input.max_invites ?? input.maxInvites);
+  const limits = enterpriseOnboardingLimits(maxInvites);
   const workspaceName = text(input.workspace_name || input.workspaceName, 255);
   const welcomeMessage = text(input.welcome_message || input.welcomeMessage, 4_000);
   const privateNotes = text(input.private_notes || input.privateNotes, 4_000);
@@ -108,6 +121,8 @@ export function normalizeEnterpriseInvitationInput(input = {}, now = new Date())
       storage_mode: account.storageMode,
       onboarding_days: days,
       onboarding_plan: 'enterprise_onboarding',
+      onboarding_max_invites: maxInvites,
+      onboarding_max_users: limits.maxUsers,
       onboarding_limits: limits,
       fallback_action: 'manual_review',
     },
@@ -124,6 +139,8 @@ function publicStatus(invitation, now = new Date()) {
 
 export function publicEnterpriseInvitation(invitation, now = new Date()) {
   if (!invitation) return null;
+  const maxUsers = Number(invitation.onboardingLimits?.maxUsers);
+  const maxInvites = Number.isSafeInteger(maxUsers) && maxUsers >= 1 ? maxUsers - 1 : 0;
   return {
     id: invitation.id,
     company_name: invitation.companyName,
@@ -137,6 +154,8 @@ export function publicEnterpriseInvitation(invitation, now = new Date()) {
     onboarding_plan: 'enterprise_onboarding',
     onboarding_plan_name: getPlan('enterprise_onboarding').name,
     onboarding_limits: invitation.onboardingLimits,
+    max_invites: maxInvites,
+    max_users: maxInvites + 1,
     status: publicStatus(invitation, now),
     delivery_status: invitation.deliveryStatus,
     last_delivery_error: invitation.lastDeliveryError,
@@ -163,6 +182,7 @@ export function publicEnterpriseInvitationPreview(invitation, now = new Date()) 
     storage_mode: invitation.storageMode,
     onboarding_plan: 'enterprise_onboarding',
     onboarding_plan_name: getPlan('enterprise_onboarding').name,
+    max_invites: Math.max(0, Number(invitation.onboardingLimits?.maxUsers || 1) - 1),
     invitation_expires_at: invitation.invitationExpiresAt,
   };
 }
@@ -303,6 +323,75 @@ export async function extendEnterpriseInvitation({ prisma, invitationId, expires
   });
   if (updated.count !== 1) throw new Error('invitation unavailable');
   return prisma.enterpriseInvitation.findUnique({ where: { id: invitationId } });
+}
+
+// Changes the invitation snapshot for a draft/sent invitation and, if it has
+// already created an onboarding tenant, publishes a new immutable entitlement
+// version plus updates the effective time-row. The invite API therefore sees
+// the new capacity immediately; this is not a UI-only setting.
+export async function updateEnterpriseInvitationMaxInvites({ prisma, invitationId, maxInvites, now = new Date() }) {
+  const normalizedMaxInvites = normalizeEnterpriseOnboardingMaxInvites(maxInvites);
+  return prisma.$transaction(async (tx) => {
+    const invitation = await tx.enterpriseInvitation.findUnique({ where: { id: invitationId } });
+    if (!invitation) throw new Error('invitation unavailable');
+    const limits = enterpriseOnboardingLimits(normalizedMaxInvites);
+    const snapshot = {
+      ...(invitation.configSnapshot && typeof invitation.configSnapshot === 'object' ? invitation.configSnapshot : {}),
+      onboarding_plan: 'enterprise_onboarding',
+      onboarding_max_invites: normalizedMaxInvites,
+      onboarding_max_users: limits.maxUsers,
+      onboarding_limits: limits,
+    };
+    const updated = await tx.enterpriseInvitation.update({ where: { id: invitation.id }, data: {
+      onboardingLimits: limits,
+      configSnapshot: snapshot,
+    } });
+
+    let entitlementVersion = null;
+    if (invitation.orgId && invitation.status === 'redeemed') {
+      const grant = await tx.entitlementGrant.findFirst({
+        where: { orgId: invitation.orgId, source: 'enterprise_invitation', status: 'active', startsAt: { lte: now }, OR: [{ endsAt: null }, { endsAt: { gt: now } }] },
+        orderBy: { startsAt: 'desc' },
+      });
+      if (grant) {
+        const latest = await tx.entitlementVersion.findFirst({ where: { grantId: grant.id }, orderBy: { version: 'desc' } });
+        const isAlreadyCurrent = latest?.planId === 'enterprise_onboarding'
+          && Number(latest?.limits?.maxUsers) === limits.maxUsers;
+        if (!isAlreadyCurrent) {
+          entitlementVersion = await tx.entitlementVersion.create({ data: {
+            grantId: grant.id,
+            version: (latest?.version || 0) + 1,
+            planId: 'enterprise_onboarding',
+            limits,
+            accountType: invitation.accountType,
+            hostingMode: invitation.hostingMode,
+            storageMode: invitation.storageMode,
+            commercialTerms: {
+              ...(latest?.commercialTerms && typeof latest.commercialTerms === 'object' ? latest.commercialTerms : {}),
+              invitation_id: invitation.id,
+              max_invites: normalizedMaxInvites,
+              max_users: limits.maxUsers,
+            },
+            effectiveFrom: now,
+            effectiveUntil: grant.endsAt,
+            transitionReason: 'enterprise_invitation_max_invites_updated',
+          } });
+        }
+        await tx.organizationEntitlement.updateMany({ where: {
+          orgId: invitation.orgId,
+          source: 'enterprise_invitation',
+          phase: 'onboarding',
+          effectiveFrom: { lte: now },
+          OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: now } }],
+        }, data: { limits } });
+      }
+    }
+    return {
+      invitation: publicEnterpriseInvitation(updated, now),
+      entitlementVersion,
+      appliedToActiveTenant: Boolean(invitation.orgId && invitation.status === 'redeemed'),
+    };
+  });
 }
 
 export async function activateEnterpriseRunway({ tx, orgId, offer, now = new Date() }) {

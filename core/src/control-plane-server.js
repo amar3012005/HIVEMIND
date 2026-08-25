@@ -63,6 +63,7 @@ import {
   revokeEnterpriseInvitation,
   rotateEnterpriseInvitationSecrets,
   normalizeEnterpriseInvitationInput,
+  updateEnterpriseInvitationMaxInvites,
 } from './billing/enterprise-invitation-service.js';
 import {
   publicAccessApplication,
@@ -3568,7 +3569,7 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, { invitation: publicEnterpriseInvitation(invitation), audit: auditRows, entitlement_grants: grants });
   }
 
-  const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(preview|send|resend|revoke|extend|rotate-code|code-copied)$/i);
+  const adminInvitationAction = pathname.match(/^\/admin\/api\/platform\/invitations\/([0-9a-f-]{36})\/(preview|send|resend|revoke|extend|rotate-code|code-copied|update-max-invites)$/i);
   if (adminInvitationAction && req.method === 'POST') {
     const operator = getPlatformAdminSession(req);
     if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
@@ -3608,6 +3609,13 @@ const server = http.createServer(async (req, res) => {
         await audit({ eventType: 'commercial.enterprise_invitation_extended', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
           metadata: { operator: operator.operator, session_id: operator.sessionId, invitation_expires_at: updated.invitationExpiresAt }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
         return jsonResponse(res, { invitation: publicEnterpriseInvitation(updated) });
+      }
+      if (action === 'update-max-invites') {
+        const updated = await updateEnterpriseInvitationMaxInvites({ prisma, invitationId, maxInvites: body.max_invites });
+        await audit({ eventType: 'commercial.enterprise_invitation_max_invites_updated', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
+          metadata: { operator: operator.operator, session_id: operator.sessionId, max_invites: updated.invitation.max_invites, max_users: updated.invitation.max_users, applied_to_active_tenant: updated.appliedToActiveTenant, entitlement_version: updated.entitlementVersion?.version || null },
+          ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+        return jsonResponse(res, { invitation: updated.invitation, applied_to_active_tenant: updated.appliedToActiveTenant, entitlement_version: updated.entitlementVersion?.version || null });
       }
       if (action === 'code-copied') {
         await audit({ eventType: 'commercial.enterprise_invitation_code_copied', eventCategory: 'billing', action: 'read', resourceType: 'enterprise_invitation', resourceId: invitationId,

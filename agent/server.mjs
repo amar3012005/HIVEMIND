@@ -37,6 +37,18 @@ const QCOLL = `org_${ORG}`.replace(/[^a-zA-Z0-9]/g, '_');
 
 function die(m) { console.error(`[hm-agent] ${m}`); process.exit(1); }
 
+function sanitizeJson(value) {
+  if (typeof value === 'string') return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(sanitizeJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [sanitizeJson(key), sanitizeJson(item)]));
+  }
+  return value;
+}
+
 // ── Postgres (rows + lexical) ───────────────────────────────────────────────────────────────────
 const { default: Pg } = await import('pg');
 // Pin the session to the agent's OWN schema `hm` so it never collides with leftover tables (e.g. a
@@ -898,7 +910,7 @@ const routes = {
   // ── KB layer (self-host) — documents + evidence segments live on the agent, never central ──
   // Upsert a knowledge document row.
   '/v1/kb-doc': async (b) => {
-    const d = b.doc || {};
+    const d = sanitizeJson(b.doc || {});
     if (!d.id) return { ok: false, error: 'doc.id required' };
     await pg.query(
       `INSERT INTO knowledge_documents (id, org_id, user_id, filename, content_type, status, checksum, metadata, created_at)
@@ -912,7 +924,7 @@ const routes = {
 
   // Upsert one evidence segment: row + vector (layer='segment' in the shared Qdrant collection).
   '/v1/kb-segment': async (b) => {
-    const s = b.segment || {};
+    const s = sanitizeJson(b.segment || {});
     if (!s.id || !s.documentId) return { ok: false, error: 'segment.id + documentId required' };
     await pg.query(
       `INSERT INTO knowledge_segments (id, org_id, user_id, document_id, content, content_hash, segment_type,

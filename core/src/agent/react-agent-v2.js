@@ -29,12 +29,12 @@
 import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js';
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
-import { projectAdaptiveRankedMemoryEvidence, projectRankedMemoryFallback } from './memory-evidence-projector.js';
+import { projectRankedMemoryFallback } from './memory-evidence-projector.js';
 import { appendGapClarification, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
 import { deriveAnswerContextStatus, normalizeAnswerCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
-import { buildSynthesisFallbackChain, chooseSynthesisModel, hasGroundingEvidence, isCandidateSynthesisAcceptable, isFailClosedSynthesisResponse, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
+import { chooseSynthesisModel, hasGroundingEvidence, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
 import { buildRecallIntentContext, fallbackRecallQueries, normalizeRecallOptimization } from './chat-query-optimizer.js';
 import { buildProjectionCacheKey, getSharedChatProjectionCache } from './chat-cag-cache.js';
 import { citationIdForEvidence, citationIdForMemory, ensureMemoryCitationPackets } from './chat-evidence-contract.js';
@@ -127,7 +127,6 @@ const RETRIEVAL_BUDGET_MS = Number(process.env.HIVEMIND_AGENT_RETRIEVAL_BUDGET_M
 // independent fallback exists precisely so one queued route can be abandoned.
 // Keep this above measured normal fact synthesis (roughly 1-5s) while bounding
 // the observed 53s provider tail.
-const SYNTHESIS_ATTEMPT_TIMEOUT_MS = Number(process.env.HIVEMIND_SYNTHESIS_ATTEMPT_TIMEOUT_MS || 12_000);
 
 // Model split:
 //   • structured intent planning uses Gemini 2.5 Flash-Lite;
@@ -145,8 +144,6 @@ const QUERY_OPTIMIZER_MODEL = process.env.CHAT_QUERY_OPTIMIZER_MODEL || DEFAULT_
 // never retrieves, reranks, plans, or executes tools; it only synthesizes the
 // already-authorized evidence packet, so connector and approval behavior stay
 // unchanged. Operators can still override it per deployment.
-const FINAL_FALLBACK_MODEL = process.env.HIVEMIND_AGENT_FINAL_FALLBACK_MODEL
-  || 'nvidia/nemotron-3.5-lightning:nitro';
 // The caller-selected model is reserved for user-facing synthesis below.
 const INTENT_MODEL = process.env.CHAT_INTENT_MODEL || process.env.HIVEMIND_AGENT_INTENT_MODEL || DEFAULT_CHAT_PLANNER_MODEL;
 
@@ -1976,54 +1973,21 @@ export async function answerStep({ message, history, evidence, plan, language, a
       _projectedMemories = await getSharedChatProjectionCache().get(projectionCacheKey);
       if (ctx?._trace) ctx._trace.cag = { phase: 'projection-only', projection: _projectedMemories ? 'hit' : 'miss', key_version: 2 };
     }
-    const embed = ctx?._embedEvidence || (async (texts) => {
-      const { getEmbedService } = await import('../embeddings/factory.js');
-      return getEmbedService().embed(texts);
-    });
-    // Semantic passage projection is valuable for a small focused window.  On
-    // a detailed/comprehensive window it can create a second large embedding
-    // workload after recall has already selected the relevant ranks.  Deliver
-    // the complete fitting rows plus rank-preserving coverage excerpts there
-    // instead: no extra provider round trip, no timeout, and no prefix-only
-    // loss of late details.  This is governed by evidence volume, not request
-    // wording or a language-specific rule.
-    const semanticProjectionMaxRows = Math.max(1, Number(process.env.HIVEMIND_SEMANTIC_PROJECTION_MAX_ROWS || 5));
-    const semanticProjectionMaxChars = Math.max(1000, Number(process.env.HIVEMIND_SEMANTIC_PROJECTION_MAX_CHARS || 7000));
     const selectedProjectionChars = _selectedMemories.reduce((sum, memory) => sum + String(memory?.content || '').length, 0);
-    const requiresBroadEvidenceDelivery = ['detailed', 'comprehensive'].includes(plan.response_depth);
-    const useSemanticProjection = !requiresBroadEvidenceDelivery
-      && _selectedMemories.length <= semanticProjectionMaxRows
-      && selectedProjectionChars <= semanticProjectionMaxChars;
-    if (!_projectedMemories && useSemanticProjection) {
-      const timeoutMs = Number(process.env.HIVEMIND_EVIDENCE_PROJECTION_TIMEOUT_MS || 3500);
-      let timer;
-      try {
-        _projectedMemories = await Promise.race([
-          projectAdaptiveRankedMemoryEvidence({
-            query: _projectionQuery,
-            memories: _selectedMemories,
-            totalBudget: projectionBudget,
-            lowerRankBudget: _contentBudget,
-            embed,
-          }),
-          new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error('semantic evidence projection timed out')), timeoutMs);
-          }),
-        ]);
-      } finally {
-        clearTimeout(timer);
-      }
-      if (projectionCacheKey) await getSharedChatProjectionCache().set(projectionCacheKey, _projectedMemories);
-    }
+    // Unified recall has already embedded the canonical query and performed
+    // the one mixed rerank. Re-embedding selected passages here turned five
+    // recalled memories into two additional provider batches. Preserve the
+    // authoritative ranking and project excerpts deterministically instead.
     if (!_projectedMemories) {
       _projectedMemories = projectRankedMemoryFallback(_selectedMemories, {
         totalBudget: projectionBudget,
         lowerRankBudget: _contentBudget,
       });
+      if (projectionCacheKey) await getSharedChatProjectionCache().set(projectionCacheKey, _projectedMemories);
     }
     if (ctx?._trace) {
       ctx._trace.evidence_projection = {
-        mode: useSemanticProjection ? 'semantic' : 'rank-preserving-coverage',
+        mode: 'rank-preserving-coverage',
         memories: _selectedMemories.length,
         input_chars: selectedProjectionChars,
         output_chars: _projectedMemories.reduce((sum, item) => sum + String(item?.excerpt || '').length, 0),
@@ -2415,7 +2379,8 @@ ${message}`;
   // contract despite a non-empty packet, give it one bounded repair pass over
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
-  if ((!validated.claims.length || coverageIncomplete)
+  if (String(process.env.HIVEMIND_SYNTHESIS_REPAIR_ENABLED || 'false').toLowerCase() === 'true'
+      && (!validated.claims.length || coverageIncomplete)
       && initialContextStatus !== 'query_mismatch' && hasGroundedPacketEvidence(evidence)) {
     const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation or request-completion contract. Use the same final evidence only; do not retrieve again. The planner classified this request as ${completionRequirement}. Decompose every independent requested detail, cover every supported detail, and explicitly mark unsupported details in coverage and gaps. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
     // PHASE 1 — cheaper repair, correctly scoped. The repair call is a FRESH,
@@ -3216,21 +3181,10 @@ export async function runReactAgentV2({
       timezone: ctx.timezone || ctx.accessContext?.timezone || 'UTC', now: new Date().toISOString(),
     });
     if (nativeV2Mode === 'serve') {
-      try {
-        intentParsed = await nativeV2Module.parseNativeTurnV2(await nativeV2Input());
-      } catch (nativeV2Error) {
-        // Compatibility fallback is permitted only before execution or a write.
-        // The current progressive planner remains the rapid recovery path while
-        // V2 is canaried. The trace makes the downgrade explicit.
-        console.warn(`[chat:native-v2] planner fallback: ${nativeV2Error.message}`);
-        intentParsed = await (await import('./chat-progressive-router.js')).parseChatIntentProgressive({
-          message, history, language, apiKey, signal: abortCtrl.signal, useTools: false,
-        });
-        intentParsed.decision = {
-          ...intentParsed.decision,
-          _native_v2_fallback: nativeV2Error.message,
-        };
-      }
+      // One turn owns one planner request. Provider failover belongs to the
+      // Cloudflare route; invoking the progressive planner here paid for a
+      // second LLM decision and could execute a different plan.
+      intentParsed = await nativeV2Module.parseNativeTurnV2(await nativeV2Input());
     } else {
       if (nativeV2Mode === 'shadow') {
         void nativeV2Input()
@@ -3996,88 +3950,12 @@ export async function runReactAgentV2({
       apiKey, signal: abortCtrl.signal, ctx, allowGeneralKnowledge, preloadedProfileContext,
       streamValidated: streamAnswer, onEvent,
     };
-    const synthesisModels = buildSynthesisFallbackChain({
-      served: answerModel,
-      requested: requestedAnswerModel,
-      finalFallback: FINAL_FALLBACK_MODEL,
-    });
     let synthesisPasses = 0;
-    const synthesizeWithFallback = async (input, { validateCandidate = true } = {}) => {
-      let lastError = null;
-      const attemptModels = [...new Set([answerModel, ...synthesisModels])];
-      for (let index = 0; index < attemptModels.length; index += 1) {
-        const candidateModel = attemptModels[index];
-        try {
-          synthesisPasses += 1;
-          const attemptSignal = AbortSignal.any([
-            input.signal,
-            AbortSignal.timeout(Math.max(1_000, SYNTHESIS_ATTEMPT_TIMEOUT_MS)),
-          ].filter(Boolean));
-          // Only the primary gets the provider's validated streaming attempt.
-          // After that contract fails, run each independent safety model once
-          // in ordinary JSON mode and stream its validated sentence chunks from
-          // the server. This avoids paying for the same fallback model twice
-          // when its provider streams plain prose instead of NDJSON.
-          const candidateAnswer = await answerStep({
-            ...input,
-            signal: attemptSignal,
-            model: candidateModel,
-            ...(streamAnswer && index > 0 ? { streamValidated: false } : {}),
-          });
-          // Valid JSON can still contradict a packet by claiming that visible
-          // evidence is missing. Apply the grounded/citation gate to every
-          // candidate, including the requested primary, so non-streaming chat
-          // can reach the independent safety model instead of accepting a
-          // false absence response.
-          if (validateCandidate && hasGroundingEvidence(input.evidence)
-              && !isCandidateSynthesisAcceptable(candidateAnswer)) {
-            lastError = new Error('candidate_synthesis_validation_failed');
-            // answerStep already ran the fail-closed citation validator and its
-            // one bounded repair. If the final independent model still cannot
-            // produce a citation-valid claim, preserve the server-owned honest
-            // response instead of converting a controlled grounding failure
-            // into an opaque HTTP 502. Earlier models still get the chance to
-            // fall through to the independent safety model.
-            if (index === attemptModels.length - 1
-                && isFailClosedSynthesisResponse(candidateAnswer)) {
-              // This is an expected grounded-absence outcome, not a provider
-              // degradation.  Preserve it for telemetry without surfacing a
-              // misleading error-like warning to users or operations.
-              trace.synthesis_outcome = 'insufficient_grounded_evidence';
-              return candidateAnswer;
-            }
-            if (streamAnswer) onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'candidate_validation_fallback' });
-            continue;
-          }
-          if (index > 0) {
-            trace.model_policy = {
-              ...modelPolicy,
-              fallback_reason: lastError?.message || 'synthesis_fallback',
-              fallback_model: candidateModel,
-              fallback_depth: index,
-              ...(streamAnswer ? { fallback_transport: 'validated_json_then_sse' } : {}),
-            };
-          }
-          answerModel = candidateModel;
-          trace.models.synthesis = candidateModel;
-          return candidateAnswer;
-        } catch (error) {
-          lastError = error;
-          trace.warnings.push(`synthesis_model_failed:${candidateModel}:${error.message || 'unknown'}`);
-          if (streamAnswer && index + 1 < attemptModels.length) {
-            onEvent?.({ type: 'answer_reset', schema_version: 1, reason: 'synthesis_model_fallback' });
-          }
-        }
-      }
-      // `attemptModels` already contains FINAL_FALLBACK_MODEL and each fallback
-      // is forced into ordinary JSON mode above. Retrying the same final model
-      // here paid for an identical third synthesis and allowed one queued
-      // provider to hold the turn for nearly a minute. Exhaustion is an honest,
-      // bounded failure; the SSE route emits its terminal error and the current
-      // frontend now renders it safely.
-      throw lastError || new Error('all_synthesis_models_failed');
-    };
-    const answer = await synthesizeWithFallback(answerInput);
+    // One turn owns one synthesis request. Provider failover belongs behind
+    // the Cloudflare route; application-level model loops produced duplicate
+    // answers and contradictory validation outcomes.
+    synthesisPasses = 1;
+    const answer = await answerStep({ ...answerInput, model: answerModel });
     if (modelPolicy.shadow) {
       const servedSummary = {
         claim_count: answer.claims?.length || 0,

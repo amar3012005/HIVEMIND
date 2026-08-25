@@ -32,6 +32,13 @@ const TIERED_VIEW_ENABLED = process.env.RECALL_TIERED_VIEW !== 'false';
 // role/tag branches below are never taken, so output is byte-identical to legacy.
 const PRINCIPLES_RECALL_ENABLED = process.env.PRINCIPLES_ENABLED !== 'false';
 
+function safeRecallText(value) {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  try { return JSON.stringify(value); } catch { return ''; }
+}
+
 // TARA voice activity (turn/insight/call-log/session) is isolated from recall.
 // Matches by project prefix `tara/` or any `tara-*` tag.
 function isTaraActivity(memory) {
@@ -71,7 +78,7 @@ function keywordScore(memory, query = '') {
   const lowered = query.toLowerCase();
   const tokens = lowered.split(/\s+/).filter(Boolean);
   const ast = memory.metadata?.ast_metadata || {};
-  const content = memory.content || '';
+  const content = safeRecallText(memory.content);
   const haystack = [
     content,
     memory.project || '',
@@ -1846,8 +1853,8 @@ async function _recallPersistedMemoriesImpl(store, {
     if (_tagsForNoise.some((t) => t === 'sent-by-user' || t === 'first-person')) score *= 1.25;
     // Retroactive detection for untagged existing memories
     if (!attribution) {
-      const c = (memory.content || '').toLowerCase();
-      const t = (memory.title || '').toLowerCase();
+      const c = safeRecallText(memory.content).toLowerCase();
+      const t = safeRecallText(memory.title).toLowerCase();
       if (c.includes('unsubscribe') || c.includes('noreply') || c.includes('no-reply') || c.includes('click here to unsub')) score *= 0.3;
       else if (t.startsWith('clinical insight') || t.startsWith('tara turn')) score *= 0.4;
       else if (t.startsWith('session:')) score *= 0.5;
@@ -1906,8 +1913,8 @@ async function _recallPersistedMemoriesImpl(store, {
     else if (attribution === 'third_party') score *= 0.8;
     // Retroactive detection for untagged existing memories
     if (!attribution && candidate.memory) {
-      const c = (candidate.memory.content || '').toLowerCase();
-      const t = (candidate.memory.title || '').toLowerCase();
+      const c = safeRecallText(candidate.memory.content).toLowerCase();
+      const t = safeRecallText(candidate.memory.title).toLowerCase();
       if (c.includes('unsubscribe') || c.includes('noreply') || c.includes('no-reply') || c.includes('click here to unsub')) score *= 0.3;
       else if (t.startsWith('clinical insight') || t.startsWith('tara turn')) score *= 0.4;
       else if (t.startsWith('session:')) score *= 0.5;
@@ -2005,7 +2012,7 @@ async function _recallPersistedMemoriesImpl(store, {
       .map((w) => w.replace(/[^a-z0-9]/g, '')).filter((w) => w.length >= 3))];
     if (qToks.length) {
       const N = ranked.length;
-      const texts = ranked.map((c) => `${c.memory?.title || ''} ${c.memory?.content || ''}`.toLowerCase());
+      const texts = ranked.map((c) => `${safeRecallText(c.memory?.title)} ${safeRecallText(c.memory?.content)}`.toLowerCase());
       const df = {};
       for (const t of qToks) df[t] = texts.filter((x) => x.includes(t)).length;
       const weight = (t) => (df[t] > 0 ? Math.max(0, 1 - df[t] / N) : 0); // in every candidate → 0; rare → ~1

@@ -8,8 +8,8 @@
 # from byod/, a fresh install ships a stale/broken agent (this is exactly how the
 # 322-line agent — missing the provenance-preservation fix — almost shipped).
 #
-# Compares git blob hashes (content-addressed → exact), so it is robust to line
-# endings / binary files (the .node addons). Exit 0 if in sync, 1 on drift.
+# Builds the expected tree through scripts/stage-byod-bundle.sh, then compares it
+# to every tracked file in the published ref. Extra published files are drift.
 #
 # Usage: scripts/check-byod-sync.sh [SRC_REF] [PUB_REF]
 #   SRC_REF  ref whose byod/ subtree is the source of truth (default: HEAD)
@@ -19,22 +19,34 @@ set -euo pipefail
 SRC_REF="${1:-HEAD}"
 PUB_REF="${2:-origin/byod}"
 
-cd "$(git rev-parse --show-toplevel)"
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
 git fetch -q origin byod 2>/dev/null || true
 
-# Manifest = "<blobhash> <relpath>" per file, sorted. For the source we strip the
-# leading "byod/" so paths line up with the branch root.
-src="$(git ls-tree -r "$SRC_REF" -- byod/ | awk '{ p=$4; sub(/^byod\//,"",p); print $3, p }' | sort)"
-pub="$(git ls-tree -r "$PUB_REF"          | awk '{ print $3, $4 }' | sort)"
+TMP="$(mktemp -d)"
+cleanup() { rm -rf "$TMP"; }
+trap cleanup EXIT
 
-if [ "$src" = "$pub" ]; then
-  echo "✅ byod setup branch in sync with byod/ ($(printf '%s\n' "$src" | grep -c . ) files)"
+mkdir -p "$TMP/source" "$TMP/expected" "$TMP/published"
+git archive "$SRC_REF" byod scripts/stage-byod-bundle.sh \
+  scripts/storage-manifest.mjs scripts/storage-restore-drill.sh \
+  | tar -x -C "$TMP/source"
+git archive "$PUB_REF" | tar -x -C "$TMP/published"
+"$TMP/source/scripts/stage-byod-bundle.sh" "$TMP/source" "$TMP/expected"
+
+# Archive extraction contains tracked files only. rsync's itemized dry run checks
+# content, type, executable mode, missing files, and unexpected published files.
+drift="$(rsync -ainc --delete "$TMP/expected/" "$TMP/published/")"
+
+if [ -z "$drift" ]; then
+  count="$(find "$TMP/expected" -type f | wc -l)"
+  echo "✅ byod setup branch in sync with staged bundle ($count files)"
   exit 0
 fi
 
-echo "❌ byod setup branch DRIFTED from byod/ — a fresh self-host install would ship a stale agent."
-echo "--- < byod/ (source of truth)   > $PUB_REF (published) ---"
-diff <(printf '%s\n' "$src") <(printf '%s\n' "$pub") || true
+echo "❌ byod setup branch DRIFTED from the staged bundle — a fresh self-host install would be stale."
+echo "--- rsync itemized changes required to make $PUB_REF match ---"
+printf '%s\n' "$drift"
 echo ""
 echo "Fix: run  scripts/publish-byod.sh  (or: make publish-byod)"
 exit 1

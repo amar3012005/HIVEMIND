@@ -2062,7 +2062,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
   const evidenceLines = _projectedMemories.map(({ memory: m, excerpt, tags: projectedTags }) => {
     const id8 = (m.id || '').slice(0, 8);
     const citationId = citationIdForMemory(citationPacket.citations, m);
-    const title = (m.title || '').replace(/\n/g, ' ').slice(0, 80);
+    const title = String(m.title || '').replace(/\n/g, ' ').slice(0, 80);
     const content = String(excerpt || '').replace(/\n/g, ' ');
     const tags = projectedTags.join(', ');
     // Synthesis detection: source_metadata.source_type OR tag fallback (FTS path).
@@ -2140,7 +2140,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // present = no recorded relation; LLM is NOT allowed to infer relations
   // from content overlap or co-mentioned entities (rule 11).
   const evidenceIdSet = new Set(evidence.memories.map(m => m.id));
-  const idToTitle = new Map(evidence.memories.map(m => [m.id, (m.title || '').slice(0, 50)]));
+  const idToTitle = new Map(evidence.memories.map(m => [m.id, String(m.title || '').slice(0, 50)]));
   const filteredEdges = (evidence.relationships || []).filter(e =>
     evidenceIdSet.has(e.from_id) || evidenceIdSet.has(e.to_id),
   );

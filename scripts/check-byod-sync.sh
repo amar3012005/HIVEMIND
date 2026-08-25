@@ -34,9 +34,19 @@ git archive "$SRC_REF" byod scripts/stage-byod-bundle.sh \
 git archive "$PUB_REF" | tar -x -C "$TMP/published"
 "$TMP/source/scripts/stage-byod-bundle.sh" "$TMP/source" "$TMP/expected"
 
-# Archive extraction contains tracked files only. rsync's itemized dry run checks
-# content, type, executable mode, missing files, and unexpected published files.
-drift="$(rsync -ainc --delete "$TMP/expected/" "$TMP/published/")"
+# Archive extraction contains tracked files only. Compare checksummed content,
+# paths, and types without tar timestamps or extraction umasks, then compare the
+# executable bit exactly as Git records it.
+drift="$(rsync -rlinc --delete --no-times --no-perms "$TMP/expected/" "$TMP/published/")"
+expected_exec="$(find "$TMP/expected" -type f -perm /111 -printf '%P\n' | LC_ALL=C sort)"
+published_exec="$(git ls-tree -r "$PUB_REF" | awk '$1 == "100755" { print $4 }' | LC_ALL=C sort)"
+if [ "$expected_exec" != "$published_exec" ]; then
+  drift="${drift}${drift:+$'\n'}executable-mode drift:
+--- expected executable files ---
+$expected_exec
+--- published executable files ---
+$published_exec"
+fi
 
 if [ -z "$drift" ]; then
   count="$(find "$TMP/expected" -type f | wc -l)"

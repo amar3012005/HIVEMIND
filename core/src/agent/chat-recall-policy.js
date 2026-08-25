@@ -43,8 +43,15 @@ export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], 
   // accidentally converted into "what does the first matching PDF say?".
   const source = plan.source || null;
   const evidenceFound = memories.length > 0 || evidence.length > 0;
-  const sourceIds = new Set(evidence.map((item) => documentIdentity(item).document_id).filter(Boolean));
-  const sourceTitles = new Set(evidence.map((item) => normalized(documentIdentity(item).title)).filter(Boolean));
+  // A named document can be represented by either lane. Evidence-only uploads
+  // resolve through KnowledgeSegment rows; memories+evidence uploads may rank
+  // their document-anchored memories above the raw segments. Both are verified
+  // source material when they carry an exact doc-id / filename / document-title
+  // anchor. Restricting identity checks to the evidence lane caused a valid
+  // memory-only top-K result to fail source coverage and skip final synthesis.
+  const sourceItems = [...memories, ...evidence];
+  const sourceIds = new Set(sourceItems.map((item) => documentIdentity(item).document_id).filter(Boolean));
+  const sourceTitles = new Set(sourceItems.map((item) => normalized(documentIdentity(item).title)).filter(Boolean));
   // A source boundary can name a stored document, or refer to a direct upload
   // such as "the latest image". The latter is represented by its promoted
   // memory before it has a KnowledgeDocument row, so document identity alone

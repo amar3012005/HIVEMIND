@@ -491,6 +491,101 @@ function appendDocumentAccess(conds, args, alias, access = {}) {
     conds.push(`(${clauses.join(' OR ')})`);
   }
 }
+
+// This is the SQL counterpart to the embedded AMR inventory filter.  It keeps
+// public list/stats reads on the same personal/org/project/team contract as
+// resident Prisma while the agent continues to own the data itself.
+function appendMemoryInventoryAccess(conds, args, alias, filter = {}) {
+  const userId = filter.user_id || null;
+  const access = filter.access_context || null;
+  const scope = `COALESCE(${alias}.scope, 'personal')`;
+  const projects = `${alias}.project_ids`;
+  const add = (value) => { args.push(value); return `$${args.length}`; };
+
+  if (filter.owner_only) {
+    if (!userId) { conds.push('FALSE'); return; }
+    conds.push(`${alias}.user_id=${add(userId)}::uuid`);
+  }
+  if (filter.project) {
+    const project = add(filter.project);
+    conds.push(`${alias}.project=${project}`);
+  }
+  if (filter.project_id) {
+    const projectId = add(filter.project_id);
+    conds.push(`${projects} @> ARRAY[${projectId}]::text[]`);
+  }
+
+  if (filter.scope === 'tier:personal') {
+    if (!userId) { conds.push('FALSE'); return; }
+    const user = add(userId);
+    conds.push(`(${alias}.user_id=${user}::uuid AND ${scope}='personal')`);
+    return;
+  }
+  if (filter.scope === 'tier:organization') {
+    if (access?.orgRole === 'guest') { conds.push('FALSE'); return; }
+    conds.push(`${scope}='organization'`);
+    return;
+  }
+  if (filter.scope === 'tier:project') {
+    const projectIds = Array.isArray(access?.projectIds) ? access.projectIds : [];
+    if (!projectIds.length) { conds.push('FALSE'); return; }
+    const ids = add(projectIds);
+    conds.push(`(${scope}='project' AND ${projects} && ${ids}::text[])`);
+    return;
+  }
+
+  if (access && (Array.isArray(access.projectIds) || Array.isArray(access.teamIds))) {
+    if (!userId) { conds.push('FALSE'); return; }
+    const projectIds = Array.isArray(access.projectIds) ? access.projectIds : [];
+    const teamIds = Array.isArray(access.teamIds) ? access.teamIds : [];
+    const user = add(userId);
+    const tiers = [`(${alias}.user_id=${user}::uuid AND ${scope}='personal')`];
+    if (access.orgRole !== 'guest') tiers.push(`${scope}='organization'`);
+    if (projectIds.length) {
+      const ids = add(projectIds);
+      tiers.push(`(${scope}='project' AND ${projects} && ${ids}::text[])`);
+    }
+    if (teamIds.length) {
+      const ids = add(teamIds);
+      tiers.push(`(${scope}='team' AND ${alias}.primary_team_id = ANY(${ids}::uuid[]))`);
+    }
+    conds.push(`(${tiers.join(' OR ')})`);
+    if (access.orgRole === 'guest' || access.crossProject === false) {
+      const crossProject = add('scope:cross-project');
+      conds.push(`NOT (${crossProject}=ANY(${alias}.tags))`);
+    }
+    return;
+  }
+
+  if (filter.scope === 'organization') { conds.push(`${scope}='organization'`); return; }
+  if (filter.scope === 'all') {
+    if (!userId) { conds.push(`${scope}='organization'`); return; }
+    const user = add(userId);
+    conds.push(`((${alias}.user_id=${user}::uuid AND ${scope}='personal') OR ${scope}='organization')`);
+    return;
+  }
+  if (userId) {
+    const user = add(userId);
+    conds.push(`${alias}.user_id=${user}::uuid`);
+  }
+}
+
+function appendMemoryInventoryFilters(conds, args, alias, filter = {}) {
+  const memoryTypes = Array.isArray(filter.memory_type)
+    ? filter.memory_type
+    : (filter.memory_type ? [filter.memory_type] : []);
+  if (memoryTypes.length) { args.push(memoryTypes); conds.push(`${alias}.memory_type = ANY($${args.length})`); }
+  if (filter.cognitive_layer_role === null) conds.push(`${alias}.cognitive_layer_role IS NULL`);
+  args.push(filter.is_latest === false ? false : true);
+  conds.push(`${alias}.is_latest=$${args.length}`);
+  if (Array.isArray(filter.tags) && filter.tags.length) { args.push(filter.tags); conds.push(`${alias}.tags @> $${args.length}::text[]`); }
+  if (Array.isArray(filter.exclude_tags) && filter.exclude_tags.length) {
+    args.push(filter.exclude_tags);
+    conds.push(`(${alias}.cognitive_layer_role = ANY(ARRAY['canonical','bridge','principle']::text[]) OR NOT (${alias}.tags && $${args.length}::text[]))`);
+  }
+  if (filter.created_after) { args.push(filter.created_after); conds.push(`${alias}.created_at >= $${args.length}::timestamptz`); }
+  appendMemoryInventoryAccess(conds, args, alias, filter);
+}
 const MAX_BODY_BYTES = 1024 * 1024; // vectors fit comfortably; unbounded bodies are a remote DoS risk.
 const readBody = (req) => new Promise((resolve, reject) => {
   let size = 0;
@@ -662,37 +757,44 @@ const routes = {
     const f = b.filter || {};
     // This endpoint enumerates memories. Evidence belongs to knowledge_segments
     // and is exposed through `/v1/kb-evidence`, never as a memory row.
-    const conds = ["org_id=$1", 'deleted_at IS NULL', "layer IN ('memory','cognitive')"];
+    const conds = ["m.org_id=$1", 'm.deleted_at IS NULL', "m.layer IN ('memory','cognitive')"];
     const args = [ORG];
-    if (Array.isArray(f.memory_type) && f.memory_type.length) { args.push(f.memory_type); conds.push(`memory_type = ANY($${args.length})`); }
-    if (f.cognitive_layer_role === null) conds.push('cognitive_layer_role IS NULL');
-    if (f.is_latest !== undefined) { args.push(!!f.is_latest); conds.push(`is_latest=$${args.length}`); }
-    if (f.user_id) { args.push(f.user_id); conds.push(`user_id=$${args.length}`); }
-    if (Array.isArray(f.tags) && f.tags.length) { args.push(f.tags); conds.push(`tags @> $${args.length}`); }
-    if (f.created_after) { args.push(f.created_after); conds.push(`created_at >= $${args.length}::timestamptz`); }
-    if (b.cursor) { args.push(b.cursor); conds.push(`created_at < $${args.length}::timestamptz`); }
-    args.push(Math.min(b.limit || 100, 500));
+    appendMemoryInventoryFilters(conds, args, 'm', f);
+    const countArgs = args.slice();
+    const count = await pg.query(`SELECT count(*)::int AS c FROM memories m WHERE ${conds.join(' AND ')}`, countArgs);
+    if (b.cursor) { args.push(b.cursor); conds.push(`m.created_at < $${args.length}::timestamptz`); }
+    const requestedLimit = Math.max(1, Math.min(Number(b.limit) || 100, 500));
+    args.push(requestedLimit);
     const limitPos = args.length;
     let offsetClause = '';
     if (b.offset && Number(b.offset) > 0) { args.push(Number(b.offset)); offsetClause = ` OFFSET $${args.length}`; }
     const { rows } = await pg.query(
-      `SELECT * FROM memories WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT $${limitPos}${offsetClause}`, args);
+      `SELECT m.* FROM memories m WHERE ${conds.join(' AND ')} ORDER BY m.created_at DESC LIMIT $${limitPos}${offsetClause}`, args);
     const cursor = rows.length ? rows[rows.length - 1].created_at : null;
-    return { memories: rows, cursor };
+    return { memories: rows, cursor, total: Number(count.rows?.[0]?.c || 0) };
   },
 
   // Counts for the Profile/Overview stats cards (memory_count + relationship_count). The engine reads
   // these from here for remote orgs — central holds 0 rows for a self-host org.
   '/v1/stats': async (b) => {
-    const f = b.filter || {};
-    const conds = ["org_id=$1", 'deleted_at IS NULL', 'is_latest=true', "layer IN ('memory','cognitive')"];
+    const f = { ...(b.filter || {}), is_latest: true };
+    const conds = ["m.org_id=$1", 'm.deleted_at IS NULL', "m.layer IN ('memory','cognitive')"];
     const args = [ORG];
-    if (f.user_id) { args.push(f.user_id); conds.push(`user_id=$${args.length}`); }
+    appendMemoryInventoryFilters(conds, args, 'm', f);
+    const documentAccess = f.document_access || f.access || null;
+    const documentConds = ['d.org_id=$1::uuid', 'd.deleted_at IS NULL'];
+    const documentArgs = [ORG];
+    if (documentAccess) appendDocumentAccess(documentConds, documentArgs, 'd', documentAccess);
     const [mem, rel, docs, evidence] = await Promise.all([
-      pg.query(`SELECT count(*)::int AS c FROM memories WHERE ${conds.join(' AND ')}`, args),
+      pg.query(`SELECT count(*)::int AS c FROM memories m WHERE ${conds.join(' AND ')}`, args),
       pg.query('SELECT count(*)::int AS c FROM relationships WHERE org_id=$1', [ORG]),
-      pg.query(`SELECT count(*)::int AS c FROM knowledge_documents WHERE org_id=$1 AND deleted_at IS NULL${f.user_id ? ' AND user_id=$2' : ''}`, f.user_id ? [ORG, f.user_id] : [ORG]),
-      pg.query(`SELECT count(*)::int AS c FROM knowledge_segments WHERE org_id=$1${f.user_id ? ' AND user_id=$2' : ''}`, f.user_id ? [ORG, f.user_id] : [ORG]),
+      pg.query(`SELECT count(*)::int AS c FROM knowledge_documents d WHERE ${documentConds.join(' AND ')}`, documentArgs),
+      pg.query(
+        `SELECT count(*)::int AS c FROM knowledge_segments s
+           JOIN knowledge_documents d ON d.id=s.document_id
+          WHERE s.org_id=$1::uuid AND ${documentConds.join(' AND ')}`,
+        documentArgs,
+      ),
     ]);
     return {
       memories: mem.rows[0]?.c || 0,

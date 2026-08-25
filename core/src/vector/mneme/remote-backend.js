@@ -21,6 +21,9 @@ const MAX_MAINTENANCE_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_RE
 // Graph walks are neither hybrid retrieval nor maintenance. They can fan out
 // through background cognition, so isolate and serialize them per tenant.
 const MAX_GRAPH_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_GRAPH_INFLIGHT_PER_ORG || 1));
+const MAX_INVENTORY_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INVENTORY_INFLIGHT_PER_ORG || 1));
+const INVENTORY_TIMEOUT_MS = Math.max(TIMEOUT_MS, Number(process.env.MNEME_REMOTE_INVENTORY_TIMEOUT_MS || 15000));
+const INVENTORY_CACHE_MS = Math.max(0, Number(process.env.MNEME_REMOTE_INVENTORY_CACHE_MS || 5000));
 const MAX_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_QUEUED_PER_ORG || 32));
 const MAX_GRAPH_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_GRAPH_QUEUED_PER_ORG || 128));
 const _failureCircuitUntil = new Map();
@@ -29,6 +32,8 @@ const _waitersByCircuit = new Map();
 const _capabilityCache = new Map();
 const _coalescedReads = new Map();
 const _coalescedGraphReads = new Map();
+const _coalescedInventoryReads = new Map();
+const _inventoryCache = new Map();
 const _lastRemoteLogAt = new Map();
 const REMOTE_LOG_DEDUPE_MS = Math.max(1000, Number(process.env.MNEME_REMOTE_LOG_DEDUPE_MS || 300000));
 
@@ -66,6 +71,7 @@ export function isRemoteMemoryUnavailableError(error) {
 function _transportClass(options = {}) {
   if (options?.transportClass === 'maintenance') return 'maintenance';
   if (options?.transportClass === 'graph') return 'graph';
+  if (options?.transportClass === 'inventory') return 'inventory';
   return 'interactive';
 }
 
@@ -100,6 +106,8 @@ async function _acquireSlot(orgId, path, signal, options = {}) {
     ? MAX_MAINTENANCE_INFLIGHT_PER_ORG
     : _transportClass(options) === 'graph'
       ? MAX_GRAPH_INFLIGHT_PER_ORG
+      : _transportClass(options) === 'inventory'
+        ? MAX_INVENTORY_INFLIGHT_PER_ORG
     : MAX_INFLIGHT_PER_ORG;
   const current = _inflightByCircuit.get(circuitKey) || 0;
   if (current < maxInflight) {
@@ -407,6 +415,51 @@ function _coalescedGraphRead(orgId, path, body) {
   return _awaitSharedRead(entry, currentStageSignal());
 }
 
+function _legacyInventoryKey(orgId, filter) {
+  return _readKey(orgId, '/v1/list:legacy-inventory', { filter });
+}
+
+function _legacyMemoryInventory(orgId, filter) {
+  const key = _legacyInventoryKey(orgId, filter);
+  const cached = _inventoryCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.memories);
+
+  let entry = _coalescedInventoryReads.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    entry = { controller, consumers: 0, settled: false, promise: null };
+    entry.promise = (async () => {
+      const pageSize = 500;
+      const maxRows = 100000;
+      const inventory = [];
+      for (let scanOffset = 0; scanOffset < maxRows; scanOffset += pageSize) {
+        const page = await _call(orgId, '/v1/list', {
+          filter,
+          cursor: null,
+          limit: pageSize,
+          offset: scanOffset,
+        }, {
+          signal: controller.signal,
+          transportClass: 'inventory',
+          timeoutMs: INVENTORY_TIMEOUT_MS,
+        });
+        const rows = Array.isArray(page?.memories) ? page.memories : [];
+        inventory.push(...rows.filter((row) => row?.layer === 'memory' || row?.layer === 'cognitive'));
+        if (rows.length < pageSize) {
+          _inventoryCache.set(key, { memories: inventory, expiresAt: Date.now() + INVENTORY_CACHE_MS });
+          return inventory;
+        }
+      }
+      throw new Error(`legacy memory inventory exceeds the ${maxRows}-row compatibility bound`);
+    })().finally(() => {
+      entry.settled = true;
+      _coalescedInventoryReads.delete(key);
+    });
+    _coalescedInventoryReads.set(key, entry);
+  }
+  return _awaitSharedRead(entry, currentStageSignal());
+}
+
 // Returns Qdrant-shaped hits [{id, score, payload}]. A sovereign box failure
 // is NOT an empty corpus and must remain distinguishable to every caller.
 export async function remoteRecall(orgId, vector, filter, limit, scoreThreshold) {
@@ -465,7 +518,12 @@ export async function remoteHydrate(orgId, ids) {
 // is the full filtered inventory, never the current page length.
 export async function remoteList(orgId, filter, cursor, limit, offset = 0, options = {}) {
   try {
-    const out = await _call(orgId, '/v1/list', { filter, cursor, limit, offset }, options);
+    const inventoryOptions = {
+      ...options,
+      transportClass: 'inventory',
+      timeoutMs: Math.max(Number(options.timeoutMs || 0), INVENTORY_TIMEOUT_MS),
+    };
+    const out = await _call(orgId, '/v1/list', { filter, cursor, limit, offset }, inventoryOptions);
     const rawTotal = out?.total;
     const parsedTotal = (typeof rawTotal === 'number' || (typeof rawTotal === 'string' && rawTotal.trim()))
       ? Number(rawTotal)
@@ -478,29 +536,14 @@ export async function remoteList(orgId, filter, cursor, limit, offset = 0, optio
     // filtered inventory with offset paging, enforce the canonical layer gate
     // locally, then apply the caller's page. Never substitute page length for
     // a total, and fail closed if the bounded scan cannot prove completeness.
-    const pageSize = 500;
-    const maxRows = 100000;
-    const inventory = [];
-    for (let scanOffset = 0; scanOffset < maxRows; scanOffset += pageSize) {
-      const page = await _call(orgId, '/v1/list', {
-        filter,
-        cursor: null,
-        limit: pageSize,
-        offset: scanOffset,
-      }, options);
-      const rows = Array.isArray(page?.memories) ? page.memories : [];
-      inventory.push(...rows.filter((row) => row?.layer === 'memory' || row?.layer === 'cognitive'));
-      if (rows.length < pageSize) {
-        const start = Math.max(0, Number(offset) || 0);
-        const size = Math.max(1, Number(limit) || 50);
-        return {
-          memories: inventory.slice(start, start + size),
-          cursor: null,
-          total: inventory.length,
-        };
-      }
-    }
-    throw new Error(`legacy memory inventory exceeds the ${maxRows}-row compatibility bound`);
+    const inventory = await _legacyMemoryInventory(orgId, filter);
+    const start = Math.max(0, Number(offset) || 0);
+    const size = Math.max(1, Number(limit) || 50);
+    return {
+      memories: inventory.slice(start, start + size),
+      cursor: null,
+      total: inventory.length,
+    };
   }
   catch (e) {
     // NEVER TURN A FAILED READ INTO AN EMPTY ONE. This returned `{ memories: [] }` on any error, so a

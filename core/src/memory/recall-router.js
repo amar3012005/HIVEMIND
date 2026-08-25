@@ -512,12 +512,31 @@ export function recallMemoryRowId(memory = {}) {
   return memory.id || memory.memory?.id || null;
 }
 
+function recallDisplayText(value, fallback = '') {
+  if (typeof value === 'string') return value;
+  if (value == null) return fallback;
+  if (Array.isArray(value)) {
+    const item = value.find((entry) => typeof entry === 'string' && entry.trim());
+    return item || fallback;
+  }
+  if (typeof value === 'object') {
+    for (const key of ['title', 'name', 'label', 'text', 'value', 'en']) {
+      if (typeof value[key] === 'string' && value[key].trim()) return value[key];
+    }
+    return fallback;
+  }
+  return String(value);
+}
+
 export function serializeRecallMemory(m, { includeFullContent = false } = {}) {
   const stored = m.memory || {};
   const content = typeof m.content === 'string' ? m.content : (typeof stored.content === 'string' ? stored.content : '');
   return {
     id: recallMemoryRowId(m),
-    title: m.title || stored.title,
+    // Recall is a public contract. Legacy/remote stores may carry a JSON title
+    // (localized object, array, or provider envelope); never let that shape
+    // escape into chat/UI code that correctly expects a scalar title.
+    title: recallDisplayText(m.title, recallDisplayText(stored.title, 'Memory')),
     content: includeFullContent ? content : content.slice(0, 400),
     memory_type: m.memory_type || stored.memory_type,
     tags: m.tags || stored.tags,

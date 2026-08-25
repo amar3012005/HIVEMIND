@@ -897,8 +897,25 @@ const TOOL_HANDLERS = {
 
     const requestedMode = args.mode || 'fact';
     const mode = normalizeAgentRecallMode(requestedMode);
+    const requestedAnswerType = (typeof args.answer_type === 'string' && args.answer_type.trim())
+      ? args.answer_type.trim().toLowerCase()
+      : null;
+    // `fact` is also the planner's generic document/entity read default. Making
+    // it a hard predicate would incorrectly remove summaries and verbatim
+    // evidence from broad source reads. Specific semantic kinds are strict;
+    // fact remains a relevance hint unless a future plan explicitly supplies
+    // memory_types=["fact"].
+    const strictAnswerTypes = new Set(['decision', 'event', 'goal', 'preference', 'lesson', 'relationship']);
+    const strictAnswerType = strictAnswerTypes.has(requestedAnswerType) ? requestedAnswerType : null;
+    // The planner's answer_type is a retrieval contract, not merely a ranking
+    // hint. Compile it into the canonical memory_types predicate once so the
+    // memory and evidence lanes apply the same filter before the unified
+    // rerank. The boost remains additive inside that already-typed pool.
     const recallPlan = resolveRecallPlan({
       ...args,
+      memory_types: Array.isArray(args.memory_types) && args.memory_types.length
+        ? args.memory_types
+        : (strictAnswerType ? [strictAnswerType] : []),
       mode,
       explicit_mode: args._explicit_mode === true,
       structured_intent: args._structured_intent === true,
@@ -936,9 +953,8 @@ const TOOL_HANDLERS = {
       allow_semantic_source_recovery: args.allow_semantic_source_recovery === true,
       semantic_recovery: args.semantic_recovery === true,
       event_range: args._event_range === true,
-      boost_memory_type: (typeof args.answer_type === 'string' && args.answer_type.trim())
-        ? args.answer_type.trim().toLowerCase()
-        : null,
+      memory_types: recallPlan.memory_types,
+      boost_memory_type: requestedAnswerType,
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,

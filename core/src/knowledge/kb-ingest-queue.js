@@ -46,10 +46,12 @@ const ORG_CONCURRENCY = Number(process.env.KB_QUEUE_ORG_CONCURRENCY || 4);
 const MAX_DEPTH = Number(process.env.KB_QUEUE_MAX_DEPTH || 2000);
 const ORG_PENDING_CAP = Number(process.env.KB_QUEUE_ORG_PENDING_CAP || 500);
 const VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
+const LIFECYCLE_PHASES = new Set(['started', 'completed', 'failed']);
 
-function taskEvent(event, fields = {}) {
+export function knowledgeIngestEvent(phase, fields = {}) {
+  if (!LIFECYCLE_PHASES.has(phase)) throw new Error(`Unsupported knowledge ingest lifecycle phase: ${phase}`);
   return JSON.stringify({
-    event,
+    event: `knowledge.ingest.${phase}`,
     task: 'knowledge.ingest',
     ts: new Date().toISOString(),
     ...fields,
@@ -170,7 +172,7 @@ export class KbIngestQueue {
     if (!deps) {
       this.inlineFallback = true;
       this.inlineFallbackReason = 'bullmq/ioredis module unavailable';
-      this.logger.warn?.('[kb-queue] DEGRADED: bullmq/ioredis unavailable — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)');
+      if (VERBOSE) this.logger.warn?.('[kb-queue] DEGRADED: bullmq/ioredis unavailable — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)');
       return;
     }
     const { bullmq, IORedis } = deps;
@@ -199,7 +201,7 @@ export class KbIngestQueue {
     if (!host) {
       this.inlineFallback = true;
       this.inlineFallbackReason = `no reachable Redis after ${PROBE_ATTEMPTS} attempts`;
-      this.logger.warn?.(`[kb-queue] DEGRADED: no reachable Redis after ${PROBE_ATTEMPTS} attempts — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)`);
+      if (VERBOSE) this.logger.warn?.(`[kb-queue] DEGRADED: no reachable Redis after ${PROBE_ATTEMPTS} attempts — queue disabled (inline fallback: no retry, no DLQ, no cross-node status)`);
       return;
     }
     this._redisHost = host;
@@ -233,7 +235,7 @@ export class KbIngestQueue {
       const final = job && job.attemptsMade >= (job.opts?.attempts || ATTEMPTS);
       if (final) {
         this._counters.dead++;
-        this.logger.error?.(taskEvent('task.failed', {
+        this.logger.error?.(knowledgeIngestEvent('failed', {
           job_id: job?.data?.trackerJobId || job?.id || null,
           org_id: job?.data?.orgId || null,
           file: job?.data?.filename || null,
@@ -248,7 +250,9 @@ export class KbIngestQueue {
         this._setStatus(job?.data?.trackerJobId, { status: 'dead', error: err?.message, filename: job?.data?.filename });
       }
     });
-    this.worker.on('error', (err) => this.logger.warn?.(`[kb-queue] worker error: ${err.message}`));
+    this.worker.on('error', (err) => {
+      if (VERBOSE) this.logger.warn?.(`[kb-queue] worker error: ${err.message}`);
+    });
     // Shared status mirror: the worker can run on a DIFFERENT hm-core node than
     // the one the FE polls /api/knowledge/status against (the in-memory
     // ingestTracker is per-process). Mirror job status into Redis so status is
@@ -309,7 +313,7 @@ export class KbIngestQueue {
         }
         if (VERBOSE && removed) this.logger.info?.(`[kb-queue] raw-file sweep: removed ${removed} file(s) older than ${hours}h, ${kept} retained for replay`);
       } catch (err) {
-        this.logger.warn?.(`[kb-queue] raw-file sweep failed: ${err.message}`);
+        if (VERBOSE) this.logger.warn?.(`[kb-queue] raw-file sweep failed: ${err.message}`);
       }
     };
     this._rawSweepTimer = setInterval(sweep, everyMs);
@@ -352,7 +356,7 @@ export class KbIngestQueue {
           bootedAt: BOOTED_AT,
         });
       } catch (e) {
-        this.logger.warn?.(`[kb-queue] reaper sweep failed: ${e.message}`);
+        if (VERBOSE) this.logger.warn?.(`[kb-queue] reaper sweep failed: ${e.message}`);
       }
     };
 
@@ -510,7 +514,7 @@ export class KbIngestQueue {
       removeOnFail: 5000, // failed set IS the DLQ — keep for inspection/replay
     });
     this._orgPending.set(orgId, (this._orgPending.get(orgId) || 0) + 1);
-    this.logger.info?.(taskEvent('task.started', {
+    this.logger.info?.(knowledgeIngestEvent('started', {
       job_id: trackerJobId,
       org_id: orgId,
       user_id: userId,
@@ -548,7 +552,7 @@ export class KbIngestQueue {
       if (durable) {
         if (Number(durable.processingVersion || 1) !== Number(processingVersion || 1)
           || !['queued', 'processing'].includes(durable.status)) {
-          if (VERBOSE) this.logger.info?.(taskEvent('task.completed', {
+          if (VERBOSE) this.logger.info?.(knowledgeIngestEvent('completed', {
             job_id: trackerJobId, org_id: orgId, stale: true, processing_version: processingVersion,
           }));
           return { stale: true };
@@ -688,14 +692,14 @@ export class KbIngestQueue {
         duration_ms: Math.max(0, Date.now() - Number(job.timestamp || Date.now())),
       };
       if (_ee && Number(_ee.failed) > 0) {
-        this.logger.error?.(taskEvent('task.failed', {
+        this.logger.error?.(knowledgeIngestEvent('failed', {
           ..._terminal,
           error_code: 'PARTIAL_EMBEDDING',
           message: `${_ee.failed}/${_ee.total} evidence segments were not embedded`,
           retryable: true,
         }));
       } else {
-        this.logger.info?.(taskEvent('task.completed', _terminal));
+        this.logger.info?.(knowledgeIngestEvent('completed', _terminal));
       }
       if (filePath) try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };

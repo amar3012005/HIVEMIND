@@ -58,6 +58,17 @@ const KB_CLAIM_KINDS = new Set(['fact', 'event', 'decision', 'preference', 'poli
 const CLAIM_ENTITY_KINDS = new Set(['person', 'organization', 'product', 'place', 'technology', 'standard']);
 const KB_INGEST_VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
 
+/** Keep parser and promotion diagnostics out of production task logs by default. */
+export function createIngestDiagnosticLogger(logger = console, { verbose = KB_INGEST_VERBOSE } = {}) {
+  const emit = (level) => (...args) => {
+    if (verbose) logger?.[level]?.(...args);
+  };
+  return { info: emit("info"), warn: emit("warn"), error: emit("error") };
+}
+
+const ingestDiagnostic = createIngestDiagnosticLogger(console);
+
+
 // A promoted memory is a claim over a persisted evidence segment. Keep the
 // segment's source/citation/scope/time fields intact instead of reconstructing
 // a smaller, lossy provenance object at promotion time. This is intentionally
@@ -497,7 +508,7 @@ async function classifyKnowledgeDocument(text, filename) {
     const confidence = Number(parsed.confidence);
     return { type: safeDocumentType(parsed.type), confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0.3 };
   } catch (error) {
-    console.warn(`[kb-ingest] document type classification unavailable: ${error.message}`);
+    ingestDiagnostic.warn(`[kb-ingest] document type classification unavailable: ${error.message}`);
     return { type: 'general', confidence: 0.2 };
   }
 }
@@ -685,7 +696,7 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   if (dropped > 0 || repaired > 0) {
     const _accounted = drop.quote_absent + drop.type + drop.short_quote + drop.noise
       + drop.shape + drop.low_importance + drop.capped;
-    console.log(`[kb-normalize] in=${arr.length} kept=${out.length} repaired=${repaired} `
+    ingestDiagnostic.info(`[kb-normalize] in=${arr.length} kept=${out.length} repaired=${repaired} `
       + `dropped=${dropped}{quote_absent:${drop.quote_absent} type:${drop.type} `
       + `short_quote:${drop.short_quote} noise:${drop.noise} shape:${drop.shape} `
       + `low_importance:${drop.low_importance} capped:${drop.capped}}`
@@ -984,7 +995,7 @@ export class DocumentFirstIngestionService {
     this.embeddingService = embeddingService;
     this.entityExtractor = entityExtractor;
     this.topicStateWriter = topicStateWriter;
-    this.logger = logger;
+    this.logger = createIngestDiagnosticLogger(logger);
     // Collapse simultaneous first uploads of the same bytes into one pipeline.
     // Database constraints protect rows across processes; this prevents callers
     // in one process from racing before the unchanged-document check is visible.
@@ -1834,7 +1845,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       if (_suspect) {
         // Print the ACTUAL threshold, not a literal. The first version hardcoded "<15%" while the
         // threshold had already moved to 0.45, so the log understated the bar it was applying.
-        console.warn(`[kb-unified] LANGUAGE DRIFT: ${_suspect}/${_judged} judged facts share under `
+        ingestDiagnostic.warn(`[kb-unified] LANGUAGE DRIFT: ${_suspect}/${_judged} judged facts share under `
           + `${Math.round(_langThreshold * 100)}% of tokens with their own source quote — likely `
           + `translated away from the section's language, which the prompt forbids. Facts kept; this `
           + `is a measurement, not a filter.`);
@@ -1860,7 +1871,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         }
       }
       if (split.length !== rawFacts.length) {
-        console.log(`[kb-atomic] ${rawFacts.length} claim(s) -> ${split.length} atomic fact(s)`);
+        ingestDiagnostic.info(`[kb-atomic] ${rawFacts.length} claim(s) -> ${split.length} atomic fact(s)`);
       }
       rawFacts = split;
     }
@@ -1966,7 +1977,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     const _tooFewWords = _wc.length > 400 && _wordish < 12;
     const _inputUnusable = _letterSpaced || _tooFewWords;
     if (_inputUnusable) {
-      console.warn(`[kb-unified] input unusable (single_char_ratio=${_singleCharRatio.toFixed(2)} `
+      ingestDiagnostic.warn(`[kb-unified] input unusable (single_char_ratio=${_singleCharRatio.toFixed(2)} `
         + `words4=${_wordish} chars=${_wc.length}) — ONE pass, no re-sample. Fix the parse tier, not the prompt.`);
     }
     // A SUCCESSFUL EXTRACTION IS NEVER RE-ASKED. Only an EXCEPTION retries.
@@ -2561,7 +2572,7 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
           if (_mode === 'shadow') {
             // Observe-only: create the ORIGINAL edge type but tag the shadow verdict
             // so we can measure precision without changing graph behaviour yet.
-            console.log(`[rel-validator][shadow] kb-hybrid WOULD-DOWNGRADE ${type}→${downgradeType} (${pair.fromId.slice(0,8)}→${pair.toId.slice(0,8)}): ${verdict.reason}`);
+            ingestDiagnostic.info(`[rel-validator][shadow] kb-hybrid WOULD-DOWNGRADE ${type}→${downgradeType} (${pair.fromId.slice(0,8)}→${pair.toId.slice(0,8)}): ${verdict.reason}`);
           } else { // enforce
             return store.createRelationship({
               id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type: downgradeType, confidence: 0.6,
@@ -2605,12 +2616,12 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     const droppedNoQuote = incoming.filter((c) => c?.segmentId && c?.f && !c?.source_quote).length;
     const droppedMalformed = incoming.length - pool.length - droppedNoQuote;
     if (droppedNoQuote || droppedMalformed) {
-      console.warn(`[kb-curate] prefilter dropped ${droppedNoQuote + droppedMalformed} of `
+      ingestDiagnostic.warn(`[kb-curate] prefilter dropped ${droppedNoQuote + droppedMalformed} of `
         + `${incoming.length} candidates (no_source_quote=${droppedNoQuote}, `
         + `malformed=${droppedMalformed}) — these never reached the curator`);
     }
     if (incoming.length > 48) {
-      console.warn(`[kb-curate] pool truncated ${incoming.length} → 48 before curation`);
+      ingestDiagnostic.warn(`[kb-curate] pool truncated ${incoming.length} → 48 before curation`);
     }
     if (!pool.length) return [];
 
@@ -2684,7 +2695,7 @@ Every item must include a non-empty content field and one or more valid support_
       if (result.length < pool.length) {
         const bound = result.length >= cap ? 'cap'
           : modelReturned < pool.length ? 'model-merged' : 'normalize';
-        console.log(`[kb-curate] pool=${pool.length} model_returned=${modelReturned} `
+        ingestDiagnostic.info(`[kb-curate] pool=${pool.length} model_returned=${modelReturned} `
           + `kept=${result.length} cap=${cap} bound_by=${bound}`);
       }
       attachCoverageLedger(result, pool);
@@ -3507,10 +3518,10 @@ Every item must include a non-empty content field and one or more valid support_
       // document that had none — the same blind spot this codebase keeps
       // producing (a hardcoded `remaining: 0`, an inert thin-extraction warning).
       if (!_tables.length) {
-        if (KB_INGEST_VERBOSE) console.log(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: parser returned no tables `
+        if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: parser returned no tables `
           + `(engine=${parseResult?.engine || '?'}) — nothing to persist`);
       } else if (!this.db?.documentTable) {
-        console.warn('[kb-tables] db.documentTable missing — prisma client lacks the model; grid NOT persisted');
+        ingestDiagnostic.warn('[kb-tables] db.documentTable missing — prisma client lacks the model; grid NOT persisted');
       }
       // ROUTED. This was `!orgIsRemote(...)`, so a self-host tenant's spreadsheet grids were never
       // stored anywhere. Removing the guard alone would have been WRONG: MNEME_MODE is dual, so
@@ -3529,7 +3540,7 @@ Every item must include a non-empty content field and one or more valid support_
           this.logger.warn?.(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)} not present on the agent — `
             + `grids skipped. Expected on a re-ingest pass; on a FIRST ingest it means the document write did not land.`);
         } else if (_tr) {
-          if (KB_INGEST_VERBOSE) console.log(`[kb-tables] remote doc ${String(knowledgeDoc.id).slice(0, 8)}: tables=${_tr.tables} rows=${_tr.rows}`);
+          if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[kb-tables] remote doc ${String(knowledgeDoc.id).slice(0, 8)}: tables=${_tr.tables} rows=${_tr.rows}`);
         } else {
           this.logger.warn?.(`[kb-tables] remote write FAILED for doc ${knowledgeDoc.id} — grids not stored`);
         }
@@ -3566,12 +3577,12 @@ Every item must include a non-empty content field and one or more valid support_
           _rowsTotal += rows.length;
         }
         if (_rowsTotal) {
-          if (KB_INGEST_VERBOSE) console.log(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: persisted `
+          if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[kb-tables] doc ${String(knowledgeDoc.id).slice(0, 8)}: persisted `
             + `${_tables.length} table(s), ${_rowsTotal} rows — now exactly queryable`);
         }
       }
     } catch (e) {
-      console.warn(`[kb-tables] persist skipped (ingest unaffected): ${e.message}`);
+      ingestDiagnostic.warn(`[kb-tables] persist skipped (ingest unaffected): ${e.message}`);
     }
 
     // Intentional evidence-only ingest stops at the durable hybrid evidence
@@ -3660,8 +3671,8 @@ Every item must include a non-empty content field and one or more valid support_
     });
     } catch (err) {
       // The document + segments are durable. Report evidence-only success.
-      console.error(`[kb-unified] PROMOTION FAILED doc=${String(knowledgeDoc.id).slice(0, 8)}: ${err.message}`);
-      console.error(`[kb-unified] DEGRADED TO EVIDENCE-ONLY — ${segments.length} segments are COMMITTED, `
+      ingestDiagnostic.error(`[kb-unified] PROMOTION FAILED doc=${String(knowledgeDoc.id).slice(0, 8)}: ${err.message}`);
+      ingestDiagnostic.error(`[kb-unified] DEGRADED TO EVIDENCE-ONLY — ${segments.length} segments are COMMITTED, `
         + `embedded and searchable; the MEMORY lane is empty for this document. Evidence recall can `
         + `answer from the verbatim text; synthesis and graph traversal cannot. The document is NOT a `
         + `failed upload and must not be re-uploaded.`);
@@ -3673,7 +3684,7 @@ Every item must include a non-empty content field and one or more valid support_
     this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
     this._structureClaimsAsync({ memories: promoted.memories, orgId });
     const _msPromote = Date.now() - _tPromote;
-    console.log(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
+    ingestDiagnostic.info(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
     // Per-stage drop counter (#3 observability): how many segments survived to
     // candidates → promoted memories. Surfaces silent loss ("167 segs → 13").
     emit('promoted', 95, {
@@ -4275,7 +4286,7 @@ Every item must include a non-empty content field and one or more valid support_
               : (doclingResult.hybridChunks || []).map(c => c.text).join('\n\n');
             const rebuilt = completeChunkMarkdown(synthesizedText, doclingResult.hybridChunks);
             if (!doclingResult.markdown && rebuilt.coverage > 0 && !rebuilt.markdown) {
-              console.warn(`[segments] rejected partial reconstructed markdown: chunks cover `
+              ingestDiagnostic.warn(`[segments] rejected partial reconstructed markdown: chunks cover `
                 + `${Math.round(rebuilt.coverage * 100)}% of parser text; preserving full text`);
             }
             return {
@@ -4350,7 +4361,7 @@ Every item must include a non-empty content field and one or more valid support_
         metadata: {}
       };
     } catch (error) {
-      console.error('[DocumentFirstIngestion] Parse failed:', error);
+      ingestDiagnostic.error('[DocumentFirstIngestion] Parse failed:', error);
       return {
         success: false,
         engine: 'none',
@@ -4444,7 +4455,7 @@ Every item must include a non-empty content field and one or more valid support_
     if ((!parseResult.success || !parseResult.text) && !hasChunks) {
       return [];
     }
-    if (KB_INGEST_VERBOSE) console.log(`[segments] hybridChunks=${hasChunks ? hybridChunks.length : 'none'} parseText=${(parseResult?.text || '').length}ch for doc ${documentId}`);
+    if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[segments] hybridChunks=${hasChunks ? hybridChunks.length : 'none'} parseText=${(parseResult?.text || '').length}ch for doc ${documentId}`);
 
     // SEMANTIC SEGMENTS (default; reversible via KB_SEMANTIC_SEGMENTS=false). Docling's HybridChunker
     // text can start/end MID-WORD (token-window artifacts: "...doc" | "ents to share…"), poisoning the
@@ -4481,7 +4492,7 @@ Every item must include a non-empty content field and one or more valid support_
           const OVERLAP = Number(process.env.KB_SEGMENT_OVERLAP_CHARS || 120);
           chunks = (chunkText(src, { targetSize: TARGET, maxSize: Math.round(TARGET * 1.5), minSize: 200, overlapSize: OVERLAP }) || [])
             .map((c) => (c && c.text ? c.text.trim() : '')).filter((t) => t.length >= 20);
-        } catch (e) { console.warn(`[segments] semantic chunk failed: ${e.message}`); }
+        } catch (e) { ingestDiagnostic.warn(`[segments] semantic chunk failed: ${e.message}`); }
         if (chunks.length) {
           const segments = [];
           let segmentIndex = 0;
@@ -4540,7 +4551,7 @@ Every item must include a non-empty content field and one or more valid support_
               }
               _pageMarks.sort((a, b) => a.at - b.at);
               if (_pageMarks.length) {
-                if (KB_INGEST_VERBOSE) console.log(`[segments] page map from parser chunks: ${_pageMarks.length} anchors across ${_pages.size} pages`);
+                if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[segments] page map from parser chunks: ${_pageMarks.length} anchors across ${_pages.size} pages`);
               }
             }
           }
@@ -4690,7 +4701,7 @@ Every item must include a non-empty content field and one or more valid support_
               try {
                 const segment = await this.db.knowledgeSegment.create({ data: base });
                 segments.push(segment); previousSegmentId = segment.id; segmentIndex++;
-              } catch (err) { console.warn(`[segments] semantic insert failed: ${err.message}`); }
+              } catch (err) { ingestDiagnostic.warn(`[segments] semantic insert failed: ${err.message}`); }
             }
           }
           if (segments.length) {
@@ -4698,9 +4709,9 @@ Every item must include a non-empty content field and one or more valid support_
             const _withPage = segments.filter((sg) => sg.startPage != null).length;
             const _withOffset = segments.filter((sg) => sg.startOffset != null).length;
             const _withHeading = segments.filter((sg) => sg.metadata?.heading_path?.length).length;
-            if (KB_INGEST_VERBOSE) console.log(`[segments] semantic: ${segments.length} clean segments for doc ${documentId} (no mid-word) `
+            if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[segments] semantic: ${segments.length} clean segments for doc ${documentId} (no mid-word) `
               + `types=${JSON.stringify(_types)} with_offset=${_withOffset}/${segments.length} with_page=${_withPage}/${segments.length} with_heading_path=${_withHeading}/${segments.length}`);
-            if (!_withPage) console.warn('[segments] no start_page on ANY segment — citations cannot name a page. Docling <!-- page N --> markers absent from this parse tier.');
+            if (!_withPage) ingestDiagnostic.warn('[segments] no start_page on ANY segment — citations cannot name a page. Docling <!-- page N --> markers absent from this parse tier.');
             return segments;
           }
         }
@@ -4756,7 +4767,7 @@ Every item must include a non-empty content field and one or more valid support_
             previousSegmentId = segment.id;
             segmentIndex++;
           } catch (err) {
-            console.warn(`[segments] hybrid chunk insert failed: ${err.message}`);
+            ingestDiagnostic.warn(`[segments] hybrid chunk insert failed: ${err.message}`);
           }
         }
       }
@@ -4932,7 +4943,7 @@ Every item must include a non-empty content field and one or more valid support_
           for (const segment of batch) {
             _failed += 1;
           }
-          console.error(`[DocumentFirstIngestion] Failed to embed segment batch (${batch.length}):`, error.message);
+          ingestDiagnostic.error(`[DocumentFirstIngestion] Failed to embed segment batch (${batch.length}):`, error.message);
           continue;
         }
         for (let index = 0; index < batch.length; index += 1) {
@@ -4941,7 +4952,7 @@ Every item must include a non-empty content field and one or more valid support_
           const embedding = vectors[index];
           if (!usableEmbedding(embedding)) {
             _failed += 1;
-            console.error(`[DocumentFirstIngestion] Invalid embedding for segment ${segment.id}; deferring to reconciliation`);
+            ingestDiagnostic.error(`[DocumentFirstIngestion] Invalid embedding for segment ${segment.id}; deferring to reconciliation`);
             continue;
           }
           if (_isRemote) {
@@ -4954,7 +4965,7 @@ Every item must include a non-empty content field and one or more valid support_
               if (!_ok) _failed += 1;
             } catch (error) {
               _failed += 1;
-              console.error(`[DocumentFirstIngestion] Failed to store remote segment ${segment.id}:`, error.message);
+              ingestDiagnostic.error(`[DocumentFirstIngestion] Failed to store remote segment ${segment.id}:`, error.message);
             }
           } else {
             let payload;
@@ -4964,7 +4975,7 @@ Every item must include a non-empty content field and one or more valid support_
               payload = assertEvidenceVectorPayload(buildEvidenceVectorPayload(segment));
             } catch (metadataError) {
               _failed += 1;
-              console.error(`[DocumentFirstIngestion] Invalid vector metadata for segment ${segment.id}; deferring to reconciliation: ${metadataError.message}`);
+              ingestDiagnostic.error(`[DocumentFirstIngestion] Invalid vector metadata for segment ${segment.id}; deferring to reconciliation: ${metadataError.message}`);
               continue;
             }
             _vectorRows.push({
@@ -5002,7 +5013,7 @@ Every item must include a non-empty content field and one or more valid support_
           }
           _embeddedIds.push(...rows.map((row) => row.segment.id));
         } catch (error) {
-          console.error(`[DocumentFirstIngestion] batched vector upsert failed (${collectionName}): ${error.message}`);
+          ingestDiagnostic.error(`[DocumentFirstIngestion] batched vector upsert failed (${collectionName}): ${error.message}`);
           _failed += rows.length;
         }
       }
@@ -5013,7 +5024,7 @@ Every item must include a non-empty content field and one or more valid support_
             where: { id: { in: _embeddedIds } }, data: { vectorStored: true },
           });
         } catch (error) {
-          console.error(`[DocumentFirstIngestion] vectorStored updateMany failed: ${error.message}`);
+          ingestDiagnostic.error(`[DocumentFirstIngestion] vectorStored updateMany failed: ${error.message}`);
         }
       }
     }
@@ -5023,7 +5034,7 @@ Every item must include a non-empty content field and one or more valid support_
     // This protects interactive recall and avoids repeating a provider outage.
     const _healed = 0;
     const _finalFailed = _failed;
-    if (KB_INGEST_VERBOSE) console.log(`[kb-embed] n=${segments.length} concurrency=${_conc} remote=${_isRemote} `
+    if (KB_INGEST_VERBOSE) ingestDiagnostic.info(`[kb-embed] n=${segments.length} concurrency=${_conc} remote=${_isRemote} `
       + `failed=${_finalFailed} healed=${_healed} ms=${Date.now() - _tEmb} ms_per_segment=${segments.length ? Math.round((Date.now() - _tEmb) / segments.length) : 0}`);
     return { total: segments.length, embedded: segments.length - _finalFailed, failed: _finalFailed, healed: _healed };
   }
@@ -5397,14 +5408,14 @@ Every item must include a non-empty content field and one or more valid support_
         const _msExtract = Date.now() - _tExtract;
         // NEVER exit a document silently. The tail-drop above survived because nothing
         // reported it: a truncated document and a thin document produced identical logs.
-        console.log(`[kb-unified] windows_total=${uWindows.length} windows_processed=${wi} `
+        ingestDiagnostic.info(`[kb-unified] windows_total=${uWindows.length} windows_processed=${wi} `
           + `fact_budget_left=${factBudget} fact_cap=${FACT_CAP} chars=${_docChars} `
           + `candidates=${extractedCandidates.length}`);
         // INVARIANT, not an expected outcome. Reading no longer depends on any budget, so this can
         // only fire if a future change reintroduces a gate on the read loop. Kept deliberately: the
         // original defect was silent, and the whole point is that it can never be silent again.
         if (wi < uWindows.length) {
-          console.error(`[kb-unified] INVARIANT VIOLATED — TAIL DROPPED: ${uWindows.length - wi} of `
+          ingestDiagnostic.error(`[kb-unified] INVARIANT VIOLATED — TAIL DROPPED: ${uWindows.length - wi} of `
             + `${uWindows.length} windows never sent to the LLM. Reading is supposed to be `
             + `unconditional; a budget gate has been reintroduced on the read loop. Facts in those `
             + `windows exist in NO layer.`);
@@ -5450,7 +5461,7 @@ Every item must include a non-empty content field and one or more valid support_
         // If you need document->summary traceability, add the evidence link — do not add a
         // second generator.
         const _msCurate = Date.now() - _tCurate;
-        console.log(`[kb-promote-timing] extract=${_msExtract}ms curate=${_msCurate}ms `
+        ingestDiagnostic.info(`[kb-promote-timing] extract=${_msExtract}ms curate=${_msCurate}ms `
           + `windows=${uWindows.length} conc=${uConc} candidates=${extractedCandidates.length} curated=${curated.length}`);
         const uFacts = [];
         let _docRelWritten = 0; // P5 coverage: doc-level relationship edges written
@@ -5487,7 +5498,7 @@ Every item must include a non-empty content field and one or more valid support_
           return true;
         });
         if (_curatedUnique.length !== curated.length) {
-          console.log(`[kb-persist] collapsed ${curated.length - _curatedUnique.length} `
+          ingestDiagnostic.info(`[kb-persist] collapsed ${curated.length - _curatedUnique.length} `
             + `duplicate claim(s) before persist (${curated.length} -> ${_curatedUnique.length})`);
         }
         curated = _curatedUnique;
@@ -5543,7 +5554,7 @@ Every item must include a non-empty content field and one or more valid support_
         await Promise.all(Array.from({ length: Math.min(_persistPool, curated.length) }, async () => {
           while (_ci < curated.length) { const c = curated[_ci++]; await _persistOne(c); }
         }));
-        console.log(`[kb-persist] n=${curated.length} concurrency=${_persistPool} ms=${Date.now() - _tPersist}`);
+        ingestDiagnostic.info(`[kb-persist] n=${curated.length} concurrency=${_persistPool} ms=${Date.now() - _tPersist}`);
 
         // ── 5b: DOCUMENT-LEVEL SEMANTIC RELATIONS ──────────────────────────────
         // Intra-window rels only see facts that shared one 2500-char window, so a
@@ -5577,7 +5588,7 @@ Every item must include a non-empty content field and one or more valid support_
                 break;
               } catch (e) {
                 if (_relTry === 1) throw e;
-                console.warn(`[kb-relations] proposer transient failure — retrying once: ${e.message}`);
+                ingestDiagnostic.warn(`[kb-relations] proposer transient failure — retrying once: ${e.message}`);
               }
             }
             const _edges = (Array.isArray(_relParsed?.edges) ? _relParsed.edges : [])
@@ -5599,9 +5610,9 @@ Every item must include a non-empty content field and one or more valid support_
               } catch { /* dup/FK tolerated */ }
             }
             _docRelWritten = _written;
-            console.log(`[kb-relations] doc=${String(documentId).slice(0, 8)} facts=${uFacts.length} proposed=${Array.isArray(_relParsed?.edges) ? _relParsed.edges.length : 0} valid=${_edges.length} written=${_written}`);
+            ingestDiagnostic.info(`[kb-relations] doc=${String(documentId).slice(0, 8)} facts=${uFacts.length} proposed=${Array.isArray(_relParsed?.edges) ? _relParsed.edges.length : 0} valid=${_edges.length} written=${_written}`);
           } catch (error) {
-            console.warn(`[kb-relations] 5b pass failed (non-fatal): ${error.message}`);
+            ingestDiagnostic.warn(`[kb-relations] 5b pass failed (non-fatal): ${error.message}`);
           }
         }
         if (extraEvidenceLinks.length && orgIsRemote(orgId)) {
@@ -5924,7 +5935,7 @@ Every item must include a non-empty content field and one or more valid support_
           });
         }
       } catch (error) {
-        console.error(`[DocumentFirstIngestion] Failed to promote segment ${segment.id}:`, error);
+        ingestDiagnostic.error(`[DocumentFirstIngestion] Failed to promote segment ${segment.id}:`, error);
       }
     };
 
@@ -5971,7 +5982,7 @@ Every item must include a non-empty content field and one or more valid support_
           this.logger.warn?.(`[kb] provenance NOT written for remote org ${orgId} — the agent call failed. `
             + `Memories and segments landed; the Evidence tab will be empty for this document.`);
         } else {
-          console.log(`[kb-provenance] remote org=${String(orgId).slice(0, 8)} linked=${res.linked} derived=${res.derived}`);
+          ingestDiagnostic.info(`[kb-provenance] remote org=${String(orgId).slice(0, 8)} linked=${res.linked} derived=${res.derived}`);
         }
       }
     } else {
@@ -6116,7 +6127,7 @@ Every item must include a non-empty content field and one or more valid support_
                   metadata: { ingest_tree: true, subtype: 'PartOf', document_id: documentId, parent_role: 'document', fallback_reason: err.message },
                 });
               } catch (err2) {
-                console.warn(`[doc-first] PartOf edge ${childId.slice(0, 8)}→${docParentId.slice(0, 8)} failed (native + fallback):`, err2.message);
+                ingestDiagnostic.warn(`[doc-first] PartOf edge ${childId.slice(0, 8)}→${docParentId.slice(0, 8)} failed (native + fallback):`, err2.message);
               }
             }
           };
@@ -6126,7 +6137,7 @@ Every item must include a non-empty content field and one or more valid support_
           memories.push({ id: docParentId, operation: 'document_parent', isParent: true });
         }
       } catch (parentErr) {
-        console.warn('[doc-first] Failed to attach Document parent:', parentErr.message);
+        ingestDiagnostic.warn('[doc-first] Failed to attach Document parent:', parentErr.message);
       }
     }
 

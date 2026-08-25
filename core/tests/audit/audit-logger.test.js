@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AuditLogger } from '../../src/audit/audit-logger.js';
+import { AuditLogger, normalizeAuditIdentifiers } from '../../src/audit/audit-logger.js';
 
 const uuid = '11111111-1111-4111-8111-111111111111';
 
@@ -14,7 +14,7 @@ test('audit UUID columns are normalized while non-UUID identifiers are retained 
   await audit.log({
     userId: ` ${uuid} `,
     organizationId: 'remote-org:acme', resourceId: 'amr://memory/42',
-    actorApiKeyId: 'key_live_123', sessionId: 'browser-session',
+    actorApiKeyId: 'key_live_123', actorId: 'provider-principal:42', sessionId: 'browser-session',
     eventType: 'memory.read', action: 'read', metadata: { request_source: 'test' },
   });
 
@@ -27,8 +27,19 @@ test('audit UUID columns are normalized while non-UUID identifiers are retained 
     request_source: 'test',
     audit_raw_identifiers: {
       organizationId: 'remote-org:acme', resourceId: 'amr://memory/42',
-      actorApiKeyId: 'key_live_123', sessionId: 'browser-session',
+      actorApiKeyId: 'key_live_123', actorId: 'provider-principal:42', sessionId: 'browser-session',
     },
+  });
+});
+
+test('audit identifier normalization accepts orgId aliases and retains actor-only identifiers', () => {
+  const normalized = normalizeAuditIdentifiers({
+    orgId: ` ${uuid} `,
+    actorId: 'platform-admin-cookie',
+  });
+  assert.equal(normalized.ids.organizationId, uuid);
+  assert.deepEqual(normalized.metadata, {
+    audit_raw_identifiers: { actorId: 'platform-admin-cookie' },
   });
 });
 

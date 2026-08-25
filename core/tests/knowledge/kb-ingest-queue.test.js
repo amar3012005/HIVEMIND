@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { KbIngestQueue, durableQueueJobId, isStoredEvidencePromotion, latchQueuedIngestMode } from '../../src/knowledge/kb-ingest-queue.js';
+import { KbIngestQueue, durableQueueJobId, isStoredEvidencePromotion, knowledgeIngestEvent, latchQueuedIngestMode } from '../../src/knowledge/kb-ingest-queue.js';
+
+test('queue lifecycle events use the canonical knowledge.ingest namespace', () => {
+  const event = JSON.parse(knowledgeIngestEvent('started', { job_id: 'job-1' }));
+  assert.equal(event.event, 'knowledge.ingest.started');
+  assert.equal(event.task, 'knowledge.ingest');
+  assert.equal(event.job_id, 'job-1');
+  assert.throws(() => knowledgeIngestEvent('progress'), /Unsupported knowledge ingest lifecycle phase/);
+});
 
 test('durable BullMQ IDs never contain the forbidden colon separator', () => {
   const id = durableQueueJobId('378c5f62-8848-48bc-be28-4f8af4d1e2b5', 2);

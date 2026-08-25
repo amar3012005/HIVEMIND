@@ -12,6 +12,7 @@
 import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
 import { logger } from '../utils/logger.js';
+import { normalizeAuditIdentifiers } from './audit-logger.js';
 
 const prisma = new PrismaClient();
 
@@ -78,6 +79,7 @@ export async function auditLog(params) {
   } = params;
 
   try {
+    const { ids, metadata } = normalizeAuditIdentifiers(params);
     // Generate unique audit ID
     const auditId = crypto.randomUUID();
 
@@ -85,19 +87,21 @@ export async function auditLog(params) {
     const logEntry = await prisma.auditLog.create({
       data: {
         id: auditId,
-        userId,
-        organizationId,
+        userId: ids.userId,
+        organizationId: ids.organizationId,
         eventType,
         eventCategory,
         resourceType,
-        resourceId,
+        resourceId: ids.resourceId,
         action,
+        actorApiKeyId: ids.actorApiKeyId,
+        metadata,
         oldValue: oldValue ? JSON.stringify(oldValue) : null,
         newValue: newValue ? JSON.stringify(newValue) : null,
         ipAddress,
         userAgent,
         platformType,
-        sessionId,
+        sessionId: ids.sessionId,
         processingBasis,
         legalBasisNote,
       },
@@ -108,7 +112,7 @@ export async function auditLog(params) {
       console.log(JSON.stringify({
         type: 'audit_log',
         id: auditId,
-        userId,
+        userId: ids.userId,
         eventType,
         action,
         timestamp: new Date().toISOString(),
@@ -118,7 +122,7 @@ export async function auditLog(params) {
     return logEntry;
   } catch (error) {
     // Never fail the main operation due to audit logging
-    console.error('Audit logging failed:', { error, params });
+    logger.warn?.('[audit] Log failed:', String(error?.message || 'unknown error').slice(0, 500));
     return null;
   }
 }

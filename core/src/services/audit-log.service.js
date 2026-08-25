@@ -17,6 +17,7 @@
 import { PrismaClient } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger.js';
+import { normalizeAuditIdentifiers } from '../audit/audit-logger.js';
 
 const prisma = new PrismaClient();
 
@@ -149,24 +150,27 @@ export async function createAuditLog(params) {
   } = params;
 
   try {
+    const { ids, metadata } = normalizeAuditIdentifiers(params);
     const auditId = uuidv4();
 
     const logEntry = await prisma.auditLog.create({
       data: {
         id: auditId,
-        userId,
-        organizationId,
+        userId: ids.userId,
+        organizationId: ids.organizationId,
         eventType,
         eventCategory,
         resourceType,
-        resourceId,
+        resourceId: ids.resourceId,
         action,
+        actorApiKeyId: ids.actorApiKeyId,
+        metadata,
         oldValue: oldValue || null,
         newValue: newValue || null,
         ipAddress,
         userAgent,
         platformType,
-        sessionId,
+        sessionId: ids.sessionId,
         processingBasis,
         legalBasisNote,
       },
@@ -185,7 +189,7 @@ export async function createAuditLog(params) {
     return logEntry;
   } catch (error) {
     // Never fail the main operation due to audit logging
-    logger.error('Audit logging failed', { error, params });
+    logger.warn?.('[audit] Log failed:', String(error?.message || 'unknown error').slice(0, 500));
     return null;
   }
 }

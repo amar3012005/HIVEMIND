@@ -8,7 +8,14 @@
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const UUID_AUDIT_FIELDS = ['userId', 'organizationId', 'resourceId', 'actorApiKeyId', 'sessionId'];
+const UUID_AUDIT_FIELDS = {
+  userId: ['userId'],
+  organizationId: ['organizationId', 'orgId'],
+  resourceId: ['resourceId'],
+  actorApiKeyId: ['actorApiKeyId'],
+  sessionId: ['sessionId'],
+};
+const METADATA_ONLY_IDENTIFIERS = ['actorId'];
 
 function normalizeUuid(value) {
   if (typeof value !== 'string') return null;
@@ -16,17 +23,28 @@ function normalizeUuid(value) {
   return UUID_RE.test(normalized) ? normalized : null;
 }
 
-function auditData(event = {}) {
+/**
+ * Normalize identifiers for every Prisma AuditLog writer.
+ *
+ * AuditLog has UUID columns for its relational identifiers, but callers also
+ * legitimately report external IDs such as AMR resource IDs and browser
+ * session keys. Persist those raw values in metadata instead of letting one
+ * invalid UUID discard the entire audit record.
+ */
+export function normalizeAuditIdentifiers(event = {}) {
   const metadata = event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
     ? { ...event.metadata }
     : {};
   const rawIdentifiers = {};
   const ids = {};
 
-  for (const field of UUID_AUDIT_FIELDS) {
-    const raw = event[field];
+  for (const [field, aliases] of Object.entries(UUID_AUDIT_FIELDS)) {
+    const raw = aliases.map((alias) => event[alias]).find((value) => value != null);
     ids[field] = normalizeUuid(raw);
     if (raw != null && !ids[field]) rawIdentifiers[field] = String(raw).slice(0, 1024);
+  }
+  for (const field of METADATA_ONLY_IDENTIFIERS) {
+    if (event[field] != null) rawIdentifiers[field] = String(event[field]).slice(0, 1024);
   }
   if (Object.keys(rawIdentifiers).length) {
     metadata.audit_raw_identifiers = {
@@ -72,7 +90,7 @@ export class AuditLogger {
       // Prisma maps these fields to UUID columns. Non-UUID identifiers still
       // matter for forensics, but must live in JSON metadata rather than causing
       // an audit write failure (and a noisy warning on every request).
-      const { ids, metadata } = auditData(event);
+      const { ids, metadata } = normalizeAuditIdentifiers(event);
       const created = await this.prisma.auditLog.create({
         select: { id: true, createdAt: true },
         data: {

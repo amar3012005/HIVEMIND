@@ -597,6 +597,15 @@ async function execRelationBetween(bus, plan, ctx, { beforeDeadline, remaining, 
     ...(plan.source?.document_id ? { source_document_id: plan.source.document_id } : {}),
     ...(plan.source?.title ? { source_title: plan.source.title } : {}),
     ...(plan.source?.kind ? { source_kind: plan.source.kind } : {}),
+    // A descriptive source label (for example "the pitch deck") is a semantic
+    // hint, not a verified filename boundary. Permit the single recall pass to
+    // fall back to tenant-scoped hybrid evidence if no unique document identity
+    // resolves. Literal filenames and document ids remain strict boundaries.
+    ...(plan.operation === 'source_read' && plan.source?.title
+      && !/\.[a-z0-9]{1,12}$/i.test(plan.source.title)
+      && !plan.source?.document_id
+      ? { allow_semantic_source_recovery: true }
+      : {}),
     ...(plan.time?.kind === 'latest' || plan.time?.kind === 'earliest'
       ? { temporal_selector: plan.time.kind }
       : {}),

@@ -1792,12 +1792,12 @@ export class RecallRouter {
     let explicitSourceDocuments = [];
     let explicitSourceMemoryAnchors = [];
     let explicitSourceHydration = null;
-    const explicitSourceRequested = recallPlan.source.requested;
+    let explicitSourceRequested = recallPlan.source.requested;
     // A source class alone (for example "the latest image") has no document
     // title or id. Do not send that broad selector to the document resolver:
     // it may be interpreted as an unconstrained document search. Images and
     // other direct uploads resolve through their scoped memory provenance.
-    const explicitDocumentSourceRequested = !!(recallPlan.source.document_id || recallPlan.source.title);
+    let explicitDocumentSourceRequested = !!(recallPlan.source.document_id || recallPlan.source.title);
     if (this.evidence?.resolveSourceDocuments && explicitDocumentSourceRequested) {
       const sourceResolution = await withTimeout(
         this.evidence.resolveSourceDocuments({
@@ -1863,6 +1863,13 @@ export class RecallRouter {
           title: explicitSourceDocuments[0].title || recallPlan.source.title,
           requested: true,
         };
+      }
+      if (explicitSourceDocuments.length === 0 && options.allow_semantic_source_recovery === true) {
+        recallPlan.source = { document_id: null, title: null, kind: null, requested: false };
+        options.source_document_id = null;
+        options.source_title = null;
+        explicitSourceRequested = false;
+        explicitDocumentSourceRequested = false;
       }
       if (explicitSourceDocuments.length && this.evidence?.hydrateSourceDocuments) {
         const fullSource = recallPlan.mode === 'full';

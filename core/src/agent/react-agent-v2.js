@@ -30,7 +30,7 @@ import { TOOL_SCHEMAS, dispatchTool as _dispatchTool } from './tool-registry.js'
 import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectRankedMemoryFallback } from './memory-evidence-projector.js';
-import { appendGapClarification, appendSuggestedFollowUps, buildSynthesisPromptArtifact } from './chat-synthesis-prompt.js';
+import { appendGapClarification, buildSynthesisPromptArtifact, normalizeSuggestedFollowUps } from './chat-synthesis-prompt.js';
 import { deriveAnswerContextStatus, normalizeAnswerCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
@@ -264,7 +264,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
   return { parsed: parseJsonObjectContent(raw), usage: data.usage };
 }
 
-async function callValidatedClaimStream({ messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, allowGeneralKnowledge, onEvent, language = 'en' }) {
+async function callValidatedClaimStream({ messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, evidence, allowGeneralKnowledge, onEvent, language = 'en' }) {
   const streamInstruction = `STREAMING OUTPUT CONTRACT: Return newline-delimited JSON (NDJSON), one complete object per line and no markdown.
 For every factual sentence emit {"type":"claim","text":"a complete natural sentence","citation_ids":["P1-C1"]}. Each claim must use only delivered evidence and include valid delivered citation IDs. Emit claims in the order the user should read them. Decompose every independent part of the user request and then emit exactly one final {"type":"meta","confidence":0.0,"gaps":[],"follow_ups":["a grounded next question","another grounded next question"],"coverage":[{"request":"independent requested detail","status":"supported|unsupported","citation_ids":["P1-C1"]}],"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Follow-ups must obey the synthesis prompt and remain empty when clarification is required. Never emit uncited prose. Never mark the response sufficient while an independent requested detail is absent from coverage.`;
   const streamedClaims = [];
@@ -390,18 +390,62 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
     }
     meta = buffered || meta;
   }
-  if (!result.ok || !streamedClaims.length) {
+  if (!result.ok) {
     const diagnostic = result.error || result.content || '';
     const detail = diagnostic ? `:${String(diagnostic).replace(/\s+/g, ' ').slice(0, 180)}` : '';
     throw new Error(`validated_stream_failed:${result.status || 'no_claims'}${detail}`);
   }
+  if (!streamedClaims.length) {
+    // A 200 meta-only response is a valid semantic result, not a transport
+    // failure. Preserve the single synthesis call and deterministically expose
+    // the already-ranked, citation-bearing recall packet instead of returning
+    // a 502 or paying for another LLM pass.
+    const recalled = groundedRecallFallback(evidence, language);
+    if (recalled) {
+      onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
+      onEvent?.({ type: 'answer_delta', schema_version: 1, delta: recalled.response, validated: true, citation_ids: recalled.claims.flatMap((claim) => claim.citation_ids) });
+      onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
+      return {
+        response: recalled.response,
+        follow_ups: normalizeSuggestedFollowUps(meta.follow_ups),
+        claims: recalled.claims,
+        rejected_claims: rejectedClaims,
+        grounded: true,
+        evidence_used: recalled.claims.flatMap((claim) => claim.citation_ids),
+        confidence: 0.7,
+        gaps: Array.isArray(meta.gaps) ? meta.gaps : [],
+        context_status: deriveAnswerContextStatus(meta),
+        answer_coverage: normalizeAnswerCoverage(meta.coverage),
+        recall_packets: recallPackets,
+        usage: result.usage,
+        usage_stages: { synthesis: result.usage },
+        streaming_emitted: true,
+      };
+    }
+  }
+  if (!streamedClaims.length) {
+    // No valid claim and no grounded packet is a normal empty-recall outcome.
+    // It must remain an answerable 200 turn rather than becoming a proxy 502.
+    const gap = Array.isArray(meta.gaps) && meta.gaps.length
+      ? `I could not verify ${meta.gaps.join(' or ')} in the HIVEMIND context available to this chat.`
+      : 'I could not verify a matching detail in the HIVEMIND context available to this chat.';
+    onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
+    onEvent?.({ type: 'answer_delta', schema_version: 1, delta: gap, validated: true, citation_ids: [] });
+    onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
+    return {
+      response: gap, follow_ups: [], claims: [], rejected_claims: rejectedClaims,
+      grounded: false, evidence_used: [], confidence: 0,
+      gaps: Array.isArray(meta.gaps) ? meta.gaps : [],
+      context_status: deriveAnswerContextStatus(meta),
+      answer_coverage: normalizeAnswerCoverage(meta.coverage),
+      recall_packets: recallPackets, usage: result.usage,
+      usage_stages: { synthesis: result.usage }, streaming_emitted: true,
+    };
+  }
   onEvent?.({ type: 'answer_completed', schema_version: 1, validated: true });
   return {
-    response: appendSuggestedFollowUps(
-      streamedClaims.map((claim) => claim.text).join(' '),
-      meta.follow_ups,
-      language,
-    ),
+    response: streamedClaims.map((claim) => claim.text).join(' '),
+    follow_ups: normalizeSuggestedFollowUps(meta.follow_ups),
     claims: streamedClaims,
     rejected_claims: rejectedClaims,
     grounded: true,
@@ -2396,7 +2440,7 @@ ${message}`;
       ],
       model, apiKey, maxTokens: answerCap, signal,
       promptCacheKey: synthesisPrompt.cache.key,
-      recallPackets: evidence.recall_packets || [], allowGeneralKnowledge, onEvent,
+      recallPackets: evidence.recall_packets || [], evidence, allowGeneralKnowledge, onEvent,
       language,
     });
   }
@@ -2524,11 +2568,8 @@ ${message}`;
     // Validation deliberately reconstructs prose from factual claims, which
     // drops non-factual clarification questions. Re-attach only the bounded
     // gap question after claims have passed the fail-closed citation check.
-    response: appendSuggestedFollowUps(
-      appendGapClarification(validated.answer, answerPayload.gaps, language),
-      answerPayload.follow_ups,
-      language,
-    ),
+    response: appendGapClarification(validated.answer, answerPayload.gaps, language),
+    follow_ups: normalizeSuggestedFollowUps(answerPayload.follow_ups),
     claims: validated.claims,
     rejected_claims: validated.rejected_claims,
     grounded: validated.grounded,
@@ -4255,6 +4296,7 @@ export async function runReactAgentV2({
       // When a save was deferred for project choice, don't claim it was saved —
       // prompt the user to pick (the FE renders project buttons below).
       response: finalResponse,
+      follow_ups: recallProjectChoice ? [] : normalizeSuggestedFollowUps(answer.follow_ups),
       // Sources include recall-trace metadata so the FE can render WHY a
       // memory ranked (synth boost, x-cluster overlap, raw score). Helps
       // users trust the answer + spot mis-ranking.

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { appendGapClarification, appendSuggestedFollowUps, buildSynthesisPromptArtifact, buildSynthesisSystemPrompt } from '../../src/agent/chat-synthesis-prompt.js';
+import { appendGapClarification, appendSuggestedFollowUps, buildSynthesisPromptArtifact, buildSynthesisSystemPrompt, normalizeSuggestedFollowUps } from '../../src/agent/chat-synthesis-prompt.js';
 import { resetStaticPromptCacheForTests } from '../../src/agent/chat-static-prompt-cache.js';
 
 test('fact synthesis loads only the compact grounding and citation contract', () => {
@@ -104,6 +104,10 @@ test('a clarification question emitted in gaps is visible in the final response'
 });
 
 test('grounded follow-up suggestions are appended in deterministic order and language', () => {
+  assert.deepEqual(
+    normalizeSuggestedFollowUps(['What changed?', 'Who approved it?', 'What changed?']),
+    ['What changed?', 'Who approved it?'],
+  );
   assert.equal(
     appendSuggestedFollowUps('The answer.', ['What changed?', 'Who approved it?', 'What changed?'], 'en'),
     'The answer.\n\nSuggested follow-ups:\n- What changed?\n- Who approved it?',

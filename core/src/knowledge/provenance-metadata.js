@@ -1,5 +1,22 @@
+export function sanitizeEvidenceText(value) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+}
+
+export function sanitizeEvidenceJson(value) {
+  if (typeof value === 'string') return sanitizeEvidenceText(value);
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(sanitizeEvidenceJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [sanitizeEvidenceText(key), sanitizeEvidenceJson(item)]));
+  }
+  return value;
+}
+
 function clean(value) {
-  const text = String(value || '').trim();
+  const text = sanitizeEvidenceText(value).trim();
   return text || null;
 }
 
@@ -47,7 +64,7 @@ export function buildEvidenceMetadata({
   const projects = list(projectIds?.length ? projectIds : (projectId || existing.project_ids || existing.project_id));
   const pages = { start: startPage ?? existing.page_start ?? existing.start_page ?? null,
     end: endPage ?? existing.page_end ?? existing.end_page ?? null };
-  return {
+  return sanitizeEvidenceJson({
     ...existing,
     semantic_layer: 'evidence',
     evidence_title: title,
@@ -86,7 +103,7 @@ export function buildEvidenceMetadata({
     content_hash: clean(contentHash) || clean(existing.content_hash),
     embedding_model: clean(embeddingModel) || clean(existing.embedding_model),
     embedding_version: clean(embeddingVersion) || clean(existing.embedding_version),
-  };
+  });
 }
 
 export function buildEvidenceVectorPayload(segment = {}) {
@@ -117,7 +134,7 @@ export function buildEvidenceVectorPayload(segment = {}) {
     embeddingModel: segment.embeddingModel || segment.metadata?.embedding_model,
     embeddingVersion: segment.embeddingVersion || segment.metadata?.embedding_version,
   });
-  return {
+  return sanitizeEvidenceJson({
     segment_id: segment.id,
     document_id: segment.documentId,
     user_id: segment.userId,
@@ -125,8 +142,8 @@ export function buildEvidenceVectorPayload(segment = {}) {
     segment_type: segment.segmentType,
     layer: 'evidence',
     ...metadata,
-    content_preview: String(segment.content || '').slice(0, 200),
-  };
+    content_preview: sanitizeEvidenceText(segment.content).slice(0, 200),
+  });
 }
 
 const VECTOR_REQUIRED = [

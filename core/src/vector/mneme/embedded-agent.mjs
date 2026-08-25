@@ -36,6 +36,18 @@ const DATA_ROOT = process.env.MNEME_DATA_ROOT || '/app/data/mneme';
 let ready = false;
 export function isEmbeddedReady() { return ready; }
 
+function sanitizeJson(value) {
+  if (typeof value === 'string') return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '');
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(sanitizeJson);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [sanitizeJson(key), sanitizeJson(item)]));
+  }
+  return value;
+}
+
 // ── Postgres (rows + lexical) — lazy singleton, schema `hm` on CENTRAL postgres ────────────────
 let pg = null;
 let schemaEnsured = null; // promise, so concurrent first-callers don't race the DDL
@@ -1431,7 +1443,7 @@ function routesFor(ctx) {
 
     // ── KB layer (documents + evidence segments) — Postgres + Qdrant, same as self-host ────────
     '/v1/kb-doc': async (b) => {
-      const d = b.doc || {};
+      const d = sanitizeJson(b.doc || {});
       if (!d.id) return { ok: false, error: 'doc.id required' };
       await db().query(
         // ingest_mode is written to the COLUMN, not just metadata. The caller carries it in
@@ -1490,7 +1502,7 @@ function routesFor(ctx) {
     },
 
     '/v1/kb-segment': async (b) => {
-      const s = b.segment || {};
+      const s = sanitizeJson(b.segment || {});
       if (!s.id || !s.documentId) return { ok: false, error: 'segment.id + documentId required' };
       // Postgres text columns reject NUL bytes — strip them or the segment (evidence) is lost.
       if (typeof s.content === 'string') s.content = s.content.replace(/\u0000/g, '');

@@ -2367,11 +2367,11 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
           // Use the existing Qdrant client's embedding pipeline
           if (Array.isArray(input)) {
             return qdrantClient.generateEmbeddings(
-              input.map((text) => String(text).slice(0, 8000)),
+              input.map((text) => String(text)),
               { workload: 'ingestion', ...options },
             );
           }
-          return qdrantClient.generateEmbedding(String(input).slice(0, 8000), {
+          return qdrantClient.generateEmbedding(String(input), {
             workload: 'ingestion', ...options,
           });
         },

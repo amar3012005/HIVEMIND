@@ -44,6 +44,7 @@ const CONCURRENCY = Number(process.env.KB_QUEUE_CONCURRENCY || 6);
 const ORG_CONCURRENCY = Number(process.env.KB_QUEUE_ORG_CONCURRENCY || 4);
 const MAX_DEPTH = Number(process.env.KB_QUEUE_MAX_DEPTH || 2000);
 const ORG_PENDING_CAP = Number(process.env.KB_QUEUE_ORG_PENDING_CAP || 500);
+const VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
 
 export function durableQueueJobId(trackerJobId, processingVersion = 1) {
   return `${String(trackerJobId).replace(/:/g, '-')}-v${Number(processingVersion) || 1}`;
@@ -212,7 +213,7 @@ export class KbIngestQueue {
     // readable cross-node. 24h TTL.
     this.redis = new IORedis({ host, port, password, username, db, maxRetriesPerRequest: null });
     this.redis.on('error', () => {});
-    this.logger.info?.(`[kb-queue] ready on redis://${host}:${port}/${db} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
+    if (VERBOSE) this.logger.info?.(`[kb-queue] ready on redis://${host}:${port}/${db} (concurrency=${CONCURRENCY}, org-cap=${ORG_CONCURRENCY})`);
     this._startStaleJobReaper();
     this._startRawFileSweeper();
   }
@@ -264,7 +265,7 @@ export class KbIngestQueue {
           }
           try { if (!fs.readdirSync(orgDir).length) fs.rmdirSync(orgDir); } catch { /* non-empty */ }
         }
-        if (removed) this.logger.info?.(`[kb-queue] raw-file sweep: removed ${removed} file(s) older than ${hours}h, ${kept} retained for replay`);
+        if (VERBOSE && removed) this.logger.info?.(`[kb-queue] raw-file sweep: removed ${removed} file(s) older than ${hours}h, ${kept} retained for replay`);
       } catch (err) {
         this.logger.warn?.(`[kb-queue] raw-file sweep failed: ${err.message}`);
       }
@@ -459,6 +460,7 @@ export class KbIngestQueue {
       removeOnFail: 5000, // failed set IS the DLQ — keep for inspection/replay
     });
     this._orgPending.set(orgId, (this._orgPending.get(orgId) || 0) + 1);
+    this.logger.info?.(`[kb-ingest] accepted file=${filename} org=${orgId.slice(0, 8)} job=${trackerJobId}`);
     return { job_id: trackerJobId, queue_job_id: job.id };
   }
 
@@ -567,12 +569,12 @@ export class KbIngestQueue {
       // ingest-time heal, say so LOUD. The doc still indexes (evidence-only stays a
       // success), but a partial-embed must never be reported as fully clean.
       const _ee = result?.coverage?.evidence_embed;
-      if (_ee && Number(_ee.failed) > 0) {
-        this.logger.warn?.(`[kb-queue] ⚠ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} `
-          + `PARTIAL EMBED: ${_ee.failed}/${_ee.total} segments un-embedded after heal — recall will miss them until reconciled`);
-      }
       const _eeStr = _ee ? ` embed=${_ee.embedded}/${_ee.total}${_ee.healed ? ` healed=${_ee.healed}` : ''}${_ee.failed ? ` FAILED=${_ee.failed}` : ''}` : '';
-      this.logger.info?.(`[kb-queue] ✓ ${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} segs=${result.segmentCount} promoted=${result.promotedCount}${_eeStr}${_evidenceOnly ? ' (evidence-only: 0 memories, segments searchable)' : ''}`);
+      if (_ee && Number(_ee.failed) > 0) {
+        this.logger.error?.(`[kb-ingest] failed file=${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} reason=partial-embedding ${_ee.failed}/${_ee.total}`);
+      } else {
+        this.logger.info?.(`[kb-ingest] completed file=${filename} org=${orgId.slice(0, 8)} doc=${result.documentId} evidence=${result.segmentCount} memories=${result.promotedCount}${_eeStr}${_evidenceOnly ? ' mode=evidence-only' : ''}`);
+      }
       try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };
     } catch (error) {
@@ -585,7 +587,7 @@ export class KbIngestQueue {
         // was unrecoverable and the user was never told. Keeping the file is what
         // makes a retry endpoint possible at all.
         // Disk is bounded by _sweepRawFiles() below, not by deleting on failure.
-        this.logger.warn?.(`[kb-queue] retaining raw file for replay: ${filePath} (job ${trackerJobId} dead: ${error?.message})`);
+        if (VERBOSE) this.logger.warn?.(`[kb-queue] retaining raw file for replay: ${filePath} (job ${trackerJobId} dead: ${error?.message})`);
       }
       throw error;
     } finally {

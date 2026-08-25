@@ -561,7 +561,7 @@ export async function remoteKbSegment(orgId, segment, vector) {
   // TIMEOUT_MS → "This operation was aborted") and the segment was dropped with
   // NO reconciler backstop — evidence silently missing. The agent upserts a
   // segment by its stable id, so a retry is idempotent (no duplicate rows).
-  const attempts = Math.max(1, Number(process.env.KB_SEGMENT_WRITE_ATTEMPTS || 3));
+  const attempts = Math.max(1, Number(process.env.KB_SEGMENT_WRITE_ATTEMPTS || 1));
   let lastErr = null;
   for (let i = 0; i < attempts; i++) {
     try {

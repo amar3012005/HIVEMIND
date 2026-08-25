@@ -1864,7 +1864,7 @@ export class RecallRouter {
           requested: true,
         };
       }
-      if (explicitSourceDocuments.length === 0 && options.allow_semantic_source_recovery === true) {
+      if (explicitSourceDocuments.length !== 1 && options.allow_semantic_source_recovery === true) {
         recallPlan.source = { document_id: null, title: null, kind: null, requested: false };
         options.source_document_id = null;
         options.source_title = null;

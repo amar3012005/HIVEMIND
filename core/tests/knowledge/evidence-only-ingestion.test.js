@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DocumentFirstIngestionService, promotionProvenance } from '../../src/knowledge/document-first-ingestion.js';
+import {
+  DocumentFirstIngestionService,
+  normalizeCuratedClaims,
+  promotionProvenance,
+} from '../../src/knowledge/document-first-ingestion.js';
 
 test('promotion retains complete persisted evidence provenance', () => {
   const provenance = promotionProvenance({
@@ -69,6 +73,198 @@ test('stored evidence promotion generates memories without invoking extraction a
   assert.equal(updates.length, 1);
   assert.equal(updates[0].data.ingestMode, 'both');
   assert.equal(updates[0].data.parseMetadata.original_ingest_mode, 'evidence');
+});
+
+test('promoted memories retain stored evidence provenance in memory and vector writes', async () => {
+  const documentId = '33333333-3333-4333-8333-333333333333';
+  const segmentId = '55555555-5555-4555-8555-555555555555';
+  const memoryWrites = [];
+  const vectorWrites = [];
+  const evidenceLinks = [];
+  const service = new DocumentFirstIngestionService({
+    db: {
+      knowledgeSegment: { findMany: async () => [], update: async () => ({}) },
+      memoryEvidenceLink: { createMany: async ({ data }) => evidenceLinks.push(...data) },
+      memoryDerivation: { createMany: async () => ({}) },
+    },
+    memoryGraphEngine: {
+      ingestMemory: async (payload) => {
+        memoryWrites.push(payload);
+        return { memoryId: '66666666-6666-4666-8666-666666666666' };
+      },
+      store: { createRelationship: async () => ({}) },
+      vectorStore: {
+        generateEmbeddings: async () => [Array(1024).fill(0.1)],
+        storeMemory: async (payload) => vectorWrites.push(payload),
+      },
+    },
+    smartIngestRouter: null, embeddingService: null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  const segment = {
+    id: segmentId,
+    startPage: 7,
+    metadata: {
+      source_id: 'stored-source', source_title: 'Stored evidence title', source_kind: 'pdf',
+      citation_id: 'cite:annual-report:7', scope: 'project', project_ids: ['project-1'],
+      primary_team_id: 'team-1', document_date: '2026-01-20T00:00:00.000Z',
+      known_at: '2026-02-01T00:00:00.000Z', event_time: '2026-02-03T00:00:00.000Z',
+      uploaded_by_user_id: 'evidence-uploader', content_hash: 'evidence-hash',
+      embedding_model: 'bge-m3', embedding_version: '7',
+    },
+  };
+  const provenance = promotionProvenance(segment, documentId, {
+    filename: 'annual.pdf', scope: 'organization', document_date: '2026-03-01T00:00:00.000Z',
+  });
+
+  await service._ingestUnifiedWindow({
+    segmentId,
+    content: 'The verified launch date is 14 September 2028.',
+  }, {
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    documentId,
+    metadata: { filename: 'annual.pdf', scope: 'organization', visibility: 'organization' },
+    docTitle: 'Annual report',
+    evidenceProvenance: provenance,
+    supportingEvidenceProvenance: [provenance],
+    preExtractedFacts: [{
+      t: 'Launch date', f: 'The verified launch date is 14 September 2028.',
+      memory_type: 'fact', claim_kind: 'event', importance: 0.9,
+      source_quote: 'The verified launch date is 14 September 2028.',
+      source_start: 0, source_end: 47, entities: [], rels: [],
+      segmentId, support_segment_ids: [segmentId],
+      support_quotes: ['The verified launch date is 14 September 2028.'],
+    }],
+  });
+
+  assert.equal(memoryWrites.length, 1);
+  assert.equal(vectorWrites.length, 1);
+  assert.equal(memoryWrites[0].scope, 'project');
+  assert.deepEqual(memoryWrites[0].project_ids, ['project-1']);
+  assert.equal(memoryWrites[0].primary_team_id, 'team-1');
+  for (const provenancePayload of [
+    memoryWrites[0].source_metadata,
+    memoryWrites[0].metadata,
+    vectorWrites[0].source_metadata,
+    vectorWrites[0].metadata,
+  ]) {
+    assert.equal(provenancePayload.document_id, documentId);
+    assert.equal(provenancePayload.segment_id, segmentId);
+    assert.equal(provenancePayload.source_id, 'stored-source');
+    assert.equal(provenancePayload.source_title, 'Stored evidence title');
+    assert.equal(provenancePayload.citation_id, 'cite:annual-report:7');
+    assert.equal(provenancePayload.scope, 'project');
+    assert.equal(provenancePayload.uploaded_by_user_id, 'evidence-uploader');
+    assert.equal(provenancePayload.document_date, '2026-01-20T00:00:00.000Z');
+    assert.equal(provenancePayload.known_at, '2026-02-01T00:00:00.000Z');
+    assert.equal(provenancePayload.source_content_hash, 'evidence-hash');
+    assert.equal(provenancePayload.embedding_model, 'bge-m3');
+    assert.equal(provenancePayload.supporting_evidence[0].citation_id, 'cite:annual-report:7');
+  }
+  assert.deepEqual(evidenceLinks.map((link) => link.segmentId), [segmentId]);
+});
+
+test('default promotion curation caps atomic memories at fourteen', async () => {
+  const caps = [];
+  const service = new DocumentFirstIngestionService({
+    db: {}, memoryGraphEngine: { vectorStore: null }, smartIngestRouter: null, embeddingService: null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  service._extractUnifiedReliable = async () => Array.from({ length: 20 }, (_, index) => ({
+    t: `Fact ${index}`, f: `A durable fact ${index}.`, memory_type: 'fact', claim_kind: 'fact',
+    importance: 0.9, source_quote: `A durable fact ${index}.`, entities: [], rels: [],
+  }));
+  service._curateDocumentClaims = async (_candidates, options) => {
+    caps.push(options.maxMemories);
+    return [];
+  };
+  service._attachDocumentParent = async () => null;
+  const previousConcurrency = process.env.KB_UNIFIED_CONCURRENCY;
+  process.env.KB_UNIFIED_CONCURRENCY = '1';
+  try {
+    await service._promoteMemories({
+      documentId: '33333333-3333-4333-8333-333333333333',
+      userId: '11111111-1111-4111-8111-111111111111',
+      orgId: '22222222-2222-4222-8222-222222222222',
+      metadata: { filename: 'dense.txt', scope: 'organization' },
+      segments: [{
+        id: '55555555-5555-4555-8555-555555555555',
+        content: 'A durable source sentence. '.repeat(400), metadata: {},
+      }],
+    });
+  } finally {
+    if (previousConcurrency === undefined) delete process.env.KB_UNIFIED_CONCURRENCY;
+    else process.env.KB_UNIFIED_CONCURRENCY = previousConcurrency;
+  }
+  assert.deepEqual(caps, [14]);
+});
+
+test('one document parent completes a fourteen-memory promotion and keeps child provenance', async () => {
+  const parentWrites = [];
+  const relationships = [];
+  const summaryLinks = [];
+  const documentId = '33333333-3333-4333-8333-333333333333';
+  const memories = Array.from({ length: 14 }, (_, index) => ({
+    id: `memory-${index}`,
+    title: `Fact ${index}`,
+    support_segment_ids: [`segment-${index}`],
+    source_metadata: {
+      evidence_provenance: {
+        segment_id: `segment-${index}`,
+        document_id: documentId,
+        source_id: 'stored-source',
+        source_title: 'Stored evidence title',
+        citation_id: `cite:${index}`,
+        scope: 'organization',
+        uploaded_by_user_id: 'evidence-uploader',
+        document_date: '2026-01-20T00:00:00.000Z',
+        known_at: '2026-02-01T00:00:00.000Z',
+      },
+    },
+  }));
+  const service = new DocumentFirstIngestionService({
+    db: { memoryEvidenceLink: { createMany: async ({ data }) => summaryLinks.push(...data) } },
+    memoryGraphEngine: {
+      ingestMemory: async (payload) => {
+        parentWrites.push(payload);
+        return { memoryId: 'parent-1' };
+      },
+      store: { createRelationship: async (edge) => relationships.push(edge) },
+    },
+    smartIngestRouter: null, embeddingService: null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+
+  const parentId = await service._attachDocumentParent({
+    memories,
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    documentId,
+    metadata: { filename: 'annual.pdf', scope: 'organization' },
+    totalFacts: 14,
+  });
+
+  assert.equal(parentId, 'parent-1');
+  assert.equal(parentWrites.length, 1);
+  assert.equal(parentWrites[0].memory_type, 'summary');
+  assert.equal(memories.length, 15);
+  assert.equal(relationships.length, 14);
+  assert.equal(summaryLinks.length, 14);
+  assert.equal(parentWrites[0].source_metadata.citation_id, 'cite:0');
+  assert.equal(parentWrites[0].source_metadata.supporting_evidence.length, 14);
+  assert.equal(parentWrites[0].source_metadata.supporting_evidence[13].citation_id, 'cite:13');
+});
+
+test('relationship labels remain graph edges and cannot be promoted as memories', () => {
+  const candidates = [{
+    t: 'Launch', f: 'Launch is 15 July.', memory_type: 'event', importance: 0.9,
+    entities: [], segmentId: 'segment-1', source_quote: 'Launch is 15 July.',
+  }];
+  assert.deepEqual(normalizeCuratedClaims([{
+    title: 'Relationship', content: 'A relationship row.', memory_type: 'relationship',
+    importance: 1, support_indices: [0], entities: [],
+  }], candidates, 8), []);
 });
 
 test('intentional evidence ingest stops after hybrid indexing and never calls memory generation', async () => {

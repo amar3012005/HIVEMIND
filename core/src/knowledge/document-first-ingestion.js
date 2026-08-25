@@ -79,7 +79,8 @@ export function promotionProvenance(segment, documentId, documentMetadata = {}) 
     ? { ...segment.metadata }
     : {};
   const sourceId = source.source_id || source.sourceId || documentMetadata.source_id || documentMetadata.sourceId || documentId;
-  const sourceTitle = source.source_title || source.sourceTitle || documentMetadata.documentTitle || documentMetadata.filename || null;
+  const sourceTitle = source.source_title || source.sourceTitle || documentMetadata.source_title
+    || documentMetadata.sourceTitle || documentMetadata.documentTitle || documentMetadata.filename || null;
   return {
     ...source,
     segment_id: segment?.id || source.segment_id || source.segmentId || null,
@@ -94,6 +95,62 @@ export function promotionProvenance(segment, documentId, documentMetadata = {}) 
     primary_team_id: source.primary_team_id || source.team_id || documentMetadata.primary_team_id || null,
     document_date: source.document_date || documentMetadata.document_date || null,
     known_at: source.known_at || source.ingested_at || documentMetadata.known_at || null,
+    content_hash: source.content_hash || segment?.contentHash || segment?.content_hash || documentMetadata.content_hash || null,
+    embedding_model: source.embedding_model || segment?.embeddingModel || documentMetadata.embedding_model || null,
+    embedding_version: source.embedding_version || segment?.embeddingVersion || documentMetadata.embedding_version || null,
+    uploaded_by_user_id: source.uploaded_by_user_id || source.uploader_user_id
+      || documentMetadata.uploaded_by_user_id || documentMetadata.uploader_user_id || null,
+    uploader_user_id: source.uploader_user_id || source.uploaded_by_user_id
+      || documentMetadata.uploader_user_id || documentMetadata.uploaded_by_user_id || null,
+  };
+}
+
+function promotionMemoryContext({ evidenceProvenance, supportingEvidenceProvenance = [], documentId, metadata = {}, userId }) {
+  const primary = evidenceProvenance && typeof evidenceProvenance === 'object' && !Array.isArray(evidenceProvenance)
+    ? sanitizeKnowledgeJson(evidenceProvenance)
+    : {};
+  const hasPrimary = Object.keys(primary).length > 0;
+  const supportingCandidates = Array.isArray(supportingEvidenceProvenance)
+    ? supportingEvidenceProvenance
+    : [];
+  const supporting = [];
+  const seenSegments = new Set();
+  for (const candidate of [...(hasPrimary ? [primary] : []), ...supportingCandidates]) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const normalized = sanitizeKnowledgeJson(candidate);
+    const key = normalized.segment_id || normalized.segmentId || JSON.stringify(normalized);
+    if (seenSegments.has(key)) continue;
+    seenSegments.add(key);
+    supporting.push(normalized);
+  }
+  const projectIds = Array.isArray(primary.project_ids) && primary.project_ids.length
+    ? primary.project_ids
+    : (Array.isArray(metadata.project_ids) ? metadata.project_ids : []);
+  const sourceContentHash = primary.content_hash || null;
+  return {
+    sourceId: primary.source_id || primary.sourceId || metadata.source_id || metadata.sourceId || documentId,
+    sourceTitle: primary.source_title || primary.sourceTitle || metadata.source_title || metadata.sourceTitle
+      || metadata.documentTitle || metadata.filename || null,
+    sourceKind: primary.source_kind || metadata.source_kind || 'document',
+    sourcePlatform: primary.source_platform || metadata.source_platform || 'knowledge_base',
+    sourceUrl: primary.source_url || metadata.source_url || null,
+    scope: primary.scope || metadata.scope || null,
+    visibility: primary.visibility || metadata.visibility || 'private',
+    projectIds,
+    teamId: primary.primary_team_id || primary.team_id || metadata.primary_team_id || null,
+    documentDate: primary.document_date || metadata.document_date || null,
+    eventTime: primary.event_time || metadata.event_time || null,
+    validFrom: primary.valid_from || metadata.valid_from || null,
+    validTo: primary.valid_to || metadata.valid_to || null,
+    knownAt: primary.known_at || metadata.known_at || null,
+    language: primary.language || metadata.language || null,
+    uploaderUserId: primary.uploaded_by_user_id || primary.uploader_user_id || userId,
+    existing: {
+      ...primary,
+      ...(sourceContentHash ? { source_content_hash: sourceContentHash } : {}),
+      ...(hasPrimary ? { evidence_provenance: primary } : {}),
+      ...(supporting.length ? { supporting_evidence: supporting } : {}),
+    },
   };
 }
 
@@ -630,6 +687,11 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   for (let _i = 0; _i < arr.length; _i += 1) {
     const item = arr[_i];
     if (!item || typeof item.f !== 'string' || item.f.trim().length < 4) { drop.shape += 1; continue; }
+    const rawMemoryType = String(item.memory_type || '').trim().toLowerCase();
+    // `relationship` is a legacy graph-edge label, never a durable memory. The
+    // general taxonomy normalizer maps unknown KB labels to `fact` for legacy
+    // read compatibility, so reject this one before that fallback can promote it.
+    if (rawMemoryType === 'relationship') { drop.type += 1; continue; }
     const kbMemoryType = normalizeKbMemoryType(item.memory_type);
     if (!DURABLE_EXTRACT_TYPES.includes(kbMemoryType)) { drop.type += 1; continue; }
     if (typeof item.source_quote !== 'string' || item.source_quote.length < 4) { drop.short_quote += 1; continue; }
@@ -787,6 +849,8 @@ export function normalizeCuratedClaims(rawMemories, candidates, maxMemories = 8)
     const indices = [...new Set((memory?.support_indices || []).map(Number))]
       .filter((index) => Number.isInteger(index) && index >= 0 && index < pool.length);
     if (!indices.length) continue;
+    const rawMemoryType = String(memory?.memory_type || '').trim().toLowerCase();
+    if (rawMemoryType === 'relationship') continue;
     const kbMemoryType = normalizeKbMemoryType(memory?.memory_type);
     if (!KB_CURATED_TYPES.includes(kbMemoryType)) continue;
     const supports = indices.map((index) => pool[index]).filter((item) => item?.segmentId && item?.source_quote);
@@ -2061,8 +2125,18 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
    * Returns factObjs (for the cross-doc co-mention pass). Self-contained + residency-safe
    * (ingestMemory → agent, createRelationship → amrAddEdge for remote).
    */
-  async _ingestUnifiedWindow(window, { userId, orgId, documentId, metadata = {}, docTitle = '', entityContext = '', preExtractedFacts = null }) {
+  async _ingestUnifiedWindow(window, {
+    userId, orgId, documentId, metadata = {}, docTitle = '', entityContext = '', preExtractedFacts = null,
+    evidenceProvenance = null, supportingEvidenceProvenance = [],
+  }) {
     if (!window?.segmentId) return [];
+    const memoryContext = promotionMemoryContext({
+      evidenceProvenance,
+      supportingEvidenceProvenance,
+      documentId,
+      metadata,
+      userId,
+    });
     const extractionModel = process.env.KB_UNIFIED_MODEL || memoryLLMRoute()?.model
       || process.env.MEMORY_FAST_MODEL || 'llama-3.1-8b-instant';
     let facts = Array.isArray(preExtractedFacts) ? preExtractedFacts : [];
@@ -2092,7 +2166,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       // date (document_date) else ingest time. Put it in the fact's OWN tags so
       // BOTH the engine write AND the vector re-upsert carry it (the ingestMemory
       // ts-stamp gets clobbered by the 2-phase write; this is the durable source).
-      const _tsd = (() => { try { const d = metadata.document_date ? new Date(metadata.document_date) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
+      const _tsd = (() => { try { const d = memoryContext.documentDate ? new Date(memoryContext.documentDate) : new Date(); return Number.isNaN(d.getTime()) ? new Date() : d; } catch { return new Date(); } })();
       const _tsDay = `ts:${_tsd.toISOString().slice(0, 10)}`;
       const tags = normalizeTagsArray([
         ...(metadata.tags || []), 'promoted-memory', `memory-type:${fact.memory_type}`, 'distilled-from-kb', _tsDay, ...entityTags,
@@ -2108,17 +2182,17 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         const plannedMemoryId = crypto.randomUUID();
         const memoryContentHash = crypto.createHash('sha256').update(fact.f).digest('hex');
         const eventTime = claimStructure.qualifiers?.event_time || claimStructure.qualifiers?.eventTime
-          || metadata.event_time || null;
+          || memoryContext.eventTime || null;
         const validFrom = claimStructure.qualifiers?.valid_from || claimStructure.qualifiers?.validFrom
-          || metadata.valid_from || null;
+          || memoryContext.validFrom || null;
         const validTo = claimStructure.qualifiers?.valid_to || claimStructure.qualifiers?.validTo
-          || metadata.valid_to || null;
+          || memoryContext.validTo || null;
         const res = await this.memoryGraphEngine.ingestMemory({
           id: plannedMemoryId,
           user_id: userId, org_id: orgId,
-          scope: metadata.scope, visibility: metadata.visibility || 'private',
-          primary_team_id: metadata.primary_team_id || null,
-          project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+          scope: memoryContext.scope, visibility: memoryContext.visibility,
+          primary_team_id: memoryContext.teamId,
+          project_ids: memoryContext.projectIds,
           content: fact.f, title: provenanceMemoryTitle(docTitle, fact.t), memory_type: normalizeKbMemoryType(fact.memory_type), tags,
           importance_score: fact.importance,           // LLM-rated salience (same-pass) → confidence/recall ranking + FE score
           ...(claimKey ? { claim_key: claimKey } : {}),
@@ -2126,19 +2200,22 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           ...(claimStructure.predicate ? { claim_predicate: claimStructure.predicate } : {}),
           ...(Object.keys(claimStructure.qualifiers || {}).length ? { claim_qualifiers: claimStructure.qualifiers } : {}),
           extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
-          document_date: metadata.document_date || null,
+          document_date: memoryContext.documentDate,
           source_metadata: buildMemoryProvenance({
-            existing: { source_platform: metadata.source_platform || 'knowledge_base', source_type: 'knowledge_fact', source_url: metadata.source_url || null, document_type: metadata.document_type || 'general' },
-            memoryId: plannedMemoryId,
-            documentId, sourceId: metadata.source_id || documentId, sourceTitle: docTitle,
-            segmentIds: fact.support_segment_ids || [window.segmentId], userId, orgId,
-            scope: metadata.scope, projectIds: metadata.project_ids, teamId: metadata.primary_team_id,
-            documentDate: metadata.document_date, eventTime, validFrom, validTo,
-            knownAt: metadata.known_at, claimKind: fact.claim_kind,
-            language: metadata.language, contentHash: memoryContentHash,
+            existing: { ...memoryContext.existing, source_platform: memoryContext.sourcePlatform,
+              source_type: 'knowledge_fact', source_url: memoryContext.sourceUrl,
+              document_type: metadata.document_type || 'general' },
+            memoryId: plannedMemoryId, sourceKind: memoryContext.sourceKind,
+            documentId, sourceId: memoryContext.sourceId, sourceTitle: memoryContext.sourceTitle || docTitle,
+            segmentIds: fact.support_segment_ids || [window.segmentId], userId: memoryContext.uploaderUserId, orgId,
+            scope: memoryContext.scope, projectIds: memoryContext.projectIds, teamId: memoryContext.teamId,
+            documentDate: memoryContext.documentDate, eventTime, validFrom, validTo,
+            knownAt: memoryContext.knownAt, claimKind: fact.claim_kind,
+            language: memoryContext.language, contentHash: memoryContentHash,
           }),
           metadata: buildMemoryProvenance({
             existing: {
+            ...memoryContext.existing,
             document_id: documentId,
             document_type: metadata.document_type || 'general',
             document_type_confidence: metadata.document_type_confidence ?? null,
@@ -2158,13 +2235,13 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             },
             distill_agent: 'kb_unified_v2',
             },
-            memoryId: plannedMemoryId,
-            documentId, sourceId: metadata.source_id || documentId, sourceTitle: docTitle,
-            segmentIds: fact.support_segment_ids || [window.segmentId], userId, orgId,
-            scope: metadata.scope, projectIds: metadata.project_ids, teamId: metadata.primary_team_id,
-            documentDate: metadata.document_date, eventTime, validFrom, validTo,
-            knownAt: metadata.known_at, claimKind: fact.claim_kind,
-            language: metadata.language, contentHash: memoryContentHash,
+            memoryId: plannedMemoryId, sourceKind: memoryContext.sourceKind,
+            documentId, sourceId: memoryContext.sourceId, sourceTitle: memoryContext.sourceTitle || docTitle,
+            segmentIds: fact.support_segment_ids || [window.segmentId], userId: memoryContext.uploaderUserId, orgId,
+            scope: memoryContext.scope, projectIds: memoryContext.projectIds, teamId: memoryContext.teamId,
+            documentDate: memoryContext.documentDate, eventTime, validFrom, validTo,
+            knownAt: memoryContext.knownAt, claimKind: fact.claim_kind,
+            language: memoryContext.language, contentHash: memoryContentHash,
           }),
           skip_fact_extraction: true, defer_entity_linking: true,
           // Memories carry their authoritative document/event time as the
@@ -2178,14 +2255,14 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         if (!id || (res?.operation || '').startsWith('skipped')) continue;
         idByIdx[i] = id;
         const memoryVectorProvenance = buildMemoryProvenance({
-          existing: { source_platform: 'knowledge_base', source_type: 'knowledge_fact',
-            document_type: metadata.document_type || 'general' },
-          memoryId: id, documentId, sourceId: metadata.source_id || documentId,
-          sourceTitle: docTitle, segmentIds: fact.support_segment_ids || [window.segmentId],
-          userId, orgId, scope: metadata.scope, projectIds: metadata.project_ids,
-          teamId: metadata.primary_team_id, documentDate: metadata.document_date,
-          eventTime, validFrom, validTo, knownAt: metadata.known_at,
-          claimKind: fact.claim_kind, language: metadata.language,
+          existing: { ...memoryContext.existing, source_platform: memoryContext.sourcePlatform,
+            source_type: 'knowledge_fact', document_type: metadata.document_type || 'general' },
+          memoryId: id, sourceKind: memoryContext.sourceKind, documentId, sourceId: memoryContext.sourceId,
+          sourceTitle: memoryContext.sourceTitle || docTitle, segmentIds: fact.support_segment_ids || [window.segmentId],
+          userId: memoryContext.uploaderUserId, orgId, scope: memoryContext.scope, projectIds: memoryContext.projectIds,
+          teamId: memoryContext.teamId, documentDate: memoryContext.documentDate,
+          eventTime, validFrom, validTo, knownAt: memoryContext.knownAt,
+          claimKind: fact.claim_kind, language: memoryContext.language,
           contentHash: memoryContentHash,
         });
         factObjs.push({
@@ -2196,16 +2273,17 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           claim_predicate: claimStructure.predicate || null,
           claim_qualifiers: Object.keys(claimStructure.qualifiers || {}).length ? claimStructure.qualifiers : null,
           extraction_confidence: claimStructure.extractionConfidence ?? fact.importance,
-          project: Array.isArray(metadata.project_ids) ? metadata.project_ids[0] : null,
+          project: memoryContext.projectIds[0] || null,
           support_segment_ids: fact.support_segment_ids,
           support_quotes: fact.support_quotes,
+          source_metadata: memoryVectorProvenance,
         });
         embedPending.push({ id, fact: fact.f, title: provenanceMemoryTitle(docTitle, fact.t),
           memory_type: normalizeKbMemoryType(fact.memory_type),
           ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`,
-          tags, project_ids: metadata.project_ids, primary_team_id: metadata.primary_team_id,
-          visibility: metadata.visibility, source_metadata: memoryVectorProvenance,
-          metadata: memoryVectorProvenance, document_date: metadata.document_date,
+          tags, project_ids: memoryContext.projectIds, primary_team_id: memoryContext.teamId,
+          visibility: memoryContext.visibility, source_metadata: memoryVectorProvenance,
+          metadata: memoryVectorProvenance, document_date: memoryContext.documentDate,
           valid_from: validFrom, valid_to: validTo, content_hash: memoryContentHash });
         // Collected for EVERY storage mode now. These used to be gathered only for central orgs
         // because the tables were central-only and hard-FK'd to hivemind.memories; the .amr agents
@@ -2874,24 +2952,49 @@ Every item must include a non-empty content field and one or more valid support_
       })();
       const parentMemoryId = crypto.randomUUID();
       const supportSegmentIds = [...new Set((memories || []).flatMap((memory) => memory?.support_segment_ids || []).filter(Boolean))];
+      const supportEvidence = [];
+      const seenEvidenceSegments = new Set();
+      for (const memory of memories || []) {
+        const source = memory?.source_metadata || memory?.metadata || {};
+        const candidates = [
+          source?.evidence_provenance,
+          ...(Array.isArray(source?.supporting_evidence) ? source.supporting_evidence : []),
+        ];
+        for (const candidate of candidates) {
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+          const segmentId = candidate.segment_id || candidate.segmentId || JSON.stringify(candidate);
+          if (seenEvidenceSegments.has(segmentId)) continue;
+          seenEvidenceSegments.add(segmentId);
+          supportEvidence.push(candidate);
+        }
+      }
+      const parentContext = promotionMemoryContext({
+        evidenceProvenance: supportEvidence[0] || null,
+        supportingEvidenceProvenance: supportEvidence,
+        documentId,
+        metadata,
+        userId,
+      });
       const parentProvenance = buildMemoryProvenance({
-        existing: { source_platform: 'knowledge_base', source_type: 'document_summary',
-          semantic_role: 'document', ingest_tree_role: 'parent', document_type: metadata.document_type || 'general' },
-        memoryId: parentMemoryId, documentId, sourceId: metadata.source_id || documentId,
-        sourceTitle: docTitle, segmentIds: supportSegmentIds, userId, orgId,
-        scope: metadata.scope, projectIds: metadata.project_ids, teamId: metadata.primary_team_id,
-        documentDate: metadata.document_date, eventTime: metadata.event_time,
-        validFrom: metadata.valid_from, validTo: metadata.valid_to, knownAt: metadata.known_at,
-        claimKind: 'summary', language: metadata.language,
+        existing: { ...parentContext.existing, source_platform: parentContext.sourcePlatform,
+          source_type: 'document_summary', semantic_role: 'document', ingest_tree_role: 'parent',
+          document_type: metadata.document_type || 'general' },
+        memoryId: parentMemoryId, sourceKind: parentContext.sourceKind, documentId,
+        sourceId: parentContext.sourceId, sourceTitle: parentContext.sourceTitle || docTitle,
+        segmentIds: supportSegmentIds, userId: parentContext.uploaderUserId, orgId,
+        scope: parentContext.scope, projectIds: parentContext.projectIds, teamId: parentContext.teamId,
+        documentDate: parentContext.documentDate, eventTime: parentContext.eventTime,
+        validFrom: parentContext.validFrom, validTo: parentContext.validTo, knownAt: parentContext.knownAt,
+        claimKind: 'summary', language: parentContext.language,
         contentHash: crypto.createHash('sha256').update(parentContent).digest('hex'),
       });
       const parentRes = await this.memoryGraphEngine.ingestMemory({
         id: parentMemoryId,
         user_id: userId, org_id: orgId,
-        scope: metadata.scope || (Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0 ? 'project' : metadata.primary_team_id ? 'team' : undefined),
-        visibility: metadata.visibility || 'private',
-        primary_team_id: metadata.primary_team_id || null,
-        project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+        scope: parentContext.scope || (parentContext.projectIds.length > 0 ? 'project' : parentContext.teamId ? 'team' : undefined),
+        visibility: parentContext.visibility,
+        primary_team_id: parentContext.teamId,
+        project_ids: parentContext.projectIds,
         // Same shape as every other memory: «filename : summary» header + trailing (recorded …).
         // The fact path applies this in _persistOne, which the summary does NOT go through — so
         // measured 24 of 25 memories compliant and the summary the lone exception. A summary is the
@@ -2901,7 +3004,7 @@ Every item must include a non-empty content field and one or more valid support_
         title: provenanceMemoryTitle(docTitle, 'Summary'), memory_type: 'summary',
         // The parent is source-local navigation context, not a durable claim.
         importance_score: 0.45,
-        document_date: metadata.document_date || null,
+        document_date: parentContext.documentDate,
         tags: normalizeTagsArray([
           ...(metadata.tags || []), 'knowledge-base', 'document', 'document-summary',
           `ts:${_tsd.toISOString().slice(0, 10)}`,
@@ -5466,6 +5569,23 @@ Every item must include a non-empty content field and one or more valid support_
         const uFacts = [];
         let _docRelWritten = 0; // P5 coverage: doc-level relationship edges written
         const extraEvidenceLinks = [];
+        const persistedSegmentsById = new Map((segments || [])
+          .filter((segment) => segment?.id)
+          .map((segment) => [segment.id, segment]));
+        const evidenceContextForClaim = (claim) => {
+          const supportIds = [...new Set([
+            claim?.segmentId,
+            ...(Array.isArray(claim?.support_segment_ids) ? claim.support_segment_ids : []),
+          ].filter(Boolean))];
+          const support = supportIds
+            .map((segmentId) => persistedSegmentsById.get(segmentId))
+            .filter(Boolean)
+            .map((segment) => promotionProvenance(segment, documentId, metadata));
+          return {
+            primary: support.find((item) => item.segment_id === claim?.segmentId) || support[0] || null,
+            supporting: support,
+          };
+        };
         // Persist with BOUNDED CONCURRENCY. This loop was sequential — 27 claims x
         // (embed + entity pass + writes) = promote 325s of a 398s ingest.
         //
@@ -5533,8 +5653,11 @@ Every item must include a non-empty content field and one or more valid support_
             heading: claim.heading || null,
             page: claim.page || null,
           };
+          const evidenceContext = evidenceContextForClaim(claim);
           const persisted = await this._ingestUnifiedWindow(sourceWindow, {
             userId, orgId, documentId, metadata, docTitle, preExtractedFacts: [claim],
+            evidenceProvenance: evidenceContext.primary,
+            supportingEvidenceProvenance: evidenceContext.supporting,
           });
           const memory = persisted?.[0];
           if (!memory) return;

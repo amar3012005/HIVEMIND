@@ -8,7 +8,11 @@ test('remote list preserves the agent-filtered total and never invents one', asy
   const originalFetch = globalThis.fetch;
   const payloads = [
     { memories: [{ id: 'm-1' }], cursor: null, total: 17 },
-    { memories: [], cursor: null },
+    { memories: [{ id: 'ignored-page' }], cursor: null },
+    { memories: [
+      { id: 'm-legacy', layer: 'memory' },
+      { id: 'e-legacy', layer: 'evidence_segment' },
+    ], cursor: null },
   ];
   registerAgent(orgId, 'http://memory-box.test', 'test-token');
   globalThis.fetch = async (url, options) => {
@@ -22,8 +26,9 @@ test('remote list preserves the agent-filtered total and never invents one', asy
     assert.equal(exact.total, 17);
     assert.deepEqual(exact.memories, [{ id: 'm-1' }]);
 
-    const unsupported = await remoteList(orgId, { is_latest: true }, null, 1, 0);
-    assert.equal(unsupported.total, null, 'an old agent cannot be mistaken for an empty inventory');
+    const compatible = await remoteList(orgId, { is_latest: true }, null, 1, 0);
+    assert.equal(compatible.total, 1, 'legacy pagination computes an exact memory-layer inventory');
+    assert.deepEqual(compatible.memories, [{ id: 'm-legacy', layer: 'memory' }]);
   } finally {
     globalThis.fetch = originalFetch;
     unregisterAgent(orgId);

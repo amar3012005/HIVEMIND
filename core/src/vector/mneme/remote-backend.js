@@ -470,11 +470,37 @@ export async function remoteList(orgId, filter, cursor, limit, offset = 0, optio
     const parsedTotal = (typeof rawTotal === 'number' || (typeof rawTotal === 'string' && rawTotal.trim()))
       ? Number(rawTotal)
       : NaN;
-    return {
-      memories: out?.memories || [],
-      cursor: out?.cursor || null,
-      total: Number.isFinite(parsedTotal) && parsedTotal >= 0 ? parsedTotal : null,
-    };
+    if (Number.isFinite(parsedTotal) && parsedTotal >= 0) {
+      return { memories: out?.memories || [], cursor: out?.cursor || null, total: parsedTotal };
+    }
+
+    // Rolling-upgrade compatibility for pre-total agents. Enumerate their
+    // filtered inventory with offset paging, enforce the canonical layer gate
+    // locally, then apply the caller's page. Never substitute page length for
+    // a total, and fail closed if the bounded scan cannot prove completeness.
+    const pageSize = 500;
+    const maxRows = 100000;
+    const inventory = [];
+    for (let scanOffset = 0; scanOffset < maxRows; scanOffset += pageSize) {
+      const page = await _call(orgId, '/v1/list', {
+        filter,
+        cursor: null,
+        limit: pageSize,
+        offset: scanOffset,
+      }, options);
+      const rows = Array.isArray(page?.memories) ? page.memories : [];
+      inventory.push(...rows.filter((row) => row?.layer === 'memory' || row?.layer === 'cognitive'));
+      if (rows.length < pageSize) {
+        const start = Math.max(0, Number(offset) || 0);
+        const size = Math.max(1, Number(limit) || 50);
+        return {
+          memories: inventory.slice(start, start + size),
+          cursor: null,
+          total: inventory.length,
+        };
+      }
+    }
+    throw new Error(`legacy memory inventory exceeds the ${maxRows}-row compatibility bound`);
   }
   catch (e) {
     // NEVER TURN A FAILED READ INTO AN EMPTY ONE. This returned `{ memories: [] }` on any error, so a

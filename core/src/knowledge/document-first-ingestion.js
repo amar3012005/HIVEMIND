@@ -330,7 +330,7 @@ export function adaptiveAtomicMemoryBudget(sourceChars, uniqueCandidateCount = N
  * budget (a number, or a function of batch size where the output scales with input).
  */
 const EXTRACT_DEFAULT_MODEL = 'deepseek/deepseek-v4-flash-0731';
-const FALLBACK_CHAIN_DEFAULT = 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731';
+const FALLBACK_CHAIN_DEFAULT = 'google/gemini-2.5-flash-lite,openai/gpt-oss-120b';
 
 export const LLM_PROFILES = {
   'kb-document-type':     { envModel: 'KB_DOCUMENT_TYPE_MODEL',   maxTokens: 1200 },
@@ -1181,7 +1181,7 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
           .join('\n\n');
         const parsed = await chatCompletionWithFallback({
           models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
-            || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
+      || 'google/gemini-2.5-flash-lite,openai/gpt-oss-120b')
             .split(',').map((x) => x.trim()).filter(Boolean)],
           // Scales with the sub-batch and sized for the most verbose plausible model
           // (deepseek ~300-350/claim vs gpt-oss ~155, measured) — see LLM_PROFILES.
@@ -1242,7 +1242,7 @@ Emit one entry per input memory, using its exact number in "i". subject+predicat
               try {
                 const one = await chatCompletionWithFallback({
                   models: [model, ...(process.env.KB_UNIFIED_FALLBACK_MODELS
-                    || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731')
+      || 'google/gemini-2.5-flash-lite,openai/gpt-oss-120b')
                     .split(',').map((x) => x.trim()).filter(Boolean)],
                   temperature: 0, max_tokens: llmProfile('v5-claim-structuring-single').maxTokens, json_mode: true, feature: 'v5-claim-structuring-single',
                   messages: [
@@ -1847,7 +1847,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // section's facts are never lost to one model/provider hiccup. Configurable
     // via KB_UNIFIED_FALLBACK_MODELS (comma-separated).
     const _fallbacks = (process.env.KB_UNIFIED_FALLBACK_MODELS
-      || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean);
+      || 'google/gemini-2.5-flash-lite,openai/gpt-oss-120b').split(',').map((x) => x.trim()).filter(Boolean);
     const parsed = await chatCompletionWithFallback({
       // Dense sections emit up to 8 facts × (180-700 char claim + 40-900 char
       // source_quote + entities). 1800 tokens overflowed → finish=length →
@@ -2750,7 +2750,7 @@ Every item must include a non-empty content field and one or more valid support_
     // KB_CURATOR_FALLBACK_MODELS (defaults to the extractor's chain).
     const _curatorFallbacks = (process.env.KB_CURATOR_FALLBACK_MODELS
       || process.env.KB_UNIFIED_FALLBACK_MODELS
-      || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean);
+      || 'google/gemini-2.5-flash-lite,openai/gpt-oss-120b').split(',').map((x) => x.trim()).filter(Boolean);
     try {
       const parsed = await chatCompletionWithFallback({
         // Qwen is used for atomic fact/entity/relation extraction. The
@@ -3536,6 +3536,7 @@ Every item must include a non-empty content field and one or more valid support_
       knownAt: knowledgeDoc.createdAt || new Date().toISOString(),
     };
     const _tSeg = Date.now();
+    emit('segmenting', 40);
     let segments;
     let _segmentsNeedEmbed = false; // true only when segments were freshly created this request
     if (orgIsRemote(orgId)) {
@@ -3593,6 +3594,7 @@ Every item must include a non-empty content field and one or more valid support_
         });
       }
     }
+    emit('segmented', 45, { segments: segments.length });
     let _msEmbed = 0;
     let _evEmbedCov = null; // P1b/P3: evidence-embed coverage {total,embedded,failed,healed}
     if (_segmentsNeedEmbed) {
@@ -3600,7 +3602,14 @@ Every item must include a non-empty content field and one or more valid support_
       // Central path: store vector in Qdrant + update DB row (vectorStored=true).
       // Remote path: embed and push segment + vector to the agent via amrKbSegment.
       const _tEmbed = Date.now();
-      _evEmbedCov = await this._embedSegments(segments, orgId);
+      emit('embedding', 50, { segments: segments.length, processed: 0, total: segments.length });
+      _evEmbedCov = await this._embedSegments(segments, orgId, {
+        onProgress: ({ processed, total }) => emit(
+          'embedding',
+          50 + Math.floor(20 * (total > 0 ? processed / total : 1)),
+          { segments: segments.length, processed, total },
+        ),
+      });
       _msEmbed = Date.now() - _tEmbed;
     }
     const _msSeg = Date.now() - _tSeg;
@@ -3773,6 +3782,11 @@ Every item must include a non-empty content field and one or more valid support_
         document_type_confidence: documentClassification.confidence,
         tags: [...(metadata.tags || []), documentTypeTag],
       },
+      onProgress: ({ processed, total, promoted: promotedSoFar }) => emit(
+        'promoting',
+        80 + Math.floor(15 * (total > 0 ? processed / total : 1)),
+        { processed, total, promoted: promotedSoFar, segments: segments.length },
+      ),
     });
     } catch (err) {
       // The document + segments are durable. Report evidence-only success.
@@ -4989,7 +5003,7 @@ Every item must include a non-empty content field and one or more valid support_
    * @param {Array} segments - segment objects (DB rows for central, in-memory for remote)
    * @param {string} [callerOrgId] - orgId hint; falls back to segment.orgId
    */
-  async _embedSegments(segments, callerOrgId, { workload = 'ingestion' } = {}) {
+  async _embedSegments(segments, callerOrgId, { workload = 'ingestion', onProgress = null } = {}) {
     if (!this.embeddingService) return;
 
     // Legacy: a dedicated hivemind_evidence collection. Per-tenant: evidence
@@ -5029,6 +5043,7 @@ Every item must include a non-empty content field and one or more valid support_
     const _batches = [];
     for (let i = 0; i < segments.length; i += _batchSize) _batches.push(segments.slice(i, i + _batchSize));
     let _batchIndex = 0;
+    let _processed = 0;
     await Promise.all(Array.from({ length: Math.min(_conc, _batches.length) }, async () => {
       while (_batchIndex < _batches.length) {
         const batch = _batches[_batchIndex++];
@@ -5049,6 +5064,8 @@ Every item must include a non-empty content field and one or more valid support_
             _failed += 1;
           }
           ingestDiagnostic.error(`[DocumentFirstIngestion] Failed to embed segment batch (${batch.length}):`, error.message);
+          _processed += batch.length;
+          try { onProgress?.({ processed: _processed, total: segments.length }); } catch { /* telemetry only */ }
           continue;
         }
         for (let index = 0; index < batch.length; index += 1) {
@@ -5094,6 +5111,8 @@ Every item must include a non-empty content field and one or more valid support_
             });
           }
         }
+        _processed += batch.length;
+        try { onProgress?.({ processed: _processed, total: segments.length }); } catch { /* telemetry only */ }
       }
     }));
 
@@ -5241,7 +5260,7 @@ Every item must include a non-empty content field and one or more valid support_
     };
   }
 
-  async _promoteMemories({ documentId, segments, userId, orgId, metadata, promotionStrategy = 'kb_default' }) {
+  async _promoteMemories({ documentId, segments, userId, orgId, metadata, promotionStrategy = 'kb_default', onProgress = null }) {
     const candidates = [];
     const memories = [];
     const entityLinkTargets = []; // collected during promote, entity-linked concurrently after commit
@@ -5702,7 +5721,7 @@ Every item must include a non-empty content field and one or more valid support_
               try {
                 _relParsed = await chatCompletionWithFallback({
                   models: [process.env.KB_UNIFIED_MODEL || 'deepseek/deepseek-v4-flash-0731',
-                    ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,deepseek/deepseek-v4-flash-0731').split(',').map((x) => x.trim()).filter(Boolean)],
+                    ...(process.env.KB_UNIFIED_FALLBACK_MODELS || 'google/gemini-2.5-flash-lite,openai/gpt-oss-120b').split(',').map((x) => x.trim()).filter(Boolean)],
                   temperature: 0, max_tokens: llmProfile('kb-doc-relations').maxTokens, json_mode: true,
                   response_format: QWEN_RELATION_EDGES_RESPONSE_FORMAT, feature: 'kb-doc-relations',
                   messages: [
@@ -5961,12 +5980,11 @@ Every item must include a non-empty content field and one or more valid support_
               : []),
             ...(segment.metadata?.page ? [`page:${segment.metadata.page}`] : []),
           ],
-          // Fact-extract enabled by default. Big PDFs (≥30 segs) skip per-segment
-          // LLM to keep ingest under a minute — facts can be extracted lazily by
-          // promotion-cron later. Override via metadata.force_fact_extraction.
-          skip_fact_extraction: metadata.force_fact_extraction === true
-            ? false
-            : (Array.isArray(segments) && segments.length >= 30),
+          // Section promotion is a pure insert. Fact extraction has one owner:
+          // the batched deferred distiller below. Allowing small documents to run
+          // the graph engine's inline LLM here duplicated extraction and put one
+          // provider straggler on the synchronous upload critical path.
+          skip_fact_extraction: true,
           // Strict contradiction mode for KB: only fires when BOTH sides
           // carry negation/change language AND token-similarity ≥0.65.
           // Catches real "value updated" cases (e.g. price change in newer
@@ -6090,11 +6108,20 @@ Every item must include a non-empty content field and one or more valid support_
     // worker preps while one holds the lock) without a deep timeout-prone queue.
     const PROMOTE_CONCURRENCY = Number(process.env.PHASE1_PROMOTE_CONCURRENCY || 4);
     let nextIdx = 0;
+    let processedPromotions = 0;
     const workers = Array.from({ length: Math.min(PROMOTE_CONCURRENCY, promotableSegments.length) }, async () => {
       while (true) {
         const i = nextIdx++;
         if (i >= promotableSegments.length) return;
         await promoteOne(promotableSegments[i]);
+        processedPromotions += 1;
+        try {
+          onProgress?.({
+            processed: processedPromotions,
+            total: promotableSegments.length,
+            promoted: memories.filter((m) => m?.id).length,
+          });
+        } catch { /* telemetry only */ }
       }
     });
     await Promise.all(workers);

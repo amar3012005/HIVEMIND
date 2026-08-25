@@ -590,13 +590,27 @@ export class KbIngestQueue {
       // Canonical front door: file uploads normalize into the IngestEnvelope
       // (source.type='kb'); ingestSource routes document+file → the same
       // ingestKnowledgeDocument pipeline, adding uniform provenance.
+      const ingestStartedAt = new Date().toISOString();
+      let currentStage = null;
+      let stageStartedAt = ingestStartedAt;
       const onProgress = (p) => {
+          const now = new Date();
+          if (p.stage && p.stage !== currentStage) {
+            currentStage = p.stage;
+            stageStartedAt = now.toISOString();
+          }
+          const detail = {
+            ...p,
+            started_at: ingestStartedAt,
+            stage_started_at: stageStartedAt,
+            elapsed_ms: Math.max(0, now.getTime() - new Date(ingestStartedAt).getTime()),
+          };
           try {
             const prev = this.tracker?.getJob(trackerJobId)?.metadata || {};
-            this.tracker?.updateJob(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...p } });
+            this.tracker?.updateJob(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, metadata: { ...prev, ...detail } });
           } catch { /* noop */ }
-          this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename });
-          this.jobStore?.progress(trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0).catch(() => {});
+          this._setStatus(trackerJobId, { status: p.stage || 'processing', progress: p.progress ?? 0, filename, ...detail });
+          this.jobStore?.progress(trackerJobId, orgId, p.stage || 'processing', p.progress ?? 0, detail).catch(() => {});
         };
       const work = promotionOnly
         ? this.dfi.promoteStoredEvidence({
@@ -674,6 +688,7 @@ export class KbIngestQueue {
       this._setStatus(trackerJobId, {
         status: 'indexed', progress: 100, document_id: result.documentId,
         segmentCount: result.segmentCount, promotedCount: result.promotedCount,
+        candidateCount: result.candidateCount,
         ingestMode: metadata?.ingest_mode || 'both', evidenceOnly: _evidenceOnly,
         evidenceOnlyReason: _evidenceOnlyReason, coverage: result.coverage || null, filename,
       });

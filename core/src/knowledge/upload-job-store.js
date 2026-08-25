@@ -157,6 +157,8 @@ export class KnowledgeUploadJobStore {
   }
 
   async progress(jobId, orgId, stage, progress, extra = {}) {
+    const existing = await this.findOwned(jobId, { orgId });
+    const detail = Object.fromEntries(Object.entries(extra || {}).filter(([, value]) => value !== undefined));
     await this._model().updateMany({
       where: { id: jobId, orgId, status: { notIn: [...TERMINAL] } },
       data: {
@@ -172,11 +174,17 @@ export class KnowledgeUploadJobStore {
         // This is also the documented contract: queued -> processing -> done.
         // The where-clause already excludes TERMINAL, so a finished, failed or
         // cancelled job can never be dragged back into 'processing'. `extra` is
-        // spread last so an explicit caller-supplied status still wins.
+        // Progress detail belongs in JSON metadata. Spreading arbitrary stage
+        // fields into Prisma data made additions such as elapsed_ms or total
+        // fail at runtime because they are not columns on knowledge_ingest_jobs.
         status: 'processing',
         stage,
         progress: Math.max(0, Math.min(100, Number(progress) || 0)),
-        ...extra,
+        attempt: Number.isFinite(Number(extra?.attempt)) ? Number(extra.attempt) : (existing?.attempt || 0),
+        metadata: {
+          ...(existing?.metadata && typeof existing.metadata === 'object' ? existing.metadata : {}),
+          progress_detail: detail,
+        },
       },
     });
   }
@@ -257,6 +265,7 @@ export class KnowledgeUploadJobStore {
       evidence_only_reason: evidenceOnly ? (job.evidenceOnlyReason || 'extraction_yield_zero') : null,
       memory_generation_failed: ready && job.evidenceOnlyReason === 'promotion_failed',
       counts: { pages: job.pageCount, segments: job.segmentCount, candidates: job.candidateCount, memories: job.promotedCount },
+      progress_detail: job.metadata?.progress_detail || null,
       error: job.errorCode ? { code: job.errorCode, message: job.errorMessage } : null,
       created_at: job.createdAt, updated_at: job.updatedAt, completed_at: job.completedAt,
     };

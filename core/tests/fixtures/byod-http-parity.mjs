@@ -12,6 +12,7 @@ const ids = {
   document: '00000000-0000-4000-8000-00000000c201',
   segment: '00000000-0000-4000-8000-00000000c202',
   repair: '00000000-0000-4000-8000-00000000c104',
+  evidenceMemory: '00000000-0000-4000-8000-00000000c105',
 };
 const vector = (index) => Array.from({ length: 8 }, (_, position) => position === index ? 1 : 0);
 const access = { userId: '00000000-0000-4000-8000-00000000c301' };
@@ -42,6 +43,15 @@ if (process.argv[2] === 'write') {
       tags: ['document-summary'], layer: 'memory', isLatest: true, scope: 'organization',
       metadata: { source_metadata: { source_id: 'policy.md' } },
     }, vector: vector(0),
+  })).payload.ok, true);
+  // A shard/SQL mirror may carry evidence records for unified recall, but the
+  // memory inventory endpoints must never present them as memories.
+  assert.equal((await call('/v1/write', {
+    record: {
+      id: ids.evidenceMemory, userId: access.userId, title: 'Raw supporting segment',
+      content: 'This is evidence, not a promoted memory.', memoryType: 'evidence_segment',
+      tags: ['promoted-from-segment'], layer: 'evidence', isLatest: true,
+    }, vector: vector(2),
   })).payload.ok, true);
   assert.equal((await call('/v1/write', {
     record: {
@@ -120,6 +130,8 @@ assert.equal(relationships.payload.out[0].type, 'PartOf');
 const stats = await call('/v1/stats', {});
 assert.equal(stats.payload.memories, 3);
 assert.equal(stats.payload.relationships, 1);
+const inventory = await call('/v1/list', { limit: 10 });
+assert.equal(inventory.payload.memories.some((row) => row.id === ids.evidenceMemory), false);
 assertCanonicalBackendContract({
   backend: 'byod',
   memories: stats.payload.memories,

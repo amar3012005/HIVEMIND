@@ -57,6 +57,34 @@ const KB_CLAIM_KINDS = new Set(['fact', 'event', 'decision', 'preference', 'poli
 const CLAIM_ENTITY_KINDS = new Set(['person', 'organization', 'product', 'place', 'technology', 'standard']);
 const KB_INGEST_VERBOSE = String(process.env.KB_INGEST_VERBOSE || '').toLowerCase() === 'true';
 
+// A promoted memory is a claim over a persisted evidence segment. Keep the
+// segment's source/citation/scope/time fields intact instead of reconstructing
+// a smaller, lossy provenance object at promotion time. This is intentionally
+// data-shaped rather than provider-shaped so the same contract applies to
+// central, embedded AMR, and self-hosted agent stores.
+export function promotionProvenance(segment, documentId, documentMetadata = {}) {
+  const source = segment?.metadata && typeof segment.metadata === 'object' && !Array.isArray(segment.metadata)
+    ? { ...segment.metadata }
+    : {};
+  const sourceId = source.source_id || source.sourceId || documentMetadata.source_id || documentMetadata.sourceId || documentId;
+  const sourceTitle = source.source_title || source.sourceTitle || documentMetadata.documentTitle || documentMetadata.filename || null;
+  return {
+    ...source,
+    segment_id: segment?.id || source.segment_id || source.segmentId || null,
+    document_id: documentId || source.document_id || source.documentId || null,
+    source_id: sourceId,
+    source_title: sourceTitle,
+    heading: source.heading || source.heading_path || null,
+    page: source.page || segment?.startPage || source.start_page || null,
+    citation_id: source.citation_id || source.citationId || null,
+    scope: source.scope || documentMetadata.scope || null,
+    project_ids: Array.isArray(source.project_ids) ? source.project_ids : (documentMetadata.project_ids || []),
+    primary_team_id: source.primary_team_id || source.team_id || documentMetadata.primary_team_id || null,
+    document_date: source.document_date || documentMetadata.document_date || null,
+    known_at: source.known_at || source.ingested_at || documentMetadata.known_at || null,
+  };
+}
+
 // qwen3-ingest is schema-led: plain JSON mode can return a valid but unrelated
 // shape. Keep required fields deliberately small so the existing normalization
 // and source-quote validation still own quality, while the model is forced to
@@ -5617,6 +5645,7 @@ Every item must include a non-empty content field and one or more valid support_
       });
 
       try {
+        const segmentProvenance = promotionProvenance(segment, documentId, metadata);
         // Route through SmartIngestRouter for deterministic edges
         const payload = {
           userId,
@@ -5626,12 +5655,14 @@ Every item must include a non-empty content field and one or more valid support_
           // Honor explicit scope (e.g. 'organization' from an org-targeted KB
           // upload) before project/team inference; lift visibility to TOP level
           // so graph-engine infers scope='organization' for org uploads.
-          scope: metadata.scope || (Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
+          scope: segmentProvenance.scope || metadata.scope || (Array.isArray(metadata.project_ids) && metadata.project_ids.length > 0
             ? 'project'
             : metadata.primary_team_id ? 'team' : undefined),
           visibility: metadata.visibility || 'private',
-          primary_team_id: metadata.primary_team_id || null,
-          project_ids: Array.isArray(metadata.project_ids) ? metadata.project_ids : [],
+          primary_team_id: segmentProvenance.primary_team_id || metadata.primary_team_id || null,
+          project_ids: Array.isArray(segmentProvenance.project_ids) && segmentProvenance.project_ids.length
+            ? segmentProvenance.project_ids
+            : (Array.isArray(metadata.project_ids) ? metadata.project_ids : []),
           content: segment.content,
           // Title: prefer the chunk heading; else first sentence/line of the
           // segment (meaningful + searchable) instead of the opaque
@@ -5641,6 +5672,7 @@ Every item must include a non-empty content field and one or more valid support_
             : cleanTitleFrom(segment.content) || `Segment ${documentId.slice(0, 8)}`,
           source_type: 'knowledge_segment',
           source_metadata: {
+            ...segmentProvenance,
             segment_id: segment.id,
             document_id: documentId,
             heading: segment.metadata?.heading || null,
@@ -5675,9 +5707,13 @@ Every item must include a non-empty content field and one or more valid support_
           // Catches real "value updated" cases (e.g. price change in newer
           // catalog), skips noise from unrelated facts.
           strict_contradictions: true,
-          documentDate: new Date(),
+          documentDate: segmentProvenance.document_date || metadata.document_date || new Date(),
           metadata: {
             ...(metadata || {}),
+            // Retain the complete evidence envelope on the memory itself. The
+            // source_metadata projection is for recall; this copy is the durable
+            // provenance authority for export, audit, and future re-promotion.
+            evidence_provenance: segmentProvenance,
             project_id: Array.isArray(metadata.project_ids) && metadata.project_ids.length === 1
               ? metadata.project_ids[0]
               : metadata.project_id || null,

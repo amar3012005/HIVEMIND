@@ -960,6 +960,7 @@ export class PrismaGraphStore {
       where: {
         ...baseWhere,
         ...auditExclusion,
+        layer: { in: ['memory', 'cognitive'] },
         memoryType: memory_type || undefined,
         isLatest: isLatestFilter,
         tags: tags?.length ? { hasEvery: tags } : undefined,
@@ -993,6 +994,7 @@ export class PrismaGraphStore {
       where: {
         ...countWhere,
         ...auditExclusion,
+        layer: { in: ['memory', 'cognitive'] },
         memoryType: memory_type || undefined,
         isLatest: isLatestFilter,
         tags: tags?.length ? { hasEvery: tags } : undefined

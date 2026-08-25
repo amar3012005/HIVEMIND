@@ -1,6 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DocumentFirstIngestionService } from '../../src/knowledge/document-first-ingestion.js';
+import { DocumentFirstIngestionService, promotionProvenance } from '../../src/knowledge/document-first-ingestion.js';
+
+test('promotion retains complete persisted evidence provenance', () => {
+  const provenance = promotionProvenance({
+    id: '55555555-5555-4555-8555-555555555555', startPage: 7,
+    metadata: {
+      source_id: 'uploaded:report-v3', source_title: 'Annual report', source_kind: 'pdf',
+      citation_id: 'cite:annual-report:7', scope: 'project', project_ids: ['project-1'],
+      primary_team_id: 'team-1', document_date: '2026-01-20T00:00:00.000Z',
+      known_at: '2026-02-01T00:00:00.000Z', embedding_model: 'bge-m3', content_hash: 'abc',
+    },
+  }, '33333333-3333-4333-8333-333333333333', { filename: 'annual.pdf' });
+
+  assert.equal(provenance.document_id, '33333333-3333-4333-8333-333333333333');
+  assert.equal(provenance.segment_id, '55555555-5555-4555-8555-555555555555');
+  assert.equal(provenance.citation_id, 'cite:annual-report:7');
+  assert.equal(provenance.scope, 'project');
+  assert.deepEqual(provenance.project_ids, ['project-1']);
+  assert.equal(provenance.primary_team_id, 'team-1');
+  assert.equal(provenance.document_date, '2026-01-20T00:00:00.000Z');
+  assert.equal(provenance.known_at, '2026-02-01T00:00:00.000Z');
+  assert.equal(provenance.embedding_model, 'bge-m3');
+});
 
 test('intentional evidence ingest stops after hybrid indexing and never calls memory generation', async () => {
   const calls = [];
@@ -171,6 +193,7 @@ test('large evidence embedding uses provider batches of at most twenty and one v
     documentId: '33333333-3333-4333-8333-333333333333',
     content: `Evidence row ${index}.`, contentHash: `hash-${index}`,
     segmentType: 'paragraph', segmentIndex: index,
+    metadata: { scope: 'organization', document_title: 'Batch evidence' },
   }));
 
   const coverage = await service._embedSegments(segments, '22222222-2222-4222-8222-222222222222');

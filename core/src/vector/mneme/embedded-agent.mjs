@@ -33,6 +33,15 @@ const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
 const MAX_OPEN = Number(process.env.MNEME_EMBEDDED_MAX_OPEN || 64);
 const DATA_ROOT = process.env.MNEME_DATA_ROOT || '/app/data/mneme';
 const RUNTIME_PROGRESS_VERBOSE = String(process.env.RUNTIME_PROGRESS_VERBOSE || '').toLowerCase() === 'true';
+const MEMORY_INVENTORY_LAYERS = ['memory', 'cognitive'];
+
+// `/v1/list` and `/v1/stats` are the memory inventory contract. Evidence has
+// dedicated KB endpoints, so callers cannot turn evidence into memories by
+// passing a permissive layer filter to these generic-looking storage routes.
+function memoryInventoryFilter(filter = {}) {
+  const { layer: _ignoredLayer, layers: _ignoredLayers, ...rest } = filter || {};
+  return { ...rest, layers: MEMORY_INVENTORY_LAYERS };
+}
 
 let ready = false;
 export function isEmbeddedReady() { return ready; }
@@ -1197,9 +1206,9 @@ function routesFor(ctx) {
 
     // Hydrate full rows by id (content stays on-box until requested).
     '/v1/hydrate': async (b) => ({ memories: Array.isArray(b.ids) && b.ids.length ? amr.hydrate(b.ids) : [] }),
-    '/v1/list': async (b) => amr.list(b.filter || {}, b.cursor, b.limit || 100, Number(b.offset) || 0),
+    '/v1/list': async (b) => amr.list(memoryInventoryFilter(b.filter), b.cursor, b.limit || 100, Number(b.offset) || 0),
     '/v1/stats': async (b) => {
-      const filter = b.filter || {};
+      const filter = memoryInventoryFilter(b.filter);
       const base = amr.stats(filter);
       const args = [];
       const userClause = filter.user_id ? ' WHERE user_id=$1::uuid' : '';
@@ -1893,7 +1902,7 @@ function routesFor(ctx) {
       const detailArgs = [b.documentId, org];
       appendDocumentAccess(detailConds, detailArgs, 'd', org, b.access);
       const { rows: docRows } = await db().query(
-        `SELECT d.id, d.filename, d.content_type, d.status, d.metadata, d.created_at FROM knowledge_documents d WHERE ${detailConds.join(' AND ')}`,
+        `SELECT d.id, d.user_id, d.filename, d.content_type, d.status, d.metadata, d.created_at, d.ingest_mode FROM knowledge_documents d WHERE ${detailConds.join(' AND ')}`,
         detailArgs);
       if (!docRows.length) return { error: 'not found' };
       const d = docRows[0];
@@ -1918,6 +1927,8 @@ function routesFor(ctx) {
       }
       const document = {
         id: d.id,
+        userId: d.user_id,
+        ingestMode: d.ingest_mode || d.metadata?.ingest_mode || 'both',
         title: d.metadata?.title || d.filename || d.id,
         documentType: d.content_type || d.metadata?.document_type || null,
         sourcePlatform: d.metadata?.source_platform || null,

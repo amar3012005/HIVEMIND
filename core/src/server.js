@@ -13146,40 +13146,57 @@ exit \$RC
                 return jsonResponse(res, { error: 'Document-first not enabled' }, 503);
               }
               const documentId = typeof body.document_id === 'string' ? body.document_id : null;
+              const promoteEvidence = body.promote_evidence === true;
               if (documentId) {
-                const document = await prisma.knowledgeDocument.findFirst({
-                  where: { id: documentId, orgId },
-                  select: {
-                    id: true, userId: true, ingestMode: true, title: true, documentType: true, sourcePlatform: true,
-                    sourceId: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
-                    segments: { orderBy: { segmentIndex: 'asc' }, select: { id: true, content: true, segmentIndex: true } },
-                  },
-                });
+                // Promotion is intentionally a read-from-evidence operation. It
+                // never reparses an upload or changes the original ingest-mode
+                // choice; an explicit flag is required to promote a document
+                // that was deliberately persisted as evidence-only.
+                const document = orgIsRemote(orgId)
+                  ? await amrKbDocDetail(orgId, documentId, {
+                    userId,
+                    accessContext: await buildAccessContext(userId, orgId).catch(() => null),
+                  })
+                  : await prisma.knowledgeDocument.findFirst({
+                    where: { id: documentId, orgId },
+                    select: {
+                      id: true, userId: true, ingestMode: true, title: true, documentType: true, sourcePlatform: true,
+                      sourceId: true, sourceUrl: true, documentDate: true, tags: true, parseMetadata: true,
+                      segments: { orderBy: { segmentIndex: 'asc' }, select: {
+                        id: true, content: true, segmentIndex: true, segmentType: true, startPage: true,
+                        endPage: true, metadata: true, createdAt: true,
+                      } },
+                    },
+                  });
                 if (!document) return jsonResponse(res, { error: 'Document not found' }, 404);
-                if (document.ingestMode === 'evidence') {
+                const documentMode = document.ingestMode || document.document?.ingestMode || document.document?.metadata?.ingest_mode || 'both';
+                const documentData = document.document || document;
+                const documentSegments = document.segments || [];
+                if (documentMode === 'evidence' && !promoteEvidence) {
                   return jsonResponse(res, {
                     error: 'intentional_evidence_only',
-                    message: 'This document was intentionally uploaded as evidence only and cannot be promoted by repair.',
+                    message: 'This document is evidence-only. Set promote_evidence=true to explicitly promote its stored segments without reparsing.',
                   }, 409);
                 }
-                const unpromoted = document.segments.filter((segment) => segment.content?.trim());
+                const unpromoted = documentSegments.filter((segment) => segment.content?.trim());
                 const result = await documentFirstIngestion._promoteMemories({
-                  documentId: document.id,
-                  userId: document.userId,
+                  documentId: documentData.id,
+                  userId: documentData.userId || userId,
                   orgId,
                   segments: unpromoted,
                   metadata: {
-                    filename: document.title || '', documentTitle: document.title || '',
-                    document_type: document.documentType, source_platform: document.sourcePlatform,
-                    source_id: document.sourceId, source_url: document.sourceUrl,
-                    document_date: document.documentDate, tags: document.tags || [],
-                    ...(document.parseMetadata || {}),
+                    filename: documentData.filename || documentData.title || '', documentTitle: documentData.title || '',
+                    document_type: documentData.documentType, source_platform: documentData.sourcePlatform,
+                    source_id: documentData.sourceId, source_url: documentData.sourceUrl,
+                    document_date: documentData.documentDate, tags: documentData.tags || [],
+                    ...(documentData.parseMetadata || documentData.metadata || {}),
                   },
-                  promotionStrategy: 'admin_document_repair',
+                  promotionStrategy: promoteEvidence ? 'explicit_evidence_promotion' : 'admin_document_repair',
                 });
                 return jsonResponse(res, {
-                  success: true, document_id: document.id, scanned: unpromoted.length,
+                  success: true, document_id: documentData.id, scanned: unpromoted.length,
                   promoted: (result?.memories || []).filter((memory) => memory?.id).length,
+                  promotion_mode: promoteEvidence ? 'from_existing_evidence' : 'repair',
                 });
               }
               const since = body.since ? new Date(body.since) : new Date(Date.now() - 30 * 86400000);
@@ -19667,7 +19684,7 @@ exit \$RC
                 'tara-turn', 'tara-insight', 'tara-session', 'tara-call-log', 'tara-config', 'tara-skill',
               ];
               const statsNoise = { NOT: { tags: { hasSome: statsHiddenTags } } };
-              const memWhere = { orgId, deletedAt: null, isLatest: true, OR: tiers, ...statsNoise };
+              const memWhere = { orgId, deletedAt: null, isLatest: true, layer: { in: ['memory', 'cognitive'] }, OR: tiers, ...statsNoise };
               const relMemScope = { orgId, deletedAt: null, OR: tiers, ...statsNoise };
               // REMOTE: central memories/relationships hold nothing for .amr orgs, so these counts
               // read 0 and the FE showed empty counters. The agent's /v1/stats counts its OWN

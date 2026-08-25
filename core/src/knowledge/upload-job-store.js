@@ -1,5 +1,9 @@
 const TERMINAL = new Set(['ready', 'failed', 'dead', 'cancelled']);
 
+function isUniqueViolation(error) {
+  return error?.code === 'P2002' || error?.code === '23505';
+}
+
 export class KnowledgeUploadJobStore {
   constructor({ prisma, planEnforcer = null, creditService = null, logger = console }) {
     this.prisma = prisma;
@@ -35,6 +39,24 @@ export class KnowledgeUploadJobStore {
 
   async create(input) {
     return this._model().create({ data: input });
+  }
+
+  /**
+   * Serialize same-source admission across API processes. The partial unique
+   * index only covers live jobs; historical failed rows remain retryable via
+   * the normal state machine without becoming a second active upload.
+   */
+  async createOrReuse(input) {
+    try {
+      return { job: await this.create(input), created: true };
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const job = await this.findDuplicate({
+        orgId: input.orgId, scopeKey: input.scopeKey, checksum: input.checksum,
+      });
+      if (!job) throw error;
+      return { job, created: false };
+    }
   }
 
   /**

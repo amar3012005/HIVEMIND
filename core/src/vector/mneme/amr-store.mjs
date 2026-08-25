@@ -431,6 +431,7 @@ export class AmrMemoryStore {
     for (const { rec } of this._scan()) {
       if (rec.deleted_at) continue;
       if (Array.isArray(filter.memory_type) && filter.memory_type.length && !filter.memory_type.includes(rec.memory_type)) continue;
+      if (Array.isArray(filter.layers) && filter.layers.length && !filter.layers.includes(rec.layer || 'memory')) continue;
       if (filter.layer && rec.layer !== filter.layer) continue;
       if (filter.cognitive_layer_role === null && rec.cognitive_layer_role) continue;
       if (filter.is_latest !== undefined && !!rec.is_latest !== !!filter.is_latest) continue;
@@ -451,12 +452,12 @@ export class AmrMemoryStore {
 
   stats(filter = {}) {
     let memories = 0;
-    if (filter.user_id) {
-      for (const { rec } of this._scan()) {
-        if (!rec.deleted_at && rec.is_latest !== false && rec.user_id === filter.user_id) memories++;
-      }
-    } else {
-      memories = this.store.liveCount();
+    for (const { rec } of this._scan()) {
+      if (rec.deleted_at || rec.is_latest === false) continue;
+      if (filter.user_id && rec.user_id !== filter.user_id) continue;
+      if (Array.isArray(filter.layers) && filter.layers.length && !filter.layers.includes(rec.layer || 'memory')) continue;
+      if (filter.layer && rec.layer !== filter.layer) continue;
+      memories++;
     }
     this._ensureRevEdges();
     return { memories, relationships: this._edgeCount };

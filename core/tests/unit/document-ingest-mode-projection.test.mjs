@@ -8,6 +8,8 @@ test('central document list and search select the persisted ingest mode', () => 
   const source = read('../../src/server.js');
   const route = source.slice(source.indexOf("case '/api/documents':"), source.indexOf('default:', source.indexOf("case '/api/documents':")));
   assert.equal((route.match(/ingestMode:\s*true/g) || []).length, 2);
+  assert.ok((route.match(/countDerivedMemoriesByDocumentIds/g) || []).length >= 2,
+    'document list and search must use the same provenance-aware promoted count');
 });
 
 test('embedded and BYOD document projections preserve unknown mode as null', () => {

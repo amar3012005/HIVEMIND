@@ -188,6 +188,7 @@ function _loadFile() {
         qdrantUrl: v.qdrantUrl || '',
         kind: v.kind,
         maintenanceQuarantinedUntil: Number(v.maintenanceQuarantinedUntil || 0),
+        releaseStatus: v.releaseStatus && typeof v.releaseStatus === 'object' ? v.releaseStatus : null,
       });
     }
   } catch { /* malformed file → keep what we have */ }
@@ -600,6 +601,12 @@ export async function remoteCapabilities(orgId, { maxAgeMs = 300_000, transportC
     console.warn(`[mneme/remote] capability handshake unavailable org=${orgId}: ${error.message}`);
     return null;
   }
+}
+
+export async function remoteSupportsCapability(orgId, capability, options = {}) {
+  if (!capability || typeof capability !== 'string') return false;
+  const negotiated = await remoteCapabilities(orgId, options);
+  return Array.isArray(negotiated?.capabilities) && negotiated.capabilities.includes(capability);
 }
 
 export async function remoteVectorPending(orgId, { kind = 'memory', cursor = null, limit = 100, transportClass = 'interactive' } = {}) {

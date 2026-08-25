@@ -255,6 +255,7 @@ export class KnowledgeUploadJobStore {
       document_id: job.documentId, memory_ids: job.memoryIds || [], storage_mode: job.storageMode,
       ingest_mode: ingestMode, evidence_only: evidenceOnly,
       evidence_only_reason: evidenceOnly ? (job.evidenceOnlyReason || 'extraction_yield_zero') : null,
+      memory_generation_failed: ready && job.evidenceOnlyReason === 'promotion_failed',
       counts: { pages: job.pageCount, segments: job.segmentCount, candidates: job.candidateCount, memories: job.promotedCount },
       error: job.errorCode ? { code: job.errorCode, message: job.errorMessage } : null,
       created_at: job.createdAt, updated_at: job.updatedAt, completed_at: job.completedAt,

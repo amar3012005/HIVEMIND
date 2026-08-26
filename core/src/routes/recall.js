@@ -268,7 +268,7 @@ export async function handleRecallRoute(ctx = {}) {
           // An explicit public API limit is caller intent. Forward it to the
           // unified retrieval service instead of silently falling back to the
           // org's synthesis delivery window (commonly five).
-          limit: normalizeRecallLimit(body.limit),
+          limit: normalizeRecallLimit(body.max_memories ?? body.limit),
           // A valid-time snapshot must search historical revisions too. If
           // retrieval is restricted to `is_latest`, the post-filter cannot
           // recover the version that was valid at the requested instant.

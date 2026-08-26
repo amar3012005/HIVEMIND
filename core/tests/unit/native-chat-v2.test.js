@@ -119,6 +119,13 @@ test('validator promotes a generic recall with relationship semantics to the rel
   assert.ok(repaired.repairs.includes('operation.relationship_semantics'));
 });
 
+test('validator repairs a relationship objective even when response type was mislabeled fact', () => {
+  const generic = makePlan({ operation: 'recall', query: 'What is the relationship between Kruti and Amar?', entities: ['Kruti', 'Amar'], response: { type: 'fact' } });
+  const repaired = validateNativePlanResult(generic);
+  assert.equal(repaired.plan.operation, 'relation_between');
+  assert.deepEqual(repaired.plan.relation_entities, ['Kruti', 'Amar']);
+});
+
 test('validator downgrades overview and source-shaped aggregate mistakes to unified recall', () => {
   const overview = validateNativePlanResult(makePlan({
     operation: 'aggregate', query: 'everything about Kruti',

@@ -130,6 +130,11 @@ function rowSearchText(row = {}) {
     .map(safeText).filter(Boolean).join(' ');
 }
 
+function rowMentionsEntity(row, entity) {
+  const needle = normalizeEntity(entity);
+  return Boolean(needle && normalizeEntity(rowSearchText(row)).includes(needle));
+}
+
 function isUserAssertion(row = {}) {
   const { metadata, source, nested } = legacyMetadata(row);
   const tags = Array.isArray(row.tags) ? row.tags.map((tag) => String(tag).toLowerCase()) : [];
@@ -1251,29 +1256,27 @@ const TOOL_HANDLERS = {
         query: entity,
         query_original: entity,
         query_canonical_en: entity,
-        entities: [entity],
       }, ctx)));
     const memories = new Map();
     const evidence = new Map();
     const edges = new Map();
-    const packets = [];
     const memoryIdsByEntity = new Map();
     recalled.forEach((result, index) => {
       const ids = new Set();
       for (const memory of (result?.memories || [])) {
-        if (!memory?.id) continue;
+        if (!memory?.id || !rowMentionsEntity(memory, entities[index])) continue;
         ids.add(memory.id);
         if (!memories.has(memory.id)) memories.set(memory.id, memory);
       }
       memoryIdsByEntity.set(entities[index], ids);
       for (const item of (result?.evidence || [])) {
+        if (!rowMentionsEntity(item, entities[index])) continue;
         const key = item?.id || `${item?.document_id || item?.document_title}|${item?.page || ''}|${String(item?.content || item?.snippet || '').slice(0, 80)}`;
         if (!evidence.has(key)) evidence.set(key, item);
       }
       for (const edge of (result?.relationships || [])) {
         if (edge?.from_id && edge?.to_id && edge?.type) edges.set(`${edge.from_id}|${edge.to_id}|${edge.type}`, edge);
       }
-      if (result?.evidence_packet) packets.push(result.evidence_packet);
     });
 
     const anchorIds = [...memories.keys()];
@@ -1337,6 +1340,11 @@ const TOOL_HANDLERS = {
         type: 'shared_source', source_id,
         entities: [...members.keys()], memory_ids: [...members.values()], verified_relation: false,
       }));
+    const relationPacket = buildEvidencePacket({
+      memories: [...memories.values()], evidence: [...evidence.values()],
+      graph: allEdges, live: [], plan: { operation: 'relation_between', entities },
+      trace: { operation: 'relation_between' },
+    });
     return {
       entities,
       direct_edges: directEdges,
@@ -1346,7 +1354,7 @@ const TOOL_HANDLERS = {
       verified_relation_found: directEdges.length > 0,
       grounded_relation_claim_found: explicitClaims.length > 0,
       memories: [...memories.values()], evidence: [...evidence.values()],
-      relationships: allEdges, evidence_packets: packets,
+      relationships: allEdges, evidence_packets: [relationPacket],
       coverage: {
         requested_entities: entities,
         resolved_entities: entities.filter((entity) => (memoryIdsByEntity.get(entity)?.size || 0) > 0),

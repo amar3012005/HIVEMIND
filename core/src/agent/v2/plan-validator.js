@@ -195,10 +195,12 @@ function recoverCanonicalProfileUpdate(plan, repairs) {
 
 function reconcileSemanticOperation(plan, repairs) {
   const exactSource = plan.references.source?.title || plan.references.source?.document_id;
+  const canonicalReadObjective = `${plan.steps[0]?.query || ''} ${plan.response.objective || ''}`;
+  const relationshipObjective = /\b(?:relationship|related|relation|connection)\b/i.test(canonicalReadObjective);
   // A relationship objective with two resolved entities owns the dedicated
   // relation lane even when the model selected generic recall. This is a
   // deterministic semantic repair, not a keyword classifier.
-  if (plan.operation === 'recall' && plan.response.type === 'relationship'
+  if (plan.operation === 'recall' && (plan.response.type === 'relationship' || relationshipObjective)
       && plan.references.entities.length >= 2) {
     plan.operation = 'relation_between';
     plan.relation_entities = [...new Set(plan.references.entities)].slice(0, 6);

@@ -348,7 +348,20 @@ export function resolveRecallPlan(input = {}) {
   const sourceDocumentId = boundedString(input.source_document_id || structuredSource.document_id, 128);
   const sourceTitle = boundedString(input.source_title || structuredSource.title, 512);
   const sourceKind = boundedString(input.source_kind || structuredSource.kind, 64);
-  const temporalSelectorValue = String(input.temporal_selector || structuredTime.kind || structuredTime.selector || '');
+  // Accept the compact planner vocabulary as well as the established flat
+  // public fields.  Planner revisions have emitted each of these spellings in
+  // production (`selector`, `mode`, and `semantics`); silently treating one as
+  // ordinary recall makes a "latest" answer relevance-ordered instead of
+  // time-ordered.
+  const temporalSelectorValue = String(
+    input.temporal_selector
+      || input.temporal_intent
+      || structuredTime.kind
+      || structuredTime.selector
+      || structuredTime.mode
+      || structuredTime.semantics
+      || '',
+  ).toLowerCase();
   const temporalSelector = ['latest', 'earliest'].includes(temporalSelectorValue)
     ? temporalSelectorValue
     : null;
@@ -372,9 +385,23 @@ export function resolveRecallPlan(input = {}) {
   const scopeFilter = boundedString(input.scope_filter || input.scope, 32);
   const targetMemoryId = boundedString(input.target_memory_id || input.memory_id, 128);
   const entityFilterMode = normalizeEntityFilterMode(input.entity_filter_mode, entities.length > 0);
-  const validAt = normalizedIso(input.valid_at || structuredTime.valid_at);
-  const knownAt = normalizedIso(input.known_at || structuredTime.known_at);
-  const range = normalizeTemporalRange(input.date_range || structuredTime.range);
+  const asOf = structuredTime.as_of;
+  const validAt = normalizedIso(
+    input.valid_at
+      || structuredTime.valid_at
+      || (asOf && temporalAxis !== 'known_time' ? asOf : null),
+  );
+  const knownAt = normalizedIso(
+    input.known_at
+      || structuredTime.known_at
+      || (asOf && temporalAxis === 'known_time' ? asOf : null),
+  );
+  const range = normalizeTemporalRange(
+    input.date_range
+      || structuredTime.range
+      || ((structuredTime.semantics === 'range' || structuredTime.mode === 'range')
+        ? structuredTime : null),
+  );
   const temporal = knownAt
     ? 'known_at'
     : validAt

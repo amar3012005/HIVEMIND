@@ -2655,7 +2655,7 @@ OUTPUT JSON only.`;
 
     const prompt = `You are a multilingual memory graph linker. Given a NEW MEMORY and CANDIDATE memories, do FIVE things in ONE pass:
 
-  1. extract the salient NAMED entities from the new memory — specific people, organizations / brands, products / models, and named projects or initiatives. Read the memory in WHATEVER language it is written, but EMIT every entity in CANONICAL form per the ENTITY NAMING rules below — never two surface forms for the same real-world thing. See EXCLUDE below for what is NOT an entity.
+  1. extract ALL materially useful, source-supported entities from the new memory — specific people, organizations / brands, products / models, named projects or initiatives, technologies, standards, and specific components, subsystems, or named features whose identity is needed to retrieve the claim precisely. Read the memory in WHATEVER language it is written, but EMIT every entity in CANONICAL form per the ENTITY NAMING rules below — never two surface forms for the same real-world thing. See EXCLUDE below for what is NOT an entity. Do not stop after the first or most obvious entity: retain crucial secondary entities when they identify what a product contains, uses, affects, enables, improves, or depends on.
   2. extract TEMPORAL anchors (day-of-week, time-of-day, relative refs like "tomorrow"/"mañana"/"morgen", absolute dates, recurring patterns). Resolve relatives against today=${todayIso}.
   3. classify the new memory's TYPE. Read the memory in ANY language and pick the SINGLE best-fit type by MEANING (not keywords), using these definitions:
        • decision     — a choice made or a commitment to a course of action ("we will ship X", "chose vendor Y", "agreed to Z"). Prefer over 'fact' whenever a resolution/commitment is expressed.
@@ -2666,7 +2666,7 @@ OUTPUT JSON only.`;
        • relationship  — a durable connection BETWEEN entities (reports-to, works-with, partner-of, owns, located-in).
        • fact          — an objective, verifiable state or attribute that fits none of the above ("SolvisPia 13 uses R290", "warranty is 5 years"). This is the DEFAULT only when no more-specific type applies.
      Choose the most specific type the content genuinely supports; do not force-fit.
-  4. for EACH candidate that shares an entity OR temporal anchor OR clear semantic continuity, emit ONE typed edge.
+  4. for EACH candidate that shares an entity OR temporal anchor OR clear semantic continuity, emit ONE typed edge. Inspect the complete claim, including exact model names, components, mechanisms, quantities, units, conditions, negation, dates, ownership, and causal language; these details often distinguish an Extends edge from an Update or contradiction.
      Multiple candidates can each get DIFFERENT edge types simultaneously
      (e.g. Updates A, Extends B, Mentions C in the same save).
   5. when 2+ candidates together inform a synthesis claim made in the new
@@ -2682,12 +2682,14 @@ ENTITY NAMING — emit ONE canonical name per real-world thing so the same entit
   • ABBREVIATIONS: prefer the full, widely-recognized term over an abbreviation or acronym — UNLESS the abbreviation IS the entity's established proper name.
   • SUFFIXES: drop corporate / legal-form suffixes from organization names.
   • FORM: the bare name only — no leading articles, quotes, trailing qualifiers, or punctuation.
+  • SPECIFIC PARTS: a concrete component, subsystem, or named feature may be an entity even when it is not a proper noun, when the memory makes it a stable participant in a durable relation (for example a product contains it, it retains something, or it enables an operating mode). Keep the shortest source-faithful noun phrase that uniquely identifies it. Do not promote broad attributes such as "quality", "temperature", or "efficiency" by themselves.
+  • COVERAGE CHECK: before answering, verify that every specific participant required to express the memory's durable subject-predicate-object claims is present. Preserve crucial qualifiers in link reasoning; never erase model variants, quantities, units, scope, conditions, negation, uncertainty, or temporal validity.
   The SAME thing mentioned twice (in any language, case, number, or abbreviation) MUST map to the SAME canonical string both times.
 
 EXCLUDE — never emit these as entities:
   • job titles, roles, or functions (CTO, Chief Scientist, manager, engineer) — emit the PERSON'S name, not their title.
   • bare geographies or nationalities (Berlin, Germany, German) UNLESS part of a proper name (e.g. "Bank of America", "Project Berlin").
-  • generic descriptors (the project, the team, the company, the document, the meeting, data, stuff).
+  • generic descriptors (the project, the team, the company, the document, the meeting, data, stuff) and broad attributes with no stable identity. This exclusion does NOT remove a specific source-supported component, subsystem, technology, standard, model, or named feature.
   • standalone dates, times, numbers, or money amounts (captured under TEMPORAL / not entities).
   • placeholder or test tokens (foo, bar, test, smoke, alpha/bravo-style fillers).
 
@@ -2699,6 +2701,7 @@ PICK THE OPERATOR FROM SEMANTICS, NOT WORD OVERLAP:
     parties hold opposing positions).
   • "X and Y separately suggested Z, so we'll do Z" → Derives from both X and Y.
   • two memories mentioning the same person but unrelated facts → Mentions only.
+  • a product capability plus a memory naming the component or mechanism that provides it → Extends when the source supports additive detail; never infer the mechanism from co-occurrence alone.
 
 NEW MEMORY:
 ${(baseMemory.title || '').slice(0, 200)}

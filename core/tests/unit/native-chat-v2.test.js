@@ -18,6 +18,7 @@ function makePlan({ operation = 'recall', query = 'Kruti', entities = ['Kruti'],
     completion: { needs_user_input: false, approval_required: ['save', 'update_profile'].includes(operation) },
     relation_entities: relation, aggregate, memory, direct_response: direct, context_free_certificate: certified,
     external_fallback: { allowed: false, query: null, reason: null },
+    uses_recent_public_sources: false,
   };
 }
 

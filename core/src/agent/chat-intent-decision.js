@@ -509,6 +509,8 @@ export function intentDecisionToPlan(decision, message) {
     time_travel: (decision.relation?.time || decision.time) || null,
     needs_web: decision.web_fallback?.allowed === true,
     web_fallback: decision.web_fallback || { allowed: false, query: null, reason: null },
+    recent_public_sources: decision.recent_public_sources || [],
+    recent_context_answer: decision.recent_context_answer || null,
     ask_for_project: false, expected_evidence_types: [],
   };
 }

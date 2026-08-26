@@ -53,3 +53,24 @@ export function promoteWebEvidenceWindow(evidenceItems, rankedCandidates, source
   const retainedCandidates = rankedCandidates.filter((candidate) => !webIds.has(candidate.segment_id));
   rankedCandidates.splice(0, rankedCandidates.length, ...webCandidates, ...retainedCandidates);
 }
+
+export function recentPublicContextPacket(sources = [], answer = '') {
+  const refs = (sources || []).filter((source) => source?.url).slice(-8);
+  const content = String(answer || '').trim().slice(0, 4000);
+  if (!refs.length || !content) return null;
+  const sourceSections = refs.map((source, index) => ({
+    segment_id: `recent-web:${index + 1}:${source.url}`,
+    document_title: String(source.title || source.url).slice(0, 500),
+    source_platform: 'public_web', content, url: source.url,
+    retrieved_at: source.retrieved_at || null, score: 1,
+  }));
+  return {
+    mode: 'recent_public_context', facts: [], sourceSections,
+    citations: sourceSections.map((section, index) => ({
+      id: `RW${index + 1}`, segment_id: section.segment_id,
+      title: section.document_title, source_label: section.document_title,
+      source_type: 'public_web', url: section.url, retrieved_at: section.retrieved_at,
+    })),
+    coverage: { facts: 0, documents: refs.length, source_sections: refs.length },
+  };
+}

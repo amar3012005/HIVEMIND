@@ -31,6 +31,7 @@ const schema = z.object({
     allowed: z.boolean(), query: nullable,
     reason: z.enum(['explicit_web', 'current_public', 'competitor_public']).nullable(),
   }).strict(),
+  uses_recent_public_sources: z.boolean(),
   memory: z.object({
     title: nullable, content: nullable, memory_type: nullable,
     scope: z.enum(['personal', 'project', 'team', 'organization']).nullable(), project_id: nullable,
@@ -81,6 +82,10 @@ function normalizePlanShape(input) {
     if (typeof out.external_fallback.allowed !== 'boolean') {
       out.external_fallback.allowed = false; repairs.push('external_fallback.allowed');
     }
+  }
+  if (typeof out.uses_recent_public_sources !== 'boolean') {
+    out.uses_recent_public_sources = false;
+    repairs.push('uses_recent_public_sources');
   }
   if (out.memory && typeof out.memory === 'object' && !Array.isArray(out.memory)) {
     for (const key of ['title', 'content', 'memory_type', 'scope', 'project_id', 'event_time']) {

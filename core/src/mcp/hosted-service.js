@@ -48,6 +48,21 @@ const CONFIG = {
   maxConnectionsPerUser: 10
 };
 
+function hostedRetrievalFilters(args = {}) {
+  return {
+    ...(Array.isArray(args.entities) ? { entities: args.entities } : {}),
+    ...(Array.isArray(args.memory_types) ? { memory_types: args.memory_types } : {}),
+    ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
+    ...(args.source_title ? { source_title: args.source_title } : {}),
+    ...(args.source_kind ? { source_kind: args.source_kind } : {}),
+    ...(args.scope_filter ? { scope_filter: args.scope_filter } : {}),
+    ...(Array.isArray(args.relationship_types) ? { relationship_types: args.relationship_types } : {}),
+    ...(args.relationship_direction ? { relationship_direction: args.relationship_direction } : {}),
+    ...(args.time_axis ? { temporal_axis: args.time_axis } : {}),
+    ...(args.memory_id ? { target_memory_id: args.memory_id } : {}),
+  };
+}
+
 // In-memory connection tracking remains the safe fallback.
 const userConnections = new Map();
 const revokedAfterByUser = new Map();
@@ -1164,6 +1179,13 @@ transaction_time = when the system LEARNED the fact (system clock); valid_time =
           limit: { type: 'integer', description: 'Max memories to return (default 20, max 200).' },
           project: { type: 'string' },
           project_id: { type: 'string' },
+          entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          memory_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          source_document_id: { type: 'string' }, source_title: { type: 'string' }, source_kind: { type: 'string' },
+          scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'] },
+          relationship_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          relationship_direction: { type: 'string', enum: ['any', 'incoming', 'outgoing'] },
+          time_axis: { type: 'string', enum: ['event_time', 'valid_time', 'known_time'] },
         }
       }
     },
@@ -1178,6 +1200,12 @@ Use on "what changed between X and Y?" questions: vendor agreement evolution, po
           time_b: { type: 'string', description: 'Later ISO timestamp' },
           file_path: { type: 'string' },
           tags: { type: 'array', items: { type: 'string' }, description: 'Tag intersection filter, e.g. ["contract","vendor"]' },
+          memory_query: { type: 'string' }, entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          memory_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          source_document_id: { type: 'string' }, source_title: { type: 'string' }, source_kind: { type: 'string' },
+          scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'] },
+          relationship_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          relationship_direction: { type: 'string', enum: ['any', 'incoming', 'outgoing'] },
         },
         required: ['time_a', 'time_b']
       }
@@ -1191,6 +1219,13 @@ NOT for a point-in-time snapshot across many memories — use hivemind_at; NOT f
         properties: {
           memory_id: { type: 'string', description: 'Memory UUID — direct.' },
           file_path: { type: 'string', description: 'Or resolve via file:<path> tag (code use).' },
+          memory_query: { type: 'string' }, entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          memory_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          source_document_id: { type: 'string' }, source_title: { type: 'string' }, source_kind: { type: 'string' },
+          scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'] },
+          relationship_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          relationship_direction: { type: 'string', enum: ['any', 'incoming', 'outgoing'] },
+          time_axis: { type: 'string', enum: ['event_time', 'valid_time', 'known_time'], default: 'valid_time' },
         }
       }
     },
@@ -3522,14 +3557,11 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         const res = await apiClient.post('/api/recall', {
           query_context: query,
           mode: 'explain',
-          // TOP-LEVEL, not nested under `time`. /api/recall reads body.valid_at /
-          // body.transaction_at (routes/recall.js) and NEVER reads body.time, so the
-          // nested form was silently dropped: every hivemind_at call came back
-          // UNFILTERED (measured: 356 memories / 1.7MB for a single-instant query),
-          // which looks like a working tool but is the whole corpus. `known_at` was
-          // also the wrong key — the route's transaction axis is `transaction_at`.
-          ...(txTime ? { transaction_at: txTime } : {}),
-          ...(validTime ? { valid_at: validTime } : {}),
+          ...hostedRetrievalFilters(args),
+          time: {
+            ...(txTime ? { known_at: txTime } : {}),
+            ...(validTime ? { valid_at: validTime } : {}),
+          },
           ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),
           limit: atLimit,
           project_id: args.project_id || null,
@@ -3569,10 +3601,8 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         const recallAt = (value) => apiClient.post('/api/recall', {
           query_context: query,
           mode: 'explain',
-          // Top-level (see hivemind_at above): nested `time` is never read, so BOTH
-          // sides of the diff were the same unfiltered set and added/removed was
-          // recall jitter rather than a temporal delta.
-          valid_at: value.toISOString(),
+          ...hostedRetrievalFilters(args),
+          time: { valid_at: value.toISOString() },
           ...(tags.length ? { tags } : {}),
         });
         const [a, b] = await Promise.all([recallAt(from), recallAt(to)]);
@@ -3604,6 +3634,7 @@ export async function handleToolCall(params, userId, orgId, apiClient, options =
         const res = await apiClient.post('/api/recall', {
           query_context: query,
           mode: 'explain',
+          ...hostedRetrievalFilters(args),
           operation: 'timeline',
           include_superseded: true,
           ...(args.file_path ? { tags: [`file:${args.file_path}`] } : {}),

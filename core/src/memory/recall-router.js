@@ -40,6 +40,7 @@ import { initialMemoryCrossRerank } from './recall-rerank-policy.js';
 import { runWithStageDeadline } from '../runtime/stage-deadline.js';
 import { isRemoteMemoryUnavailableError } from '../vector/mneme/remote-backend.js';
 import { prepareUnifiedRecallCandidates } from './recall-evidence-dedup.js';
+import { filterEvidenceByMetadata } from '../knowledge/evidence-retrieval.js';
 
 // Same algorithmic term-overlap reranker the DIRECT path (recallPersistedMemories)
 // ends with. Applied as the agent path's final ordering step so chat and Tara
@@ -103,6 +104,56 @@ function normalizeMemoryTypes(...values) {
     .filter(Boolean))].slice(0, 12);
 }
 
+const RELATIONSHIP_TYPES = new Set([
+  'updates', 'extends', 'derives', 'contradicts', 'supports', 'references',
+  'mentions', 'partof', 'causes', 'requires', 'blocks', 'relatedto',
+]);
+
+function normalizeRelationshipTypes(...values) {
+  return [...new Set(values.flatMap((value) => Array.isArray(value) ? value : [value])
+    .map((value) => String(value || '').replace(/[\s_-]+/g, '').toLocaleLowerCase())
+    .filter((value) => RELATIONSHIP_TYPES.has(value)))].slice(0, 12);
+}
+
+function normalizeEntityFilterMode(value, hasEntities = false) {
+  const normalized = String(value || '').toLocaleLowerCase();
+  if (['must', 'should', 'off'].includes(normalized)) return normalized;
+  return hasEntities ? 'must' : 'off';
+}
+
+function memoryMatchesTags(memory, tags = []) {
+  const wanted = [...new Set((tags || []).map((tag) => normalizeSourceLabel(tag)).filter(Boolean))];
+  if (!wanted.length) return true;
+  const stored = memory?.memory || {};
+  const available = new Set([...(memory?.tags || []), ...(stored?.tags || [])]
+    .map((tag) => normalizeSourceLabel(tag)).filter(Boolean));
+  return wanted.every((tag) => available.has(tag));
+}
+
+export function filterMemoriesByEntities(memories = [], entities = [], { mode = 'must' } = {}) {
+  const wanted = [...new Set((entities || []).map((entity) => normalizeSourceLabel(entity)).filter(Boolean))];
+  if (!wanted.length || mode === 'off' || mode === 'should') return [...memories];
+  return memories.filter((memory) => {
+    const stored = memory?.memory || {};
+    const tags = [...(memory?.tags || stored?.tags || [])].map((tag) => normalizeSourceLabel(tag));
+    const metadata = memory?.source_metadata || memory?.sourceMetadata || stored?.source_metadata || {};
+    const metadataEntities = [
+      ...(Array.isArray(metadata.entities) ? metadata.entities : []),
+      ...(Array.isArray(memory?.entities) ? memory.entities : []),
+      memory?.claimSubject, memory?.claim_subject,
+    ].map(normalizeSourceLabel).filter(Boolean);
+    const searchable = [memory?.title, stored?.title, memory?.content, stored?.content]
+      .map((value) => typeof value === 'string' ? value : '')
+      .join(' ').normalize('NFKC').toLocaleLowerCase();
+    const matches = wanted.map((entity) => tags.includes(`entity:${entity}`)
+      || metadataEntities.some((candidate) => candidate === entity
+        || candidate.includes(entity) || entity.includes(candidate))
+      // Compatibility for rows ingested before canonical entity metadata.
+      || searchable.includes(entity));
+    return mode === 'any' ? matches.some(Boolean) : matches.every(Boolean);
+  });
+}
+
 function memoryMatchesSourceContract(memory, { title = null, kind = null } = {}) {
   const wantedTitle = normalizeSourceLabel(title);
   const wantedKind = normalizeSourceLabel(kind);
@@ -112,7 +163,8 @@ function memoryMatchesSourceContract(memory, { title = null, kind = null } = {})
     .map(normalizeSourceLabel).filter(Boolean);
   const filenames = tags.filter((tag) => tag.startsWith('filename:'))
     .map((tag) => normalizeSourceLabel(tag.slice('filename:'.length)));
-  const titleMatches = !wantedTitle || [...titles, ...filenames].includes(wantedTitle);
+  const titleMatches = !wantedTitle || [...titles, ...filenames].some((candidate) =>
+    candidate === wantedTitle || candidate.includes(wantedTitle) || wantedTitle.includes(candidate));
   const kindMatches = !wantedKind || tags.includes(`kind:${wantedKind}`)
     || normalizeSourceLabel(sourceMetadata.kind) === wantedKind
     || normalizeSourceLabel(sourceMetadata.source_kind) === wantedKind;
@@ -305,6 +357,21 @@ export function resolveRecallPlan(input = {}) {
     ? temporalAxisValue
     : null;
   const memoryTypes = normalizeMemoryTypes(input.memory_types, input.memory_type);
+  const inputEntities = Array.isArray(input.entities)
+    ? input.entities
+    : (Array.isArray(input.named_entities) ? input.named_entities : []);
+  const entities = [...new Set(inputEntities.map((entity) => boundedString(entity, 256)).filter(Boolean))].slice(0, 12);
+  const relationshipInput = input.relationships && typeof input.relationships === 'object'
+    ? input.relationships : {};
+  const relationshipTypes = normalizeRelationshipTypes(
+    input.relationship_types, input.relationship_type, relationshipInput.types, relationshipInput.type,
+  );
+  const relationshipDirectionValue = String(input.relationship_direction || relationshipInput.direction || 'any').toLocaleLowerCase();
+  const relationshipDirection = ['any', 'incoming', 'outgoing'].includes(relationshipDirectionValue)
+    ? relationshipDirectionValue : 'any';
+  const scopeFilter = boundedString(input.scope_filter || input.scope, 32);
+  const targetMemoryId = boundedString(input.target_memory_id || input.memory_id, 128);
+  const entityFilterMode = normalizeEntityFilterMode(input.entity_filter_mode, entities.length > 0);
   const validAt = normalizedIso(input.valid_at || structuredTime.valid_at);
   const knownAt = normalizedIso(input.known_at || structuredTime.known_at);
   const range = normalizeTemporalRange(input.date_range || structuredTime.range);
@@ -343,10 +410,20 @@ export function resolveRecallPlan(input = {}) {
       selector: temporalSelector,
     },
     memory_types: memoryTypes,
+    entities,
+    entity_filter_mode: entityFilterMode,
+    scope_filter: ['personal', 'project', 'team', 'organization'].includes(scopeFilter)
+      ? scopeFilter : null,
+    target_memory_id: operation === 'timeline' ? targetMemoryId : null,
+    relationships: {
+      requested: relationshipTypes.length > 0,
+      types: relationshipTypes,
+      direction: relationshipDirection,
+    },
     max_graph_hops: mode === 'fact' ? 0 : 1,
     max_memories: operation === 'timeline'
       ? Math.min(Math.max(Number(input.limit) || 20, 1), 50)
-      : Math.min(Math.max(Number(input.limit) || 15, 1), 15),
+      : Math.min(Math.max(Number(input.limit) || 15, 1), 50),
     context_budget: budget,
     // Evidence is a PARALLEL LANE in its own Qdrant collection — not an expensive
     // serial hop-2, which is what "fact is fast-only" was written for. So `fact` must
@@ -574,7 +651,7 @@ export function serializeRecallEvidence(e = {}) {
     segment_id:       e.segmentId || e.segment_id || e.id || null,
     document_id:      e.documentId || e.document_id || null,
     document_title:   e.document?.title || e.document_title || null,
-    content:          (e.content || '').slice(0, 600),
+    content:          String(e.content || '').slice(0, 600),
     snippet:          e.snippet,
     score:            typeof e.score === 'number' ? Number(e.score.toFixed(3)) : null,
     page:             e.metadata?.startPage || e.page || null,
@@ -778,17 +855,27 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
     query,
     deduped.map((c) => ({ title: c._title, content: c._content, _u: c })),
     { topN: deduped.length },
-  );
+  ).catch(() => null);
   const rerankMeta = rr?.rerank_meta || null;
   if (rerankMeta?.status !== 'served' || !Array.isArray(rr) || !rr.some((x) => x.rerank_score != null)) {
-    const reason = rerankMeta?.error || rerankMeta?.status || 'no usable scores';
-    throw new Error(`unified recall rerank unavailable: ${reason} (retrieval_remaining=${_rrBudget}ms)`);
+    // Provider failure must not turn an otherwise authorized recall into a
+    // 5xx. Scores from the two lanes are incomparable, so preserve each lane's
+    // internal order and interleave them deterministically instead of sorting
+    // their raw magnitudes together.
+    const memoryLane = deduped.filter((candidate) => candidate._kind === 'memory');
+    const evidenceLane = deduped.filter((candidate) => candidate._kind === 'evidence');
+    ordered = [];
+    for (let index = 0; index < Math.max(memoryLane.length, evidenceLane.length); index += 1) {
+      if (memoryLane[index]) ordered.push(memoryLane[index]);
+      if (evidenceLane[index]) ordered.push(evidenceLane[index]);
+    }
+  } else {
+    ordered = rr.map((x) => {
+      const score = Number(x.rerank_score);
+      return { ...x._u, _rerankScore: Number.isFinite(score) ? score : null };
+    });
+    usedCrossEncoder = true;
   }
-  ordered = rr.map((x) => {
-    const score = Number(x.rerank_score);
-    return { ...x._u, _rerankScore: Number.isFinite(score) ? score : null };
-  });
-  usedCrossEncoder = true;
 
   // FALLBACK MUST NOT COMPARE LANES BY SCORE. Lexical evidence scores are synthetic
   // (0.55-0.95), vector scores are real cosine (often <0.15), and memory scores come
@@ -797,8 +884,6 @@ export async function deliverHybrid({ query, memories = [], evidence = [], deliv
   // outright. That is exactly what buried the German `E3DC Zähler` row behind keyword
   // hits on the one question that needed semantics. When the cross-encoder is
   // unavailable, INTERLEAVE the lanes instead so neither can dominate, and say so.
-  if (!usedCrossEncoder) throw new Error('unified recall rerank did not produce a comparable ordering');
-
   const outMem = []; const outEv = []; const rankedCandidates = [];
   for (const c of ordered) {
     const x = c._row || {};
@@ -938,7 +1023,7 @@ async function hop1Memory({ store, query, options, ctx }) {
     // explicit time/entity controls. Avoid spawning additive remote vector
     // variants that compete for the same tenant transport budget.
     query_expansion: options.structured_intent === true ? false : null,
-    entity_filter_mode: options.structured_intent === true ? 'off' : null,
+    entity_filter_mode: options.entity_filter_mode || null,
     temporal_filter_mode: options.structured_intent === true ? 'off' : null,
     // The final delivery boundary runs one cross-encoder over the combined
     // memory + evidence pool (or applies chronological ordering for timeline).
@@ -1291,6 +1376,7 @@ export async function hop2Evidence({ evidenceService, query, queryVector = null,
     scopeFilter: ctx.scopeFilter || ctx.scope_filter || null,
     ...(docIds.length > 0 ? { documentIds: docIds } : {}),
     sourceKind: filters.source_kind || null,
+    sourceTitle: filters.source_title || null,
     temporalSelector: filters.temporal_selector || null,
     time: {
       range: filters.date_range || null,
@@ -1300,7 +1386,14 @@ export async function hop2Evidence({ evidenceService, query, queryVector = null,
     },
     memoryTypes: filters.memory_types || [],
     entities: filters.canonical_entities || filters.named_entities || [],
-    depth: EVIDENCE_DEPTH, deliver: evidenceDeliverFor(),
+    relationshipMemoryIds: filters.relationship_memory_ids || [],
+    relationshipRequired: filters.relationships?.requested === true,
+    entityFilterMode: filters.relationships?.requested === true
+      ? 'any' : (filters.entity_filter_mode || 'must'),
+    temporalInventory: filters.operation === 'timeline',
+    depth: EVIDENCE_DEPTH,
+    deliver: ['latest', 'earliest'].includes(filters.temporal_selector)
+      || filters.operation === 'timeline' ? EVIDENCE_DEPTH : evidenceDeliverFor(),
   });
   return {
     items,
@@ -1398,10 +1491,10 @@ function applyMMRDiversity(memories, lambda = 0.70) {
     for (let i = 0; i < remaining.length; i++) {
       const cand = remaining[i];
       const rel = Number(cand.score) || 0;
-      const candText = `${cand.title || ''} ${(cand.content || '').slice(0, 200)}`;
+      const candText = `${String(cand.title || '')} ${String(cand.content || '').slice(0, 200)}`;
       let maxSim = 0;
       for (const p of picked) {
-        const pText = `${p.title || ''} ${(p.content || '').slice(0, 200)}`;
+        const pText = `${String(p.title || '')} ${String(p.content || '').slice(0, 200)}`;
         const sim = jaccardTokens(candText, pText);
         if (sim > maxSim) maxSim = sim;
       }
@@ -1607,7 +1700,7 @@ export async function recallEnhance({
   };
 }
 
-export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId, accessContext = {}, time = {} }) {
+export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId, accessContext = {}, time = {}, relationship = null, limit = 200 }) {
   if (!memoryIds.length || !orgId) return { items: [], reason: null };
   const projectIds = new Set(accessContext?.projectIds || []);
   const teamIds = new Set(accessContext?.teamIds || []);
@@ -1622,17 +1715,29 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
     if (m.scope === 'organization') return accessContext?.orgRole !== 'guest';
     return false;
   };
+  const wantedTypes = new Set(normalizeRelationshipTypes(relationship?.types, relationship?.type));
+  const direction = ['incoming', 'outgoing'].includes(relationship?.direction)
+    ? relationship.direction : 'any';
+  const edgeAllowed = (edge, anchorId) => {
+    const normalized = String(edge?.type || '').replace(/[\s_-]+/g, '').toLocaleLowerCase();
+    if (wantedTypes.size && !wantedTypes.has(normalized)) return false;
+    if (direction === 'incoming') return edge?.to_id === anchorId || edge?.target_id === anchorId;
+    if (direction === 'outgoing') return edge?.from_id === anchorId || edge?.source_id === anchorId;
+    return true;
+  };
   // .amr tenants store their relationship graph inside the Memory Box, not in
   // central Prisma.  Use the same typed-edge shape as the managed path, with
   // one bounded batch and caller-side ACL filtering of both edge endpoints.
   if (orgIsRemote(orgId)) {
-    const relationships = await amrMemRelationshipsBatch(orgId, memoryIds.slice(0, 24)).catch(() => ({}));
+    const boundedMemoryIds = memoryIds.slice(0, Math.min(Math.max(limit, 1), 200));
+    const relationships = await amrMemRelationshipsBatch(orgId, boundedMemoryIds).catch(() => ({}));
     if (relationships === null) return { items: [], reason: 'remote-graph-batch-unavailable' };
     const items = [];
-    for (const memoryId of memoryIds.slice(0, 24)) {
+    for (const memoryId of boundedMemoryIds) {
       const result = relationships?.[memoryId];
       if (!result) continue;
       for (const edge of result.out || []) {
+        if (direction === 'incoming' || !edgeAllowed({ ...edge, from_id: memoryId }, memoryId)) continue;
         const peer = {
           id: edge.target_id, title: edge.target_title || '(untitled)', content: '',
           userId: edge.target_user_id, scope: edge.target_scope,
@@ -1644,6 +1749,7 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
           created_at: edge.created_at || null, metadata: edge.metadata || {}, related: [peer] });
       }
       for (const edge of result.in || []) {
+        if (direction === 'outgoing' || !edgeAllowed({ ...edge, to_id: memoryId }, memoryId)) continue;
         const peer = {
           id: edge.source_id, title: edge.source_title || '(untitled)', content: '',
           userId: edge.source_user_id, scope: edge.source_scope,
@@ -1664,7 +1770,16 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
   };
   const rows = await prisma.relationship.findMany({
     where: {
-      OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }],
+      ...(direction === 'incoming'
+        ? { toId: { in: memoryIds } }
+        : direction === 'outgoing'
+          ? { fromId: { in: memoryIds } }
+          : { OR: [{ fromId: { in: memoryIds } }, { toId: { in: memoryIds } }] }),
+      ...(wantedTypes.size ? { type: { in: [...wantedTypes].map((type) => ({
+        updates: 'Updates', extends: 'Extends', derives: 'Derives', contradicts: 'Contradicts',
+        supports: 'Supports', references: 'References', mentions: 'Mentions', partof: 'PartOf',
+        causes: 'Causes', requires: 'Requires', blocks: 'Blocks', relatedto: 'RelatedTo',
+      }[type])) } } : {}),
       ...(knownAt ? { createdAt: { lte: new Date(knownAt) } } : {}),
       fromMemory: { orgId, deletedAt: null, ...memoryTimeWhere },
       toMemory: { orgId, deletedAt: null, ...memoryTimeWhere },
@@ -1674,7 +1789,7 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
       fromMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, validFrom: true, validTo: true, memoryProjects: { select: { projectId: true } } } },
       toMemory: { select: { id: true, userId: true, title: true, content: true, scope: true, projectId: true, primaryTeamId: true, isLatest: true, validFrom: true, validTo: true, memoryProjects: { select: { projectId: true } } } },
     },
-    take: 24,
+    take: Math.min(Math.max(limit, 1), 200),
   });
   const visibleCentral = (m) => visible({
     ...m,
@@ -1694,6 +1809,21 @@ export async function loadTypedGraphEvidence({ prisma, memoryIds, userId, orgId,
         .map((m) => ({ id: m.id, title: m.title, content: String(m.content || '').slice(0, 400), is_latest: m.isLatest })),
     })),
   };
+}
+
+export function filterMemoriesByRelationships(memories = [], edges = [], relationship = {}) {
+  const wanted = new Set(normalizeRelationshipTypes(relationship.types, relationship.type));
+  if (!wanted.size) return [...memories];
+  const direction = ['incoming', 'outgoing'].includes(relationship.direction)
+    ? relationship.direction : 'any';
+  const eligible = new Set();
+  for (const edge of edges || []) {
+    const type = String(edge?.type || '').replace(/[\s_-]+/g, '').toLocaleLowerCase();
+    if (!wanted.has(type)) continue;
+    if (direction !== 'incoming' && edge?.from_id) eligible.add(edge.from_id);
+    if (direction !== 'outgoing' && edge?.to_id) eligible.add(edge.to_id);
+  }
+  return memories.filter((memory) => eligible.has(recallMemoryRowId(memory)));
 }
 
 
@@ -1775,7 +1905,10 @@ export class RecallRouter {
         source: implicitSource,
       });
     }
-    const plannedEntities = Array.isArray(options.named_entities) ? options.named_entities : [];
+    const plannedEntities = [
+      ...(Array.isArray(recallPlan.entities) ? recallPlan.entities : []),
+      ...(Array.isArray(options.named_entities) ? options.named_entities : []),
+    ];
     const mergedCanonicalEntities = [...new Set([...plannedEntities, ...canonicalEntities]
       .map((entity) => String(entity || '').trim()).filter(Boolean))].slice(0, 12);
     // Preserve the user's full natural-language question for the semantic lane,
@@ -1790,7 +1923,14 @@ export class RecallRouter {
       ...recallPlan,
       entities: mergedCanonicalEntities,
       named_entities: mergedCanonicalEntities,
+      entity_filter_mode: normalizeEntityFilterMode(
+        options.entity_filter_mode || recallPlan.entity_filter_mode,
+        mergedCanonicalEntities.length > 0,
+      ),
     };
+    const requestedDeliveryLimit = recallPlan.max_memories;
+    const temporalInventory = ['latest', 'earliest'].includes(recallPlan.time.selector)
+      || recallPlan.operation === 'timeline';
     options = {
       ...options,
       source_document_id: recallPlan.source.document_id,
@@ -1803,6 +1943,9 @@ export class RecallRouter {
       date_range: recallPlan.time.range,
       event_range: Boolean(recallPlan.time.range),
       memory_types: recallPlan.memory_types,
+      entity_filter_mode: recallPlan.entity_filter_mode,
+      scope_filter: recallPlan.scope_filter,
+      relationships: recallPlan.relationships,
       boost_memory_type: options.boost_memory_type || recallPlan.memory_types[0] || null,
       include_superseded: recallPlan.operation === 'timeline'
         || Boolean(recallPlan.time.valid_at)
@@ -1810,6 +1953,7 @@ export class RecallRouter {
       canonical_entities: mergedCanonicalEntities,
       alternate_lexical_query: options.alternate_lexical_query || exactEntityLexicalQuery,
       query_vector: queryVector,
+      limit: temporalInventory ? Math.max(50, Number(options.limit) || 0) : options.limit,
     };
     const remainingBudget = () => Math.max(1, recallPlan.latency_budget_ms - (Date.now() - startedAt));
     // THE RERANKER GETS A FLOOR, NOT A SLICE OF SOMEONE ELSE'S BUDGET.
@@ -1987,7 +2131,7 @@ export class RecallRouter {
     // start the tenant-scoped evidence lane alongside memory recall instead of
     // waiting for asynchronous fact promotion to provide an anchor.
     const evidenceStartedAt = Date.now();
-    const sourceFirstEvidence = recallPlan.expand_evidence
+    const sourceFirstEvidence = recallPlan.expand_evidence && !recallPlan.relationships?.requested
       ? (explicitDocumentSourceRequested && explicitSourceDocuments.length === 0
         ? Promise.resolve({ items: [], reason: explicitSourceMemoryAnchors.length ? 'memory-source-only' : 'source-not-found', docIds: [] })
         : hop2Evidence({
@@ -2016,12 +2160,81 @@ export class RecallRouter {
         trace_stages: options.trace_stages === true,
         timing: stageTiming ? (stageTiming.memory_detail = {}) : null,
       }, ctx });
+    // A latest/earliest request is an inventory operation after hard filters,
+    // not "the newest item among the semantic top K". Add an authorized,
+    // model-free memory inventory lane so a chronologically correct entity or
+    // source row cannot be excluded merely because an older row scored higher.
+    if (temporalInventory && this.store?.listMemories) {
+      try {
+        const inventoryArgs = {
+          user_id: ctx.userId,
+          org_id: ctx.orgId,
+          project: ctx.projectId || undefined,
+          limit: 5000,
+          scope: recallPlan.scope_filter ? `tier:${recallPlan.scope_filter}` : 'authorized',
+          access_context: ctx.accessContext,
+        };
+        const listedSets = await Promise.all([
+          withTimeout(this.store.listMemories({ ...inventoryArgs, is_latest: true }),
+            Math.min(1800, remainingBudget()), { temporal_inventory_unavailable: true }),
+          (recallPlan.operation === 'timeline' || recallPlan.time.selector === 'earliest')
+            ? withTimeout(this.store.listMemories({ ...inventoryArgs, is_latest: false }),
+              Math.min(1800, remainingBudget()), { temporal_inventory_unavailable: true })
+            : Promise.resolve({ memories: [] }),
+        ]);
+        if (listedSets.some((listed) => listed?.temporal_inventory_unavailable)) {
+          const error = new Error('temporal memory inventory unavailable');
+          error.code = 'TEMPORAL_INVENTORY_UNAVAILABLE';
+          throw error;
+        }
+        let inventory = filterMemoriesByEntities(
+          listedSets.flatMap((listed) => listed?.memories || []),
+          recallPlan.entities,
+          { mode: recallPlan.relationships?.requested ? 'any' : recallPlan.entity_filter_mode },
+        );
+        inventory = [...new Map(inventory.map((memory) => [recallMemoryRowId(memory), memory])).values()];
+        if (recallPlan.memory_types.length) {
+          const wanted = new Set(recallPlan.memory_types);
+          inventory = inventory.filter((memory) => wanted.has(String(memory?.memory_type || memory?.memoryType || '').toLocaleLowerCase()));
+        }
+        if (recallPlan.source.requested) {
+          inventory = inventory.filter((memory) => memoryMatchesSourceContract(memory, recallPlan.source));
+        }
+        if (Array.isArray(options.tags) && options.tags.length) {
+          inventory = inventory.filter((memory) => memoryMatchesTags(memory, options.tags));
+        }
+        if (recallPlan.target_memory_id) {
+          const chain = new Set([recallPlan.target_memory_id]);
+          let frontier = [recallPlan.target_memory_id];
+          for (let depth = 0; depth < 8 && frontier.length; depth += 1) {
+            const graph = await loadTypedGraphEvidence({
+              prisma: this.prisma, memoryIds: frontier, userId: ctx.userId, orgId: ctx.orgId,
+              accessContext: ctx.accessContext || {}, time: recallPlan.time,
+              relationship: { types: ['Updates'], direction: 'any' }, limit: 200,
+            });
+            const next = [];
+            for (const edge of graph.items || []) {
+              for (const id of [edge.from_id, edge.to_id]) {
+                if (id && !chain.has(id)) { chain.add(id); next.push(id); }
+              }
+            }
+            frontier = next;
+          }
+          inventory = inventory.filter((memory) => chain.has(recallMemoryRowId(memory)));
+        }
+        const byId = new Map([...memories, ...inventory].map((memory) => [recallMemoryRowId(memory), memory]));
+        memories = [...byId.values()];
+      } catch (error) {
+        if (error?.code === 'TEMPORAL_INVENTORY_UNAVAILABLE') throw error;
+        console.warn('[recall-router] temporal memory inventory lane failed:', error.message);
+      }
+    }
     let eventRangeCount = 0;
     if (options.event_range === true && recallPlan.time.range && this.store?.listMemories) {
       try {
         const explicitScope = options.scope_filter
           ? `tier:${String(options.scope_filter).replace(/^tier:/, '')}`
-          : 'personal';
+          : 'authorized';
         const listed = await withTimeout(this.store.listMemories({
           user_id: ctx.userId,
           org_id: ctx.orgId,
@@ -2119,6 +2332,32 @@ export class RecallRouter {
       memories = memories.filter((memory) => requestedTypes.has(String(
         memory.memory_type || memory.memoryType || memory.memory?.memory_type || '',
       ).toLocaleLowerCase()));
+    }
+
+    // Entity predicates are authorization-like retrieval constraints, not
+    // ranking hints. Apply the same exact all/any semantics used by evidence
+    // metadata before either lane enters unified delivery.
+    memories = filterMemoriesByEntities(memories, recallPlan.entities, {
+      mode: recallPlan.relationships?.requested ? 'any' : recallPlan.entity_filter_mode,
+    });
+
+    let relationshipEdges = [];
+    if (recallPlan.relationships?.requested) {
+      options.relationship_memory_ids = [];
+    }
+    if (recallPlan.relationships?.requested && memories.length) {
+      const graph = await loadTypedGraphEvidence({
+        prisma: this.prisma,
+        memoryIds: memories.map(recallMemoryRowId).filter(Boolean),
+        userId: ctx.userId,
+        orgId: ctx.orgId,
+        accessContext: ctx.accessContext || {},
+        time: recallPlan.time,
+        relationship: recallPlan.relationships,
+      });
+      relationshipEdges = graph.items || [];
+      memories = filterMemoriesByRelationships(memories, relationshipEdges, recallPlan.relationships);
+      options.relationship_memory_ids = memories.map(recallMemoryRowId).filter(Boolean);
     }
 
     const inspection = inspectMemories(memories);
@@ -2250,10 +2489,17 @@ export class RecallRouter {
       if (Array.isArray(hydrated) && hydrated.length) selectedEvidence = hydrated;
       else if (hydrated?.timed_out || Date.now() - startedAt >= recallPlan.latency_budget_ms) cutoffReason = 'latency_budget';
     }
-    const evidenceWithLineage = selectedEvidence.map((e) => ({
+    let evidenceWithLineage = selectedEvidence.map((e) => ({
       ...e,
       linked_memory_id: memoryByDocId.get(e.documentId) || null,
+      _lineage_inferred: !e.linked_memory_id && Boolean(memoryByDocId.get(e.documentId)),
     }));
+    if (recallPlan.relationships?.requested) {
+      evidenceWithLineage = filterEvidenceByMetadata(evidenceWithLineage, {
+        relationshipMemoryIds: options.relationship_memory_ids || [],
+        relationshipRequired: true,
+      });
+    }
 
     const tiersFired = ['memory'];
     if (hop2.items.length > 0) tiersFired.push(`evidence-${hop2.reason}`);
@@ -2262,9 +2508,9 @@ export class RecallRouter {
     // Phase 2 (B2): deliver-N comes from the per-org RetrievalConfig (the
     // self-evolution action space), falling back to RECALL_DELIVER_LIMIT.
     let deliverN = recallPlan.operation === 'timeline'
-      ? Math.min(options.limit || recallPlan.max_memories, 50)
+      ? Math.min(requestedDeliveryLimit, 50)
       : (options.structured_intent === true
-          ? Math.min(Math.max(1, options.limit || 15), 15)
+          ? Math.min(Math.max(1, requestedDeliveryLimit), 15)
           : RECALL_DELIVER_LIMIT);
     try {
       const cfg = await withTimeout(getRetrievalConfig(ctx.orgId), Math.min(120, remainingBudget()), null);
@@ -2339,7 +2585,24 @@ export class RecallRouter {
     let hybridRankingMode = 'not_applicable';
     let hybridRerankPasses = 0;
     let hybridRerankMs = 0;
-    {
+    if (recallPlan.operation === 'timeline') {
+      const timelineAxis = recallPlan.time.axis || 'valid_time';
+      const mixed = [
+        ...rankedMemories.map((row) => ({ kind: 'memory', row })),
+        ...evidenceWithLineage.map((row) => ({ kind: 'evidence', row })),
+      ].sort((left, right) => {
+        const delta = recallItemTimeForAxis(left.row, timelineAxis)
+          - recallItemTimeForAxis(right.row, timelineAxis);
+        return delta || String(recallMemoryRowId(left.row) || left.row?.segmentId || left.row?.segment_id || '')
+          .localeCompare(String(recallMemoryRowId(right.row) || right.row?.segmentId || right.row?.segment_id || ''));
+      }).slice(0, requestedDeliveryLimit);
+      deliverMemories = mixed.filter((entry) => entry.kind === 'memory').map((entry) => entry.row);
+      finalEvidence = mixed.filter((entry) => entry.kind === 'evidence').map((entry) => entry.row);
+      rankedCandidates = mixed.map((entry, index) => entry.kind === 'memory'
+        ? { kind: 'memory', memory_id: recallMemoryRowId(entry.row), rank: index + 1, score: Number(entry.row?.score) || null }
+        : { kind: 'evidence', segment_id: entry.row?.segmentId || entry.row?.segment_id || entry.row?.id, rank: index + 1, score: Number(entry.row?.score) || null });
+      hybridRankingMode = `timeline_${timelineAxis}_ascending`;
+    } else if (!['latest', 'earliest'].includes(recallPlan.time.selector)) {
       const v2 = await deliverHybrid({
         query,
         memories: rankedMemories,          // wide pre-slice pool (rerank window)
@@ -2357,25 +2620,22 @@ export class RecallRouter {
         hybridRerankPasses = Number(v2.rerank_passes) || 0;
         hybridRerankMs = Number(v2.rerank_ms) || 0;
       }
-    }
-
-    if (['latest', 'earliest'].includes(recallPlan.time.selector)) {
+    } else {
+      // Temporal selectors are time-primary operations. Select from the WIDE,
+      // already-filtered memory/evidence inventories before any semantic
+      // top-15 truncation. Relevance is only a stable tie-breaker.
       const axis = recallPlan.time.axis || 'known_time';
-      deliverMemories = orderTemporalCandidates(deliverMemories, {
-        selector: recallPlan.time.selector, axis, id: recallMemoryRowId,
-      });
-      finalEvidence = orderTemporalCandidates(finalEvidence, {
-        selector: recallPlan.time.selector, axis,
-        id: (row) => row?.segmentId || row?.segment_id || row?.id || '',
-      });
       const mixed = orderTemporalCandidates([
-        ...deliverMemories.map((row) => ({ kind: 'memory', row })),
-        ...finalEvidence.map((row) => ({ kind: 'evidence', row })),
+        ...rankedMemories.map((row) => ({ kind: 'memory', row })),
+        ...evidenceWithLineage.map((row) => ({ kind: 'evidence', row })),
       ], {
         selector: recallPlan.time.selector, axis, unwrap: (entry) => entry.row,
         id: (row) => recallMemoryRowId(row) || row?.segmentId || row?.segment_id || row?.id || '',
       });
-      rankedCandidates = mixed.slice(0, 15).map((entry, index) => entry.kind === 'memory'
+      const retained = mixed.slice(0, requestedDeliveryLimit);
+      deliverMemories = retained.filter((entry) => entry.kind === 'memory').map((entry) => entry.row);
+      finalEvidence = retained.filter((entry) => entry.kind === 'evidence').map((entry) => entry.row);
+      rankedCandidates = retained.map((entry, index) => entry.kind === 'memory'
         ? { kind: 'memory', memory_id: recallMemoryRowId(entry.row), rank: index + 1, score: Number(entry.row?.score) || null }
         : { kind: 'evidence', segment_id: entry.row?.segmentId || entry.row?.segment_id || entry.row?.id, rank: index + 1, score: Number(entry.row?.score) || null });
       hybridRankingMode = `${recallPlan.time.selector}_${axis}`;
@@ -2403,8 +2663,11 @@ export class RecallRouter {
       memories: deliverMemories.map((memory) => serializeRecallMemory(memory, {
         includeFullContent: options.include_full_memory_content === true,
       })),
-      evidence: finalEvidence.slice(0, options.structured_intent === true ? 15 : HOP2_DOC_LIMIT).map(serializeRecallEvidence),
+      evidence: finalEvidence.slice(0, temporalInventory
+        ? requestedDeliveryLimit
+        : (options.structured_intent === true ? 15 : HOP2_DOC_LIMIT)).map(serializeRecallEvidence),
       ranked_candidates: rankedCandidates,
+      relationships: relationshipEdges,
       timeline,
       live: hop3.items,
       trace: {

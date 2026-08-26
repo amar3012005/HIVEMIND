@@ -222,7 +222,11 @@ test('recall route forwards typed source and time blocks unchanged', async () =>
   const source = { document_id: 'doc-1', title: 'Brochure.pdf' };
   const time = { known_at: '2026-07-01T00:00:00.000Z' };
   const result = await handleRecallRoute({
-    req: {}, res: {}, body: { query_context: 'approval', mode: 'explain', source, time },
+    req: {}, res: {}, body: {
+      query_context: 'approval', mode: 'explain', source, time,
+      entities: ['Kruti'], memory_types: ['decision'], scope_filter: 'project',
+      relationship_types: ['Supports'], relationship_direction: 'incoming',
+    },
     userId: 'user-1', orgId: 'org-1', prisma: {}, jsonResponse,
     ensurePersistedMemoryOrFail: () => true, rateLimitAllowOrgRequest: () => true,
     planEnforcer: null, cognitiveOperator: null, detectQueryIntent: () => 'fact_lookup',
@@ -237,6 +241,8 @@ test('recall route forwards typed source and time blocks unchanged', async () =>
       resolvePlan: () => ({
         mode: 'explain', legacy: false, max_graph_hops: 0, latency_budget_ms: 3000,
         source: { requested: true, ...source }, time: { mode: 'known_at', ...time },
+        entities: ['Kruti'], entity_filter_mode: 'must', memory_types: ['decision'],
+        scope_filter: 'project', relationships: { requested: true, types: ['supports'], direction: 'incoming' },
       }),
       recall: async (_query, options) => { forwarded = options; return { memories: [], evidence: [], live: [], trace: {} }; },
       loadGraph: async () => ({ items: [] }),
@@ -247,6 +253,10 @@ test('recall route forwards typed source and time blocks unchanged', async () =>
   assert.equal(result.statusCode, 200);
   assert.deepEqual(forwarded.source, { requested: true, ...source });
   assert.deepEqual(forwarded.time, { mode: 'known_at', ...time });
+  assert.deepEqual(forwarded.memory_types, ['decision']);
+  assert.equal(forwarded.entity_filter_mode, 'must');
+  assert.equal(forwarded.scope_filter, 'project');
+  assert.deepEqual(forwarded.relationships, { requested: true, types: ['supports'], direction: 'incoming' });
 });
 
 test('a sovereign Memory Box outage returns 503 and never masquerades as zero recall', async () => {

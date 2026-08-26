@@ -114,7 +114,7 @@ test('full evidence packet preserves a bounded raw source window', () => {
   assert.equal(packet.source_sections.length, 12);
   const counts = packet.source_sections.reduce((m, s) => m.set(s.document_id, (m.get(s.document_id) || 0) + 1), new Map());
   assert.ok([...counts.values()].every((count) => count <= 8));
-  assert.equal(packet.citations.length, 12);
+  assert.equal(packet.citations.length, 13);
 });
 
 test('evidence packet prefers the query-centred snippet over a segment prefix', () => {
@@ -204,6 +204,11 @@ test('evidence hydration re-applies the document allowlist in canonical storage'
   let hydrateWhere;
   const service = new EvidenceRetrievalService({
     db: {
+      knowledgeDocument: {
+        async findMany() {
+          return [{ id: 'document-project-a' }, { id: 'document-project-b' }];
+        },
+      },
       knowledgeSegment: {
         async findMany({ where }) {
           hydrateWhere = where;
@@ -253,6 +258,9 @@ test('central evidence returns tenant-scoped lexical results when vector search 
   };
   const service = new EvidenceRetrievalService({
     db: {
+      knowledgeDocument: {
+        async findMany() { return [{ id: 'document-allowed' }]; },
+      },
       knowledgeSegment: {
         async findMany(args) {
           calls.push(args);
@@ -305,9 +313,10 @@ test('source metadata resolution is tenant-scoped and does not require an LLM fi
   const documents = await service.resolveSourceFromQuery({
     userId: 'user-1', orgId: 'org-1', query: 'What exactly does HIVEMIND Brochure.html.pdf say?',
   });
-  assert.equal(where.userId, 'user-1');
-  assert.equal(where.orgId, 'org-1');
-  assert.equal(where.archivedAt, null);
+  const accessWhere = where.AND?.[0] || where;
+  assert.ok(accessWhere.userId === 'user-1' || accessWhere.OR?.some((clause) => clause.userId === 'user-1'));
+  assert.equal(accessWhere.orgId, 'org-1');
+  assert.equal(accessWhere.archivedAt, null);
   assert.deepEqual(documents.map((document) => document.id), ['brochure']);
   assert.equal(documents[0]._sourceMatch, 'filename');
 });
@@ -449,7 +458,7 @@ test('full recall hydrates a tenant-scoped ordered source window', async () => {
     userId: 'user-1',
     orgId: 'org-1',
   });
-  assert.equal(query.where.userId, 'user-1');
+  assert.ok(query.where.userId === 'user-1' || query.where.OR?.some((clause) => clause.userId === 'user-1'));
   assert.equal(query.where.orgId, 'org-1');
   assert.deepEqual(query.where.OR[0], { documentId: 'doc-1', segmentIndex: { gte: 2, lte: 4 } });
   assert.deepEqual(result.map((item) => item.metadata.segmentIndex), [2, 3, 4]);
@@ -486,10 +495,11 @@ test('named source resolution is tenant scoped', async () => {
   const documents = await service.resolveSourceDocuments({
     userId: 'user-1', orgId: 'org-1', title: 'Board Notes',
   });
-  assert.equal(query.where.userId, 'user-1');
-  assert.equal(query.where.orgId, 'org-1');
-  assert.equal(query.where.archivedAt, null);
-  assert.equal(query.where.OR.length, 2);
+  const accessWhere = query.where.AND?.[0] || query.where;
+  assert.ok(accessWhere.userId === 'user-1' || accessWhere.OR?.some((clause) => clause.userId === 'user-1'));
+  assert.equal(accessWhere.orgId, 'org-1');
+  assert.equal(accessWhere.archivedAt, null);
+  assert.equal(query.where.AND?.[1]?.OR?.length, 2);
   assert.equal(documents[0].id, 'doc-1');
 });
 

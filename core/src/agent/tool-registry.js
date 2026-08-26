@@ -43,6 +43,22 @@ function temporalRowIdentity(row = {}) {
     || `${row.documentId || row.document_id || row.document?.id || ''}:${row.segmentIndex || row.segment_index || ''}:${temporalClaimKey(row)}`;
 }
 
+function typedRetrievalFilters(args = {}) {
+  return {
+    ...(Array.isArray(args.entities) ? { entities: args.entities } : {}),
+    ...(Array.isArray(args.memory_types) ? { memory_types: args.memory_types } : {}),
+    ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
+    ...(args.source_title ? { source_title: args.source_title } : {}),
+    ...(args.source_kind ? { source_kind: args.source_kind } : {}),
+    ...(args.scope_filter ? { scope_filter: args.scope_filter } : {}),
+    ...(Array.isArray(args.relationship_types) ? { relationship_types: args.relationship_types } : {}),
+    ...(args.relationship_direction ? { relationship_direction: args.relationship_direction } : {}),
+    ...(args.entity_filter_mode ? { entity_filter_mode: args.entity_filter_mode } : {}),
+    ...(args.time_axis ? { temporal_axis: args.time_axis } : {}),
+    ...(args.memory_id ? { target_memory_id: args.memory_id } : {}),
+  };
+}
+
 function groupTemporalRows(rows = [], relationships = []) {
   const byId = new Map(rows.filter(Boolean).map((row) => [row.id, row]));
   const parent = new Map([...byId.keys()].map((id) => [id, id]));
@@ -95,19 +111,28 @@ export function findDirectEntityEdges(edges, entities, memoryIdsByEntity) {
 // valid/known time inside persisted retrieval; this closes the equivalent gap
 // for raw evidence segments and rebuilds the packet from the filtered set.
 function restrictEvidenceToTemporalSnapshot(result, { validAt = null, knownAt = null } = {}) {
-  const cutoff = validAt || knownAt;
-  if (!result || !cutoff || Number.isNaN(new Date(cutoff).getTime())) return result;
-  const cutoffMs = new Date(cutoff).getTime();
+  if (!result) return result;
+  const validCutoff = validAt ? new Date(validAt).getTime() : null;
+  const knownCutoff = knownAt ? new Date(knownAt).getTime() : null;
+  if ((validCutoff == null || Number.isNaN(validCutoff))
+      && (knownCutoff == null || Number.isNaN(knownCutoff))) return result;
   const temporalEvidence = (result.evidence || []).filter((row) => {
     const metadata = row?.metadata || {};
-    const start = row?.valid_from || row?.valid_at || row?.document_date || row?.documentDate
-      || metadata.valid_from || metadata.valid_at || metadata.document_date
-      || (knownAt ? (row?.created_at || row?.createdAt || metadata.created_at) : null);
-    const end = row?.valid_to || metadata.valid_to || null;
-    const startMs = start ? new Date(start).getTime() : Number.NaN;
-    const endMs = end ? new Date(end).getTime() : Number.NaN;
-    return Number.isFinite(startMs) && startMs <= cutoffMs
-      && (!Number.isFinite(endMs) || endMs > cutoffMs);
+    if (validCutoff != null && !Number.isNaN(validCutoff)) {
+      const start = row?.valid_from || row?.valid_at || metadata.valid_from || metadata.valid_at;
+      const end = row?.valid_to || metadata.valid_to || null;
+      const startMs = start ? new Date(start).getTime() : Number.NaN;
+      const endMs = end ? new Date(end).getTime() : Number.NaN;
+      if (!Number.isFinite(startMs) || startMs > validCutoff
+          || (Number.isFinite(endMs) && endMs <= validCutoff)) return false;
+    }
+    if (knownCutoff != null && !Number.isNaN(knownCutoff)) {
+      const known = row?.known_at || row?.knownAt || metadata.known_at || metadata.knownAt
+        || row?.created_at || row?.createdAt || metadata.created_at;
+      const knownMs = known ? new Date(known).getTime() : Number.NaN;
+      if (!Number.isFinite(knownMs) || knownMs > knownCutoff) return false;
+    }
+    return true;
   });
   result.evidence = temporalEvidence;
   result.evidence_count = temporalEvidence.length;
@@ -175,6 +200,10 @@ export const TOOL_SCHEMAS = [
           },
           include_live: { type: 'boolean', default: false, description: 'Force live workspace lookup (Gmail/Drive/Calendar) even if memory layer does not hint at it.' },
           scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'], description: 'Server-owned scope restriction for typed requests such as self-profile recall.' },
+          memory_types: { type: 'array', items: { type: 'string' }, maxItems: 12, description: 'Hard semantic type predicate shared by memory and evidence lanes.' },
+          entity_filter_mode: { type: 'string', enum: ['must', 'should', 'off'], description: 'Hard entity predicate by default when entities are supplied.' },
+          relationship_types: { type: 'array', items: { type: 'string', enum: ['Updates', 'Extends', 'Derives', 'Contradicts', 'Supports', 'References', 'Mentions', 'PartOf', 'Causes', 'Requires', 'Blocks', 'RelatedTo'] }, maxItems: 12, description: 'Return only candidates participating in one of these authorized typed relationships.' },
+          relationship_direction: { type: 'string', enum: ['any', 'incoming', 'outgoing'], default: 'any' },
           // V5 D5: planner-signalled expected memory KIND ("what did we decide" => decision).
           // Must be declared here — validateAndSanitize strips undeclared keys.
           answer_type: { type: 'string', enum: ['decision', 'goal', 'preference', 'lesson', 'event', 'relationship', 'fact'], description: 'Expected memory type of the answer, inferred from user intent (language-neutral). Enables the type-aware recall lane.' },
@@ -425,6 +454,13 @@ export const TOOL_SCHEMAS = [
           valid_at: { type: 'string', description: 'ISO timestamp.' },
           known_at: { type: 'string', description: 'ISO timestamp: upper bound on when HIVEMIND learned the fact.' },
           tags: { type: 'array', items: { type: 'string' }, description: 'Optional tag filter (connector + marker tags).' },
+          entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          memory_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          source_document_id: { type: 'string' }, source_title: { type: 'string' }, source_kind: { type: 'string' },
+          scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'] },
+          relationship_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          relationship_direction: { type: 'string', enum: ['any', 'incoming', 'outgoing'] },
+          time_axis: { type: 'string', enum: ['event_time', 'valid_time', 'known_time'], default: 'valid_time' },
           mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], default: 'quick' },
         },
         required: ['query'],
@@ -444,6 +480,13 @@ export const TOOL_SCHEMAS = [
           from: { type: 'string' },
           to: { type: 'string' },
           tags: { type: 'array', items: { type: 'string' } },
+          entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          memory_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          source_document_id: { type: 'string' }, source_title: { type: 'string' }, source_kind: { type: 'string' },
+          scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'] },
+          relationship_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          relationship_direction: { type: 'string', enum: ['any', 'incoming', 'outgoing'] },
+          time_axis: { type: 'string', enum: ['event_time', 'valid_time', 'known_time'], default: 'valid_time' },
           mode: { type: 'string', enum: ['quick', 'panorama', 'insight'], default: 'quick' },
         },
         required: ['query', 'from', 'to'],
@@ -465,6 +508,13 @@ export const TOOL_SCHEMAS = [
           tags: { type: 'array', items: { type: 'string' } },
           file_path: { type: 'string', description: 'Code-scoped — translated to a file:<path> tag.' },
           valid_at: { type: 'string', description: 'Optional upper bound for time-travel.' },
+          entities: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          memory_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          source_document_id: { type: 'string' }, source_title: { type: 'string' }, source_kind: { type: 'string' },
+          scope_filter: { type: 'string', enum: ['personal', 'project', 'team', 'organization'] },
+          relationship_types: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+          relationship_direction: { type: 'string', enum: ['any', 'incoming', 'outgoing'] },
+          time_axis: { type: 'string', enum: ['event_time', 'valid_time', 'known_time'], default: 'valid_time' },
         },
         // No hard required: the handler accepts ANY of memory_id | query | tags |
         // file_path and returns a bounded INVALID_ARGS error if none is present.
@@ -946,6 +996,8 @@ const TOOL_HANDLERS = {
       include_live:   args.include_live === true,
       live_intent:    args.live_intent === true,
       scope_filter:   args.scope_filter,
+      entity_filter_mode: recallPlan.entity_filter_mode,
+      relationships: recallPlan.relationships,
       structured_intent: args._structured_intent === true,
       alternate_lexical_query: args.query_canonical_en && args.query_canonical_en !== originalQuery
         ? args.query_canonical_en
@@ -962,6 +1014,7 @@ const TOOL_HANDLERS = {
       orgId:         ctx.orgId,
       projectId:     ctx.projectId,
       accessContext: ctx.accessContext,
+      scopeFilter:   recallPlan.scope_filter,
     });
     // PROJECT-SCOPE POLICY — same authority as /api/recall (routes/recall.js).
     // The agent path calls router.recall DIRECTLY, bypassing the HTTP route, so
@@ -981,7 +1034,7 @@ const TOOL_HANDLERS = {
     }
     const effectivePlan = result.trace?.recall_plan || recallPlan;
 
-    let graph = [];
+    let graph = Array.isArray(result.relationships) ? result.relationships : [];
     const graphBudget = effectivePlan.latency_budget_ms - (Date.now() - recallStartedAt);
     // Graph hydration is a distinct capability, not a mandatory appendage to
     // every hybrid recall.  The old default ran it for each ordinary recall
@@ -990,6 +1043,7 @@ const TOOL_HANDLERS = {
     // executors request their one graph read explicitly; callers may opt in
     // with include_graph for the documented raw-tool use case.
     const graphRequested = args.include_graph === true
+      || effectivePlan.relationships?.requested === true
       || ['relation_between', 'timeline'].includes(String(effectivePlan.operation || ''));
     if (graphRequested && effectivePlan.max_graph_hops > 0 && result.memories.length > 0 && graphBudget > 1) {
       const loaded = await Promise.race([
@@ -1003,7 +1057,7 @@ const TOOL_HANDLERS = {
         }),
         new Promise((resolve) => setTimeout(() => resolve({ items: [], reason: 'timeout' }), Math.min(500, graphBudget))),
       ]);
-      graph = loaded.items || [];
+      graph = loaded.items || graph;
     }
     const cutoffReason = result.trace?.cutoff_reason || null;
     const evidencePacket = buildEvidencePacket({
@@ -1753,7 +1807,7 @@ const TOOL_HANDLERS = {
         });
         memories = rows.map(r => ({
           id: r.id, title: r.title,
-          content: (r.content || '').slice(0, 400),
+          content: String(r.content || '').slice(0, 400),
           tags: r.tags || [],
           memory_type: r.memoryType,
           is_latest: r.isLatest,
@@ -1814,6 +1868,7 @@ const TOOL_HANDLERS = {
     const result = await TOOL_HANDLERS.hivemind_recall(
       {
         query: args.query,
+        ...typedRetrievalFilters(args),
         time: {
           ...(validAt ? { valid_at: validAt.toISOString() } : {}),
           ...(knownAt ? { known_at: knownAt.toISOString() } : {}),
@@ -1839,8 +1894,8 @@ const TOOL_HANDLERS = {
     const tags = Array.isArray(args.tags) && args.tags.length > 0 ? args.tags : undefined;
     const mode = 'explain';
     const [a, b] = await Promise.all([
-      TOOL_HANDLERS.hivemind_at({ query: args.query, valid_at: from.toISOString(), tags, limit: 10, mode }, ctx),
-      TOOL_HANDLERS.hivemind_at({ query: args.query, valid_at: to.toISOString(), tags, limit: 10, mode }, ctx),
+      TOOL_HANDLERS.hivemind_at({ query: args.query, ...typedRetrievalFilters(args), valid_at: from.toISOString(), tags, limit: 10, mode }, ctx),
+      TOOL_HANDLERS.hivemind_at({ query: args.query, ...typedRetrievalFilters(args), valid_at: to.toISOString(), tags, limit: 10, mode }, ctx),
     ]);
     // Compute stable identity delta first, then pair changed claims by typed
     // supersession edges or normalized claim identity. IDs alone cannot express
@@ -1949,6 +2004,7 @@ const TOOL_HANDLERS = {
     const recalled = await TOOL_HANDLERS.hivemind_recall(
       {
         query: args.query || tags.join(' '),
+        ...typedRetrievalFilters(args),
         mode: 'explain',
         operation: 'timeline',
         include_superseded: true,

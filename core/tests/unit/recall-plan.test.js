@@ -2,11 +2,104 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canonicalEntityLexicalQuery,
+  filterMemoriesByEntities,
+  filterMemoriesByRelationships,
+  loadTypedGraphEvidence,
+  orderTemporalCandidates,
   RecallRouter,
   isLiveExpansionEligible,
   resolveCanonicalEntities,
   resolveRecallPlan,
 } from '../../src/memory/recall-router.js';
+
+const emptyStore = (overrides = {}) => ({
+  searchMemories: async () => [],
+  listRelationships: async () => [],
+  listMemories: async () => ({ memories: [], total: 0 }),
+  getMemories: async () => [],
+  getMemory: async () => null,
+  getRelatedMemories: async () => [],
+  ...overrides,
+});
+
+const embeddingEvidence = (overrides = {}) => ({
+  qdrantClient: { generateEmbedding: async () => [1, 0] },
+  retrieveEvidence: async () => [],
+  ...overrides,
+});
+
+test('RetrievalSpec preserves hard entity, scope, source, type and relationship predicates', () => {
+  const plan = resolveRecallPlan({
+    mode: 'explain',
+    entities: ['Kruti'],
+    entity_filter_mode: 'must',
+    memory_types: ['decision'],
+    source: { title: 'Board Notes.pdf', kind: 'kb' },
+    scope_filter: 'organization',
+    relationship_types: ['Updates', 'Supports'],
+    relationship_direction: 'incoming',
+    time: { selector: 'latest', axis: 'known_time' },
+  });
+  assert.deepEqual(plan.entities, ['Kruti']);
+  assert.equal(plan.entity_filter_mode, 'must');
+  assert.deepEqual(plan.memory_types, ['decision']);
+  assert.equal(plan.source.title, 'Board Notes.pdf');
+  assert.equal(plan.source.kind, 'kb');
+  assert.equal(plan.scope_filter, 'organization');
+  assert.deepEqual(plan.relationships, {
+    requested: true, types: ['updates', 'supports'], direction: 'incoming',
+  });
+  assert.equal(plan.time.selector, 'latest');
+});
+
+test('memory entity and relationship predicates are hard filters before delivery', () => {
+  const rows = [
+    { id: 'm1', title: 'Kruti update', tags: ['entity:kruti'] },
+    { id: 'm2', title: 'Unrelated update', tags: ['entity:other'] },
+  ];
+  const entityRows = filterMemoriesByEntities(rows, ['Kruti'], { mode: 'must' });
+  assert.deepEqual(entityRows.map((row) => row.id), ['m1']);
+  const related = filterMemoriesByRelationships(entityRows, [
+    { type: 'Updates', from_id: 'm0', to_id: 'm1' },
+  ], { types: ['updates'], direction: 'incoming' });
+  assert.deepEqual(related.map((row) => row.id), ['m1']);
+});
+
+test('typed relationship predicates are compiled into the graph query before its cap', async () => {
+  let captured = null;
+  await loadTypedGraphEvidence({
+    prisma: { relationship: { findMany: async (args) => { captured = args; return []; } } },
+    memoryIds: ['m1'], userId: 'u1', orgId: 'o1',
+    accessContext: { orgRole: 'member', projectIds: [], teamIds: [] },
+    relationship: { types: ['Supports'], direction: 'incoming' }, limit: 200,
+  });
+  assert.deepEqual(captured.where.toId, { in: ['m1'] });
+  assert.deepEqual(captured.where.type, { in: ['Supports'] });
+  assert.equal(captured.take, 200);
+});
+
+test('entity should remains a soft preference while relation endpoint matching uses any', () => {
+  const rows = [
+    { id: 'a', title: 'Kruti update', tags: ['entity:kruti'] },
+    { id: 'b', title: 'Amar update', tags: ['entity:amar'] },
+    { id: 'c', title: 'Unrelated', tags: ['entity:other'] },
+  ];
+  assert.equal(filterMemoriesByEntities(rows, ['Kruti'], { mode: 'should' }).length, 3);
+  assert.deepEqual(
+    filterMemoriesByEntities(rows, ['Kruti', 'Amar'], { mode: 'any' }).map((row) => row.id),
+    ['a', 'b'],
+  );
+});
+
+test('latest selection orders the wide pool by the selected clock with stable ties', () => {
+  const rows = [
+    { id: 'old-high-score', score: 0.99, known_at: '2026-08-20T00:00:00Z' },
+    { id: 'new-low-score', score: 0.10, known_at: '2026-08-25T00:00:00Z' },
+  ];
+  assert.deepEqual(orderTemporalCandidates(rows, {
+    selector: 'latest', axis: 'known_time', id: (row) => row.id,
+  }).map((row) => row.id), ['new-low-score', 'old-high-score']);
+});
 
 test('canonical entity lexical lane protects exact entity phrases without rewriting the semantic query', () => {
   assert.equal(canonicalEntityLexicalQuery(['Kruti']), 'Kruti');
@@ -86,9 +179,12 @@ test('full mode requires explicit caller provenance', () => {
 });
 
 test('timeline is a bounded version-history operation on the shared plan', () => {
-  const plan = resolveRecallPlan({ mode: 'explain', operation: 'timeline', limit: 1000 });
+  const plan = resolveRecallPlan({
+    mode: 'explain', operation: 'timeline', limit: 1000, target_memory_id: 'memory-current',
+  });
   assert.equal(plan.operation, 'timeline');
   assert.equal(plan.max_memories, 50);
+  assert.equal(plan.target_memory_id, 'memory-current');
 });
 
 test('typed selectors and memory types survive plan recompilation', () => {
@@ -124,6 +220,7 @@ test('typed source and time blocks normalize legacy arguments with explicit prec
     requested: true,
     document_id: 'explicit-doc',
     title: 'Brochure.pdf',
+    kind: null,
   });
   assert.equal(plan.time.mode, 'known_at');
   assert.equal(plan.time.known_at, '2026-07-01T12:00:00.000Z');
@@ -178,8 +275,8 @@ test('Hop-0 resolves exact tenant entities and aliases without language keyword 
 
 test('Hop-0 resolves implicit source artifacts before broad recall', async () => {
   const router = new RecallRouter({
-    persistentMemoryStore: {},
-    evidenceRetrieval: {
+    persistentMemoryStore: emptyStore(),
+    evidenceRetrieval: embeddingEvidence({
       resolveSourceFromQuery: async ({ query }) => query.includes('Wald.pdf')
         ? [{ id: 'doc-1', document_title: 'Wald.pdf' }]
         : [],
@@ -187,7 +284,7 @@ test('Hop-0 resolves implicit source artifacts before broad recall', async () =>
         ? [{ id: 'doc-1', title: 'Wald.pdf' }]
         : [],
       hydrateSourceDocuments: async () => ({ items: [] }),
-    },
+    }),
     prisma: null,
   });
 
@@ -202,10 +299,10 @@ test('Hop-0 resolves implicit source artifacts before broad recall', async () =>
 
 test('structured chat intent does not convert an entity match into a source filter', async () => {
   const router = new RecallRouter({
-    persistentMemoryStore: { recall: async () => ({ memories: [] }) },
-    evidenceRetrieval: {
+    persistentMemoryStore: emptyStore(),
+    evidenceRetrieval: embeddingEvidence({
       resolveSourceFromQuery: async () => [{ id: 'unrelated-doc', document_title: 'Solvis brochure.pdf' }],
-    },
+    }),
     prisma: null,
   });
 
@@ -220,15 +317,15 @@ test('structured chat intent does not convert an entity match into a source filt
 
 test('structured chat intent resolves a literal filename as a source boundary', async () => {
   const router = new RecallRouter({
-    persistentMemoryStore: { recall: async () => ({ memories: [] }) },
-    evidenceRetrieval: {
+    persistentMemoryStore: emptyStore(),
+    evidenceRetrieval: embeddingEvidence({
       resolveSourceFromQuery: async () => [{
         id: 'solvis-pia-doc',
         document_title: 'SolvisPia.pdf',
         _sourceMatch: 'filename',
       }],
       resolveSourceDocuments: async () => [],
-    },
+    }),
     prisma: null,
   });
 
@@ -244,8 +341,10 @@ test('structured chat intent resolves a literal filename as a source boundary', 
 test('an unresolved explicit source fails closed before memory recall', async () => {
   let recalled = false;
   const router = new RecallRouter({
-    persistentMemoryStore: { recall: async () => { recalled = true; return { memories: [] }; } },
-    evidenceRetrieval: { resolveSourceDocuments: async () => [] },
+    persistentMemoryStore: emptyStore({ recall: async () => { recalled = true; return { memories: [] }; } }),
+    evidenceRetrieval: embeddingEvidence({
+      resolveSourceDocuments: async () => [],
+    }),
     prisma: null,
   });
   const result = await router.recall('What does this source say?', {

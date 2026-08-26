@@ -9,8 +9,23 @@
  */
 
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
-import { orgIsRemote, amrKbDocs, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrKbDocs, amrKbEvidence, amrKbRecall, amrKbLexicalRemote, amrKbHydrate, amrMemoryEvidence } from '../vector/mneme/driver.js';
 import { evidenceTitle } from './provenance-metadata.js';
+
+function withinEvidenceBudget(promise, timeoutMs, fallback = []) {
+  const ms = Math.max(1, Number(timeoutMs) || 1);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(fallback), ms);
+    Promise.resolve(promise).then(finish, () => finish(fallback));
+  });
+}
 
 export function fuseRemoteEvidenceHits(vectorHits = [], lexicalHits = [], { rankConstant = 60 } = {}) {
   const byId = new Map();
@@ -177,8 +192,15 @@ export function evidenceMetadata(row = {}) {
     ...tags.filter((tag) => /^entity:/i.test(String(tag)))
       .map((tag) => String(tag).split(':').slice(1).join(':')),
   ]);
+  const linkedMemoryIds = normalizedValues([
+    ...(row._lineage_inferred ? [] : [row.linked_memory_id, row.linkedMemoryId]),
+    segmentMeta.linked_memory_id, segmentMeta.linkedMemoryId,
+    segmentMeta.linked_memory_ids, segmentMeta.linkedMemoryIds,
+    ...(row.memoryLinks || []).map((link) => link?.memory?.id || link?.memoryId),
+  ]);
   return {
     eventTime, validFrom, validTo, knownAt, sourceKinds, memoryTypes, entities,
+    linkedMemoryIds,
     citationId: segmentMeta.citation_id || row.citation_id || null,
     sourceTitle: segmentMeta.source_title || segmentMeta.document_title || document.title || null,
     projectIds: normalizedValues([segmentMeta.project_ids, segmentMeta.project_id]),
@@ -194,11 +216,15 @@ export function filterEvidenceByMetadata(rows = [], {
   citationId = null,
   sourceTitle = null,
   projectIds = [],
+  relationshipMemoryIds = [],
+  relationshipRequired = false,
+  entityFilterMode = 'must',
 } = {}) {
   const wantedKind = String(sourceKind || '').normalize('NFKC').trim().toLocaleLowerCase();
   const wantedTypes = normalizedValues(memoryTypes);
   const wantedEntities = normalizedValues(entities);
   const wantedProjects = normalizedValues(projectIds);
+  const wantedRelationshipMemories = normalizedValues(relationshipMemoryIds);
   const wantedCitation = String(citationId || '').trim();
   const wantedSourceTitle = String(sourceTitle || '').normalize('NFKC').trim().toLocaleLowerCase();
   const rangeStart = timestamp(time?.range?.start || time?.range?.from);
@@ -212,17 +238,21 @@ export function filterEvidenceByMetadata(rows = [], {
     if (wantedCitation && meta.citationId !== wantedCitation) return false;
     if (wantedSourceTitle && !String(meta.sourceTitle || '').normalize('NFKC').toLocaleLowerCase().includes(wantedSourceTitle)) return false;
     if (wantedProjects.size && ![...wantedProjects].some((project) => meta.projectIds.has(project))) return false;
+    if (relationshipRequired && !wantedRelationshipMemories.size) return false;
+    if (wantedRelationshipMemories.size
+        && ![...wantedRelationshipMemories].some((id) => meta.linkedMemoryIds.has(id))) return false;
     if (wantedKind && ![...meta.sourceKinds].some((kind) => kind === wantedKind
       || kind.startsWith(`${wantedKind}/`))) return false;
     if (wantedTypes.size && ![...wantedTypes].some((type) => meta.memoryTypes.has(type))) return false;
-    if (wantedEntities.size) {
+    if (wantedEntities.size && entityFilterMode !== 'off' && entityFilterMode !== 'should') {
       const searchable = `${row.content || row.snippet || ''} ${row.document?.title || ''}`
         .normalize('NFKC').toLocaleLowerCase();
-      const matched = [...wantedEntities].every((entity) => meta.entities.has(entity)
+      const matches = [...wantedEntities].map((entity) => meta.entities.has(entity)
         || [...meta.entities].some((candidate) => candidate.includes(entity) || entity.includes(candidate))
         // Historical rows may pre-date entity metadata. Content matching is a
         // deterministic compatibility fallback, never a source of scope widening.
         || searchable.includes(entity));
+      const matched = entityFilterMode === 'any' ? matches.some(Boolean) : matches.every(Boolean);
       if (!matched) return false;
     }
     if (rangeStart != null || rangeEnd != null) {
@@ -351,12 +381,15 @@ export class EvidenceRetrievalService {
     // appendDocumentAccess on the .amr agent already does (`scope-key:org:${ORG}` OR the
     // legacy `scope-key:organization`), so central and remote now answer identically.
     const orgTags = [`scope-key:org:${orgId}`, 'scope-key:organization'];
+    const canReadOrganization = accessContext?.orgRole !== 'guest';
 
     // An EXPLICIT lens NARROWS — it never widens. Mirrors matchesScopeFilter on the
     // memory side (persisted-retrieval.js), which does an exact scope equality check,
     // so both lanes answer the same question for the same request. Without this an
     // ?scope=personal question kept org documents in the evidence half of the answer.
-    if (scopeFilter === 'organization') return { ...base, tags: { hasSome: orgTags } };
+    if (scopeFilter === 'organization') return canReadOrganization
+      ? { ...base, tags: { hasSome: orgTags } }
+      : { ...base, id: { in: [] } };
     if (scopeFilter === 'project') {
       const tags = projectId ? [`scope-key:project:${projectId}`] : projectTags;
       // No project in scope + a project lens = nothing is in scope. Fail closed rather
@@ -391,7 +424,7 @@ export class EvidenceRetrievalService {
       ...base,
       OR: [
         { userId },                                              // own uploads + untagged
-        { tags: { hasSome: orgTags } },
+        ...(canReadOrganization ? [{ tags: { hasSome: orgTags } }] : []),
         { tags: { has: `scope-key:personal:${userId}` } },
         ...(projectTags.length ? [{ tags: { hasSome: projectTags } }] : []),
         ...(teamTags.length ? [{ tags: { hasSome: teamTags } }] : []),
@@ -451,6 +484,10 @@ export class EvidenceRetrievalService {
     entities = [],
     citationId = null,
     sourceTitle = null,
+    relationshipMemoryIds = [],
+    relationshipRequired = false,
+    entityFilterMode = 'must',
+    temporalInventory = false,
   }) {
     // Per-tenant: evidence lives in the org container (layer=evidence). Legacy:
     // a dedicated hivemind_evidence collection. Must mirror _embedSegments.
@@ -462,6 +499,24 @@ export class EvidenceRetrievalService {
     let docIdSet = Array.isArray(documentIds) && documentIds.length
       ? [...new Set(documentIds.filter(Boolean))]
       : (documentId ? [documentId] : null);
+
+    // A caller-supplied document UUID is only a selector, never authority.
+    // Intersect it with the exact same document ACL used by title resolution
+    // before either the lexical or vector lane can see it.
+    if (docIdSet && !orgIsRemote(orgId)) {
+      const authorized = await this.db.knowledgeDocument.findMany({
+        where: {
+          AND: [
+            this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
+            { id: { in: docIdSet } },
+          ],
+        },
+        select: { id: true },
+      });
+      const allowed = new Set(authorized.map((document) => document.id));
+      docIdSet = docIdSet.filter((id) => allowed.has(id));
+      if (!docIdSet.length) return [];
+    }
 
     // When a doc is selected, lower threshold so we actually return its
     // segments (Qdrant cosine on filename-style queries can score below 0.5).
@@ -494,7 +549,27 @@ export class EvidenceRetrievalService {
         // Promise.all pending until that outer deadline. Bound each lane so a
         // slow semantic provider degrades independently instead of erasing an
         // exact/phrase match that is already available.
-        const [vectorHits, lexicalHits] = await Promise.all([vectorPromise, lexicalPromise]);
+        const remoteTemporalInventory = async () => {
+          if (!(temporalInventory || ['latest', 'earliest'].includes(temporalSelector))) return [];
+          const rows = [];
+          for (let offset = 0; offset < 5000; offset += 200) {
+            const page = await amrKbEvidence(orgId, {
+              limit: 200, offset, documentId: docIdSet?.length === 1 ? docIdSet[0] : null, access,
+            });
+            if (page === null) {
+              const error = new Error('remote temporal evidence inventory unavailable');
+              error.code = 'REMOTE_MEMORY_UNAVAILABLE';
+              throw error;
+            }
+            const evidence = page?.evidence || [];
+            rows.push(...evidence);
+            if (!page?.pagination?.hasMore || evidence.length === 0) break;
+          }
+          return rows;
+        };
+        const [vectorHits, lexicalHits, temporalRows] = await Promise.all([
+          vectorPromise, lexicalPromise, remoteTemporalInventory(),
+        ]);
         // null (not []) means the lane FAILED rather than matched nothing — see
         // remote-backend.js. Say which lane is missing, because a half-working remote agent
         // returns plausible answers with a whole retrieval mode silently absent, and that is
@@ -506,8 +581,9 @@ export class EvidenceRetrievalService {
             + `degraded, NOT empty. Check the .amr agent build (is it in sync with byod/?).`);
         }
         const hits = fuseRemoteEvidenceHits(vectorHits || [], lexicalHits || []);
-        if (!hits.length) return [];
-        const hydrated = await amrKbHydrate(orgId, hits.map((h) => h.segment_id), access);
+        const hydrated = hits.length
+          ? await amrKbHydrate(orgId, hits.map((h) => h.segment_id), access)
+          : [];
         // Build a score lookup from the merged vector and lexical hits.
         const hydrateMap = new Map((hydrated || []).map((s) => [s.id, s]));
         const remoteResults = hits
@@ -552,8 +628,15 @@ export class EvidenceRetrievalService {
             };
           })
           .filter(Boolean);
-        return this._orderAndSlice(filterEvidenceByMetadata(remoteResults, {
+        const remoteById = new Map(remoteResults.map((row) => [row.segmentId, row]));
+        for (const row of temporalRows || []) {
+          const id = row.segmentId || row.segment_id || row.id;
+          if (id && !remoteById.has(id)) remoteById.set(id, { ...row, _temporal_inventory: true });
+        }
+        return this._orderAndSlice(filterEvidenceByMetadata([...remoteById.values()], {
           sourceKind, temporalSelector, time, memoryTypes, entities, citationId, sourceTitle,
+          relationshipMemoryIds,
+          relationshipRequired, entityFilterMode,
           projectIds: projectId ? [projectId] : [],
         }), _deliver);
       }
@@ -562,7 +645,7 @@ export class EvidenceRetrievalService {
       // not post-ranking hints. Resolve the authorized document set first so
       // both the vector and lexical lanes search the same bounded corpus. This
       // query is local metadata lookup only; it adds no embedding or model call.
-      if (!docIdSet && (sourceKind || temporalSelector || time?.range || time?.valid_at || time?.known_at)) {
+      if (!docIdSet && (sourceKind || sourceTitle)) {
         const documents = await this.db.knowledgeDocument.findMany({
           where: this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
           select: {
@@ -573,7 +656,7 @@ export class EvidenceRetrievalService {
         });
         const selected = filterEvidenceByMetadata(
           documents.map((document) => ({ documentId: document.id, document, metadata: {} })),
-          { sourceKind, temporalSelector, time },
+          { sourceKind, sourceTitle },
         );
         docIdSet = selected.map((row) => row.documentId);
         if (!docIdSet.length) return [];
@@ -677,6 +760,37 @@ export class EvidenceRetrievalService {
         console.warn('[EvidenceRetrieval] entity lane failed:', error.message);
         return [];
       }) : Promise.resolve([]);
+      // Chronological selectors require a metadata inventory, not merely the
+      // newest row inside semantic top-K. The inventory remains tenant/source
+      // bounded in Postgres, then the shared metadata predicate applies the
+      // requested entity/type/clock before deterministic ordering.
+      const temporalInventoryPromise = (temporalInventory || ['latest', 'earliest'].includes(temporalSelector))
+        ? this.db.knowledgeSegment.findMany({
+          where: {
+            ...lexicalWhere,
+            ...(entityNames.length ? {
+              entityMentions: {
+                some: {
+                  entity: {
+                    orgId, isActive: true,
+                    OR: entityNames.flatMap((name) => [
+                      { canonicalName: { equals: name, mode: 'insensitive' } },
+                      { canonicalName: { contains: name, mode: 'insensitive' } },
+                      { aliases: { has: name } },
+                    ]),
+                  },
+                },
+              },
+            } : {}),
+          },
+          include: lexicalInclude,
+          orderBy: { createdAt: temporalSelector === 'latest' ? 'desc' : 'asc' },
+          take: Math.min(Math.max(_depth * 10, 500), 5000),
+        }).catch((error) => {
+          console.warn('[EvidenceRetrieval] temporal inventory lane failed:', error.message);
+          return null;
+        })
+        : Promise.resolve([]);
       const vectorPromise = this.qdrantClient.searchMemories({
         collectionName,
         query,
@@ -697,9 +811,19 @@ export class EvidenceRetrievalService {
         // Per-tenant: constrain to evidence layer within the shared org container.
         layer: PER_TENANT ? 'evidence' : undefined,
       });
-      const [boundedVectorResults, lexicalSegments, entitySegments] = await Promise.all([
-        vectorPromise, lexicalPromise, entityPromise,
+      const vectorBudgetMs = Number(process.env.CENTRAL_EVIDENCE_VECTOR_BUDGET_MS || 900);
+      const lexicalBudgetMs = Number(process.env.CENTRAL_EVIDENCE_LEXICAL_BUDGET_MS || 700);
+      const [boundedVectorResults, lexicalSegments, entitySegments, temporalSegments] = await Promise.all([
+        withinEvidenceBudget(vectorPromise, vectorBudgetMs, null),
+        withinEvidenceBudget(lexicalPromise, lexicalBudgetMs, []),
+        withinEvidenceBudget(entityPromise, lexicalBudgetMs, []),
+        withinEvidenceBudget(temporalInventoryPromise, lexicalBudgetMs, []),
       ]);
+      if (temporalSegments === null) {
+        const error = new Error('central temporal evidence inventory unavailable');
+        error.code = 'TEMPORAL_INVENTORY_UNAVAILABLE';
+        throw error;
+      }
       if (boundedVectorResults === null) {
         console.warn(`[EvidenceRetrieval] CENTRAL VECTOR LANE TIMEOUT org=${orgId}; delivering bounded lexical evidence`);
       }
@@ -797,6 +921,8 @@ export class EvidenceRetrievalService {
           source_kind: segment.metadata?.source_kind || segment.document?.sourcePlatform || 'document',
           uploader_user_id: segment.metadata?.uploader_user_id || segment.userId || null,
           org_id: segment.metadata?.org_id || segment.orgId || null,
+          linked_memory_ids: (segment.memoryLinks || [])
+            .map((link) => link?.memory?.id || link?.memoryId).filter(Boolean),
         },
         };
       };
@@ -844,11 +970,21 @@ export class EvidenceRetrievalService {
         }
       }
 
+      for (const segment of temporalSegments || []) {
+        if (!haveIds.has(segment.id)) {
+          results.push({ ...fmt(segment, 0), _temporal_inventory: true });
+          haveIds.add(segment.id);
+        }
+      }
+
       return this._orderAndSlice(filterEvidenceByMetadata(results, {
         sourceKind, temporalSelector, time, memoryTypes, entities, citationId, sourceTitle,
+        relationshipMemoryIds,
+        relationshipRequired, entityFilterMode,
         projectIds: projectId ? [projectId] : [],
       }), _deliver);
     } catch (error) {
+      if (['REMOTE_MEMORY_UNAVAILABLE', 'TEMPORAL_INVENTORY_UNAVAILABLE'].includes(error?.code)) throw error;
       console.error('[EvidenceRetrieval] Retrieval failed:', error);
       return [];
     }
@@ -916,16 +1052,15 @@ export class EvidenceRetrievalService {
         // evidence retrieval. The previous owner-only `{ userId }` condition
         // made organization, team, and authorized-project uploads impossible
         // to resolve by title even though their segments were readable.
-        ...this._accessibleDocumentWhere({
-          userId, orgId, projectId, accessContext, scopeFilter,
-        }),
-        ...(documentId ? { id: documentId } : {}),
-        ...(!documentId && title ? {
-          OR: [
-            { title: { contains: title, mode: 'insensitive' } },
-            { sourceId: { contains: title, mode: 'insensitive' } },
-          ],
-        } : {}),
+        AND: [
+          this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
+          documentId
+            ? { id: documentId }
+            : { OR: [
+              { title: { contains: title, mode: 'insensitive' } },
+              { sourceId: { contains: title, mode: 'insensitive' } },
+            ] },
+        ],
       },
       select: {
         id: true,
@@ -992,13 +1127,13 @@ export class EvidenceRetrievalService {
     if (!this.db?.knowledgeDocument) return [];
     const documents = await this.db.knowledgeDocument.findMany({
       where: {
-        ...this._accessibleDocumentWhere({
-          userId, orgId, projectId, accessContext, scopeFilter,
-        }),
-        OR: tokens.flatMap((token) => [
-          { title: { contains: token, mode: 'insensitive' } },
-          { sourceId: { contains: token, mode: 'insensitive' } },
-        ]),
+        AND: [
+          this._accessibleDocumentWhere({ userId, orgId, projectId, accessContext, scopeFilter }),
+          { OR: tokens.flatMap((token) => [
+            { title: { contains: token, mode: 'insensitive' } },
+            { sourceId: { contains: token, mode: 'insensitive' } },
+          ]) },
+        ],
       },
       select: {
         id: true, title: true, sourceId: true, documentType: true,

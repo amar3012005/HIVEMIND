@@ -252,6 +252,9 @@ export async function handleRecallRoute(ctx = {}) {
           time: recallPlan.time,
           operation: recallPlan.operation,
           memory_types: recallPlan.memory_types,
+          entity_filter_mode: recallPlan.entity_filter_mode,
+          scope_filter: recallPlan.scope_filter,
+          relationships: recallPlan.relationships,
           boost_memory_type: recallPlan.memory_types?.[0] || null,
           named_entities: Array.isArray(recallPlan.entities)
             ? recallPlan.entities
@@ -278,6 +281,7 @@ export async function handleRecallRoute(ctx = {}) {
           orgId,
           projectId: recallProjectId,
           accessContext: recallAccessCtx,
+          scopeFilter: recallPlan.scope_filter,
         });
       } catch (error) {
         if (isRemoteMemoryUnavailableError(error)) {
@@ -287,11 +291,18 @@ export async function handleRecallRoute(ctx = {}) {
             retryable: true,
           }, 503);
         }
+        if (error?.code === 'TEMPORAL_INVENTORY_UNAVAILABLE') {
+          return jsonResponse(res, {
+            error: 'temporal_inventory_unavailable',
+            message: 'The complete authorized temporal inventory could not be read. No latest or historical conclusion was made.',
+            retryable: true,
+          }, 503);
+        }
         throw error;
       }
       const effectivePlan = bounded.trace?.recall_plan || recallPlan;
 
-      let graphEvidence = [];
+      let graphEvidence = Array.isArray(bounded.relationships) ? bounded.relationships : [];
       if (effectivePlan.max_graph_hops > 0 && bounded.memories?.length && remainingMs() > 1) {
         const graph = await resolveWithinDeadline(
           () => recallRuntime.loadGraph({
@@ -306,7 +317,7 @@ export async function handleRecallRoute(ctx = {}) {
           { items: [], reason: 'timeout' },
           'recall-route-graph',
         );
-        graphEvidence = graph.items || [];
+        graphEvidence = graph.items || graphEvidence;
       }
 
       const elapsed = Date.now() - _recallT0;

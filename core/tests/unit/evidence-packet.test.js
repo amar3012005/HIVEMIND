@@ -8,17 +8,17 @@ test('evidence metadata filters source, type, and three temporal contracts deter
     {
       documentId: 'old', segmentType: 'decision', createdAt: '2026-08-05T00:00:00Z',
       document: { id: 'old', documentType: 'image/jpeg', documentDate: '2026-08-01T00:00:00Z' },
-      metadata: { valid_from: '2026-08-01T00:00:00Z', valid_to: '2026-08-10T00:00:00Z' },
+      metadata: { event_time: '2026-08-01T00:00:00Z', valid_from: '2026-08-01T00:00:00Z', valid_to: '2026-08-10T00:00:00Z' },
     },
     {
       documentId: 'new', segmentType: 'decision', createdAt: '2026-08-20T00:00:00Z',
       document: { id: 'new', documentType: 'image/png', documentDate: '2026-08-15T00:00:00Z' },
-      metadata: { valid_from: '2026-08-10T00:00:00Z' },
+      metadata: { event_time: '2026-08-15T00:00:00Z', valid_from: '2026-08-10T00:00:00Z' },
     },
     {
       documentId: 'noise', segmentType: 'fact', createdAt: '2026-08-03T00:00:00Z',
       document: { id: 'noise', documentType: 'application/pdf', documentDate: '2026-08-02T00:00:00Z' },
-      metadata: {},
+      metadata: { event_time: '2026-08-02T00:00:00Z' },
     },
   ];
   assert.deepEqual(filterEvidenceByMetadata(rows, {

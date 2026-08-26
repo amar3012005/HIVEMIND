@@ -22,7 +22,7 @@ test('visual artifact path is disabled by default and honors the production flag
 });
 
 test('static artifact contract accepts self-contained HTML and rejects active external access', () => {
-  const safe = `<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Board</title></head><body><main><h1>Operating board</h1><p>${'Evidence. '.repeat(100)}</p></main></body></html>`;
+  const safe = `<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Board</title><style>body{font-family:system-ui}figure{display:grid}</style></head><body><main><h1>Operating board</h1><figure><svg viewBox="0 0 100 20" role="img"><title>Evidence signal</title><path d="M0 20L100 0"/></svg><figcaption>${'Evidence. '.repeat(100)}</figcaption></figure></main></body></html>`;
   assert.deepEqual(validateHyperArtifactHtml(safe), []);
   const cited = safe.replace('</p>', ' <a href="https://example.com/source">Source</a></p>');
   assert.deepEqual(validateHyperArtifactHtml(cited), []);
@@ -35,4 +35,12 @@ test('static artifact contract accepts self-contained HTML and rejects active ex
     safe.replace('</head>', '<link rel="stylesheet" href="https://example.com/a.css"></head>'),
   ).join(' ');
   assert.match(stylesheetErrors, /External loaded assets/);
+});
+
+test('quality floor rejects report-template residue and missing visual explanation', () => {
+  const weak = `<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>Report</title><style>body{font-family:system-ui}</style></head><body><main><h1>Report</h1><p>**Projected result** (source) ${'Narrative. '.repeat(100)}</p></main></body></html>`;
+  const errors = validateHyperArtifactHtml(weak).join(' ');
+  assert.match(errors, /Markdown residue/);
+  assert.match(errors, /meaningful evidence labels/);
+  assert.match(errors, /meaningful visual explanation/);
 });

@@ -17,6 +17,27 @@ work as editorial and interaction design, not as Markdown placed in a web page.
 5. Self-review for hierarchy, density, legibility, clipping, empty space, and factual
    integrity before returning the artifact.
 
+## Quality floor
+
+- The result must feel authored for this exact decision and audience. A heading,
+  anchor row, and stack of full-width white cards is a report template, not a
+  designed artifact.
+- Make the first viewport communicate the thesis through composition: a decisive
+  headline, a meaningful visual signal, and the most consequential evidence. Do
+  not spend it on navigation or introductory prose.
+- Use at least one genuine visual explanation appropriate to the material: an
+  inline SVG chart, scenario plot, comparison, flow, matrix, timeline, annotated
+  diagram, or similarly purposeful figure. A tinted text box does not count.
+- Create rhythm by varying composition across sections. Combine editorial text,
+  data, annotations, and negative space; avoid repeating the same card component
+  down the page.
+- Convert Markdown semantics into real HTML. Never display `**`, Markdown heading
+  markers, raw JSON, `(source)`, or other drafting residue.
+- Use concise, human source labels such as `Internal analytics, Aug 2026` near the
+  claim. A generic `source` label is not provenance.
+- If evidence is insufficient for a requested metric, show the unknown and the
+  measurement needed. Never manufacture a number to make a chart look complete.
+
 ## Freedom and constraints
 
 - You own the art direction. Do not use a fixed template, prescribed coordinates,
@@ -34,6 +55,8 @@ work as editorial and interaction design, not as Markdown placed in a web page.
 - Every claim and number must come from SOURCE EVIDENCE. Clearly distinguish facts,
   assumptions, proposals, scenarios, and unknowns. Never turn a target into a result.
 - Put concise provenance close to consequential claims and include a source note.
+- Do not copy the ART DIRECTION BRIEF mechanically. Use it as a creative decision,
+  then improve it when the evidence suggests a stronger composition.
 
 Return a complete document beginning with `<!doctype html>`. The HTML must contain
 an informative `<title>`, one `<h1>`, semantic landmarks, and a viewport meta tag.

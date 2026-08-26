@@ -18,6 +18,21 @@ export function validateHyperArtifactHtml(html) {
   if (bytes > MAX_HTML_BYTES) errors.push(`Document exceeds ${MAX_HTML_BYTES} bytes.`);
   if (!/<meta\s+[^>]*name=["']viewport["']/i.test(html)) errors.push('Viewport meta tag is required.');
   if (!/<h1(?:\s|>)/i.test(html)) errors.push('One primary h1 heading is required.');
+  if (!/<style(?:\s|>)/i.test(html)) errors.push('A self-contained visual design system is required.');
+  const visibleText = String(html || '')
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  if (/\*\*|(?:^|\s)#{1,6}\s/.test(visibleText)) {
+    errors.push('Rendered copy contains raw Markdown residue.');
+  }
+  if (/\(\s*source\s*\)/i.test(visibleText)) {
+    errors.push('Replace generic (source) placeholders with meaningful evidence labels.');
+  }
+  const visualExplanations = String(html || '').match(/<(?:svg|figure|table|canvas|meter|progress)\b/gi) || [];
+  if (visualExplanations.length < 1) {
+    errors.push('Artifact needs at least one meaningful visual explanation (figure, chart, table, diagram, or timeline).');
+  }
   const blocked = [
     [/<script\b[^>]*\bsrc\s*=/i, 'External scripts are forbidden.'],
     [/<(?:iframe|object|embed|form|base)\b/i, 'iframes, objects, embeds, forms, and base tags are forbidden.'],

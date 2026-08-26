@@ -96,6 +96,25 @@ _HTML_ARTIFACT_SCHEMA: Dict[str, Any] = {
     },
     "required": ["title", "summary", "html", "source_refs"],
 }
+_VISUAL_DIRECTION_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "visual_thesis": {"type": "string"},
+        "experience": {"type": "string"},
+        "layout_system": {"type": "string"},
+        "art_direction": {"type": "string"},
+        "palette": {"type": "array", "items": {"type": "string"}},
+        "narrative_flow": {"type": "array", "items": {"type": "string"}},
+        "visual_explanations": {"type": "array", "items": {"type": "string"}},
+        "interaction": {"type": "string"},
+        "avoid": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "visual_thesis", "experience", "layout_system", "art_direction", "palette",
+        "narrative_flow", "visual_explanations", "interaction", "avoid",
+    ],
+}
 _VISUAL_SKILL_PATH = Path(__file__).with_name("visual_artifact_skill.md")
 
 
@@ -6083,10 +6102,66 @@ class Director:
             return None
         return answer.strip() if isinstance(answer, str) and answer.strip() else None
 
+    async def _plan_visual_direction(
+        self,
+        forced_debate: bool,
+        transcript_json: str,
+    ) -> Dict[str, Any]:
+        """Turn evidence into a concrete art direction before writing markup."""
+        board = self._synthesis_context(10000)
+        debate = (
+            "\n\nTEAM ANALYSIS (composition and objections only; never factual authority):\n"
+            f"{transcript_json[:8000]}"
+            if forced_debate else ""
+        )
+        system = (
+            "You are an exacting digital art director. Create a concrete visual direction for one "
+            "self-contained HTML artifact. Choose a distinctive composition that serves the evidence, "
+            "audience, and decision. Do not write HTML. Do not invent facts, metrics, sources, or brand "
+            "constraints. Reject generic dashboards, slide-template chrome, stacked report cards, and "
+            "decoration without explanatory value. Return JSON only."
+        )
+        user = (
+            f"ARTIFACT INTENT:\n{json.dumps(self.artifact_intent, ensure_ascii=False)}\n\n"
+            f"TASK:\n{self.user_message}\n\n{board}{debate}\n\n"
+            "Define the visual thesis, reading experience, responsive layout system, art direction, "
+            "palette, narrative flow, evidence-backed visual explanations, useful interaction, and "
+            "specific patterns to avoid."
+        )
+        try:
+            msg = await self._groq(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                force_text=True,
+                model=canonical_hyper_model(os.environ.get("HYPER_VISUAL_DIRECTION_MODEL", HYPER_FAST_MODEL)),
+                bucket="synth",
+                schema=_VISUAL_DIRECTION_SCHEMA,
+                schema_name="visual_art_direction",
+                temp=0.7,
+                max_tokens=1800,
+            )
+            self.director_iters.append(self._last_tok)
+            direction = json.loads((msg or {}).get("content") or "{}")
+            if isinstance(direction, dict) and direction.get("visual_thesis"):
+                return direction
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[hyper-engine] visual art direction failed, using local fallback: %s", exc)
+        return {
+            "visual_thesis": str((self.artifact_intent or {}).get("purpose") or self.user_message)[:500],
+            "experience": "A clear, evidence-led visual narrative tailored to the stated audience.",
+            "layout_system": "Responsive editorial composition with varied section geometry.",
+            "art_direction": "Distinctive, restrained, and specific to the subject matter.",
+            "palette": [],
+            "narrative_flow": [],
+            "visual_explanations": ["Choose one evidence-backed figure that clarifies the central decision."],
+            "interaction": "Use interaction only when it improves comparison or exploration.",
+            "avoid": ["generic dashboard", "stacked report cards", "unsupported metrics"],
+        }
+
     async def _synthesize_visual(
         self,
         forced_debate: bool,
         transcript_json: str,
+        direction: Dict[str, Any],
         repair_errors: Optional[List[str]] = None,
         prior_html: str = "",
     ) -> Optional[Dict[str, Any]]:
@@ -6099,7 +6174,8 @@ class Director:
             skill = "Create a polished, self-contained, responsive HTML artifact from the supplied evidence."
         board = self._synthesis_context(10000)
         debate = (
-            f"\n\nDEBATE TRANSCRIPT:\n{transcript_json[:10000]}"
+            "\n\nTEAM ANALYSIS (narrative options and objections only; never copy claims, numbers, "
+            f"dates, or sources unless independently present in SOURCE EVIDENCE):\n{transcript_json[:10000]}"
             if forced_debate else ""
         )
         repair = ""
@@ -6120,8 +6196,11 @@ class Director:
         )
         user = (
             f"ARTIFACT INTENT:\n{json.dumps(self.artifact_intent, ensure_ascii=False)}\n\n"
+            f"ART DIRECTION BRIEF:\n{json.dumps(direction, ensure_ascii=False)}\n\n"
             f"TASK:\n{self.user_message}\n\n{board}{debate}{repair}\n\n"
-            "Create the complete artifact now. summary is a concise in-room handoff, not a second report. "
+            "Create the complete artifact now. Treat the quality floor as acceptance criteria. Before "
+            "returning, remove drafting residue and verify that every number is evidence-backed or visibly "
+            "labeled as an assumption/scenario. summary is a concise in-room handoff, not a second report. "
             "source_refs lists only compact source labels actually present in SOURCE EVIDENCE."
         )
         msg = await self._groq(
@@ -6159,7 +6238,8 @@ class Director:
         transcript_json: str,
     ) -> Optional[Dict[str, Any]]:
         """Render, validate, and at most once repair the selected artifact."""
-        candidate = await self._synthesize_visual(forced_debate, transcript_json)
+        direction = await self._plan_visual_direction(forced_debate, transcript_json)
+        candidate = await self._synthesize_visual(forced_debate, transcript_json, direction)
         if not candidate:
             return None
         delivery = await self.emit({"t": "artifact_candidate", "candidate": candidate})
@@ -6168,6 +6248,7 @@ class Director:
             candidate = await self._synthesize_visual(
                 forced_debate,
                 transcript_json,
+                direction,
                 repair_errors=[str(item) for item in (result.get("errors") or [])],
                 prior_html=str(candidate.get("html") or ""),
             )

@@ -2211,7 +2211,59 @@ export class RecallRouter {
     // not "the newest item among the semantic top K". Add an authorized,
     // model-free memory inventory lane so a chronologically correct entity or
     // source row cannot be excluded merely because an older row scored higher.
-    if (temporalInventory && this.store?.listMemories) {
+    // A targeted version history is an ID/graph operation, not a tenant-wide
+    // inventory operation. Resolve the authorized anchor, traverse only its
+    // Updates chain, and batch-hydrate those IDs. This keeps targeted timelines
+    // deterministic for remote Memory Boxes and avoids a 5,000-row scan.
+    if (temporalInventory && recallPlan.target_memory_id) {
+      const target = await this.store.getMemoryScoped?.(recallPlan.target_memory_id, {
+        user_id: ctx.userId,
+        org_id: ctx.orgId,
+        access_context: ctx.accessContext || {},
+      });
+      if (!target) {
+        memories = [];
+      } else {
+        const chain = new Set([recallPlan.target_memory_id]);
+        let frontier = [recallPlan.target_memory_id];
+        for (let depth = 0; depth < 8 && frontier.length; depth += 1) {
+          const graph = await loadTypedGraphEvidence({
+            prisma: this.prisma, memoryIds: frontier, userId: ctx.userId, orgId: ctx.orgId,
+            accessContext: ctx.accessContext || {}, time: recallPlan.time,
+            relationship: { types: ['Updates'], direction: 'any' }, limit: 200,
+          });
+          const next = [];
+          for (const edge of graph.items || []) {
+            for (const id of [edge.from_id, edge.to_id]) {
+              if (id && !chain.has(id)) { chain.add(id); next.push(id); }
+            }
+          }
+          frontier = next;
+        }
+        const hydrated = this.store.getMemories
+          ? await withTimeout(
+            this.store.getMemories([...chain], {
+              valid_at: recallPlan.time.as_of?.axis === 'valid_time' ? recallPlan.time.as_of.at : null,
+              known_at: recallPlan.time.as_of?.axis === 'known_time' ? recallPlan.time.as_of.at : null,
+            }),
+            Math.min(1800, remainingBudget()),
+            { temporal_inventory_unavailable: true },
+          )
+          : new Map([[recallPlan.target_memory_id, target]]);
+        if (hydrated?.temporal_inventory_unavailable) {
+          const error = new Error('temporal memory inventory unavailable');
+          error.code = 'TEMPORAL_INVENTORY_UNAVAILABLE';
+          throw error;
+        }
+        const chainRows = hydrated instanceof Map ? [...hydrated.values()] : [target];
+        if (!chainRows.some((memory) => recallMemoryRowId(memory) === recallPlan.target_memory_id)) {
+          chainRows.push(target);
+        }
+        const prepared = chainRows.map(prepareTimelineAnchor);
+        ({ memories } = restrictTimelineCandidates([...memories, ...prepared], [], chain));
+      }
+    }
+    if (temporalInventory && !recallPlan.target_memory_id && this.store?.listMemories) {
       try {
         const inventoryArgs = {
           user_id: ctx.userId,
@@ -2249,43 +2301,6 @@ export class RecallRouter {
         }
         if (Array.isArray(options.tags) && options.tags.length) {
           inventory = inventory.filter((memory) => memoryMatchesTags(memory, options.tags));
-        }
-        if (recallPlan.target_memory_id) {
-          const chain = new Set([recallPlan.target_memory_id]);
-          let frontier = [recallPlan.target_memory_id];
-          for (let depth = 0; depth < 8 && frontier.length; depth += 1) {
-            const graph = await loadTypedGraphEvidence({
-              prisma: this.prisma, memoryIds: frontier, userId: ctx.userId, orgId: ctx.orgId,
-              accessContext: ctx.accessContext || {}, time: recallPlan.time,
-              relationship: { types: ['Updates'], direction: 'any' }, limit: 200,
-            });
-            const next = [];
-            for (const edge of graph.items || []) {
-              for (const id of [edge.from_id, edge.to_id]) {
-                if (id && !chain.has(id)) { chain.add(id); next.push(id); }
-              }
-            }
-            frontier = next;
-          }
-          // Inventory calls are bounded and may omit the explicit anchor even
-          // though it is authorized and directly addressable.  A targeted
-          // timeline must always contain its anchor (a one-item history is a
-          // valid timeline), so hydrate it through the store's ACL-aware read
-          // before applying the hard chain boundary.
-          if (![...memories, ...inventory].some((memory) => recallMemoryRowId(memory) === recallPlan.target_memory_id)) {
-            const target = await this.store.getMemoryScoped?.(recallPlan.target_memory_id, {
-              user_id: ctx.userId,
-              org_id: ctx.orgId,
-              access_context: ctx.accessContext || {},
-            });
-            const anchor = prepareTimelineAnchor(target);
-            if (anchor) inventory.push(anchor);
-          }
-          // The target chain is a hard boundary for the whole timeline, not
-          // only for the additive historical inventory.  Otherwise semantic
-          // hop-1 candidates are merged back below and unrelated tenant rows
-          // appear in a targeted version history.
-          ({ memories, inventory } = restrictTimelineCandidates(memories, inventory, chain));
         }
         const byId = new Map([...memories, ...inventory].map((memory) => [recallMemoryRowId(memory), memory]));
         memories = [...byId.values()];

@@ -260,6 +260,33 @@ test('directly hydrated timeline anchors survive generic relevance floors', () =
   assert.equal(anchor._timeline_anchor, true);
 });
 
+test('targeted timeline bypasses tenant inventory and returns its authorized anchor', async () => {
+  let inventoryCalls = 0;
+  const target = {
+    id: 'memory-current', title: 'Current version', content: 'current claim',
+    memory_type: 'fact', scope: 'personal', user_id: 'user-1', org_id: 'org-1',
+    created_at: '2026-08-23T19:12:16.456Z', is_latest: true,
+  };
+  const router = new RecallRouter({
+    persistentMemoryStore: emptyStore({
+      recall: async () => ({ memories: [] }),
+      listMemories: async () => { inventoryCalls += 1; return { memories: [] }; },
+      getMemoryScoped: async (id) => id === target.id ? target : null,
+      getMemories: async () => new Map([[target.id, target]]),
+    }),
+    evidenceRetrieval: embeddingEvidence(),
+    prisma: null,
+  });
+
+  const result = await router.recall('history of current claim', {
+    mode: 'full', explicit_mode: true, operation: 'timeline',
+    target_memory_id: target.id, limit: 20,
+  }, { userId: 'user-1', orgId: 'org-1', accessContext: { orgRole: 'member' } });
+
+  assert.equal(inventoryCalls, 0);
+  assert.deepEqual(result.memories.map((memory) => memory.id), [target.id]);
+});
+
 test('typed selectors and memory types survive plan recompilation', () => {
   const first = resolveRecallPlan({
     mode: 'explain',

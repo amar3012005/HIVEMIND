@@ -507,6 +507,8 @@ export function intentDecisionToPlan(decision, message) {
       || (decision.time?.kind !== 'event_range'
         && !!(decision.time?.valid_at || decision.time?.known_at || decision.time?.range)),
     time_travel: (decision.relation?.time || decision.time) || null,
-    needs_web: false, ask_for_project: false, expected_evidence_types: [],
+    needs_web: decision.web_fallback?.allowed === true,
+    web_fallback: decision.web_fallback || { allowed: false, query: null, reason: null },
+    ask_for_project: false, expected_evidence_types: [],
   };
 }

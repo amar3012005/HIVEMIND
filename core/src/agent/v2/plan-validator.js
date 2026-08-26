@@ -27,6 +27,10 @@ const schema = z.object({
   completion: z.object({ needs_user_input: z.boolean(), approval_required: z.boolean() }).strict(),
   relation_entities: z.array(z.string().trim().min(1)).max(6),
   aggregate: z.object({ parent: nullable, kind: nullable }).strict().nullable(),
+  external_fallback: z.object({
+    allowed: z.boolean(), query: nullable,
+    reason: z.enum(['explicit_web', 'current_public', 'competitor_public']).nullable(),
+  }).strict(),
   memory: z.object({
     title: nullable, content: nullable, memory_type: nullable,
     scope: z.enum(['personal', 'project', 'team', 'organization']).nullable(), project_id: nullable,
@@ -67,6 +71,17 @@ function normalizePlanShape(input) {
   const aggregate = normalizeNullableObject(out.aggregate, ['parent', 'kind']);
   if (JSON.stringify(aggregate) !== JSON.stringify(out.aggregate ?? null)) repairs.push('aggregate.nullables');
   out.aggregate = aggregate;
+  if (!out.external_fallback || typeof out.external_fallback !== 'object' || Array.isArray(out.external_fallback)) {
+    out.external_fallback = { allowed: false, query: null, reason: null };
+    repairs.push('external_fallback');
+  } else {
+    for (const key of ['query', 'reason']) {
+      if (!(key in out.external_fallback)) { out.external_fallback[key] = null; repairs.push(`external_fallback.${key}`); }
+    }
+    if (typeof out.external_fallback.allowed !== 'boolean') {
+      out.external_fallback.allowed = false; repairs.push('external_fallback.allowed');
+    }
+  }
   if (out.memory && typeof out.memory === 'object' && !Array.isArray(out.memory)) {
     for (const key of ['title', 'content', 'memory_type', 'scope', 'project_id', 'event_time']) {
       if (!(key in out.memory)) { out.memory[key] = null; repairs.push(`memory.${key}`); }
@@ -177,6 +192,25 @@ function reconcileSemanticOperation(plan, repairs) {
   if (plan.operation === 'source_read' && !exactSource && plan.references.source?.selection) {
     plan.operation = 'recall';
     repairs.push('operation.selected_source');
+  }
+  // Aggregate is a completeness operator, not a synonym for "a lot of
+  // detail". The planner can emit a schema-valid aggregate for a broad source
+  // overview; that used to skip hybrid recall and end in the exact-count
+  // refusal without ever running synthesis. Certify the semantic shape on the
+  // server: only a canonical inventory may use the registry executor.
+  if (plan.operation === 'aggregate'
+      && (plan.response.shape !== 'inventory' || plan.references.source)) {
+    plan.operation = 'recall';
+    plan.aggregate = null;
+    repairs.push('operation.uncertified_aggregate');
+  }
+  const webUnsafe = !['recall', 'event_range'].includes(plan.operation)
+    || Boolean(plan.references.source)
+    || !plan.external_fallback.query
+    || !plan.external_fallback.reason;
+  if (plan.external_fallback.allowed && webUnsafe) {
+    plan.external_fallback = { allowed: false, query: null, reason: null };
+    repairs.push('external_fallback.unsafe');
   }
   const temporalOperation = {
     event_range: 'event_range',

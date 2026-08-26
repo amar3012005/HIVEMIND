@@ -22,6 +22,23 @@ test('explicit document anchor accepts exact document-backed memory coverage', (
   assert.equal(escalation, null);
 });
 
+test('source coverage recognizes promoted memory titles and evidence metadata filenames', () => {
+  const plan = { named_entities: [], source: { title: 'Four-Minor Equivalence Plan.pdf' } };
+  const memoryCoverage = assessRecallCoverage({
+    plan,
+    memories: [{ title: 'Four-Minor Equivalence Plan.pdf : Summary', source_metadata: { source_title: 'Four-Minor Equivalence Plan.pdf' } }],
+    evidence: [],
+  });
+  assert.equal(memoryCoverage.source_covered, true);
+
+  const evidenceCoverage = assessRecallCoverage({
+    plan,
+    memories: [],
+    evidence: [{ title: 'Segment 1', source_metadata: {}, metadata: { filename: 'Four-Minor Equivalence Plan.pdf' } }],
+  });
+  assert.equal(evidenceCoverage.source_covered, true);
+});
+
 test('broad entity recall does not narrow to the first retrieved document', () => {
   const coverage = assessRecallCoverage({
     plan: { named_entities: ['Solvis'] },

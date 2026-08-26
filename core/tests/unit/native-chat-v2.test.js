@@ -17,8 +17,23 @@ function makePlan({ operation = 'recall', query = 'Kruti', entities = ['Kruti'],
     steps: [{ id: 'step_1', capability: family, tool, query, entities, depends_on: [], result_binding: 'result' }],
     completion: { needs_user_input: false, approval_required: ['save', 'update_profile'].includes(operation) },
     relation_entities: relation, aggregate, memory, direct_response: direct, context_free_certificate: certified,
+    external_fallback: { allowed: false, query: null, reason: null },
   };
 }
+
+test('public web fallback compiles as a recall-first policy and unsafe source fallback is disabled', () => {
+  const publicPlan = makePlan({ query: 'current public Acme pricing' });
+  publicPlan.external_fallback = { allowed: true, query: 'Acme public pricing 2026', reason: 'current_public' };
+  const compiled = compileNativePlan(validateNativePlan(publicPlan), 'Compare current pricing');
+  assert.equal(compiled.operation, 'recall');
+  assert.equal(compiled.web_fallback.allowed, true);
+
+  const sourcePlan = makePlan({ operation: 'source_read', query: 'Plan.pdf', source: { title: 'Plan.pdf', document_id: null, kind: 'pdf', selection: null } });
+  sourcePlan.external_fallback = { allowed: true, query: 'Plan.pdf', reason: 'explicit_web' };
+  const checked = validateNativePlanResult(sourcePlan);
+  assert.equal(checked.plan.external_fallback.allowed, false);
+  assert.ok(checked.repairs.includes('external_fallback.unsafe'));
+});
 
 test('TurnContextBuilder bounds history, profile and authorized projects', () => {
   const context = buildTurnContext({ message: ' hello ', history: Array.from({ length: 8 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `t${i}` })), profileContext: 'x'.repeat(3000), projectCatalog: Array.from({ length: 30 }, (_, i) => ({ id: `${i}`, name: `P${i}` })) });
@@ -55,6 +70,26 @@ test('relation, aggregate and projects have dedicated exact operations', () => {
   assert.equal(compileNativePlan(validateNativePlan(makePlan({ operation: 'aggregate', query: 'all Solvis products', aggregate: { parent: 'Solvis', kind: 'product' }, response: { scope: 'exhaustive', shape: 'inventory' } })), 'aggregate').native_tool, 'hivemind_aggregate_entities');
   const projects = compileNativePlan(validateNativePlan(makePlan({ operation: 'projects', query: 'authorized projects', entities: [] })), 'projects');
   assert.equal(projects.native_tool, 'hivemind_list_projects'); assert.deepEqual(projects.tool_groups, ['hivemind-projects']);
+});
+
+test('validator downgrades overview and source-shaped aggregate mistakes to unified recall', () => {
+  const overview = validateNativePlanResult(makePlan({
+    operation: 'aggregate', query: 'everything about Kruti',
+    aggregate: { parent: 'Kruti', kind: 'fact' },
+    response: { scope: 'exhaustive', depth: 'comprehensive', shape: 'overview' },
+  }));
+  assert.equal(overview.plan.operation, 'recall');
+  assert.equal(overview.plan.aggregate, null);
+  assert.ok(overview.repairs.includes('operation.uncertified_aggregate'));
+
+  const source = validateNativePlanResult(makePlan({
+    operation: 'aggregate', query: 'all details in Plan.pdf',
+    aggregate: { parent: 'Plan.pdf', kind: 'fact' },
+    source: { title: 'Plan.pdf', document_id: null, kind: 'pdf', selection: null },
+    response: { scope: 'exhaustive', depth: 'comprehensive', shape: 'inventory' },
+  }));
+  assert.equal(source.plan.operation, 'source_read');
+  assert.equal(source.plan.aggregate, null);
 });
 
 test('unscoped save stays null and profile update stays caller scoped', () => {
@@ -113,7 +148,7 @@ test('validator canonicalizes an empty provider result binding', () => {
 test('validator safely derives structural save, aggregate and snapshot fields', () => {
   const savePlan = makePlan({ operation: 'save', query: null, entities: ['Kruti'], memory: { title: null, content: 'Kruti joined marketing.', memory_type: 'fact', scope: null, project_id: null, tags: [], entities: ['Kruti'], event_time: null, profile_fields: {}, preferences: [] } });
   assert.equal(validateNativePlanResult(savePlan).plan.memory.title, 'Kruti fact');
-  const aggregatePlan = makePlan({ operation: 'aggregate', query: 'documents mentioning SolvisPia', entities: ['SolvisPia'], aggregate: { parent: null, kind: 'source' } });
+  const aggregatePlan = makePlan({ operation: 'aggregate', query: 'documents mentioning SolvisPia', entities: ['SolvisPia'], response: { shape: 'inventory' }, aggregate: { parent: null, kind: 'source' } });
   assert.equal(validateNativePlanResult(aggregatePlan).plan.aggregate.parent, 'SolvisPia');
   const snapshotPlan = makePlan({ operation: 'snapshot', time: { semantics: 'snapshot', axis: 'valid_time', start: '2026-08-01T00:00:00Z' } });
   assert.equal(validateNativePlanResult(snapshotPlan).plan.time.valid_at, '2026-08-01T00:00:00Z');

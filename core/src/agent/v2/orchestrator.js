@@ -4,15 +4,19 @@ import { validateNativePlanResult } from './plan-validator.js';
 import { compileNativePlan } from './plan-compiler.js';
 import { buildTurnContext } from './turn-context-builder.js';
 import { compactCapabilityCatalog } from './capability-registry.js';
+import { hydrateCompactContext } from './compact-context.js';
 
 const State = Annotation.Root({
   input: Annotation(), context: Annotation(), capabilityCatalog: Annotation(), rawPlan: Annotation(),
   validation: Annotation(), validatedPlan: Annotation(), decision: Annotation(), usage: Annotation(),
 });
 
-export function createNativePlannerGraph({ planner = planNativeTurn } = {}) {
+export function createNativePlannerGraph({ planner = planNativeTurn, compactContextGraph } = {}) {
   return new StateGraph(State)
-    .addNode('turn_context', async (state) => ({ context: buildTurnContext(state.input) }))
+    .addNode('turn_context', async (state) => {
+      const compact = await hydrateCompactContext(state.input, { graph: compactContextGraph });
+      return { context: buildTurnContext({ ...state.input, history: compact.history, recentSourceRefs: compact.sourceRefs }) };
+    })
     .addNode('capability_catalog', async () => ({ capabilityCatalog: compactCapabilityCatalog() }))
     .addNode('semantic_planner', async (state) => {
       const result = await planner({ ...state.input, context: state.context, capabilityCatalog: state.capabilityCatalog });

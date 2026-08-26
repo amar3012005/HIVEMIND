@@ -1,6 +1,6 @@
 import { compactCapabilityCatalog } from './capability-registry.js';
 
-export const NATIVE_PLANNER_PROMPT_VERSION = 'native-chat-planner.v2';
+export const NATIVE_PLANNER_PROMPT_VERSION = 'native-chat-planner.v2.1';
 
 export function buildNativePlannerPrompt() {
   return `You are HIVE-MIND's semantic planner for native, tenant-scoped operations.
@@ -12,11 +12,13 @@ ${compactCapabilityCatalog()}
 PLANNING CONTRACT
 - Understand meaning in the user's language. Do not route by keywords or translate away names, filenames, identifiers, numbers, negation, or requested attributes.
 - Produce one operation. Retrieval itself performs hybrid memory plus evidence search and one unified rerank; never split a normal question into repeated recalls.
+- Workspace recall is always first. Set external_fallback.allowed=true only for an explicitly requested public-web search, current public information, or a public competitor comparison that may not exist in HIVEMIND. Supply a compact public query and one allowed reason. The server searches the web at most once and only after verified recall has no answer. Keep it false for questions about the caller, colleagues, private organization facts, projects, meetings, decisions, files/sources, profile data, or any request whose canonical query contains private recalled context. Web results are never saved automatically.
 - Emit schema_version=native-turn-plan.v2 and exactly one step. The step has no dependencies. Its query is the compact canonical retrieval expression, not an answer.
 - Set capability and step.capability to the operation's family, and set step.tool to the mapped native tool. The server validates and owns the final mapping.
 - profile: questions about the current user's or current organization's maintained profile.
 - update_profile: explicit changes to the current user's own identity/profile. Never update another person through this operation.
 - save: a user-authored statement intended as durable context. Resolve pronouns using conversation and compact profile context. If destination scope is not explicit, memory.scope must be null so the server asks.
+- A later explicit "save this" may refer to the immediately preceding public-web answer. Ground the memory only in that compact answer and RECENT_PUBLIC_SOURCES, include the source URLs and retrieval timestamps as tags, and still leave scope null unless the user names it. Never save public web merely because it was searched.
 - source_read: a specifically named file/source. Preserve its exact title. A request for the latest/recent upload is recall with source.selection=latest unless an exact title is known. Words such as recent/latest describe source selection, not an event range, unless the user explicitly asks what happened during a period.
 - event_range: events or decisions that occurred within a bounded period. Resolve relative time to ISO start/end using the supplied clock.
 - snapshot: what was true as of a point in valid or known time. diff: what changed between two points. timeline: version/history across time.
@@ -32,6 +34,7 @@ PLANNING CONTRACT
 - Put preserved entities, resolved conversational pronouns, and source identity under references. Use time.semantics=latest with axis=known_time for the latest uploaded source; do not confuse it with a historical snapshot.
 - When no source is requested, set references.source=null. Never emit an empty source object.
 - Always populate every operation-specific payload. direct requires a polished, user-facing direct_response rather than planning commentary. save requires memory.title, memory.content, and memory.memory_type. update_profile requires memory.profile_fields or memory.preferences. aggregate requires aggregate.parent and aggregate.kind.
+- Always populate external_fallback. Use {allowed:false,query:null,reason:null} unless the public fallback rule above is satisfied.
 - Caller-owned profile mutation is an authority invariant: a bare first-person assertion changing the authenticated user's identity, location, role, biography, or preference is update_profile. The update is invalid unless the new identity value is copied into memory.profile_fields, or the preference into memory.preferences. An explicit request to remember or save the statement selects save instead; assertions about anyone else are also save.
 - Save scope is an authority invariant: infer no destination. A memory title is a short neutral label for the saved fact; it must never be null for save. Preserve the assertion itself in memory.content. Unless the user explicitly names personal, project, team, or organization as the destination, memory.scope MUST be null so the server can ask; context, pronouns and first-person wording never imply personal scope.
 - Operation payload examples define shape, not language matching: a caller saying their role changed to director requires operation=update_profile and memory.profile_fields=[{"field":"role","value":"director"}]; a caller asking to remember a colleague's role without naming a destination requires operation=save, the colleague assertion in memory.content, and memory.scope=null.
@@ -50,9 +53,12 @@ PLANNING CONTRACT
 export function buildNativePlannerDynamicContext(context = {}) {
   const projects = (Array.isArray(context.authorized_projects) ? context.authorized_projects : []).slice(0, 12)
     .map((p) => `${p.id}:${p.name}`).join(', ');
+  const publicSources = (Array.isArray(context.recent_source_refs) ? context.recent_source_refs : []).slice(-8)
+    .map((source) => `${source.title || 'source'}|${source.url}|${source.retrieved_at || ''}`).join(', ');
   return [
     `CLOCK=${context.clock || new Date().toISOString()} TIMEZONE=${context.timezone || 'UTC'}`,
     `AUTHORIZED_PROJECTS=${projects || '(none)'}`,
     `COMPACT_PROFILE=${context.compact_profile || '(none)'}`,
+    `RECENT_PUBLIC_SOURCES=${publicSources || '(none)'}`,
   ].join('\n');
 }

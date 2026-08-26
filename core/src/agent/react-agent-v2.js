@@ -967,6 +967,11 @@ async function execWeb(bus, plan, ctx, { recordTool, startTool, remaining }, cov
     plan, coverage,
     hasRuntime: Boolean(ctx.runWebSearchJob && ctx.webJobStore),
     remainingMs: remaining(),
+    // Public web is deliberately opt-in. The planner may classify a request as
+    // externally answerable, but the default chat contract remains the same
+    // authorized memory+evidence synthesis on every turn. This also prevents a
+    // depleted browser allowance from replacing a useful internal answer.
+    enabled: process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED === 'true',
   })) return;
   try {
     const args = { query: policy.query, limit: 8 };

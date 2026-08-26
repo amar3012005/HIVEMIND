@@ -127,6 +127,8 @@ test('base recall preserves distinct adapter evidence rows with identical prefix
 });
 
 test('explicit web fallback polls once and promotes public evidence into the synthesis pool', async () => {
+  const previous = process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED;
+  process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED = 'true';
   const internal = Array.from({ length: 15 }, (_, index) => ({
     segment_id: `internal-${index}`, document_title: 'Internal', content: `internal ${index}`,
   }));
@@ -148,6 +150,9 @@ test('explicit web fallback polls once and promotes public evidence into the syn
       web_fallback: { allowed: true, query: 'current public pricing', reason: 'explicit_web' },
     }),
     ctx, deadlineAt: FAR(),
+  }).finally(() => {
+    if (previous === undefined) delete process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED;
+    else process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED = previous;
   });
   assert.equal(result.steps.at(-1).tool, 'hivemind_web_search');
   assert.equal(result.steps.at(-1).result_summary, '1 public web sources');
@@ -156,6 +161,8 @@ test('explicit web fallback polls once and promotes public evidence into the syn
 });
 
 test('explicit web failure is surfaced as unavailable instead of complete internal coverage', async () => {
+  const previous = process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED;
+  process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED = 'true';
   const { ctx } = makeCtx({
     hivemind_recall: { memories: memRows('A'), evidence: [], evidence_count: 0 },
     hivemind_web_search: { error: 'plan_limit_exceeded' },
@@ -169,6 +176,9 @@ test('explicit web failure is surfaced as unavailable instead of complete intern
       web_fallback: { allowed: true, query: 'current public pricing', reason: 'explicit_web' },
     }),
     ctx, deadlineAt: FAR(),
+  }).finally(() => {
+    if (previous === undefined) delete process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED;
+    else process.env.HIVEMIND_CHAT_WEB_SEARCH_ENABLED = previous;
   });
   assert.equal(result.coverage.external_web_requested, true);
   assert.equal(result.coverage.external_web_unavailable, 'plan_limit_exceeded');

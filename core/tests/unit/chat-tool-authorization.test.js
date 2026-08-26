@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { dispatchTool, findDirectEntityEdges } from '../../src/agent/tool-registry.js';
+import { dispatchTool, findDirectEntityEdges, findExplicitRelationClaims } from '../../src/agent/tool-registry.js';
 import { createDraftApprovalMiddleware } from '../../src/agent/middleware/draft-approval.js';
 import { McpClientPool } from '../../src/agent/mcp-client-pool.js';
 import { RecallRouter } from '../../src/memory/recall-router.js';
@@ -97,6 +97,19 @@ test('verified relationships require distinct endpoints bound to different reque
     { from_id: 'pia-fact', to_id: 'max-fact', type: 'Extends' },
   ];
   assert.deepEqual(findDirectEntityEdges(edges, entities, bindings), [edges[2]]);
+});
+
+test('relation claims distinguish explicit assertions from mere co-mentions and normalize legacy metadata', () => {
+  const rows = [
+    { id: 'profile', content: 'User name: Amar Sai Gadde' },
+    { id: 'claim', title: { text: 'legacy title' }, content: 'I want to meet Kruti tomorrow.', tags: ['provenance:user-assertion'], source_metadata: { metadata: { entities: ['Kruti'] } } },
+    { id: 'noise', content: 'Amar and Kruti appear in this attendee list.' },
+  ];
+  const claims = findExplicitRelationClaims(rows, ['Amar', 'Kruti'], { requesterProfile: 'Name: Amar Sai Gadde' });
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].type, 'explicit_user_claim');
+  assert.equal(claims[0].resolved_first_person, true);
+  assert.equal(claims[0].citation_status, 'user_assertion');
 });
 
 test('save refuses a caller project outside the authorized project set', async () => {

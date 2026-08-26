@@ -105,6 +105,69 @@ export function findDirectEntityEdges(edges, entities, memoryIdsByEntity) {
   });
 }
 
+function safeText(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try { return JSON.stringify(value); } catch { return ''; }
+}
+
+function legacyMetadata(row = {}) {
+  const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+  const source = row?.source_metadata && typeof row.source_metadata === 'object' ? row.source_metadata : {};
+  const nested = source?.metadata && typeof source.metadata === 'object' ? source.metadata : {};
+  return { metadata, source, nested };
+}
+
+function rowSearchText(row = {}) {
+  const { metadata, source, nested } = legacyMetadata(row);
+  const tags = Array.isArray(row.tags) ? row.tags : [];
+  const entities = [metadata.entities, source.entities, nested.entities, metadata.entity_names]
+    .flatMap((value) => Array.isArray(value) ? value : (value ? [value] : []));
+  return [row.title, row.content, row.snippet, row.document_title, row.filename,
+    source.document_title, source.filename, metadata.source_title, metadata.filename,
+    metadata.claim, source.claim, nested.claim, tags, entities]
+    .map(safeText).filter(Boolean).join(' ');
+}
+
+function isUserAssertion(row = {}) {
+  const { metadata, source, nested } = legacyMetadata(row);
+  const tags = Array.isArray(row.tags) ? row.tags.map((tag) => String(tag).toLowerCase()) : [];
+  const admission = metadata.memory_admission || source.memory_admission || nested.memory_admission;
+  return admission === 'user_assertion' || tags.includes('provenance:user-assertion');
+}
+
+const RELATION_LANGUAGE = /\b(?:want(?:s|ed)?|work(?:s|ed)?\s+(?:with|for)|report(?:s|ed)?\s+to|colleague|coworker|friend|partner|married|spouse|sibling|parent|child|manager|manage(?:s|d)?|lead(?:s|ing)?|know(?:s|n)?|like(?:s|d)?|love(?:s|d)?|hate(?:s|d)?|meet(?:s|ing)?|met|spoke|speak(?:s|ing)?|sleep(?:s|ing)?\s+with|sex\s+with|fuck(?:s|ed|ing)?|related\s+to|connected\s+to|collaborat(?:e|es|ed|ing)\s+with)\b/iu;
+const FIRST_PERSON = /\b(?:i|me|my|mine|myself)\b/iu;
+
+export function findExplicitRelationClaims(rows = [], entities = [], { requesterProfile = '' } = {}) {
+  const requested = [...new Set(entities.map((entity) => normalizeEntity(entity)).filter(Boolean))];
+  if (requested.length < 2) return [];
+  const normalizedProfile = normalizeEntity(requesterProfile);
+  const requesterEntities = requested.filter((entity) => normalizedProfile.includes(entity));
+  return rows.filter(Boolean).flatMap((row) => {
+    const text = rowSearchText(row);
+    if (!text || !RELATION_LANGUAGE.test(text)) return [];
+    const normalizedText = normalizeEntity(text);
+    const mentioned = requested.filter((entity) => normalizedText.includes(entity));
+    const firstPersonResolved = mentioned.length >= 1
+      && requesterEntities.some((entity) => !mentioned.includes(entity))
+      && FIRST_PERSON.test(text)
+      && isUserAssertion(row);
+    if (mentioned.length < 2 && !firstPersonResolved) return [];
+    return [{
+      id: row.id || row.segment_id || row.segmentId || null,
+      type: firstPersonResolved ? 'explicit_user_claim' : 'explicit_relation_claim',
+      entities,
+      text: safeText(row.content || row.snippet || row.title).trim(),
+      source_title: safeText(row.document_title || row.title || '').trim() || null,
+      citation_status: isUserAssertion(row) ? 'user_assertion' : 'stored_record',
+      resolved_first_person: firstPersonResolved,
+      verified_graph_edge: false,
+    }];
+  }).slice(0, 12);
+}
+
 // Evidence is eligible for an as-of answer only when it carries explicit
 // temporal provenance.  A semantically relevant document uploaded today is
 // not proof of what was true at an earlier snapshot.  Memories already enforce
@@ -1229,6 +1292,11 @@ const TOOL_HANDLERS = {
 
     const allEdges = [...edges.values()];
     const directEdges = findDirectEntityEdges(allEdges, entities, memoryIdsByEntity);
+    const explicitClaims = findExplicitRelationClaims(
+      [...memories.values(), ...evidence.values()],
+      entities,
+      { requesterProfile: ctx._compactProfileContext || '' },
+    );
     const sourceGroups = new Map();
     for (const [entity, ids] of memoryIdsByEntity.entries()) {
       for (const id of ids) {
@@ -1259,9 +1327,11 @@ const TOOL_HANDLERS = {
     return {
       entities,
       direct_edges: directEdges,
+      explicit_relation_claims: explicitClaims,
       shared_paths: sharedPaths,
       co_mentions: sharedPaths.map((path) => ({ ...path, type: 'co_mention' })),
       verified_relation_found: directEdges.length > 0,
+      grounded_relation_claim_found: explicitClaims.length > 0,
       memories: [...memories.values()], evidence: [...evidence.values()],
       relationships: allEdges, evidence_packets: packets,
       coverage: {

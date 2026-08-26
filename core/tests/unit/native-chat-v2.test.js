@@ -96,6 +96,21 @@ test('relation, aggregate and projects have dedicated exact operations', () => {
   assert.equal(projects.native_tool, 'hivemind_list_projects'); assert.deepEqual(projects.tool_groups, ['hivemind-projects']);
 });
 
+test('validator repairs legacy and reference-only relation entity shapes', () => {
+  const referenceOnly = makePlan({ operation: 'relation_between', query: 'Amar and Kruti relationship', entities: ['Amar', 'Kruti'], relation: [] });
+  delete referenceOnly.relation_entities;
+  const repaired = validateNativePlanResult(referenceOnly);
+  assert.deepEqual(repaired.plan.relation_entities, ['Amar', 'Kruti']);
+  assert.ok(repaired.repairs.includes('relation_entities.references'));
+
+  const legacy = makePlan({ operation: 'relation_between', query: 'Amar and Kruti relationship', entities: [], relation: [] });
+  delete legacy.relation_entities;
+  legacy.relation = { entities: ['Amar', 'Kruti'] };
+  const legacyRepaired = validateNativePlanResult(legacy);
+  assert.deepEqual(legacyRepaired.plan.relation_entities, ['Amar', 'Kruti']);
+  assert.ok(legacyRepaired.repairs.includes('relation_entities.legacy'));
+});
+
 test('validator downgrades overview and source-shaped aggregate mistakes to unified recall', () => {
   const overview = validateNativePlanResult(makePlan({
     operation: 'aggregate', query: 'everything about Kruti',

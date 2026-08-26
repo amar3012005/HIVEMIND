@@ -59,6 +59,18 @@ function normalizePlanShape(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { input, repairs: [] };
   const out = structuredClone(input);
   const repairs = [];
+  // Normalize known pre-V2/provider variants before the strict schema sees
+  // them. Semantic validation below still requires two distinct entities.
+  if (!Array.isArray(out.relation_entities)) {
+    const legacyRelationEntities = Array.isArray(out.relation?.entities) ? out.relation.entities : null;
+    const referenceEntities = Array.isArray(out.references?.entities) ? out.references.entities : null;
+    out.relation_entities = legacyRelationEntities || (out.operation === 'relation_between' ? referenceEntities : []) || [];
+    repairs.push(legacyRelationEntities ? 'relation_entities.legacy' : 'relation_entities.references');
+  }
+  if ('relation' in out) {
+    delete out.relation;
+    repairs.push('relation.legacy_removed');
+  }
   if (out.references && typeof out.references === 'object') {
     const source = normalizeNullableObject(out.references.source, ['title', 'document_id', 'kind', 'selection']);
     if (JSON.stringify(source) !== JSON.stringify(out.references.source ?? null)) repairs.push('references.source.nullables');
@@ -327,6 +339,11 @@ export function validateNativePlanResult(input) {
     if (plan.operation === 'aggregate' && !plan.aggregate?.parent && plan.references.entities.length === 1) {
       plan.aggregate.parent = plan.references.entities[0];
       semanticRepairs.push('aggregate.parent');
+    }
+    if (plan.operation === 'relation_between' && plan.relation_entities.length < 2
+        && plan.references.entities.length >= 2) {
+      plan.relation_entities = [...new Set(plan.references.entities)].slice(0, 6);
+      semanticRepairs.push('relation_entities.references');
     }
     if (plan.operation === 'snapshot') {
       if (plan.time.axis === 'valid_time' && !plan.time.valid_at && plan.time.start) {

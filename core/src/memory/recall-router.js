@@ -2207,6 +2207,7 @@ export class RecallRouter {
         trace_stages: options.trace_stages === true,
         timing: stageTiming ? (stageTiming.memory_detail = {}) : null,
       }, ctx });
+    let targetedTimelineRows = null;
     // A latest/earliest request is an inventory operation after hard filters,
     // not "the newest item among the semantic top K". Add an authorized,
     // model-free memory inventory lane so a chronologically correct entity or
@@ -2260,6 +2261,7 @@ export class RecallRouter {
           chainRows.push(target);
         }
         const prepared = chainRows.map(prepareTimelineAnchor);
+        targetedTimelineRows = prepared;
         ({ memories } = restrictTimelineCandidates([...memories, ...prepared], [], chain));
       }
     }
@@ -2445,7 +2447,7 @@ export class RecallRouter {
     // ── HOP 2 + HOP 3 (parallel, both keyed on inspection) ────────────────
     const t2Start = Date.now();
     const [hop2, hop3] = await Promise.all([
-      !recallPlan.expand_evidence
+      !recallPlan.expand_evidence || Boolean(recallPlan.target_memory_id)
         ? Promise.resolve({ items: [], reason: 'disabled' })
         : measuredSourceFirstEvidence || hop2Evidence({
           evidenceService: this.evidence, query, queryVector, ctx, inspection, prisma: this.prisma,
@@ -2574,6 +2576,14 @@ export class RecallRouter {
       linked_memory_id: memoryByDocId.get(e.documentId) || null,
       _lineage_inferred: !e.linked_memory_id && Boolean(memoryByDocId.get(e.documentId)),
     }));
+    if (recallPlan.operation === 'timeline' && recallPlan.target_memory_id) {
+      // The ACL-checked Updates chain is the complete answer authority for a
+      // targeted timeline. Generic salience/MMR stages are designed for
+      // semantic recall and must not remove an explicit version, while broad
+      // evidence search must not append unrelated tenant documents.
+      rankedMemories = targetedTimelineRows || [];
+      evidenceWithLineage = [];
+    }
     if (recallPlan.relationships?.requested) {
       evidenceWithLineage = filterEvidenceByMetadata(evidenceWithLineage, {
         relationshipMemoryIds: options.relationship_memory_ids || [],

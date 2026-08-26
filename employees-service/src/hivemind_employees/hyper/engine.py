@@ -342,6 +342,19 @@ def _or_provider_routing(model: str) -> Tuple[Optional[List[str]], List[str]]:
     return pin, ignore
 
 
+def _normalize_openrouter_parameters(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate OpenAI reasoning aliases before strict provider matching.
+
+    OpenRouter providers advertise ``max_tokens``. Leaving Groq's
+    ``max_completion_tokens`` alias in a request with ``require_parameters``
+    eliminates every otherwise-compatible Nitro endpoint.
+    """
+    normalized = dict(body)
+    if "max_completion_tokens" in normalized and "max_tokens" not in normalized:
+        normalized["max_tokens"] = normalized.pop("max_completion_tokens")
+    return normalized
+
+
 async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> Optional[Dict[str, Any]]:
     """Replay a Groq chat body against OpenRouter when Groq is unavailable.
 
@@ -354,7 +367,7 @@ async def _openrouter_chat(body: Dict[str, Any], *, timeout: httpx.Timeout) -> O
     or_model = _or_model(canonical_hyper_model(str(body.get("model") or "")))
     if not or_key or not or_model:
         return None
-    or_body = dict(body)
+    or_body = _normalize_openrouter_parameters(body)
     or_body["model"] = or_model
     # Exclude reasoning from the response. gpt-oss (Harmony) returns its private
     # analysis channel in `reasoning`; with a thin/empty `content` the coalesce

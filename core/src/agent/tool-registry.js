@@ -140,7 +140,7 @@ function isUserAssertion(row = {}) {
 const RELATION_LANGUAGE = /\b(?:want(?:s|ed)?|work(?:s|ed)?\s+(?:with|for)|report(?:s|ed)?\s+to|colleague|coworker|friend|partner|married|spouse|sibling|parent|child|manager|manage(?:s|d)?|lead(?:s|ing)?|know(?:s|n)?|like(?:s|d)?|love(?:s|d)?|hate(?:s|d)?|meet(?:s|ing)?|met|spoke|speak(?:s|ing)?|sleep(?:s|ing)?\s+with|sex\s+with|fuck(?:s|ed|ing)?|related\s+to|connected\s+to|collaborat(?:e|es|ed|ing)\s+with)\b/iu;
 const FIRST_PERSON = /\b(?:i|me|my|mine|myself)\b/iu;
 
-export function findExplicitRelationClaims(rows = [], entities = [], { requesterProfile = '' } = {}) {
+export function findExplicitRelationClaims(rows = [], entities = [], { requesterProfile = '', requesterUserId = null } = {}) {
   const requested = [...new Set(entities.map((entity) => normalizeEntity(entity)).filter(Boolean))];
   if (requested.length < 2) return [];
   const normalizedProfile = normalizeEntity(requesterProfile);
@@ -150,10 +150,11 @@ export function findExplicitRelationClaims(rows = [], entities = [], { requester
     if (!text || !RELATION_LANGUAGE.test(text)) return [];
     const normalizedText = normalizeEntity(text);
     const mentioned = requested.filter((entity) => normalizedText.includes(entity));
+    const authoredByRequester = requesterUserId && row._author_user_id === requesterUserId;
     const firstPersonResolved = mentioned.length >= 1
       && requesterEntities.some((entity) => !mentioned.includes(entity))
       && FIRST_PERSON.test(text)
-      && isUserAssertion(row);
+      && (isUserAssertion(row) || authoredByRequester);
     if (mentioned.length < 2 && !firstPersonResolved) return [];
     return [{
       id: row.id || row.segment_id || row.segmentId || null,
@@ -161,7 +162,7 @@ export function findExplicitRelationClaims(rows = [], entities = [], { requester
       entities,
       text: safeText(row.content || row.snippet || row.title).trim(),
       source_title: safeText(row.document_title || row.title || '').trim() || null,
-      citation_status: isUserAssertion(row) ? 'user_assertion' : 'stored_record',
+      citation_status: (isUserAssertion(row) || authoredByRequester) ? 'user_assertion' : 'stored_record',
       resolved_first_person: firstPersonResolved,
       verified_graph_edge: false,
     }];
@@ -1238,7 +1239,7 @@ const TOOL_HANDLERS = {
       // memories and reported both absent though each has 28-31 KB segments.
       // explain pulls each entity's document evidence so synthesis can actually
       // compare them. limit bumped 5→8 for the richer two-entity merge.
-      mode: 'explain', limit: 8,
+      mode: 'explain', limit: 15,
       ...(args.source_document_id ? { source_document_id: args.source_document_id } : {}),
       ...(args.source_title ? { source_title: args.source_title } : {}),
       ...(args.valid_at ? { valid_at: args.valid_at } : {}),
@@ -1292,10 +1293,22 @@ const TOOL_HANDLERS = {
 
     const allEdges = [...edges.values()];
     const directEdges = findDirectEntityEdges(allEdges, entities, memoryIdsByEntity);
+    let relationRows = [...memories.values(), ...evidence.values()];
+    if (ctx.prisma?.memory && memories.size) {
+      const ownership = await ctx.prisma.memory.findMany({
+        where: { id: { in: [...memories.keys()] }, orgId: ctx.orgId, deletedAt: null },
+        select: { id: true, userId: true, scope: true },
+      }).catch(() => []);
+      const ownershipById = new Map(ownership.map((row) => [row.id, row]));
+      relationRows = relationRows.map((row) => {
+        const owner = ownershipById.get(row?.id);
+        return owner ? { ...row, _author_user_id: owner.userId, _memory_scope: owner.scope } : row;
+      });
+    }
     const explicitClaims = findExplicitRelationClaims(
-      [...memories.values(), ...evidence.values()],
+      relationRows,
       entities,
-      { requesterProfile: ctx._compactProfileContext || '' },
+      { requesterProfile: ctx._compactProfileContext || '', requesterUserId: ctx.userId },
     );
     const sourceGroups = new Map();
     for (const [entity, ids] of memoryIdsByEntity.entries()) {

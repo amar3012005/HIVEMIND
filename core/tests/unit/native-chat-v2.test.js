@@ -111,6 +111,14 @@ test('validator repairs legacy and reference-only relation entity shapes', () =>
   assert.ok(legacyRepaired.repairs.includes('relation_entities.legacy'));
 });
 
+test('validator promotes a generic recall with relationship semantics to the relation lane', () => {
+  const generic = makePlan({ operation: 'recall', query: 'How is Kruti related to Amar?', entities: ['Kruti', 'Amar'], response: { type: 'relationship' } });
+  const repaired = validateNativePlanResult(generic);
+  assert.equal(repaired.plan.operation, 'relation_between');
+  assert.deepEqual(repaired.plan.relation_entities, ['Kruti', 'Amar']);
+  assert.ok(repaired.repairs.includes('operation.relationship_semantics'));
+});
+
 test('validator downgrades overview and source-shaped aggregate mistakes to unified recall', () => {
   const overview = validateNativePlanResult(makePlan({
     operation: 'aggregate', query: 'everything about Kruti',

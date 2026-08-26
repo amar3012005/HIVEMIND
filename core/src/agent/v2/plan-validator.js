@@ -195,6 +195,15 @@ function recoverCanonicalProfileUpdate(plan, repairs) {
 
 function reconcileSemanticOperation(plan, repairs) {
   const exactSource = plan.references.source?.title || plan.references.source?.document_id;
+  // A relationship objective with two resolved entities owns the dedicated
+  // relation lane even when the model selected generic recall. This is a
+  // deterministic semantic repair, not a keyword classifier.
+  if (plan.operation === 'recall' && plan.response.type === 'relationship'
+      && plan.references.entities.length >= 2) {
+    plan.operation = 'relation_between';
+    plan.relation_entities = [...new Set(plan.references.entities)].slice(0, 6);
+    repairs.push('operation.relationship_semantics');
+  }
   if (plan.time.semantics === 'event_range' && (!plan.time.start || !plan.time.end)) {
     plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
     if (plan.operation === 'event_range') plan.operation = 'recall';

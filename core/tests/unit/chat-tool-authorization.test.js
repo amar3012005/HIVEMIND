@@ -105,11 +105,22 @@ test('relation claims distinguish explicit assertions from mere co-mentions and 
     { id: 'claim', title: { text: 'legacy title' }, content: 'I want to meet Kruti tomorrow.', tags: ['provenance:user-assertion'], source_metadata: { metadata: { entities: ['Kruti'] } } },
     { id: 'noise', content: 'Amar and Kruti appear in this attendee list.' },
   ];
-  const claims = findExplicitRelationClaims(rows, ['Amar', 'Kruti'], { requesterProfile: 'Name: Amar Sai Gadde' });
+  rows[1]._author_user_id = authCtx.userId;
+  const claims = findExplicitRelationClaims(rows, ['Amar', 'Kruti'], { requesterProfile: 'Name: Amar Sai Gadde', requesterUserId: authCtx.userId });
   assert.equal(claims.length, 1);
   assert.equal(claims[0].type, 'explicit_user_claim');
   assert.equal(claims[0].resolved_first_person, true);
   assert.equal(claims[0].citation_status, 'user_assertion');
+});
+
+test('legacy first-person relation claims require authenticated authorship', () => {
+  const row = { id: 'legacy', content: 'Kruti wants to sleep with me', tags: ['source:api'], _author_user_id: authCtx.userId };
+  assert.equal(findExplicitRelationClaims([row], ['Amar', 'Kruti'], {
+    requesterProfile: 'Name: Amar Sai Gadde', requesterUserId: authCtx.userId,
+  }).length, 1);
+  assert.equal(findExplicitRelationClaims([{ ...row, _author_user_id: 'another-user' }], ['Amar', 'Kruti'], {
+    requesterProfile: 'Name: Amar Sai Gadde', requesterUserId: authCtx.userId,
+  }).length, 0);
 });
 
 test('save refuses a caller project outside the authorized project set', async () => {

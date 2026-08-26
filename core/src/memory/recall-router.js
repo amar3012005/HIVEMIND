@@ -1861,6 +1861,18 @@ export function restrictTimelineCandidates(memories = [], inventory = [], chain 
   };
 }
 
+export function prepareTimelineAnchor(memory) {
+  if (!memory) return null;
+  return {
+    ...memory,
+    // Direct ID hydration has no semantic score. Keep the explicit,
+    // authorized anchor above generic relevance floors; timeline ordering
+    // remains chronological below.
+    score: Math.max(Number(memory.score) || 0, 0.99),
+    _timeline_anchor: true,
+  };
+}
+
 
 // ── Public entry ───────────────────────────────────────────────────────────
 
@@ -2266,7 +2278,8 @@ export class RecallRouter {
               org_id: ctx.orgId,
               access_context: ctx.accessContext || {},
             });
-            if (target) inventory.push(target);
+            const anchor = prepareTimelineAnchor(target);
+            if (anchor) inventory.push(anchor);
           }
           // The target chain is a hard boundary for the whole timeline, not
           // only for the additive historical inventory.  Otherwise semantic

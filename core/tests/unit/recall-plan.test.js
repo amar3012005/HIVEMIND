@@ -11,6 +11,7 @@ import {
   resolveCanonicalEntities,
   resolveRecallPlan,
   restrictTimelineCandidates,
+  prepareTimelineAnchor,
 } from '../../src/memory/recall-router.js';
 
 const emptyStore = (overrides = {}) => ({
@@ -251,6 +252,12 @@ test('targeted timeline keeps a directly hydrated anchor with no Updates neighbo
   );
   assert.deepEqual(restricted.memories, []);
   assert.deepEqual(restricted.inventory.map((memory) => memory.id), ['memory-current']);
+});
+
+test('directly hydrated timeline anchors survive generic relevance floors', () => {
+  const anchor = prepareTimelineAnchor({ id: 'memory-current', title: 'Current' });
+  assert.equal(anchor.score, 0.99);
+  assert.equal(anchor._timeline_anchor, true);
 });
 
 test('typed selectors and memory types survive plan recompilation', () => {

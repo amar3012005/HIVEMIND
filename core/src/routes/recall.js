@@ -251,6 +251,7 @@ export async function handleRecallRoute(ctx = {}) {
           source: recallPlan.source,
           time: recallPlan.time,
           operation: recallPlan.operation,
+          target_memory_id: recallPlan.target_memory_id,
           memory_types: recallPlan.memory_types,
           entity_filter_mode: recallPlan.entity_filter_mode,
           scope_filter: recallPlan.scope_filter,

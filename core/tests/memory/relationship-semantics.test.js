@@ -174,8 +174,11 @@ test('malformed entity-link output retains structured entities and explicit type
 test('canonical linker prompt requests rich source-supported entities from every memory save', async () => {
   const store = new InMemoryGraphStore();
   let capturedPrompt = '';
+  let capturedModel = '';
   const memoryChatClient = async (_url, options) => {
-    capturedPrompt = JSON.parse(options.body).messages[0].content;
+    const request = JSON.parse(options.body);
+    capturedPrompt = request.messages[0].content;
+    capturedModel = request.model;
     return new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify({
         entities: ['Leo', 'insulated container', 'housing interior', 'lid area'],
@@ -200,6 +203,7 @@ test('canonical linker prompt requests rich source-supported entities from every
   assert.match(capturedPrompt, /exact model names, components, mechanisms, quantities, units/);
   assert.match(capturedPrompt, /never infer the mechanism from co-occurrence alone/);
   assert.match(capturedPrompt, /If no CANDIDATE matches, return "links":\[\] but STILL extract/);
+  assert.equal(capturedModel, 'google/gemini-2.5-flash-lite');
   const stored = await store.getMemory(memory.id);
   assert.ok(stored.tags.includes('entity:leo'));
   assert.ok(stored.tags.includes('entity:insulated-container'));

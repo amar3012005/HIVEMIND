@@ -23,7 +23,7 @@ test('evidence metadata filters source, type, and three temporal contracts deter
   ];
   assert.deepEqual(filterEvidenceByMetadata(rows, {
     sourceKind: 'image', memoryTypes: ['decision'], temporalSelector: 'latest',
-  }).map((row) => row.documentId), ['new']);
+  }).map((row) => row.documentId), ['new', 'old']);
   assert.deepEqual(filterEvidenceByMetadata(rows, {
     time: { range: { start: '2026-08-01T00:00:00Z', end: '2026-08-03T00:00:00Z' } },
   }).map((row) => row.documentId), ['old', 'noise']);

@@ -55,6 +55,34 @@ Honor `artifact_intent.kind` as a hard product contract.
   scanning, comparison, filters, and state. A dashboard is never the fallback for
   a presentation request.
 
+### Presentation composition standard
+
+This constrains quality, not visual taste. The artifact still owns its theme,
+palette, typography character, and layout ideas.
+
+- Treat the desktop slide as a composed 16:9 stage, not a browser page with text
+  placed at the top. Fill the stage intentionally. Empty space is useful only when
+  balanced by an oversized thesis, figure, image treatment, or focal object.
+- Establish a real type system: expressive display headline, compact supporting
+  copy, legible labels, and restrained annotations. Do not use monospace as the
+  primary presentation voice unless the subject specifically calls for it.
+- Give the central visual explanation meaningful scale. A chart, model, diagram,
+  matrix, or timeline should normally occupy 35-60% of the slide rather than appear
+  as a tiny icon between paragraphs.
+- Vary the sequence with at least three materially different arrangements, such as
+  a thesis scene, split evidence story, full-width model, comparison, annotated
+  timeline, and closing decision. Recoloring the same grid is not variation.
+- Prefer direct visual encoding over interface chrome. Slide rails, dots, tabs, and
+  controls remain quiet and secondary; the narrative owns the viewport.
+- Never use fake check states, placeholder buttons, decorative KPI cards, generic
+  arrows between plain boxes, or empty charts. Unknown evidence should become a
+  deliberate visual tension, measurement plan, or decision gate.
+- Review the first frame at 1440x1000: the thesis must be immediately legible and
+  the slide must look complete without scrolling. Review 390x844 independently;
+  resize and recompose rather than merely shrinking desktop.
+- Apply accessible contrast to every rendered state, including entrance animation.
+  Keep essential content at full opacity and respect reduced motion.
+
 ## Freedom and constraints
 
 - You own the art direction. Do not use a fixed template, prescribed coordinates,

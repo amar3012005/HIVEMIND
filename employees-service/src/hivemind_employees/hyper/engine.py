@@ -46,6 +46,11 @@ from ..db import (
 from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog, work_skill_catalog
 from .domains import get_domain_pack
 from .model_policy import HYPER_FAST_MODEL, canonical_hyper_model
+from .visual_artifact_renderer import (
+    PRESENTATION_SPEC_SCHEMA,
+    normalize_presentation_spec,
+    render_presentation,
+)
 from ..hivemind_client import (
     campaign_create_emulated,
     connector_exec_emulated,
@@ -6180,6 +6185,7 @@ class Director:
         direction: Dict[str, Any],
         repair_errors: Optional[List[str]] = None,
         prior_html: str = "",
+        prior_spec: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Generate one governed HTML artifact directly from evidence and debate."""
         if not (_visual_artifacts_enabled() and self.artifact_intent):
@@ -6194,6 +6200,68 @@ class Director:
             f"dates, or sources unless independently present in SOURCE EVIDENCE):\n{transcript_json[:10000]}"
             if forced_debate else ""
         )
+        if (self.artifact_intent or {}).get("kind") == "presentation":
+            repair = ""
+            if repair_errors:
+                repair = (
+                    "\n\nRENDERED PRESENTATION REVIEW: Repair the typed specification, not HTML. "
+                    "Return the complete corrected specification and address every observed defect:\n- "
+                    + "\n- ".join(str(item)[:500] for item in repair_errors[:10])
+                    + (f"\n\nPRIOR SPECIFICATION:\n{json.dumps(prior_spec, ensure_ascii=False)[:30000]}"
+                       if prior_spec else "")
+                )
+            system = (
+                self._system_prompt()
+                + "\n\nYou are the final presentation creative director. Return only the typed "
+                  "visual-presentation.v1 specification matching the schema. A governed renderer owns HTML, "
+                  "CSS, responsive behavior, navigation, and safety. You own the narrative, art direction, "
+                  "slide purposes, composition choices, concise copy, and evidence mapping. Use at least three "
+                  "materially different compositions. The first slide must be composition=hero and the final "
+                  "slide composition=decision. Never invent a metric, date, source, market claim, milestone, "
+                  "legal conclusion, or completed result. Unknown inputs remain lane=unknown; proposals and "
+                  "scenarios use lane=target or assumption. source_refs must copy only compact source labels "
+                  "that appear verbatim in SOURCE EVIDENCE."
+                + self._room_instr_block
+                + self._lang_directive()
+            )
+            user = (
+                f"ARTIFACT INTENT:\n{json.dumps(self.artifact_intent, ensure_ascii=False)}\n\n"
+                f"ART DIRECTION BRIEF:\n{json.dumps(direction, ensure_ascii=False)}\n\n"
+                f"TASK:\n{self.user_message}\n\n{board}{debate}{repair}\n\n"
+                "Create the complete presentation specification now. Each slide has one communicative job. "
+                "Choose compositions that make the evidence visually legible rather than filling fields."
+            )
+            msg = await self._groq(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                force_text=True,
+                model=canonical_hyper_model(os.environ.get("HYPER_VISUAL_SPEC_MODEL", HYPER_FAST_MODEL)),
+                bucket="synth",
+                schema=PRESENTATION_SPEC_SCHEMA,
+                schema_name="visual_presentation",
+                temp=0.5 if not repair_errors else 0.35,
+                max_tokens=7000,
+            )
+            self.director_iters.append(self._last_tok)
+            try:
+                spec = normalize_presentation_spec(json.loads((msg or {}).get("content") or "{}"))
+                html = render_presentation(spec)
+            except (TypeError, ValueError, KeyError) as exc:
+                log.warning("[hyper-engine] typed presentation render failed: %s", exc)
+                return None
+            source_refs = []
+            for slide in spec.get("slides") or []:
+                for ref in slide.get("source_refs") or []:
+                    if ref and ref not in source_refs:
+                        source_refs.append(ref)
+            return {
+                "contract": "artifact-candidate.v1",
+                "intent": dict(self.artifact_intent),
+                "title": spec["title"],
+                "summary": spec["summary"],
+                "html": html,
+                "source_refs": source_refs[:24],
+                "_visual_spec": spec,
+            }
         repair = ""
         if repair_errors:
             repair = (
@@ -6269,7 +6337,8 @@ class Director:
         candidate = await self._synthesize_visual(forced_debate, transcript_json, direction)
         if not candidate:
             return None
-        delivery = await self.emit({"t": "artifact_candidate", "candidate": candidate})
+        public_candidate = {key: value for key, value in candidate.items() if not key.startswith("_")}
+        delivery = await self.emit({"t": "artifact_candidate", "candidate": public_candidate})
         result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
         if isinstance(result, dict) and result.get("ok") is False:
             candidate = await self._synthesize_visual(
@@ -6278,13 +6347,15 @@ class Director:
                 direction,
                 repair_errors=[str(item) for item in (result.get("errors") or [])],
                 prior_html=str(candidate.get("html") or ""),
+                prior_spec=candidate.get("_visual_spec") if isinstance(candidate.get("_visual_spec"), dict) else None,
             )
             if not candidate:
                 return None
-            delivery = await self.emit({"t": "artifact_candidate", "candidate": candidate})
+            public_candidate = {key: value for key, value in candidate.items() if not key.startswith("_")}
+            delivery = await self.emit({"t": "artifact_candidate", "candidate": public_candidate})
             result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
         if isinstance(result, dict) and result.get("ok") is True:
-            return {"candidate": candidate, "receipt": result}
+            return {"candidate": public_candidate, "receipt": result}
         return None
 
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:

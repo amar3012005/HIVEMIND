@@ -19,8 +19,8 @@ async def test_visual_producer_repairs_once_and_returns_verified_receipt():
     async def direction(_forced, _transcript):
         return {"visual_thesis": "A decision story"}
 
-    async def synth(_forced, _transcript, _direction, repair_errors=None, prior_html=""):
-        calls.append({"direction": _direction, "errors": repair_errors, "prior": prior_html})
+    async def synth(_forced, _transcript, _direction, repair_errors=None, prior_html="", prior_spec=None):
+        calls.append({"direction": _direction, "errors": repair_errors, "prior": prior_html, "spec": prior_spec})
         return {"html": "<!doctype html><h1>Board</h1>", "summary": "Ready"}
 
     deliveries = iter([

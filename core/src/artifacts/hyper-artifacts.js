@@ -92,7 +92,7 @@ async function browserInstance() {
 async function inspectViewport(page, viewport) {
   await page.setViewport(viewport);
   await page.evaluate(() => window.dispatchEvent(new Event('resize')));
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  await new Promise((resolve) => setTimeout(resolve, 650));
   const metrics = await page.evaluate(() => {
     const body = document.body;
     const text = String(body?.innerText || '').trim();
@@ -175,6 +175,8 @@ export async function reviewHyperArtifactVisualQuality({
               'Pass only work that could be shown to a demanding executive without apology.',
               'Score visual hierarchy, first-viewport thesis, purpose-specific composition, information design,',
               'typography, spacing, density, responsive adaptation, and polish.',
+              'For presentations, require deliberate slide storytelling, at least three materially different',
+              'compositions, strong stage occupancy, and a central visual explanation at useful scale.',
               'Reject stacked generic cards, crude diagrams, huge empty areas, raw markup, placeholder citations,',
               'decorative metrics without evidence, collapsed primary content, and controls that look unfinished.',
               'Do not require a particular theme, color palette, illustration style, or external imagery.',

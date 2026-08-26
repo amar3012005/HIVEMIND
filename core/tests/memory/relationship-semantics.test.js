@@ -170,3 +170,38 @@ test('malformed entity-link output retains structured entities and explicit type
     else process.env.ENTITY_LINK_MAX_ATTEMPTS = previousAttempts;
   }
 });
+
+test('canonical linker prompt requests rich source-supported entities from every memory save', async () => {
+  const store = new InMemoryGraphStore();
+  let capturedPrompt = '';
+  const memoryChatClient = async (_url, options) => {
+    capturedPrompt = JSON.parse(options.body).messages[0].content;
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        entities: ['Leo', 'insulated container', 'housing interior', 'lid area'],
+        temporal: {}, memory_type: 'fact', links: [],
+      }) } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false, memoryChatClient });
+  const memory = await store.createMemory({
+    id: '00000000-0000-4000-8000-000000009404',
+    user_id: '00000000-0000-4000-8000-000000009401',
+    org_id: '00000000-0000-4000-8000-000000009402',
+    title: 'Long-term heat retention in the Leo',
+    content: 'Heat stored in the Leo is retained for a long time due to the insulated container, including the housing interior and lid area.',
+    memory_type: 'fact', is_latest: true, tags: [], created_at: new Date().toISOString(),
+  });
+
+  await engine._attachEntityCoMentionEdges(memory, store, []);
+
+  assert.match(capturedPrompt, /ALL materially useful, source-supported entities/);
+  assert.match(capturedPrompt, /specific components, subsystems, or named features/);
+  assert.match(capturedPrompt, /exact model names, components, mechanisms, quantities, units/);
+  assert.match(capturedPrompt, /never infer the mechanism from co-occurrence alone/);
+  const stored = await store.getMemory(memory.id);
+  assert.ok(stored.tags.includes('entity:leo'));
+  assert.ok(stored.tags.includes('entity:insulated-container'));
+  assert.ok(stored.tags.includes('entity:housing-interior'));
+  assert.ok(stored.tags.includes('entity:lid-area'));
+});

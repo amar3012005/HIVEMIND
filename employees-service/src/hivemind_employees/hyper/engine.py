@@ -4855,7 +4855,9 @@ class Director:
             schema["properties"]["artifact_intent"] = {
                 "type": ["object", "null"],
                 "properties": {
-                    "kind": {"type": "string", "enum": ["interactive_document"]},
+                    "kind": {"type": "string", "enum": [
+                        "presentation", "interactive_document", "dashboard"
+                    ]},
                     "medium": {"type": "string", "enum": ["html"]},
                     "purpose": {"type": "string"},
                     "audience": {"type": "string"},
@@ -5008,11 +5010,15 @@ class Director:
         )
         if _visual_artifacts_enabled():
             sysp += (
-                "\n\nARTIFACT CAPABILITY: artifact_intent may select an interactive HTML document when "
-                "a designed, visual, explorable, presentation-like, or dashboard-like result materially "
+                "\n\nARTIFACT CAPABILITY: artifact_intent may select a designed HTML artifact when "
+                "a presentation, explorable document, or dashboard materially "
                 "completes the ACTIVE request better than prose. This capability belongs to every Room; decide "
                 "from the requested outcome, never the Room name. Use null for normal answers, greetings, email, "
-                "or external Docs/Sheets/Notion writes. Describe purpose and audience without choosing a theme "
+                "or external Docs/Sheets/Notion writes. Preserve the requested medium exactly: use kind=presentation "
+                "for a deck, pitch deck, slides, briefing presentation, or slide-by-slide request; use kind=dashboard "
+                "only when the user asks for monitoring, a dashboard, console, or recurring metric exploration; "
+                "otherwise use kind=interactive_document. Never turn a presentation into a scrolling report or "
+                "dashboard. Describe purpose and audience without choosing a theme "
                 "or fixed layout. Use creative_freedom=high unless supplied brand constraints require guided."
                 " When artifact_intent is not null, choose execution_engine=debate so the governed final-output "
                 "adapter receives the complete evidence board instead of returning early through agentic execution."
@@ -5120,9 +5126,12 @@ class Director:
             plan = {}
         if _visual_artifacts_enabled() and isinstance(plan.get("artifact_intent"), dict):
             raw_intent = plan["artifact_intent"]
+            artifact_kind = str(raw_intent.get("kind") or "interactive_document").strip()
+            if artifact_kind not in {"presentation", "interactive_document", "dashboard"}:
+                artifact_kind = "interactive_document"
             self.artifact_intent = {
                 "contract": "artifact-intent.v1",
-                "kind": "interactive_document",
+                "kind": artifact_kind,
                 "medium": "html",
                 "purpose": str(raw_intent.get("purpose") or "visual deliverable").strip()[:240],
                 "audience": str(raw_intent.get("audience") or "intended reader").strip()[:160],
@@ -6121,6 +6130,13 @@ class Director:
             "constraints. Reject generic dashboards, slide-template chrome, stacked report cards, and "
             "decoration without explanatory value. Return JSON only."
         )
+        if (self.artifact_intent or {}).get("kind") == "presentation":
+            system += (
+                " This artifact is a PRESENTATION: design a deliberate slide-by-slide narrative, not a "
+                "dashboard, console, report page, document outline, or stack of cards. Each slide has one "
+                "communicative job and a composed visual idea. Define the slide sequence, pacing, and how "
+                "desktop navigation and mobile vertical reading preserve that sequence."
+            )
         user = (
             f"ARTIFACT INTENT:\n{json.dumps(self.artifact_intent, ensure_ascii=False)}\n\n"
             f"TASK:\n{self.user_message}\n\n{board}{debate}\n\n"
@@ -6181,8 +6197,9 @@ class Director:
         repair = ""
         if repair_errors:
             repair = (
-                "\n\nRENDER REPAIR: Return the complete corrected artifact. Preserve the visual direction "
-                "and evidence, fixing only these verified defects:\n- "
+                "\n\nRENDER REPAIR: Return a complete corrected artifact. Preserve factual evidence, but "
+                "redesign any art direction, layout, typography, interaction, or composition that caused these "
+                "verified defects. This is a full visual repair, not a narrow patch:\n- "
                 + "\n- ".join(str(item)[:400] for item in repair_errors[:12])
                 + (f"\n\nPRIOR HTML:\n{prior_html[:180000]}" if prior_html else "")
             )
@@ -6194,6 +6211,16 @@ class Director:
             + self._room_instr_block
             + self._lang_directive()
         )
+        if (self.artifact_intent or {}).get("kind") == "presentation":
+            system += (
+                "\n\nPRESENTATION CONTRACT: Produce a real slide deck in HTML. Use a sequence of semantic "
+                "slide sections with stable presentation proportions on desktop, deliberate next/previous and "
+                "keyboard navigation, a visible slide position indicator, and print-friendly page breaks. The "
+                "opening slide establishes the thesis visually; subsequent slides advance a narrative through "
+                "evidence, model, risk, and action. Do not output a dashboard, console, navigation bar with report "
+                "sections, or one long card-based memo. On 390px mobile, preserve the slide sequence as readable "
+                "vertical compositions without horizontal overflow."
+            )
         user = (
             f"ARTIFACT INTENT:\n{json.dumps(self.artifact_intent, ensure_ascii=False)}\n\n"
             f"ART DIRECTION BRIEF:\n{json.dumps(direction, ensure_ascii=False)}\n\n"
@@ -6206,7 +6233,7 @@ class Director:
         msg = await self._groq(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             force_text=True,
-            model=self.synth_model,
+            model=canonical_hyper_model(os.environ.get("HYPER_VISUAL_SYNTH_MODEL") or self.synth_model),
             bucket="synth",
             schema=_HTML_ARTIFACT_SCHEMA,
             schema_name="interactive_artifact",

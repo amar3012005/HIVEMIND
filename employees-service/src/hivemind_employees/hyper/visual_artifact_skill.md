@@ -38,6 +38,23 @@ work as editorial and interaction design, not as Markdown placed in a web page.
 - If evidence is insufficient for a requested metric, show the unknown and the
   measurement needed. Never manufacture a number to make a chart look complete.
 
+## Medium fidelity
+
+Honor `artifact_intent.kind` as a hard product contract.
+
+- `presentation`: build a genuine slide-by-slide story. Compose every slide as a
+  bounded visual scene with one purpose, purposeful pacing, stable proportions,
+  previous/next and keyboard navigation, a slide position indicator, and print
+  page breaks. On mobile, retain the sequence as intentionally composed vertical
+  slides. Never substitute a dashboard, console, scrolling report, outline
+  navigation, or stack of report cards.
+- `interactive_document`: build an editorial reading experience whose layout and
+  interactions serve the subject. It may scroll, but must not impersonate slides
+  or a monitoring dashboard.
+- `dashboard`: use only for repeated monitoring and metric exploration. Prioritize
+  scanning, comparison, filters, and state. A dashboard is never the fallback for
+  a presentation request.
+
 ## Freedom and constraints
 
 - You own the art direction. Do not use a fixed template, prescribed coordinates,

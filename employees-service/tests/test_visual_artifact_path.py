@@ -16,8 +16,11 @@ async def test_visual_producer_repairs_once_and_returns_verified_receipt():
     director = object.__new__(Director)
     calls = []
 
-    async def synth(_forced, _transcript, repair_errors=None, prior_html=""):
-        calls.append({"errors": repair_errors, "prior": prior_html})
+    async def direction(_forced, _transcript):
+        return {"visual_thesis": "A decision story"}
+
+    async def synth(_forced, _transcript, _direction, repair_errors=None, prior_html=""):
+        calls.append({"direction": _direction, "errors": repair_errors, "prior": prior_html})
         return {"html": "<!doctype html><h1>Board</h1>", "summary": "Ready"}
 
     deliveries = iter([
@@ -30,6 +33,7 @@ async def test_visual_producer_repairs_once_and_returns_verified_receipt():
         return next(deliveries)
 
     director._synthesize_visual = synth
+    director._plan_visual_direction = direction
     director.emit = emit
     result = await director._produce_visual_artifact(False, "")
 

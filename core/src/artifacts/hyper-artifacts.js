@@ -1,7 +1,11 @@
 import crypto from 'crypto';
 
+import { gatewayFirstFetch } from '../llm/cloudflare-gateway.js';
+
 const MAX_HTML_BYTES = 200_000;
 const SOURCE_PLATFORM = 'hyper_room_artifact';
+const DEFAULT_VISUAL_CRITIC_MODEL = 'google/gemini-2.5-flash-lite';
+const VISUAL_QUALITY_PASS_SCORE = 80;
 
 export function hyperArtifactsEnabled() {
   const value = process.env.Visual_path_In_Hyperrooms
@@ -44,6 +48,25 @@ export function validateHyperArtifactHtml(html) {
   ];
   for (const [pattern, message] of blocked) if (pattern.test(html)) errors.push(message);
   return [...new Set(errors)];
+}
+
+export function validateHyperArtifactMedium(html, intent = {}) {
+  const errors = [];
+  if (intent?.kind === 'presentation') {
+    const slides = String(html || '').match(
+      /<section\b[^>]*(?:\bdata-slide(?:\s*=|\s|>)|\bclass\s*=\s*["'][^"']*\bslide\b[^"']*["'])/gi,
+    ) || [];
+    if (slides.length < 3) {
+      errors.push(`Presentation must contain at least three semantic slide sections; found ${slides.length}.`);
+    }
+    if (!/(?:aria-label\s*=\s*["'][^"']*(?:next|previous)|data-(?:next|previous)|class\s*=\s*["'][^"']*\b(?:next|previous)-slide\b)/i.test(html)) {
+      errors.push('Presentation requires accessible next/previous slide navigation.');
+    }
+    if (!/@media\s+print/i.test(html) || !/(?:break-after|page-break-after)\s*:/i.test(html)) {
+      errors.push('Presentation requires print-friendly slide page breaks.');
+    }
+  }
+  return errors;
 }
 
 let browserPromise;
@@ -106,8 +129,109 @@ async function inspectViewport(page, viewport) {
   return { ...metrics, screenshot: screenshot.toString('base64') };
 }
 
-async function renderAndValidate(html) {
-  const errors = validateHyperArtifactHtml(html);
+function parseJsonObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  const raw = String(value || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+export async function reviewHyperArtifactVisualQuality({
+  desktopScreenshot,
+  mobileScreenshot,
+  intent = {},
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  if (!desktopScreenshot || !mobileScreenshot) {
+    return { reviewed: false, passed: true, reason: 'screenshots_unavailable' };
+  }
+  const model = String(
+    process.env.HYPER_VISUAL_CRITIC_MODEL
+      || process.env.HIVEMIND_VISION_OR_MODEL
+      || DEFAULT_VISUAL_CRITIC_MODEL,
+  ).trim();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25_000);
+  try {
+    const response = await gatewayFirstFetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(process.env.OPENROUTER_API_KEY
+          ? { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` }
+          : {}),
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 900,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'You are the acceptance reviewer for a premium, purpose-authored HTML artifact.',
+              'Judge the screenshots, not the intent of the author. A technically valid report template is not enough.',
+              'Pass only work that could be shown to a demanding executive without apology.',
+              'Score visual hierarchy, first-viewport thesis, purpose-specific composition, information design,',
+              'typography, spacing, density, responsive adaptation, and polish.',
+              'Reject stacked generic cards, crude diagrams, huge empty areas, raw markup, placeholder citations,',
+              'decorative metrics without evidence, collapsed primary content, and controls that look unfinished.',
+              'Do not require a particular theme, color palette, illustration style, or external imagery.',
+              'Return JSON only: {"pass":boolean,"score":integer_0_to_100,"issues":[up_to_5_specific_repair_instructions],"strengths":[up_to_3_strings]}.',
+            ].join(' '),
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `Artifact intent: ${JSON.stringify(intent || {}).slice(0, 3000)}\nReview desktop and mobile together. The minimum passing score is ${VISUAL_QUALITY_PASS_SCORE}.`,
+              },
+              { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${desktopScreenshot}` } },
+              { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${mobileScreenshot}` } },
+            ],
+          },
+        ],
+      }),
+    }, { fetchImpl });
+    if (!response.ok) throw new Error(`visual_critic_http_${response.status}`);
+    const payload = await response.json();
+    const verdict = parseJsonObject(payload?.choices?.[0]?.message?.content);
+    if (!verdict || !Number.isFinite(Number(verdict.score)) || typeof verdict.pass !== 'boolean') {
+      throw new Error('visual_critic_invalid_response');
+    }
+    const score = Math.max(0, Math.min(100, Math.round(Number(verdict.score))));
+    const issues = Array.isArray(verdict.issues)
+      ? verdict.issues.map((item) => String(item).trim()).filter(Boolean).slice(0, 5)
+      : [];
+    const strengths = Array.isArray(verdict.strengths)
+      ? verdict.strengths.map((item) => String(item).trim()).filter(Boolean).slice(0, 3)
+      : [];
+    return {
+      reviewed: true,
+      passed: verdict.pass && score >= VISUAL_QUALITY_PASS_SCORE,
+      score,
+      issues,
+      strengths,
+      model,
+    };
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: 'hyper_artifact.visual_review_unavailable',
+      error: String(error?.message || error).slice(0, 300),
+    }));
+    return { reviewed: false, passed: true, reason: 'critic_unavailable', model };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function renderAndValidate(html, intent) {
+  const errors = [
+    ...validateHyperArtifactHtml(html),
+    ...validateHyperArtifactMedium(html, intent),
+  ];
   if (errors.length) return { ok: false, errors };
   const browser = await browserInstance();
   const page = await browser.newPage();
@@ -132,7 +256,28 @@ async function renderAndValidate(html) {
     if (mobile.horizontal_overflow) errors.push(`Mobile has horizontal overflow (${mobile.scroll_width}px).`);
     if (desktop.h1_count !== 1) errors.push(`Artifact must render exactly one h1; found ${desktop.h1_count}.`);
     if (consoleErrors.length) errors.push(...consoleErrors.slice(0, 5).map((error) => `Browser error: ${error}`));
-    return { ok: errors.length === 0, errors: [...new Set(errors)], desktop, mobile, console_errors: consoleErrors };
+    let visualQuality = { reviewed: false, passed: true, reason: 'technical_validation_failed' };
+    if (errors.length === 0) {
+      visualQuality = await reviewHyperArtifactVisualQuality({
+        desktopScreenshot: desktop.screenshot,
+        mobileScreenshot: mobile.screenshot,
+        intent,
+      });
+      if (!visualQuality.passed) {
+        const issues = visualQuality.issues.length
+          ? visualQuality.issues
+          : ['The rendered artifact does not meet the authored visual quality threshold.'];
+        errors.push(...issues.map((issue) => `Visual quality review (${visualQuality.score}/100): ${issue}`));
+      }
+    }
+    return {
+      ok: errors.length === 0,
+      errors: [...new Set(errors)],
+      desktop,
+      mobile,
+      console_errors: consoleErrors,
+      visual_quality: visualQuality,
+    };
   } finally {
     await page.close().catch(() => {});
   }
@@ -144,9 +289,10 @@ export async function persistHyperArtifactCandidate({ prisma, turnId, candidate 
     return { ok: false, errors: ['Unsupported artifact candidate contract.'] };
   }
   const html = String(candidate.html || '');
+  const intent = candidate.intent && typeof candidate.intent === 'object' ? candidate.intent : {};
   let validation;
   try {
-    validation = await renderAndValidate(html);
+    validation = await renderAndValidate(html, intent);
   } catch (error) {
     return { ok: false, errors: [`Browser validation failed: ${String(error.message || error).slice(0, 500)}`] };
   }
@@ -158,7 +304,6 @@ export async function persistHyperArtifactCandidate({ prisma, turnId, candidate 
   });
   if (!turn?.room) return { ok: false, errors: ['Artifact turn scope could not be resolved.'] };
   const checksum = crypto.createHash('sha256').update(html).digest('hex');
-  const intent = candidate.intent && typeof candidate.intent === 'object' ? candidate.intent : {};
   const { screenshot: _desktopScreenshot, ...desktopReceipt } = validation.desktop;
   const { screenshot: _mobileScreenshot, ...mobileReceipt } = validation.mobile;
   const payload = {
@@ -180,6 +325,7 @@ export async function persistHyperArtifactCandidate({ prisma, turnId, candidate 
       console_errors: validation.console_errors.length,
       desktop: desktopReceipt,
       mobile: mobileReceipt,
+      visual_quality: validation.visual_quality,
       content_sha256: checksum,
     },
   };

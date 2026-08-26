@@ -227,6 +227,7 @@ test('recall route forwards typed source and time blocks unchanged', async () =>
       entities: ['Kruti'], memory_types: ['decision'], scope_filter: 'project',
       relationship_types: ['Supports'], relationship_direction: 'incoming',
       max_memories: 5,
+      target_memory_id: 'memory-1',
     },
     userId: 'user-1', orgId: 'org-1', prisma: {}, jsonResponse,
     ensurePersistedMemoryOrFail: () => true, rateLimitAllowOrgRequest: () => true,
@@ -243,7 +244,8 @@ test('recall route forwards typed source and time blocks unchanged', async () =>
         mode: 'explain', legacy: false, max_graph_hops: 0, latency_budget_ms: 3000,
         source: { requested: true, ...source }, time: { mode: 'known_at', ...time },
         entities: ['Kruti'], entity_filter_mode: 'must', memory_types: ['decision'],
-        scope_filter: 'project', relationships: { requested: true, types: ['supports'], direction: 'incoming' },
+        scope_filter: 'project', target_memory_id: 'memory-1',
+        relationships: { requested: true, types: ['supports'], direction: 'incoming' },
       }),
       recall: async (_query, options) => { forwarded = options; return { memories: [], evidence: [], live: [], trace: {} }; },
       loadGraph: async () => ({ items: [] }),
@@ -258,6 +260,7 @@ test('recall route forwards typed source and time blocks unchanged', async () =>
   assert.equal(forwarded.entity_filter_mode, 'must');
   assert.equal(forwarded.scope_filter, 'project');
   assert.equal(forwarded.limit, 5);
+  assert.equal(forwarded.target_memory_id, 'memory-1');
   assert.deepEqual(forwarded.relationships, { requested: true, types: ['supports'], direction: 'incoming' });
 });
 

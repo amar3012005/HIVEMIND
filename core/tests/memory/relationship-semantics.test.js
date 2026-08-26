@@ -199,6 +199,7 @@ test('canonical linker prompt requests rich source-supported entities from every
   assert.match(capturedPrompt, /specific components, subsystems, or named features/);
   assert.match(capturedPrompt, /exact model names, components, mechanisms, quantities, units/);
   assert.match(capturedPrompt, /never infer the mechanism from co-occurrence alone/);
+  assert.match(capturedPrompt, /If no CANDIDATE matches, return "links":\[\] but STILL extract/);
   const stored = await store.getMemory(memory.id);
   assert.ok(stored.tags.includes('entity:leo'));
   assert.ok(stored.tags.includes('entity:insulated-container'));

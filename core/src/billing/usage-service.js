@@ -84,11 +84,32 @@ export class UsageService {
     const month = new Date().toISOString().slice(0, 7);
     const day = new Date().toISOString().slice(0, 10);
     const m = entry.month, d = entry.daily, c = entry.cumulative;
-    await this.prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe(`INSERT INTO "OrgUsage" ("orgId", "month", "${m}", "updatedAt") VALUES ($1::uuid, $2, $3, NOW()) ON CONFLICT ("orgId", "month") DO UPDATE SET "${m}" = "OrgUsage"."${m}" + $3, "updatedAt" = NOW()`, orgId, month, quantity);
-      await tx.$executeRawUnsafe(`INSERT INTO "OrgUsageDaily" ("orgId", "day", "${d}", "updatedAt") VALUES ($1::uuid, $2::date, $3, NOW()) ON CONFLICT ("orgId", "day") DO UPDATE SET "${d}" = "OrgUsageDaily"."${d}" + $3, "updatedAt" = NOW()`, orgId, day, quantity);
-      if (c) await tx.$executeRawUnsafe(`INSERT INTO hivemind.org_usage_cumulative (org_id, "${c}") VALUES ($1::uuid, $2) ON CONFLICT (org_id) DO UPDATE SET "${c}" = hivemind.org_usage_cumulative."${c}" + $2, updated_at = NOW()`, orgId, quantity);
-    });
+    // Keep projection atomic without an interactive Prisma transaction. Under
+    // concurrent chat settlement the former three round trips could wait on a
+    // row lock until Prisma's 5s transaction lease expired, producing a noisy
+    // P2028 even though the user-facing turn had already succeeded. One DML CTE
+    // is one server-side statement/transaction and cannot expire between
+    // projection queries.
+    const cumulativeCte = c
+      ? `, cumulative_projection AS (
+          INSERT INTO hivemind.org_usage_cumulative (org_id, "${c}") VALUES ($1::uuid, $4)
+          ON CONFLICT (org_id) DO UPDATE SET "${c}" = hivemind.org_usage_cumulative."${c}" + $4, updated_at = NOW()
+          RETURNING 1
+        )`
+      : '';
+    await this.prisma.$queryRawUnsafe(
+      `WITH monthly_projection AS (
+         INSERT INTO "OrgUsage" ("orgId", "month", "${m}", "updatedAt") VALUES ($1::uuid, $2, $4, NOW())
+         ON CONFLICT ("orgId", "month") DO UPDATE SET "${m}" = "OrgUsage"."${m}" + $4, "updatedAt" = NOW()
+         RETURNING 1
+       ), daily_projection AS (
+         INSERT INTO "OrgUsageDaily" ("orgId", "day", "${d}", "updatedAt") VALUES ($1::uuid, $3::date, $4, NOW())
+         ON CONFLICT ("orgId", "day") DO UPDATE SET "${d}" = "OrgUsageDaily"."${d}" + $4, "updatedAt" = NOW()
+         RETURNING 1
+       )${cumulativeCte}
+       SELECT 1 AS projected`,
+      orgId, month, day, quantity,
+    );
     if (metric === 'tokens') {
       const metadata = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
       await this.usageTracker?.recordKeyUsage?.(

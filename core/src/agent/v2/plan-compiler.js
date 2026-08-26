@@ -34,6 +34,11 @@ export function compileNativePlan(plan, message) {
     side_effect_policy: plan.completion.approval_required ? 'approval_required' : 'read_only',
     source: descriptiveSourceHint ? null : plan.references.source,
     time: temporalDecision(plan), aggregate: plan.aggregate,
+    web_fallback: plan.external_fallback?.allowed ? {
+      allowed: true,
+      query: plan.external_fallback.query,
+      reason: plan.external_fallback.reason,
+    } : { allowed: false, query: null, reason: null },
     relation: operation === 'relation_between' ? { entities: plan.relation_entities, source: plan.references.source, time: temporalDecision(plan) } : null,
     save: operation === 'save' ? {
       title: plan.memory.title, content: plan.memory.content, memory_type: plan.memory.memory_type || 'fact',

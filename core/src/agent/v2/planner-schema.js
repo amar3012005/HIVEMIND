@@ -38,6 +38,10 @@ export function createNativePlanTool() {
       }, required: ['needs_user_input', 'approval_required'] },
       relation_entities: { type: 'array', items: { type: 'string' }, maxItems: 6 },
       aggregate: { type: ['object', 'null'], description: 'Non-null only for a complete canonical registry count/enumeration beneath a named parent. Null for ordinary lists, arithmetic, comparisons, compatibility filters, and document questions.', additionalProperties: false, properties: { parent: nullableString, kind: nullableString } },
+      external_fallback: { type: 'object', additionalProperties: false, description: 'Optional public-web fallback policy. Recall always runs first; the server may search at most once only after a verified workspace gap.', properties: {
+        allowed: { type: 'boolean' }, query: nullableString,
+        reason: { type: ['string', 'null'], enum: ['explicit_web', 'current_public', 'competitor_public', null] },
+      }, required: ['allowed', 'query', 'reason'] },
       memory: { type: ['object', 'null'], additionalProperties: false, properties: {
         title: nullableString, content: nullableString, memory_type: nullableString,
         scope: { type: ['string', 'null'], enum: ['personal', 'project', 'team', 'organization', null], description: 'Explicit destination stated by the user. MUST be null when the user did not state a destination; the server owns the scope chooser.' }, project_id: nullableString,
@@ -48,6 +52,6 @@ export function createNativePlanTool() {
         preferences: { type: 'array', items: { type: 'string' }, maxItems: 12 },
       } },
       direct_response: nullableString, context_free_certificate: { type: 'boolean' },
-    }, required: ['schema_version', 'capability', 'operation', 'response', 'references', 'time', 'steps', 'completion', 'relation_entities', 'aggregate', 'memory', 'direct_response', 'context_free_certificate'] },
+    }, required: ['schema_version', 'capability', 'operation', 'response', 'references', 'time', 'steps', 'completion', 'relation_entities', 'aggregate', 'external_fallback', 'memory', 'direct_response', 'context_free_certificate'] },
   } };
 }

@@ -56,6 +56,7 @@ import {
   resolveChatSynthesisModel,
 } from '../llm/chat-provider.js';
 import { remainingStageMs, runWithStageDeadline, StageDeadlineError } from '../runtime/stage-deadline.js';
+import { publicWebFallbackEligible, webResultPacket } from './web-fallback.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -946,18 +947,50 @@ async function execConnectorRead(bus, plan, ctx, { beforeDeadline, recordTool, o
   }
 }
 
-// (d) Web — only when planner explicitly flagged needs_web AND we got <2
-// memories. NOTE: unwrapped dispatch (no beforeDeadline, no startTool) — preserve
-// that asymmetry (R9/R10). memoriesById.size read AFTER all prior merges (R8).
-async function execWeb(bus, plan, ctx, { recordTool }) {
-  if (!(plan.needs_web && bus.memoriesById.size < 2 && plan.sub_queries.length > 0)) return;
+async function waitForWebJob(jobId, ctx, remaining) {
+  while (remaining() > 0) {
+    const job = await ctx.webJobStore.get(jobId, { userId: ctx.userId, orgId: ctx.orgId });
+    if (!job || ['failed', 'cancelled'].includes(job.status)) return job;
+    if (job.status === 'succeeded') return job;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(150, remaining())));
+  }
+  return null;
+}
+
+// Public web is a fallback lane, never a competing first retrieval system.
+// Run it only after deterministic recall coverage proves a genuine gap. A
+// timeout/outage is not a gap, and evidence-only hits count as workspace
+// evidence just as much as memories do.
+async function execWeb(bus, plan, ctx, { recordTool, startTool, remaining }, coverage) {
+  const policy = plan.web_fallback || {};
+  if (!publicWebFallbackEligible({
+    plan, coverage,
+    hasRuntime: Boolean(ctx.runWebSearchJob && ctx.webJobStore),
+    remainingMs: remaining(),
+  })) return;
   try {
-    const args = { query: plan.sub_queries[0], limit: 5 };
+    const args = { query: policy.query, limit: 8 };
+    startTool('hivemind_web_search', args);
     const r = await dispatchTool('hivemind_web_search', args, ctx);
-    recordTool('hivemind_web_search', args, r?.job_id ? `job ${(r.job_id || '').slice(0, 8)}` : 'submitted', r);
-    return { webJob: r };
+    if (!r?.job_id) {
+      recordTool('hivemind_web_search', args, `error: ${r?.error || 'web_job_not_created'}`, null);
+      return { webJob: r };
+    }
+    const job = await waitForWebJob(r.job_id, ctx, remaining);
+    const packet = webResultPacket(job, policy.query);
+    if (packet) {
+      bus.addPacket(packet);
+      bus.mergeEvidence(packet.sourceSections, { keyMode: 'withPage' });
+      bus.mergeRankedCandidates(packet.sourceSections.map((section) => ({
+        kind: 'evidence', segment_id: section.segment_id, score: section.score || 0,
+      })));
+    }
+    recordTool('hivemind_web_search', args,
+      packet ? `${packet.sourceSections.length} public web sources` : `job ${job?.status || 'incomplete'}`,
+      packet ? job : null);
+    return { webJob: job || r, webPacket: packet };
   } catch (err) {
-    recordTool('hivemind_web_search', { query: plan.sub_queries[0] }, `error: ${err.message}`, null);
+    recordTool('hivemind_web_search', { query: policy.query }, `error: ${err.message}`, null);
   }
 }
 
@@ -1346,9 +1379,17 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // Connector reads use the same AgentScope-style toolkit as writes.
   await execConnectorRead(bus, plan, ctx, helpers);
 
-  // (d) Web — only when planner flagged needs_web AND we got <2 memories.
-  const webPatch = await execWeb(bus, plan, ctx, helpers);
+  // (d) Public web fallback — after recall and semantic coverage only.
+  const webPatch = await execWeb(bus, plan, ctx, helpers, coverage);
   const webJob = webPatch?.webJob ?? null;
+  if (webPatch?.webPacket) {
+    coverage = assessRecallCoverage({
+      plan: { ...plan, source: null },
+      memories: [...memoriesById.values()], evidence: evidenceItems,
+      relationships: [...edgesByKey.values()],
+    });
+    coverage = { ...coverage, external_web_used: true, workspace_gap: true };
+  }
 
   // (e) Save intent — fire async after answer (handled in caller).
 
@@ -1599,6 +1640,8 @@ export function buildChatCitationSources(recallPackets = [], claims = []) {
         page: citation.page ?? section.page ?? null,
         source_type: citation.source_type || (citation.memory_id ? 'memory_evidence' : 'document_evidence'),
         score: Number.isFinite(section.score) ? section.score : null,
+        url: citation.url || section.url || null,
+        retrieved_at: citation.retrieved_at || section.retrieved_at || null,
       });
     }
   }
@@ -2175,11 +2218,11 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // Fresher than memory snapshots; agent should cite these when the user asks
   // about recent emails, meetings, or docs.
   const liveLines = (evidence.live || []).slice(0, 10).map((li) => {
-    const src = (li.source || '?').toUpperCase();
+    const src = String(li.source || '?').toUpperCase();
     const date = li.date ? ` (${String(li.date).slice(0, 19)})` : '';
     const from = li.from ? ` from ${li.from}` : '';
-    const title = (li.title || '').replace(/\n/g, ' ').slice(0, 100);
-    const body = (li.snippet || '').replace(/\n/g, ' ').slice(0, 320);
+    const title = String(li.title || '').replace(/\n/g, ' ').slice(0, 100);
+    const body = String(li.snippet || '').replace(/\n/g, ' ').slice(0, 320);
     return `[LIVE/${src}]${date}${from} "${title}" — ${body}`;
   }).join('\n');
 
@@ -2188,7 +2231,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // pitch decks / catalogs even when only 5-20 chunks made it into the
   // canonical memory layer.
   const evLines = (evidence.evidence || []).slice(0, evidenceTopK).map((e, index) => {
-    const doc = (e.document_title || 'unknown.pdf').replace(/\n/g, ' ').slice(0, 80);
+    const doc = String(e.document_title || 'unknown.pdf').replace(/\n/g, ' ').slice(0, 80);
     const page = e.page ? ` p.${e.page}` : '';
     // Evidence retrieval produces a query-centred snippet. Prefer it over the
     // start of a long source segment so exact policy questions retain the
@@ -2232,7 +2275,7 @@ export async function answerStep({ message, history, evidence, plan, language, a
   const chainLines = (evidence.synthesis_chains || []).slice(0, 5).map((c) => {
     const head = `[${(c.synthesis_id || '').slice(0, 8)}] (conf=${c.synthesis_confidence ?? '?'} rev=${c.synthesis_revision ?? '?'}) ${c.synthesis_title || ''}`;
     const evRows = (c.evidence || []).slice(0, 4).map(e =>
-      `      ▸ [${(e.id || '').slice(0, 8)}] ${(e.title || '').slice(0, 60)} — ${(e.content || '').replace(/\n/g, ' ').slice(0, 180)}`
+      `      ▸ [${String(e.id || '').slice(0, 8)}] ${String(e.title || '').slice(0, 60)} — ${String(e.content || '').replace(/\n/g, ' ').slice(0, 180)}`
     ).join('\n');
     return `  ▶ ${head}\n${evRows}`;
   }).join('\n');
@@ -3326,6 +3369,7 @@ export async function runReactAgentV2({
     const nativeV2Input = async () => ({
       message, history, language, apiKey, signal: abortCtrl.signal,
       profileContext: await profilePreloadPromise, projectCatalog,
+      orgId: ctx.orgId, userId: ctx.userId, threadId: ctx.threadId || null,
       timezone: ctx.timezone || ctx.accessContext?.timezone || 'UTC', now: new Date().toISOString(),
     });
     if (nativeV2Mode === 'serve') {

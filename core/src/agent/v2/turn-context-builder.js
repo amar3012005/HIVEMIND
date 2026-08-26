@@ -13,6 +13,8 @@ export function buildTurnContext(input = {}) {
     clock: String(input.now || new Date().toISOString()),
     timezone: String(input.timezone || 'UTC').slice(0, 64),
     compact_profile: String(input.profileContext || '').slice(0, 1800),
+    recent_source_refs: (Array.isArray(input.recentSourceRefs) ? input.recentSourceRefs : []).slice(-8)
+      .map((source) => ({ title: source.title, url: source.url, retrieved_at: source.retrieved_at || null })),
     authorized_projects: (Array.isArray(input.projectCatalog) ? input.projectCatalog : []).slice(0, 24)
       .map((project) => ({ id: project.id, name: project.name, slug: project.slug || null })),
   });

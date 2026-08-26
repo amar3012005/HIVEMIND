@@ -24057,6 +24057,7 @@ exit \$RC
                       allowGeneralKnowledge: body?.allow_general_knowledge === true,
                       ctx: {
                         userId, orgId,
+                        threadId: body?.thread_id || body?.conversation_id || null,
                         projectId: requestProjectId,
                         scopeFilter: requestScopeFilter,
                         prisma,
@@ -24084,6 +24085,13 @@ exit \$RC
                       const tot = Number(result?.usage?.total_tokens) || 0;
                       if (tot > 0) planEnforcer?.recordUsage(orgId, 'tokens', tot);
                     } catch { /* metering never breaks the stream */ }
+                    if (!useTools && (body?.thread_id || body?.conversation_id)) {
+                      const { recordCompactAssistantTurn } = await import('./agent/v2/compact-context.js');
+                      await recordCompactAssistantTurn({
+                        orgId, userId, threadId: body.thread_id || body.conversation_id,
+                        response: result?.response, sources: result?.sources || [],
+                      });
+                    }
                     emit({ type: 'done', ...result });
                     await settleChatCredit();
                   } catch (agentErr) {
@@ -24114,6 +24122,7 @@ exit \$RC
                   allowGeneralKnowledge: body?.allow_general_knowledge === true,
                   ctx: {
                     userId, orgId,
+                    threadId: body?.thread_id || body?.conversation_id || null,
                     projectId: requestProjectId,
                     scopeFilter: requestScopeFilter,
                     prisma,
@@ -24154,6 +24163,13 @@ exit \$RC
 
                 if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
                   result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
+                }
+                if (!useTools && (body?.thread_id || body?.conversation_id)) {
+                  const { recordCompactAssistantTurn } = await import('./agent/v2/compact-context.js');
+                  await recordCompactAssistantTurn({
+                    orgId, userId, threadId: body.thread_id || body.conversation_id,
+                    response: result?.response, sources: result?.sources || [],
+                  });
                 }
                 await settleChatCredit();
                 return jsonResponse(res, result);
@@ -25520,6 +25536,13 @@ if (shouldStartHttpServer()) {
 `);
 
   ensureQdrantSearchIndexes();
+  // Prepare the bounded Native V2 conversation checkpointer during boot so a
+  // user's first chat turn never pays schema setup latency. It is an optional
+  // context accelerator: request-provided compact history remains the safe
+  // degraded path if Postgres checkpointing is temporarily unavailable.
+  import('./agent/v2/compact-context.js')
+    .then(({ warmCompactContextCheckpoint }) => warmCompactContextCheckpoint())
+    .catch((error) => console.warn(`[chat-context] boot warmup degraded: ${error.message}`));
 
   // Connector Runtime durable-sync worker loop (Phase 10). Gated by
   // CONNECTOR_RUNTIME_SYNC (default OFF → inert). Leases + drains one

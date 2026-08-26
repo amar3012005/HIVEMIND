@@ -6,15 +6,35 @@ function documentIdentity(item) {
   const tags = Array.isArray(item?.tags) ? item.tags : [];
   const taggedId = tags.find((tag) => typeof tag === 'string' && tag.startsWith('doc-id:'));
   const taggedTitle = tags.find((tag) => typeof tag === 'string' && tag.startsWith('filename:'));
-  const explicitTitle = item?.document_title || item?.documentTitle || null;
+  const metadata = {
+    ...(item?.metadata || {}),
+    ...(item?.sourceMetadata || {}),
+    ...(item?.source_metadata || {}),
+  };
+  const citation = item?.citation || item?.source || {};
+  const explicitTitle = item?.document_title || item?.documentTitle
+    || metadata.source_title || metadata.document_title || metadata.filename
+    || citation.source_label || citation.title || null;
   return {
-    document_id: item?.source_metadata?.document_id || item?.document_id || item?.documentId
+    document_id: metadata.document_id || metadata.source_document_id || item?.document_id || item?.documentId
       || (taggedId ? taggedId.slice('doc-id:'.length) : null),
     title: explicitTitle
       || (taggedTitle ? taggedTitle.slice('filename:'.length) : null)
       || item?.title || null,
-    anchored: !!(taggedId || taggedTitle || explicitTitle || item?.source_metadata?.document_id || item?.document_id || item?.documentId),
+    anchored: !!(taggedId || taggedTitle || explicitTitle || metadata.document_id
+      || metadata.source_document_id || item?.document_id || item?.documentId),
   };
+}
+
+function titleMatches(actual, expected) {
+  const stored = normalized(actual);
+  const requested = normalized(expected);
+  if (!stored || !requested) return false;
+  return stored === requested
+    || stored.startsWith(`${requested} :`)
+    || stored.startsWith(`${requested}:`)
+    || stored.startsWith(`${requested} —`)
+    || stored.startsWith(`${requested} -`);
 }
 
 function sourceKindMatches(item, expectedKind) {
@@ -51,14 +71,14 @@ export function assessRecallCoverage({ plan = {}, memories = [], evidence = [], 
   // memory-only top-K result to fail source coverage and skip final synthesis.
   const sourceItems = [...memories, ...evidence];
   const sourceIds = new Set(sourceItems.map((item) => documentIdentity(item).document_id).filter(Boolean));
-  const sourceTitles = new Set(sourceItems.map((item) => normalized(documentIdentity(item).title)).filter(Boolean));
+  const sourceTitles = sourceItems.map((item) => documentIdentity(item).title).filter(Boolean);
   // A source boundary can name a stored document, or refer to a direct upload
   // such as "the latest image". The latter is represented by its promoted
   // memory before it has a KnowledgeDocument row, so document identity alone
   // would wrongly discard the exact retrieved memory as "not covered".
   const sourceCovered = !source || (
     (source.document_id && sourceIds.has(source.document_id))
-    || (source.title && sourceTitles.has(normalized(source.title)))
+    || (source.title && sourceTitles.some((title) => titleMatches(title, source.title)))
     || (source.kind && [...memories, ...evidence].some((item) => sourceKindMatches(item, source.kind)))
   );
 

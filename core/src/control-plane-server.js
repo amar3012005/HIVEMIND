@@ -110,7 +110,7 @@ import {
   handleHyperTurnStreamRoute,
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
-import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSessionSecret } from './security/internal-auth.js';
+import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSecret, requireSessionSecret } from './security/internal-auth.js';
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
@@ -1282,6 +1282,13 @@ function requestsGrowthStage(message) {
 
 const connectorStore = prisma ? new ConnectorStore(prisma) : null;
 const ADMIN_SECRET = requireAdminSecret();
+// Keep the platform-console passcode separate from HIVEMIND_ADMIN_SECRET.
+// The latter also authenticates internal administrative paths and must remain
+// high-entropy; a human-entered console code must never silently replace it.
+const PLATFORM_ADMIN_PASSCODE = requireSecret('HIVEMIND_PLATFORM_ADMIN_PASSCODE', [], {
+  allowDevFallback: true,
+  devFallback: '126301',
+});
 const PLATFORM_ADMIN_COOKIE = 'hm_platform_admin';
 const PLATFORM_ADMIN_TTL_SECONDS = 15 * 60;
 const PLATFORM_ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -3127,8 +3134,11 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/admin/api/platform/unlock' && req.method === 'POST') {
     if (platformUnlockLimited(req)) return jsonResponse(res, { error: 'Too many attempts. Try again later.' }, 429);
     const body = await parseBody(req).catch(() => ({}));
-    const operator = normalizePlatformOperator(body?.operator_name);
-    if (!secretsMatch(body?.passkey, ADMIN_SECRET) || !operator) {
+    // Platform Admin is a single operator console. Do not take an arbitrary
+    // display name from the browser: it was not identity proof and made the
+    // compact/mobile unlock unnecessarily two-step.
+    const operator = 'platform_admin';
+    if (!secretsMatch(body?.passcode, PLATFORM_ADMIN_PASSCODE)) {
       recordPlatformUnlockFailure(req);
       return jsonResponse(res, { error: 'Unauthorized' }, 401);
     }

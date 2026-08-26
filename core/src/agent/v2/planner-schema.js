@@ -42,6 +42,7 @@ export function createNativePlanTool() {
         allowed: { type: 'boolean' }, query: nullableString,
         reason: { type: ['string', 'null'], enum: ['explicit_web', 'current_public', 'competitor_public', null] },
       }, required: ['allowed', 'query', 'reason'] },
+      uses_recent_public_sources: { type: 'boolean', description: 'True only when this turn refers to the immediately preceding public-web answer or asks which public source was used.' },
       memory: { type: ['object', 'null'], additionalProperties: false, properties: {
         title: nullableString, content: nullableString, memory_type: nullableString,
         scope: { type: ['string', 'null'], enum: ['personal', 'project', 'team', 'organization', null], description: 'Explicit destination stated by the user. MUST be null when the user did not state a destination; the server owns the scope chooser.' }, project_id: nullableString,
@@ -52,6 +53,6 @@ export function createNativePlanTool() {
         preferences: { type: 'array', items: { type: 'string' }, maxItems: 12 },
       } },
       direct_response: nullableString, context_free_certificate: { type: 'boolean' },
-    }, required: ['schema_version', 'capability', 'operation', 'response', 'references', 'time', 'steps', 'completion', 'relation_entities', 'aggregate', 'external_fallback', 'memory', 'direct_response', 'context_free_certificate'] },
+    }, required: ['schema_version', 'capability', 'operation', 'response', 'references', 'time', 'steps', 'completion', 'relation_entities', 'aggregate', 'external_fallback', 'uses_recent_public_sources', 'memory', 'direct_response', 'context_free_certificate'] },
   } };
 }

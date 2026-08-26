@@ -27,7 +27,7 @@ export function createNativePlannerGraph({ planner = planNativeTurn, compactCont
       if (validation.status === 'invalid') throw new Error(validation.error);
       return { validation, validatedPlan: validation.plan };
     })
-    .addNode('compile_plan', async (state) => ({ decision: compileNativePlan(state.validatedPlan, state.input.message) }))
+    .addNode('compile_plan', async (state) => ({ decision: compileNativePlan(state.validatedPlan, state.input.message, state.context) }))
     .addEdge(START, 'turn_context')
     .addEdge('turn_context', 'capability_catalog')
     .addEdge('capability_catalog', 'semantic_planner')

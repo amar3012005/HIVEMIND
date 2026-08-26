@@ -10,7 +10,7 @@ function temporalDecision(plan) {
   return null;
 }
 
-export function compileNativePlan(plan, message) {
+export function compileNativePlan(plan, message, context = {}) {
   const step = plan.steps[0];
   const descriptiveSourceHint = plan.operation === 'source_read'
     && plan.references.source?.title
@@ -39,6 +39,12 @@ export function compileNativePlan(plan, message) {
       query: plan.external_fallback.query,
       reason: plan.external_fallback.reason,
     } : { allowed: false, query: null, reason: null },
+    recent_public_sources: plan.uses_recent_public_sources
+      ? (context.recent_source_refs || []).slice(-8)
+      : [],
+    recent_context_answer: plan.uses_recent_public_sources
+      ? [...(context.history || [])].reverse().find((turn) => turn.role === 'assistant')?.content || null
+      : null,
     relation: operation === 'relation_between' ? { entities: plan.relation_entities, source: plan.references.source, time: temporalDecision(plan) } : null,
     save: operation === 'save' ? {
       title: plan.memory.title, content: plan.memory.content, memory_type: plan.memory.memory_type || 'fact',

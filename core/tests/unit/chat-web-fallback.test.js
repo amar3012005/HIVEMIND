@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { promoteWebEvidenceWindow, publicWebFallbackEligible, webResultPacket } from '../../src/agent/web-fallback.js';
+import { promoteWebEvidenceWindow, publicWebFallbackEligible, recentPublicContextPacket, webResultPacket } from '../../src/agent/web-fallback.js';
 
 const plan = { needs_web: true, web_fallback: { allowed: true, query: 'current Acme pricing', reason: 'current_public' } };
 
@@ -9,6 +9,15 @@ test('public web is recall-first and never treats a retrieval outage as a knowle
   assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: true }, hasRuntime: true, remainingMs: 1000 }), false);
   assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false, retrieval_timed_out: true }, hasRuntime: true, remainingMs: 1000 }), false);
   assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false, retrieval_unavailable: true }, hasRuntime: true, remainingMs: 1000 }), false);
+});
+
+test('recent public checkpoint context becomes bounded cited evidence', () => {
+  const packet = recentPublicContextPacket([
+    { title: 'Pricing', url: 'https://example.com/pricing', retrieved_at: '2026-08-26T10:00:00Z' },
+  ], 'The public price is EUR 10.');
+  assert.equal(packet.sourceSections[0].content, 'The public price is EUR 10.');
+  assert.equal(packet.citations[0].url, 'https://example.com/pricing');
+  assert.equal(packet.citations[0].source_type, 'public_web');
 });
 
 test('successful web evidence is visible inside an already-full synthesis window', () => {

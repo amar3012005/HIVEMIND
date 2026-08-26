@@ -56,7 +56,7 @@ import {
   resolveChatSynthesisModel,
 } from '../llm/chat-provider.js';
 import { remainingStageMs, runWithStageDeadline, StageDeadlineError } from '../runtime/stage-deadline.js';
-import { promoteWebEvidenceWindow, publicWebFallbackEligible, webResultPacket } from './web-fallback.js';
+import { promoteWebEvidenceWindow, publicWebFallbackEligible, recentPublicContextPacket, webResultPacket } from './web-fallback.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -1152,6 +1152,12 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // inline `if(!has)set` fragments keep compiling. Step 2 routes each fragment
   // through the bus.merge* methods one accumulator at a time.
   const { memoriesById, liveItems, evidenceItems, edgesByKey, synthesisChains, recallPackets, coMentions, rankedCandidates, recallTelemetry } = bus;
+  const recentContextPacket = recentPublicContextPacket(plan.recent_public_sources, plan.recent_context_answer);
+  if (recentContextPacket) {
+    bus.addPacket(recentContextPacket);
+    bus.mergeEvidence(recentContextPacket.sourceSections, { keyMode: 'withPage' });
+    promoteWebEvidenceWindow(bus.evidenceItems, bus.rankedCandidates, recentContextPacket.sourceSections);
+  }
   let relationChecked = false;
   let relationResult = null;
   let activeDeadlineAt = deadlineAt;

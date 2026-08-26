@@ -1324,6 +1324,9 @@ const TOOL_HANDLERS = {
         requesterUserId: ctx.userId,
       },
     );
+    const explicitClaimIds = new Set(explicitClaims.map((claim) => claim.id).filter(Boolean));
+    const orderedMemories = [...memories.values()].sort((left, right) =>
+      Number(explicitClaimIds.has(right.id)) - Number(explicitClaimIds.has(left.id)));
     const sourceGroups = new Map();
     for (const [entity, ids] of memoryIdsByEntity.entries()) {
       for (const id of ids) {
@@ -1352,7 +1355,7 @@ const TOOL_HANDLERS = {
         entities: [...members.keys()], memory_ids: [...members.values()], verified_relation: false,
       }));
     const relationPacket = buildEvidencePacket({
-      memories: [...memories.values()], evidence: [...evidence.values()],
+      memories: orderedMemories, evidence: [...evidence.values()],
       graph: allEdges, live: [], plan: { operation: 'relation_between', entities },
       trace: { operation: 'relation_between' },
     });
@@ -1364,7 +1367,7 @@ const TOOL_HANDLERS = {
       co_mentions: sharedPaths.map((path) => ({ ...path, type: 'co_mention' })),
       verified_relation_found: directEdges.length > 0,
       grounded_relation_claim_found: explicitClaims.length > 0,
-      memories: [...memories.values()], evidence: [...evidence.values()],
+      memories: orderedMemories, evidence: [...evidence.values()],
       relationships: allEdges, evidence_packets: [relationPacket],
       coverage: {
         requested_entities: entities,

@@ -285,6 +285,7 @@ test('targeted timeline bypasses tenant inventory and returns its authorized anc
 
   assert.equal(inventoryCalls, 0);
   assert.deepEqual(result.memories.map((memory) => memory.id), [target.id]);
+  assert.deepEqual(result.evidence, []);
 });
 
 test('typed selectors and memory types survive plan recompilation', () => {

@@ -2746,7 +2746,7 @@ Memory type rules:
 Confidence: 0.55–1.0 only. Skip uncertain links.
 Reason: ≤80 chars plain English.
 At most one link per candidate index.
-If nothing matches: { "entities": [], "temporal": {}, "memory_type": null, "links": [] }.`;
+If no CANDIDATE matches, return "links":[] but STILL extract all supported entities, temporal anchors, and memory_type from NEW MEMORY. Return "entities":[] only when NEW MEMORY itself contains no supported entity.`;
 
     // Retry the Groq call on TRANSIENT failures (429 rate-limit, 5xx, and
     // network/timeout aborts). A single-attempt best-effort call meant any

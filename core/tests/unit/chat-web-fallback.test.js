@@ -11,6 +11,11 @@ test('public web is recall-first and never treats a retrieval outage as a knowle
   assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false, retrieval_unavailable: true }, hasRuntime: true, remainingMs: 1000 }), false);
 });
 
+test('an explicit web request searches once after recall even when internal context exists', () => {
+  const explicit = { ...plan, web_fallback: { ...plan.web_fallback, reason: 'explicit_web' } };
+  assert.equal(publicWebFallbackEligible({ plan: explicit, coverage: { complete: true }, hasRuntime: true, remainingMs: 1000 }), true);
+});
+
 test('public web packet retains bounded content, URLs and retrieval time for synthesis and explicit save', () => {
   const packet = webResultPacket({
     id: 'job-1', status: 'succeeded', completed_at: '2026-08-26T10:00:00Z',

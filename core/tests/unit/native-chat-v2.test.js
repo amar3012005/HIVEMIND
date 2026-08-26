@@ -226,6 +226,22 @@ test('validator keeps latest unnamed sources on recall instead of requiring an e
   assert.ok(result.repairs.includes('operation.selected_source'));
 });
 
+test('validator degrades incomplete temporal misroutes to recall instead of failing the turn', () => {
+  const snapshot = validateNativePlanResult(makePlan({
+    operation: 'snapshot', query: 'business model from pitch deck',
+    time: { semantics: 'snapshot', axis: 'known_time' },
+  }));
+  assert.equal(snapshot.plan.operation, 'recall');
+  assert.ok(snapshot.repairs.includes('operation.incomplete_snapshot'));
+
+  const range = validateNativePlanResult(makePlan({
+    operation: 'event_range', query: 'recent decisions',
+    time: { semantics: 'event_range', axis: 'event_time', start: null, end: null },
+  }));
+  assert.equal(range.plan.operation, 'recall');
+  assert.ok(range.repairs.some((repair) => ['time.incomplete_range', 'operation.incomplete_event_range'].includes(repair)));
+});
+
 test('LangGraph trajectory performs one planner call after deterministic context/catalog nodes', async () => {
   let calls = 0;
   const graph = createNativePlannerGraph({ planner: async ({ context, capabilityCatalog }) => { calls += 1; assert.equal(context.message, 'Who is Kruti?'); assert.match(capabilityCatalog, /workspace_read/); return { rawPlan: makePlan(), usage: { total_tokens: 42 } }; } });

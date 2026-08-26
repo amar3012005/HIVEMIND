@@ -193,6 +193,25 @@ function reconcileSemanticOperation(plan, repairs) {
     plan.operation = 'recall';
     repairs.push('operation.selected_source');
   }
+  // An incomplete temporal payload is not executable and must never make an
+  // ordinary workspace question fail with native_plan_missing_* after two
+  // identical planner attempts. With no usable boundary, the only safe
+  // read-only interpretation is ordinary typed recall of the unchanged query.
+  if (plan.operation === 'snapshot' && !plan.time.valid_at && !plan.time.known_at && !plan.time.start) {
+    plan.operation = 'recall';
+    plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
+    repairs.push('operation.incomplete_snapshot');
+  }
+  if (plan.operation === 'diff' && (!plan.time.start || !plan.time.end)) {
+    plan.operation = 'recall';
+    plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
+    repairs.push('operation.incomplete_diff');
+  }
+  if (plan.operation === 'event_range' && (!plan.time.start || !plan.time.end)) {
+    plan.operation = 'recall';
+    plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
+    repairs.push('operation.incomplete_event_range');
+  }
   // Aggregate is a completeness operator, not a synonym for "a lot of
   // detail". The planner can emit a schema-valid aggregate for a broad source
   // overview; that used to skip hybrid recall and end in the exact-count

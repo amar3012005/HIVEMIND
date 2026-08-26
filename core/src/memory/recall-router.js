@@ -449,8 +449,8 @@ export function resolveRecallPlan(input = {}) {
     },
     max_graph_hops: mode === 'fact' ? 0 : 1,
     max_memories: operation === 'timeline'
-      ? Math.min(Math.max(Number(input.limit) || 20, 1), 50)
-      : Math.min(Math.max(Number(input.limit) || 15, 1), 50),
+      ? Math.min(Math.max(Number(input.limit ?? input.max_memories) || 20, 1), 50)
+      : Math.min(Math.max(Number(input.limit ?? input.max_memories) || 15, 1), 50),
     context_budget: budget,
     // Evidence is a PARALLEL LANE in its own Qdrant collection — not an expensive
     // serial hop-2, which is what "fact is fast-only" was written for. So `fact` must

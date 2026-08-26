@@ -156,19 +156,22 @@ export function findExplicitRelationClaims(rows = [], entities = [], { requester
     const normalizedText = normalizeEntity(text);
     const mentioned = requested.filter((entity) => normalizedText.includes(entity));
     const authoredByRequester = requesterUserId && row._author_user_id === requesterUserId;
-    const firstPersonResolved = mentioned.length >= 1
+    const firstPersonCandidate = mentioned.length >= 1
       && requesterEntities.some((entity) => !mentioned.includes(entity))
-      && FIRST_PERSON.test(text)
-      && (isUserAssertion(row) || authoredByRequester);
-    if (mentioned.length < 2 && !firstPersonResolved) return [];
+      && FIRST_PERSON.test(text);
+    const firstPersonResolved = firstPersonCandidate && (isUserAssertion(row) || authoredByRequester);
+    if (mentioned.length < 2 && !firstPersonCandidate) return [];
     return [{
       id: row.id || row.segment_id || row.segmentId || null,
-      type: firstPersonResolved ? 'explicit_user_claim' : 'explicit_relation_claim',
+      type: firstPersonResolved ? 'explicit_user_claim'
+        : firstPersonCandidate ? 'legacy_unresolved_relation_claim' : 'explicit_relation_claim',
       entities,
       text: safeText(row.content || row.snippet || row.title).trim(),
       source_title: safeText(row.document_title || row.title || '').trim() || null,
-      citation_status: (isUserAssertion(row) || authoredByRequester) ? 'user_assertion' : 'stored_record',
+      citation_status: firstPersonResolved ? 'user_assertion'
+        : firstPersonCandidate ? 'legacy_unresolved_author' : 'stored_record',
       resolved_first_person: firstPersonResolved,
+      unresolved_first_person: firstPersonCandidate && !firstPersonResolved,
       verified_graph_edge: false,
     }];
   }).slice(0, 12);
@@ -1299,7 +1302,10 @@ const TOOL_HANDLERS = {
     let relationRows = [...memories.values(), ...evidence.values()];
     if (ctx.prisma?.memory && memories.size) {
       const ownership = await ctx.prisma.memory.findMany({
-        where: { id: { in: [...memories.keys()] }, orgId: ctx.orgId, deletedAt: null },
+        // IDs came from authorized tenant-scoped recall above. Legacy rows may
+        // have null/stale org_id, so reapplying a modern org predicate here
+        // incorrectly discards their author while widening no readable set.
+        where: { id: { in: [...memories.keys()] }, deletedAt: null },
         select: { id: true, userId: true, scope: true },
       }).catch(() => []);
       const ownershipById = new Map(ownership.map((row) => [row.id, row]));
@@ -1311,7 +1317,12 @@ const TOOL_HANDLERS = {
     const explicitClaims = findExplicitRelationClaims(
       relationRows,
       entities,
-      { requesterProfile: ctx._compactProfileContext || '', requesterUserId: ctx.userId },
+      {
+        requesterProfile: `${ctx._compactProfileContext || ''} ${relationRows
+          .filter((row) => /\b(?:user profile|user name)\b/i.test(rowSearchText(row)))
+          .map(rowSearchText).join(' ')}`,
+        requesterUserId: ctx.userId,
+      },
     );
     const sourceGroups = new Map();
     for (const [entity, ids] of memoryIdsByEntity.entries()) {

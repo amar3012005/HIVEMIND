@@ -2337,6 +2337,14 @@ export async function answerStep({ message, history, evidence, plan, language, a
   const coMentionLines = (evidence.co_mentions || []).slice(0, 12).map((path) =>
     `[UNVERIFIED CO-MENTION/${path.source_id || 'unknown'}] ${(path.entities || []).join(' + ')}. This is shared-source evidence, not a typed graph relationship.`,
   ).join('\n');
+  const relationClaimLines = (evidence.relation?.explicit_relation_claims || []).slice(0, 12).map((claim) => {
+    const row = (evidence.memories || []).find((memory) => memory.id === claim.id);
+    const citationId = row ? citationIdForMemory(citationPacket.citations, row) : null;
+    const citation = citationId ? ` citation_id:${citationId}` : '';
+    const warning = claim.unresolved_first_person
+      ? ' FIRST-PERSON AUTHOR UNRESOLVED: do not equate "me" with the authenticated user.' : '';
+    return `[EXPLICIT RELATION CLAIM status=${claim.citation_status}${citation}] ${String(claim.text || '').replace(/\n/g, ' ').slice(0, 500)}.${warning}`;
+  }).join('\n');
 
   // SYNTHESIS CHAINS block — insight-mode recall returns curated
   // synthesis-tier memories + their evidence chain (top-4 source rows
@@ -2450,6 +2458,7 @@ ${groundedEvidence}`;
   const optionalSections = [
     { text: chainLines && `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` },
     { text: edgeLines && `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for verified relation claims):\n${edgeLines}` },
+    { text: relationClaimLines && `\n\nEXPLICIT RELATION CLAIMS (${(evidence.relation?.explicit_relation_claims || []).length} sourced claims; preserve verification and author status):\n${relationClaimLines}` },
     { text: coMentionLines && `\n\nCO-MENTIONS (${(evidence.co_mentions || []).length} shared-source paths — report as unverified co-mentions, never as typed relationships):\n${coMentionLines}` },
     { text: liveLines && `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` },
   ].filter((s) => s.text);

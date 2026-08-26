@@ -986,7 +986,7 @@ async function execWeb(bus, plan, ctx, { recordTool, startTool, remaining }, cov
       // at the front of the one synthesis window; appending them behind an
       // already-full top-15 pool made the tool succeed but guaranteed final
       // synthesis could never see its output.
-      promoteWebEvidenceWindow(evidenceItems, rankedCandidates, packet.sourceSections);
+      promoteWebEvidenceWindow(bus.evidenceItems, bus.rankedCandidates, packet.sourceSections);
     }
     recordTool('hivemind_web_search', args,
       packet ? `${packet.sourceSections.length} public web sources` : `job ${job?.status || 'incomplete'}`,

@@ -266,8 +266,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
 }
 
 async function callValidatedClaimStream({ messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, evidence, allowGeneralKnowledge, onEvent, language = 'en' }) {
-  const streamInstruction = `STREAMING OUTPUT CONTRACT: Return newline-delimited JSON (NDJSON), one complete object per line and no markdown.
-For every factual sentence emit {"type":"claim","text":"a complete natural sentence","citation_ids":["P1-C1"]}. Each claim must use only delivered evidence and include valid delivered citation IDs. Emit claims in the order the user should read them. Decompose every independent part of the user request and then emit exactly one final {"type":"meta","confidence":0.0,"gaps":[],"follow_ups":["a grounded next question","another grounded next question"],"coverage":[{"request":"independent requested detail","status":"supported|unsupported","citation_ids":["P1-C1"]}],"context_status":"sufficient|relevant_but_incomplete|query_mismatch"}. Follow-ups must obey the synthesis prompt and remain empty when clarification is required. Never emit uncited prose. Never mark the response sufficient while an independent requested detail is absent from coverage.`;
+  const streamInstruction = `STREAMING OUTPUT CONTRACT: Return exactly one JSON object matching the supplied strict response schema and no markdown. Every factual sentence in response must have a corresponding claims item with valid delivered citation IDs. Decompose every independent requested detail in coverage. For broad, detailed, comprehensive, overview, comparison, or additional-information requests, use all distinct relevant delivered passages and normally produce 3-5 non-duplicate grounded claims when the evidence supports them. Never emit uncited prose or mark the response sufficient while a requested detail is absent.`;
   const streamedClaims = [];
   const rejectedClaims = [];
   let meta = {};
@@ -351,6 +350,7 @@ For every factual sentence emit {"type":"claim","text":"a complete natural sente
         ? { reasoning: { enabled: false } }
         : { reasoning_effort: 'low' }),
       prompt_cache_key: promptCacheKey,
+      response_format: GROUNDED_SYNTHESIS_RESPONSE_FORMAT,
     }),
     signal,
   }, {
@@ -1752,14 +1752,27 @@ function groundedRecallFallback(evidence, language) {
       if (!citation?.id) continue;
       const section = sections.get(citation.segment_id) || {};
       const fact = facts.get(citation.memory_id) || {};
-      const text = String(
+      const rawText = String(
         section.snippet || section.content || fact.content || citation.snippet || '',
-      ).replace(/\s+/g, ' ').trim().slice(0, 600);
+      );
+      const cleaned = rawText
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1')
+        .replace(/^\s{0,3}(?:#{1,6}|[-*+]|\d+[.)])\s+/gm, '')
+        .replace(/\|\s*:?-{3,}:?\s*/g, ' ')
+        .replace(/[|*_>`~]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const sentences = cleaned.split(/(?<=[.!?])\s+/)
+        .map((sentence) => sentence.trim())
+        .filter((sentence) => sentence.length >= 35);
+      const text = String(sentences[0] || cleaned).slice(0, 360).trim();
       const fingerprint = text.toLocaleLowerCase();
       if (!text || seen.has(fingerprint)) continue;
       seen.add(fingerprint);
       rows.push({
         text,
+        title: String(citation.title || citation.source_label || section.document_title || '').trim().slice(0, 180),
         citation_id: `P${packetIndex + 1}-${citation.id}`,
       });
       if (rows.length >= 5) break;
@@ -1775,7 +1788,7 @@ function groundedRecallFallback(evidence, language) {
     en: 'Here is the verified information I found:',
   };
   return {
-    response: `${headings[lang] || headings.en}\n${rows.map((row) => `- ${row.text}`).join('\n')}`,
+    response: `${headings[lang] || headings.en}\n${rows.map((row) => `- ${row.title ? `${row.title}: ` : ''}${row.text}`).join('\n')}`,
     claims: rows.map((row) => ({
       text: row.text,
       grounded: true,

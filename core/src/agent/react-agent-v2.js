@@ -661,7 +661,7 @@ async function execRelationBetween(bus, plan, ctx, { beforeDeadline, remaining, 
     ...(plan.source?.title ? { source_title: plan.source.title } : {}),
     ...(plan.source?.kind ? { source_kind: plan.source.kind } : {}),
     ...(plan.time?.kind === 'latest' || plan.time?.kind === 'earliest'
-      ? { temporal_selector: plan.time.kind }
+      ? { temporal_selector: plan.time.kind, temporal_axis: plan.time.axis || 'known_time' }
       : {}),
     ...(plan.time?.valid_at ? { valid_at: plan.time.valid_at } : {}),
     ...(plan.time?.known_at ? { known_at: plan.time.known_at } : {}),
@@ -1248,7 +1248,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       ? { allow_semantic_source_recovery: true }
       : {}),
     ...(plan.time?.kind === 'latest' || plan.time?.kind === 'earliest'
-      ? { temporal_selector: plan.time.kind }
+      ? { temporal_selector: plan.time.kind, temporal_axis: plan.time.axis || 'known_time' }
       : {}),
     // Scope: an EXPLICIT request scope (the chat's personal/organization/project selector,
     // ctx.scopeFilter) WINS over the planner's inferred scope — the user's chosen lens is

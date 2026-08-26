@@ -205,6 +205,7 @@ export function filterEvidenceByMetadata(rows = [], {
   const rangeEnd = timestamp(time?.range?.end || time?.range?.to);
   const validAt = timestamp(time?.valid_at);
   const knownAt = timestamp(time?.known_at);
+  const timeAxis = time?.axis || 'known_time';
 
   let filtered = rows.filter((row) => {
     const meta = evidenceMetadata(row);
@@ -241,25 +242,26 @@ export function filterEvidenceByMetadata(rows = [], {
   });
 
   if (['latest', 'earliest'].includes(temporalSelector) && filtered.length) {
-    const byDocument = new Map();
     for (const row of filtered) {
-      const documentId = row.documentId || row.document_id || row.document?.id;
-      if (!documentId) continue;
       const meta = evidenceMetadata(row);
-      const order = timestamp(meta.eventTime) ?? timestamp(meta.knownAt);
-      const current = byDocument.get(documentId);
-      if (!current || (order != null && (current.order == null
-        || (temporalSelector === 'latest' ? order > current.order : order < current.order)))) {
-        byDocument.set(documentId, { order });
-      }
+      const order = timeAxis === 'event_time'
+        ? timestamp(meta.eventTime) ?? timestamp(meta.knownAt)
+        : timeAxis === 'valid_time'
+          ? timestamp(meta.validFrom) ?? timestamp(meta.knownAt)
+          : timestamp(meta.knownAt) ?? timestamp(meta.eventTime);
+      Object.defineProperty(row, '_temporal_sort_ms', {
+        value: Number.isFinite(order) && temporalSelector === 'latest' ? -order : order,
+        configurable: true, enumerable: false, writable: true,
+      });
     }
-    const ordered = [...byDocument.entries()].filter(([, value]) => value.order != null)
-      .sort((left, right) => temporalSelector === 'latest'
-        ? right[1].order - left[1].order
-        : left[1].order - right[1].order);
-    if (!ordered.length) return [];
-    const selectedDocumentId = ordered[0][0];
-    filtered = filtered.filter((row) => (row.documentId || row.document_id || row.document?.id) === selectedDocumentId);
+    filtered = filtered.filter((row) => Number.isFinite(row._temporal_sort_ms))
+      .sort((left, right) => {
+        const delta = left._temporal_sort_ms - right._temporal_sort_ms;
+        return delta || (Number(right.score) || 0) - (Number(left.score) || 0)
+          || String(left.segmentId || left.segment_id || left.id || '').localeCompare(
+            String(right.segmentId || right.segment_id || right.id || ''),
+          );
+      });
   }
   return filtered;
 }
@@ -399,7 +401,16 @@ export class EvidenceRetrievalService {
 
   _orderAndSlice(candidates, deliver) {
     return candidates
-      .sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0))
+      .sort((a, b) => {
+        if (Number.isFinite(a?._temporal_sort_ms) && Number.isFinite(b?._temporal_sort_ms)) {
+          const delta = a._temporal_sort_ms - b._temporal_sort_ms;
+          if (delta) return delta;
+        }
+        return (Number(b.score) || 0) - (Number(a.score) || 0)
+          || String(a.segmentId || a.segment_id || a.id || '').localeCompare(
+            String(b.segmentId || b.segment_id || b.id || ''),
+          );
+      })
       .slice(0, deliver);
   }
 
@@ -1352,8 +1363,9 @@ export class EvidenceRetrievalService {
    * @private
    */
   _extractSnippet(content, query, contextLength = 150) {
-    const contentLower = content.toLowerCase();
-    let index = contentLower.indexOf((query || '').toLowerCase());
+    const safeContent = typeof content === 'string' ? content : String(content ?? '');
+    const contentLower = safeContent.toLowerCase();
+    let index = contentLower.indexOf(String(query || '').toLowerCase());
 
     // Full query rarely appears verbatim. Center the snippet on the most
     // DISTINCTIVE query token present (longest match) so a buried matched term
@@ -1369,7 +1381,7 @@ export class EvidenceRetrievalService {
         let position = contentLower.indexOf(needle);
         while (position !== -1) {
           const start = Math.max(0, position - Math.floor(contextLength / 2));
-          const window = contentLower.slice(start, Math.min(content.length, start + contextLength));
+          const window = contentLower.slice(start, Math.min(safeContent.length, start + contextLength));
           const covered = tokens.reduce((count, item) => count + Number(window.includes(item.toLowerCase())), 0);
           const candidate = { position, covered, tokenLength: token.length };
           if (!best || candidate.covered > best.covered
@@ -1381,15 +1393,15 @@ export class EvidenceRetrievalService {
     }
 
     if (index === -1) {
-      return content.slice(0, contextLength) + '...';
+      return safeContent.slice(0, contextLength) + '...';
     }
 
     const start = Math.max(0, index - Math.floor(contextLength / 2));
-    const end = Math.min(content.length, index + Math.floor(contextLength / 2));
+    const end = Math.min(safeContent.length, index + Math.floor(contextLength / 2));
 
-    let snippet = content.slice(start, end);
+    let snippet = safeContent.slice(start, end);
     if (start > 0) snippet = '...' + snippet;
-    if (end < content.length) snippet = snippet + '...';
+    if (end < safeContent.length) snippet = snippet + '...';
 
     return snippet;
   }

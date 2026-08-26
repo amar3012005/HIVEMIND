@@ -162,6 +162,7 @@ export const TOOL_SCHEMAS = [
           // source contract through to RecallRouter.
           source_kind: { type: 'string', enum: ['document', 'image', 'conversation', 'connector'] },
           temporal_selector: { type: 'string', enum: ['latest', 'earliest'], description: 'Order an authorized direct source by stored event/created time; not snapshot time travel.' },
+          temporal_axis: { type: 'string', enum: ['known_time', 'event_time', 'valid_time'], description: 'Clock used for latest/earliest ordering. known_time means latest mention, event_time means latest real-world event, and valid_time means latest effective claim.' },
           valid_at: { type: 'string', description: 'ISO timestamp for bi-temporal time-travel.' },
           known_at: { type: 'string', description: 'ISO timestamp for what the workspace had learned by that time.' },
           date_range: {
@@ -936,6 +937,7 @@ const TOOL_HANDLERS = {
       // preserve ordered direct-source selectors after the first normalization.
       source_kind:    args.source_kind,
       temporal_selector: args.temporal_selector,
+      temporal_axis: recallPlan.time.axis,
       operation:      recallPlan.operation,
       include_superseded: recallPlan.operation === 'timeline' || args.include_superseded === true,
       // Date range — { start, end } ISO timestamps. Filters memories whose

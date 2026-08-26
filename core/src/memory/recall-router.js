@@ -300,6 +300,10 @@ export function resolveRecallPlan(input = {}) {
   const temporalSelector = ['latest', 'earliest'].includes(temporalSelectorValue)
     ? temporalSelectorValue
     : null;
+  const temporalAxisValue = String(input.temporal_axis || structuredTime.axis || '');
+  const temporalAxis = ['known_time', 'event_time', 'valid_time'].includes(temporalAxisValue)
+    ? temporalAxisValue
+    : null;
   const memoryTypes = normalizeMemoryTypes(input.memory_types, input.memory_type);
   const validAt = normalizedIso(input.valid_at || structuredTime.valid_at);
   const knownAt = normalizedIso(input.known_at || structuredTime.known_at);
@@ -332,6 +336,7 @@ export function resolveRecallPlan(input = {}) {
     },
     time: {
       mode: temporal,
+      axis: temporalAxis,
       valid_at: validAt,
       known_at: knownAt,
       range,
@@ -594,6 +599,42 @@ function recallItemTime(item = {}) {
     || item.created_at || item.createdAt || stored.created_at || stored.createdAt;
   const parsed = raw ? new Date(raw).getTime() : Number.NaN;
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+}
+
+function recallItemTimeForAxis(item = {}, axis = 'known_time') {
+  const stored = item.memory || {};
+  const metadata = item.metadata || {};
+  const candidates = axis === 'event_time'
+    ? [item.event_time, item.eventTime, stored.event_time, stored.eventTime,
+      metadata.event_time, item.document?.documentDate, item.document_date]
+    : axis === 'valid_time'
+      ? [item.valid_from, item.validFrom, stored.valid_from, stored.validFrom,
+        item.valid_at, item.validAt, metadata.valid_from, item.document?.documentDate]
+      : [item.known_at, item.knownAt, stored.known_at, stored.knownAt,
+        metadata.known_at, item.created_at, item.createdAt,
+        stored.created_at, stored.createdAt, item.document?.createdAt];
+  for (const raw of candidates) {
+    const parsed = raw ? new Date(raw).getTime() : Number.NaN;
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Number.NEGATIVE_INFINITY;
+}
+
+export function orderTemporalCandidates(rows = [], {
+  selector = null,
+  axis = 'known_time',
+  unwrap = (row) => row,
+  id = (row) => row?.id || row?.segmentId || row?.segment_id || '',
+} = {}) {
+  if (!['latest', 'earliest'].includes(selector)) return [...rows];
+  const direction = selector === 'latest' ? -1 : 1;
+  return [...rows].sort((left, right) => {
+    const leftRow = unwrap(left); const rightRow = unwrap(right);
+    const temporal = direction * (recallItemTimeForAxis(leftRow, axis) - recallItemTimeForAxis(rightRow, axis));
+    if (temporal) return temporal;
+    const relevance = (Number(rightRow?.score) || 0) - (Number(leftRow?.score) || 0);
+    return relevance || String(id(leftRow)).localeCompare(String(id(rightRow)));
+  });
 }
 
 // Legacy KB promotions can receive a strong retrieval score even when their
@@ -1255,6 +1296,7 @@ export async function hop2Evidence({ evidenceService, query, queryVector = null,
       range: filters.date_range || null,
       valid_at: filters.valid_at || null,
       known_at: filters.known_at || null,
+      axis: filters.temporal_axis || null,
     },
     memoryTypes: filters.memory_types || [],
     entities: filters.canonical_entities || filters.named_entities || [],
@@ -1755,6 +1797,7 @@ export class RecallRouter {
       source_title: recallPlan.source.title,
       source_kind: recallPlan.source.kind,
       temporal_selector: recallPlan.time.selector,
+      temporal_axis: recallPlan.time.axis,
       valid_at: recallPlan.time.valid_at,
       known_at: recallPlan.time.known_at,
       date_range: recallPlan.time.range,
@@ -2314,6 +2357,28 @@ export class RecallRouter {
         hybridRerankPasses = Number(v2.rerank_passes) || 0;
         hybridRerankMs = Number(v2.rerank_ms) || 0;
       }
+    }
+
+    if (['latest', 'earliest'].includes(recallPlan.time.selector)) {
+      const axis = recallPlan.time.axis || 'known_time';
+      deliverMemories = orderTemporalCandidates(deliverMemories, {
+        selector: recallPlan.time.selector, axis, id: recallMemoryRowId,
+      });
+      finalEvidence = orderTemporalCandidates(finalEvidence, {
+        selector: recallPlan.time.selector, axis,
+        id: (row) => row?.segmentId || row?.segment_id || row?.id || '',
+      });
+      const mixed = orderTemporalCandidates([
+        ...deliverMemories.map((row) => ({ kind: 'memory', row })),
+        ...finalEvidence.map((row) => ({ kind: 'evidence', row })),
+      ], {
+        selector: recallPlan.time.selector, axis, unwrap: (entry) => entry.row,
+        id: (row) => recallMemoryRowId(row) || row?.segmentId || row?.segment_id || row?.id || '',
+      });
+      rankedCandidates = mixed.slice(0, 15).map((entry, index) => entry.kind === 'memory'
+        ? { kind: 'memory', memory_id: recallMemoryRowId(entry.row), rank: index + 1, score: Number(entry.row?.score) || null }
+        : { kind: 'evidence', segment_id: entry.row?.segmentId || entry.row?.segment_id || entry.row?.id, rank: index + 1, score: Number(entry.row?.score) || null });
+      hybridRankingMode = `${recallPlan.time.selector}_${axis}`;
     }
 
     let timeline = [];

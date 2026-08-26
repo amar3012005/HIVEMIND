@@ -69,6 +69,7 @@ from .hyper.execution_profiles import (
     DEFAULT_PROFILE_ID, get_execution_profile, default_execution_profile,
     profile_registry_manifest,
 )
+from .hyper.model_policy import HYPER_FAST_MODEL, canonical_hyper_model
 from .db import (
     get_org_approval_rules,
     get_permanent_lead_id,
@@ -1242,7 +1243,7 @@ async def _build_web_intel_agent_for_room(
             "return a concise evidence dossier with sources, caveats, and a clear POV."
         ),
         "llm_provider": os.environ.get("HYPER_WEB_INTEL_PROVIDER", "groq"),
-        "model": os.environ.get("HYPER_WEB_INTEL_MODEL", "gpt-oss-20b"),
+        "model": canonical_hyper_model(os.environ.get("HYPER_WEB_INTEL_MODEL", HYPER_FAST_MODEL)),
         "tools": DEFAULT_HYPER_TOOLS + WEB_INTEL_TOOLS,
         "max_iters": int(os.environ.get("HYPER_WEB_INTEL_MAX_ITERS", "2")),
     }
@@ -3265,14 +3266,14 @@ def _quality_models(mode: str) -> tuple:
     but an ordinary ``auto`` or ``best`` Room must never quietly switch to a
     legacy 120B/Haiku path.
     """
-    default = os.environ.get("HYPER_ROOM_MODEL", "openai/gpt-oss-20b")
-    best = os.environ.get("HYPER_MODEL_BEST", default)
+    default = canonical_hyper_model(os.environ.get("HYPER_ROOM_MODEL", HYPER_FAST_MODEL))
+    best = canonical_hyper_model(os.environ.get("HYPER_MODEL_BEST", default))
     if (mode or "auto").strip().lower() == "best":
         return (best, best, best)
     return (
-        os.environ.get("HYPER_AUTO_GATHER", default),
-        os.environ.get("HYPER_AUTO_DEBATE", default),
-        os.environ.get("HYPER_AUTO_SYNTH") or os.environ.get("HYPER_SYNTH_MODEL", default),
+        canonical_hyper_model(os.environ.get("HYPER_AUTO_GATHER", default)),
+        canonical_hyper_model(os.environ.get("HYPER_AUTO_DEBATE", default)),
+        canonical_hyper_model(os.environ.get("HYPER_AUTO_SYNTH") or os.environ.get("HYPER_SYNTH_MODEL", default)),
     )
 
 
@@ -3780,9 +3781,11 @@ async def _orchestrate_single_agent(
     else:
         from .hyper.skills import resolve_turn_room_kind
         _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")
-    _m_recon = (getattr(req, "agentic_model", None)
-                or os.environ.get("HYPER_MODEL_RECON")
-                or os.environ.get("HYPER_ROOM_MODEL", "openai/gpt-oss-20b"))
+    _m_recon = canonical_hyper_model(
+        getattr(req, "agentic_model", None)
+        or os.environ.get("HYPER_MODEL_RECON")
+        or os.environ.get("HYPER_ROOM_MODEL", HYPER_FAST_MODEL)
+    )
 
     async def _emit(ev: Dict[str, Any]) -> None:
         await _emit_event(req.callback_url, req.turn_id, ev)

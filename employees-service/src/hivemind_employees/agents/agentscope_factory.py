@@ -32,6 +32,7 @@ from agentscope.memory import InMemoryMemory
 from agentscope.model import AnthropicChatModel, ChatModelBase, OpenAIChatModel
 
 from ..ai_gateway import sdk_target
+from ..hyper.model_policy import HYPER_FAST_MODEL, canonical_hyper_model, requires_openrouter
 
 from .agentscope_tools import build_hivemind_toolkit, register_experience_tool
 
@@ -249,7 +250,7 @@ def _resolve_openai_compatible_target(
         groq_model = model  # respect explicit gpt-oss (20b / 120b)
     elif ("llama-3" in ml or "llama3" in ml) and has_tools:
         env_default = os.environ.get("GROQ_INFERENCE_MODEL", "")
-        fallback = env_default if (env_default and "llama-3" not in env_default.lower() and "llama3" not in env_default.lower()) else "openai/gpt-oss-20b"
+        fallback = env_default if (env_default and "llama-3" not in env_default.lower() and "llama3" not in env_default.lower()) else HYPER_FAST_MODEL
         log.info("Swapping Groq tool-USING llama %s -> %s (tool-call reliability)", model, fallback)
         groq_model = fallback
     # else: tool-less llama / 8b-instant kept as-is (no swap)
@@ -269,7 +270,9 @@ def _uses_groq_fallback(provider: str) -> bool:
 def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> ChatModelBase:
     """Map employee.llm_provider + employee.model → AgentScope chat model."""
     provider = (employee_row.get("llm_provider") or "anthropic").lower()
-    model = employee_row.get("model") or "claude-haiku-4-5"
+    model = canonical_hyper_model(employee_row.get("model") or "claude-haiku-4-5")
+    if requires_openrouter(model):
+        provider = "openrouter"
 
     if provider == "openai":
         api_key = llm_api_key or os.environ.get("OPENAI_API_KEY", "")

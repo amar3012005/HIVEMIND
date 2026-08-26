@@ -41,3 +41,15 @@ export function webResultPacket(job, query) {
     coverage: { facts: 0, documents: rows.length, source_sections: rows.length },
   };
 }
+
+export function promoteWebEvidenceWindow(evidenceItems, rankedCandidates, sourceSections) {
+  const webIds = new Set((sourceSections || []).map((section) => section.segment_id).filter(Boolean));
+  const webRows = evidenceItems.filter((item) => webIds.has(item.segment_id));
+  const retainedEvidence = evidenceItems.filter((item) => !webIds.has(item.segment_id));
+  evidenceItems.splice(0, evidenceItems.length, ...webRows, ...retainedEvidence);
+  const webCandidates = (sourceSections || []).map((section) => ({
+    kind: 'evidence', segment_id: section.segment_id, score: section.score || 0,
+  }));
+  const retainedCandidates = rankedCandidates.filter((candidate) => !webIds.has(candidate.segment_id));
+  rankedCandidates.splice(0, rankedCandidates.length, ...webCandidates, ...retainedCandidates);
+}

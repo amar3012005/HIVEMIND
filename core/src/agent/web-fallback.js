@@ -1,6 +1,7 @@
-export function publicWebFallbackEligible({ plan = {}, coverage = {}, hasRuntime = false, remainingMs = 0 } = {}) {
+export function publicWebFallbackEligible({ plan = {}, coverage = {}, hasRuntime = false, remainingMs = 0, enabled = false } = {}) {
   const policy = plan.web_fallback || {};
-  return plan.needs_web === true
+  return enabled === true
+    && plan.needs_web === true
     && policy.allowed === true
     // An explicit web request cannot be fulfilled by internal evidence alone;
     // recall still runs first for context, then exactly one public search runs.

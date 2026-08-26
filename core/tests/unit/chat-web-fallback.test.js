@@ -5,10 +5,11 @@ import { promoteWebEvidenceWindow, publicWebFallbackEligible, recentPublicContex
 const plan = { needs_web: true, web_fallback: { allowed: true, query: 'current Acme pricing', reason: 'current_public' } };
 
 test('public web is recall-first and never treats a retrieval outage as a knowledge gap', () => {
-  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false }, hasRuntime: true, remainingMs: 1000 }), true);
-  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: true }, hasRuntime: true, remainingMs: 1000 }), false);
-  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false, retrieval_timed_out: true }, hasRuntime: true, remainingMs: 1000 }), false);
-  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false, retrieval_unavailable: true }, hasRuntime: true, remainingMs: 1000 }), false);
+  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false }, hasRuntime: true, remainingMs: 1000 }), false, 'off by default');
+  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false }, hasRuntime: true, remainingMs: 1000, enabled: true }), true);
+  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: true }, hasRuntime: true, remainingMs: 1000, enabled: true }), false);
+  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false, retrieval_timed_out: true }, hasRuntime: true, remainingMs: 1000, enabled: true }), false);
+  assert.equal(publicWebFallbackEligible({ plan, coverage: { complete: false, retrieval_unavailable: true }, hasRuntime: true, remainingMs: 1000, enabled: true }), false);
 });
 
 test('recent public checkpoint context becomes bounded cited evidence', () => {
@@ -32,7 +33,7 @@ test('successful web evidence is visible inside an already-full synthesis window
 
 test('an explicit web request searches once after recall even when internal context exists', () => {
   const explicit = { ...plan, web_fallback: { ...plan.web_fallback, reason: 'explicit_web' } };
-  assert.equal(publicWebFallbackEligible({ plan: explicit, coverage: { complete: true }, hasRuntime: true, remainingMs: 1000 }), true);
+  assert.equal(publicWebFallbackEligible({ plan: explicit, coverage: { complete: true }, hasRuntime: true, remainingMs: 1000, enabled: true }), true);
 });
 
 test('public web packet retains bounded content, URLs and retrieval time for synthesis and explicit save', () => {

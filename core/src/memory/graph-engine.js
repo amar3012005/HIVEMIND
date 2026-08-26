@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { isMnemeOrg, mnemeMode, amrUpdateTags, orgIsRemote, amrListRecent } from '../vector/mneme/driver.js';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch } from '../llm/groq-fallback.js';
-import { chatCompletionWithFallback, isQwenIngestModel } from '../knowledge/enterprise/litellm-client.js';
+import { chatCompletionWithFallback } from '../knowledge/enterprise/litellm-client.js';
 import { ConflictDetector, computeTokenSimilarity } from './conflict-detector.js';
 import { RelationshipClassifier } from './relationship-classifier.js';
 import { extractCodeChunks, detectCodeLanguage } from './code-ingestion.js';
@@ -60,12 +60,13 @@ function computeImportanceScore({ memory_type, priority } = {}) {
 }
 
 // ── Memory-ingest LLM model (overrides per-stage env vars). ────────────
-// The schema-led Qwen ingestion model is the canonical default. It runs via
-// Cloudflare's custom provider and has a governed Gemini fallback, avoiding the
-// malformed/truncated free-form JSON observed on the legacy direct Groq path.
+// Follow the configured canonical memory processor unless a stage explicitly
+// overrides it. Gemini is the schema-capable production default.
 // Override per-stage via STRUCTURED_ENRICHER_MODEL / ENTITY_LINKER_MODEL
 // if a specific stage needs different quality vs. cost tradeoff.
-const MEMORY_INGEST_MODEL = process.env.MEMORY_INGEST_MODEL || 'singulance/qwen3-ingest';
+const MEMORY_INGEST_MODEL = process.env.MEMORY_INGEST_MODEL
+  || process.env.MEMORY_PROCESSOR_MODEL
+  || 'google/gemini-2.5-flash-lite';
 
 // Sleep helper for retry backoff.
 function _sleep(ms) {
@@ -78,7 +79,7 @@ const ENTITY_MEMORY_TYPES = new Set(CANONICAL_MEMORY_TYPES);
 // linker parser below: required arrays keep a single extracted entity from
 // being returned as the whole response, while optional fields preserve the
 // current tolerant enrichment and retry semantics.
-const QWEN_ENTITY_LINK_RESPONSE_FORMAT = {
+const ENTITY_LINK_RESPONSE_FORMAT = {
   type: 'json_schema',
   json_schema: {
     name: 'hivemind_entity_link',
@@ -2430,12 +2431,9 @@ OUTPUT JSON only.`;
       await persistEntityStatus('skipped:disabled', { entity_link_completed_at: nowIso() });
       return { ok: true, status: 'skipped', reason: 'disabled', entities: 0, edges: 0 };
     }
-    const configuredEntityLinkModel = process.env.ENTITY_LINKER_MODEL || 'singulance/qwen3-ingest';
-    if (!process.env.GROQ_API_KEY && !this.hasInjectedMemoryChatClient && !isQwenIngestModel(configuredEntityLinkModel)) {
-      console.warn('[entity-co-mention] GROQ_API_KEY missing — skipping LLM extraction');
-      await persistEntityStatus('error:provider_unavailable', { entity_link_error: 'provider_unavailable' });
-      return { ok: false, status: 'error', error: 'provider_unavailable', entities: 0, edges: 0 };
-    }
+    const configuredEntityLinkModel = process.env.ENTITY_LINKER_MODEL
+      || process.env.MEMORY_PROCESSOR_MODEL
+      || 'google/gemini-2.5-flash-lite';
     if (content.length < minLen) {
       await persistEntityStatus('skipped:short_content', { entity_link_completed_at: nowIso() });
       return { ok: true, status: 'skipped', reason: 'short_content', entities: 0, edges: 0 };
@@ -2763,18 +2761,17 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
     let linkLastErr = null;
     for (let attempt = 1; attempt <= LINK_MAX_ATTEMPTS; attempt++) {
       try {
-        if (isQwenIngestModel(LINK_MODEL) && !this.hasInjectedMemoryChatClient) {
-          // Keep the injected legacy client seam intact for unit tests. In
-          // production Qwen travels through the Cloudflare-only route and the
-          // established fallback chain protects a transient custom-provider
-          // failure from orphaning entity/relationship enrichment.
+        if (!this.hasInjectedMemoryChatClient) {
+          // Keep the injected legacy client seam intact for unit tests. Normal
+          // production traffic uses the governed provider route, so Gemini and
+          // its fallback chain behave consistently with canonical extraction.
           parsed = await chatCompletionWithFallback({
-            models: [LINK_MODEL, process.env.ENTITY_LINKER_FALLBACK_MODEL || 'google/gemini-2.5-flash-lite'],
+            models: [LINK_MODEL, process.env.ENTITY_LINKER_FALLBACK_MODEL || 'deepseek/deepseek-v4-flash-0731'],
             messages: [{ role: 'user', content: prompt }],
             temperature: 0.1,
             max_tokens: 700,
             json_mode: true,
-            response_format: QWEN_ENTITY_LINK_RESPONSE_FORMAT,
+            response_format: ENTITY_LINK_RESPONSE_FORMAT,
             feature: 'entity-linking',
           });
           lastRaw = JSON.stringify(parsed);

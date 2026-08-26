@@ -61,3 +61,20 @@ test('a later non-web assistant answer clears stale public source context', asyn
   const next = await hydrateCompactContext({ ...identity, message: 'new topic' }, { graph });
   assert.equal(next.sourceContext, null);
 });
+
+test('hydrating the next user turn preserves replaceable source context', async () => {
+  const graph = createCompactContextGraph({ checkpointer: new MemorySaver() });
+  const identity = { orgId: 'org-a', userId: 'user-a', threadId: 'source-follow-up' };
+  await recordCompactAssistantTurn({
+    ...identity,
+    response: 'The answer came from the pricing page.',
+    sources: [{ title: 'Pricing', url: 'https://example.com/pricing', source_type: 'public_web' }],
+  }, { graph });
+  const hydrated = await hydrateCompactContext({
+    ...identity,
+    message: 'Which source did you use?',
+    history: [],
+  }, { graph });
+  assert.equal(hydrated.sourceContext.answer, 'The answer came from the pricing page.');
+  assert.equal(hydrated.sourceContext.refs[0].url, 'https://example.com/pricing');
+});

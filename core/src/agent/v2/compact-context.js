@@ -107,9 +107,16 @@ export async function hydrateCompactContext(input = {}, { graph } = {}) {
   try {
     const runtime = graph || await productionGraph();
     const current = normalizeTurn({ role: 'user', content: input.message });
+    // PostgresSaver materializes omitted annotated fields using their default
+    // value. For replace-on-write fields that would turn an ordinary user-turn
+    // append into an accidental clear. Read the current checkpoint and carry
+    // the replaceable source context through the append explicitly.
+    const checkpoint = await runtime.getState(config);
+    const priorSourceContext = checkpoint?.values?.sourceContext || null;
     const result = await runtime.invoke({
       turns: [...fallback, ...(current ? [current] : [])],
       sourceRefs: [],
+      sourceContext: priorSourceContext,
     }, config);
     // The current message is supplied separately to the planner. Do not send
     // it twice as both history and the active user turn.

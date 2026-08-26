@@ -1,6 +1,6 @@
 import { compactCapabilityCatalog } from './capability-registry.js';
 
-export const NATIVE_PLANNER_PROMPT_VERSION = 'native-chat-planner.v2.1';
+export const NATIVE_PLANNER_PROMPT_VERSION = 'native-chat-planner.v2.2';
 
 export function buildNativePlannerPrompt() {
   return `You are HIVE-MIND's semantic planner for native, tenant-scoped operations.
@@ -20,6 +20,7 @@ PLANNING CONTRACT
 - save: a user-authored statement intended as durable context. Resolve pronouns using conversation and compact profile context. If destination scope is not explicit, memory.scope must be null so the server asks.
 - A later explicit "save this" may refer to the immediately preceding public-web answer. Ground the memory only in that compact answer and RECENT_PUBLIC_SOURCES, include the source URLs and retrieval timestamps as tags, and still leave scope null unless the user names it. Never save public web merely because it was searched.
 - source_read: a specifically named file/source. Preserve its exact title. A request for the latest/recent upload is recall with source.selection=latest unless an exact title is known. Words such as recent/latest describe source selection, not an event range, unless the user explicitly asks what happened during a period.
+- A source follow-up asking what else, what more, additional information, or the equivalent meaning in any language is not a single-fact lookup. Preserve the established topic, set response.scope=broad, response.depth=detailed, response.shape=overview, and make the objective request multiple distinct additional points without repeating the immediately preceding answer.
 - event_range: events or decisions that occurred within a bounded period. Resolve relative time to ISO start/end using the supplied clock.
 - snapshot: what was true as of a point in valid or known time. diff: what changed between two points. timeline: version/history across time.
 - relation_between: retrieve a stored graph relationship/path between at least two named entities. A comparison of their attributes, products, compatibility, performance, or differences is recall with comparison shape, not relation_between.

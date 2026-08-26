@@ -5,6 +5,7 @@ import { validateNativePlan, validateNativePlanResult } from '../../src/agent/v2
 import { createNativePlannerGraph, nativeV2RoutingMode } from '../../src/agent/v2/orchestrator.js';
 import { buildTurnContext } from '../../src/agent/v2/turn-context-builder.js';
 import { intentDecisionToPlan } from '../../src/agent/chat-intent-decision.js';
+import { buildNativePlannerPrompt, NATIVE_PLANNER_PROMPT_VERSION } from '../../src/agent/v2/planner-prompt.js';
 
 function makePlan({ operation = 'recall', query = 'Kruti', entities = ['Kruti'], response = {}, source = null, time = {}, relation = [], aggregate = null, memory = null, direct = null, certified = false, capability } = {}) {
   const family = capability || (['save'].includes(operation) ? 'memory_write' : ['profile', 'update_profile'].includes(operation) ? 'profile' : operation === 'direct' ? 'direct' : 'workspace_read');
@@ -40,6 +41,14 @@ test('TurnContextBuilder bounds history, profile and authorized projects', () =>
   const context = buildTurnContext({ message: ' hello ', history: Array.from({ length: 8 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `t${i}` })), profileContext: 'x'.repeat(3000), projectCatalog: Array.from({ length: 30 }, (_, i) => ({ id: `${i}`, name: `P${i}` })) });
   assert.equal(context.message, 'hello'); assert.equal(context.history.length, 4);
   assert.equal(context.compact_profile.length, 1800); assert.equal(context.authorized_projects.length, 24);
+});
+
+test('planner classifies additional source follow-ups as multi-point detailed coverage', () => {
+  const prompt = buildNativePlannerPrompt();
+  assert.equal(NATIVE_PLANNER_PROMPT_VERSION, 'native-chat-planner.v2.2');
+  assert.match(prompt, /source follow-up asking what else/i);
+  assert.match(prompt, /response\.shape=overview/);
+  assert.match(prompt, /multiple distinct additional points/i);
 });
 
 test('compiler carries the replaceable recent public checkpoint independently of planner phrasing', () => {

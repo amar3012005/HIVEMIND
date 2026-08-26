@@ -2449,10 +2449,19 @@ ${groundedEvidence}`;
   const evidenceBlock = alwaysKept + _kept.join('');
 
   const assistantContext = `\n\nASSISTANT CONTEXT: You are ${assistantName || 'HIVE'}, serving ${orgName || 'this HIVEMIND workspace'}.`;
+  const recentAssistant = [...(Array.isArray(history) ? history : [])]
+    .reverse()
+    .find((turn) => turn?.role === 'assistant' && turn?.content);
+  const recentConversation = recentAssistant
+    ? `\n\nRECENT ASSISTANT ANSWER (conversation continuity only; do not treat it as new evidence):\n${String(recentAssistant.content).slice(0, 1200)}`
+    : '';
+  const sourceCoverageNote = plan.operation === 'source_read'
+    ? `\n\nSOURCE COVERAGE CONTRACT: Answer the requested scope from the named source. If the user asks what else, what more, for additional information, or for an overview of the established topic, do not merely repeat the RECENT ASSISTANT ANSWER or stop after the first matching row. When the delivered evidence supports it, synthesize 3-5 distinct, non-duplicate points across separate relevant citations. If the request is genuinely one exact attribute, answer only that attribute. Never add a point that the delivered evidence does not support.`
+    : '';
   const progressiveNote = evidence.progressive_recall
     ? `\n\nRECALL WINDOW: showing the one intent-selected unified window, ranks 1-${evidence.progressive_recall.delivered_until} of ${evidence.progressive_recall.candidates.length}, from recall ${evidence.progressive_recall.recall_id}. No later retrieval or reveal will run. If the window is relevant but cannot fully answer the stated objective, use everything useful it does support, identify only the requested missing detail, and set context_status="relevant_but_incomplete". If it is off-topic because retrieval misunderstood the request, set context_status="query_mismatch". Otherwise set "sufficient".`
     : '';
-  const userBlock = `${evidenceBlock}${progressiveNote}${assistantContext}${capabilityHint}${windowNote}${personaNote}${coverageNote}
+  const userBlock = `${evidenceBlock}${progressiveNote}${assistantContext}${recentConversation}${sourceCoverageNote}${capabilityHint}${windowNote}${personaNote}${coverageNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 

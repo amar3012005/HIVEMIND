@@ -76,7 +76,7 @@ export function buildSynthesisPromptArtifact({
     modules.push('TEMPORAL: rows marked REMOVED/SUPERSEDED are past values. Describe the change; never present them as current.');
   }
   if (operation === 'relation_between') {
-    modules.push('RELATIONS: typed edges are verified graph relationships. Explicit relation claims may also be reported exactly as sourced claims, preserving whether they are user assertions or stored records; never promote them to graph edges or independently verified facts. Shared sources and co-occurrence alone are not relationships.');
+    modules.push('RELATIONS: typed edges are verified graph relationships. Explicit relation claims may also be reported exactly as sourced claims, preserving whether they are user assertions or stored records; never promote them to graph edges or independently verified facts. A legacy_unresolved_author claim must be quoted/paraphrased with its first-person pronoun unresolved—never assume "me" is the authenticated user. Shared sources and co-occurrence alone are not relationships.');
   }
   if (operation === 'aggregate') {
     modules.push('AGGREGATES: state an exact count only when the evidence marks coverage complete.');

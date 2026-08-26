@@ -118,9 +118,12 @@ test('legacy first-person relation claims require authenticated authorship', () 
   assert.equal(findExplicitRelationClaims([row], ['Amar', 'Kruti'], {
     requesterProfile: 'Name: Amar Sai Gadde', requesterUserId: authCtx.userId,
   }).length, 1);
-  assert.equal(findExplicitRelationClaims([{ ...row, _author_user_id: 'another-user' }], ['Amar', 'Kruti'], {
+  const unresolved = findExplicitRelationClaims([{ ...row, _author_user_id: 'another-user' }], ['Amar', 'Kruti'], {
     requesterProfile: 'Name: Amar Sai Gadde', requesterUserId: authCtx.userId,
-  }).length, 0);
+  });
+  assert.equal(unresolved.length, 1);
+  assert.equal(unresolved[0].citation_status, 'legacy_unresolved_author');
+  assert.equal(unresolved[0].resolved_first_person, false);
 });
 
 test('save refuses a caller project outside the authorized project set', async () => {

@@ -1,4 +1,5 @@
 import { subscribeTurnStream } from '../realtime/hyper-turn-events.js';
+import { persistHyperArtifactCandidate } from '../artifacts/hyper-artifacts.js';
 
 export async function handleHyperTurnStreamRoute({
   req,
@@ -130,6 +131,23 @@ export async function handleInternalHyperTurnEventRoute({
     if (!valid) return jsonResponse(res, { error: 'work_room_execution_identity_mismatch' }, 409);
   }
 
+  let artifact = null;
+  if (body.event.t === 'artifact_candidate') {
+    artifact = await persistHyperArtifactCandidate({
+      prisma,
+      turnId: body.turn_id,
+      candidate: body.event.candidate,
+    });
+    if (!artifact.ok) {
+      return {
+        body,
+        sealed: false,
+        response: { ok: true, artifact: { ok: false, errors: artifact.errors || ['Artifact validation failed.'] } },
+      };
+    }
+    body.event = artifact.event;
+  }
+
   if (body.event.t === 'seal') {
     await sealTurn(prisma, body.turn_id, {
       status: body.event.status || 'complete',
@@ -143,5 +161,12 @@ export async function handleInternalHyperTurnEventRoute({
     });
   }
 
-  return { body, sealed: body.event.t === 'seal' };
+  const artifactResponse = artifact
+    ? Object.fromEntries(Object.entries(artifact).filter(([key]) => key !== 'event'))
+    : null;
+  return {
+    body,
+    sealed: body.event.t === 'seal',
+    response: artifactResponse ? { ok: true, artifact: artifactResponse } : { ok: true },
+  };
 }

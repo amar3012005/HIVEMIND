@@ -27,6 +27,7 @@ import re
 import time
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -73,6 +74,29 @@ _CEREBRAS_URL = (os.environ.get("CEREBRAS_BASE_URL") or "https://api.cerebras.ai
 _CEREBRAS_DIRECT_MODELS = {m.strip() for m in
     (os.environ.get("HYPER_CEREBRAS_DIRECT_MODELS", "zai-glm-4.7,gpt-oss-120b")).split(",") if m.strip()}
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w+")
+
+
+def _visual_artifacts_enabled() -> bool:
+    """Return whether the additive HyperRoom artifact path is enabled."""
+    value = os.environ.get(
+        "Visual_path_In_Hyperrooms",
+        os.environ.get("VISUAL_PATH_IN_HYPERROOMS", "false"),
+    )
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+_HTML_ARTIFACT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "html": {"type": "string"},
+        "source_refs": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["title", "summary", "html", "source_refs"],
+}
+_VISUAL_SKILL_PATH = Path(__file__).with_name("visual_artifact_skill.md")
 
 
 def _normalize_work_step_wait(value: Any) -> Dict[str, Any]:
@@ -1319,7 +1343,7 @@ class Director:
         room_template: str,
         room_goal: Optional[str],
         enabled_connectors: List[str],
-        emit: Callable[[Dict[str, Any]], Awaitable[None]],
+        emit: Callable[[Dict[str, Any]], Awaitable[Any]],
         director_model: Optional[str] = None,
         persona_model: Optional[str] = None,
         max_iters: int = 16,
@@ -1390,6 +1414,7 @@ class Director:
         # message BEFORE the run so SYNTH writes the right FORMAT (a ready email, not a generic report).
         self.intended_output = str(intended_output or "answer").strip().lower()
         self.post_output_actions: List[Dict[str, Any]] = []
+        self.artifact_intent: Optional[Dict[str, Any]] = None
         self.work_results: List[Dict[str, Any]] = []
         # The persisted room kind is authoritative. Legacy callers without one use
         # the compatibility resolver; active turn intent is still decided by the
@@ -4807,6 +4832,24 @@ class Director:
             "required": ["recall_queries", "history_turns_back", "connector_calls", "web_query", "seo_audit_url", "seo_audit_scope", "seo_task", "places_query", "needs_debate", "method_skills", "campaign_method_assignments", "work_orders", "turn_mode", "execution_engine", "collaboration_intensity", "response_depth", "evidence_mode", "post_output_actions", "outreach_request", "campaign_request"],
             "additionalProperties": False,
         }
+        if _visual_artifacts_enabled():
+            schema["properties"]["artifact_intent"] = {
+                "type": ["object", "null"],
+                "properties": {
+                    "kind": {"type": "string", "enum": ["interactive_document"]},
+                    "medium": {"type": "string", "enum": ["html"]},
+                    "purpose": {"type": "string"},
+                    "audience": {"type": "string"},
+                    "quality_profile": {"type": "string", "enum": [
+                        "executive", "analytical", "editorial", "operational", "educational"
+                    ]},
+                    "creative_freedom": {"type": "string", "enum": ["high", "guided"]},
+                    "requirements": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["kind", "medium", "purpose", "audience", "quality_profile", "creative_freedom", "requirements"],
+                "additionalProperties": False,
+            }
+            schema["required"].append("artifact_intent")
         sysp = (
             _now_block() +
             "You plan the GATHER and ACTION stages for a HIVEMIND room turn. "
@@ -4944,6 +4987,17 @@ class Director:
             "own name, products, customers, and market (e.g. 'Acme competitors in <region>', 'prospects for "
             "<product> in <market>'), NEVER a generic industry query."
         )
+        if _visual_artifacts_enabled():
+            sysp += (
+                "\n\nARTIFACT CAPABILITY: artifact_intent may select an interactive HTML document when "
+                "a designed, visual, explorable, presentation-like, or dashboard-like result materially "
+                "completes the ACTIVE request better than prose. This capability belongs to every Room; decide "
+                "from the requested outcome, never the Room name. Use null for normal answers, greetings, email, "
+                "or external Docs/Sheets/Notion writes. Describe purpose and audience without choosing a theme "
+                "or fixed layout. Use creative_freedom=high unless supplied brand constraints require guided."
+                " When artifact_intent is not null, choose execution_engine=debate so the governed final-output "
+                "adapter receives the complete evidence board instead of returning early through agentic execution."
+            )
         if self.domain_pack:
             sysp += (
                 f"\n\nDEDICATED ROOM: {self.domain_pack.display_name} "
@@ -5045,6 +5099,24 @@ class Director:
             plan = {}
         if not isinstance(plan, dict):
             plan = {}
+        if _visual_artifacts_enabled() and isinstance(plan.get("artifact_intent"), dict):
+            raw_intent = plan["artifact_intent"]
+            self.artifact_intent = {
+                "contract": "artifact-intent.v1",
+                "kind": "interactive_document",
+                "medium": "html",
+                "purpose": str(raw_intent.get("purpose") or "visual deliverable").strip()[:240],
+                "audience": str(raw_intent.get("audience") or "intended reader").strip()[:160],
+                "quality_profile": str(raw_intent.get("quality_profile") or "editorial").strip(),
+                "creative_freedom": str(raw_intent.get("creative_freedom") or "high").strip(),
+                "requirements": [
+                    str(item).strip()[:240]
+                    for item in (raw_intent.get("requirements") or [])
+                    if str(item).strip()
+                ][:12],
+            }
+        else:
+            self.artifact_intent = None
         intensity = str(plan.get("collaboration_intensity") or "").strip().lower()
         if intensity not in {"light", "standard", "deep"}:
             legacy_depth = str(plan.get("response_depth") or "focused").strip().lower()
@@ -6011,6 +6083,102 @@ class Director:
             return None
         return answer.strip() if isinstance(answer, str) and answer.strip() else None
 
+    async def _synthesize_visual(
+        self,
+        forced_debate: bool,
+        transcript_json: str,
+        repair_errors: Optional[List[str]] = None,
+        prior_html: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Generate one governed HTML artifact directly from evidence and debate."""
+        if not (_visual_artifacts_enabled() and self.artifact_intent):
+            return None
+        try:
+            skill = _VISUAL_SKILL_PATH.read_text(encoding="utf-8")
+        except OSError:
+            skill = "Create a polished, self-contained, responsive HTML artifact from the supplied evidence."
+        board = self._synthesis_context(10000)
+        debate = (
+            f"\n\nDEBATE TRANSCRIPT:\n{transcript_json[:10000]}"
+            if forced_debate else ""
+        )
+        repair = ""
+        if repair_errors:
+            repair = (
+                "\n\nRENDER REPAIR: Return the complete corrected artifact. Preserve the visual direction "
+                "and evidence, fixing only these verified defects:\n- "
+                + "\n- ".join(str(item)[:400] for item in repair_errors[:12])
+                + (f"\n\nPRIOR HTML:\n{prior_html[:180000]}" if prior_html else "")
+            )
+        system = (
+            self._system_prompt()
+            + "\n\nYou are the final artifact designer. Return JSON only, matching the schema. "
+              "The html field is the finished artifact, not a specification or explanation.\n\n"
+            + skill
+            + self._room_instr_block
+            + self._lang_directive()
+        )
+        user = (
+            f"ARTIFACT INTENT:\n{json.dumps(self.artifact_intent, ensure_ascii=False)}\n\n"
+            f"TASK:\n{self.user_message}\n\n{board}{debate}{repair}\n\n"
+            "Create the complete artifact now. summary is a concise in-room handoff, not a second report. "
+            "source_refs lists only compact source labels actually present in SOURCE EVIDENCE."
+        )
+        msg = await self._groq(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            force_text=True,
+            model=self.synth_model,
+            bucket="synth",
+            schema=_HTML_ARTIFACT_SCHEMA,
+            schema_name="interactive_artifact",
+            temp=0.55,
+            max_tokens=9000,
+        )
+        self.director_iters.append(self._last_tok)
+        try:
+            artifact = json.loads((msg or {}).get("content") or "{}")
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(artifact, dict):
+            return None
+        html = str(artifact.get("html") or "").strip()
+        if not html.lower().startswith("<!doctype html") or len(html) < 800 or len(html) > 200000:
+            return None
+        return {
+            "contract": "artifact-candidate.v1",
+            "intent": dict(self.artifact_intent),
+            "title": str(artifact.get("title") or "Interactive artifact").strip()[:180],
+            "summary": str(artifact.get("summary") or "The interactive artifact is ready.").strip()[:1200],
+            "html": html,
+            "source_refs": [str(item).strip()[:240] for item in (artifact.get("source_refs") or []) if str(item).strip()][:24],
+        }
+
+    async def _produce_visual_artifact(
+        self,
+        forced_debate: bool,
+        transcript_json: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Render, validate, and at most once repair the selected artifact."""
+        candidate = await self._synthesize_visual(forced_debate, transcript_json)
+        if not candidate:
+            return None
+        delivery = await self.emit({"t": "artifact_candidate", "candidate": candidate})
+        result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
+        if isinstance(result, dict) and result.get("ok") is False:
+            candidate = await self._synthesize_visual(
+                forced_debate,
+                transcript_json,
+                repair_errors=[str(item) for item in (result.get("errors") or [])],
+                prior_html=str(candidate.get("html") or ""),
+            )
+            if not candidate:
+                return None
+            delivery = await self.emit({"t": "artifact_candidate", "candidate": candidate})
+            result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
+        if isinstance(result, dict) and result.get("ok") is True:
+            return {"candidate": candidate, "receipt": result}
+        return None
+
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
         on the synth model — no tool-call transcript → no harmony glitch, full quality."""
@@ -6837,6 +7005,7 @@ class Director:
         work_order_result = None
         runtime_stage_result = None
         room_phase_result = None
+        artifact_receipt = None
         if self.room_phase:
             work_order_result = await self._synthesize_work_order_result()
             room_phase_result = await self._synthesize_room_phase_result(work_order_result)
@@ -6880,7 +7049,11 @@ class Director:
                 await self.emit({"t": "growth_stage", "stage": "plan", "status": "complete",
                                  "title": "Growth stage selected", "detail": "One bounded stage and one specialist work order are ready to persist."})
         else:
-            if (self.room_kind == "seo" and self._seo_audit_evidence
+            if self.artifact_intent:
+                # The visual producer is the final synthesizer for ordinary Room
+                # turns; do not pay for a prose report that would be rendered again.
+                final_text = ""
+            elif (self.room_kind == "seo" and self._seo_audit_evidence
                     and self.seo_task in {"remediate", "rescan"}
                     and self.response_depth != "operating"):
                 from .domains.seo.reporting import render_remediation_report
@@ -6908,6 +7081,19 @@ class Director:
             else:
                 agent_answer = await self._try_direct_answer_hook()
                 final_text = agent_answer or await self._synthesize(forced_debate, transcript_json)
+        if self.artifact_intent:
+            visual = await self._produce_visual_artifact(forced_debate, transcript_json)
+            if visual:
+                artifact_receipt = visual["receipt"]
+                final_text = str(visual["candidate"].get("summary") or "The interactive artifact is ready.")
+            else:
+                if not final_text:
+                    final_text = await self._synthesize(forced_debate, transcript_json)
+                await self.emit({
+                    "t": "warning",
+                    "code": "artifact_render_failed",
+                    "note": "The visual artifact did not pass rendering checks; the grounded text deliverable was retained.",
+                })
         if not final_text:
             # Every synthesis attempt failed — never return empty at the emit boundary.
             final_text = ("(The room could not produce a grounded answer this turn — "
@@ -6972,6 +7158,8 @@ class Director:
             "work_order_result": None if self.room_phase else work_order_result,
             "runtime_stage_result": runtime_stage_result,
             "room_phase_result": room_phase_result,
+            "artifact_intent": dict(self.artifact_intent) if self.artifact_intent else None,
+            "artifact_receipt": artifact_receipt,
         }
 
 
@@ -6985,7 +7173,7 @@ async def run_director(
     room_template: str,
     room_goal: Optional[str],
     enabled_connectors: List[str],
-    emit: Callable[[Dict[str, Any]], Awaitable[None]],
+    emit: Callable[[Dict[str, Any]], Awaitable[Any]],
     director_model: Optional[str] = None,
     persona_model: Optional[str] = None,
     synth_model: Optional[str] = None,

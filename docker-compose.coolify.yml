@@ -572,6 +572,7 @@ services:
             PORT: '3000'
             HOST: 0.0.0.0
             VERSION: '${VERSION:-2.0.0}'
+            Visual_path_In_Hyperrooms: '${Visual_path_In_Hyperrooms:-false}'
             HIVEMIND_API_URL: '${HIVEMIND_API_URL:-https://core.hivemind.davinciai.eu:8050}'
             HIVEMIND_CORE_API_BASE_URL: '${HIVEMIND_CORE_API_BASE_URL:-https://core.hivemind.davinciai.eu:8050}'
             HIVEMIND_CONTROL_PLANE_PUBLIC_URL: '${HIVEMIND_CONTROL_PLANE_PUBLIC_URL:-https://api.hivemind.davinciai.eu:8040}'
@@ -735,6 +736,7 @@ services:
             REDIS_PORT: '6379'
             REDIS_PASSWORD: '${REDIS_PASSWORD}'
             HIVEMIND_MASTER_API_KEY: '${HIVEMIND_MASTER_API_KEY}'
+            Visual_path_In_Hyperrooms: '${Visual_path_In_Hyperrooms:-false}'
             OPENROUTER_API_KEY: '${OPENROUTER_API_KEY}'
             OPENROUTER_BASE_URL: '${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}'
             ANTHROPIC_API_KEY: '${ANTHROPIC_API_KEY}'

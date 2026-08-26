@@ -110,6 +110,7 @@ import {
   handleHyperTurnStreamRoute,
   handleInternalHyperTurnEventRoute,
 } from './routes/hyper-rooms.js';
+import { readHyperArtifact } from './artifacts/hyper-artifacts.js';
 import { getInternalApiKey, hasInternalApiKey, requireAdminSecret, requireSecret, requireSessionSecret } from './security/internal-auth.js';
 import { createOutreachModule } from './outreach/campaigns.js';
 import { validateDomain } from './web/web-policy.js';
@@ -12967,7 +12968,7 @@ Write the persona now.`;
           logger.warn({ err: _artifactErr.message, turn_id: body.turn_id }, '[hyper-rooms] artifact persist failed (best-effort)');
         }
 
-        return jsonResponse(res, { ok: true });
+        return jsonResponse(res, routeResult?.response || { ok: true });
       } catch (err) {
         console.warn('[hyper-rooms] turn-event append failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);
@@ -13000,6 +13001,50 @@ Write the persona now.`;
         result.relations = await prisma.hyperRelation.findMany({ where: { roomId }, take: limit, ...orderAsc });
       }
       return jsonResponse(res, result);
+    }
+
+    // Generated HyperRoom artifacts are tenant-scoped SourceArtifacts. HTML is
+    // served with a restrictive CSP and rendered by the frontend in a sandboxed
+    // iframe; previews are immutable browser-validation receipts.
+    const hyperArtifactMatch = pathname.match(/^\/v1\/hyper-artifacts\/([0-9a-f-]{36})(?:\/(preview))?$/);
+    if (hyperArtifactMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const artifact = await readHyperArtifact({
+        prisma,
+        artifactId: hyperArtifactMatch[1],
+        orgId: current.session.orgId,
+      });
+      if (!artifact) return jsonResponse(res, { error: 'Artifact not found' }, 404);
+      const payload = artifact.payload && typeof artifact.payload === 'object' ? artifact.payload : {};
+      if (hyperArtifactMatch[2] === 'preview') {
+        const viewport = url.searchParams.get('viewport') === 'mobile' ? 'mobile' : 'desktop';
+        const encoded = payload.previews?.[viewport];
+        if (!encoded) return jsonResponse(res, { error: 'Artifact preview unavailable' }, 404);
+        const image = Buffer.from(String(encoded), 'base64');
+        res.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': image.length,
+          'Cache-Control': 'private, max-age=31536000, immutable',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end(image);
+        return;
+      }
+      const html = String(payload.html || '');
+      if (!html) return jsonResponse(res, { error: 'Artifact content unavailable' }, 404);
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': Buffer.byteLength(html),
+        'Cache-Control': 'private, max-age=31536000, immutable',
+        'Content-Security-Policy': "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'",
+        'Cross-Origin-Resource-Policy': 'same-origin',
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'SAMEORIGIN',
+        'Referrer-Policy': 'no-referrer',
+      });
+      res.end(html);
+      return;
     }
   }
   // ─── End Hyper Agents Rooms ───────────────────────────────

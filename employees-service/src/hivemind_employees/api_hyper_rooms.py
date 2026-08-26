@@ -887,7 +887,7 @@ def _get_callback_client() -> httpx.AsyncClient:
     return _CALLBACK_CLIENT
 
 
-async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) -> None:
+async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """POST an event back to the control-plane append hook.
 
     Every event carries a stable delivery id so a response lost after the
@@ -896,7 +896,7 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
     completed Room looking permanently busy even though all LLM work finished.
     """
     if not callback_url:
-        return
+        return None
     settings = get_settings()
     headers = {
         "X-API-Key": settings.hivemind_master_api_key or "",
@@ -909,7 +909,7 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
     if identity:
         body["execution_identity"] = identity
     critical = str(event.get("t") or "") in {
-        "final_report", "seal", "connector_logo", "approval_request",
+        "final_report", "seal", "connector_logo", "artifact_candidate", "approval_request",
         "approval_required", "campaign_bundle", "campaign_bundle_partial", "runtime_stage_result",
         "room_phase_result", "work_order_result",
     }
@@ -922,7 +922,11 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
             response.raise_for_status()
             if outbox_persisted:
                 await mark_hyper_turn_outbox_delivered(turn_id, str(event["event_id"]))
-            return
+            try:
+                payload = response.json()
+                return payload if isinstance(payload, dict) else None
+            except Exception:  # noqa: BLE001
+                return None
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if attempt + 1 < attempts:
@@ -931,6 +935,7 @@ async def _emit_event(callback_url: str, turn_id: str, event: Dict[str, Any]) ->
         "hyper-rooms event delivery exhausted type=%s turn=%s attempts=%d: %s",
         event.get("t"), turn_id, attempts, last_error,
     )
+    return None
 
 
 # ─── Agent build / reuse ──────────────────────────────────────────────
@@ -3145,6 +3150,19 @@ async def _verify_and_emit(
         return None
     plan = _PLAN_BY_TURN.get(req.turn_id)
     if isinstance(plan, dict):
+        if isinstance(plan.get("artifact_intent"), dict):
+            receipt = plan.get("artifact_receipt")
+            artifact_ok = bool(isinstance(receipt, dict) and receipt.get("ok") and receipt.get("artifact_id"))
+            verdict["artifact_ok"] = artifact_ok
+            verdict["met"] = bool(verdict.get("met")) and artifact_ok
+            if artifact_ok:
+                produced = list(verdict.get("produced_artifacts") or [])
+                produced.append(str(receipt.get("artifact_id")))
+                verdict["produced_artifacts"] = list(dict.fromkeys(produced))
+            else:
+                gaps = list(verdict.get("gaps") or [])
+                gaps.append("The requested interactive artifact did not pass production rendering checks.")
+                verdict["gaps"] = list(dict.fromkeys(gaps))
         plan["verification"] = verdict
     await _emit_event(req.callback_url, req.turn_id, {"t": "verify", **verdict})
     log.info("[verify] room=%s met=%s artifact=%s assign=%s grounded=%s gaps=%d",
@@ -3787,8 +3805,8 @@ async def _orchestrate_single_agent(
         or os.environ.get("HYPER_ROOM_MODEL", HYPER_FAST_MODEL)
     )
 
-    async def _emit(ev: Dict[str, Any]) -> None:
-        await _emit_event(req.callback_url, req.turn_id, ev)
+    async def _emit(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        return await _emit_event(req.callback_url, req.turn_id, ev)
 
     # Quality mode → model combo. 'best' = all gpt-oss-120b (max rigor). 'auto' =
     # cheap gather + debate, strong 120b SYNTHESIS (the synth anchors quality; the
@@ -4228,6 +4246,8 @@ async def _orchestrate_single_agent(
 
     _PLAN_BY_TURN[req.turn_id] = {
         "intended_output": intended_output,
+        "artifact_intent": result.get("artifact_intent"),
+        "artifact_receipt": result.get("artifact_receipt"),
         "artifact_steps": [
             {"kind": action.get("artifact_kind"), "capability": action.get("capability")}
             for action in post_output_actions
@@ -4359,6 +4379,18 @@ async def _orchestrate_single_agent(
     # Drain AFTER produce+verify so a deliverable that only succeeded on the verify-side
     # idempotent retry is still counted. Non-destructive snapshots; post_room_turn emits.
     artifacts = drain_artifacts()
+    _visual_receipt = result.get("artifact_receipt")
+    if isinstance(_visual_receipt, dict) and _visual_receipt.get("ok") and _visual_receipt.get("url"):
+        artifacts.append({
+            "connector": "hivemind-artifact",
+            "artifact_type": _visual_receipt.get("artifact_type") or "interactive_document",
+            "medium": _visual_receipt.get("medium") or "html",
+            "artifact_id": _visual_receipt.get("artifact_id"),
+            "url": _visual_receipt.get("url"),
+            "preview_url": _visual_receipt.get("preview_url"),
+            "title": _visual_receipt.get("title") or "Interactive artifact",
+            "receipt": _visual_receipt.get("receipt") or {},
+        })
     pending = drain_pending_writes()
     _vp = _PLAN_BY_TURN.get(req.turn_id) or {}
     _gv = _vp.get("verification") or {}

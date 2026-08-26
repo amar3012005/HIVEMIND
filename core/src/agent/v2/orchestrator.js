@@ -15,7 +15,12 @@ export function createNativePlannerGraph({ planner = planNativeTurn, compactCont
   return new StateGraph(State)
     .addNode('turn_context', async (state) => {
       const compact = await hydrateCompactContext(state.input, { graph: compactContextGraph });
-      return { context: buildTurnContext({ ...state.input, history: compact.history, recentSourceRefs: compact.sourceRefs }) };
+      return { context: buildTurnContext({
+        ...state.input,
+        history: compact.history,
+        recentSourceRefs: compact.sourceContext?.refs || compact.sourceRefs,
+        recentContextAnswer: compact.sourceContext?.answer || null,
+      }) };
     })
     .addNode('capability_catalog', async () => ({ capabilityCatalog: compactCapabilityCatalog() }))
     .addNode('semantic_planner', async (state) => {

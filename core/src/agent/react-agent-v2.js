@@ -973,8 +973,9 @@ async function execWeb(bus, plan, ctx, { recordTool, startTool, remaining }, cov
     startTool('hivemind_web_search', args);
     const r = await dispatchTool('hivemind_web_search', args, ctx);
     if (!r?.job_id) {
-      recordTool('hivemind_web_search', args, `error: ${r?.error || 'web_job_not_created'}`, null);
-      return { webJob: r };
+      const error = r?.error || 'web_job_not_created';
+      recordTool('hivemind_web_search', args, `error: ${error}`, null);
+      return { webJob: r, webAttempted: true, webError: error };
     }
     const job = await waitForWebJob(r.job_id, ctx, remaining);
     const packet = webResultPacket(job, policy.query);
@@ -991,9 +992,15 @@ async function execWeb(bus, plan, ctx, { recordTool, startTool, remaining }, cov
     recordTool('hivemind_web_search', args,
       packet ? `${packet.sourceSections.length} public web sources` : `job ${job?.status || 'incomplete'}`,
       packet ? job : null);
-    return { webJob: job || r, webPacket: packet };
+    return {
+      webJob: job || r,
+      webPacket: packet,
+      webAttempted: true,
+      webError: packet ? null : (job?.error || job?.status || 'web_search_incomplete'),
+    };
   } catch (err) {
     recordTool('hivemind_web_search', { query: policy.query }, `error: ${err.message}`, null);
+    return { webAttempted: true, webError: err.message };
   }
 }
 
@@ -1398,6 +1405,13 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
       relationships: [...edgesByKey.values()],
     });
     coverage = { ...coverage, external_web_used: true, workspace_gap: true };
+  } else if (webPatch?.webAttempted) {
+    coverage = {
+      ...coverage,
+      external_web_requested: true,
+      external_web_unavailable: webPatch.webError || 'web_search_unavailable',
+      complete: false,
+    };
   }
 
   // (e) Save intent — fire async after answer (handled in caller).
@@ -1816,6 +1830,24 @@ function unavailableEvidenceResponse({ message, evidence, language }) {
   return responses[lang] || responses.en;
 }
 
+function publicWebUnavailableResponse({ evidence, language }) {
+  const lang = String(language || 'en').slice(0, 2).toLowerCase();
+  const reason = String(evidence?.coverage?.external_web_unavailable || 'web_search_unavailable');
+  const quota = /plan_limit|quota|allowance|credit/i.test(reason);
+  const responses = quota ? {
+    de: 'Ich habe zuerst HIVEMIND durchsucht, konnte die angeforderte öffentliche Websuche aber nicht ausführen, weil das Web-Kontingent derzeit ausgeschöpft ist. Ich stelle internen Workspace-Kontext nicht als aktuelle öffentliche Information dar.',
+    fr: "J'ai d'abord consulté HIVEMIND, mais je n'ai pas pu lancer la recherche Web publique demandée car le quota Web est épuisé. Je ne présenterai pas le contexte interne comme une information publique actuelle.",
+    es: 'Primero busqué en HIVEMIND, pero no pude ejecutar la búsqueda web pública solicitada porque se agotó la cuota web. No presentaré el contexto interno como información pública actual.',
+    en: 'I searched HIVEMIND first, but the requested public-web search could not run because the web allowance is currently exhausted. I will not present internal workspace context as current public information.',
+  } : {
+    de: 'Ich habe zuerst HIVEMIND durchsucht, aber die angeforderte öffentliche Websuche ist derzeit nicht verfügbar. Ich werde internen Workspace-Kontext nicht als aktuelle öffentliche Information ausgeben. Bitte versuche es gleich noch einmal.',
+    fr: "J'ai d'abord consulté HIVEMIND, mais la recherche Web publique demandée est momentanément indisponible. Je ne présenterai pas le contexte interne comme une information publique actuelle. Réessaie dans un instant.",
+    es: 'Primero busqué en HIVEMIND, pero la búsqueda web pública solicitada no está disponible ahora. No presentaré el contexto interno como información pública actual. Inténtalo de nuevo en un momento.',
+    en: 'I searched HIVEMIND first, but the requested public-web search is temporarily unavailable. I will not present internal workspace context as current public information. Please try again in a moment.',
+  };
+  return responses[lang] || responses.en;
+}
+
 function sourceUnavailableResponse({ evidence, language }) {
   const lang = String(language || 'en').slice(0, 2).toLowerCase();
   const source = evidence?.coverage?.source?.title || evidence?.coverage?.source?.document_id || 'the requested source';
@@ -1870,6 +1902,14 @@ export async function answerStep({ message, history, evidence, plan, language, a
     responseDepth: plan.response_depth,
     answerObjective: plan.answer_objective || message,
   });
+  if (plan.web_fallback?.reason === 'explicit_web' && evidence.coverage?.external_web_unavailable) {
+    return {
+      response: publicWebUnavailableResponse({ evidence, language }),
+      claims: [], rejected_claims: [], grounded: false, evidence_used: [], confidence: 0,
+      gaps: ['The requested public-web search did not complete.'],
+      context_status: 'relevant_but_incomplete', answer_coverage: [], usage: null,
+    };
+  }
   if (plan.requires_complete_coverage && evidence.coverage?.aggregate_complete === true
       && Number.isInteger(evidence.aggregate?.count)) {
     const count = evidence.aggregate.count;

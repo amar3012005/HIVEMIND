@@ -34,10 +34,30 @@ test('compact context preserves only bounded public source references', async ()
   await recordCompactAssistantTurn({
     ...identity,
     response: 'Public pricing summary.',
-    sources: Array.from({ length: 12 }, (_, index) => ({ title: `S${index}`, url: `https://example.com/${index}` })),
+    sources: Array.from({ length: 12 }, (_, index) => ({
+      title: `S${index}`,
+      url: `https://example.com/${index}`,
+      source_type: 'public_web',
+    })),
   }, { graph });
   const next = await hydrateCompactContext({ ...identity, message: 'save this', history: [] }, { graph });
   assert.equal(next.sourceRefs.length, compactContextLimits.sourceRefs);
   assert.equal(next.sourceRefs[0].url, 'https://example.com/4');
+  assert.equal(next.sourceContext.answer, 'Public pricing summary.');
   assert.equal(next.history.at(-1).content, 'Public pricing summary.');
+});
+
+test('a later non-web assistant answer clears stale public source context', async () => {
+  const graph = createCompactContextGraph({ checkpointer: new MemorySaver() });
+  const identity = { orgId: 'org-a', userId: 'user-a', threadId: 'replaceable-sources' };
+  await recordCompactAssistantTurn({
+    ...identity,
+    response: 'Public pricing summary.',
+    sources: [{ title: 'Pricing', url: 'https://example.com/pricing', source_type: 'public_web' }],
+  }, { graph });
+  assert.ok((await hydrateCompactContext({ ...identity, message: 'which source?' }, { graph })).sourceContext);
+
+  await recordCompactAssistantTurn({ ...identity, response: 'Hello Amar.', sources: [] }, { graph });
+  const next = await hydrateCompactContext({ ...identity, message: 'new topic' }, { graph });
+  assert.equal(next.sourceContext, null);
 });

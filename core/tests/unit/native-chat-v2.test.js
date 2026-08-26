@@ -42,6 +42,17 @@ test('TurnContextBuilder bounds history, profile and authorized projects', () =>
   assert.equal(context.compact_profile.length, 1800); assert.equal(context.authorized_projects.length, 24);
 });
 
+test('compiler carries the replaceable recent public checkpoint independently of planner phrasing', () => {
+  const plan = validateNativePlan(makePlan({ query: 'which source did you use?' }));
+  plan.uses_recent_public_sources = false;
+  const decision = compileNativePlan(plan, 'which source did you use?', {
+    recent_source_refs: [{ title: 'Pricing', url: 'https://example.com/pricing' }],
+    recent_context_answer: 'The public price is EUR 10.',
+  });
+  assert.equal(decision.recent_public_sources[0].url, 'https://example.com/pricing');
+  assert.equal(decision.recent_context_answer, 'The public price is EUR 10.');
+});
+
 test('person overview preserves entity and compiles one canonical recall', () => {
   const decision = compileNativePlan(validateNativePlan(makePlan()), 'What do you know about Kruti?');
   assert.equal(decision.operation, 'recall'); assert.deepEqual(decision.queries, ['Kruti']);

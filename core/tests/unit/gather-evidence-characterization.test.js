@@ -155,6 +155,26 @@ test('explicit web fallback polls once and promotes public evidence into the syn
   assert.equal(result.ranked_candidates[0].segment_id, 'web:web-job-1:1');
 });
 
+test('explicit web failure is surfaced as unavailable instead of complete internal coverage', async () => {
+  const { ctx } = makeCtx({
+    hivemind_recall: { memories: memRows('A'), evidence: [], evidence_count: 0 },
+    hivemind_web_search: { error: 'plan_limit_exceeded' },
+  }, { extra: {
+    runWebSearchJob: async () => ({ error: 'plan_limit_exceeded' }),
+    webJobStore: { get: async () => null },
+  } });
+  const result = await gatherEvidence({
+    plan: basePlan({
+      needs_web: true,
+      web_fallback: { allowed: true, query: 'current public pricing', reason: 'explicit_web' },
+    }),
+    ctx, deadlineAt: FAR(),
+  });
+  assert.equal(result.coverage.external_web_requested, true);
+  assert.equal(result.coverage.external_web_unavailable, 'plan_limit_exceeded');
+  assert.equal(result.coverage.complete, false);
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // R2 — the flag-collision case: base adds X unflagged, temporal re-adds X with
 // _superseded_predecessor. The flag MUST WIN on the existing entry.

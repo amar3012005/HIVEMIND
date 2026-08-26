@@ -2452,13 +2452,15 @@ export async function answerStep({ message, history, evidence, plan, language, a
   // id cut in half is worse than the section being absent), lowest priority
   // first, until the remainder fits.
   const EVIDENCE_CHAR_BUDGET = Number(process.env.HIVEMIND_ANSWER_EVIDENCE_CHAR_BUDGET || 12000);
-  const alwaysKept = `EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
+  const relationCritical = relationClaimLines
+    ? `EXPLICIT RELATION CLAIMS (${(evidence.relation?.explicit_relation_claims || []).length} sourced claims; preserve verification and author status):\n${relationClaimLines}\n\n`
+    : '';
+  const alwaysKept = `${relationCritical}EVIDENCE (${Math.min(evidence.memories.length, evidenceTopK)} of ${evidence.memories.length} memories):
 ${groundedEvidence}`;
   // Highest priority first — this is the drop order, last entry drops first.
   const optionalSections = [
     { text: chainLines && `\n\nSYNTHESIS CHAINS (${(evidence.synthesis_chains || []).length} curated claims + sources — cite the claim, support with the evidence rows):\n${chainLines}` },
     { text: edgeLines && `\n\nGRAPH EDGES (${filteredEdges.length} typed relationships between the memories above — ONLY trust these for verified relation claims):\n${edgeLines}` },
-    { text: relationClaimLines && `\n\nEXPLICIT RELATION CLAIMS (${(evidence.relation?.explicit_relation_claims || []).length} sourced claims; preserve verification and author status):\n${relationClaimLines}` },
     { text: coMentionLines && `\n\nCO-MENTIONS (${(evidence.co_mentions || []).length} shared-source paths — report as unverified co-mentions, never as typed relationships):\n${coMentionLines}` },
     { text: liveLines && `\n\nLIVE WORKSPACE (${(evidence.live || []).length} fresh items — Gmail / Drive / Calendar):\n${liveLines}` },
   ].filter((s) => s.text);

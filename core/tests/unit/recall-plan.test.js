@@ -52,6 +52,41 @@ test('RetrievalSpec preserves hard entity, scope, source, type and relationship 
   assert.equal(plan.time.selector, 'latest');
 });
 
+test('RetrievalSpec accepts planner time mode, semantics, direct range, and as_of aliases', () => {
+  const latestByMode = resolveRecallPlan({
+    mode: 'full', explicit_mode: true,
+    time: { mode: 'latest', axis: 'known_time' },
+  });
+  assert.equal(latestByMode.time.selector, 'latest');
+  assert.equal(latestByMode.time.mode, 'latest');
+
+  const latestBySemantics = resolveRecallPlan({
+    mode: 'full', explicit_mode: true,
+    time: { semantics: 'latest', axis: 'event_time' },
+  });
+  assert.equal(latestBySemantics.time.selector, 'latest');
+  assert.equal(latestBySemantics.time.axis, 'event_time');
+
+  const ranged = resolveRecallPlan({
+    mode: 'full', explicit_mode: true,
+    time: {
+      semantics: 'range', axis: 'event_time',
+      start: '2026-08-08T00:00:00+02:00',
+      end: '2026-08-23T23:59:59.999+02:00',
+    },
+  });
+  assert.equal(ranged.time.mode, 'range');
+  assert.equal(ranged.time.range.start, '2026-08-07T22:00:00.000Z');
+  assert.equal(ranged.time.range.end, '2026-08-23T21:59:59.999Z');
+
+  const knownSnapshot = resolveRecallPlan({
+    mode: 'full', explicit_mode: true,
+    time: { semantics: 'snapshot', axis: 'known_time', as_of: '2026-08-23T12:00:00Z' },
+  });
+  assert.equal(knownSnapshot.time.mode, 'known_at');
+  assert.equal(knownSnapshot.time.known_at, '2026-08-23T12:00:00.000Z');
+});
+
 test('memory entity and relationship predicates are hard filters before delivery', () => {
   const rows = [
     { id: 'm1', title: 'Kruti update', tags: ['entity:kruti'] },

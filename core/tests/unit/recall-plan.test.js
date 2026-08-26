@@ -87,6 +87,16 @@ test('RetrievalSpec accepts planner time mode, semantics, direct range, and as_o
   assert.equal(knownSnapshot.time.known_at, '2026-08-23T12:00:00.000Z');
 });
 
+test('RetrievalSpec honors max_memories as the public limit alias', () => {
+  assert.equal(resolveRecallPlan({
+    mode: 'full', explicit_mode: true, max_memories: 5,
+  }).max_memories, 5);
+  // The established `limit` field remains authoritative when both exist.
+  assert.equal(resolveRecallPlan({
+    mode: 'full', explicit_mode: true, limit: 7, max_memories: 5,
+  }).max_memories, 7);
+});
+
 test('memory entity and relationship predicates are hard filters before delivery', () => {
   const rows = [
     { id: 'm1', title: 'Kruti update', tags: ['entity:kruti'] },

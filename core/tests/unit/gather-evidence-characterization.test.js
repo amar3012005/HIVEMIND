@@ -126,6 +126,35 @@ test('base recall preserves distinct adapter evidence rows with identical prefix
   assert.equal(result.ranked_candidates.length, 2);
 });
 
+test('explicit web fallback polls once and promotes public evidence into the synthesis pool', async () => {
+  const internal = Array.from({ length: 15 }, (_, index) => ({
+    segment_id: `internal-${index}`, document_title: 'Internal', content: `internal ${index}`,
+  }));
+  const { ctx } = makeCtx({
+    hivemind_recall: { memories: [], evidence: internal, evidence_count: internal.length },
+    hivemind_web_search: { job_id: 'web-job-1', status: 'queued' },
+  }, { extra: {
+    runWebSearchJob: async () => ({ ok: true, job_id: 'web-job-1' }),
+    webJobStore: {
+      get: async () => ({
+        id: 'web-job-1', status: 'succeeded', completed_at: '2026-08-26T10:00:00Z',
+        results: [{ title: 'Public pricing', url: 'https://example.com/pricing', snippet: 'Current price.' }],
+      }),
+    },
+  } });
+  const result = await gatherEvidence({
+    plan: basePlan({
+      needs_web: true,
+      web_fallback: { allowed: true, query: 'current public pricing', reason: 'explicit_web' },
+    }),
+    ctx, deadlineAt: FAR(),
+  });
+  assert.equal(result.steps.at(-1).tool, 'hivemind_web_search');
+  assert.equal(result.steps.at(-1).result_summary, '1 public web sources');
+  assert.equal(result.evidence[0].source_platform, 'public_web');
+  assert.equal(result.ranked_candidates[0].segment_id, 'web:web-job-1:1');
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // R2 — the flag-collision case: base adds X unflagged, temporal re-adds X with
 // _superseded_predecessor. The flag MUST WIN on the existing entry.

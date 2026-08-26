@@ -80,7 +80,7 @@ export class ResultReranker {
   }
 
   _tokenize(text) {
-    return (text || '').toLowerCase()
+    return String(text ?? '').toLowerCase()
       .replace(/[^\w\s]/g, ' ')
       .split(/\s+/)
       .filter(w => w.length > 2);
@@ -93,7 +93,7 @@ export class ResultReranker {
 
   _computeTermOverlap(queryTerms, content) {
     if (!queryTerms.length || !content) return 0;
-    const contentLower = content.toLowerCase();
+    const contentLower = String(content).toLowerCase();
     const contentTokens = new Set(this._tokenize(contentLower));
 
     let matches = 0;

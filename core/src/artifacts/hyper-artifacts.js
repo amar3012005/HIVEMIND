@@ -24,7 +24,7 @@ export function validateHyperArtifactHtml(html) {
     [/<meta\b[^>]*http-equiv\s*=\s*["']?refresh/i, 'Meta refresh is forbidden.'],
     [/\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(/i, 'Network APIs are forbidden.'],
     [/\b(?:localStorage|sessionStorage|document\.cookie)\b/i, 'Browser credential and storage APIs are forbidden.'],
-    [/(?:src|href)\s*=\s*["']\s*(?:https?:)?\/\//i, 'External assets are forbidden.'],
+    [/(?:\bsrc\s*=|<link\b[^>]*\bhref\s*=)\s*["']\s*(?:https?:)?\/\//i, 'External loaded assets are forbidden.'],
     [/url\(\s*["']?\s*(?:https?:)?\/\//i, 'External CSS assets are forbidden.'],
   ];
   for (const [pattern, message] of blocked) if (pattern.test(html)) errors.push(message);

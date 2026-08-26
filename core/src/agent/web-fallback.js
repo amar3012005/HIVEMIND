@@ -2,7 +2,11 @@ export function publicWebFallbackEligible({ plan = {}, coverage = {}, hasRuntime
   const policy = plan.web_fallback || {};
   return plan.needs_web === true
     && policy.allowed === true
-    && coverage.complete !== true
+    // An explicit web request cannot be fulfilled by internal evidence alone;
+    // recall still runs first for context, then exactly one public search runs.
+    // For implicit current/competitor fallback, a complete workspace answer
+    // suppresses the external call.
+    && (policy.reason === 'explicit_web' || coverage.complete !== true)
     && coverage.retrieval_timed_out !== true
     && coverage.retrieval_unavailable !== true
     && Boolean(policy.query)

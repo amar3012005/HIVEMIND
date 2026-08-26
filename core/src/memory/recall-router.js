@@ -2255,6 +2255,19 @@ export class RecallRouter {
             }
             frontier = next;
           }
+          // Inventory calls are bounded and may omit the explicit anchor even
+          // though it is authorized and directly addressable.  A targeted
+          // timeline must always contain its anchor (a one-item history is a
+          // valid timeline), so hydrate it through the store's ACL-aware read
+          // before applying the hard chain boundary.
+          if (![...memories, ...inventory].some((memory) => recallMemoryRowId(memory) === recallPlan.target_memory_id)) {
+            const target = await this.store.getMemoryScoped?.(recallPlan.target_memory_id, {
+              user_id: ctx.userId,
+              org_id: ctx.orgId,
+              access_context: ctx.accessContext || {},
+            });
+            if (target) inventory.push(target);
+          }
           // The target chain is a hard boundary for the whole timeline, not
           // only for the additive historical inventory.  Otherwise semantic
           // hop-1 candidates are merged back below and unrelated tenant rows

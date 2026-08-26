@@ -7417,6 +7417,7 @@ async def run_director(
     campaign_brief: Optional[Dict[str, Any]] = None,
     room_id: str = "",
     turn_id: str = "",
+    execution_profile: Optional[Dict[str, Any]] = None,
     direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
     agentic_task_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
 ) -> Dict[str, Any]:
@@ -7438,6 +7439,7 @@ async def run_director(
         out_language=out_language,
         campaign_brief=campaign_brief,
         room_id=room_id, turn_id=turn_id,
+        execution_profile=execution_profile,
         direct_answer_hook=direct_answer_hook,
         agentic_task_hook=agentic_task_hook,
     )

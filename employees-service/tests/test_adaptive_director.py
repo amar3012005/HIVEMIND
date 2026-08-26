@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from hivemind_employees.hyper.engine import Director, _work_order_activity
+from hivemind_employees.hyper.engine import Director, _work_order_activity, run_director
 from hivemind_employees.hyper.domains.seo.reporting import render_remediation_report
 
 
@@ -31,6 +31,44 @@ def _director(*, message: str, room_kind: str = "general", company_brief: str = 
         execution_profile=execution_profile,
     )
     return director, events
+
+
+def test_run_director_forwards_execution_profile(monkeypatch):
+    captured = {}
+
+    class FakeDirector:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self):
+            return {"status": "complete"}
+
+    monkeypatch.setattr("hivemind_employees.hyper.engine.Director", FakeDirector)
+
+    profile = {
+        "contract": "execution-profile.v1",
+        "profile_id": "fundraising.presentation.v1",
+        "allowed_outputs": ["artifact"],
+    }
+
+    async def emit(_event):
+        return None
+
+    result = asyncio.run(run_director(
+        user_message="Create a Series A pitch deck",
+        user_id="user-1",
+        org_id="org-1",
+        project_id=None,
+        participants=[],
+        room_template="auto",
+        room_goal=None,
+        enabled_connectors=[],
+        emit=emit,
+        execution_profile=profile,
+    ))
+
+    assert result == {"status": "complete"}
+    assert captured["execution_profile"] == profile
 
 
 def test_artifact_only_profile_cannot_silently_degrade_to_text(monkeypatch):

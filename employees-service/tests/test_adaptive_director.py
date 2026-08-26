@@ -5,7 +5,8 @@ from hivemind_employees.hyper.engine import Director, _work_order_activity
 from hivemind_employees.hyper.domains.seo.reporting import render_remediation_report
 
 
-def _director(*, message: str, room_kind: str = "general", company_brief: str = "", enabled_connectors=None):
+def _director(*, message: str, room_kind: str = "general", company_brief: str = "",
+              enabled_connectors=None, execution_profile=None):
     events = []
 
     async def emit(event):
@@ -27,8 +28,44 @@ def _director(*, message: str, room_kind: str = "general", company_brief: str = 
         emit=emit,
         room_kind=room_kind,
         company_brief=company_brief,
+        execution_profile=execution_profile,
     )
     return director, events
+
+
+def test_artifact_only_profile_cannot_silently_degrade_to_text(monkeypatch):
+    monkeypatch.setenv("Visual_path_In_Hyperrooms", "true")
+    director, _events = _director(
+        message="Create the requested experience deliverable",
+        room_kind="design",
+        execution_profile={
+            "contract": "execution-profile.v1",
+            "profile_id": "design.artifact.v1",
+            "allowed_outputs": ["artifact"],
+            "required_artifacts": ["design_artifact"],
+        },
+    )
+    payload = {
+        "recall_queries": [], "history_turns_back": 0, "connector_calls": [],
+        "web_query": None, "seo_audit_url": None, "seo_audit_scope": "none",
+        "seo_task": "none", "places_query": None, "needs_debate": False,
+        "method_skills": [], "campaign_method_assignments": [], "work_orders": [],
+        "turn_plan": [], "turn_mode": "task", "execution_engine": "debate",
+        "collaboration_intensity": "standard", "response_depth": "focused",
+        "evidence_mode": "standard", "post_output_actions": [],
+        "outreach_request": None, "campaign_request": None, "artifact_intent": None,
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert director.artifact_intent is not None
+    assert director.artifact_intent["kind"] == "interactive_document"
+    assert plan["artifact_intent"] == director.artifact_intent
+    assert plan["execution_engine"] == "debate"
 
 
 def test_source_evidence_excludes_skills_and_agent_work_results():

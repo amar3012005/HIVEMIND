@@ -2494,34 +2494,40 @@ async def _verify_turn(
         "If nothing is missing, gaps must be []. Output JSON only."
     )
     try:
-        verifier_emp = {
-            **lead,
-            "tools": ["_verify_noop"],   # truthy, matches no real tool → empty toolkit
-            "connectors": [],
-            "persona": "A neutral evidence verifier. Judge only the supplied contract and evidence; do not role-play.",
-            "hyper": None,
-            "active_prompt_version": None,
-            "max_iters": 1,
+        verdict_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "met": {"type": "boolean"},
+                "artifact_ok": {"type": "boolean"},
+                "assignments_ok": {"type": "boolean"},
+                "grounded_ok": {"type": "boolean"},
+                "unsupported_claims": {"type": "array", "items": {"type": "string"}},
+                "gaps": {"type": "array", "items": {"type": "string"}},
+                "note": {"type": "string"},
+            },
+            "required": [
+                "met", "artifact_ok", "assignments_ok", "grounded_ok",
+                "unsupported_claims", "gaps", "note",
+            ],
         }
-        # Put the final grounding/recon JUDGE on the reliable recon model (the
-        # caller passes _M_RECON, e.g. deepseek) instead of the room's default —
-        # judgment reliability is what this gate is FOR. tool-less → no routing swap.
-        if model:
-            verifier_emp["model"] = model
-            # A namespaced model such as deepseek/... must go to OpenRouter. The
-            # previous forced Groq route ignored the model and made verification
-            # silently unavailable when Groq billing was restricted.
-            verifier_emp["llm_provider"] = "openrouter"
-        # This is a model-only judge.  A bootstrap employee API key is a
-        # HIVE-MIND tool credential, not an OpenRouter credential; passing it
-        # here made AgentScope send that key to the gateway and intermittently
-        # fail with "User not found".  An empty tool credential makes the
-        # factory use the service's configured OpenRouter/Gateway key instead.
-        agent = build_react_agent(
-            verifier_emp, "",
-            user_id=req.user_id, org_id=req.org_id, project_id=req.project_id,
-        )
-        reply = await agent(Msg(name="user", content=prompt, role="user"))
+        verifier_model = canonical_hyper_model(model or HYPER_FAST_MODEL)
+        body = {
+            "model": verifier_model,
+            "messages": [
+                {"role": "system", "content": "You are a neutral evidence verifier. Return only the requested JSON verdict."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1200,
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "hyper_room_verdict", "schema": verdict_schema, "strict": True,
+            }},
+        }
+        if _needs_reasoning_disabled(verifier_model):
+            body["reasoning"] = {"enabled": False}
+        data = await _openrouter_chat(body, timeout=httpx.Timeout(25.0, connect=5.0))
+        reply = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
     except Exception as exc:  # noqa: BLE001 — preserve the report, but never silently pass quality
         log.warning("[verify] pass failed: %s", exc)
         return {
@@ -2533,7 +2539,7 @@ async def _verify_turn(
             "intended_output": plan.get("intended_output"), "done_criterion": plan.get("done_criterion"),
             "verification_available": False,
         }
-    obj = _first_json_object(_msg_to_text(reply) or "")
+    obj = _first_json_object(str(reply or ""))
     if not isinstance(obj, dict):
         return {
             "met": False, "artifact_ok": False, "assignments_ok": False,
@@ -3997,6 +4003,7 @@ async def _orchestrate_single_agent(
             "sender_email": _sender_email, "out_language": (req.language or ""),
             "campaign_brief": req.campaign_brief,
             "room_id": req.room_id, "turn_id": req.turn_id,
+            "execution_profile": _work_room_profile,
             "direct_answer_hook": (
                 _direct_answer_via_agent
                 if str(os.environ.get("HYPER_DIRECT_ANSWER_AGENT_ENABLED", "false")).strip().lower()

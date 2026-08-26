@@ -1390,6 +1390,7 @@ class Director:
         campaign_brief: Optional[Dict[str, Any]] = None,
         room_id: str = "",
         turn_id: str = "",
+        execution_profile: Optional[Dict[str, Any]] = None,
         direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
         agentic_task_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
     ) -> None:
@@ -1402,6 +1403,7 @@ class Director:
         self.project_id = project_id
         self.room_id = str(room_id or "")
         self.turn_id = str(turn_id or "")
+        self.execution_profile = dict(execution_profile) if isinstance(execution_profile, dict) else {}
         # Direct-answer via a real tool-using agent, instead of this Director's own
         # tool-less _synthesize() — only exercised for response_depth=="direct" +
         # a plain-answer turn (see run()). None (default) preserves today's
@@ -5014,6 +5016,13 @@ class Director:
             "<product> in <market>'), NEVER a generic industry query."
         )
         if _visual_artifacts_enabled():
+            profile_contract = ""
+            if self.execution_profile:
+                profile_contract = (
+                    "\n\nSEMANTIC EXECUTION PROFILE — selected once for this turn before planning. "
+                    "Reconcile your output-mode decision with this contract; do not silently downgrade a required "
+                    "artifact to prose:\n" + json.dumps(self.execution_profile, ensure_ascii=False)[:3000]
+                )
             sysp += (
                 "\n\nARTIFACT CAPABILITY: artifact_intent may select a designed HTML artifact when "
                 "a presentation, explorable document, or dashboard materially "
@@ -5025,8 +5034,13 @@ class Director:
                 "otherwise use kind=interactive_document. Never turn a presentation into a scrolling report or "
                 "dashboard. Describe purpose and audience without choosing a theme "
                 "or fixed layout. Use creative_freedom=high unless supplied brand constraints require guided."
-                " When artifact_intent is not null, choose execution_engine=debate so the governed final-output "
-                "adapter receives the complete evidence board instead of returning early through agentic execution."
+                " A requested wireframe, prototype, journey map, flow visualization, system diagram, or other "
+                "designed visual deliverable normally uses kind=interactive_document unless the user explicitly "
+                "asked for slides or a dashboard. A request to explain, advise, summarize, or write without a "
+                "visual deliverable remains textual and uses null. When artifact_intent is not null, choose "
+                "execution_engine=debate so the governed final-output adapter receives the complete evidence board "
+                "instead of returning early through agentic execution."
+                + profile_contract
             )
         if self.domain_pack:
             sysp += (
@@ -5150,6 +5164,30 @@ class Director:
             }
         else:
             self.artifact_intent = None
+        required_artifacts = [
+            str(item).strip()
+            for item in (self.execution_profile.get("required_artifacts") or [])
+            if str(item).strip()
+        ]
+        allowed_outputs = {
+            str(item).strip().lower()
+            for item in (self.execution_profile.get("allowed_outputs") or [])
+            if str(item).strip()
+        }
+        if (_visual_artifacts_enabled() and self.artifact_intent is None
+                and required_artifacts and allowed_outputs == {"artifact"}):
+            self.artifact_intent = {
+                "contract": "artifact-intent.v1",
+                "kind": "interactive_document",
+                "medium": "html",
+                "purpose": str(self.user_message or "visual deliverable")[:240],
+                "audience": "intended user",
+                "quality_profile": "editorial",
+                "creative_freedom": "high",
+                "requirements": required_artifacts[:12],
+            }
+            plan["artifact_intent"] = dict(self.artifact_intent)
+            plan["execution_engine"] = "debate"
         intensity = str(plan.get("collaboration_intensity") or "").strip().lower()
         if intensity not in {"light", "standard", "deep"}:
             legacy_depth = str(plan.get("response_depth") or "focused").strip().lower()
@@ -6983,6 +7021,17 @@ class Director:
         plan = await self._plan_gather()
         log.info("[hyper-engine] planner picked execution_engine=%s turn_mode=%s room_kind=%s",
                  plan.get("execution_engine"), plan.get("turn_mode"), self.room_kind)
+        await self.emit({
+            "t": "output_mode_selected",
+            "mode": "visual" if self.artifact_intent else "text",
+            "artifact_kind": (self.artifact_intent or {}).get("kind"),
+            "profile_id": self.execution_profile.get("profile_id"),
+            "reason": (
+                "A governed visual artifact is the selected deliverable."
+                if self.artifact_intent else
+                "A textual response is the selected deliverable."
+            ),
+        })
         self.post_output_actions = list(plan.get("post_output_actions") or [])
         if self.post_output_actions:
             self.intended_output = str(self.post_output_actions[-1].get("artifact_kind") or "answer")

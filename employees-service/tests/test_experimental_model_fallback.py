@@ -53,12 +53,12 @@ def test_unpinned_model_keeps_the_full_default_ignore_list(monkeypatch):
 
 
 def test_gpt_oss_120b_pin_is_unaffected_by_the_filter(monkeypatch):
-    # None of its pinned providers (Cerebras/Groq/Together) are in the
+    # None of its pinned providers (Cerebras/Together) are in the
     # default ignore list, so the filter must be a complete no-op here.
     monkeypatch.delenv("HYPER_OR_IGNORE", raising=False)
     pin, ignore = _or_provider_routing("openai/gpt-oss-120b")
-    assert pin == ["Cerebras", "Groq", "Together"]
-    assert ignore == ["DekaLLM", "WandB", "DeepInfra", "Novita", "Mancer", "SiliconFlow", "Phala"]
+    assert pin == ["Cerebras", "Together"]
+    assert ignore == ["DekaLLM", "WandB", "DeepInfra", "Mancer", "SiliconFlow", "Phala", "Groq"]
 
 
 def _director(**overrides):

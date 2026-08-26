@@ -1,4 +1,10 @@
-from hivemind_employees.hyper.engine import _normalize_openrouter_parameters, _or_model, _or_provider_routing
+from hivemind_employees.hyper.engine import (
+    _GROQ_PROVIDER_DISABLED,
+    _normalize_openrouter_parameters,
+    _or_model,
+    _or_provider_routing,
+    _route_direct_openrouter,
+)
 from hivemind_employees.hyper.model_policy import HYPER_FAST_MODEL, canonical_hyper_model, requires_openrouter
 
 
@@ -17,8 +23,24 @@ def test_legacy_20b_openrouter_mapping_prefers_novita(monkeypatch):
     monkeypatch.delenv("HYPER_OR_IGNORE", raising=False)
     assert _or_model("openai/gpt-oss-20b") == HYPER_FAST_MODEL
     order, ignored = _or_provider_routing(HYPER_FAST_MODEL)
-    assert order == ["novita"]
+    assert order == ["Novita"]
     assert "Novita" not in ignored
+    assert "Groq" in ignored
+
+
+def test_groq_is_excluded_even_when_custom_ignore_omits_it(monkeypatch):
+    monkeypatch.setenv("HYPER_OR_IGNORE", "DekaLLM")
+    order, ignored = _or_provider_routing(HYPER_FAST_MODEL)
+    assert order == ["Novita"]
+    assert "Groq" not in order
+    assert "Groq" in ignored
+
+
+def test_hyperagent_gpt_oss_never_routes_to_direct_groq(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("HYPER_OPENROUTER_PRIMARY", "0")
+    assert _GROQ_PROVIDER_DISABLED is True
+    assert _route_direct_openrouter(HYPER_FAST_MODEL) is True
 
 
 def test_openrouter_uses_provider_supported_token_budget_name():

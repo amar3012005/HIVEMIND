@@ -185,7 +185,7 @@ def _or_model(model: str) -> Optional[str]:
     return None
 
 
-# Groq-native models (Groq direct, or gpt-oss via OpenRouter→Cerebras failover).
+# Models historically available through Groq, now routed through governed providers.
 # A vendor-namespaced, non-native model (google/, anthropic/, deepseek/, …) routes
 # DIRECT to OpenRouter — no wasted Groq round-trip. Driven by HYPER_DIRECTOR_MODEL.
 _GROQ_NATIVE_RE = re.compile(r"^(openai/gpt-oss|gpt-oss|llama-|llama3|mixtral|gemma|groq/|whisper)", re.I)
@@ -195,34 +195,9 @@ _OR_PROVIDER_PIN = {
     "google/": ["Google", "Google AI Studio"],
     "anthropic/": ["Anthropic"],
     "deepseek/": ["DeepSeek", "Fireworks"],
-    # Model-SPECIFIC: Cerebras hosts 120b but NOT 20b — a bare "openai/gpt-oss" pin made
-    # every 20b call (plan + debate personas) fall to a slow provider (measured: DekaLLM
-    # ~60 tok/s, 3-25s/call = the room's latency gap) while 120b flew on Cerebras
-    # (1.9k tok in 1.5s). 20b pins to OpenRouter's own Groq capacity (~1000 tok/s;
-    # OpenRouter's account — unaffected by our dead Groq key).
-    # Deep fast tier: a single-provider pin meant one hiccup dumped the call into the
-    # open pool (measured: synth on DeepInfra 44 tok/s = 55s; debate on DekaLLM 20 tok/s).
-    # Groq FIRST for both — cheapest that's also fast (120b: Groq $0.60 < Cerebras $0.75;
-    # 20b: Groq $0.30, proven 695ms live). Fast alternates follow for when a parallel burst
-    # throttles OpenRouter's Groq capacity. Our DIRECT Groq key is delinquent — this is
-    # OpenRouter's Groq host; paying the Groq bill + HYPER_OPENROUTER_PRIMARY=0 = direct (no margin).
-    # Cerebras FIRST for 120b: wafer-scale serving measured ~3000 tok/s (synth
-    # 2.4k tok ≈ 2s) while Groq under load served the same call in 12-18s
-    # (logged "SLOW — fell off the fast-provider pin" on 2026-07-14). Groq stays
-    # the immediate fallback.
-    # 2026-08-12: Groq re-added as a candidate (owner instruction) — our DIRECT
-    # Groq key is confirmed delinquent (billing-dead, causing repeated 400s on
-    # every call site that still hits api.groq.com raw, see _select_execution_
-    # profile in api_hyper_rooms.py). "Groq" here is OpenRouter's OWN hosted
-    # Groq capacity, billed through OpenRouter — unaffected by our dead key.
-    # Cerebras stays first per the 2026-07-14 measured finding (wafer-scale
-    # ~3000 tok/s vs Groq under load 12-18s for the same call); Groq is an
-    # explicit fallback candidate instead of being excluded outright.
-    "openai/gpt-oss-120b": ["Cerebras", "Groq", "Together"],
-    # Fireworks dropped from the 20b pin — measured 13.5s and 39.3s per call live
-    # (2026-07-07) vs Groq ~1.6-2.5s on the same calls; it was the plan-phase spike.
-    "openai/gpt-oss-20b": ["novita"],
-    HYPER_FAST_MODEL: ["novita"],
+    "openai/gpt-oss-120b": ["Cerebras", "Together"],
+    "openai/gpt-oss-20b": ["Novita"],
+    HYPER_FAST_MODEL: ["Novita"],
     "openai/gpt-oss": ["Cerebras"],
     "qwen/": ["Alibaba"],
     "moonshotai/": ["Moonshot AI", "Novita"],
@@ -276,6 +251,11 @@ def _fallback_model_for(model: str) -> Optional[str]:
 # route DIRECT to OpenRouter→Cerebras (skip the wasted Groq 400 round-trips). Resets
 # on process restart (re-probes Groq once), so funding Groq self-heals.
 _GROQ_DEAD = False
+# HyperAgent model traffic must not use Groq, either directly or as an
+# OpenRouter fallback. An explicit emergency rollback can opt back in.
+_GROQ_PROVIDER_DISABLED = os.environ.get("HYPER_DISABLE_GROQ_PROVIDER", "1").lower() not in (
+    "0", "false", "no", "off",
+)
 _BILLING_RE = re.compile(r"organization_delinquent|overdue payment|payment method|insufficient.*(quota|credit)|quota.*exceeded", re.I)
 
 # Leading meta-planning cues that mark reasoning-model chain-of-thought
@@ -342,6 +322,8 @@ def _route_direct_openrouter(model: str) -> bool:
     if "compound" in m.lower():
         return False
     if _GROQ_NATIVE_RE.search(m):
+        if _GROQ_PROVIDER_DISABLED:
+            return True
         # OpenRouter-PRIMARY for the director: native gpt-oss/llama route DIRECT to OpenRouter from
         # call 1 (skip the wasted Groq probe) by default. Reversible per-process via
         # HYPER_OPENROUTER_PRIMARY=0 → revert to Groq-primary-with-failover (direct only once Groq dead).
@@ -382,8 +364,10 @@ def _or_provider_routing(model: str) -> Tuple[Optional[List[str]], List[str]]:
     pool leaks measured 9-36s per 20b debate call."""
     pin = _or_provider_pin(model)
     ignore = [s.strip() for s in os.environ.get(
-        "HYPER_OR_IGNORE", "DekaLLM,WandB,DeepInfra,Novita,Mancer,SiliconFlow,Phala"
+        "HYPER_OR_IGNORE", "DekaLLM,WandB,DeepInfra,Mancer,SiliconFlow,Phala,Groq"
     ).split(",") if s.strip()]
+    if _GROQ_PROVIDER_DISABLED and "groq" not in {p.lower() for p in ignore}:
+        ignore.append("Groq")
     if pin:
         pinned = {p.lower() for p in pin}
         ignore = [p for p in ignore if p.lower() not in pinned]
@@ -1060,13 +1044,17 @@ async def _evo_groq(messages: List[Dict[str, Any]], *, model: str, schema: Optio
     """Minimal standalone Groq call for api-layer helpers (post-verify reflection + journal entry),
     decoupled from the Director instance. With a schema → strict json_schema output; schema=None →
     plain text. Short backoff on 429/5xx. Returns content or None."""
-    key = _groq_key()
-    if not key:
-        return None
     body: Dict[str, Any] = {"model": model, "messages": messages, "temperature": temp}
     if schema is not None:
         body["response_format"] = {"type": "json_schema",
                                    "json_schema": {"name": "evo_out", "schema": schema, "strict": True}}
+    if _GROQ_PROVIDER_DISABLED:
+        j = await _openrouter_chat(body, timeout=httpx.Timeout(30.0, connect=5.0))
+        return ((j["choices"][0]["message"].get("content") or "").strip()
+                if j is not None else None)
+    key = _groq_key()
+    if not key:
+        return None
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as c:
@@ -1780,8 +1768,8 @@ class Director:
         at a lower temperature per Groq's guidance. Returns the message dict or
         None on a hard failure (the caller treats None as 'stop')."""
         key = _groq_key()
-        if not key:
-            log.error("[hyper-engine] no Groq API key configured")
+        if not key and not os.environ.get("OPENROUTER_API_KEY"):
+            log.error("[hyper-engine] no governed model provider configured")
             return None
         # force_text: OMIT tools AND flatten the tool-call transcript to plain text.
         # gpt-oss's harmony decoder, primed by assistant.tool_calls/role:tool messages,
@@ -1868,6 +1856,10 @@ class Director:
                 u = j.get("usage") or {}
                 self._record_model_usage(body.get("model"), u, bucket)
                 return (j.get("choices") or [{}])[0].get("message") or None
+            return None
+        if _GROQ_PROVIDER_DISABLED:
+            log.error("[hyper-engine] Groq provider is disabled and no governed route is available model=%s",
+                      body.get("model"))
             return None
         max_attempts = 3
         _nudged = False
@@ -2146,6 +2138,8 @@ class Director:
     async def _browser_search_fallback(self, content: str, key: str) -> str:
         """gpt-oss browser_search retry — used when the deep compound web call returns empty content.
         Exa-powered interactive browse, reliably returns its result inline. '' on failure; never raises."""
+        if _GROQ_PROVIDER_DISABLED:
+            return ""
         try:
             # Groq's browser_search tool is provider-specific and has no Nitro
             # equivalent. Keep this emergency web-only path isolated from the

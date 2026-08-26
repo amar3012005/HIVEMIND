@@ -271,6 +271,12 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
     """Map employee.llm_provider + employee.model → AgentScope chat model."""
     provider = (employee_row.get("llm_provider") or "anthropic").lower()
     model = canonical_hyper_model(employee_row.get("model") or "claude-haiku-4-5")
+    # Existing employee records may still name Groq. Treat that as a legacy
+    # configuration and move the call onto the governed 20B OpenRouter route;
+    # no HyperAgent participant may bypass the room-level provider policy.
+    if provider == "groq":
+        provider = "openrouter"
+        model = HYPER_FAST_MODEL
     if requires_openrouter(model):
         provider = "openrouter"
 

@@ -1247,7 +1247,7 @@ async def _build_web_intel_agent_for_room(
             "evidence. Prefer Hivemind memory first, browse only for gaps, and "
             "return a concise evidence dossier with sources, caveats, and a clear POV."
         ),
-        "llm_provider": os.environ.get("HYPER_WEB_INTEL_PROVIDER", "groq"),
+        "llm_provider": os.environ.get("HYPER_WEB_INTEL_PROVIDER", "openrouter"),
         "model": canonical_hyper_model(os.environ.get("HYPER_WEB_INTEL_MODEL", HYPER_FAST_MODEL)),
         "tools": DEFAULT_HYPER_TOOLS + WEB_INTEL_TOOLS,
         "max_iters": int(os.environ.get("HYPER_WEB_INTEL_MAX_ITERS", "2")),
@@ -1860,7 +1860,8 @@ async def _run_web_intel_turn(
     # Canonical (owner "no groq" rule, 2026-07-23): HIVEMIND web tools are PRIMARY —
     # the block below runs hivemind_web_search (web_search_emulated) + recall. groq/compound
     # only when HYPER_WEB_INTEL_PROVIDER=groq (reversible). Default = hivemind.
-    _use_groq_web = os.environ.get("HYPER_WEB_INTEL_PROVIDER", "hivemind").strip().lower() == "groq"
+    # External research uses the provider-independent HIVEMIND web adapter.
+    _use_groq_web = False
     try:
         if not _use_groq_web:
             raise _HivemindWebPrimary()
@@ -3596,10 +3597,8 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
     # Groq key is confirmed delinquent (billing-dead), so every direct call here
     # was a guaranteed 400 followed by this exact fallback anyway (verified live
     # 2026-08-12: two calls in one turn's log, both 400 then OpenRouter-served).
-    # _openrouter_chat's provider pin for openai/gpt-oss-120b includes "Groq" —
-    # OpenRouter's own hosted Groq capacity, billed through OpenRouter, unaffected
-    # by our dead key — so this still reaches Groq's infra when it's the fastest
-    # candidate, just without the wasted direct round-trip.
+    # OpenRouter routing explicitly excludes Groq and uses the governed provider
+    # order for the selected model.
     data: Optional[Dict[str, Any]] = None
     try:
         data = await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))

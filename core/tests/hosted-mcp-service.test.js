@@ -144,7 +144,7 @@ test('temporal MCP tools are thin presets over the shared recall endpoint', asyn
   }, 'user-1', 'org-1', apiClient);
   await hostedService.handleToolCall({
     name: 'hivemind_timeline',
-    arguments: { memory_id: 'm1' },
+    arguments: { memory_id: 'm1', entities: ['Kruti'], memory_types: ['decision'] },
   }, 'user-1', 'org-1', apiClient);
 
   assert.equal(calls.length, 4);
@@ -159,4 +159,7 @@ test('temporal MCP tools are thin presets over the shared recall endpoint', asyn
   ]);
   assert.equal(calls[3].body.operation, 'timeline');
   assert.equal(calls[3].body.include_superseded, true);
+  assert.equal(calls[3].body.target_memory_id, 'm1');
+  assert.deepEqual(calls[3].body.entities, ['Kruti']);
+  assert.deepEqual(calls[3].body.memory_types, ['decision']);
 });

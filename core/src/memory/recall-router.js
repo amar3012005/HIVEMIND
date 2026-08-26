@@ -1853,6 +1853,14 @@ export function filterMemoriesByRelationships(memories = [], edges = [], relatio
   return memories.filter((memory) => eligible.has(recallMemoryRowId(memory)));
 }
 
+export function restrictTimelineCandidates(memories = [], inventory = [], chain = new Set()) {
+  const allowed = chain instanceof Set ? chain : new Set(chain || []);
+  return {
+    memories: memories.filter((memory) => allowed.has(recallMemoryRowId(memory))),
+    inventory: inventory.filter((memory) => allowed.has(recallMemoryRowId(memory))),
+  };
+}
+
 
 // ── Public entry ───────────────────────────────────────────────────────────
 
@@ -2247,7 +2255,11 @@ export class RecallRouter {
             }
             frontier = next;
           }
-          inventory = inventory.filter((memory) => chain.has(recallMemoryRowId(memory)));
+          // The target chain is a hard boundary for the whole timeline, not
+          // only for the additive historical inventory.  Otherwise semantic
+          // hop-1 candidates are merged back below and unrelated tenant rows
+          // appear in a targeted version history.
+          ({ memories, inventory } = restrictTimelineCandidates(memories, inventory, chain));
         }
         const byId = new Map([...memories, ...inventory].map((memory) => [recallMemoryRowId(memory), memory]));
         memories = [...byId.values()];

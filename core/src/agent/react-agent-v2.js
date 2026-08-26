@@ -56,7 +56,7 @@ import {
   resolveChatSynthesisModel,
 } from '../llm/chat-provider.js';
 import { remainingStageMs, runWithStageDeadline, StageDeadlineError } from '../runtime/stage-deadline.js';
-import { publicWebFallbackEligible, webResultPacket } from './web-fallback.js';
+import { promoteWebEvidenceWindow, publicWebFallbackEligible, webResultPacket } from './web-fallback.js';
 
 // Retry router: transient failures (TIMEOUT/RATE_LIMIT) get ONE auto-retry
 // with exponential backoff. AUTH_ERROR / INVALID_ARGS / UNKNOWN_TOOL pass
@@ -981,9 +981,12 @@ async function execWeb(bus, plan, ctx, { recordTool, startTool, remaining }, cov
     if (packet) {
       bus.addPacket(packet);
       bus.mergeEvidence(packet.sourceSections, { keyMode: 'withPage' });
-      bus.mergeRankedCandidates(packet.sourceSections.map((section) => ({
-        kind: 'evidence', segment_id: section.segment_id, score: section.score || 0,
-      })));
+      // Web runs only when the workspace answer is incomplete (or the user
+      // explicitly requested public web). Put those newly requested passages
+      // at the front of the one synthesis window; appending them behind an
+      // already-full top-15 pool made the tool succeed but guaranteed final
+      // synthesis could never see its output.
+      promoteWebEvidenceWindow(evidenceItems, rankedCandidates, packet.sourceSections);
     }
     recordTool('hivemind_web_search', args,
       packet ? `${packet.sourceSections.length} public web sources` : `job ${job?.status || 'incomplete'}`,

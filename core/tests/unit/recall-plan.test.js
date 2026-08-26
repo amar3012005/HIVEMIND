@@ -10,6 +10,7 @@ import {
   isLiveExpansionEligible,
   resolveCanonicalEntities,
   resolveRecallPlan,
+  restrictTimelineCandidates,
 } from '../../src/memory/recall-router.js';
 
 const emptyStore = (overrides = {}) => ({
@@ -230,6 +231,16 @@ test('timeline is a bounded version-history operation on the shared plan', () =>
   assert.equal(plan.operation, 'timeline');
   assert.equal(plan.max_memories, 50);
   assert.equal(plan.target_memory_id, 'memory-current');
+});
+
+test('targeted timeline removes unrelated semantic candidates before merge', () => {
+  const restricted = restrictTimelineCandidates(
+    [{ id: 'unrelated' }, { id: 'memory-current' }],
+    [{ id: 'memory-old' }, { id: 'another-unrelated' }],
+    new Set(['memory-current', 'memory-old']),
+  );
+  assert.deepEqual(restricted.memories.map((memory) => memory.id), ['memory-current']);
+  assert.deepEqual(restricted.inventory.map((memory) => memory.id), ['memory-old']);
 });
 
 test('typed selectors and memory types survive plan recompilation', () => {

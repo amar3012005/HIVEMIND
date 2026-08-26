@@ -40,6 +40,11 @@ function compactSourceRefs(refs = []) {
 const CompactState = Annotation.Root({
   turns: Annotation({ reducer: (left = [], right = []) => compactTurns([...left, ...right]), default: () => [] }),
   sourceRefs: Annotation({ reducer: (left = [], right = []) => compactSourceRefs([...left, ...right]), default: () => [] }),
+  // The most recent public-web answer is a replaceable conversational unit,
+  // not an ever-growing bag of URLs. Replacing (and explicitly clearing) it
+  // makes immediate follow-ups deterministic while preventing stale web
+  // context from leaking into unrelated later turns.
+  sourceContext: Annotation({ reducer: (_left, right) => right, default: () => null }),
 });
 
 export function createCompactContextGraph({ checkpointer } = {}) {
@@ -98,7 +103,7 @@ function graphConfig(identity) {
 export async function hydrateCompactContext(input = {}, { graph } = {}) {
   const fallback = compactTurns(input.history || []);
   const config = graphConfig(input);
-  if (!config) return { history: fallback, sourceRefs: [] };
+  if (!config) return { history: fallback, sourceRefs: [], sourceContext: null };
   try {
     const runtime = graph || await productionGraph();
     const current = normalizeTurn({ role: 'user', content: input.message });
@@ -110,10 +115,20 @@ export async function hydrateCompactContext(input = {}, { graph } = {}) {
     // it twice as both history and the active user turn.
     const turns = compactTurns(result.turns || []);
     if (current && turns.at(-1)?.role === 'user' && turns.at(-1)?.content === current.content) turns.pop();
-    return { history: turns, sourceRefs: compactSourceRefs(result.sourceRefs || []) };
+    const sourceContext = result.sourceContext && typeof result.sourceContext === 'object'
+      ? {
+        answer: String(result.sourceContext.answer || '').slice(0, 4000),
+        refs: compactSourceRefs(result.sourceContext.refs || []),
+      }
+      : null;
+    return {
+      history: turns,
+      sourceRefs: sourceContext?.refs || compactSourceRefs(result.sourceRefs || []),
+      sourceContext,
+    };
   } catch (error) {
     reportCheckpointFailure(error.message);
-    return { history: fallback, sourceRefs: [] };
+    return { history: fallback, sourceRefs: [], sourceContext: null };
   }
 }
 
@@ -123,7 +138,16 @@ export async function recordCompactAssistantTurn({ orgId, userId, threadId, resp
   if (!config || !turn) return false;
   try {
     const runtime = graph || await productionGraph();
-    await runtime.invoke({ turns: [turn], sourceRefs: compactSourceRefs(sources) }, config);
+    const publicRefs = compactSourceRefs((sources || []).filter((source) => (
+      source?.source_type === 'public_web'
+      || source?.source_platform === 'public_web'
+      || String(source?.segment_id || '').startsWith('web:')
+    )));
+    await runtime.invoke({
+      turns: [turn],
+      sourceRefs: publicRefs,
+      sourceContext: publicRefs.length ? { answer: turn.content, refs: publicRefs } : null,
+    }, config);
     return true;
   } catch (error) {
     reportCheckpointFailure(error.message);

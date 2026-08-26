@@ -15,6 +15,7 @@ export function buildTurnContext(input = {}) {
     compact_profile: String(input.profileContext || '').slice(0, 1800),
     recent_source_refs: (Array.isArray(input.recentSourceRefs) ? input.recentSourceRefs : []).slice(-8)
       .map((source) => ({ title: source.title, url: source.url, retrieved_at: source.retrieved_at || null })),
+    recent_context_answer: String(input.recentContextAnswer || '').trim().slice(0, 4000) || null,
     authorized_projects: (Array.isArray(input.projectCatalog) ? input.projectCatalog : []).slice(0, 24)
       .map((project) => ({ id: project.id, name: project.name, slug: project.slug || null })),
   });

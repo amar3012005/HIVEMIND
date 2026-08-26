@@ -243,6 +243,16 @@ test('targeted timeline removes unrelated semantic candidates before merge', () 
   assert.deepEqual(restricted.inventory.map((memory) => memory.id), ['memory-old']);
 });
 
+test('targeted timeline keeps a directly hydrated anchor with no Updates neighbors', () => {
+  const restricted = restrictTimelineCandidates(
+    [{ id: 'unrelated' }],
+    [{ id: 'memory-current' }],
+    new Set(['memory-current']),
+  );
+  assert.deepEqual(restricted.memories, []);
+  assert.deepEqual(restricted.inventory.map((memory) => memory.id), ['memory-current']);
+});
+
 test('typed selectors and memory types survive plan recompilation', () => {
   const first = resolveRecallPlan({
     mode: 'explain',

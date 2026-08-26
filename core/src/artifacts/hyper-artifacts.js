@@ -56,8 +56,17 @@ export function validateHyperArtifactMedium(html, intent = {}) {
     const slides = String(html || '').match(
       /<section\b[^>]*(?:\bdata-slide(?:\s*=|\s|>)|\bclass\s*=\s*["'][^"']*\bslide\b[^"']*["'])/gi,
     ) || [];
-    if (slides.length < 3) {
-      errors.push(`Presentation must contain at least three semantic slide sections; found ${slides.length}.`);
+    if (slides.length < 5) {
+      errors.push(`Presentation must contain at least five semantic slide sections; found ${slides.length}.`);
+    }
+    const compositions = new Set(
+      [...String(html || '').matchAll(/\bcomposition-([a-z-]+)/gi)].map((match) => match[1].toLowerCase()),
+    );
+    if (compositions.size < 3) {
+      errors.push(`Presentation requires at least three materially different compositions; found ${compositions.size}.`);
+    }
+    if (!/<html\b[^>]*\bdata-mode\s*=\s*["'](?:editorial|cinematic|data-room|technical|minimal-luxury)["']/i.test(html)) {
+      errors.push('Presentation must declare its governed visual mode.');
     }
     if (!/(?:aria-label\s*=\s*["'][^"']*(?:next|previous)|data-(?:next|previous)|class\s*=\s*["'][^"']*\b(?:next|previous)-slide\b)/i.test(html)) {
       errors.push('Presentation requires accessible next/previous slide navigation.');

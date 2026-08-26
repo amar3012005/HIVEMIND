@@ -95,16 +95,18 @@ test('quality floor rejects report-template residue and missing visual explanati
 test('presentation intent requires a real navigable slide sequence', () => {
   const report = '<!doctype html><html><head><style>@media print{main{display:block}}</style></head><body><main><section>Memo</section></main></body></html>';
   const errors = validateHyperArtifactMedium(report, { kind: 'presentation' }).join(' ');
-  assert.match(errors, /at least three semantic slide sections/);
+  assert.match(errors, /at least five semantic slide sections/);
   assert.match(errors, /next\/previous slide navigation/);
   assert.match(errors, /print-friendly slide page breaks/);
 
-  const deck = `<!doctype html><html><head><style>
+  const deck = `<!doctype html><html data-mode="editorial"><head><style>
     @media print { .slide { break-after: page; } }
   </style></head><body><main>
-    <section class="slide" data-slide="1">Thesis</section>
-    <section class="slide" data-slide="2">Evidence</section>
-    <section class="slide" data-slide="3">Decision</section>
+    <section class="slide composition-hero" data-slide="1">Thesis</section>
+    <section class="slide composition-comparison" data-slide="2">Evidence</section>
+    <section class="slide composition-process" data-slide="3">Model</section>
+    <section class="slide composition-comparison" data-slide="4">Risk</section>
+    <section class="slide composition-decision" data-slide="5">Decision</section>
     <button class="previous-slide" aria-label="Previous slide">Back</button>
     <button class="next-slide" aria-label="Next slide">Next</button>
   </main></body></html>`;

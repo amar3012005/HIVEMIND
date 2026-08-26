@@ -45,6 +45,11 @@ def test_governed_presentation_renderer_emits_navigable_responsive_slides():
     assert '@media print' in html
     assert 'break-after:page' in html
     assert 'type="application/json"' in html
+    assert 'data-mode="editorial"' in html
+    assert 'composition-hero' in html
+    assert 'composition-comparison' in html
+    assert 'composition-timeline' in html
+    assert "touchstart" in html
 
 
 def test_renderer_normalizes_invalid_lanes_and_rejects_too_few_slides():

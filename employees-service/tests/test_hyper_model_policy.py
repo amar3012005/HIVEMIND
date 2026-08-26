@@ -1,4 +1,4 @@
-from hivemind_employees.hyper.engine import _or_model, _or_provider_routing
+from hivemind_employees.hyper.engine import _normalize_openrouter_parameters, _or_model, _or_provider_routing
 from hivemind_employees.hyper.model_policy import HYPER_FAST_MODEL, canonical_hyper_model, requires_openrouter
 
 
@@ -19,3 +19,9 @@ def test_legacy_20b_openrouter_mapping_prefers_novita(monkeypatch):
     order, ignored = _or_provider_routing(HYPER_FAST_MODEL)
     assert order == ["novita"]
     assert "Novita" not in ignored
+
+
+def test_openrouter_uses_provider_supported_token_budget_name():
+    body = _normalize_openrouter_parameters({"max_completion_tokens": 120, "messages": []})
+    assert body["max_tokens"] == 120
+    assert "max_completion_tokens" not in body

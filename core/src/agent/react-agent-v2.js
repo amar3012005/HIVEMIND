@@ -2669,6 +2669,68 @@ ${message}`;
     }, evidence.recall_packets || [], { allowGeneralKnowledge });
   }
 
+  // Legacy AMR rows can contain a first-person relation statement without a
+  // surviving author row.  This case must not depend on model phrasing: two
+  // identical turns previously alternated between verbatim sexual text,
+  // attributing "me" to the current user, and omitting the relationship
+  // caveat altogether.  Present the already-retrieved facts deterministically
+  // while retaining citation-bearing descriptive rows for compound questions.
+  const unresolvedRelationClaims = plan.operation === 'relation_between'
+    ? (evidence.relation?.explicit_relation_claims || []).filter((claim) => claim.unresolved_first_person)
+    : [];
+  if (unresolvedRelationClaims.length
+      && evidence.relation?.verified_relation_found !== true
+      && unresolvedRelationClaims.length === (evidence.relation?.explicit_relation_claims || []).length) {
+    const entities = evidence.relation?.entities || plan.relation_intent?.entities || [];
+    const subject = entities.length >= 2 ? `${entities[0]} and ${entities[1]}` : 'the requested people';
+    const asksWho = /\bwho\s+is\b/iu.test(message);
+    const whoMatch = String(message || '').match(/\bwho\s+is\s+([^,?.]+)/iu);
+    const describedEntity = whoMatch?.[1]?.trim()
+      || entities.find((entity) => new RegExp(`\\bwho\\s+is\\s+${String(entity).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'iu').test(message));
+    const claimIds = new Set(unresolvedRelationClaims.map((claim) => claim.id).filter(Boolean));
+    const descriptionClaims = asksWho && describedEntity
+      ? (evidence.memories || []).filter((memory) => {
+        if (!memory?.id || claimIds.has(memory.id)) return false;
+        const text = `${memory.title || ''} ${memory.content || ''}`;
+        return text.toLocaleLowerCase().includes(String(describedEntity).toLocaleLowerCase())
+          && !/\b(?:want|sleep|sex|fuck|gangbang)\b/iu.test(text)
+          && !/\buser profile\b/iu.test(text);
+      }).map((memory) => {
+        const citationId = citationIdForMemory(citationPacket.citations, memory);
+        const text = String(memory.content || memory.title || '').trim();
+        return citationId && text ? { text, citation_ids: [citationId] } : null;
+      }).filter(Boolean).filter((claim, index, rows) =>
+        rows.findIndex((candidate) => candidate.text === claim.text) === index).slice(0, 3)
+      : [];
+    const description = descriptionClaims.length
+      ? `${describedEntity} is described in the stored memories as follows: ${descriptionClaims.map((claim) => claim.text).join(' ')} `
+      : '';
+    const response = `${description}No typed or otherwise verified relationship between ${subject} is stored. HIVEMIND found legacy first-person statements expressing personal or sexual interest, but their authorship metadata is missing, so they cannot be attributed to either person or used to establish a relationship.`;
+    const relationCitationIds = unresolvedRelationClaims.map((claim) => {
+      const row = (evidence.memories || []).find((memory) => memory.id === claim.id);
+      return row ? citationIdForMemory(citationPacket.citations, row) : null;
+    }).filter(Boolean);
+    const relationClaim = {
+      text: 'Legacy first-person statements express personal or sexual interest, but their author is unresolved.',
+      citation_ids: [...new Set(relationCitationIds)],
+    };
+    const claims = [...descriptionClaims, ...(relationClaim.citation_ids.length ? [relationClaim] : [])];
+    return {
+      response,
+      claims,
+      rejected_claims: validated.rejected_claims,
+      grounded: claims.length > 0,
+      evidence_used: claims.flatMap((claim) => claim.citation_ids),
+      confidence: 0.9,
+      gaps: ['Legacy first-person authorship metadata is unavailable.'],
+      context_status: 'relevant_but_incomplete',
+      answer_coverage: normalizeAnswerCoverage(answerPayload?.coverage),
+      recall_packets: evidence.recall_packets || [],
+      usage: repairUsage || usage,
+      usage_stages: { synthesis: usage, ...(repairUsage ? { repair: repairUsage } : {}) },
+    };
+  }
+
   if (!validated.claims.length) {
     // A failed model formatting/relevance judgment must not erase authorized,
     // citable recall. Fall back to a deterministic extractive answer over the

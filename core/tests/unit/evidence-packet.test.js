@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildEvidencePacket, deliverHybrid, hop2Evidence, loadTypedGraphEvidence, projectInventoryAbsentIsAuthoritative, recallEnhance } from '../../src/memory/recall-router.js';
+import { buildEvidencePacket, deliverHybrid, hop2Evidence, loadTypedGraphEvidence, orderTemporalCandidates, projectInventoryAbsentIsAuthoritative, recallEnhance } from '../../src/memory/recall-router.js';
 import { buildLexicalPhrases, EvidenceRetrievalService, filterEvidenceByMetadata, fuseRemoteEvidenceHits, matchSourceDocuments } from '../../src/knowledge/evidence-retrieval.js';
 
 test('evidence metadata filters source, type, and three temporal contracts deterministically', () => {
@@ -33,6 +33,21 @@ test('evidence metadata filters source, type, and three temporal contracts deter
   assert.deepEqual(filterEvidenceByMetadata(rows, {
     time: { known_at: '2026-08-10T00:00:00Z' }, memoryTypes: ['decision'],
   }).map((row) => row.documentId), ['old']);
+});
+
+test('latest mention and latest event use distinct clocks with stable tie-breakers', () => {
+  const rows = [
+    { id: 'older-event-newer-mention', eventTime: '2026-08-20T09:00:00Z', knownAt: '2026-08-25T11:00:00Z', score: 0.4 },
+    { id: 'newer-event-older-mention', eventTime: '2026-08-24T09:00:00Z', knownAt: '2026-08-24T11:00:00Z', score: 0.9 },
+    { id: 'tie-b', eventTime: '2026-08-18T09:00:00Z', knownAt: '2026-08-23T11:00:00Z', score: 0.8 },
+    { id: 'tie-a', eventTime: '2026-08-18T09:00:00Z', knownAt: '2026-08-23T11:00:00Z', score: 0.8 },
+  ];
+  assert.equal(orderTemporalCandidates(rows, { selector: 'latest', axis: 'known_time' })[0].id, 'older-event-newer-mention');
+  assert.equal(orderTemporalCandidates(rows, { selector: 'latest', axis: 'event_time' })[0].id, 'newer-event-older-mention');
+  assert.deepEqual(
+    orderTemporalCandidates(rows.slice(2), { selector: 'latest', axis: 'known_time' }).map((row) => row.id),
+    ['tie-a', 'tie-b'],
+  );
 });
 
 test('lexical phrase planning is language-independent and preserves query order', () => {
@@ -536,6 +551,11 @@ test('query-centred snippets prefer the window covering the most lowercase query
   const snippet = service._extractSnippet(content, 'what does the brochure say about human approval', 120);
   assert.match(snippet, /human approval/);
   assert.doesNotMatch(snippet, /^This brochure is an overview/);
+});
+
+test('query-centred snippets tolerate structured content without crashing recall', () => {
+  const service = new EvidenceRetrievalService({ db: null, qdrantClient: null });
+  assert.doesNotThrow(() => service._extractSnippet({ text: 'Kruti was mentioned here.' }, 'Kruti', 120));
 });
 
 test('named source hydration falls back to canonical segments when vector search hangs', async () => {

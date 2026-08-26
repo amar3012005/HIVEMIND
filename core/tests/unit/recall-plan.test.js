@@ -102,6 +102,16 @@ test('typed selectors and memory types survive plan recompilation', () => {
   assert.deepEqual(second.memory_types, ['decision', 'event']);
 });
 
+test('latest temporal intent preserves the selected clock', () => {
+  const plan = resolveRecallPlan({
+    mode: 'fact',
+    temporal_selector: 'latest',
+    temporal_axis: 'event_time',
+  });
+  assert.equal(plan.time.selector, 'latest');
+  assert.equal(plan.time.axis, 'event_time');
+});
+
 test('typed source and time blocks normalize legacy arguments with explicit precedence', () => {
   const plan = resolveRecallPlan({
     mode: 'explain',

@@ -46,6 +46,7 @@ export function compileNativePlan(plan, message, context = {}) {
     // decides whether it is relevant alongside current recall.
     recent_public_sources: (context.recent_source_refs || []).slice(-8),
     recent_context_answer: context.recent_context_answer || null,
+    uses_recent_public_sources: plan.uses_recent_public_sources === true,
     relation: operation === 'relation_between' ? { entities: plan.relation_entities, source: plan.references.source, time: temporalDecision(plan) } : null,
     save: operation === 'save' ? {
       title: plan.memory.title, content: plan.memory.content, memory_type: plan.memory.memory_type || 'fact',

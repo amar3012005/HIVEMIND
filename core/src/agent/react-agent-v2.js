@@ -2485,10 +2485,13 @@ ${groundedEvidence}`;
   const sourceCoverageNote = plan.operation === 'source_read'
     ? `\n\nSOURCE COVERAGE CONTRACT: Answer the requested scope from the named source. If the user asks what else, what more, for additional information, or for an overview of the established topic, do not merely repeat the RECENT ASSISTANT ANSWER or stop after the first matching row. When the delivered evidence supports it, synthesize 3-5 distinct, non-duplicate points across separate relevant citations. If the request is genuinely one exact attribute, answer only that attribute. Never add a point that the delivered evidence does not support.`
     : '';
+  const relationAnswerNote = plan.operation === 'relation_between'
+    ? `\n\nRELATION ANSWER CONTRACT: Start by stating whether a typed graph relationship exists. If the only support is one or more explicit claims, report them collectively as sourced claims rather than as verified relationships. For legacy_unresolved_author claims, NEVER quote graphic wording, NEVER identify the first-person speaker as either requested person, and NEVER list the raw claims line by line; summarize them as "legacy first-person statements expressing personal or sexual interest" and say plainly that missing authorship metadata prevents attribution. If the user also asks who a person is, answer that clause separately from the non-claim descriptive memories in RANKED CONTEXT. Cover every clause, but do not infer a relationship from co-mentions or descriptive facts.`
+    : '';
   const progressiveNote = evidence.progressive_recall
     ? `\n\nRECALL WINDOW: showing the one intent-selected unified window, ranks 1-${evidence.progressive_recall.delivered_until} of ${evidence.progressive_recall.candidates.length}, from recall ${evidence.progressive_recall.recall_id}. No later retrieval or reveal will run. If the window is relevant but cannot fully answer the stated objective, use everything useful it does support, identify only the requested missing detail, and set context_status="relevant_but_incomplete". If it is off-topic because retrieval misunderstood the request, set context_status="query_mismatch". Otherwise set "sufficient".`
     : '';
-  const userBlock = `${evidenceBlock}${progressiveNote}${assistantContext}${recentConversation}${sourceCoverageNote}${capabilityHint}${windowNote}${personaNote}${coverageNote}
+  const userBlock = `${evidenceBlock}${progressiveNote}${assistantContext}${recentConversation}${sourceCoverageNote}${relationAnswerNote}${capabilityHint}${windowNote}${personaNote}${coverageNote}
 
 PLANNER INTENT: ${(plan.intents || []).join(' / ') || '(unspecified)'}
 

@@ -17,6 +17,17 @@ export function normalizeAnswerCoverage(value) {
     }));
 }
 
+export function validateSupportedCoverage(coverage, validatedClaims = []) {
+  const claimCitationIds = new Set((Array.isArray(validatedClaims) ? validatedClaims : [])
+    .flatMap((claim) => Array.isArray(claim?.citation_ids) ? claim.citation_ids : [])
+    .filter((id) => typeof id === 'string' && id.trim()));
+  return normalizeAnswerCoverage(coverage).map((item) => {
+    if (item.status !== 'supported') return item;
+    const citationIds = item.citation_ids.filter((id) => claimCitationIds.has(id));
+    return citationIds.length ? { ...item, citation_ids: citationIds } : { ...item, status: 'unsupported', citation_ids: [] };
+  });
+}
+
 export function deriveAnswerContextStatus(payload = {}) {
   const reported = payload?.context_status;
   if (reported === 'query_mismatch') return reported;

@@ -31,7 +31,7 @@ import { validateGroundedClaims } from '../memory/recall-packet.js';
 import { applyExplicitRecallControls, assessRecallCoverage, chooseRecallEscalation } from './chat-recall-policy.js';
 import { projectRankedMemoryFallback } from './memory-evidence-projector.js';
 import { appendGapClarification, buildSynthesisPromptArtifact, normalizeSearchableFollowUps, normalizeSuggestedFollowUps } from './chat-synthesis-prompt.js';
-import { deriveAnswerContextStatus, normalizeAnswerCoverage } from './chat-answer-coverage.js';
+import { deriveAnswerContextStatus, normalizeAnswerCoverage, validateSupportedCoverage } from './chat-answer-coverage.js';
 import { ORGANIZATIONAL_BRAIN_PERSONA, organizationalBrainIdentity } from './chat-persona-skill.js';
 import { promptContributionTelemetry } from './chat-static-prompt-cache.js';
 import { chooseSynthesisModel, hasGroundingEvidence, parseJsonObjectContent, scheduleShadowEvaluation, shouldOptimizeRecallQuery, shouldRetryAfterZeroCoverage, shouldRunRecallOptimizer, summarizeUsage } from './chat-synthesis-policy.js';
@@ -671,7 +671,7 @@ async function execRelationBetween(bus, plan, ctx, { beforeDeadline, remaining, 
     const relationResult = await beforeDeadline(() => dispatchTool('hivemind_relation_between', relationArgs, ctx));
     recordTool(
       'hivemind_relation_between', relationArgs,
-      `${relationResult?.direct_edges?.length || 0} typed edges + ${relationResult?.shared_paths?.length || 0} shared paths`,
+      `${relationResult?.direct_edges?.length || 0} typed edges + ${relationResult?.explicit_relation_claims?.length || 0} explicit claims + ${relationResult?.shared_paths?.length || 0} shared paths`,
       relationResult,
     );
     bus.mergeMemories(relationResult?.memories);
@@ -1587,23 +1587,24 @@ CORE RULES:
     when no SYNTH row is on-topic. \`x-cluster=X.XX\` marks memories
     reinforced by neighbour clusters sharing entities — these are extra
     high-confidence cross-domain links worth surfacing in the answer.
-11. **RELATIONS COME FROM EDGES BLOCK ONLY — NEVER INVENT.** When the
+11. **RELATIONS REQUIRE EDGES OR EXPLICIT CLAIMS — NEVER INVENT.** When the
     user asks how memory X relates to memory Y, or what the connection
     between two people/projects/topics is, you must:
       (a) look up the GRAPH EDGES block above,
       (b) report ONLY edges that touch the relevant memory ids,
       (c) state edge type literally ("Updates", "Extends", "Mentions",
           "Derives", "Contradicts") with the confidence shown,
-      (d) if NO edge in the EDGES block connects the two memories,
-          answer "no recorded relation in the graph between these
-          memories" — do NOT infer a relation from shared entities,
-          co-occurring tags, or topic overlap. Co-mention in content
-          is NOT a relation.
+      (d) an explicit delivered sentence relating both requested entities may
+          be reported as that source's claim, preserving whether it is a user
+          assertion or stored record; it is not a verified graph edge,
+      (e) if neither an edge nor an explicit relation claim is delivered,
+          answer that no recorded relation was found. Do NOT infer a relation
+          from shared entities, co-occurring tags, or topic overlap.
     The GRAPH EDGES block reflects what the cognition loop and
-    smart-ingest actually wrote into the Relationship table; everything
-    else is content co-occurrence, which is suggestive but not a
-    relation. Misreporting this is the #1 source of hallucinated
-    history. When in doubt, default to the literal absence of the edge.
+    smart-ingest actually wrote into the Relationship table. An explicit
+    sourced relation claim remains a claim, not an edge; everything else is
+    content co-occurrence and is not a relation. When in doubt, preserve that
+    distinction and never invent an edge.
 11c. **[REMOVED/SUPERSEDED] rows are NO LONGER TRUE.** A row prefixed
     [REMOVED/SUPERSEDED] was superseded/removed as of the queried time window
     (from a temporal diff). Report it as a PAST value that changed ("the launch
@@ -1992,7 +1993,9 @@ export async function answerStep({ message, history, evidence, plan, language, a
       usage: null,
     };
   }
-  if (plan.operation === 'relation_between' && evidence.relation?.verified_relation_found !== true) {
+  if (plan.operation === 'relation_between'
+      && evidence.relation?.verified_relation_found !== true
+      && evidence.relation?.grounded_relation_claim_found !== true) {
     return {
       response: noVerifiedRelationResponse({ evidence, language }),
       claims: [],
@@ -2592,7 +2595,7 @@ ${message}`;
     claims: parsed.claims,
   }, evidence.recall_packets || [], { allowGeneralKnowledge });
   const initialContextStatus = deriveAnswerContextStatus(answerPayload);
-  const initialCoverage = normalizeAnswerCoverage(answerPayload?.coverage);
+  const initialCoverage = validateSupportedCoverage(answerPayload?.coverage, validated.claims);
   const supportedCoverageCount = initialCoverage.filter((item) => item.status === 'supported').length;
   const completionRequirement = plan.answer_completion_requirement || 'single_answer';
   // The planner already made the language-independent breadth decision. Enforce
@@ -2616,7 +2619,7 @@ ${message}`;
   // contract despite a non-empty packet, give it one bounded repair pass over
   // the same final context instead of discarding useful tenant evidence.
   let repairUsage = null;
-  if (String(process.env.HIVEMIND_SYNTHESIS_REPAIR_ENABLED || 'false').toLowerCase() === 'true'
+  if (String(process.env.HIVEMIND_SYNTHESIS_REPAIR_ENABLED || 'true').toLowerCase() !== 'false'
       && (!validated.claims.length || coverageIncomplete)
       && hasGroundedPacketEvidence(evidence)) {
     const repairInstruction = `REPAIR PASS: The prior draft did not satisfy the citation or request-completion contract. Use the same final evidence only; do not retrieve again. The planner classified this request as ${completionRequirement}. Decompose every independent requested detail, cover every supported detail, and explicitly mark unsupported details in coverage and gaps. Return a natural, useful synthesis of everything relevant that the evidence supports, including closely related grounded details when helpful, then name the specific part of the user's question that remains uncovered. If any gap remains, the visible response must end with one targeted clarification question that would help close it. Every factual sentence must be a grounded claim with one or more inline citation_id values from the delivered evidence objects. Do not output a blanket absence response while any cited evidence exists.`;
@@ -3578,6 +3581,10 @@ export async function runReactAgentV2({
     recordUsage('router', intentParsed.usage);
     // Resolve the parallel profile preload (kicked off before the planner).
     const preloadedProfileContext = await profilePreloadPromise;
+    // Request-scoped identity for deterministic first-person resolution in
+    // user-authored relation claims. It is never persisted or sent as a
+    // caller-controlled tool argument.
+    ctx._compactProfileContext = preloadedProfileContext;
     _ps = Date.now();
     const turnToolkit = await buildToolkitForUser({
       prisma: ctx.prisma,

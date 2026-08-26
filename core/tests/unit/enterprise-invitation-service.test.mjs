@@ -12,7 +12,6 @@ import {
   redeemEnterpriseInvitation,
   enterpriseOnboardingLimits,
 } from '../../src/billing/enterprise-invitation-service.js';
-import { getPlan } from '../../src/billing/plans.js';
 import { renderTemplate } from '../../src/email/email-service.js';
 
 describe('EnterpriseInvitationService', () => {
@@ -37,7 +36,7 @@ describe('EnterpriseInvitationService', () => {
     assert.equal(created.plaintextCode, 'HM-EXPLICIT1');
   });
 
-  it('creates a Scale-equivalent onboarding profile with an explicit, bounded invite allowance', () => {
+  it('creates a credit-governed onboarding profile with an explicit, bounded invite allowance', () => {
     const input = normalizeEnterpriseInvitationInput({
       company_name: 'Example GmbH', recipient_email: 'Owner@Example.com',
       account_type: 'enterprise_managed', storage_mode: 'hybrid', onboarding_days: 14,
@@ -47,19 +46,24 @@ describe('EnterpriseInvitationService', () => {
     assert.equal(input.storageMode, 'hybrid');
     assert.equal(input.recipientEmail, 'owner@example.com');
     assert.deepEqual(input.onboardingLimits, enterpriseOnboardingLimits());
-    assert.deepEqual(input.onboardingLimits, getPlan('scale').limits);
-    assert.equal(input.onboardingLimits.monthlyCredits, 1_000_000);
-    assert.equal(input.onboardingLimits.meetingMinutesPerMonth, 500);
+    assert.equal(input.onboardingLimits.monthlyCredits, 20_000);
+    assert.equal(input.onboardingLimits.meetingMinutesPerMonth, -1);
+    assert.equal(input.onboardingLimits.llmTokensPerDay, -1);
     assert.equal(input.onboardingLimits.maxUsers, 1);
     const teamInput = normalizeEnterpriseInvitationInput({
       company_name: 'Example GmbH', recipient_email: 'team@example.com',
-      account_type: 'enterprise_managed', storage_mode: 'hybrid', max_invites: 7,
+      account_type: 'enterprise_managed', storage_mode: 'hybrid', max_invites: 7, monthly_credits: 20_000,
     });
     assert.equal(teamInput.onboardingLimits.maxUsers, 8);
+    assert.equal(teamInput.onboardingLimits.monthlyCredits, 20_000);
     assert.equal(teamInput.configSnapshot.onboarding_max_invites, 7);
+    assert.equal(teamInput.configSnapshot.onboarding_monthly_credits, 20_000);
     assert.throws(() => normalizeEnterpriseInvitationInput({
       company_name: 'Example', recipient_email: 'owner@example.com', account_type: 'enterprise_managed', storage_mode: 'hybrid', max_invites: -1,
     }), /max_invites/);
+    assert.throws(() => normalizeEnterpriseInvitationInput({
+      company_name: 'Example', recipient_email: 'owner@example.com', account_type: 'enterprise_managed', storage_mode: 'hybrid', monthly_credits: -2,
+    }), /monthly_credits/);
     assert.throws(() => normalizeEnterpriseInvitationInput({
       company_name: 'Example', recipient_email: 'owner@example.com', account_type: 'personal',
     }), /enterprise invitation requires an enterprise account type/);
@@ -125,8 +129,8 @@ describe('EnterpriseInvitationService', () => {
     const redeemed = await redeemEnterpriseInvitation({ tx, invitationId: invitation.id, method: 'link', version: 1, userId: '22222222-2222-4222-8222-222222222222', userEmail: recipient, orgId: '33333333-3333-4333-8333-333333333333', now });
     assert.equal(redeemed.grant.source, 'enterprise_invitation');
     assert.equal(redeemed.entitlementVersion.planId, 'enterprise_onboarding');
-    assert.equal(redeemed.entitlementVersion.limits.llmTokensPerMonth, 100_000_000);
-    assert.equal(redeemed.entitlementVersion.limits.monthlyCredits, 1_000_000);
+    assert.equal(redeemed.entitlementVersion.limits.llmTokensPerMonth, -1);
+    assert.equal(redeemed.entitlementVersion.limits.monthlyCredits, 20_000);
     assert.deepEqual(entitlementRows.map((row) => row.planId), ['enterprise_onboarding', 'free']);
     assert.equal(entitlementRows[1].effectiveFrom.getTime(), redeemed.onboardingEndsAt.getTime());
     assert.equal(invitation.status, 'redeemed');

@@ -3626,9 +3626,14 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, { invitation: publicEnterpriseInvitation(updated) });
       }
       if (action === 'update-max-invites') {
-        const updated = await updateEnterpriseInvitationMaxInvites({ prisma, invitationId, maxInvites: body.max_invites });
+        const updated = await updateEnterpriseInvitationMaxInvites({
+          prisma,
+          invitationId,
+          maxInvites: body.max_invites,
+          monthlyCredits: body.monthly_credits,
+        });
         await audit({ eventType: 'commercial.enterprise_invitation_max_invites_updated', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
-          metadata: { operator: operator.operator, session_id: operator.sessionId, max_invites: updated.invitation.max_invites, max_users: updated.invitation.max_users, applied_to_active_tenant: updated.appliedToActiveTenant, entitlement_version: updated.entitlementVersion?.version || null },
+          metadata: { operator: operator.operator, session_id: operator.sessionId, max_invites: updated.invitation.max_invites, max_users: updated.invitation.max_users, monthly_credits: updated.invitation.onboarding_monthly_credits, applied_to_active_tenant: updated.appliedToActiveTenant, entitlement_version: updated.entitlementVersion?.version || null },
           ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
         return jsonResponse(res, { invitation: updated.invitation, applied_to_active_tenant: updated.appliedToActiveTenant, entitlement_version: updated.entitlementVersion?.version || null });
       }

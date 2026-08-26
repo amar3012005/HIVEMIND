@@ -51,6 +51,9 @@ test('compiler carries the replaceable recent public checkpoint independently of
   });
   assert.equal(decision.recent_public_sources[0].url, 'https://example.com/pricing');
   assert.equal(decision.recent_context_answer, 'The public price is EUR 10.');
+  assert.equal(decision.uses_recent_public_sources, false);
+  decision.uses_recent_public_sources = true;
+  assert.equal(intentDecisionToPlan(decision, 'which source?').uses_recent_public_sources, true);
 });
 
 test('person overview preserves entity and compiles one canonical recall', () => {

@@ -3723,11 +3723,21 @@ export async function runReactAgentV2({
     if (intentDecision.operation === 'direct' && plan._direct_answer) {
       if (intentDecision._router === 'native-v2') {
         const response = String(plan._direct_answer).trim();
+        const recentSources = intentDecision.uses_recent_public_sources
+          ? (intentDecision.recent_public_sources || []).map((source, index) => ({
+            id: `recent-public-${index + 1}`,
+            title: source.title || source.url,
+            url: source.url,
+            retrieved_at: source.retrieved_at || null,
+            source_type: 'public_web',
+          }))
+          : [];
         onEvent?.({ type: 'finish', text: response });
-        onEvent?.({ type: 'turn_completed', grounded: false, operation: 'direct' });
+        onEvent?.({ type: 'turn_completed', grounded: recentSources.length > 0, operation: 'direct' });
         return {
-          response,
-          sources: [], steps, evidence_used: [], confidence: 0.95, gaps: [],
+          response, sources: recentSources, citations: recentSources,
+          steps, evidence_used: recentSources.map((source) => source.id),
+          grounded: recentSources.length > 0, confidence: 0.95, gaps: [],
           usage: sumUsage(usages), trace: finalizeTrace(trace, usages),
           assistant_name: assistantName || null,
         };

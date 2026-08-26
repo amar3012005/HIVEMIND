@@ -511,6 +511,7 @@ export function intentDecisionToPlan(decision, message) {
     web_fallback: decision.web_fallback || { allowed: false, query: null, reason: null },
     recent_public_sources: decision.recent_public_sources || [],
     recent_context_answer: decision.recent_context_answer || null,
+    uses_recent_public_sources: decision.uses_recent_public_sources === true,
     ask_for_project: false, expected_evidence_types: [],
   };
 }

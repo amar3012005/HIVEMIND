@@ -133,7 +133,17 @@ function cloudflareError(payload, fallback) {
   return detail?.code ? `cloudflare_${detail.code}` : fallback;
 }
 
-async function sendWithCloudflare({ config, to, from, rendered, templateId, threadHeaders }) {
+function normalizeAttachments(attachments = []) {
+  return attachments.filter((attachment) => attachment?.content && attachment?.filename && attachment?.type)
+    .map((attachment) => ({
+      content: Buffer.isBuffer(attachment.content) ? attachment.content.toString('base64') : String(attachment.content),
+      filename: String(attachment.filename).slice(0, 180),
+      type: String(attachment.type).slice(0, 120),
+      disposition: 'attachment',
+    }));
+}
+
+async function sendWithCloudflare({ config, to, from, rendered, templateId, threadHeaders, attachments = [] }) {
   const url = `${CLOUDFLARE_SEND_BASE}/${encodeURIComponent(config.accountId)}/email/sending/send`;
   // Cloudflare's Email Sending API rejects the request outright
   // (errors[0].code 10202, "email.sending.error.email.invalid") if a custom
@@ -158,6 +168,7 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId, thre
           html: rendered.html,
           text: rendered.text,
           ...(Object.keys(cfHeaders).length ? { headers: cfHeaders } : {}),
+          ...(attachments.length ? { attachments: normalizeAttachments(attachments) } : {}),
         }),
         signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       });
@@ -193,7 +204,7 @@ async function sendWithCloudflare({ config, to, from, rendered, templateId, thre
   return { ok: false, provider: 'cloudflare', retryable: true, error: 'send_failed' };
 }
 
-async function sendWithGmail({ connectionId, to, from, rendered, templateId, threadHeaders }) {
+async function sendWithGmail({ connectionId, to, from, rendered, templateId, threadHeaders, attachments = [] }) {
   const raw = buildRawMessage({
     to,
     from,
@@ -201,6 +212,7 @@ async function sendWithGmail({ connectionId, to, from, rendered, templateId, thr
     text: rendered.text,
     html: rendered.html,
     threadHeaders,
+    attachments,
   });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -302,8 +314,9 @@ function wrapHtml(inner, preheader, ctx) {
 }
 
 /** Build a base64url RFC 5322 multipart/alternative message. */
-function buildRawMessage({ to, from, subject, text, html, threadHeaders }) {
+function buildRawMessage({ to, from, subject, text, html, threadHeaders, attachments = [] }) {
   const boundary = `hm_${Date.now().toString(36)}`;
+  const altBoundary = `hm_alt_${Date.now().toString(36)}`;
   const headers = [
     `To: ${to}`,
     from ? `From: ${from}` : null,
@@ -312,19 +325,31 @@ function buildRawMessage({ to, from, subject, text, html, threadHeaders }) {
     threadHeaders?.['In-Reply-To'] ? `In-Reply-To: ${threadHeaders['In-Reply-To']}` : null,
     threadHeaders?.References ? `References: ${threadHeaders.References}` : null,
     'MIME-Version: 1.0',
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
   ].filter(Boolean).join('\r\n');
   const body = [
     `--${boundary}`,
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+    '',
+    `--${altBoundary}`,
     'Content-Type: text/plain; charset=UTF-8',
     'Content-Transfer-Encoding: 7bit',
     '',
     text || '',
-    `--${boundary}`,
+    `--${altBoundary}`,
     'Content-Type: text/html; charset=UTF-8',
     'Content-Transfer-Encoding: 7bit',
     '',
     html || '',
+    `--${altBoundary}--`,
+    ...normalizeAttachments(attachments).flatMap((attachment) => [
+      `--${boundary}`,
+      `Content-Type: ${attachment.type}; name="${attachment.filename.replace(/[\r\n"]/g, '')}"`,
+      'Content-Transfer-Encoding: base64',
+      `Content-Disposition: attachment; filename="${attachment.filename.replace(/[\r\n"]/g, '')}"`,
+      '',
+      attachment.content,
+    ]),
     `--${boundary}--`,
     '',
   ].join('\r\n');
@@ -347,7 +372,7 @@ function buildRawMessage({ to, from, subject, text, html, threadHeaders }) {
  *   root on the first send, then passes it back in on every later send.
  * @returns {Promise<{ok: boolean, skipped?: boolean, messageId?: string, error?: string}>}
  */
-export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId, thread } = {}) {
+export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId, thread, attachments = [] } = {}) {
   if (!to) return { ok: false, skipped: true, error: 'no_recipient' };
   if (!validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
   if (!validFromHeader(from)) return { ok: false, skipped: true, error: 'invalid_sender' };
@@ -382,15 +407,29 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
   };
 
   if (providers.cloudflare) {
-    const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, threadHeaders });
+    const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, threadHeaders, attachments });
     // Cloudflare rejects our self-minted Message-ID (see sendWithCloudflare) —
     // prefer its own returned message_id for thread continuity; only fall
     // back to our mint if Cloudflare's response is somehow missing one.
     if (cloudflareResult.ok || cloudflareResult.permanent || !gmail) return { ...cloudflareResult, messageId: cloudflareResult.messageId || mintedMessageId };
     log('warn', 'provider_fallback', { from: 'cloudflare', to: 'gmail_nango', templateId, recipientDomain: recipientDomain(to) });
   }
-  const gmailResult = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, threadHeaders });
+  const gmailResult = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, threadHeaders, attachments });
   return { ...gmailResult, messageId: gmailResult.messageId || mintedMessageId };
+}
+
+/** Send a fully rendered branded message through the canonical delivery path. */
+export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [] } = {}) {
+  if (!to || !validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
+  if (!rendered?.subject || !rendered?.html) return { ok: false, skipped: true, error: 'invalid_rendered_message' };
+  const providers = configuredProviders();
+  const gmail = connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
+  if (!providers.cloudflare && !gmail) return { ok: false, skipped: true, error: 'no_email_provider' };
+  if (providers.cloudflare) {
+    const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders: {} });
+    if (result.ok || result.permanent || !gmail) return result;
+  }
+  return sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, attachments, threadHeaders: {} });
 }
 
 /**
@@ -515,6 +554,7 @@ export async function sendSystemEmailBatch(recipients = [], opts = {}) {
 
 export default {
   sendSystemEmail,
+  sendRenderedSystemEmail,
   sendSystemEmailBatch,
   sendSystemEmailBundle,
   queueEmailDelivery,

@@ -12,6 +12,8 @@ const HOST = '0.0.0.0';
 const PORT = Number(process.env.PLAYWRIGHT_CRAWL_PORT || 8932);
 const TOKEN = String(process.env.PLAYWRIGHT_SERVICE_TOKEN || '');
 const MAX_BODY_BYTES = 64 * 1024;
+const MAX_PDF_HTML_BYTES = 180 * 1024;
+const MAX_PDF_BYTES = 4 * 1024 * 1024;
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.PLAYWRIGHT_CRAWL_CONCURRENCY || 2));
 const IDLE_CLOSE_MS = Math.max(10_000, Number(process.env.PLAYWRIGHT_BROWSER_IDLE_MS || 60_000));
 const NAVIGATION_TIMEOUT_MS = Math.max(3_000, Number(process.env.PLAYWRIGHT_NAVIGATION_TIMEOUT_MS || 15_000));
@@ -200,6 +202,11 @@ async function browserInstance() {
 function send(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' });
+  res.end(body);
+}
+
+function sendBinary(res, status, body, contentType) {
+  res.writeHead(status, { 'content-type': contentType, 'content-length': body.length, 'cache-control': 'no-store' });
   res.end(body);
 }
 
@@ -497,6 +504,21 @@ async function crawl(input) {
   };
 }
 
+async function renderPdf(input) {
+  const html = typeof input?.html === 'string' ? input.html : '';
+  if (!html.trim()) throw Object.assign(new Error('html_required'), { status: 400 });
+  if (Buffer.byteLength(html) > MAX_PDF_HTML_BYTES) throw Object.assign(new Error('html_too_large'), { status: 413 });
+  const browser = await browserInstance();
+  const context = await browser.newContext({ serviceWorkers: 'block' });
+  const page = await context.newPage();
+  try {
+    await page.setContent(html, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
+    const pdf = await page.pdf({ format: 'A4', printBackground: true, preferCSSPageSize: true, margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' } });
+    if (!pdf.length || pdf.length > MAX_PDF_BYTES) throw Object.assign(new Error('pdf_too_large'), { status: 413 });
+    return pdf;
+  } finally { await context.close().catch(() => {}); }
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     const mcpRunning = mcp.exitCode === null;
@@ -511,7 +533,8 @@ const server = http.createServer(async (req, res) => {
   const sessionIdMatch = req.url.match(/^\/v1\/sessions\/([^/]+)$/);
   const isSessionsRoute = req.url === '/v1/sessions' || actionMatch || sessionIdMatch;
   const isCrawlRoute = req.url === '/v1/crawl';
-  if (!isSessionsRoute && !isCrawlRoute) return send(res, 404, { error: 'not_found' });
+  const isPdfRoute = req.url === '/v1/pdf';
+  if (!isSessionsRoute && !isCrawlRoute && !isPdfRoute) return send(res, 404, { error: 'not_found' });
   if (!secureEqual(String(req.headers.authorization || '').replace(/^Bearer\s+/i, ''), TOKEN)) return send(res, 401, { error: 'unauthorized' });
 
   if (isCrawlRoute) {
@@ -526,6 +549,13 @@ const server = http.createServer(async (req, res) => {
     } finally {
       release();
     }
+  }
+  if (isPdfRoute) {
+    if (req.method !== 'POST') return send(res, 404, { error: 'not_found' });
+    await acquire();
+    try { return sendBinary(res, 200, await renderPdf(await readJson(req)), 'application/pdf'); }
+    catch (error) { return send(res, error.status || 500, { error: String(error.message || error).slice(0, 500) }); }
+    finally { release(); }
   }
 
   // Interactive sessions do not go through acquire()/release() — that pool

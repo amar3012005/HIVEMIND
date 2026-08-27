@@ -86,7 +86,9 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { renderTemplate, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
+import { renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
+import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from './email/templates/day0-company-onboarding.js';
+import { renderDayZeroOnboardingPdf } from './email/day0-company-report-pdf.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
@@ -10594,6 +10596,7 @@ Write the persona now.`;
             company_location: profile.location || null,
             profile, mission, company_context: companyContext, tasks,
             research: research.slice(0, 10),
+            source_pages: pages.slice(0, 12).map((page) => ({ url: page.url || '', title: page.title || '', purpose: page.purpose || 'company' })).filter((page) => page.url),
             documents: [
               `${companyName} — Company profile`,
               ...(research.length ? [`${companyName} — Market research`] : []),
@@ -10666,6 +10669,25 @@ Write the persona now.`;
                 JSON.stringify({ _company: resultPayload }), room.id,
               );
             } catch (error) { console.warn('[hyper-onboarding] website preview persist failed:', error.message); }
+            // One evidence-derived Day-0 report after the company record has
+            // been written. It is deliberately non-blocking for onboarding.
+            try {
+              const owner = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+              if (owner?.email) {
+                const appUrl = `${String(process.env.HIVEMIND_APP_URL || 'https://next.singulancelabs.com/hivemind/app').replace(/\/$/, '')}/employees/mycompany`;
+                const rendered = renderDayZeroOnboardingEmail(resultPayload, { appUrl });
+                const print = renderDayZeroOnboardingReportHtml(resultPayload, { appUrl });
+                const pdf = await renderDayZeroOnboardingPdf(print.html);
+                const delivery = await sendRenderedSystemEmail({
+                  templateId: 'day0_company_onboarding', to: owner.email, rendered,
+                  attachments: [{ filename: `${resultPayload.company.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 72) || 'company'}-day-0-onboarding-report.pdf`, type: 'application/pdf', content: pdf }],
+                });
+                if (delivery.ok) {
+                  resultPayload.day0_report_email = { version: 'day-0-v1', sent_at: new Date().toISOString(), provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted' };
+                  await prisma.$executeRawUnsafe('UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = "agent_connectors" || $1::jsonb WHERE "id" = $2::uuid', JSON.stringify({ _company: resultPayload }), room.id);
+                }
+              }
+            } catch (error) { console.warn('[hyper-onboarding] day-0 report failed:', error.message); }
           })();
           console.info('[hyper-onboarding] timing', JSON.stringify({
             org_id: orgId,

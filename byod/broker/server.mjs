@@ -139,13 +139,17 @@ async function acquireOrgLock(client, orgId) {
   throw Object.assign(new Error('Memory Box enrollment is busy; retry shortly'), { statusCode: 409 });
 }
 
-let readinessCache = { expires: 0, value: null };
-async function automaticReadiness() {
-  if (readinessCache.expires > Date.now()) return readinessCache.value;
+const readinessCache = new Map();
+async function automaticReadiness(channel = 'stable') {
+  if (!['stable', 'canary'].includes(channel)) throw Object.assign(new Error('invalid release channel'), { statusCode: 400 });
+  const cached = readinessCache.get(channel);
+  if (cached?.expires > Date.now()) return cached.value;
   let tunnel = false; let release = false;
   try { tunnel = await checkTunnelProvisioningReady(); } catch {}
   try {
-    const manifest = process.env.MEMORY_BOX_STABLE_MANIFEST_URL || 'https://get.singulancelabs.com/memory-box/releases/stable/release.json';
+    const manifest = channel === 'canary'
+      ? (process.env.MEMORY_BOX_CANARY_MANIFEST_URL || 'https://get.singulancelabs.com/memory-box/releases/canary/release.json')
+      : (process.env.MEMORY_BOX_STABLE_MANIFEST_URL || 'https://get.singulancelabs.com/memory-box/releases/stable/release.json');
     const response = await fetch(manifest, { method: 'GET', headers: { accept: 'application/json' }, signal: AbortSignal.timeout(3000) });
     const base = manifest.replace(/\/release\.json(?:\?.*)?$/, '');
     const publicKeyUrl = new URL('../../release.pub', manifest).toString();
@@ -155,8 +159,9 @@ async function automaticReadiness() {
     ]);
     if (response.ok && signature.ok && publicKey.ok) { const body = await response.json(); release = Boolean(body && typeof body === 'object'); }
   } catch {}
-  readinessCache = { expires: Date.now() + 30_000, value: { ready: tunnel && release, tunnel, signedRelease: release } };
-  return readinessCache.value;
+  const value = { ready: tunnel && release, tunnel, signedRelease: release, channel };
+  readinessCache.set(channel, { expires: Date.now() + 30_000, value });
+  return value;
 }
 
 await reconcileLegacyRegistry();
@@ -167,7 +172,9 @@ http.createServer(async (req, res) => {
     const body = await readBody(req);
     if (req.url === '/v1/selfhost/readiness') {
       if (!isInternal(req)) return send(res, 401, { error: 'unauthorized' });
-      const readiness = await automaticReadiness();
+      const channel = body.channel || 'stable';
+      if (!['stable', 'canary'].includes(channel)) return send(res, 400, { error: 'invalid release channel' });
+      const readiness = await automaticReadiness(channel);
       return send(res, readiness.ready ? 200 : 503, readiness.ready ? readiness : { ...readiness, error: 'automatic Memory Box setup unavailable' });
     }
     if (req.url === '/v1/selfhost/enroll') {

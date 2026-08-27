@@ -24,9 +24,15 @@ docker info >/dev/null 2>&1 || die "Docker daemon is not reachable"
 
 ENROLLMENT_TOKEN="${HIVEMIND_ENROLLMENT_TOKEN:-}"
 API_KEY="${HIVEMIND_API_KEY:-}"
+BOOTSTRAP_RELEASE_FILE="${BYOD_BOOTSTRAP_RELEASE_FILE:-$STATE_DIR/bootstrap-release.env}"
 if [[ ! -f "$ENV_FILE" ]]; then
   INITIAL_IMAGE="${BYOD_INITIAL_AGENT_IMAGE:-}"
   INITIAL_RELEASE="${BYOD_INITIAL_AGENT_RELEASE:-}"
+  if [[ ! "$INITIAL_IMAGE" =~ @sha256:[a-f0-9]{64}$ || ! "$INITIAL_RELEASE" =~ ^[A-Za-z0-9._-]{7,80}$ ]] && [[ -f "$BOOTSTRAP_RELEASE_FILE" ]]; then
+    hm_load_env_file "$BOOTSTRAP_RELEASE_FILE"
+    INITIAL_IMAGE="${HIVEMIND_AGENT_IMAGE:-}"
+    INITIAL_RELEASE="${VERSION:-}"
+  fi
   [[ "$INITIAL_IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || die "a digest-pinned signed agent image is required"
   [[ "$INITIAL_RELEASE" =~ ^[A-Za-z0-9._-]{7,80}$ ]] || die "a signed agent release is required"
   if [[ -z "$ENROLLMENT_TOKEN" && -z "$API_KEY" ]]; then
@@ -88,6 +94,7 @@ TS_AUTHKEY=${TS_AUTHKEY:-}
 TS_HOSTNAME=${TS_HOSTNAME:-hivemind-byod}
 EOF
   chmod 600 "$ENV_FILE"
+  rm -f -- "$BOOTSTRAP_RELEASE_FILE"
 else
   log "existing protected configuration found; reconciling services"
 fi

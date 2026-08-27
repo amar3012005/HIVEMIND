@@ -77,6 +77,11 @@ install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-reconcile.service" /et
 install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-reconcile.timer" /etc/systemd/system/hivemind-memory-box-reconcile.timer
 systemctl daemon-reload
 log "installed governed host tools in $INSTALL_DIR"
+# The verified manifest is the only authority for the first agent image. Keep
+# its two non-secret values in a root-only hand-off file so setup remains
+# correct even if a shell or sudo policy drops inherited environment variables.
+BOOTSTRAP_RELEASE_FILE="$STATE_DIR/bootstrap-release.env"
+printf 'HIVEMIND_AGENT_IMAGE=%s\nVERSION=%s\n' "$INITIAL_IMAGE" "$INITIAL_RELEASE" | hm_atomic_write "$BOOTSTRAP_RELEASE_FILE" 600
 if [[ -f "$CONFIG_DIR/memory-box.env" ]]; then
   ACTIVE_IMAGE="$INITIAL_IMAGE"; ACTIVE_RELEASE="$INITIAL_RELEASE"
   if [[ -f "$STATE_DIR/CURRENT_RELEASE.json" ]]; then
@@ -89,6 +94,7 @@ if [[ -f "$CONFIG_DIR/memory-box.env" ]]; then
     '. "$HIVEMIND_MEMORY_BOX_INSTALL_DIR/memory-box-common.sh"; hm_set_env_value "$HIVEMIND_MEMORY_BOX_CONFIG_DIR/memory-box.env" HIVEMIND_AGENT_IMAGE "$ACTIVE_IMAGE"; hm_set_env_value "$HIVEMIND_MEMORY_BOX_CONFIG_DIR/memory-box.env" VERSION "$ACTIVE_RELEASE"'
 fi
 BYOD_INITIAL_AGENT_IMAGE="$INITIAL_IMAGE" BYOD_INITIAL_AGENT_RELEASE="$INITIAL_RELEASE" \
+  BYOD_BOOTSTRAP_RELEASE_FILE="$BOOTSTRAP_RELEASE_FILE" \
   HIVEMIND_MEMORY_BOX_LOCK_HELD=false /usr/local/sbin/hivemind-memory-box install
 /usr/local/sbin/hivemind-memory-box update
 systemctl enable --now hivemind-memory-box-update.timer hivemind-memory-box-backup.timer hivemind-memory-box-reconcile.timer

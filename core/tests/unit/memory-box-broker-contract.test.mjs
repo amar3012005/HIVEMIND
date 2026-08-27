@@ -23,6 +23,7 @@ test('Control Plane delegates lifecycle writes to the dedicated broker', () => {
 
 test('broker enforces expiring tenant credentials and stores only credential hashes', () => {
   const source = fs.readFileSync(path.join(root, 'byod/broker/server.mjs'), 'utf8');
+  assert.match(source, /options: '-c search_path=hivemind,public'/);
   assert.match(source, /k\.expires_at IS NULL OR k\.expires_at>now\(\)/);
   assert.match(source, /o\.hosting_mode='self_host'/);
   assert.match(source, /BYOD_BROKER_INTERNAL_TOKEN required/);

@@ -10,7 +10,14 @@ import { validateEndpoint } from './endpoint-policy.mjs';
 const PORT = Number(process.env.BROKER_PORT || 8790);
 const REG = process.env.MNEME_AGENT_REGISTRY_FILE || die('MNEME_AGENT_REGISTRY_FILE required');
 const INTERNAL_TOKEN = process.env.BYOD_BROKER_INTERNAL_TOKEN || die('BYOD_BROKER_INTERNAL_TOKEN required');
-const pool = new Pg.Pool({ connectionString: process.env.DATABASE_URL || die('DATABASE_URL required'), max: 8 });
+// Prisma owns these tables in the `hivemind` schema. node-postgres does not
+// interpret Prisma's `?schema=hivemind` URL parameter, so set the PostgreSQL
+// search path explicitly for every pooled connection.
+const pool = new Pg.Pool({
+  connectionString: process.env.DATABASE_URL || die('DATABASE_URL required'),
+  options: '-c search_path=hivemind,public',
+  max: 8,
+});
 const sha256 = (value) => crypto.createHash('sha256').update(String(value)).digest('hex');
 const issueToken = () => `hmb_${crypto.randomBytes(32).toString('base64url')}`;
 const durableTokenForEnrollment = (raw) => `hmb_${crypto.createHmac('sha256', INTERNAL_TOKEN).update(`box:${raw}`).digest('base64url')}`;

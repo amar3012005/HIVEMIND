@@ -43,12 +43,16 @@ if [[ "$CHANNEL" == stable ]]; then
   ' "$CANARY_RECEIPT" || { echo "canary receipt does not match the signed release" >&2; exit 1; }
 fi
 
+# Wrangler v4 parses --env-file as a global flag only after the command. Keep
+# command and environment arguments separate so both local and production
+# promotions use the same invocation shape.
 WRANGLER=(npx wrangler)
-[[ -z "$ENV_FILE" ]] || WRANGLER+=(--env-file "$ENV_FILE")
+WRANGLER_ENV_ARGS=()
+[[ -z "$ENV_FILE" ]] || WRANGLER_ENV_ARGS+=(--env-file "$ENV_FILE")
 put() {
   local key="$1" file="$2"
   if [[ "$DRY_RUN" == true ]]; then printf 'DRY RUN put %s/%s <- %s\n' "$BUCKET" "$key" "$file"; return; fi
-  "${WRANGLER[@]}" r2 object put "$BUCKET/$key" --file "$file" --remote >/dev/null
+  "${WRANGLER[@]}" r2 object put "$BUCKET/$key" "${WRANGLER_ENV_ARGS[@]}" --file "$file" --remote >/dev/null
 }
 
 # Anonymous pull is the actual customer contract. A package that CI can push

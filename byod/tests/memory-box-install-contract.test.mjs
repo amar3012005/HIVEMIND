@@ -15,8 +15,12 @@ test('first install is signed-first and cannot locally build or float the agent 
   const compose = read('docker-compose.byod.yml');
   assert.match(install, /verify-release\.mjs/);
   assert.match(install, /BYOD_INITIAL_AGENT_IMAGE="\$INITIAL_IMAGE"/);
+  assert.match(install, /bootstrap-release\.env/);
+  assert.match(install, /BYOD_BOOTSTRAP_RELEASE_FILE="\$BOOTSTRAP_RELEASE_FILE"/);
   assert.ok(install.lastIndexOf('systemctl enable --now') > install.lastIndexOf('hivemind-memory-box update'));
   assert.match(setup, /digest-pinned signed agent image is required/);
+  assert.match(setup, /BOOTSTRAP_RELEASE_FILE/);
+  assert.match(setup, /hm_load_env_file "\$BOOTSTRAP_RELEASE_FILE"/);
   assert.match(setup, /pull agent postgres qdrant/);
   assert.doesNotMatch(setup, /compose\.byod\.yml build|\$COMPOSE build/);
   assert.match(compose, /HIVEMIND_AGENT_IMAGE:\?signed HIVEMIND_AGENT_IMAGE is required/);

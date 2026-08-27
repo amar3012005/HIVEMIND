@@ -54,6 +54,15 @@ test('one-command enrollment defaults to a private managed Cloudflare tunnel whi
   assert.match(compose, /AGENT_BIND:-127\.0\.0\.1/);
 });
 
+test('rerunning an organization-bound command cannot silently reuse another organizations configuration', () => {
+  const setup = read('setup.sh');
+  assert.match(setup, /existing organization verified/);
+  assert.match(setup, /already contains a Memory Box for another organization/);
+  assert.ok(setup.indexOf('REQUESTED_ORG=') < setup.indexOf('existing organization verified'));
+  assert.match(setup, /Memory Box connected to SINGULANCE/);
+  assert.match(setup, /███████╗██╗███╗/);
+});
+
 test('upgrade, rollback and backup preserve the governed runtime contract', () => {
   const upgrade = read('upgrade.sh');
   const rollback = read('rollback.sh');

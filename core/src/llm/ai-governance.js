@@ -174,10 +174,10 @@ export async function totalAiCost() {
 export const CREDIT_POLICY_VERSION = '2026-08-v1';
 export const DEFAULT_MONTHLY_CREDITS = Object.freeze({
   free: 500,
-  plus: 5_000,
-  pro: 100_000,
-  scale: 1_000_000,
-  enterprise_onboarding: 1_000_000,
+  plus: 2_000,
+  pro: 5_000,
+  scale: 10_000,
+  enterprise_onboarding: 10_000,
   enterprise: null,
 });
 

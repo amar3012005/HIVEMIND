@@ -94,7 +94,7 @@ export const PLANS = {
     price: 39,
     currency: 'EUR',
     limits: {
-      monthlyCredits: 10_000,
+      monthlyCredits: 2_000,
       maxMemories: 10_000,
       llmTokensPerDay: 500_000,
       llmTokensPerMonth: 5_000_000,
@@ -133,7 +133,7 @@ export const PLANS = {
     price: 79,
     currency: 'EUR',
     limits: {
-      monthlyCredits: 100_000,
+      monthlyCredits: 5_000,
       maxMemories: 25_000,
       llmTokensPerDay: 1_000_000,
       llmTokensPerMonth: 10_000_000,
@@ -174,7 +174,7 @@ export const PLANS = {
     price: 239,
     currency: 'EUR',
     limits: {
-      monthlyCredits: 1_000_000,
+      monthlyCredits: 10_000,
       maxMemories: 250_000,
       llmTokensPerDay: 10_000_000,
       llmTokensPerMonth: 100_000_000,
@@ -224,7 +224,7 @@ export const PLANS = {
     price: 0,
     currency: 'EUR',
     limits: {
-      monthlyCredits: 1_000_000,
+      monthlyCredits: 10_000,
       maxMemories: 250_000,
       llmTokensPerDay: 10_000_000,
       llmTokensPerMonth: 100_000_000,

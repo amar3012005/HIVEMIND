@@ -91,7 +91,7 @@ import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from 
 import { renderDayZeroOnboardingPdf } from './email/day0-company-report-pdf.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
-import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
+import { ADMIN_EMAIL_SENDER_DOMAINS, ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage, renderAdminComposerMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
 import { discoverCompanyPages, discoverHttpLinks, fallbackDomainHires, selectCompanyResearchPages } from './onboarding/company-discovery.js';
 import { buildCompanyOperatingContext, captureWebsiteScreenshot, captureWebsiteScreenshotWithPlaywright, extractCompanyContacts, firstPartyResearchDigest, isFirstPartyUrl, mergeCompanyResearchPages, normalizeCompanyProfile, researchCompanyWebsite, searchCompanyMarket, verifiedSocialProfiles } from './onboarding/company-research.js';
@@ -3341,7 +3341,7 @@ const server = http.createServer(async (req, res) => {
   // enterprise invitations keep using their secure invitation lifecycle.
   if (pathname === '/admin/api/platform/email/templates' && req.method === 'GET') {
     if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
-    return jsonResponse(res, { templates: Object.entries(ADMIN_EMAIL_TEMPLATES).map(([id, label]) => ({ id, label })) });
+    return jsonResponse(res, { templates: [{ id: 'custom', label: 'Custom message' }, ...Object.entries(ADMIN_EMAIL_TEMPLATES).map(([id, label]) => ({ id, label }))], sender_domains: ADMIN_EMAIL_SENDER_DOMAINS });
   }
   if (pathname === '/admin/api/platform/email/preview' && req.method === 'POST') {
     if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
@@ -3349,8 +3349,11 @@ const server = http.createServer(async (req, res) => {
       const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
         appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
       });
-      const rendered = renderTemplate(message.templateId, message.vars);
-      return jsonResponse(res, { template_id: message.templateId, subject: rendered.subject, text: rendered.text, html: rendered.html });
+      const templateRendered = message.templateId === 'custom' ? null : renderTemplate(message.templateId, message.vars);
+      const rendered = message.templateId === 'custom'
+        ? renderAdminComposerMessage(message)
+        : (message.visual ? templateRendered : renderAdminComposerMessage({ ...message, subject: templateRendered.subject, body: templateRendered.text, visual: false }));
+      return jsonResponse(res, { template_id: message.templateId, from: message.from, recipients: message.recipients, subject: rendered.subject, text: rendered.text, html: rendered.html, visual: message.visual });
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 400);
     }
@@ -3362,14 +3365,28 @@ const server = http.createServer(async (req, res) => {
       const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
         appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
       });
-      const delivery = await sendSystemEmail({ templateId: message.templateId, to: message.to, vars: message.vars });
+      const templateRendered = message.templateId === 'custom' ? null : renderTemplate(message.templateId, message.vars);
+      const rendered = message.templateId === 'custom'
+        ? renderAdminComposerMessage(message)
+        : (message.visual ? templateRendered : renderAdminComposerMessage({ ...message, subject: templateRendered.subject, body: templateRendered.text, visual: false }));
+      const results = [];
+      for (let index = 0; index < message.recipients.length; index += 1) {
+        const to = message.recipients[index];
+        // Deliberately sequential: avoids burst delivery and keeps receipts attributable.
+        // eslint-disable-next-line no-await-in-loop
+        const delivery = await sendRenderedSystemEmail({ to, from: message.from, rendered, templateId: message.templateId === 'custom' ? 'admin_custom' : message.templateId });
+        results.push({ to, ...delivery });
+      }
+      const sent = results.filter((result) => result.ok).length;
+      const failed = results.length - sent;
+      const delivery = results[0] || { ok: false, error: 'no_recipient' };
       await audit({
-        eventType: delivery.ok ? 'commercial.admin_email_sent' : 'commercial.admin_email_delivery_failed',
+        eventType: failed === 0 ? 'commercial.admin_email_sent' : 'commercial.admin_email_delivery_failed',
         eventCategory: 'billing', action: 'create', resourceType: 'system_email', resourceId: crypto.randomUUID(),
-        metadata: { operator: operator.operator, session_id: operator.sessionId, template_id: message.templateId, recipient_domain: message.to.split('@')[1], provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, safe_error: delivery.error || null },
+        metadata: { operator: operator.operator, session_id: operator.sessionId, template_id: message.templateId, sender_domain: message.fromAddress.split('@')[1], recipient_count: results.length, sent, failed, provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, safe_error: failed ? 'partial_or_total_failure' : null },
         ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin',
       });
-      return jsonResponse(res, { ok: delivery.ok, provider: delivery.provider || null, delivery_status: delivery.deliveryStatus || null, error: delivery.ok ? null : (delivery.error || 'delivery_failed') }, delivery.ok ? 200 : 502);
+      return jsonResponse(res, { ok: failed === 0, total: results.length, sent, failed, provider: delivery.provider || null, delivery_status: failed ? 'partial_or_failed' : (delivery.deliveryStatus || 'accepted'), results: results.map(({ to, ok, provider, deliveryStatus, error }) => ({ to, ok, provider, delivery_status: deliveryStatus, error })) }, failed === 0 ? 200 : (sent ? 207 : 502));
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 400);
     }

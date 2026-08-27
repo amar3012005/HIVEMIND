@@ -45,10 +45,22 @@ export function renderHumationAvatarSvg(employee = {}, { size = 64 } = {}) {
   const lane = resolveHumationLane(employee.roleArchetype || employee.role);
   const seed = String(employee.id || employee.slug || employee.name || 'agent');
   const title = String(employee.name || lane);
-  const data = createAvatar(humation1, { seed, background: 'transparent' }).toRenderData();
+  const data = createAvatar(humation1, {
+    seed,
+    background: 'transparent',
+    colors: {
+      stroke: '#171717',
+      hair: '#241b18',
+      skin: '#f4c7ab',
+      clothes: LANE_COLORS[lane],
+      bottom: '#334155',
+    },
+  }).toRenderData();
   const width = Math.max(24, Math.min(256, Number(size) || 64));
   const height = (width * data.viewBox.height) / data.viewBox.width;
-  const style = `--hm-clothes:${LANE_COLORS[lane]}`;
+  const style = Object.entries(data.colors || {})
+    .map(([slot, color]) => `--hm-${slot}:#${color}`)
+    .join(';');
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${data.viewBox.x} ${data.viewBox.y} ${data.viewBox.width} ${data.viewBox.height}" width="${width}" height="${height}" role="img" aria-label="${escapeAttribute(title)}" style="${style}"><title>${escapeAttribute(title)}</title><g>${data.content}</g></svg>`;
 }
 

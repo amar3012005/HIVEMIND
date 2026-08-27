@@ -147,6 +147,7 @@ services:
       CLOUDFLARE_AI_GATEWAY_GROQ_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_GROQ_BYOK_ALIAS:-}
       CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_CEREBRAS_BYOK_ALIAS:-}
       HYPER_SYNTH_MODEL: ${HYPER_SYNTH_MODEL:-openai/gpt-oss-20b:nitro}
+      VISUAL_PATH_IN_HYPERROOMS: ${VISUAL_PATH_IN_HYPERROOMS:-true}
       CLAUDE_ADS_RESOURCE_ROOT: /opt/hivemind-resources/claude-ads
       # Employees sidecar MUST listen on 8060 — control-plane calls http://hm-employees:8060
       # (control-plane-server.js _hyperSidecar default). The global .env sets PORT=3000 (for core), so

@@ -17,6 +17,20 @@ COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$INSTALL_DIR/docker-compose.b
 log(){ printf '\033[1;36m[memory-box]\033[0m %s\n' "$*"; }
 die(){ printf '\033[1;31m[memory-box] %s\033[0m\n' "$*" >&2; exit 1; }
 gen(){ openssl rand -hex "${1:-24}"; }
+C='\033[1;36m'; D='\033[0;90m'; G='\033[1;32m'; Z='\033[0m'
+step(){ printf "  ${C}◆${Z} %-24s ${D}%s${Z}\n" "$1" "$2"; }
+ok(){ printf "  ${G}✓${Z} %-24s ${D}%s${Z}\n" "$1" "$2"; }
+banner(){ printf "
+${C}  ███████╗██╗███╗   ██╗ ██████╗ ██╗   ██╗██╗      █████╗ ███╗   ██╗ ██████╗███████╗
+  ██╔════╝██║████╗  ██║██╔════╝ ██║   ██║██║     ██╔══██╗████╗  ██║██╔════╝██╔════╝
+  ███████╗██║██╔██╗ ██║██║  ███╗██║   ██║██║     ███████║██╔██╗ ██║██║     █████╗
+  ╚════██║██║██║╚██╗██║██║   ██║██║   ██║██║     ██╔══██║██║╚██╗██║██║     ██╔══╝
+  ███████║██║██║ ╚████║╚██████╔╝╚██████╔╝███████╗██║  ██║██║ ╚████║╚██████╗███████╗
+  ╚══════╝╚═╝╚═╝  ╚═══╝ ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝${Z}
+  ${D}Memory Box · your server · your data · connected to SINGULANCE${Z}
+
+"; }
+banner
 case "$CENTRAL" in https://*) ;; *) die "HIVEMIND_CENTRAL_URL must use HTTPS" ;; esac
 command -v docker >/dev/null || die "Docker is required"
 command -v node >/dev/null || die "Node.js 18 or newer is required"
@@ -25,6 +39,24 @@ docker info >/dev/null 2>&1 || die "Docker daemon is not reachable"
 ENROLLMENT_TOKEN="${HIVEMIND_ENROLLMENT_TOKEN:-}"
 API_KEY="${HIVEMIND_API_KEY:-}"
 BOOTSTRAP_RELEASE_FILE="${BYOD_BOOTSTRAP_RELEASE_FILE:-$STATE_DIR/bootstrap-release.env}"
+if [[ -f "$ENV_FILE" && -n "$ENROLLMENT_TOKEN" ]]; then
+  step "Enrollment" "validating organization-bound command"
+  ENROLL_BODY="$(ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" node -e 'process.stdout.write(JSON.stringify({enrollmentToken:process.env.ENROLLMENT_TOKEN}))')"
+  RESP="$(curl -fsS --proto '=https' --tlsv1.2 --max-time 30 -X POST "$CENTRAL/v1/selfhost/enroll" -H 'content-type: application/json' --data-binary "$ENROLL_BODY")" \
+    || die "organization enrollment failed"
+  REQUESTED_ORG="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);if(!/^[0-9a-f-]{36}$/i.test(x.orgId||""))process.exit(1);process.stdout.write(x.orgId)' 2>/dev/null || true)"
+  hm_load_env_file "$ENV_FILE"
+  [[ -n "$REQUESTED_ORG" ]] || die "enrollment response did not contain a valid organization"
+  [[ "${HIVEMIND_ORG_ID:-}" == "$REQUESTED_ORG" ]] || die "this server already contains a Memory Box for another organization; preserve or remove that installation before enrolling a different organization"
+  MANAGED_URL="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);process.stdout.write(x.agentUrl||x.agent_url||"")')"
+  TUNNEL_TOKEN="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);process.stdout.write(x.tunnelToken||x.tunnel_token||"")')"
+  [[ "$MANAGED_URL" == https://* && -n "$TUNNEL_TOKEN" ]] || die "managed tunnel enrollment response is incomplete"
+  hm_validate_env_value AGENT_PUBLIC_URL "$MANAGED_URL"
+  hm_validate_env_value CLOUDFLARE_TUNNEL_TOKEN "$TUNNEL_TOKEN"
+  hm_set_env_value "$ENV_FILE" AGENT_PUBLIC_URL "$MANAGED_URL"
+  hm_set_env_value "$ENV_FILE" CLOUDFLARE_TUNNEL_TOKEN "$TUNNEL_TOKEN"
+  ok "Enrollment" "existing organization verified"
+fi
 if [[ ! -f "$ENV_FILE" ]]; then
   INITIAL_IMAGE="${BYOD_INITIAL_AGENT_IMAGE:-}"
   INITIAL_RELEASE="${BYOD_INITIAL_AGENT_RELEASE:-}"
@@ -43,7 +75,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
   [[ -z "$API_KEY" || "$API_KEY" =~ ^[A-Za-z0-9._-]{20,256}$ ]] || die "API key format is invalid"
   [[ -z "$ENROLLMENT_TOKEN" || "$ENROLLMENT_TOKEN" =~ ^[A-Za-z0-9._~-]{20,2048}$ ]] || die "enrollment token format is invalid"
 
-  log "enrolling this server with its organization"
+  step "Enrollment" "binding server to organization"
   ENROLL_BODY="$(API_KEY="$API_KEY" ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" node -e 'const b={};if(process.env.ENROLLMENT_TOKEN)b.enrollmentToken=process.env.ENROLLMENT_TOKEN;if(process.env.API_KEY)b.apiKey=process.env.API_KEY;process.stdout.write(JSON.stringify(b))')"
   RESP="$(curl -fsS --proto '=https' --tlsv1.2 --max-time 30 -X POST "$CENTRAL/v1/selfhost/enroll" -H 'content-type: application/json' --data-binary "$ENROLL_BODY")" || die "organization enrollment failed"
   ORG="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);if(!/^[0-9a-f-]{36}$/i.test(x.orgId||""))process.exit(1);process.stdout.write(x.orgId)' 2>/dev/null || true)"
@@ -69,7 +101,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
     hm_validate_env_value "$hm_key" "$hm_value"
   done
 
-  log "pulling signed agent and local data services"
+  step "Images" "pulling signed agent and local data services"
   : > "$STATE_DIR/warm.log"
   HIVEMIND_AGENT_IMAGE="$INITIAL_IMAGE" VERSION="$INITIAL_RELEASE" POSTGRES_PASSWORD=warm AGENT_TOKEN=warm HIVEMIND_ORG_ID="$ORG" \
     docker compose -f "$INSTALL_DIR/docker-compose.byod.yml" pull agent postgres qdrant >>"$STATE_DIR/warm.log" 2>&1 || die "image pull failed; inspect $STATE_DIR/warm.log"
@@ -96,17 +128,17 @@ EOF
   chmod 600 "$ENV_FILE"
   rm -f -- "$BOOTSTRAP_RELEASE_FILE"
 else
-  log "existing protected configuration found; reconciling services"
+  step "Configuration" "protected configuration verified"
 fi
 
 hm_load_env_file "$ENV_FILE"
 [[ "${HIVEMIND_AGENT_IMAGE:-}" =~ @sha256:[a-f0-9]{64}$ ]] || die "configuration has no digest-pinned signed agent image"
 if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
-  TRANSPORT=cloudflare; "${COMPOSE[@]}" --profile cloudflare up -d
+  TRANSPORT=cloudflare; step "Transport" "Cloudflare managed tunnel"; "${COMPOSE[@]}" --profile cloudflare up -d
 elif [[ -n "${TS_AUTHKEY:-}" ]]; then
-  TRANSPORT=tailscale; "${COMPOSE[@]}" --profile tailnet up -d
+  TRANSPORT=tailscale; step "Transport" "Tailscale private network"; "${COMPOSE[@]}" --profile tailnet up -d
 else
-  TRANSPORT=custom_https; "${COMPOSE[@]}" up -d
+  TRANSPORT=custom_https; step "Transport" "customer-managed HTTPS"; "${COMPOSE[@]}" up -d
 fi
 
 AGENT_PORT="${AGENT_PORT:-8787}"; AGENT_URL="${AGENT_PUBLIC_URL:-}"
@@ -127,13 +159,14 @@ case "$AGENT_URL" in
   *) die "agent URL must use HTTPS or an approved private/Tailscale address" ;;
 esac
 
-log "waiting for local agent health"
+step "Local health" "waiting for agent"
 LOCAL_READY=false
 for _ in $(seq 1 60); do
   if curl -fsS -m 3 "http://127.0.0.1:${AGENT_PORT}/health" | node -e 'let b="";process.stdin.on("data",d=>b+=d).on("end",()=>{try{process.exit(JSON.parse(b).ok===true?0:1)}catch{process.exit(1)}})' >/dev/null 2>&1; then LOCAL_READY=true; break; fi
   sleep 1
 done
 [[ "$LOCAL_READY" == true ]] || die "agent did not become healthy; run: hivemind-memory-box logs"
+ok "Local health" "agent is ready"
 
 REGISTER_BODY="$(API_KEY="${HIVEMIND_API_KEY:-$API_KEY}" ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN" BOX_TOKEN="${HIVEMIND_BOX_TOKEN:-}" AGENT_URL="$AGENT_URL" AGENT_TOKEN="$AGENT_TOKEN" TRANSPORT="$TRANSPORT" node -e 'const b={agentUrl:process.env.AGENT_URL,agentToken:process.env.AGENT_TOKEN,transport:process.env.TRANSPORT};if(process.env.ENROLLMENT_TOKEN)b.enrollmentToken=process.env.ENROLLMENT_TOKEN;if(process.env.BOX_TOKEN)b.boxToken=process.env.BOX_TOKEN;if(process.env.API_KEY)b.apiKey=process.env.API_KEY;process.stdout.write(JSON.stringify(b))')"
 REGISTER_RESPONSE="$(curl -fsS --proto '=https' --tlsv1.2 --max-time 30 -X POST "$CENTRAL/v1/selfhost/register" -H 'content-type: application/json' --data-binary "$REGISTER_BODY")" || die "agent registration failed"
@@ -145,7 +178,7 @@ if [[ -n "$NEW_BOX_TOKEN" ]]; then
   HIVEMIND_BOX_TOKEN="$NEW_BOX_TOKEN"; HIVEMIND_API_KEY=""
 fi
 
-log "verifying authenticated central reachability"
+step "Central reachability" "verifying authenticated route"
 STATUS_BODY="$(API_KEY="${HIVEMIND_API_KEY:-}" BOX_TOKEN="${HIVEMIND_BOX_TOKEN:-}" node -e 'const b={};if(process.env.BOX_TOKEN)b.boxToken=process.env.BOX_TOKEN;else b.apiKey=process.env.API_KEY;process.stdout.write(JSON.stringify(b))')"
 REMOTE_READY=false
 for _ in $(seq 1 24); do
@@ -154,4 +187,5 @@ for _ in $(seq 1 24); do
   sleep 5
 done
 [[ "$REMOTE_READY" == true ]] || die "agent is locally healthy but not centrally reachable; rerun after checking transport status"
-printf '\n  \033[1;32m✓ Memory Box connected\033[0m\n  organization: %s\n  transport:    %s\n  endpoint:     %s\n\n' "$HIVEMIND_ORG_ID" "$TRANSPORT" "$AGENT_URL"
+ok "Central reachability" "registered and reachable"
+printf '\n  \033[1;32m✓ Memory Box connected to SINGULANCE\033[0m\n\n  organization: %s\n  transport:    %s\n  endpoint:     %s\n  data:         %s\n\n' "$HIVEMIND_ORG_ID" "$TRANSPORT" "$AGENT_URL" "$INSTALL_DIR/data"

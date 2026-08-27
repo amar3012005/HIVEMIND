@@ -28,6 +28,19 @@ for container in "${BYOD_POSTGRES_CONTAINER:-hm-byod-postgres}" "${BYOD_QDRANT_C
   fi
 done
 
+if [[ -f "$HM_CONFIG_DIR/memory-box.env" ]]; then
+  hm_load_env_file "$HM_CONFIG_DIR/memory-box.env"
+  if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
+    tunnel_state="$(docker inspect hm-byod-cloudflared --format '{{.State.Status}}' 2>/dev/null || true)"
+    [[ "$tunnel_state" == running ]] && pass "managed Cloudflare tunnel running" || fail "managed Cloudflare tunnel state=${tunnel_state:-missing}"
+  elif [[ -n "${TS_AUTHKEY:-}" ]]; then
+    tunnel_state="$(docker inspect hm-byod-tunnel --format '{{.State.Status}}' 2>/dev/null || true)"
+    [[ "$tunnel_state" == running ]] && pass "Tailscale transport running" || fail "Tailscale transport state=${tunnel_state:-missing}"
+  elif [[ "${AGENT_PUBLIC_URL:-}" != https://* ]]; then
+    fail "custom transport has no HTTPS AGENT_PUBLIC_URL"
+  fi
+fi
+
 FREE_KIB="$(df -Pk "$HERE" | awk 'NR==2 {print $4}')"
 MIN_KIB="$((MIN_FREE_GIB * 1024 * 1024))"
 if [[ -z "$FREE_KIB" || "$FREE_KIB" -lt "$MIN_KIB" ]]; then

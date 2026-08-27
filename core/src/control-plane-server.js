@@ -127,6 +127,21 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const _welcomedSessions = new Set();
 const PROJECT_ROOT = path.join(__dirname, '..');
 
+async function memoryBoxBrokerRequest(route, body) {
+  const base = String(process.env.BYOD_BROKER_URL || 'http://byod-broker:8790').replace(/\/$/, '');
+  const response = await fetch(`${base}${route}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(process.env.BYOD_BROKER_INTERNAL_TOKEN ? { 'x-hivemind-internal-token': process.env.BYOD_BROKER_INTERNAL_TOKEN } : {}),
+    },
+    body: JSON.stringify(body || {}),
+    signal: AbortSignal.timeout(5000),
+  });
+  const payload = await response.json().catch(() => ({ error: 'Memory Box broker returned an invalid response' }));
+  return { status: response.status, payload };
+}
+
 function loadLocalEnv(envPath) {
   if (!fs.existsSync(envPath)) {
     return;
@@ -3832,176 +3847,93 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Self-host (BYOD) enrollment ─────────────────────────────
-  // A self-hosted DATA box validates its API key here → learns its org; then registers its tunnel
-  // endpoints (Postgres + Qdrant). We record them in the shared registry file the core reads, so core
-  // routes that org's memory data to the customer's box. Global user/org info stays in central PG.
+  if (pathname === '/v1/selfhost/bootstrap' && req.method === 'POST') {
+    const current = await requireSession(req, res);
+    if (!current) return;
+    const orgId = current.session.orgId;
+    if (!orgId) return jsonResponse(res, { error: 'No active organization' }, 409);
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId);
+    if (!membership) return;
+    const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { hostingMode: true } }).catch(() => null);
+    if (org?.hostingMode !== 'self_host') return jsonResponse(res, { error: 'Memory Box enrollment is available only for self-hosted organizations' }, 409);
+    try {
+      const readiness = await memoryBoxBrokerRequest('/v1/selfhost/readiness', { orgId });
+      if (readiness.status !== 200 || readiness.payload?.ready !== true) {
+        return jsonResponse(res, { error: 'Automatic Memory Box setup is not currently available',
+          code: 'memory_box_automatic_setup_unavailable', readiness: readiness.payload || null }, 503);
+      }
+    } catch (error) {
+      return jsonResponse(res, { error: 'Automatic Memory Box setup is not currently available',
+        code: 'memory_box_automatic_setup_unavailable' }, 503);
+    }
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+    const issued = await createPersistedApiKey(prisma, {
+      userId: current.session.userId, orgId, keyKind: 'service', createdByUserId: current.session.userId,
+      name: 'Memory Box enrollment', description: 'Single-use organization-bound Memory Box enrollment credential',
+      scopes: ['selfhost:bootstrap'], expiresAt, rateLimitPerMinute: 12,
+      createdByIp: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || null,
+      userAgent: String(req.headers['user-agent'] || '').slice(0, 512) || null,
+    });
+    return jsonResponse(res, { enrollment_token: issued.rawKey, expires_at: expiresAt.toISOString(), org_id: orgId }, 201);
+  }
+
+  // Stable facade; the dedicated broker is the sole lifecycle writer.
   if ((pathname === '/v1/selfhost/enroll' || pathname === '/v1/selfhost/register' || pathname === '/v1/selfhost/report') && req.method === 'POST') {
     const body = await parseBody(req).catch(() => null);
-    const apiKey = (body?.apiKey || '').toString();
-    if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
-    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-    const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
-    if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
-    const orgId = rec.orgId;
-    if (pathname === '/v1/selfhost/enroll') {
-      return jsonResponse(res, { ok: true, orgId });
-    }
-    if (pathname === '/v1/selfhost/report') {
-      const release = String(body.release || '').trim();
-      const protocolVersion = String(body.protocol_version || '').trim();
-      const schemaVersion = Number(body.schema_version);
-      const lastSuccessAt = new Date(body.last_success_at || '');
-      const capabilities = Array.isArray(body.capabilities)
-        ? [...new Set(body.capabilities.map((item) => String(item || '').trim()).filter(Boolean))].sort()
-        : [];
-      if (!/^[a-zA-Z0-9._-]{1,80}$/.test(release)
-          || !/^[a-zA-Z0-9._-]{1,64}$/.test(protocolVersion)
-          || !Number.isInteger(schemaVersion) || schemaVersion < 1
-          || capabilities.length > 64
-          || capabilities.some((item) => !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(item))
-          || !Number.isFinite(lastSuccessAt.getTime())) {
-        return jsonResponse(res, { error: 'invalid Memory Box release report' }, 400);
-      }
-      const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
-      try {
-        const fs = await import('node:fs');
-        let reg = {};
-        try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
-        const existing = reg[orgId];
-        if (!existing?.url) return jsonResponse(res, { error: 'no agent registered for this organization' }, 409);
-        reg[orgId] = {
-          ...existing,
-          releaseStatus: {
-            release,
-            protocolVersion,
-            schemaVersion,
-            capabilities,
-            lastSuccessAt: lastSuccessAt.toISOString(),
-            rollbackAvailable: body.rollback_available === true,
-            rollbackRelease: String(body.rollback_release || '').slice(0, 80) || null,
-            reportedAt: new Date().toISOString(),
-          },
-        };
-        writeJsonAtomically(regFile, reg);
-        return jsonResponse(res, { ok: true, orgId });
-      } catch (error) {
-        return jsonResponse(res, { error: `release report write failed: ${error.message}` }, 500);
-      }
-    }
-    // register: record the customer's tunnel endpoints into the shared registry file (defaults to the
-    // shared core↔control volume — the file existing is what activates self-host; no env flip needed).
-    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
-    if (!body.pgUrl && !body.qdrantUrl && !body.instanceUrl && !body.agentUrl) return jsonResponse(res, { error: 'agentUrl (Model B) or pgUrl/qdrantUrl required' }, 400);
-    // Phase 9 — transport security: an agent URL must be HTTPS, OR plain http only over a PRIVATE/
-    // encrypted path (loopback, Tailscale CGNAT 100.64/10 or *.ts.net, RFC1918 LAN). Cleartext http to
-    // a PUBLIC host would expose memory content + the bearer token on the wire → reject.
-    const _agentUrl = (body.agentUrl || body.instanceUrl || '').trim();
-    if (_agentUrl) {
-      const agentToken = String(body.agentToken || '');
-      if (!/^[A-Za-z0-9_-]{43,128}$/.test(agentToken)) {
-        return jsonResponse(res, { error: 'agentToken must be a strong URL-safe bearer token', code: 'INVALID_AGENT_TOKEN' }, 400);
-      }
-      let secure = false;
-      try {
-        const u = new URL(_agentUrl);
-        if (u.username || u.password || u.hash || u.search) throw new Error('agent URL must not contain credentials, query, or fragment');
-        if (u.protocol === 'https:') secure = true;
-        else if (u.protocol === 'http:') {
-          const h = u.hostname;
-          const oct = h.split('.').map(Number);
-          const isLoopback = h === 'localhost' || h === '::1' || oct[0] === 127;
-          const isTailscale = h.endsWith('.ts.net') || (oct[0] === 100 && oct[1] >= 64 && oct[1] <= 127); // CGNAT 100.64.0.0/10
-          const isRfc1918 = oct[0] === 10 || (oct[0] === 192 && oct[1] === 168) || (oct[0] === 172 && oct[1] >= 16 && oct[1] <= 31);
-          secure = isLoopback || isTailscale || isRfc1918;
-        }
-      } catch { secure = false; }
-      if (!secure) return jsonResponse(res, { error: 'agentUrl must be https:// (or http only over a private/Tailscale/LAN address). Cleartext http to a public host is rejected — it would expose memory content and the agent token.', code: 'INSECURE_AGENT_URL' }, 400);
-    }
+    if (!body) return jsonResponse(res, { error: 'Invalid JSON body' }, 400);
     try {
-      const fs = await import('node:fs');
-      let reg = {};
-      try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* new file */ }
-      const existing = reg[orgId] || {};
-      reg[orgId] = {
-        url: (body.agentUrl || body.instanceUrl || '').replace(/\/$/, ''), // hm-agent http (.amr self-host, Model B); empty for hybrid
-        token: body.agentToken || '',
-        pgUrl: body.pgUrl || '',                          // customer Postgres (via tunnel)
-        qdrantUrl: (body.qdrantUrl || '').replace(/\/$/, ''), // customer Qdrant (via tunnel)
-        kind: 'selfhost',
-        ...(existing.releaseStatus ? { releaseStatus: existing.releaseStatus } : {}),
-      };
-      writeJsonAtomically(regFile, reg);
-    } catch (e) {
-      return jsonResponse(res, { error: `registry write failed: ${e.message}` }, 500);
+      const result = await memoryBoxBrokerRequest(pathname, body);
+      return jsonResponse(res, result.payload, result.status);
+    } catch (error) {
+      return jsonResponse(res, { error: 'Memory Box broker unavailable', detail: error.message }, 503);
     }
-    // Reuse PROD migrations to create the memory-subgraph schema in the customer's Postgres (the same
-    // `prisma migrate deploy` prod runs, just pointed at their DB via the tunnel). Idempotent; the
-    // global tables it also creates sit unused (global queries route to central). No rebuild.
-    let migrated = false;
-    let migrateError = null;
-    if (body.pgUrl) {
-      try {
-        const { exec } = await import('node:child_process');
-        // Apply the CURRENT Prisma schema to the customer/agent Postgres via `db push` — always in
-        // sync with the live client (no stale hand-maintained DDL, no schema drift). The pgUrl carries
-        // ?schema=hivemind so tables land in the hivemind schema; global tables it also creates sit
-        // unused (global queries route to central). Idempotent.
-        const cmd = 'node_modules/.bin/prisma db push --skip-generate --accept-data-loss --schema=prisma/schema.prisma';
-        await new Promise((resolve, reject) => {
-          exec(cmd, { env: { ...process.env, DATABASE_URL: body.pgUrl }, cwd: '/app', timeout: 180000, shell: '/bin/sh' },
-            (err, stdout, stderr) => (err ? reject(new Error((stderr || stdout || err.message).slice(0, 400))) : resolve()));
-        });
-        migrated = true;
-        console.log(`[selfhost] customer PG schema synced (db push) org=${orgId}`);
-      } catch (e) {
-        migrateError = e.message;
-        console.warn(`[selfhost] customer PG migrate failed org=${orgId}: ${e.message}`);
-      }
-    }
-    return jsonResponse(res, { ok: true, orgId, migrated, ...(migrateError ? { migrateError } : {}) });
   }
 
   // Rotate a self-hosted agent bearer token without an immediate outage. Core
   // tries the new token first and accepts the old token only during this short
   // grace period, giving the customer time to update and restart their Box.
   if (pathname === '/v1/selfhost/rotate-agent-token' && req.method === 'POST') {
-    const body = await parseBody(req).catch(() => null);
-    const apiKey = (body?.apiKey || '').toString();
-    if (!apiKey) return jsonResponse(res, { error: 'apiKey required' }, 400);
-    const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-    const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
-    if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
-    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
+    const current = await requireSession(req, res); if (!current) return;
+    const orgId = current.session.orgId;
+    if (!orgId) return jsonResponse(res, { error: 'No active organization' }, 409);
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId); if (!membership) return;
     try {
-      let reg = {};
-      try { reg = JSON.parse(fs.readFileSync(regFile, 'utf8')); } catch { /* no registry */ }
-      const entry = reg[rec.orgId];
-      if (!entry?.url || !entry?.token) return jsonResponse(res, { error: 'no agent registered for this organization' }, 409);
-      const graceExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-      const previousTokens = (Array.isArray(entry.previousTokens) ? entry.previousTokens : [])
-        .filter((item) => item?.token && new Date(item.expiresAt).getTime() > Date.now())
-        .slice(-2);
-      previousTokens.push({ token: entry.token, expiresAt: graceExpiresAt });
-      const agentToken = crypto.randomBytes(32).toString('base64url');
-      reg[rec.orgId] = { ...entry, token: agentToken, previousTokens };
-      writeJsonAtomically(regFile, reg);
-      return jsonResponse(res, { ok: true, agentToken, grace_expires_at: graceExpiresAt });
+      const result = await memoryBoxBrokerRequest(pathname, { orgId });
+      return jsonResponse(res, result.payload, result.status);
     } catch (error) {
-      return jsonResponse(res, { error: `agent token rotation failed: ${error.message}` }, 500);
+      return jsonResponse(res, { error: 'Memory Box broker unavailable', detail: error.message }, 503);
     }
   }
-
+  if (pathname === '/v1/selfhost/disenroll' && req.method === 'POST') {
+    const current = await requireSession(req, res); if (!current) return;
+    const orgId = current.session.orgId;
+    if (!orgId) return jsonResponse(res, { error: 'No active organization' }, 409);
+    const membership = await requireOrgAdmin(req, res, current.session.userId, orgId); if (!membership) return;
+    try {
+      const result = await memoryBoxBrokerRequest('/v1/byod/disenroll', { orgId });
+      return jsonResponse(res, result.payload, result.status);
+    } catch (error) {
+      return jsonResponse(res, { error: 'Memory Box broker unavailable', detail: error.message }, 503);
+    }
+  }
   // Self-host connection status — the FE polls this during onboarding to show "waiting → connected".
   // POST { apiKey } (key in body, never the URL). Resolves org → reads the shared registry → reports
   // whether an agent is registered and (best-effort) reachable.
   if (pathname === '/v1/selfhost/status' && req.method === 'POST') {
     const body = await parseBody(req).catch(() => null);
     const apiKey = (body?.apiKey || '').toString();
+    const boxToken = (body?.boxToken || '').toString();
     // Resolve org by API key (onboarding poll) OR by session (Settings, no raw key on hand).
     let statusOrgId = null;
-    if (apiKey) {
+    if (boxToken) {
+      const credentialHash = crypto.createHash('sha256').update(boxToken).digest('hex');
+      const rec = await prisma.memoryBoxConnection.findFirst({ where: { credentialHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
+      if (!rec?.orgId) return jsonResponse(res, { error: 'invalid Memory Box credential' }, 401);
+      statusOrgId = rec.orgId;
+    } else if (apiKey) {
       const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-      const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null }, select: { orgId: true } }).catch(() => null);
+      const rec = await prisma.apiKey.findFirst({ where: { keyHash, revokedAt: null,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }, select: { orgId: true } }).catch(() => null);
       if (!rec?.orgId) return jsonResponse(res, { error: 'invalid api key' }, 401);
       statusOrgId = rec.orgId;
     } else {
@@ -4019,40 +3951,24 @@ const server = http.createServer(async (req, res) => {
       }
       if (!statusOrgId) return jsonResponse(res, { registered: false, reachable: false });
     }
-    const regFile = process.env.MNEME_AGENT_REGISTRY_FILE || '/app/data/byod-agents.json';
-    let entry = null;
     try {
-      const fs = await import('node:fs');
-      const reg = JSON.parse(fs.readFileSync(regFile, 'utf8'));
-      entry = reg[statusOrgId] || null;
-    } catch { /* no registry yet */ }
-    if (!entry || !(entry.url || entry.pgUrl || entry.qdrantUrl)) {
-      return jsonResponse(res, { registered: false, reachable: false });
+      const result = await memoryBoxBrokerRequest('/v1/selfhost/status', boxToken ? { boxToken } : { orgId: statusOrgId });
+      if (result.status >= 500) throw new Error(result.payload?.error || 'Memory Box broker unavailable');
+      return jsonResponse(res, result.payload, result.status);
+    } catch (error) {
+      const last = await prisma.memoryBoxConnection.findUnique({ where: { orgId: statusOrgId }, select: {
+        orgId: true, boxId: true, transport: true, endpoint: true, state: true, desiredRelease: true,
+        observedRelease: true, protocolVersion: true, schemaVersion: true, capabilities: true,
+        lastHeartbeatAt: true, lastReachableAt: true, consecutiveFailures: true, registeredAt: true, revokedAt: true,
+      } }).catch(() => null);
+      if (last && !last.revokedAt) return jsonResponse(res, { registered: true, reachable: null, stale: true,
+        orgId: last.orgId, boxId: last.boxId, transport: last.transport, endpoint: last.endpoint, state: last.state,
+        desiredRelease: last.desiredRelease, observedRelease: last.observedRelease, protocolVersion: last.protocolVersion,
+        schemaVersion: last.schemaVersion, capabilities: last.capabilities, lastHeartbeatAt: last.lastHeartbeatAt,
+        lastReachableAt: last.lastReachableAt, consecutiveFailures: last.consecutiveFailures, registeredAt: last.registeredAt,
+        warning: 'Memory Box broker unavailable; showing last known state' }, 200);
+      return jsonResponse(res, { registered: false, reachable: null, stale: true, state: 'UNAVAILABLE', error: 'Memory Box broker unavailable' }, 503);
     }
-    // Best-effort reachability ping (Model B agent /health), 2.5s budget — never blocks the answer.
-    let reachable = false;
-    if (entry.url) {
-      try {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 2500);
-        const r = await fetch(`${entry.url}/health`, {
-          headers: entry.token ? { authorization: `Bearer ${entry.token}` } : {},
-          signal: ctrl.signal,
-        }).catch(() => null);
-        clearTimeout(t);
-        reachable = !!(r && r.ok);
-      } catch { /* unreachable */ }
-    }
-    // Phase 10: surface outbox health (push lag + DLQ) so the view shows degradation, not just green/red.
-    let outbox = null;
-    try { const { getOutboxStats } = await import('./memory/outbox.js'); outbox = await getOutboxStats(statusOrgId); } catch { /* non-fatal */ }
-    return jsonResponse(res, {
-      registered: true,
-      reachable,
-      kind: entry.kind || 'selfhost',
-      transport: entry.url ? 'agent' : (entry.pgUrl ? 'postgres' : 'qdrant'),
-      outbox, // { pending, dead, oldestUnackedAgeMs, lastAckedAt } | null
-    });
   }
 
   // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────

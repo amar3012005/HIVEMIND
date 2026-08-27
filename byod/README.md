@@ -6,13 +6,16 @@ The central engine reaches the authenticated agent over HTTPS or a private netwo
 stays on the customer box; only ranked recall results and explicitly requested rows traverse the link.
 
 ## Setup (one command)
+Copy the organization-bound command shown in the dashboard. It has this shape:
 ```bash
-curl -fsSL https://get.singulancelabs.com/memory-box | sudo bash
+curl -fsSL https://get.singulancelabs.com/memory-box | sudo env HIVEMIND_ENROLLMENT_TOKEN='<short-lived>' bash
 ```
 The bootstrap verifies the signed stable release, installs governed host tools under
 `/opt/hivemind-memory-box`, stores protected configuration in `/etc/hivemind-memory-box`, and stores
-signed receipts in `/var/lib/hivemind-memory-box`. It then asks for your **API key** (dashboard →
-Settings → BYOD), pulls the digest-pinned signed agent image, starts the local data plane, proves
+signed receipts in `/var/lib/hivemind-memory-box`. The enrollment token is organization-bound,
+single-purpose, and exchanged for a durable box credential after registration. The installer pulls
+the digest-pinned signed agent image, starts PostgreSQL, Qdrant, the agent, and the outbound managed
+Cloudflare connector, proves
 both local health and central reachability, and only then reports the box as connected. Existing `.env`, data, and backups
 are adopted in place; PostgreSQL and Qdrant are never recreated by an agent update.
 
@@ -22,6 +25,7 @@ are adopted in place; PostgreSQL and Qdrant are never recreated by an agent upda
 | `hm-agent` | serves the local PostgreSQL + Qdrant data plane (recall/write/edge/hydrate), Bearer-authenticated |
 | `postgres` | authoritative local memory rows and relational graph |
 | `qdrant` | authoritative local vector index |
+| `cloudflared` | outbound-only managed tunnel; no inbound firewall rule required |
 
 Your data lives in `./data/pg/` and `./data/qdrant/`. **Back up both** — they are the authoritative copies.
 
@@ -30,7 +34,7 @@ Your data lives in `./data/pg/` and `./data/qdrant/`. **Back up both** — they 
 HIVEMIND core (their box) ──► authenticated HTTPS/private link ──► hm-agent (your box) ──► PostgreSQL + Qdrant
         recall/write/dashboard                                     customer-owned memory store
 ```
-The API key authenticates the agent and binds it to your org. From then on, HIVEMIND routes only
+The box credential identifies the installation and binds it to your org. From then on, HIVEMIND routes only
 your org's memory traffic to this box (per-org — other tenants are unaffected). Memory rows and
 vectors persist on the customer box. The current agent protocol still receives finished memory
 envelopes from the central engine; use a fully self-hosted processing stack when source-content
@@ -79,7 +83,9 @@ The updater verifies the Ed25519 signature, channel, validity window, anti-downg
 hash, and digest-pinned image. It retains the current local image, replaces only `hm-agent` with
 Compose `--no-deps`, then verifies health, release identity, protocol/schema versions, required
 capabilities, exact memory/evidence inventory access, and authenticated recall. Any failure restores
-the previous local image automatically and leaves the current receipt unchanged.
+the previous local image automatically and leaves the current receipt unchanged. After the agent
+passes, it promotes the host tools, Compose contract, transport definition, and systemd units from
+that same signed bundle, preventing agent/host drift.
 
 ```bash
 sudo hivemind-memory-box rollback
@@ -87,6 +93,7 @@ sudo hivemind-memory-box channel canary   # explicit opt-in
 sudo hivemind-memory-box channel stable
 hivemind-memory-box status
 sudo hivemind-memory-box doctor
+sudo hivemind-memory-box recover
 ```
 
 `install`, `update`, and `rollback` share a host lock and cannot overlap. The signing private key is

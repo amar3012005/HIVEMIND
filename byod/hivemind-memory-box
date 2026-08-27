@@ -11,6 +11,8 @@ Usage: hivemind-memory-box COMMAND
   update                  install the newest signed release for the selected channel
   status                  show containers, channel, and verified release receipt
   doctor                  run read-only health and recoverability checks
+  logs [lines]            show bounded service logs
+  recover                 idempotently repair missing/stopped services
   backup                  create and verify a customer-controlled recovery set
   rollback                restore the prior locally retained agent image
   channel [stable|canary] show or change the update channel
@@ -20,10 +22,10 @@ EOF
 report_release() {
   local result="$1" env_file="$HM_CONFIG_DIR/memory-box.env"
   [[ -f "$env_file" ]] || return 0
-  set -a; . "$env_file"; set +a
-  [[ -n "${HIVEMIND_API_KEY:-}" && -f "$HM_CURRENT_RECEIPT" ]] || return 0
+  hm_load_env_file "$env_file"
+  [[ -n "${HIVEMIND_BOX_TOKEN:-${HIVEMIND_API_KEY:-}}" && -f "$HM_CURRENT_RECEIPT" ]] || return 0
   local central="${HIVEMIND_CENTRAL_URL:-https://api.singulancelabs.com}" payload
-  payload="$(RECEIPT="$HM_CURRENT_RECEIPT" RESULT="$result" HIVEMIND_API_KEY="$HIVEMIND_API_KEY" node -e 'const r=require(process.env.RECEIPT);process.stdout.write(JSON.stringify({apiKey:process.env.HIVEMIND_API_KEY,release:r.release||null,protocol_version:r.protocol_version||null,schema_version:r.schema_version||null,capabilities:r.required_capabilities||[],last_success_at:r.verified_at||null,rollback_available:Boolean(r.rollback_image),rollback_release:r.previous_release||null,state:process.env.RESULT}))')"
+  payload="$(RECEIPT="$HM_CURRENT_RECEIPT" RESULT="$result" HIVEMIND_API_KEY="${HIVEMIND_API_KEY:-}" HIVEMIND_BOX_TOKEN="${HIVEMIND_BOX_TOKEN:-}" node -e 'const r=require(process.env.RECEIPT),b={release:r.release||null,protocol_version:r.protocol_version||null,schema_version:r.schema_version||null,capabilities:r.required_capabilities||[],last_success_at:r.verified_at||null,rollback_available:Boolean(r.rollback_image),rollback_release:r.previous_release||null,state:process.env.RESULT};if(process.env.HIVEMIND_BOX_TOKEN)b.boxToken=process.env.HIVEMIND_BOX_TOKEN;else b.apiKey=process.env.HIVEMIND_API_KEY;process.stdout.write(JSON.stringify(b))')"
   curl -fsS --proto '=https' --tlsv1.2 --max-time 15 -H 'content-type: application/json' -d "$payload" "$central/v1/selfhost/report" >/dev/null 2>&1 || true
 }
 
@@ -46,8 +48,24 @@ case "$command_name" in
   status)
     printf 'channel: %s\n' "$(hm_channel)"
     if [[ -f "$HM_CURRENT_RECEIPT" ]]; then node -e 'const r=require(process.argv[1]);console.log(`release: ${r.release||"unknown"}\nimage: ${r.image||"unknown"}\nverified: ${r.verified_at||"unknown"}\nrollback: ${r.rollback_state||"ready"}`)' "$HM_CURRENT_RECEIPT"; else echo 'release: unmanaged'; fi
-    for container in hm-byod-postgres hm-byod-qdrant hm-byod-agent; do
+    for container in hm-byod-postgres hm-byod-qdrant hm-byod-agent hm-byod-cloudflared hm-byod-tunnel; do
       state="$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || true)"; printf '%s: %s\n' "$container" "${state:-missing}"
+    done
+    ;;
+  logs)
+    hm_compose_prefix
+    "${HM_COMPOSE[@]}" logs --tail "${1:-100}" postgres qdrant agent cloudflared tunnel
+    ;;
+  recover)
+    hm_require_root; hm_lock; hm_compose_prefix
+    hm_load_env_file "$HM_CONFIG_DIR/memory-box.env"
+    if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then "${HM_COMPOSE[@]}" --profile cloudflare up -d
+    elif [[ -n "${TS_AUTHKEY:-}" ]]; then "${HM_COMPOSE[@]}" --profile tailnet up -d
+    else "${HM_COMPOSE[@]}" up -d; fi
+    # Reconciliation is intentionally limited to service repair. Full doctor
+    # also enforces backup age and is run independently by operators/monitoring.
+    for container in hm-byod-postgres hm-byod-qdrant hm-byod-agent; do
+      [[ "$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || true)" == running ]] || hm_die "$container did not recover"
     done
     ;;
   doctor)

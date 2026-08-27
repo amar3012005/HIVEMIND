@@ -18,14 +18,19 @@ command -v systemctl >/dev/null 2>&1 || die 'systemd is required for governed up
 [[ -d /run/systemd/system ]] || die 'systemd is not running'
 
 command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl ca-certificates; }
-command -v docker >/dev/null || { log 'installing Docker'; curl -fsSL --proto '=https' https://get.docker.com | sh; }
+fetch(){ curl -fsSLo "$2" --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 300 "$1"; }
+if ! command -v docker >/dev/null; then
+  log 'installing Docker'
+  DOCKER_INSTALLER="$WORK/get-docker.sh"
+  fetch 'https://get.docker.com' "$DOCKER_INSTALLER"
+  sh "$DOCKER_INSTALLER" || die 'Docker installation failed'
+fi
 docker compose version >/dev/null 2>&1 || die 'Docker Compose v2 is required'
 command -v node >/dev/null || { apt-get update -qq && apt-get install -y -qq nodejs; }
 node -e 'process.exit(Number(process.versions.node.split(".")[0])>=18?0:1)' || die 'Node.js 18 or newer is required'
 command -v flock >/dev/null || { apt-get update -qq && apt-get install -y -qq util-linux; }
 docker info >/dev/null 2>&1 || die 'Docker daemon is not reachable'
 
-fetch(){ curl -fsSLo "$2" --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 300 "$1"; }
 fetch "$BASE/releases/$CHANNEL/release.json" "$WORK/release.json"
 fetch "$BASE/releases/$CHANNEL/release.sig" "$WORK/release.sig"
 if [[ -n "${HIVEMIND_RELEASE_PUBLIC_KEY_PATH:-}" ]]; then cp "${HIVEMIND_RELEASE_PUBLIC_KEY_PATH}" "$WORK/release.pub"; else fetch "$BASE/release.pub" "$WORK/release.pub"; fi
@@ -42,7 +47,7 @@ if tar -tzf "$WORK/bundle.tar.gz" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then die 're
 if tar -tvzf "$WORK/bundle.tar.gz" | awk 'substr($1,1,1)=="l" || substr($1,1,1)=="h" {found=1} END{exit found?0:1}'; then die 'release bundle must not contain symbolic or hard links'; fi
 mkdir "$WORK/unpacked"; tar -xzf "$WORK/bundle.tar.gz" -C "$WORK/unpacked"
 SOURCE="$WORK/unpacked"; [[ -f "$SOURCE/setup.sh" ]] || SOURCE="$WORK/unpacked/byod"
-[[ -f "$SOURCE/setup.sh" && -f "$SOURCE/hivemind-memory-box" ]] || die 'release bundle is missing Memory Box host tools'
+[[ -f "$SOURCE/setup.sh" && -f "$SOURCE/hivemind-memory-box" && -f "$SOURCE/memory-box-common.sh" ]] || die 'release bundle is missing Memory Box host tools'
 VERIFIED_RELEASE="$(BYOD_ALLOW_LEGACY_RELEASE_V1=false BYOD_RELEASE_CHANNEL="$CHANNEL" node "$SOURCE/verify-release.mjs" "$WORK/release.json" "$WORK/release.sig" "$WORK/release.pub")" \
   || die 'governed release manifest verification failed'
 INITIAL_IMAGE="$(VERIFIED_RELEASE="$VERIFIED_RELEASE" node -e 'const x=JSON.parse(process.env.VERIFIED_RELEASE);process.stdout.write(x.image)')"
@@ -56,7 +61,11 @@ fi
 if [[ -n "$LEGACY" && -f "$LEGACY/.env" && ! -f "$CONFIG_DIR/memory-box.env" ]]; then cp -p "$LEGACY/.env" "$CONFIG_DIR/memory-box.env"; chmod 600 "$CONFIG_DIR/memory-box.env"; fi
 if [[ -n "$LEGACY" && -d "$LEGACY/data" && ! -e "$INSTALL_DIR/data" ]]; then ln -s "$LEGACY/data" "$INSTALL_DIR/data"; fi
 if [[ -n "$LEGACY" && -d "$LEGACY/backups" && ! -e "$INSTALL_DIR/backups" ]]; then ln -s "$LEGACY/backups" "$INSTALL_DIR/backups"; fi
-cp -a "$SOURCE/." "$INSTALL_DIR/"
+for host_script in "$SOURCE"/*.sh "$SOURCE"/hivemind-memory-box; do
+  [[ ! -f "$host_script" ]] || bash -n "$host_script" || die "release bundle contains an invalid host tool: $(basename "$host_script")"
+done
+. "$SOURCE/memory-box-common.sh"
+hm_promote_host_tree "$SOURCE" "$INSTALL_DIR"
 install -m 0755 "$INSTALL_DIR/hivemind-memory-box" /usr/local/sbin/hivemind-memory-box
 install -m 0644 "$WORK/release.pub" "$CONFIG_DIR/release.pub"
 printf '%s\n' "$CHANNEL" > "$CONFIG_DIR/channel"; chmod 644 "$CONFIG_DIR/channel"
@@ -64,6 +73,8 @@ install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-update.service" /etc/s
 install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-update.timer" /etc/systemd/system/hivemind-memory-box-update.timer
 install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-backup.service" /etc/systemd/system/hivemind-memory-box-backup.service
 install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-backup.timer" /etc/systemd/system/hivemind-memory-box-backup.timer
+install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-reconcile.service" /etc/systemd/system/hivemind-memory-box-reconcile.service
+install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-reconcile.timer" /etc/systemd/system/hivemind-memory-box-reconcile.timer
 systemctl daemon-reload
 log "installed governed host tools in $INSTALL_DIR"
 if [[ -f "$CONFIG_DIR/memory-box.env" ]]; then
@@ -80,4 +91,4 @@ fi
 BYOD_INITIAL_AGENT_IMAGE="$INITIAL_IMAGE" BYOD_INITIAL_AGENT_RELEASE="$INITIAL_RELEASE" \
   HIVEMIND_MEMORY_BOX_LOCK_HELD=false /usr/local/sbin/hivemind-memory-box install
 /usr/local/sbin/hivemind-memory-box update
-systemctl enable --now hivemind-memory-box-update.timer hivemind-memory-box-backup.timer
+systemctl enable --now hivemind-memory-box-update.timer hivemind-memory-box-backup.timer hivemind-memory-box-reconcile.timer

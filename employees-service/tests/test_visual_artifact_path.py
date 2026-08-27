@@ -41,3 +41,31 @@ async def test_visual_producer_repairs_once_and_returns_verified_receipt():
     assert len(calls) == 2
     assert calls[1]["errors"] == ["Mobile has horizontal overflow."]
     assert calls[1]["prior"].startswith("<!doctype html>")
+
+
+@pytest.mark.asyncio
+async def test_artifact_only_profile_stops_before_expensive_work_when_renderer_is_disabled(monkeypatch):
+    monkeypatch.delenv("Visual_path_In_Hyperrooms", raising=False)
+    monkeypatch.delenv("VISUAL_PATH_IN_HYPERROOMS", raising=False)
+    director = object.__new__(Director)
+    director.participants = [{"slug": "lead"}]
+    director.execution_profile = {
+        "profile_id": "fundraising.artifact.v1",
+        "allowed_outputs": ["artifact"],
+        "required_artifacts": ["fundraising_artifact"],
+    }
+    director.transcript = []
+    director.io = {"input": 0, "output": 0}
+    director.tok_by = {}
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    director.emit = emit
+    result = await director.run()
+
+    assert result["cost_tokens"] == 0
+    assert result["artifact_path_error"] == "visual_artifact_path_disabled"
+    assert result["intended_output"] == "artifact"
+    assert any(event.get("code") == "visual_artifact_path_disabled" for event in events)

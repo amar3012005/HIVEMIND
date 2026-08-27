@@ -5182,6 +5182,18 @@ class Director:
             }
             plan["artifact_intent"] = dict(self.artifact_intent)
             plan["execution_engine"] = "debate"
+        if self.artifact_intent:
+            # The execution profile and the planner have selected the visual
+            # producer as the final-output adapter. Keep that decision authoritative
+            # through verification instead of inheriting the caller's prose default.
+            self.intended_output = "artifact"
+        log.info(
+            "[hyper-engine] output contract profile=%s visual_enabled=%s intended_output=%s artifact_kind=%s",
+            self.execution_profile.get("profile_id") or "none",
+            _visual_artifacts_enabled(),
+            self.intended_output,
+            (self.artifact_intent or {}).get("kind") or "none",
+        )
         intensity = str(plan.get("collaboration_intensity") or "").strip().lower()
         if intensity not in {"light", "standard", "deep"}:
             legacy_depth = str(plan.get("response_depth") or "focused").strip().lower()
@@ -6999,6 +7011,40 @@ class Director:
         # never looks frozen right after the query is sent.
         _lead = self.participants[0].get("slug") if self.participants else "director"
         await self.emit({"t": "typing", "agent": _lead, "note": "Reading the goal and gathering context…"})
+        _required = [item for item in (self.execution_profile.get("required_artifacts") or []) if item]
+        _allowed = {
+            str(item).strip().lower()
+            for item in (self.execution_profile.get("allowed_outputs") or [])
+            if str(item).strip()
+        }
+        if _required and _allowed == {"artifact"} and not _visual_artifacts_enabled():
+            # A disabled renderer can never satisfy this profile. Stop before
+            # recall, workers, debate, and synthesis consume a full turn budget.
+            message = "The visual artifact renderer is unavailable for this room. No generation work was started."
+            log.error(
+                "[hyper-engine] artifact-only profile unavailable profile=%s required=%s",
+                self.execution_profile.get("profile_id") or "none",
+                _required,
+            )
+            await self.emit({
+                "t": "warning",
+                "code": "visual_artifact_path_disabled",
+                "note": message,
+            })
+            await self.emit({"t": "line", "agent": _lead, "kind": "dead_end", "content": message})
+            return {
+                "cost_tokens": 0,
+                "final_text": message,
+                "transcript": self.transcript,
+                "gather_count": 0,
+                "tool_calls": 0,
+                "sim_report": None,
+                "io": self.io,
+                "tok_by": self.tok_by,
+                "intended_output": "artifact",
+                "artifact_intent": None,
+                "artifact_path_error": "visual_artifact_path_disabled",
+            }
         if self.domain_pack:
             await self.emit({
                 "t": "domain_pack",

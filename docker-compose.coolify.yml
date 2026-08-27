@@ -747,6 +747,7 @@ services:
             COOLIFY_RESOURCE_UUID: s0k0s0k40wo44w4w8gcs8ow0
             COOLIFY_CONTAINER_NAME: employees-s0k0s0k40wo44w4w8gcs8ow0-125656582244
             SERVICE_NAME_APP: employees
+            VISUAL_PATH_IN_HYPERROOMS: '${VISUAL_PATH_IN_HYPERROOMS:-true}'
             SERVICE_NAME_POSTGRES: postgres
             SERVICE_NAME_QDRANT: qdrant
             SERVICE_NAME_REDIS: redis

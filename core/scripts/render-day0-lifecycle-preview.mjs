@@ -22,9 +22,9 @@ const fixture = {
     contact_details: { emails: ['enterprise@singulancelabs.com'] },
   },
   team: [
-    { id: 'elena-kovacs', slug: 'elena-kovacs', name: 'Elena Kovács', roleArchetype: 'Communicator' },
-    { id: 'mateo-rossi', slug: 'mateo-rossi', name: 'Mateo Rossi', roleArchetype: 'Communicator' },
-    { id: 'anika-patel', slug: 'anika-patel', name: 'Anika Patel', roleArchetype: 'Communicator' },
+    { id: 'lena-kovacs', slug: 'lena-kovacs', name: 'Lena Kovács', roleArchetype: 'Product Risk & Quality Lead', focus: 'Protects product claims, reliability, privacy, and delivery quality.' },
+    { id: 'ravi-patel', slug: 'ravi-patel', name: 'Ravi Patel', roleArchetype: 'User & Market Researcher', focus: 'Finds user needs, competition, and evidence of market adoption.' },
+    { id: 'sofia-almeida', slug: 'sofia-almeida', name: 'Sofia Almeida', roleArchetype: 'Product Strategy Lead', focus: 'Owns product positioning, roadmap priorities, and differentiation.' },
   ],
   tasks: [
     { title: 'Audit and optimize core site keywords', room_name: 'SEO', deliverable: 'Keyword optimization report' },

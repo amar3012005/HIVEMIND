@@ -32,7 +32,13 @@ function escapeAttribute(value) {
 export function resolveHumationLane(roleArchetype) {
   const raw = String(roleArchetype || 'Communicator').trim();
   if (LANE_COLORS[raw]) return raw;
-  return ARCHETYPE_TO_LANE[raw.toLowerCase()] || 'Communicator';
+  const lower = raw.toLowerCase();
+  if (ARCHETYPE_TO_LANE[lower]) return ARCHETYPE_TO_LANE[lower];
+  if (/risk|quality|compliance|legal|counsel|privacy|audit|security/.test(lower)) return 'Skeptic';
+  if (/research|analyst|insight|intelligence|quantitative|seo/.test(lower)) return 'Researcher';
+  if (/strateg|design lead|brand|treasury|finance lead/.test(lower)) return 'Strategist';
+  if (/builder|engineer|developer|architect|technical/.test(lower)) return 'Builder';
+  return 'Communicator';
 }
 
 export function renderHumationAvatarSvg(employee = {}, { size = 64 } = {}) {

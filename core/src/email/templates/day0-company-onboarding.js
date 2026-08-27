@@ -20,6 +20,13 @@ function unique(values, limit) {
   return [...new Set(values.map((value) => clean(value)).filter(Boolean))].slice(0, limit);
 }
 
+function firstSentence(value, limit = 180) {
+  const normalized = clean(value, limit * 2);
+  if (!normalized) return '';
+  const match = normalized.match(/^(.+?[.!?])(?:\s|$)/);
+  return clean(match?.[1] || normalized, limit);
+}
+
 const ROLE_ONE_LINERS = Object.freeze({
   Strategist: 'Turns company context into priorities, plans, and clear operating decisions.',
   Builder: 'Transforms approved plans into concrete assets, workflows, and deliverables.',
@@ -61,24 +68,29 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, pu
   })).filter((item) => item.title || item.url);
   const reportUrl = safeUrl(appUrl) || 'https://next.singulancelabs.com/hivemind/app/employees/mycompany';
   const members = team.slice(0, 8).map((member) => {
-    const role = resolveHumationLane(member?.roleArchetype || member?.role);
+    const roleTitle = clean(member?.jobTitle || member?.title || member?.roleArchetype || member?.role || 'Company Specialist', 96);
+    const lane = resolveHumationLane(member?.lane || member?.archetype || roleTitle);
     const normalized = {
       id: clean(member?.id || member?.slug || member?.name, 160),
       slug: clean(member?.slug, 120),
       name: clean(member?.name, 72),
-      role,
-      roleArchetype: member?.roleArchetype || member?.role,
+      role: roleTitle,
+      lane,
+      roleArchetype: lane,
     };
     const suppliedAvatar = safeUrl(member?.avatarUrl || member?.avatar_url);
     const avatarSvg = renderHumationAvatarSvg(normalized, { size: 72 });
     return {
       ...normalized,
-      oneLiner: clean(member?.oneLiner || member?.summary || ROLE_ONE_LINERS[role], 180),
+      oneLiner: clean(member?.oneLiner || member?.focus || member?.summary || firstSentence(member?.persona) || ROLE_ONE_LINERS[lane], 180),
       avatarUrl: embedEmailAvatars ? `data:image/svg+xml;base64,${Buffer.from(avatarSvg).toString('base64')}` : (suppliedAvatar || humationAvatarPublicUrl(normalized, publicApiUrl)),
       avatarSvg,
     };
   }).filter((member) => member.name);
-  const leadAgent = members.find((member) => member.role === 'Communicator') || members[0] || null;
+  const leadAgent = members.find((member) => member.lane === 'Communicator')
+    || members.find((member) => member.lane === 'Strategist')
+    || members[0]
+    || null;
 
   return {
     version: 'day-0-v2',

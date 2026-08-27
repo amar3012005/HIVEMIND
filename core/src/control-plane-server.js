@@ -10714,7 +10714,7 @@ Write the persona now.`;
 
         const employees = await prisma.digitalEmployee.findMany({
           where: { orgId: current.session.orgId, archivedAt: null },
-          select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true },
+          select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, persona: true },
           take: 12,
         }).catch(() => []);
         const dashboardCompany = {
@@ -10727,6 +10727,7 @@ Write the persona now.`;
             name: employee.name,
             avatarUrl: employee.avatarUrl,
             roleArchetype: employee.roleArchetype || 'Communicator',
+            persona: employee.persona,
           })),
         };
         const ownerId = current.session.userId;

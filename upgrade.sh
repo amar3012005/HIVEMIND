@@ -4,6 +4,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/memory-box-common.sh"
 MANIFEST="${1:-}"; SIGNATURE="${2:-}"; PUBLIC_KEY="${BYOD_RELEASE_PUBLIC_KEY:-$HM_PUBLIC_KEY}"
 AGENT_CONTAINER="${BYOD_AGENT_CONTAINER:-hm-byod-agent}"; STATE="${BYOD_RELEASE_STATE_DIR:-$HM_STATE_DIR}"
+CURRENT_RECEIPT="$STATE/CURRENT_RELEASE.json"; PREVIOUS_RECEIPT="$STATE/PREVIOUS_RELEASE.json"
 [[ "${HIVEMIND_MEMORY_BOX_LOCK_HELD:-false}" == true ]] || hm_lock
 [[ -f "$MANIFEST" && -f "$SIGNATURE" && -f "$PUBLIC_KEY" ]] || { echo "usage: BYOD_RELEASE_PUBLIC_KEY=... $0 RELEASE.json RELEASE.sig" >&2; exit 2; }
 
@@ -33,10 +34,10 @@ if [[ "$VERSION" == 2 ]]; then
   [[ "$CAPABILITIES" != '[]' ]] || hm_die 'manifest v2 has no required capabilities'
   [[ -n "$BUNDLE_URL" && "$BUNDLE_SHA" =~ ^[a-f0-9]{64}$ ]] || hm_die 'manifest v2 has an invalid bundle contract'
 fi
-if [[ -f "$HM_CURRENT_RECEIPT" ]]; then
-  INSTALLED_RELEASE="$(hm_json_field "$HM_CURRENT_RECEIPT" 'x.release||null' 2>/dev/null || true)"
-  INSTALLED_IMAGE="$(hm_json_field "$HM_CURRENT_RECEIPT" 'x.image||null' 2>/dev/null || true)"
-  CURRENT_CREATED="$(hm_json_field "$HM_CURRENT_RECEIPT" 'x.created_at||null' 2>/dev/null || true)"
+if [[ -f "$CURRENT_RECEIPT" ]]; then
+  INSTALLED_RELEASE="$(hm_json_field "$CURRENT_RECEIPT" 'x.release||null' 2>/dev/null || true)"
+  INSTALLED_IMAGE="$(hm_json_field "$CURRENT_RECEIPT" 'x.image||null' 2>/dev/null || true)"
+  CURRENT_CREATED="$(hm_json_field "$CURRENT_RECEIPT" 'x.created_at||null' 2>/dev/null || true)"
   if [[ -n "$CURRENT_CREATED" ]] && ! CURRENT_CREATED="$CURRENT_CREATED" NEXT_CREATED="$CREATED_AT" node -e 'process.exit(Date.parse(process.env.NEXT_CREATED)>=Date.parse(process.env.CURRENT_CREATED)?0:1)'; then hm_die 'release downgrade rejected'; fi
   if [[ "$CURRENT_CREATED" == "$CREATED_AT" && -n "$INSTALLED_RELEASE" && "$INSTALLED_RELEASE" != "$RELEASE" ]]; then hm_die 'conflicting release identity at current release time'; fi
   if [[ "$INSTALLED_RELEASE" == "$RELEASE" && "$INSTALLED_IMAGE" == "$IMAGE" ]]; then echo "Memory Box agent is current: $RELEASE"; exit 0; fi
@@ -116,8 +117,8 @@ if [[ -n "$BUNDLE_URL" && "${BYOD_SKIP_HOST_PROMOTION:-false}" != true ]]; then
 fi
 
 MANIFEST_SHA="$(sha256sum "$MANIFEST" | awk '{print $1}')"
-[[ ! -f "$HM_CURRENT_RECEIPT" ]] || cp -f "$HM_CURRENT_RECEIPT" "$HM_PREVIOUS_RECEIPT"
-RELEASE="$RELEASE" IMAGE="$IMAGE" MANIFEST_SHA="$MANIFEST_SHA" ROLLBACK_TAG="$ROLLBACK_TAG" PREVIOUS_RELEASE="$CURRENT_RELEASE" PREVIOUS_IMAGE="$CURRENT_IMAGE" CREATED_AT="$CREATED_AT" CHANNEL="$CHANNEL" PROTOCOL="$PROTOCOL" SCHEMA="$SCHEMA" CAPABILITIES="$CAPABILITIES" node <<'NODE' | hm_atomic_write "$HM_CURRENT_RECEIPT" 600
+[[ ! -f "$CURRENT_RECEIPT" ]] || cp -f "$CURRENT_RECEIPT" "$PREVIOUS_RECEIPT"
+RELEASE="$RELEASE" IMAGE="$IMAGE" MANIFEST_SHA="$MANIFEST_SHA" ROLLBACK_TAG="$ROLLBACK_TAG" PREVIOUS_RELEASE="$CURRENT_RELEASE" PREVIOUS_IMAGE="$CURRENT_IMAGE" CREATED_AT="$CREATED_AT" CHANNEL="$CHANNEL" PROTOCOL="$PROTOCOL" SCHEMA="$SCHEMA" CAPABILITIES="$CAPABILITIES" node <<'NODE' | hm_atomic_write "$CURRENT_RECEIPT" 600
 const receipt={version:2,complete:true,release:process.env.RELEASE,image:process.env.IMAGE,manifest_sha256:process.env.MANIFEST_SHA,rollback_image:process.env.ROLLBACK_TAG,previous_release:process.env.PREVIOUS_RELEASE,previous_image:process.env.PREVIOUS_IMAGE,created_at:process.env.CREATED_AT,channel:process.env.CHANNEL||null,protocol_version:process.env.PROTOCOL,schema_version:process.env.SCHEMA||null,required_capabilities:JSON.parse(process.env.CAPABILITIES||'[]'),verified_at:new Date().toISOString()};process.stdout.write(JSON.stringify(receipt,null,2)+'\n');
 NODE
 cp -f "$MANIFEST" "$STATE/${RELEASE}.release.json"; cp -f "$SIGNATURE" "$STATE/${RELEASE}.release.sig"

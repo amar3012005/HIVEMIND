@@ -4,6 +4,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/memory-box-common.sh"
+if [[ -f "$HM_CONFIG_DIR/memory-box.env" ]]; then set -a; . "$HM_CONFIG_DIR/memory-box.env"; set +a; fi
 MANIFEST_TOOL="$HERE/storage-manifest.mjs"
 [[ -f "$MANIFEST_TOOL" ]] || MANIFEST_TOOL="$HERE/../scripts/storage-manifest.mjs"
 [[ -f "$MANIFEST_TOOL" ]] || { echo "storage-manifest.mjs is missing; reinstall the Memory Box bundle" >&2; exit 1; }
@@ -12,7 +14,8 @@ KEEP="${BYOD_BACKUP_KEEP:-14}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 STAGING="$DEST_ROOT/.${STAMP}.partial"
 FINAL="$DEST_ROOT/$STAMP"
-COMPOSE=(docker compose -f "$HERE/docker-compose.byod.yml")
+hm_compose_prefix
+COMPOSE=("${HM_COMPOSE[@]}")
 
 mkdir -p "$DEST_ROOT"
 rm -rf "$STAGING"

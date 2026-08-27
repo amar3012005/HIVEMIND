@@ -55,6 +55,18 @@ hm_json_field() {
   node -e "const x=require(process.argv[1]);const v=($expression);if(v===undefined||v===null)process.exit(1);process.stdout.write(typeof v==='string'?v:JSON.stringify(v))" "$file"
 }
 
+hm_set_env_value() {
+  local file="$1" key="$2" value="$3" temporary
+  [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || hm_die "invalid environment key: $key"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || hm_die "invalid newline in $key"
+  mkdir -p "$(dirname "$file")"
+  temporary="$(mktemp "$(dirname "$file")/.env.XXXXXX")"
+  if [[ -f "$file" ]]; then awk -v key="$key" 'index($0,key "=")!=1 {print}' "$file" > "$temporary"; fi
+  printf '%s=%s\n' "$key" "$value" >> "$temporary"
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$file"
+}
+
 hm_compose_prefix() {
   HM_COMPOSE=(docker compose)
   [[ -z "${BYOD_COMPOSE_PROJECT_NAME:-}" ]] || HM_COMPOSE+=(-p "$BYOD_COMPOSE_PROJECT_NAME")

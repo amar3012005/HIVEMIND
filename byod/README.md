@@ -12,7 +12,8 @@ curl -fsSL https://get.singulancelabs.com/memory-box | sudo bash
 The bootstrap verifies the signed stable release, installs governed host tools under
 `/opt/hivemind-memory-box`, stores protected configuration in `/etc/hivemind-memory-box`, and stores
 signed receipts in `/var/lib/hivemind-memory-box`. It then asks for your **API key** (dashboard →
-Settings → BYOD), starts the local data plane, and registers it. Existing `.env`, data, and backups
+Settings → BYOD), pulls the digest-pinned signed agent image, starts the local data plane, proves
+both local health and central reachability, and only then reports the box as connected. Existing `.env`, data, and backups
 are adopted in place; PostgreSQL and Qdrant are never recreated by an agent update.
 
 ## What runs here
@@ -71,6 +72,7 @@ same transaction can be run manually:
 
 ```bash
 sudo hivemind-memory-box update
+sudo hivemind-memory-box backup
 ```
 
 The updater verifies the Ed25519 signature, channel, validity window, anti-downgrade order, bundle
@@ -90,3 +92,8 @@ sudo hivemind-memory-box doctor
 `install`, `update`, and `rollback` share a host lock and cannot overlap. The signing private key is
 never distributed to a customer box; only the pinned public key is installed. The box requires only
 outbound HTTPS to the release channel, GHCR, and the SINGULANCE registration API.
+
+The installer supports systemd-based Linux hosts on x86-64 and ARM64 with Docker Compose v2 and
+Node.js 18 or newer. It never compiles the production agent locally and never falls back to an
+unsigned image. Daily verified backups and six-hour signed update checks are installed only after
+the initial agent passes health, capability, inventory, recall, and external reachability checks.

@@ -76,6 +76,7 @@ else
 fi
 if command -v systemctl >/dev/null 2>&1 && [[ -f /etc/systemd/system/hivemind-memory-box-update.timer ]]; then
   systemctl is-enabled --quiet hivemind-memory-box-update.timer && pass "automatic signed updates enabled" || fail "automatic update timer is disabled"
+  systemctl is-enabled --quiet hivemind-memory-box-backup.timer && pass "automatic verified backups enabled" || fail "automatic backup timer is disabled"
 fi
 
 LATEST="$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name '.*.partial' -print 2>/dev/null | sort | tail -1)"

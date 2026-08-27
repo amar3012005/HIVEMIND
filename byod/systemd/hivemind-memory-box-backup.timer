@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily verified HIVEMIND Memory Box backup
+
+[Timer]
+OnBootSec=30min
+OnCalendar=daily
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -13,7 +13,7 @@ name: hivemind-byod
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: hm-byod-postgres
     restart: unless-stopped
     environment:
@@ -32,7 +32,7 @@ services:
   # Local vector store. It is the authoritative vector index for this BYOD workspace.
   # Internal only (not published); only the agent talks to it over the compose network.
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.12.4}
     container_name: hm-byod-qdrant
     restart: unless-stopped
     volumes:
@@ -45,8 +45,10 @@ services:
       retries: 10
 
   agent:
-    build: { context: ./agent }
-    image: hivemind/hm-agent:${VERSION:-latest}
+    # Production installs must provide the digest-pinned image from the signed
+    # release manifest. There is deliberately no build fallback here: a
+    # customer box must never register a locally built, unsigned agent.
+    image: ${HIVEMIND_AGENT_IMAGE:?signed HIVEMIND_AGENT_IMAGE is required}
     container_name: hm-byod-agent
     restart: unless-stopped
     environment:
@@ -65,7 +67,7 @@ services:
 
   # Optional private transport (alternative to direct HTTPS). Enable with: --profile tailnet
   tunnel:
-    image: tailscale/tailscale:latest
+    image: ${TAILSCALE_IMAGE:-tailscale/tailscale:stable}
     container_name: hm-byod-tunnel
     restart: unless-stopped
     profiles: ["tailnet"]

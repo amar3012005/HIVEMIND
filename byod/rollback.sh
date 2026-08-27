@@ -30,4 +30,9 @@ else
 process.stdout.write(JSON.stringify({version:2,complete:true,release:process.env.PREVIOUS_RELEASE,image:process.env.ROLLBACK_IMAGE,rollback_state:'manual',verified_at:new Date().toISOString()},null,2)+'\n');
 NODE
 fi
+ACTIVE_IMAGE="$(hm_json_field "$RECEIPT" 'x.image||null' 2>/dev/null || true)"
+ACTIVE_RELEASE="$(hm_json_field "$RECEIPT" 'x.release||null' 2>/dev/null || true)"
+[[ "$ACTIVE_IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || hm_die 'rolled-back receipt has no digest-pinned signed image'
+hm_set_env_value "$HM_CONFIG_DIR/memory-box.env" HIVEMIND_AGENT_IMAGE "$ACTIVE_IMAGE"
+hm_set_env_value "$HM_CONFIG_DIR/memory-box.env" VERSION "${ACTIVE_RELEASE:-$PREVIOUS_RELEASE}"
 echo "Memory Box agent rolled back to $PREVIOUS_RELEASE"

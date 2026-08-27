@@ -103,6 +103,9 @@ test('successful update swaps only agent and commits an atomic verified receipt'
   assert.equal(receipt.complete, true); assert.equal(receipt.release, f.manifest.release); assert.equal(receipt.rollback_image.startsWith('hivemind/hm-agent:rollback-'), true);
   const log = fs.readFileSync(env.MOCK_DOCKER_LOG, 'utf8');
   assert.match(log, /compose .*up -d --no-deps --force-recreate agent/); assert.doesNotMatch(log, /\bdown\b/);
+  const protectedEnv = fs.readFileSync(path.join(f.config, 'memory-box.env'), 'utf8');
+  assert.match(protectedEnv, new RegExp(`HIVEMIND_AGENT_IMAGE=${f.manifest.image.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(protectedEnv, new RegExp(`VERSION=${f.manifest.release}`));
 });
 
 test('failed verification automatically restores the previous local image', (t) => {
@@ -133,5 +136,7 @@ test('host contract schedules persistent six-hour checks and forbids dependency 
   assert.match(cli, /apiKey:process\.env\.HIVEMIND_API_KEY/);
   assert.match(cli, /protocol_version:r\.protocol_version/);
   assert.match(cli, /last_success_at:r\.verified_at/);
-  for (const command of ['install', 'update', 'status', 'doctor', 'rollback', 'channel']) assert.match(cli, new RegExp(`\\b${command}\\)`));
+  const backupTimer = fs.readFileSync(path.join(BYOD, 'systemd/hivemind-memory-box-backup.timer'), 'utf8');
+  assert.match(backupTimer, /OnCalendar=daily/); assert.match(backupTimer, /Persistent=true/);
+  for (const command of ['install', 'update', 'status', 'doctor', 'backup', 'rollback', 'channel']) assert.match(cli, new RegExp(`\\b${command}\\)`));
 });

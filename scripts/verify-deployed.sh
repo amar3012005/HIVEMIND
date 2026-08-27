@@ -12,11 +12,12 @@ esac; done
 [ -n "$SHA" ] && [ -n "$SERVICES" ] && [ -d "$SOURCE_ROOT" ] \
   || { echo "usage: $0 --sha FULL_SHA --services core,control-plane,employees --source-root PATH" >&2; exit 2; }
 
-declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
+declare -A CONTAINER=( [core]=hm-core [control-plane]=hm-control [employees]=hm-employees [byod-broker]=hm-byod-broker [playwright]=hm-playwright [tara-grok]=tara-grok [tara-deepgram]=tara-deepgram [hm-extract]=hm-extract )
 declare -A LOCAL_FILE=(
   [core]="core/src/runtime-playbooks/stage-executor.js"
   [control-plane]="core/src/runtime-playbooks/stage-executor.js"
   [employees]="employees-service/src/hivemind_employees/api_hyper_rooms.py"
+  [byod-broker]="byod/broker/server.mjs"
   [playwright]="services/hm-playwright/server.mjs"
   [tara-grok]="services/tara-grok/tara_grok/app.py"
   [tara-deepgram]="services/tara-deepgram/tara_deepgram/app.py"
@@ -26,6 +27,7 @@ declare -A IMAGE_FILE=(
   [core]="/app/src/runtime-playbooks/stage-executor.js"
   [control-plane]="/app/src/runtime-playbooks/stage-executor.js"
   [employees]="/app/src/hivemind_employees/api_hyper_rooms.py"
+  [byod-broker]="/app/server.mjs"
   [playwright]="/app/server.mjs"
   [tara-grok]="/app/tara_grok/app.py"
   [tara-deepgram]="/app/tara_deepgram/app.py"

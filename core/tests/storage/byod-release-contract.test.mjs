@@ -21,6 +21,7 @@ const ROLLBACK = path.resolve(TEST_DIR, '../../../byod/rollback.sh');
 const RELEASE_DRILL = path.resolve(TEST_DIR, '../../../byod/signed-release-restore-drill.sh');
 const SIGN_RELEASE = path.resolve(TEST_DIR, '../../../byod/sign-release.mjs');
 const CONTROL_PLANE = path.resolve(TEST_DIR, '../../src/control-plane-server.js');
+const BROKER = path.resolve(TEST_DIR, '../../../byod/broker/server.mjs');
 
 function releaseV2(key, overrides = {}) {
   return {
@@ -258,10 +259,11 @@ test('signed release restore drill is isolated and proves recall parity', () => 
   assert.match(source, /"\$ready" -ge 3/);
 });
 
-test('central registration rejects weak tokens and ambiguous agent URLs', () => {
-  const source = fs.readFileSync(CONTROL_PLANE, 'utf8');
-  assert.match(source, /\^\[A-Za-z0-9_\-\]\{43,128\}\$/);
-  assert.match(source, /INVALID_AGENT_TOKEN/);
-  assert.match(source, /u\.username \|\| u\.password \|\| u\.hash \|\| u\.search/);
-  assert.match(source, /INSECURE_AGENT_URL/);
+test('central registration delegates to a broker that rejects weak tokens and unsafe endpoints', () => {
+  const facade = fs.readFileSync(CONTROL_PLANE, 'utf8');
+  const broker = fs.readFileSync(BROKER, 'utf8');
+  assert.match(facade, /memoryBoxBrokerRequest\(pathname, body\)/);
+  assert.match(broker, /\^\[A-Za-z0-9_\-\]\{43,128\}\$/);
+  assert.match(broker, /validateEndpoint\(endpoint, transport/);
+  assert.match(broker, /a strong URL-safe agentToken is required/);
 });

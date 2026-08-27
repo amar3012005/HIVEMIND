@@ -4,7 +4,7 @@ import { getPlan, getAllPlans, isFeatureEnabled, getLimit } from '../../src/bill
 
 describe('Plans', () => {
   it('publishes the B2C free, plus, pro, and scale tiers plus enterprise', () => {
-    assert.deepEqual(getAllPlans().map(plan => plan.id), ['free', 'plus', 'pro', 'scale', 'enterprise']);
+    assert.deepEqual(getAllPlans().map(plan => plan.id), ['free', 'plus', 'pro', 'scale', 'enterprise_onboarding', 'enterprise']);
   });
 
   it('defines daily and monthly hard limits for free', () => {
@@ -19,15 +19,20 @@ describe('Plans', () => {
   });
 
   it('keeps paid B2C tiers hard-capped until metered overage is enabled', () => {
+    const plus = getPlan('plus');
     const pro = getPlan('pro');
     const scale = getPlan('scale');
+    assert.equal(getPlan('free').limits.monthlyCredits, 500);
+    assert.equal(plus.limits.monthlyCredits, 2_000);
     assert.equal(pro.price, 79);
     assert.equal(pro.limits.llmTokensPerDay, 1_000_000);
     assert.equal(pro.limits.llmTokensPerMonth, 10_000_000);
+    assert.equal(pro.limits.monthlyCredits, 5_000);
     assert.equal(pro.overage, null);
     assert.equal(scale.price, 239);
     assert.equal(scale.limits.llmTokensPerDay, 10_000_000);
     assert.equal(scale.limits.llmTokensPerMonth, 100_000_000);
+    assert.equal(scale.limits.monthlyCredits, 10_000);
     assert.equal(scale.overage, null);
   });
 

@@ -249,6 +249,7 @@ test('signed release restore drill is isolated and proves recall parity', () => 
   assert.match(source, /BASE_HITS.*ROLLBACK_HITS/);
   assert.match(source, /backup_manifest_sha256/);
   assert.match(source, /release_manifest_sha256/);
+  assert.match(source, /source_sha:process\.env\.SOURCE_SHA/);
   assert.match(source, /upgraded agent is not the signed image/);
   assert.match(source, /rollback did not restore the original image/);
   assert.match(source, /HIVEMIND_MEMORY_BOX_STATE_DIR="\$STATE"/);

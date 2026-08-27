@@ -21,6 +21,8 @@ docker image inspect "$BASE_IMAGE" >/dev/null
 BASE_IMAGE_ID="$(docker image inspect "$BASE_IMAGE" --format '{{.Id}}')"
 node "$HERE/verify-release.mjs" "$MANIFEST" "$SIGNATURE" "$PUBLIC_KEY" >/dev/null
 RELEASE_IMAGE="$(node -e 'const m=require(process.argv[1]);process.stdout.write(m.image)' "$MANIFEST")"
+SOURCE_SHA="$(node -e 'const m=require(process.argv[1]);process.stdout.write(m.source_sha||"")' "$MANIFEST")"
+[[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo "signed release has no valid source SHA" >&2; exit 2; }
 
 MANIFEST_TOOL="$HERE/storage-manifest.mjs"
 [[ -f "$MANIFEST_TOOL" ]] || MANIFEST_TOOL="$HERE/../scripts/storage-manifest.mjs"
@@ -155,9 +157,9 @@ MANIFEST_SHA="$(sha256sum "$MANIFEST" | awk '{print $1}')"
 mkdir -p "$RECEIPT_DIR"
 chmod 700 "$RECEIPT_DIR"
 RECEIPT_TMP="$RECEIPT_DIR/.${STAMP}.json.partial"
-STAMP="$STAMP" RELEASE="$RELEASE" IMAGE="$IMAGE" BASE_IMAGE_ID="$BASE_IMAGE_ID" UPGRADE_IMAGE_ID="$UPGRADE_IMAGE_ID" ROLLBACK_IMAGE_ID="$ROLLBACK_IMAGE_ID" BACKUP_SHA="$BACKUP_SHA" MANIFEST_SHA="$MANIFEST_SHA" \
+STAMP="$STAMP" RELEASE="$RELEASE" IMAGE="$IMAGE" SOURCE_SHA="$SOURCE_SHA" BASE_IMAGE_ID="$BASE_IMAGE_ID" UPGRADE_IMAGE_ID="$UPGRADE_IMAGE_ID" ROLLBACK_IMAGE_ID="$ROLLBACK_IMAGE_ID" BACKUP_SHA="$BACKUP_SHA" MANIFEST_SHA="$MANIFEST_SHA" \
 BASE_HITS="$BASE_HITS" UPGRADE_HITS="$UPGRADE_HITS" ROLLBACK_HITS="$ROLLBACK_HITS" \
-node -e 'process.stdout.write(JSON.stringify({version:1,ok:true,completed_at:new Date().toISOString(),release:process.env.RELEASE,image:process.env.IMAGE,base_image_id:process.env.BASE_IMAGE_ID,upgraded_image_id:process.env.UPGRADE_IMAGE_ID,rolled_back_image_id:process.env.ROLLBACK_IMAGE_ID,backup_manifest_sha256:process.env.BACKUP_SHA,release_manifest_sha256:process.env.MANIFEST_SHA,base:JSON.parse(process.env.BASE_HITS),upgraded:JSON.parse(process.env.UPGRADE_HITS),rolled_back:JSON.parse(process.env.ROLLBACK_HITS)},null,2)+"\n")' \
+node -e 'process.stdout.write(JSON.stringify({version:1,ok:true,completed_at:new Date().toISOString(),release:process.env.RELEASE,image:process.env.IMAGE,source_sha:process.env.SOURCE_SHA,base_image_id:process.env.BASE_IMAGE_ID,upgraded_image_id:process.env.UPGRADE_IMAGE_ID,rolled_back_image_id:process.env.ROLLBACK_IMAGE_ID,backup_manifest_sha256:process.env.BACKUP_SHA,release_manifest_sha256:process.env.MANIFEST_SHA,base:JSON.parse(process.env.BASE_HITS),upgraded:JSON.parse(process.env.UPGRADE_HITS),rolled_back:JSON.parse(process.env.ROLLBACK_HITS)},null,2)+"\n")' \
   > "$RECEIPT_TMP"
 chmod 600 "$RECEIPT_TMP"
 mv "$RECEIPT_TMP" "$RECEIPT_DIR/$STAMP.json"

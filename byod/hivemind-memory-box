@@ -11,6 +11,7 @@ Usage: hivemind-memory-box COMMAND
   update                  install the newest signed release for the selected channel
   status                  show containers, channel, and verified release receipt
   doctor                  run read-only health and recoverability checks
+  backup                  create and verify a customer-controlled recovery set
   rollback                restore the prior locally retained agent image
   channel [stable|canary] show or change the update channel
 EOF
@@ -51,6 +52,10 @@ case "$command_name" in
     ;;
   doctor)
     BYOD_RELEASE_STATE_DIR="$HM_STATE_DIR" BYOD_BACKUP_DIR="${BYOD_BACKUP_DIR:-$HM_INSTALL_DIR/backups}" exec "$HM_INSTALL_DIR/doctor.sh" "$@"
+    ;;
+  backup)
+    hm_require_root; hm_lock
+    exec "$HM_INSTALL_DIR/backup.sh" "$@"
     ;;
   rollback)
     hm_require_root; hm_lock

@@ -20,6 +20,7 @@ const UPGRADE = path.resolve(TEST_DIR, '../../../byod/upgrade.sh');
 const ROLLBACK = path.resolve(TEST_DIR, '../../../byod/rollback.sh');
 const RELEASE_DRILL = path.resolve(TEST_DIR, '../../../byod/signed-release-restore-drill.sh');
 const SIGN_RELEASE = path.resolve(TEST_DIR, '../../../byod/sign-release.mjs');
+const CONTROL_PLANE = path.resolve(TEST_DIR, '../../src/control-plane-server.js');
 
 function releaseV2(key, overrides = {}) {
   return {
@@ -242,4 +243,12 @@ test('signed release restore drill is isolated and proves recall parity', () => 
   assert.match(source, /release_manifest_sha256/);
   assert.match(source, /upgraded agent is not the signed image/);
   assert.match(source, /rollback did not restore the original image/);
+});
+
+test('central registration rejects weak tokens and ambiguous agent URLs', () => {
+  const source = fs.readFileSync(CONTROL_PLANE, 'utf8');
+  assert.match(source, /\^\[A-Za-z0-9_\-\]\{43,128\}\$/);
+  assert.match(source, /INVALID_AGENT_TOKEN/);
+  assert.match(source, /u\.username \|\| u\.password \|\| u\.hash \|\| u\.search/);
+  assert.match(source, /INSECURE_AGENT_URL/);
 });

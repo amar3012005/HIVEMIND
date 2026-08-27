@@ -3895,9 +3895,14 @@ const server = http.createServer(async (req, res) => {
     // a PUBLIC host would expose memory content + the bearer token on the wire → reject.
     const _agentUrl = (body.agentUrl || body.instanceUrl || '').trim();
     if (_agentUrl) {
+      const agentToken = String(body.agentToken || '');
+      if (!/^[A-Za-z0-9_-]{43,128}$/.test(agentToken)) {
+        return jsonResponse(res, { error: 'agentToken must be a strong URL-safe bearer token', code: 'INVALID_AGENT_TOKEN' }, 400);
+      }
       let secure = false;
       try {
         const u = new URL(_agentUrl);
+        if (u.username || u.password || u.hash || u.search) throw new Error('agent URL must not contain credentials, query, or fragment');
         if (u.protocol === 'https:') secure = true;
         else if (u.protocol === 'http:') {
           const h = u.hostname;

@@ -97,4 +97,6 @@ const receipt={version:2,complete:true,release:process.env.RELEASE,image:process
 NODE
 cp -f "$MANIFEST" "$STATE/${RELEASE}.release.json"; cp -f "$SIGNATURE" "$STATE/${RELEASE}.release.sig"
 chmod 600 "$STATE/${RELEASE}.release.json" "$STATE/${RELEASE}.release.sig"; trap - ERR
+hm_set_env_value "$HM_CONFIG_DIR/memory-box.env" HIVEMIND_AGENT_IMAGE "$IMAGE"
+hm_set_env_value "$HM_CONFIG_DIR/memory-box.env" VERSION "$RELEASE"
 echo "Memory Box agent upgraded and verified: $RELEASE"

@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # HIVEMIND BYOD setup — runs on YOUR server. Stands up the Postgres + Qdrant agent (your memory data plane),
 # validates your API key, and registers the agent so the central engine ships finished memories here.
-# The engine + dashboard stay central; your memory data (content + vectors + graph) lives in the .amr on
-# THIS box. Only query results traverse the link.
-#   git clone --branch byod --single-branch <repo> hivemind-byod && cd hivemind-byod && ./setup.sh
+# The engine + dashboard stay central; memory rows/graph live in local PostgreSQL and vectors live in
+# local Qdrant on THIS box. Only authenticated query results traverse the link.
 #
-# Single smooth flow: the heavy work (building the .amr agent image + pulling Postgres + starting it)
+# Single smooth flow: the heavy work (pulling the signed agent + PostgreSQL + Qdrant)
 # runs in the BACKGROUND while you paste your key — so by the time the key is validated, the box is
 # already warmed and the agent comes up instantly. No second run needed.
 set -euo pipefail
@@ -36,17 +35,23 @@ ${C}  ███████╗██╗███╗   ██╗ █████�
 
 "; }
 banner
+case "$CENTRAL" in https://*) ;; *) die "HIVEMIND_CENTRAL_URL must use HTTPS" ;; esac
+docker info >/dev/null 2>&1 || die "Docker daemon is not reachable"
 
 # Idempotent re-run: .env already exists → just bring everything up and re-register.
 if [ -f "$ENV_FILE" ]; then
   log "existing configuration found — bringing up + re-registering…"
 else
   # ── 1. WARM IN BACKGROUND ──────────────────────────────────────────────────────────────────────
-  # Build the agent image + pull Postgres while you fetch/paste your key. This is the slow part; doing
+  # Pull the signed agent image + fixed data-plane dependencies while you fetch/paste your key.
   # it now means the agent starts instantly once the key is in.
-  log "warming up (building the data-plane agent + pulling Postgres + Qdrant in the background while you grab your key)…"
+  INITIAL_IMAGE="${BYOD_INITIAL_AGENT_IMAGE:-}"
+  INITIAL_RELEASE="${BYOD_INITIAL_AGENT_RELEASE:-}"
+  [[ "$INITIAL_IMAGE" =~ @sha256:[a-f0-9]{64}$ ]] || die "a digest-pinned signed BYOD_INITIAL_AGENT_IMAGE is required"
+  [[ "$INITIAL_RELEASE" =~ ^[a-zA-Z0-9._-]{7,80}$ ]] || die "a signed BYOD_INITIAL_AGENT_RELEASE is required"
+  log "warming up (pulling the signed agent and fixed data-plane dependencies while you grab your key)…"
   : > .byod-warm.log
-  ( $COMPOSE build agent >>.byod-warm.log 2>&1 && docker pull postgres:16-alpine >>.byod-warm.log 2>&1 && docker pull qdrant/qdrant:latest >>.byod-warm.log 2>&1 ) &
+  ( HIVEMIND_AGENT_IMAGE="$INITIAL_IMAGE" VERSION="$INITIAL_RELEASE" $COMPOSE pull agent postgres qdrant >>.byod-warm.log 2>&1 ) &
   WARM_PID=$!
 
   # ── 2. KEY ─────────────────────────────────────────────────────────────────────────────────────
@@ -56,10 +61,13 @@ else
     read -r API_KEY </dev/tty || true   # /dev/tty so this works under `curl … | bash`
   fi
   [ -n "$API_KEY" ] || die "no key entered (or pass HIVEMIND_API_KEY=… for non-interactive)"
+  [[ "$API_KEY" =~ ^[A-Za-z0-9._-]{20,256}$ ]] || die "API key format is invalid"
   log "validating key with $CENTRAL …"
-  RESP="$(curl -fsS -X POST "$CENTRAL/v1/selfhost/enroll" -H 'content-type: application/json' -d "{\"apiKey\":\"$API_KEY\"}")" \
+  ENROLL_BODY="$(API_KEY="$API_KEY" node -e 'process.stdout.write(JSON.stringify({apiKey:process.env.API_KEY}))')"
+  RESP="$(curl -fsS --proto '=https' --tlsv1.2 --max-time 30 -X POST "$CENTRAL/v1/selfhost/enroll" -H 'content-type: application/json' --data-binary "$ENROLL_BODY")" \
     || die "key validation failed — check the key + that $CENTRAL is reachable"
-  ORG="$(printf '%s' "$RESP" | grep -oE '"orgId":"[^"]+"' | cut -d'"' -f4)"; [ -n "$ORG" ] || die "no org for key: $RESP"
+  ORG="$(RESP="$RESP" node -e 'const x=JSON.parse(process.env.RESP);if(!/^[0-9a-f-]{36}$/i.test(x.orgId||""))process.exit(1);process.stdout.write(x.orgId)' 2>/dev/null || true)"
+  [ -n "$ORG" ] || die "enrollment response did not contain a valid organization"
   log "key OK → org $ORG"
 
   # ── 3. EXPOSURE ────────────────────────────────────────────────────────────────────────────────
@@ -73,7 +81,7 @@ else
   fi
 
   # ── 4. WAIT FOR WARM ───────────────────────────────────────────────────────────────────────────
-  log "finishing warm-up (image build + Postgres + Qdrant pull)…"
+  log "finishing warm-up (signed agent + PostgreSQL + Qdrant pull)…"
   if ! wait "$WARM_PID"; then die "warm-up failed — see $(pwd)/.byod-warm.log"; fi
   log "warm-up done — box is primed."
 
@@ -82,6 +90,8 @@ else
   cat > "$ENV_FILE" <<EOF
 HIVEMIND_API_KEY=$API_KEY
 HIVEMIND_ORG_ID=$ORG
+HIVEMIND_AGENT_IMAGE=$INITIAL_IMAGE
+VERSION=$INITIAL_RELEASE
 EMBEDDING_DIMENSION=1024
 POSTGRES_USER=hivemind
 POSTGRES_PASSWORD=$(gen)
@@ -100,12 +110,13 @@ EOF
 fi
 
 set -a; . "$ENV_FILE"; set +a
+[[ "${HIVEMIND_AGENT_IMAGE:-}" =~ @sha256:[a-f0-9]{64}$ ]] || die "protected configuration has no digest-pinned signed agent image"
 
-# ── 6. BRING UP (fast — image already built + Postgres/Qdrant pulled during warm) ────────────────────
+# ── 6. BRING UP (signed agent + data dependencies already pulled during warm) ──────────────────────
 if [ -n "${TS_AUTHKEY:-}" ]; then
-  log "starting Postgres + Qdrant + .amr agent + Tailscale tunnel…"; $COMPOSE --profile tailnet up -d
+  log "starting PostgreSQL + Qdrant + signed agent + Tailscale tunnel…"; $COMPOSE --profile tailnet up -d
 else
-  log "starting Postgres + Qdrant + .amr agent…"; $COMPOSE up -d
+  log "starting PostgreSQL + Qdrant + signed agent…"; $COMPOSE up -d
 fi
 
 # ── 7. RESOLVE THE AGENT URL THE ENGINE WILL USE ───────────────────────────────────────────────────
@@ -127,14 +138,27 @@ esac
 
 # ── 8. WAIT FOR THE AGENT TO BE HEALTHY, THEN REGISTER ─────────────────────────────────────────────
 log "waiting for the agent to be ready…"
+LOCAL_READY=false
 for i in $(seq 1 30); do
-  if curl -fsS -m 3 "http://127.0.0.1:${AGENT_PORT:-8787}/health" >/dev/null 2>&1; then break; fi
+  if curl -fsS -m 3 "http://127.0.0.1:${AGENT_PORT:-8787}/health" | node -e 'let b="";process.stdin.on("data",d=>b+=d).on("end",()=>{try{process.exit(JSON.parse(b).ok===true?0:1)}catch{process.exit(1)}})' >/dev/null 2>&1; then LOCAL_READY=true; break; fi
   sleep 1
 done
+[[ "$LOCAL_READY" == true ]] || die "agent did not become healthy; inspect: $COMPOSE logs agent"
 log "registering the BYOD agent with HIVEMIND ($AGENT_URL)…"
-curl -fsS -X POST "$CENTRAL/v1/selfhost/register" -H 'content-type: application/json' \
-  -d "{\"apiKey\":\"$HIVEMIND_API_KEY\",\"agentUrl\":\"$AGENT_URL\",\"agentToken\":\"$AGENT_TOKEN\"}" >/dev/null \
+REGISTER_BODY="$(API_KEY="$HIVEMIND_API_KEY" AGENT_URL="$AGENT_URL" AGENT_TOKEN="$AGENT_TOKEN" node -e 'process.stdout.write(JSON.stringify({apiKey:process.env.API_KEY,agentUrl:process.env.AGENT_URL,agentToken:process.env.AGENT_TOKEN}))')"
+curl -fsS --proto '=https' --tlsv1.2 --max-time 30 -X POST "$CENTRAL/v1/selfhost/register" -H 'content-type: application/json' \
+  --data-binary "$REGISTER_BODY" >/dev/null \
   || die "registration failed"
+
+log "verifying central reachability…"
+STATUS_BODY="$(API_KEY="$HIVEMIND_API_KEY" node -e 'process.stdout.write(JSON.stringify({apiKey:process.env.API_KEY}))')"
+REMOTE_READY=false
+for _ in $(seq 1 12); do
+  STATUS="$(curl -fsS --proto '=https' --tlsv1.2 --max-time 15 -X POST "$CENTRAL/v1/selfhost/status" -H 'content-type: application/json' --data-binary "$STATUS_BODY" 2>/dev/null || true)"
+  if STATUS="$STATUS" node -e 'try{const x=JSON.parse(process.env.STATUS);process.exit(x.registered===true&&x.reachable===true?0:1)}catch{process.exit(1)}'; then REMOTE_READY=true; break; fi
+  sleep 5
+done
+[[ "$REMOTE_READY" == true ]] || die "agent is healthy locally but HIVEMIND cannot reach $AGENT_URL; verify DNS, TLS, firewall, and reverse-proxy routing, then rerun setup"
 
 ok "agent registered" "$AGENT_URL"
 printf "

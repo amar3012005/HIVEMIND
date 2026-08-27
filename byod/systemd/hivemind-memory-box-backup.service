@@ -1,0 +1,14 @@
+[Unit]
+Description=Create a verified HIVEMIND Memory Box recovery set
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hivemind-memory-box backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

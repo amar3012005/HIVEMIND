@@ -12,11 +12,18 @@ WORK="$(mktemp -d /tmp/hivemind-memory-box.XXXXXX)"; trap 'rm -rf -- "$WORK"' EX
 log(){ printf 'hivemind-memory-box: %s\n' "$*"; }; die(){ log "$*" >&2; exit 1; }
 case "$BASE" in https://*) ;; *) die 'release channel must use HTTPS' ;; esac
 
+[[ "$(uname -s)" == Linux ]] || die 'Memory Box requires Linux'
+case "$(uname -m)" in x86_64|aarch64|arm64) ;; *) die "unsupported architecture: $(uname -m)" ;; esac
+command -v systemctl >/dev/null 2>&1 || die 'systemd is required for governed updates and backups'
+[[ -d /run/systemd/system ]] || die 'systemd is not running'
+
 command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl ca-certificates; }
 command -v docker >/dev/null || { log 'installing Docker'; curl -fsSL --proto '=https' https://get.docker.com | sh; }
 docker compose version >/dev/null 2>&1 || die 'Docker Compose v2 is required'
 command -v node >/dev/null || { apt-get update -qq && apt-get install -y -qq nodejs; }
+node -e 'process.exit(Number(process.versions.node.split(".")[0])>=18?0:1)' || die 'Node.js 18 or newer is required'
 command -v flock >/dev/null || { apt-get update -qq && apt-get install -y -qq util-linux; }
+docker info >/dev/null 2>&1 || die 'Docker daemon is not reachable'
 
 fetch(){ curl -fsSLo "$2" --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 --max-time 300 "$1"; }
 fetch "$BASE/releases/$CHANNEL/release.json" "$WORK/release.json"
@@ -32,11 +39,16 @@ console.log(u);console.log(s);' "$WORK/release.json" "$CHANNEL") || die 'invalid
 fetch "${RELEASE_DATA[0]}" "$WORK/bundle.tar.gz"
 printf '%s  %s\n' "${RELEASE_DATA[1]}" "$WORK/bundle.tar.gz" | sha256sum --check --status || die 'release bundle digest mismatch'
 if tar -tzf "$WORK/bundle.tar.gz" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then die 'release bundle contains an unsafe path'; fi
+if tar -tvzf "$WORK/bundle.tar.gz" | awk 'substr($1,1,1)=="l" || substr($1,1,1)=="h" {found=1} END{exit found?0:1}'; then die 'release bundle must not contain symbolic or hard links'; fi
 mkdir "$WORK/unpacked"; tar -xzf "$WORK/bundle.tar.gz" -C "$WORK/unpacked"
 SOURCE="$WORK/unpacked"; [[ -f "$SOURCE/setup.sh" ]] || SOURCE="$WORK/unpacked/byod"
 [[ -f "$SOURCE/setup.sh" && -f "$SOURCE/hivemind-memory-box" ]] || die 'release bundle is missing Memory Box host tools'
+VERIFIED_RELEASE="$(BYOD_ALLOW_LEGACY_RELEASE_V1=false BYOD_RELEASE_CHANNEL="$CHANNEL" node "$SOURCE/verify-release.mjs" "$WORK/release.json" "$WORK/release.sig" "$WORK/release.pub")" \
+  || die 'governed release manifest verification failed'
+INITIAL_IMAGE="$(VERIFIED_RELEASE="$VERIFIED_RELEASE" node -e 'const x=JSON.parse(process.env.VERIFIED_RELEASE);process.stdout.write(x.image)')"
+INITIAL_RELEASE="$(VERIFIED_RELEASE="$VERIFIED_RELEASE" node -e 'const x=JSON.parse(process.env.VERIFIED_RELEASE);process.stdout.write(x.release)')"
 
-mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"; chmod 755 "$INSTALL_DIR" "$CONFIG_DIR"; chmod 700 "$STATE_DIR"
+mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATE_DIR"; chmod 755 "$INSTALL_DIR"; chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 LEGACY="${HIVEMIND_MEMORY_BOX_LEGACY_DIR:-}"
 if [[ -z "$LEGACY" ]]; then
   for candidate in /opt/hivemind-byod /root/hivemind-byod "$PWD/hivemind-byod"; do [[ -f "$candidate/.env" ]] && { LEGACY="$candidate"; break; }; done
@@ -50,7 +62,22 @@ install -m 0644 "$WORK/release.pub" "$CONFIG_DIR/release.pub"
 printf '%s\n' "$CHANNEL" > "$CONFIG_DIR/channel"; chmod 644 "$CONFIG_DIR/channel"
 install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-update.service" /etc/systemd/system/hivemind-memory-box-update.service
 install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-update.timer" /etc/systemd/system/hivemind-memory-box-update.timer
-systemctl daemon-reload; systemctl enable --now hivemind-memory-box-update.timer
+install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-backup.service" /etc/systemd/system/hivemind-memory-box-backup.service
+install -m 0644 "$INSTALL_DIR/systemd/hivemind-memory-box-backup.timer" /etc/systemd/system/hivemind-memory-box-backup.timer
+systemctl daemon-reload
 log "installed governed host tools in $INSTALL_DIR"
-HIVEMIND_MEMORY_BOX_LOCK_HELD=false /usr/local/sbin/hivemind-memory-box install
+if [[ -f "$CONFIG_DIR/memory-box.env" ]]; then
+  ACTIVE_IMAGE="$INITIAL_IMAGE"; ACTIVE_RELEASE="$INITIAL_RELEASE"
+  if [[ -f "$STATE_DIR/CURRENT_RELEASE.json" ]]; then
+    RECEIPT_IMAGE="$(node -e 'const x=require(process.argv[1]);if(typeof x.image!=="string"||!x.image.includes("@sha256:"))process.exit(1);process.stdout.write(x.image)' "$STATE_DIR/CURRENT_RELEASE.json" 2>/dev/null || true)"
+    RECEIPT_RELEASE="$(node -e 'const x=require(process.argv[1]);if(typeof x.release!=="string")process.exit(1);process.stdout.write(x.release)' "$STATE_DIR/CURRENT_RELEASE.json" 2>/dev/null || true)"
+    if [[ -n "$RECEIPT_IMAGE" && -n "$RECEIPT_RELEASE" ]]; then ACTIVE_IMAGE="$RECEIPT_IMAGE"; ACTIVE_RELEASE="$RECEIPT_RELEASE"; fi
+  fi
+  HIVEMIND_MEMORY_BOX_INSTALL_DIR="$INSTALL_DIR" HIVEMIND_MEMORY_BOX_CONFIG_DIR="$CONFIG_DIR" \
+    ACTIVE_IMAGE="$ACTIVE_IMAGE" ACTIVE_RELEASE="$ACTIVE_RELEASE" bash -c \
+    '. "$HIVEMIND_MEMORY_BOX_INSTALL_DIR/memory-box-common.sh"; hm_set_env_value "$HIVEMIND_MEMORY_BOX_CONFIG_DIR/memory-box.env" HIVEMIND_AGENT_IMAGE "$ACTIVE_IMAGE"; hm_set_env_value "$HIVEMIND_MEMORY_BOX_CONFIG_DIR/memory-box.env" VERSION "$ACTIVE_RELEASE"'
+fi
+BYOD_INITIAL_AGENT_IMAGE="$INITIAL_IMAGE" BYOD_INITIAL_AGENT_RELEASE="$INITIAL_RELEASE" \
+  HIVEMIND_MEMORY_BOX_LOCK_HELD=false /usr/local/sbin/hivemind-memory-box install
 /usr/local/sbin/hivemind-memory-box update
+systemctl enable --now hivemind-memory-box-update.timer hivemind-memory-box-backup.timer

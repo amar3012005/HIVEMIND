@@ -17,6 +17,32 @@ work as editorial and interaction design, not as Markdown placed in a web page.
 5. Self-review for hierarchy, density, legibility, clipping, empty space, and factual
    integrity before returning the artifact.
 
+## Current house visual system
+
+All visual HTML artifacts use one restrained editorial family until a later brand-DNA
+contract explicitly replaces it. The reference is a premium product editorial: warm
+white canvas, near-black sans-serif typography, electric-blue micro-accents, hairline
+rules, large quiet margins, and alternating copy/visual compositions.
+
+- Use `#faf9f6` or a nearby warm white for the canvas, `#0a0a0a` for primary ink,
+  neutral gray supporting copy, `#117dff` for compact labels and meaningful accents,
+  and very light warm-gray rules. Semantic warning/error colors remain functional.
+- Use a modern system sans-serif throughout. Headlines are compact, bold, and
+  typographically decisive; supporting copy is smaller, calm, and highly legible.
+- Prefer unframed editorial sections separated by thin horizontal rules. Alternate
+  text and visual placement to create rhythm. Use generous negative space with clear
+  alignment rather than filling the canvas.
+- When content benefits from a framed surface, render it like a refined product or
+  browser window: square-to-subtle radius, thin neutral border, tiny restrained
+  chrome, and a soft diffuse shadow. Do not turn every section into a card.
+- Use blue checks, hairline diagrams, concise labels, timelines, waveforms, graphs,
+  and interface fragments as explanatory visuals. Keep decoration sparse.
+- Avoid dark hero bands, loud gradients, neon fills, oversized colored closing
+  panels, glassmorphism, pill-heavy navigation, dashboard grids, and repeated cards.
+- The house system governs visual language, not content geometry. Presentations,
+  documents, flows, comparisons, and monitoring tools must still use layouts and
+  interactions appropriate to their actual purpose.
+
 ## Quality floor
 
 - The result must feel authored for this exact decision and audience. A heading,
@@ -57,8 +83,8 @@ Honor `artifact_intent.kind` as a hard product contract.
 
 ### Presentation composition standard
 
-This constrains quality, not visual taste. The artifact still owns its theme,
-palette, typography character, and layout ideas.
+This constrains composition inside the current house visual system. The artifact
+still owns its narrative pacing and purpose-specific layout ideas.
 
 - Treat the desktop slide as a composed 16:9 stage, not a browser page with text
   placed at the top. Fill the stage intentionally. Empty space is useful only when
@@ -85,8 +111,8 @@ palette, typography character, and layout ideas.
 
 ## Freedom and constraints
 
-- You own the art direction. Do not use a fixed template, prescribed coordinates,
-  or the same visual language for every purpose.
+- You own purpose-specific composition within the current house visual system. Do
+  not use fixed coordinates or the same layout for every purpose.
 - Do not imitate a named product or designer. Build a distinct direction suited to
   this material.
 - Use system fonts, CSS, inline SVG, and data URIs only. No external scripts, fonts,

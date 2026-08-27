@@ -6162,10 +6162,14 @@ class Director:
         )
         system = (
             "You are an exacting digital art director. Create a concrete visual direction for one "
-            "self-contained HTML artifact. Choose a distinctive composition that serves the evidence, "
+            "self-contained HTML artifact. Work inside the HIVEMIND editorial house system: warm-white "
+            "canvas, near-black modern sans typography, electric-blue micro-accents, thin warm-gray rules, "
+            "generous negative space, alternating copy/visual rhythm, and restrained product-window frames "
+            "only when content needs a surface. Choose a distinctive composition that serves the evidence, "
             "audience, and decision. Do not write HTML. Do not invent facts, metrics, sources, or brand "
             "constraints. Reject generic dashboards, slide-template chrome, stacked report cards, and "
-            "decoration without explanatory value. Return JSON only."
+            "decoration without explanatory value. Reject dark hero bands, gradients, neon panels, and loud "
+            "colored closing scenes. Return JSON only."
         )
         if (self.artifact_intent or {}).get("kind") == "presentation":
             system += (
@@ -6201,9 +6205,9 @@ class Director:
         return {
             "visual_thesis": str((self.artifact_intent or {}).get("purpose") or self.user_message)[:500],
             "experience": "A clear, evidence-led visual narrative tailored to the stated audience.",
-            "layout_system": "Responsive editorial composition with varied section geometry.",
-            "art_direction": "Distinctive, restrained, and specific to the subject matter.",
-            "palette": [],
+            "layout_system": "Responsive editorial composition with alternating copy and visual geometry.",
+            "art_direction": "Warm-white product editorial with near-black sans typography, blue micro-accents, hairline rules, and restrained window-like evidence frames.",
+            "palette": ["#faf9f6", "#0a0a0a", "#117dff", "#dedbd4"],
             "narrative_flow": [],
             "visual_explanations": ["Choose one evidence-backed figure that clarifies the central decision."],
             "interaction": "Use interaction only when it improves comparison or exploration.",
@@ -6247,7 +6251,9 @@ class Director:
                 + "\n\nYou are the final presentation creative director. Return only the typed "
                   "visual-presentation.v1 specification matching the schema. A governed renderer owns HTML, "
                   "CSS, responsive behavior, navigation, and safety. You own the narrative, art direction, "
-                  "slide purposes, composition choices, concise copy, and evidence mapping. Use at least three "
+                  "slide purposes, composition choices, concise copy, and evidence mapping. The governed "
+                  "renderer applies the warm-white HIVEMIND editorial house system, so select visual_mode=editorial "
+                  "and accent=cobalt. Use at least three "
                   "materially different compositions. The first slide must be composition=hero and the final "
                   "slide composition=decision. Never invent a metric, date, source, market claim, milestone, "
                   "legal conclusion, or completed result. Unknown inputs remain lane=unknown; proposals and "

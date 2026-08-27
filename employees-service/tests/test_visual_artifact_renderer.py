@@ -49,6 +49,13 @@ def test_governed_presentation_renderer_emits_navigable_responsive_slides():
     assert 'composition-hero' in html
     assert 'composition-comparison' in html
     assert 'composition-timeline' in html
+    assert 'data-house-style="hivemind-editorial-v1"' in html
+    assert '--paper:#faf9f6' in html
+    assert '--ink:#0a0a0a' in html
+    assert '--accent:#4165ff' in html
+    assert 'font-family:Inter,ui-sans-serif' in html
+    assert '.composition-hero{background:var(--paper);color:var(--ink)}' in html
+    assert '.composition-decision{background:var(--paper);color:var(--ink)}' in html
     assert "touchstart" in html
 
 
@@ -73,6 +80,9 @@ def test_renderer_repairs_model_markup_unknown_values_and_repeated_compositions(
     for slide in spec["slides"]:
         slide["composition"] = "decision"
     normalized = renderer.normalize_presentation_spec(spec)
+
+    assert normalized["visual_mode"] == "editorial"
+    assert normalized["accent"] == "cobalt"
     assert normalized["title"] == "Decision deck"
     assert normalized["slides"][0]["body"] == "Markup must not leak Clean copy."
     assert normalized["slides"][0]["items"][0]["value"] == "Unknown"

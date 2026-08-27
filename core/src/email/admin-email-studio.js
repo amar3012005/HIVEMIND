@@ -29,7 +29,7 @@ function recipientsFrom(input = {}) {
   const recipients = [...new Set(values.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))];
   if (!recipients.length) throw new Error('At least one recipient is required');
   if (recipients.length > 200) throw new Error('A single send is limited to 200 recipients');
-  if (recipients.some((email) => !EMAIL_ADDRESS.test(email))) throw new Error('One or more recipient emails are invalid');
+  if (recipients.some((email) => !EMAIL_ADDRESS.test(email))) throw new Error('Recipient email is invalid');
   return recipients;
 }
 

@@ -229,6 +229,13 @@ test('BYOD upgrade and rollback can target an isolated disposable box', () => {
     assert.match(source, /BYOD_RELEASE_STATE_DIR/);
     assert.doesNotMatch(source, /docker (?:inspect|exec) hm-byod-agent/);
   }
+  const upgrade = fs.readFileSync(UPGRADE, 'utf8');
+  assert.match(upgrade, /CURRENT_RECEIPT="\$STATE\/CURRENT_RELEASE\.json"/);
+  assert.match(upgrade, /PREVIOUS_RECEIPT="\$STATE\/PREVIOUS_RELEASE\.json"/);
+  assert.doesNotMatch(upgrade, /hm_atomic_write "\$HM_CURRENT_RECEIPT"/);
+  const rollback = fs.readFileSync(ROLLBACK, 'utf8');
+  assert.match(rollback, /PREVIOUS_RECEIPT="\$STATE_DIR\/PREVIOUS_RELEASE\.json"/);
+  assert.doesNotMatch(rollback, /\$HM_PREVIOUS_RECEIPT/);
 });
 
 test('signed release restore drill is isolated and proves recall parity', () => {
@@ -243,6 +250,12 @@ test('signed release restore drill is isolated and proves recall parity', () => 
   assert.match(source, /release_manifest_sha256/);
   assert.match(source, /upgraded agent is not the signed image/);
   assert.match(source, /rollback did not restore the original image/);
+  assert.match(source, /HIVEMIND_MEMORY_BOX_STATE_DIR="\$STATE"/);
+  assert.match(source, /HIVEMIND_MEMORY_BOX_CONFIG_DIR="\$CONFIG"/);
+  assert.match(source, /BYOD_SKIP_HOST_PROMOTION=true/);
+  assert.match(source, /"release":"restore-base"/);
+  assert.match(source, /ready=0/);
+  assert.match(source, /"\$ready" -ge 3/);
 });
 
 test('central registration rejects weak tokens and ambiguous agent URLs', () => {

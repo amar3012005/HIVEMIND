@@ -5,6 +5,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ "${HIVEMIND_MEMORY_BOX_LOCK_HELD:-false}" == true ]] || hm_lock
 AGENT_CONTAINER="${BYOD_AGENT_CONTAINER:-hm-byod-agent}"; STATE_DIR="${BYOD_RELEASE_STATE_DIR:-$HM_STATE_DIR}"
 RECEIPT="$STATE_DIR/CURRENT_RELEASE.json"
+PREVIOUS_RECEIPT="$STATE_DIR/PREVIOUS_RELEASE.json"
 [[ -f "$RECEIPT" ]] || hm_die 'no verified rollback receipt'
 ROLLBACK_IMAGE="$(hm_json_field "$RECEIPT" 'x.complete===true&&x.rollback_image')" || hm_die 'rollback receipt is incomplete'
 PREVIOUS_RELEASE="$(hm_json_field "$RECEIPT" 'x.previous_release||"rollback"')"
@@ -23,8 +24,8 @@ Promise.all([fetch("http://127.0.0.1:8787/health").then(r=>r.json()),fetch("http
 done
 [[ "$OBSERVED" == "$PREVIOUS_RELEASE" ]] || hm_die 'rollback image failed health, identity, or inventory verification'
 cp -f "$RECEIPT" "$STATE_DIR/ROLLED_BACK_FROM-$STAMP.json"
-if [[ -f "$HM_PREVIOUS_RECEIPT" ]]; then
-  cp -f "$HM_PREVIOUS_RECEIPT" "$RECEIPT.tmp"; chmod 600 "$RECEIPT.tmp"; mv -f "$RECEIPT.tmp" "$RECEIPT"
+if [[ -f "$PREVIOUS_RECEIPT" ]]; then
+  cp -f "$PREVIOUS_RECEIPT" "$RECEIPT.tmp"; chmod 600 "$RECEIPT.tmp"; mv -f "$RECEIPT.tmp" "$RECEIPT"
 else
   PREVIOUS_RELEASE="$PREVIOUS_RELEASE" ROLLBACK_IMAGE="$ROLLBACK_IMAGE" node <<'NODE' | hm_atomic_write "$RECEIPT" 600
 process.stdout.write(JSON.stringify({version:2,complete:true,release:process.env.PREVIOUS_RELEASE,image:process.env.ROLLBACK_IMAGE,rollback_state:'manual',verified_at:new Date().toISOString()},null,2)+'\n');

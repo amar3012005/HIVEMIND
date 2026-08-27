@@ -3848,7 +3848,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Self-host (BYOD) enrollment ─────────────────────────────
-  if (pathname === '/v1/selfhost/bootstrap' && req.method === 'POST') {
+  if ((pathname === '/v1/selfhost/bootstrap' || pathname === '/v1/selfhost/canary-bootstrap') && req.method === 'POST') {
+    const releaseChannel = pathname === '/v1/selfhost/canary-bootstrap' ? 'canary' : 'stable';
     const current = await requireSession(req, res);
     if (!current) return;
     const orgId = current.session.orgId;
@@ -3857,8 +3858,14 @@ const server = http.createServer(async (req, res) => {
     if (!membership) return;
     const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { hostingMode: true } }).catch(() => null);
     if (org?.hostingMode !== 'self_host') return jsonResponse(res, { error: 'Memory Box enrollment is available only for self-hosted organizations' }, 409);
+    if (releaseChannel === 'canary') {
+      const allowlist = new Set(String(process.env.MEMORY_BOX_CANARY_ORG_ALLOWLIST || '').split(',').map((value) => value.trim()).filter(Boolean));
+      if (process.env.MEMORY_BOX_CANARY_ENROLLMENT_ENABLED !== 'true' || !allowlist.has(orgId)) {
+        return jsonResponse(res, { error: 'Memory Box canary enrollment is not enabled for this organization' }, 403);
+      }
+    }
     try {
-      const readiness = await memoryBoxBrokerRequest('/v1/selfhost/readiness', { orgId });
+      const readiness = await memoryBoxBrokerRequest('/v1/selfhost/readiness', { orgId, channel: releaseChannel });
       if (readiness.status !== 200 || readiness.payload?.ready !== true) {
         return jsonResponse(res, { error: 'Automatic Memory Box setup is not currently available',
           code: 'memory_box_automatic_setup_unavailable', readiness: readiness.payload || null }, 503);
@@ -3870,12 +3877,12 @@ const server = http.createServer(async (req, res) => {
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
     const issued = await createPersistedApiKey(prisma, {
       userId: current.session.userId, orgId, keyKind: 'service', createdByUserId: current.session.userId,
-      name: 'Memory Box enrollment', description: 'Single-use organization-bound Memory Box enrollment credential',
+      name: `Memory Box ${releaseChannel} enrollment`, description: `Single-use organization-bound Memory Box ${releaseChannel} enrollment credential`,
       scopes: ['selfhost:bootstrap'], expiresAt, rateLimitPerMinute: 12,
       createdByIp: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || null,
       userAgent: String(req.headers['user-agent'] || '').slice(0, 512) || null,
     });
-    return jsonResponse(res, { enrollment_token: issued.rawKey, expires_at: expiresAt.toISOString(), org_id: orgId }, 201);
+    return jsonResponse(res, { enrollment_token: issued.rawKey, expires_at: expiresAt.toISOString(), org_id: orgId, channel: releaseChannel }, 201);
   }
 
   // Stable facade; the dedicated broker is the sole lifecycle writer.

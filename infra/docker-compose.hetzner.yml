@@ -112,6 +112,11 @@ services:
     environment:
       <<: *common-env
       HIVEMIND_CORE_API_BASE_URL: http://core:3000
+      # Memory Box lifecycle mutations are owned by the dedicated broker. The
+      # Control Plane authenticates browser sessions, then delegates over the
+      # private Compose network with this service credential.
+      BYOD_BROKER_URL: http://byod-broker:8790
+      BYOD_BROKER_INTERNAL_TOKEN: ${BYOD_BROKER_INTERNAL_TOKEN:?BYOD_BROKER_INTERNAL_TOKEN is required}
       HYPERAGENTS_RUNTIME_CONNECTORS: ${HYPERAGENTS_RUNTIME_CONNECTORS:-nango}
       # Company onboarding is latency-sensitive and Groq is currently failing
       # over on this host. Prefer OpenRouter here; groqFetch still falls back.
@@ -121,6 +126,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       core:     { condition: service_started }
+      byod-broker: { condition: service_healthy }
     ports:
       - "127.0.0.1:${CONTROL_PORT:-2027}:3000"
 
@@ -285,12 +291,23 @@ services:
       DATABASE_URL: ${BROKER_DATABASE_URL:?set BROKER_DATABASE_URL for the BYOD broker}
       MNEME_AGENT_REGISTRY_FILE: /app/data/byod-agents.json
       BROKER_PORT: "8790"
+      BYOD_BROKER_INTERNAL_TOKEN: ${BYOD_BROKER_INTERNAL_TOKEN:?BYOD_BROKER_INTERNAL_TOKEN is required}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_MEMORY_BOX_API_TOKEN: ${CLOUDFLARE_MEMORY_BOX_API_TOKEN:-}
+      CLOUDFLARE_MEMORY_BOX_ZONE_ID: ${CLOUDFLARE_MEMORY_BOX_ZONE_ID:-}
+      CLOUDFLARE_MEMORY_BOX_DOMAIN: ${CLOUDFLARE_MEMORY_BOX_DOMAIN:-singulancelabs.com}
     volumes:
       - hivemind-data:/app/data
     depends_on:
       postgres: { condition: service_healthy }
     ports:
       - "127.0.0.1:${BROKER_PORT:-8790}:8790"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8790/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # ── Voice agent (TARA) — Deepgram orchestration + managed telephony ──
   tara-deepgram:

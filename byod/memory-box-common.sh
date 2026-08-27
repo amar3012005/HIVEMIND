@@ -33,6 +33,26 @@ hm_atomic_write() {
   mv -f "$temporary" "$destination"
 }
 
+hm_promote_host_tree() {
+  local source="$1" destination="$2" relative target temporary
+  [[ -d "$source" ]] || hm_die "host-tool source is missing: $source"
+  mkdir -p "$destination"
+  while IFS= read -r -d '' relative; do
+    relative="${relative#./}"
+    [[ -n "$relative" ]] || continue
+    target="$destination/$relative"
+    if [[ -d "$source/$relative" ]]; then
+      mkdir -p "$target"
+      continue
+    fi
+    [[ -f "$source/$relative" && ! -L "$source/$relative" ]] || hm_die "unsupported host-tool entry: $relative"
+    mkdir -p "$(dirname "$target")"
+    temporary="$(mktemp "$(dirname "$target")/.promote.XXXXXX")"
+    cp -p "$source/$relative" "$temporary"
+    mv -f "$temporary" "$target"
+  done < <(cd "$source" && find . -mindepth 1 -print0)
+}
+
 hm_lock() {
   mkdir -p "$(dirname "$HM_LOCK_FILE")"
   exec 9>"$HM_LOCK_FILE"
@@ -57,14 +77,47 @@ hm_json_field() {
 
 hm_set_env_value() {
   local file="$1" key="$2" value="$3" temporary
-  [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]] || hm_die "invalid environment key: $key"
-  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || hm_die "invalid newline in $key"
+  hm_allowed_env_key "$key" || hm_die "unsupported environment key: $key"
+  hm_validate_env_value "$key" "$value"
   mkdir -p "$(dirname "$file")"
   temporary="$(mktemp "$(dirname "$file")/.env.XXXXXX")"
   if [[ -f "$file" ]]; then awk -v key="$key" 'index($0,key "=")!=1 {print}' "$file" > "$temporary"; fi
   printf '%s=%s\n' "$key" "$value" >> "$temporary"
   chmod 600 "$temporary"
   mv -f "$temporary" "$file"
+}
+
+# memory-box.env is a Docker Compose env file, not a shell program. Never
+# source it: enrollment and transport values cross a trust boundary and shell
+# evaluation would turn a crafted value into root command execution.
+hm_validate_env_value() {
+  local key="$1" value="$2"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || hm_die "invalid control character in $key"
+  [[ "$value" =~ ^[A-Za-z0-9._~:/?=@%+,\-]*$ ]] || hm_die "unsupported character in $key"
+}
+
+hm_allowed_env_key() {
+  case "$1" in
+    HIVEMIND_API_KEY|HIVEMIND_BOX_TOKEN|HIVEMIND_ORG_ID|HIVEMIND_AGENT_IMAGE|HIVEMIND_CENTRAL_URL|VERSION|\
+    EMBEDDING_DIMENSION|POSTGRES_USER|POSTGRES_PASSWORD|POSTGRES_DB|POSTGRES_IMAGE|QDRANT_IMAGE|\
+    AGENT_TOKEN|AGENT_PORT|AGENT_BIND|AGENT_PUBLIC_URL|CLOUDFLARE_TUNNEL_TOKEN|CLOUDFLARED_IMAGE|\
+    TS_AUTHKEY|TS_HOSTNAME|TAILSCALE_IMAGE|BYOD_COMPOSE_PROJECT_NAME) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+hm_load_env_file() {
+  local file="$1" line key value
+  [[ -f "$file" ]] || hm_die "configuration not found: $file"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" == *=* ]] || hm_die "invalid configuration line in $file"
+    key="${line%%=*}"; value="${line#*=}"
+    hm_allowed_env_key "$key" || hm_die "unsupported environment key in $file: $key"
+    hm_validate_env_value "$key" "$value"
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done < "$file"
 }
 
 hm_compose_prefix() {

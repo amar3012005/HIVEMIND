@@ -13,7 +13,7 @@ name: hivemind-byod
 
 services:
   postgres:
-    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    image: ${POSTGRES_IMAGE:-postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685}
     container_name: hm-byod-postgres
     restart: unless-stopped
     environment:
@@ -32,7 +32,7 @@ services:
   # Local vector store. It is the authoritative vector index for this BYOD workspace.
   # Internal only (not published); only the agent talks to it over the compose network.
   qdrant:
-    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.12.4}
+    image: ${QDRANT_IMAGE:-qdrant/qdrant@sha256:241edb9d7778327516ef218f8c74e1bd61b5ea42cd4f193cb8d0896199705636}
     container_name: hm-byod-qdrant
     restart: unless-stopped
     volumes:
@@ -60,17 +60,20 @@ services:
       AGENT_PORT: "8787"
       AGENT_TOKEN: ${AGENT_TOKEN}                   # bearer the central engine must present
     ports:
-      - "${AGENT_BIND:-0.0.0.0}:${AGENT_PORT:-8787}:8787"
+      - "${AGENT_BIND:-127.0.0.1}:${AGENT_PORT:-8787}:8787"
     depends_on:
       postgres: { condition: service_healthy }
       qdrant: { condition: service_started }
 
   # Optional private transport (alternative to direct HTTPS). Enable with: --profile tailnet
   tunnel:
-    image: ${TAILSCALE_IMAGE:-tailscale/tailscale:stable}
+    image: ${TAILSCALE_IMAGE:-tailscale/tailscale@sha256:8c42c4574ab066384fcb72f69e086a2ff1dd3652eb6f56856cee34bcf0d2f680}
     container_name: hm-byod-tunnel
     restart: unless-stopped
     profiles: ["tailnet"]
+    # Share the agent's network namespace so port 8787 is reachable on the
+    # Tailscale interface; merely joining a tailnet would not proxy the agent.
+    network_mode: "service:agent"
     hostname: ${TS_HOSTNAME:-hivemind-byod}
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:-}
@@ -79,4 +82,16 @@ services:
     volumes:
       - ./data/ts:/var/lib/tailscale
     cap_add: [NET_ADMIN, SYS_MODULE]
-    depends_on: [agent]
+    depends_on:
+      agent: { condition: service_started }
+
+  # Default zero-configuration transport. The connector establishes only an
+  # outbound tunnel; the agent remains private on this Compose network.
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38}
+    container_name: hm-byod-cloudflared
+    restart: unless-stopped
+    profiles: ["cloudflare"]
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:-missing}"]
+    depends_on:
+      agent: { condition: service_started }

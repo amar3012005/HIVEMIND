@@ -12,11 +12,19 @@ const BYOD = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UPGRADE = path.join(BYOD, 'upgrade.sh');
 const CLI = path.join(BYOD, 'hivemind-memory-box');
 
-function fixture(t, overrides = {}) {
+function fixture(t, overrides = {}, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-updater-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, 'bin'); fs.mkdirSync(bin);
-  const bundle = path.join(root, 'bundle.tar.gz'); fs.writeFileSync(bundle, 'signed bundle fixture');
+  const bundle = path.join(root, 'bundle.tar.gz');
+  if (options.hostBundle) {
+    const source = path.join(root, 'bundle-source'); fs.mkdirSync(path.join(source, 'systemd'), { recursive: true });
+    fs.writeFileSync(path.join(source, 'setup.sh'), '#!/usr/bin/env bash\n# promoted-host-v2\n');
+    fs.writeFileSync(path.join(source, 'docker-compose.byod.yml'), 'services:\n  agent: {}\n');
+    fs.writeFileSync(path.join(source, 'hivemind-memory-box'), '#!/usr/bin/env bash\n');
+    for (const unit of ['hivemind-memory-box-update.service','hivemind-memory-box-update.timer','hivemind-memory-box-backup.service','hivemind-memory-box-backup.timer','hivemind-memory-box-reconcile.service','hivemind-memory-box-reconcile.timer']) fs.writeFileSync(path.join(source, 'systemd', unit), '[Unit]\n');
+    execFileSync('tar', ['-czf', bundle, '-C', source, '.']);
+  } else fs.writeFileSync(bundle, 'signed bundle fixture');
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const manifest = {
     version: 2, release: 'agent-abcdef123456', channel: 'stable', source_sha: 'a'.repeat(40),
@@ -35,6 +43,11 @@ function fixture(t, overrides = {}) {
   const curl = path.join(bin, 'curl');
   fs.writeFileSync(curl, '#!/usr/bin/env bash\nset -eu\nout=""\nwhile (($#)); do if [[ "$1" == -o ]]; then out="$2"; shift 2; else shift; fi; done\ncp "$MOCK_BUNDLE" "$out"\n');
   fs.chmodSync(curl, 0o755);
+  const flock = path.join(bin, 'flock');
+  fs.writeFileSync(flock, '#!/usr/bin/env bash\nexit 0\n'); fs.chmodSync(flock, 0o755);
+  const sha256sum = path.join(bin, 'sha256sum');
+  fs.writeFileSync(sha256sum, '#!/usr/bin/env bash\nset -eu\nif [[ "${1:-}" == --check ]]; then read -r expected file; actual="$(shasum -a 256 "$file" | awk "{print \\$1}")"; [[ "$actual" == "$expected" ]]; else shasum -a 256 "$@"; fi\n');
+  fs.chmodSync(sha256sum, 0o755);
   const state = path.join(root, 'state'), config = path.join(root, 'config'); fs.mkdirSync(state); fs.mkdirSync(config);
   fs.writeFileSync(path.join(root, 'compose.yml'), 'services:\n  agent: {}\n');
   return { root, manifest, manifestPath, signaturePath, publicKeyPath, bundle, state, config, env: {
@@ -44,6 +57,7 @@ function fixture(t, overrides = {}) {
     HIVEMIND_MEMORY_BOX_LOCK_FILE: path.join(root, 'updater.lock'), BYOD_UPGRADE_DRY_RUN: 'true',
     BYOD_COMPOSE_FILE: path.join(root, 'compose.yml'), BYOD_VERIFY_ATTEMPTS: '1', BYOD_VERIFY_INTERVAL_SECONDS: '0',
     BYOD_REQUIRE_MANIFEST_V2: 'true', BYOD_EXPECTED_CHANNEL: 'stable',
+    BYOD_SKIP_HOST_PROMOTION: options.hostBundle ? 'false' : 'true',
   } };
 }
 
@@ -65,9 +79,23 @@ elif [[ "$1" == compose ]]; then
 fi
 `);
   fs.chmodSync(docker, 0o755);
+  for (const command of ['install', 'systemctl']) {
+    const executable = path.join(f.root, 'bin', command);
+    fs.writeFileSync(executable, '#!/usr/bin/env bash\nexit 0\n'); fs.chmodSync(executable, 0o755);
+  }
   fs.writeFileSync(path.join(f.root, 'agent-state'), 'agent-old123456'); fs.writeFileSync(path.join(f.root, 'docker.log'), '');
   return { ...f.env, BYOD_UPGRADE_DRY_RUN: 'false', MOCK_AGENT_STATE: path.join(f.root, 'agent-state'), MOCK_DOCKER_LOG: path.join(f.root, 'docker.log') };
 }
+
+test('successful update promotes host tools and systemd contract from the verified bundle', (t) => {
+  const f = fixture(t, {}, { hostBundle: true });
+  const installDir = path.join(f.root, 'install'); fs.mkdirSync(installDir);
+  fs.writeFileSync(path.join(installDir, 'setup.sh'), '# old-host\n');
+  const env = { ...installDockerMock(f), HIVEMIND_MEMORY_BOX_INSTALL_DIR: installDir };
+  execFileSync('bash', [UPGRADE, f.manifestPath, f.signaturePath], { env, encoding: 'utf8' });
+  assert.match(fs.readFileSync(path.join(installDir, 'setup.sh'), 'utf8'), /promoted-host-v2/);
+  assert.ok(fs.readdirSync(f.state).some(name => name.startsWith('host-rollback-')));
+});
 
 test('governed dry run verifies canonical v2 signature, channel, and bundle digest', (t) => {
   const f = fixture(t);
@@ -96,7 +124,7 @@ test('governed update rejects an altered bundle', (t) => {
   assert.notEqual(run.status, 0); assert.match(run.stderr, /bundle digest mismatch/);
 });
 
-test('successful update swaps only agent and commits an atomic verified receipt', (t) => {
+test('successful update swaps the agent without restarting data stores and commits a verified receipt', (t) => {
   const f = fixture(t), env = installDockerMock(f);
   execFileSync('bash', [UPGRADE, f.manifestPath, f.signaturePath], { env, encoding: 'utf8' });
   const receipt = JSON.parse(fs.readFileSync(path.join(f.state, 'CURRENT_RELEASE.json')));
@@ -117,7 +145,7 @@ test('failed verification automatically restores the previous local image', (t) 
   assert.equal(swaps.length, 2);
 });
 
-test('CLI defaults to stable and only accepts stable or canary', (t) => {
+test('CLI defaults to stable and only accepts stable or canary', { skip: typeof process.getuid === 'function' && process.getuid() !== 0 }, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hm-cli-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const env = { ...process.env, HIVEMIND_MEMORY_BOX_CONFIG_DIR: path.join(root, 'etc'), HIVEMIND_MEMORY_BOX_STATE_DIR: path.join(root, 'state'), HIVEMIND_MEMORY_BOX_LOCK_FILE: path.join(root, 'lock') };
   assert.equal(execFileSync('bash', [CLI, 'channel'], { env, encoding: 'utf8' }).trim(), 'stable');
@@ -133,10 +161,12 @@ test('host contract schedules persistent six-hour checks and forbids dependency 
   assert.match(timer, /OnUnitActiveSec=6h/); assert.match(timer, /RandomizedDelaySec=30min/); assert.match(timer, /Persistent=true/);
   assert.match(upgrade, /--no-deps --force-recreate agent/); assert.doesNotMatch(upgrade, /compose[^\n]* down|\$\{HM_COMPOSE\[@\]\}[^\n]* down/);
   assert.match(cli, /\/v1\/selfhost\/report/);
-  assert.match(cli, /apiKey:process\.env\.HIVEMIND_API_KEY/);
+  assert.match(cli, /HIVEMIND_BOX_TOKEN/);
+  assert.match(cli, /b\.boxToken=process\.env\.HIVEMIND_BOX_TOKEN/);
   assert.match(cli, /protocol_version:r\.protocol_version/);
   assert.match(cli, /last_success_at:r\.verified_at/);
   const backupTimer = fs.readFileSync(path.join(BYOD, 'systemd/hivemind-memory-box-backup.timer'), 'utf8');
   assert.match(backupTimer, /OnCalendar=daily/); assert.match(backupTimer, /Persistent=true/);
   for (const command of ['install', 'update', 'status', 'doctor', 'backup', 'rollback', 'channel']) assert.match(cli, new RegExp(`\\b${command}\\)`));
+  assert.match(upgrade, /Promote host tools from the same verified bundle/);
 });

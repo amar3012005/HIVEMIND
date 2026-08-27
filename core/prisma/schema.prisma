@@ -117,6 +117,7 @@ model Organization {
   // user_id/project_id/layer). Null until provisioned.
   vectorContainer              String?            @map("vector_container") @db.VarChar(255)
   apiKeys                      ApiKey[]           @relation("OrgApiKeys")
+  memoryBoxConnection          MemoryBoxConnection?
   memories                     Memory[]           @relation("OrgMemories")
   invites                      OrgInvite[]
   projects                     Project[]
@@ -2342,6 +2343,38 @@ model ApiKey {
   @@index([userId], map: "idx_api_keys_user")
   @@index([orgId, keyKind], map: "idx_api_keys_org_kind")
   @@map("api_keys")
+}
+
+/// Canonical control-plane record for a tenant-owned Memory Box. The legacy
+/// byod-agents.json file is a compatibility projection consumed by Core; it is
+/// never the authority for credentials or lifecycle state.
+model MemoryBoxConnection {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId                 String    @unique @map("org_id") @db.Uuid
+  boxId                 String    @unique @map("box_id") @db.Uuid
+  transport             String    @default("custom_https") @db.VarChar(32)
+  endpoint              String?   @db.Text
+  credentialHash        String?   @map("credential_hash") @db.VarChar(64)
+  credentialVersion     Int       @default(1) @map("credential_version")
+  state                 String    @default("REGISTERED") @db.VarChar(32)
+  desiredRelease        String?   @map("desired_release") @db.VarChar(120)
+  observedRelease       String?   @map("observed_release") @db.VarChar(120)
+  protocolVersion       String?   @map("protocol_version") @db.VarChar(64)
+  schemaVersion         Int?      @map("schema_version")
+  capabilities          String[]  @default([])
+  tunnelId              String?   @map("tunnel_id") @db.VarChar(64)
+  lastHeartbeatAt       DateTime? @map("last_heartbeat_at") @db.Timestamptz(6)
+  lastReachableAt       DateTime? @map("last_reachable_at") @db.Timestamptz(6)
+  consecutiveFailures   Int       @default(0) @map("consecutive_failures")
+  metadata              Json      @default("{}") @db.JsonB
+  registeredAt          DateTime  @default(now()) @map("registered_at") @db.Timestamptz(6)
+  revokedAt             DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organization          Organization @relation(fields: [orgId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([state, lastHeartbeatAt])
+  @@map("memory_box_connections")
 }
 
 /// Registered agents with role, model version, and skill manifest

@@ -82,6 +82,7 @@ rollback_failed_upgrade() {
   local rollback_override="$STATE/rollback-$STAMP.yml"
   printf 'services:\n  agent:\n    image: %s\n    environment:\n      AGENT_RELEASE: %s\n' "$ROLLBACK_TAG" "$CURRENT_RELEASE" | hm_atomic_write "$rollback_override" 600
   "${HM_COMPOSE[@]}" -f "$rollback_override" up -d --no-deps --force-recreate agent >/dev/null
+  if [[ -n "${HOST_BACKUP:-}" && -d "$HOST_BACKUP" ]]; then cp -a "$HOST_BACKUP/." "$HM_INSTALL_DIR/"; fi
   verify_agent "$CURRENT_RELEASE" "" "" '[]'
   hm_log "upgrade failed; restored $CURRENT_IMAGE ($CURRENT_RELEASE)"
   exit 1
@@ -89,6 +90,30 @@ rollback_failed_upgrade() {
 trap rollback_failed_upgrade ERR
 "${HM_COMPOSE[@]}" -f "$OVERRIDE" up -d --no-deps --force-recreate agent >/dev/null
 verify_agent "$RELEASE" "$PROTOCOL" "$SCHEMA" "$CAPABILITIES"
+
+# Promote host tools from the same verified bundle as the agent. This prevents
+# long-lived drift between Compose, transport, backup, and rollback behavior.
+if [[ -n "$BUNDLE_URL" && "${BYOD_SKIP_HOST_PROMOTION:-false}" != true ]]; then
+  if tar -tzf "$BUNDLE" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then hm_die 'release bundle contains an unsafe path'; fi
+  if tar -tvzf "$BUNDLE" | awk 'substr($1,1,1)=="l" || substr($1,1,1)=="h" {found=1} END{exit found?0:1}'; then hm_die 'release bundle contains links'; fi
+  HOST_STAGE="$(mktemp -d "$STATE/.host-stage.XXXXXX")"
+  tar -xzf "$BUNDLE" -C "$HOST_STAGE"
+  HOST_SOURCE="$HOST_STAGE"; [[ -f "$HOST_SOURCE/setup.sh" ]] || HOST_SOURCE="$HOST_STAGE/byod"
+  [[ -f "$HOST_SOURCE/setup.sh" && -f "$HOST_SOURCE/docker-compose.byod.yml" && -f "$HOST_SOURCE/hivemind-memory-box" ]] || hm_die 'verified bundle is missing host tools'
+  for host_script in "$HOST_SOURCE"/*.sh "$HOST_SOURCE"/hivemind-memory-box; do
+    [[ ! -f "$host_script" ]] || bash -n "$host_script" || hm_die "verified bundle contains an invalid host tool: $(basename "$host_script")"
+  done
+  HOST_BACKUP="$STATE/host-rollback-$STAMP"
+  mkdir -p "$HOST_BACKUP"; cp -a "$HM_INSTALL_DIR/." "$HOST_BACKUP/"
+  hm_promote_host_tree "$HOST_SOURCE" "$HM_INSTALL_DIR"
+  install -m 0755 "$HM_INSTALL_DIR/hivemind-memory-box" /usr/local/sbin/hivemind-memory-box
+  for unit in hivemind-memory-box-update.service hivemind-memory-box-update.timer hivemind-memory-box-backup.service hivemind-memory-box-backup.timer hivemind-memory-box-reconcile.service hivemind-memory-box-reconcile.timer; do
+    install -m 0644 "$HM_INSTALL_DIR/systemd/$unit" "/etc/systemd/system/$unit"
+  done
+  systemctl daemon-reload
+  systemctl enable --now hivemind-memory-box-reconcile.timer
+  rm -rf -- "$HOST_STAGE"
+fi
 
 MANIFEST_SHA="$(sha256sum "$MANIFEST" | awk '{print $1}')"
 [[ ! -f "$HM_CURRENT_RECEIPT" ]] || cp -f "$HM_CURRENT_RECEIPT" "$HM_PREVIOUS_RECEIPT"

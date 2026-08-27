@@ -3,7 +3,11 @@
 The central engine talks only to the authenticated `hm-agent` HTTP API. It does
 not connect directly to customer PostgreSQL or Qdrant.
 
-Set `AGENT_PUBLIC_URL` before running `./setup.sh`:
+The default one-command installation receives a remotely managed Cloudflare
+tunnel from the broker. It requires no inbound firewall rule, public IP, DNS,
+or customer Cloudflare account. The agent remains bound to `127.0.0.1` on the host.
+
+For customer-managed HTTPS, set `AGENT_PUBLIC_URL` before running `./setup.sh`:
 
 ```text
 https://agent.customer.example
@@ -27,9 +31,9 @@ that window the Engine tries the new token first, then the old token only if
 the Box returns `401`. After the Box restarts, the old credential is rejected.
 Never put either credential in a URL, browser storage, log, or support ticket.
 
-The bundled Tailscale container establishes membership only; operators must
-still provide a reachable private agent endpoint. Do not assume it publishes the
-agent port automatically. Validate from the central network before registering.
+The bundled Tailscale container shares the agent network namespace, making the
+agent's port 8787 reachable on the container's tailnet IP. The installer resolves
+that IP before registration and still requires a successful central probe.
 
 Data at rest is local PostgreSQL plus local Qdrant. Back up both directories:
 

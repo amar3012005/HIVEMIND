@@ -8,6 +8,8 @@ export const ENTITLEMENT_SCOPES = [
   'web_research',
   'web_crawl',
   'web_admin',
+  'selfhost:bootstrap',
+  'selfhost:connect',
 ];
 
 export function hasEntitlement(principal, entitlement) {

@@ -13,6 +13,9 @@ test('Control Plane delegates lifecycle writes to the dedicated broker', () => {
   assert.match(source, /BYOD_BROKER_URL/);
   assert.match(source, /BYOD_BROKER_INTERNAL_TOKEN/);
   assert.match(source, /pathname === '\/v1\/selfhost\/bootstrap'/);
+  assert.match(source, /pathname === '\/v1\/selfhost\/canary-bootstrap'/);
+  assert.match(source, /MEMORY_BOX_CANARY_ORG_ALLOWLIST/);
+  assert.match(source, /channel: releaseChannel/);
   assert.match(source, /scopes: \['selfhost:bootstrap'\]/);
   assert.match(source, /memoryBoxBrokerRequest\(pathname, body\)/);
   assert.match(source, /memoryBoxBrokerRequest\('\/v1\/selfhost\/readiness'/);

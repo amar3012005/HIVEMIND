@@ -42,6 +42,8 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl } =
   const team = Array.isArray(company.team) ? company.team : [];
   const documents = unique(Array.isArray(company.documents) ? company.documents : [], 8);
   const sourcePages = Array.isArray(company.source_pages) ? company.source_pages : [];
+  const socialProfiles = Array.isArray(profile.social_profiles) ? profile.social_profiles : [];
+  const contactDetails = profile.contact_details && typeof profile.contact_details === 'object' ? profile.contact_details : {};
   const sourceUrls = unique([website, ...sourcePages.map((item) => item?.url), ...research.map((item) => item?.url || item?.source_url || item?.link)].filter(Boolean), 40);
   const facts = unique([
     profile.what_it_does,
@@ -70,6 +72,20 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl } =
     location: clean(company.company_location || profile.location, 100),
     mission: clean(company.mission || profile.mission, 440),
     positioning: clean(profile.positioning || profile.what_it_does || profile.tagline, 440),
+    tagline: clean(profile.tagline, 220),
+    whatItDoes: clean(profile.what_it_does, 440),
+    icp: clean(profile.icp, 440),
+    profileRows: [
+      ['Company location', clean(company.company_location || profile.location, 100)],
+      ['ICP', clean(profile.icp, 440)],
+      ['Positioning', clean(profile.positioning, 440)],
+      ['Mission', clean(company.mission || profile.mission, 440)],
+    ].filter(([, value]) => value),
+    contacts: unique([
+      ...(Array.isArray(contactDetails.emails) ? contactDetails.emails : []),
+      ...(Array.isArray(contactDetails.phones) ? contactDetails.phones : []),
+      ...socialProfiles.map((item) => item?.url),
+    ], 8),
     facts,
     confirmations,
     firstMoves,
@@ -104,13 +120,14 @@ function reportBody(report) {
   const sourceCards = report.sourceUrls.slice(0, 4).map((url, index) => `<tr><td style="padding:${index ? '12px 0 0' : '0'}"><a href="${escapeHtml(url)}" style="color:${INK};text-decoration:none"><span style="font:700 9px/14px ${MONO};letter-spacing:1.2px;color:${BLUE}">SOURCE ${String(index + 1).padStart(2, '0')}</span><br><span style="font-size:13px;line-height:20px">${escapeHtml(hostname(url))}</span></a></td></tr>`).join('');
   const moves = report.firstMoves.map((move) => `<tr><td style="padding:0 0 14px"><div style="font:700 9px/14px ${MONO};letter-spacing:1.5px;color:${BLUE}">${escapeHtml(move.room || 'FIRST MOVE')}</div><div style="margin-top:4px;font-size:15px;line-height:21px;font-weight:700;color:${INK}">${escapeHtml(move.title)}</div><div style="margin-top:4px;font-size:12px;line-height:18px;color:${MUTED}">${escapeHtml(move.deliverable)}</div></td></tr>`).join('');
   const people = report.team.map((member) => `${member.name}${member.role ? ` — ${member.role}` : ''}`);
+  const profileRows = report.profileRows.map(([label, value]) => `<tr><td style="padding:0 0 12px"><div style="font:700 8px/12px ${MONO};letter-spacing:1.3px;color:#989898">${escapeHtml(label.toUpperCase())}</div><div style="margin-top:4px;font-size:12px;line-height:19px;color:${INK}">${escapeHtml(value)}</div></td></tr>`).join('');
   return `
   <tr><td style="padding:40px 44px 36px;background:${PAPER}">
     ${sectionLabel('DAY-0 ONBOARDING REPORT', 1)}
     <h1 style="margin:17px 0 0;font:700 36px/39px Arial,Helvetica,sans-serif;letter-spacing:-1.5px;color:${INK}">Your company is<br>now alive.</h1>
     <p style="margin:18px 0 0;max-width:490px;font-size:15px;line-height:25px;color:${MUTED}">HIVEMIND has created the first working model of <strong style="color:${INK}">${escapeHtml(report.companyName)}</strong> from your public company context. This report is a deterministic record of what entered your workspace on Day-0.</p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:27px;border-top:1px solid ${LINE};border-bottom:1px solid ${LINE}"><tr>
-      <td style="width:33%;padding:16px 6px 16px 0"><div style="font:700 8px/12px ${MONO};letter-spacing:1.3px;color:#989898">SOURCES READ</div><div style="margin-top:5px;font-size:22px;line-height:25px;font-weight:700">${report.sourceCount}</div></td>
+      <td style="width:33%;padding:16px 6px 16px 0"><div style="font:700 8px/12px ${MONO};letter-spacing:1.3px;color:#989898">MARKET RESEARCH</div><div style="margin-top:5px;font-size:22px;line-height:25px;font-weight:700">${report.sourceCount}</div></td>
       <td style="width:33%;padding:16px 6px;border-left:1px solid ${LINE};padding-left:16px"><div style="font:700 8px/12px ${MONO};letter-spacing:1.3px;color:#989898">FIRST MOVES</div><div style="margin-top:5px;font-size:22px;line-height:25px;font-weight:700">${report.taskCount}</div></td>
       <td style="width:33%;padding:16px 0 16px 16px;border-left:1px solid ${LINE}"><div style="font:700 8px/12px ${MONO};letter-spacing:1.3px;color:#989898">MEMORY DOCUMENTS</div><div style="margin-top:5px;font-size:22px;line-height:25px;font-weight:700">${report.documentCount}</div></td>
     </tr></table>
@@ -118,13 +135,14 @@ function reportBody(report) {
   <tr><td style="padding:40px 44px;border-top:1px solid ${LINE};background:#fff"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td valign="top" width="52%" style="padding-right:26px">
     ${sectionLabel('COMPANY SIGNAL', 2)}
     <h2 style="margin:15px 0 0;font:700 25px/28px Arial,Helvetica,sans-serif;letter-spacing:-.8px;color:${INK}">The first shape of<br>${escapeHtml(report.companyName)}.</h2>
-    ${report.positioning ? `<p style="margin:15px 0 0;font-size:14px;line-height:23px;color:${MUTED}">${escapeHtml(report.positioning)}</p>` : ''}
-    ${bulletLines(overview, { empty: 'The initial company signal is ready for your confirmation.' })}
+    ${report.tagline ? `<p style="margin:15px 0 0;font-size:14px;line-height:23px;color:${MUTED}">${escapeHtml(report.tagline)}</p>` : ''}
+    ${report.whatItDoes ? `<p style="margin:12px 0 0;font-size:14px;line-height:23px;color:${MUTED}">${escapeHtml(report.whatItDoes)}</p>` : ''}
+    ${bulletLines(overview, { empty: 'The company record is ready for your review.' })}
   </td><td valign="top" width="48%">
     ${browserBar(report.websiteHost || 'company source')}<tr><td style="padding:20px 18px 18px;background:#fbfbf9;border:1px solid ${LINE};border-top:0;border-radius:0 0 8px 8px"><div style="font:700 8px/12px ${MONO};letter-spacing:1.6px;color:#989898">FIRST-PARTY CONTEXT</div><div style="margin-top:11px;font-size:17px;line-height:20px;font-weight:700;color:${INK}">${escapeHtml(report.websiteHost || report.companyName)}</div><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px">${sourceCards || '<tr><td style="font-size:12px;color:#777">Company profile saved</td></tr>'}</table></td></tr></table>
   </td></tr></table></td></tr>
   <tr><td style="padding:40px 44px;background:${PAPER};border-top:1px solid ${LINE}"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td valign="top" width="46%" style="padding-right:26px">
-    ${browserBar('hivemind — first moves')}<tr><td style="padding:18px;background:#fff;border:1px solid ${LINE};border-top:0;border-radius:0 0 8px 8px"><div style="font:700 8px/12px ${MONO};letter-spacing:1.4px;color:#989898">YOUR OPERATING QUEUE</div><div style="margin-top:12px;font-size:14px;font-weight:700;line-height:20px">${escapeHtml(report.firstMoves[0]?.title || 'Your first company task')}</div><div style="margin-top:8px;height:8px;border-radius:4px;background:#e6efff"><div style="width:68%;height:8px;border-radius:4px;background:${BLUE}"></div></div></td></tr></table>
+    ${browserBar('hivemind — company record')}<tr><td style="padding:18px;background:#fff;border:1px solid ${LINE};border-top:0;border-radius:0 0 8px 8px">${profileRows || '<div style="font-size:12px;color:#777">Company record saved</div>'}</td></tr></table>
   </td><td valign="top" width="54%">
     ${sectionLabel('YOUR FIRST WEEK', 3)}
     <h2 style="margin:15px 0 0;font:700 25px/28px Arial,Helvetica,sans-serif;letter-spacing:-.8px;color:${INK}">A company that<br>starts with context.</h2>

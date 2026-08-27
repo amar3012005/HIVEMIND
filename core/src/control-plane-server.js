@@ -89,6 +89,7 @@ import { handleScimRequest } from './scim/scim-router.js';
 import { renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from './email/templates/day0-company-onboarding.js';
 import { renderDayZeroOnboardingPdf } from './email/day0-company-report-pdf.js';
+import { renderHumationAvatarSvg } from './email/humation-avatar.js';
 import { createSignupWelcomeDispatcher, welcomeProfileForWorkspace } from './email/signup-welcome-dispatcher.js';
 import { ADMIN_EMAIL_TEMPLATES, normalizeAdminEmailMessage } from './email/admin-email-studio.js';
 import { groqFetch } from './llm/groq-fallback.js';
@@ -10660,6 +10661,22 @@ Write the persona now.`;
       }
     }
 
+    // Public, immutable avatar asset used by lifecycle emails. It renders the
+    // same Humation package, stable seed, and role palette as AgentAvatar.jsx.
+    if (pathname === '/v1/public/humation-avatar.svg' && req.method === 'GET') {
+      const seed = String(url.searchParams.get('seed') || '').trim().slice(0, 160);
+      const roleArchetype = String(url.searchParams.get('role') || 'Communicator').trim().slice(0, 40);
+      if (!seed) return jsonResponse(res, { error: 'seed_required' }, 400);
+      const svg = renderHumationAvatarSvg({ id: seed, name: roleArchetype, roleArchetype }, { size: 72 });
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml; charset=utf-8',
+        'Content-Length': Buffer.byteLength(svg),
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      return res.end(svg);
+    }
+
     // POST /v1/hyper/company/day0-report — the CompanyDashboard calls this
     // only after it has rendered the completed company payload. The database
     // claim makes delivery idempotent across refreshes, tabs, and retries:
@@ -10678,18 +10695,29 @@ Write the persona now.`;
         const row = rows?.[0];
         if (!row?.company) return jsonResponse(res, { error: 'not_onboarded' }, 404);
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
-        const already = company?.day0_report_email?.status;
-        if (already === 'sent' || already === 'sending') {
+        const deliveryState = company?.day0_report_email || {};
+        const already = deliveryState.status;
+        const claimedMs = Date.parse(deliveryState.claimed_at || '');
+        const sendingLeaseActive = already === 'sending'
+          && Number.isFinite(claimedMs)
+          && Date.now() - claimedMs < 10 * 60 * 1000;
+        if (already === 'sent' || sendingLeaseActive) {
           return jsonResponse(res, { ok: true, accepted: false, status: already });
         }
 
         const claimedAt = new Date().toISOString();
-        const claimState = { version: 'day-0-v1', status: 'sending', claimed_at: claimedAt };
+        const claimState = { version: 'day-0-v2', status: 'sending', claimed_at: claimedAt };
         const claimed = await prisma.$queryRawUnsafe(
           `UPDATE "hivemind"."hyper_rooms"
               SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
             WHERE id = $2::uuid
-              AND COALESCE("agent_connectors" #>> '{_company,day0_report_email,status}', '') NOT IN ('sending', 'sent')
+              AND (
+                COALESCE("agent_connectors" #>> '{_company,day0_report_email,status}', '') NOT IN ('sending', 'sent')
+                OR (
+                  "agent_connectors" #>> '{_company,day0_report_email,status}' = 'sending'
+                  AND COALESCE(("agent_connectors" #>> '{_company,day0_report_email,claimed_at}')::timestamptz, to_timestamp(0)) < now() - interval '10 minutes'
+                )
+              )
           RETURNING id`,
           JSON.stringify(claimState), row.id,
         );
@@ -10697,14 +10725,21 @@ Write the persona now.`;
 
         const employees = await prisma.digitalEmployee.findMany({
           where: { orgId: current.session.orgId, archivedAt: null },
-          select: { name: true, roleArchetype: true },
+          select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, persona: true },
           take: 12,
         }).catch(() => []);
         const dashboardCompany = {
           ...company,
           // The report receives the same live employee list that the page
           // renders, instead of the earlier onboarding-only team snapshot.
-          team: employees.map((employee) => ({ name: employee.name, role: employee.roleArchetype || '' })),
+          team: employees.map((employee) => ({
+            id: employee.id,
+            slug: employee.slug,
+            name: employee.name,
+            avatarUrl: employee.avatarUrl,
+            roleArchetype: employee.roleArchetype || 'Communicator',
+            persona: employee.persona,
+          })),
         };
         const ownerId = current.session.userId;
         const orgId = current.session.orgId;
@@ -10722,20 +10757,47 @@ Write the persona now.`;
               attachments: [{ filename: `${dashboardCompany.company.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 72) || 'company'}-day-0-onboarding-report.pdf`, type: 'application/pdf', content: pdf }],
             });
             if (!delivery.ok) throw new Error(`day0_report_delivery_${delivery.reason || 'failed'}`);
+            const sentAt = new Date().toISOString();
             await prisma.$executeRawUnsafe(
               `UPDATE "hivemind"."hyper_rooms"
                   SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
                 WHERE id = $2::uuid AND org_id = $3::uuid`,
-              JSON.stringify({ version: 'day-0-v1', status: 'sent', claimed_at: claimedAt, sent_at: new Date().toISOString(), provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted' }),
+              JSON.stringify({ version: 'day-0-v2', status: 'sent', claimed_at: claimedAt, sent_at: sentAt, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null }),
               roomId, orgId,
             );
+            await createWorkspaceNotification(prisma, {
+              orgId,
+              userId: ownerId,
+              type: 'lifecycle.email.sent',
+              title: `Your ${dashboardCompany.company} Day-0 report is in your inbox`,
+              body: `Open ${recipient.email} to read the onboarding report and meet your new AI HyperAgents.`,
+              resourceType: 'hyper_company',
+              resourceId: roomId,
+              dedupeKey: `lifecycle-email:day0:${roomId}`,
+              data: {
+                channel: 'email',
+                provider: delivery.provider,
+                icon: 'gmail',
+                lifecycle_day: 0,
+                sent_at: sentAt,
+                recipient: recipient.email,
+                company: dashboardCompany.company,
+                subject: rendered.subject,
+                href: appUrl,
+              },
+            }).catch((notificationError) => {
+              // Email acceptance is the delivery authority. A transient inbox
+              // projection failure must never rewrite an already-sent email as
+              // failed; the notification can be reconciled independently.
+              console.warn('[hyper-company] day-0 notification failed:', notificationError.message);
+            });
           } catch (error) {
             console.warn('[hyper-company] day-0 report failed:', error.message);
             await prisma.$executeRawUnsafe(
               `UPDATE "hivemind"."hyper_rooms"
                   SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day0_report_email}', $1::jsonb, true)
                 WHERE id = $2::uuid AND org_id = $3::uuid`,
-              JSON.stringify({ version: 'day-0-v1', status: 'failed', claimed_at: claimedAt, failed_at: new Date().toISOString() }),
+              JSON.stringify({ version: 'day-0-v2', status: 'failed', claimed_at: claimedAt, failed_at: new Date().toISOString(), failure_reason: String(error.message || 'delivery_failed').slice(0, 240) }),
               roomId, orgId,
             ).catch((persistError) => console.warn('[hyper-company] day-0 report state failed:', persistError.message));
           }
@@ -10765,7 +10827,7 @@ Write the persona now.`;
         const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
         const employees = await prisma.digitalEmployee.findMany({
           where: { orgId: current.session.orgId, archivedAt: null },
-          select: { id: true, name: true, roleArchetype: true, status: true },
+          select: { id: true, slug: true, name: true, avatarUrl: true, roleArchetype: true, persona: true, status: true },
           take: 12,
         }).catch(() => []);
         // Closed-loop outcomes summary (7d) for the dashboard tile. Zeros when
@@ -10789,7 +10851,18 @@ Write the persona now.`;
             replies: Number(o.replies || 0), bookings: Number(o.bookings || 0),
           };
         } catch { /* zeros */ }
-        return jsonResponse(res, { onboarded: true, hq_room_id: row.id, company, employees, outcomes });
+        const onboardedAtMs = Date.parse(company.onboarded_at || '');
+        const lifecycleDay = Number.isFinite(onboardedAtMs)
+          ? Math.max(0, Math.floor((Date.now() - onboardedAtMs) / 86_400_000))
+          : 0;
+        return jsonResponse(res, {
+          onboarded: true,
+          hq_room_id: row.id,
+          company,
+          employees,
+          outcomes,
+          lifecycle: { day: lifecycleDay, onboarded_at: company.onboarded_at || null },
+        });
       } catch (err) {
         return jsonResponse(res, { error: err.message }, 500);
       }

@@ -1333,8 +1333,15 @@ const TOOL_HANDLERS = {
     // synthesis.  The relation claim remains rank 1; entity descriptions are
     // interleaved before the remaining claims, then the ordinary recall order
     // continues unchanged.
-    const descriptiveByEntity = entities.map((entity) => [...memories.values()].find((memory) =>
-      !explicitClaimIds.has(memory.id) && rowMentionsEntity(memory, entity))).filter(Boolean);
+    const descriptiveScore = (memory) => {
+      const text = rowSearchText(memory);
+      const objective = /\b(?:colleague|coworker|work(?:s|ed)?|based|born|joined|reports?\s+to|led|attended|presented|coordinated|manager|role|office|team)\b/iu.test(text) ? 10 : 0;
+      const subjective = /\b(?:good|bad|nice|really|beautiful|awful)\b/iu.test(text) ? 5 : 0;
+      return objective - subjective;
+    };
+    const descriptiveByEntity = entities.map((entity) => [...memories.values()]
+      .filter((memory) => !explicitClaimIds.has(memory.id) && rowMentionsEntity(memory, entity))
+      .sort((left, right) => descriptiveScore(right) - descriptiveScore(left))[0]).filter(Boolean);
     const orderedMemories = [];
     const appendUnique = (memory) => {
       if (memory?.id && !orderedMemories.some((item) => item.id === memory.id)) orderedMemories.push(memory);

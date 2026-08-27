@@ -663,3 +663,15 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   legacy-format canaries ready; hybrid recall and cited grounded chat passed.
 - Live verification: Core healthy, zero restarts, exact revision label;
   hm-extract healthy; fresh fatal and extraction-failure logs empty.
+
+## 335e7a34 — Memory Box durable one-command onboarding (Core, Control Plane, Employees, BYOD Broker, Frontend)
+
+- Canonical backend SHA: `335e7a34d384d76d5afe5ccf0a38ebb1d4ba4011` (PRs #638–#640). Frontend Da-vinci SHA: `7f7d8960ff9299c96b3c34e8a2e0b61c0c21c9ed` (PR #90). Additive migration: `20260827183000_memory_box_connections`.
+- Release ID: `prod-20260827-335e7a34`. Manifest: `/root/releases/manifests/335e7a34/20260827T152202Z/RELEASE_MANIFEST.json`. Pre-migration backup: `/root/releases/backups/pre-memory-box-20260827T150248Z.sql.gz` (SHA-256 verified before migration).
+- Runtime images: `core-api` `sha256:476764ff7e2d19d04dd40cdaa3cd9be6df1962199d33e555d2c5602cb007cc9a`; `control-plane` `sha256:9705e47db1ac5f95ecf1cb23e6609d3bd18c9d2c64a4fb0beb3fc23730baa1a1`; `employees` `sha256:788d3e7f96eea36216972995a361d00fca91a5af5a5dca2c1bd1e5fabe09f8e7`; `byod-broker` `sha256:4dfeee2a2fa61ce507ab1943e68b620a5ffe5b8519c2dd16b00c4cc23e71a5d0`. All four containers are healthy and labeled with the exact canonical SHA.
+- Feature: PostgreSQL-authoritative Memory Box connection lifecycle, transport-bound single-use bootstrap, managed Cloudflare readiness, explicit existing API/custom HTTPS/Tailscale compatibility, SSRF and DNS-rebinding defenses, durable token hashes, idempotent replay handling, atomic signed installer updates with rollback and systemd reconciliation, and a stateful one-command onboarding UI.
+- Verification: Prisma schema validation; 20 integrated Node tests (19 pass, one root-only test skipped); 5/5 focused broker-security tests; 10/10 frontend self-host contract tests; frontend production build; shell and Node syntax checks; public homepage/login/API-health checks; five consecutive `READY` broker checks for the existing self-hosted tenant; DB projection present; fresh critical-error scan empty.
+- Frontend: Cloudflare Worker `hivemind-web`, version `2775a643-27a4-4413-813a-802c42d3c822`, serving `singulancelabs.com`, `next.singulancelabs.com`, and `admin.hivemind.singulancelabs.com`.
+- Fail-closed gate: automatic managed Cloudflare bootstrap remains unavailable until the protected offline Ed25519 signer publishes the stable signed release and a dedicated Cloudflare token with Tunnel and DNS Edit permissions is installed. The UI exposes the signed advanced compatibility path; existing custom HTTPS/Tailscale installations remain operational.
+- Rollback: canonical per-service `rollback` tags exist for Core, Control Plane, Employees, and BYOD Broker; the additive DB migration is compatible with code rollback. No destructive customer canary was run.
+- Operational note: production disk had 24 GB free after image builds, so the final canonical release used `RELEASE_MIN_DISK_GB=20`; schedule image-cache cleanup before the next multi-service build.

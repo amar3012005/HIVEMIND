@@ -5,7 +5,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/memory-box-common.sh"
-if [[ -f "$HM_CONFIG_DIR/memory-box.env" ]]; then set -a; . "$HM_CONFIG_DIR/memory-box.env"; set +a; fi
+if [[ -f "$HM_CONFIG_DIR/memory-box.env" ]]; then hm_load_env_file "$HM_CONFIG_DIR/memory-box.env"; fi
 MANIFEST_TOOL="$HERE/storage-manifest.mjs"
 [[ -f "$MANIFEST_TOOL" ]] || MANIFEST_TOOL="$HERE/../scripts/storage-manifest.mjs"
 [[ -f "$MANIFEST_TOOL" ]] || { echo "storage-manifest.mjs is missing; reinstall the Memory Box bundle" >&2; exit 1; }

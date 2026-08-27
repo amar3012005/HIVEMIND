@@ -1325,8 +1325,24 @@ const TOOL_HANDLERS = {
       },
     );
     const explicitClaimIds = new Set(explicitClaims.map((claim) => claim.id).filter(Boolean));
-    const orderedMemories = [...memories.values()].sort((left, right) =>
-      Number(explicitClaimIds.has(right.id)) - Number(explicitClaimIds.has(left.id)));
+    const claimMemories = [...memories.values()].filter((memory) => explicitClaimIds.has(memory.id));
+    // Keep at least one descriptive row for every requested entity inside the
+    // smallest progressive answer window.  Putting every relation claim first
+    // made a compound "who is X and how are X/Y related" turn retrieve the
+    // relationship claims correctly but starve the identity clause before
+    // synthesis.  The relation claim remains rank 1; entity descriptions are
+    // interleaved before the remaining claims, then the ordinary recall order
+    // continues unchanged.
+    const descriptiveByEntity = entities.map((entity) => [...memories.values()].find((memory) =>
+      !explicitClaimIds.has(memory.id) && rowMentionsEntity(memory, entity))).filter(Boolean);
+    const orderedMemories = [];
+    const appendUnique = (memory) => {
+      if (memory?.id && !orderedMemories.some((item) => item.id === memory.id)) orderedMemories.push(memory);
+    };
+    appendUnique(claimMemories[0]);
+    descriptiveByEntity.forEach(appendUnique);
+    claimMemories.slice(1).forEach(appendUnique);
+    [...memories.values()].forEach(appendUnique);
     const sourceGroups = new Map();
     for (const [entity, ids] of memoryIdsByEntity.entries()) {
       for (const id of ids) {

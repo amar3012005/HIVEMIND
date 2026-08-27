@@ -203,7 +203,12 @@ export function renderDayZeroOnboardingEmail(input, options = {}) {
     report,
     subject: lifecycleSubject(report.companyName, 0, `The Rise Of Awakening for ${report.companyName}`),
     text: `${report.companyName} has awakened. We read ${report.sourceCount} sources, prepared ${report.taskCount} first moves, and recruited ${report.teamCount} AI HyperAgents to run ${report.companyName}. Open your company: ${report.reportUrl}`,
-    html: lifecycleEmailShell({ title: `Day 0 - The Rise Of Awakening for ${report.companyName}`, preheader: `${report.companyName} has awakened inside HIVEMIND.`, body: emailBody(report) }),
+    html: lifecycleEmailShell({
+      title: `Day 0 - The Rise Of Awakening for ${report.companyName}`,
+      preheader: `${report.companyName} has awakened inside HIVEMIND.`,
+      body: emailBody(report),
+      logoUrl: report.logoUrl,
+    }),
   };
 }
 

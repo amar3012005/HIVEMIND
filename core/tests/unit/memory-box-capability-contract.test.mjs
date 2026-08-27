@@ -9,7 +9,7 @@ test('Memory Box advertises versioned storage and recovery capabilities', () => 
     "PROTOCOL_VERSION = 'memory-box.v1'",
     "storage_mode: 'byod_postgres_qdrant'",
     "'memory.recall'",
-    "'memory.list.total'",
+    "'memory.inventory.total'",
     "'evidence.recall'",
     "'evidence.lexical'",
     "'graph.read'",

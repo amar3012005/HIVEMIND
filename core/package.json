@@ -29,6 +29,8 @@
     "build": "tsc"
   },
   "dependencies": {
+    "@humation/assets-humation-1": "^1.0.1",
+    "@humation/core": "^1.0.1",
     "@langchain/langgraph": "^1.4.8",
     "@langchain/langgraph-checkpoint-postgres": "^1.0.4",
     "@lightpanda/browser": "^1.2.0",

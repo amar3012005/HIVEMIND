@@ -41,6 +41,8 @@ QD="$DRILL-qdrant"
 AG="$DRILL-agent"
 TMP="$(mktemp -d "${TMPDIR:-/var/tmp}/hm-byod-release-drill.XXXXXX")"
 STATE="$TMP/releases"
+CONFIG="$TMP/config"
+INSTALL="$TMP/install"
 COMPOSE_FILE="$TMP/compose.yml"
 TOKEN="$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')"
 cleanup() {
@@ -49,18 +51,24 @@ cleanup() {
   rm -rf "$TMP"
 }
 trap cleanup EXIT INT TERM
-mkdir -p "$TMP/pg" "$TMP/qdrant" "$STATE"
-chmod 700 "$TMP" "$TMP/pg" "$TMP/qdrant" "$STATE"
+mkdir -p "$TMP/pg" "$TMP/qdrant" "$STATE" "$CONFIG" "$INSTALL"
+chmod 700 "$TMP" "$TMP/pg" "$TMP/qdrant" "$STATE" "$CONFIG" "$INSTALL"
 docker network create "$NET" >/dev/null
 
 docker run -d --name "$PG" --network "$NET" --network-alias postgres \
   -e POSTGRES_USER=hivemind -e POSTGRES_PASSWORD=restore-drill-only -e POSTGRES_DB=hivemind \
   -v "$TMP/pg:/var/lib/postgresql/data" "$PG_IMAGE" >/dev/null
+ready=0
 for _ in $(seq 1 60); do
-  docker exec "$PG" pg_isready -U hivemind -d hivemind >/dev/null 2>&1 && break
+  if docker exec "$PG" pg_isready -U hivemind -d hivemind >/dev/null 2>&1; then
+    ready=$((ready + 1))
+  else
+    ready=0
+  fi
+  [[ "$ready" -ge 3 ]] && break
   sleep 1
 done
-docker exec "$PG" pg_isready -U hivemind -d hivemind >/dev/null
+[[ "$ready" -ge 3 ]] || { docker logs "$PG" --tail 80 >&2; exit 1; }
 docker exec -i "$PG" pg_restore -U hivemind -d hivemind \
   --exit-on-error --no-owner --no-privileges < "$BACKUP/postgres.dump"
 
@@ -120,6 +128,14 @@ export BYOD_COMPOSE_FILE="$COMPOSE_FILE"
 export BYOD_COMPOSE_PROJECT_NAME="$DRILL"
 export BYOD_AGENT_CONTAINER="$AG"
 export BYOD_RELEASE_STATE_DIR="$STATE"
+export HIVEMIND_MEMORY_BOX_STATE_DIR="$STATE"
+export HIVEMIND_MEMORY_BOX_CONFIG_DIR="$CONFIG"
+export HIVEMIND_MEMORY_BOX_INSTALL_DIR="$INSTALL"
+export HIVEMIND_MEMORY_BOX_LOCK_FILE="$TMP/memory-box.lock"
+export BYOD_SKIP_HOST_PROMOTION=true
+printf '{"version":2,"complete":true,"release":"restore-base","image":"hivemind/hm-agent@%s","created_at":"1970-01-01T00:00:00.000Z"}\n' "$BASE_IMAGE_ID" \
+  > "$STATE/CURRENT_RELEASE.json"
+chmod 600 "$STATE/CURRENT_RELEASE.json"
 bash "$HERE/upgrade.sh" "$MANIFEST" "$SIGNATURE"
 UPGRADE_IMAGE_ID="$(docker inspect "$AG" --format '{{.Image}}')"
 EXPECTED_UPGRADE_IMAGE_ID="$(docker image inspect "$RELEASE_IMAGE" --format '{{.Id}}')"

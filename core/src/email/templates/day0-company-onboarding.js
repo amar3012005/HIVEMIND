@@ -78,12 +78,14 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, pu
       lane,
       roleArchetype: lane,
     };
-    const suppliedAvatar = safeUrl(member?.avatarUrl || member?.avatar_url);
     const avatarSvg = renderHumationAvatarSvg(normalized, { size: 72 });
     return {
       ...normalized,
       oneLiner: clean(member?.oneLiner || member?.focus || member?.summary || firstSentence(member?.persona) || ROLE_ONE_LINERS[lane], 180),
-      avatarUrl: embedEmailAvatars ? `data:image/svg+xml;base64,${Buffer.from(avatarSvg).toString('base64')}` : (suppliedAvatar || humationAvatarPublicUrl(normalized, publicApiUrl)),
+      // Email must use the canonical generated portrait. Persisted avatar URLs
+      // can point at legacy monochrome assets; the report deck still keeps the
+      // vector inline, while mail fetches the same colorized public renderer.
+      avatarUrl: embedEmailAvatars ? `data:image/svg+xml;base64,${Buffer.from(avatarSvg).toString('base64')}` : humationAvatarPublicUrl(normalized, publicApiUrl),
       avatarSvg,
     };
   }).filter((member) => member.name);

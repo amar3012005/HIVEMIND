@@ -31,11 +31,16 @@ export function lifecycleSubject(companyName, day, episodeTitle) {
 
 export const SINGULANCE_MARK = `<svg width="54" height="54" viewBox="-6 -6 112 112" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Singulance"><ellipse cx="50" cy="50" rx="40" ry="13" transform="rotate(-18 50 50)" stroke="#0a0a0a" stroke-width="3.2"/><circle cx="88.04" cy="37.64" r="4.4" fill="#0a0a0a"/><path d="M80 50 57.39 53.06 62.73 62.73 53.06 57.39 50 96 46.94 57.39 37.27 62.73 42.61 53.06 20 50 42.61 46.94 37.27 37.27 46.94 42.61 50 4 53.06 42.61 62.73 37.27 57.39 46.94Z" fill="#22d3ee"/></svg>`;
 
+/** The single email-client-safe brand header used by every outbound template. */
+export function emailBrandLockup({ compact = true, logoUrl, subtitle = DEFAULT_LIFECYCLE_BRAND.subtitle } = {}) {
+  const size = compact ? 42 : 54;
+  const resolvedLogoUrl = escapeHtml(logoUrl || DEFAULT_LIFECYCLE_BRAND.logoUrl);
+  return `<table role="presentation" cellpadding="0" cellspacing="0"><tr><td width="${size + 12}" valign="middle"><img src="${resolvedLogoUrl}" width="${size}" height="${size}" alt="Singulance" style="display:block;width:${size}px;height:${size}px;object-fit:contain;border:0"></td><td valign="middle"><div style="font-size:${compact ? 24 : 28}px;line-height:${compact ? 25 : 30}px;font-weight:800;letter-spacing:-1px;color:${CARTESIA.ink};font-family:${CARTESIA.sans}">${DEFAULT_LIFECYCLE_BRAND.wordmark}</div><div style="margin-top:5px;font:700 8px/12px ${CARTESIA.mono};letter-spacing:2px;color:#999">${escapeHtml(subtitle).replace(' · ', ` <span style="color:${CARTESIA.blue}">·</span> `)}</div></td></tr></table>`;
+}
+
 export function brandLockup({ compact = false, surface = 'deck', logoUrl, subtitle = DEFAULT_LIFECYCLE_BRAND.subtitle } = {}) {
   if (surface === 'email') {
-    const size = compact ? 42 : 54;
-    const resolvedLogoUrl = escapeHtml(logoUrl || DEFAULT_LIFECYCLE_BRAND.logoUrl);
-    return `<table role="presentation" cellpadding="0" cellspacing="0" class="brand-lockup"><tr><td width="${size + 12}" valign="middle"><img src="${resolvedLogoUrl}" width="${size}" height="${size}" alt="Singulance" style="display:block;width:${size}px;height:${size}px;object-fit:contain;border:0"></td><td valign="middle"><div class="brand-word">${DEFAULT_LIFECYCLE_BRAND.wordmark}</div><div class="brand-sub">${escapeHtml(subtitle).replace(' · ', ' <span>·</span> ')}</div></td></tr></table>`;
+    return emailBrandLockup({ compact, logoUrl, subtitle });
   }
   const mark = compact ? SINGULANCE_MARK.replace('width="54" height="54"', 'width="42" height="42"') : SINGULANCE_MARK;
   return `<div class="brand-lockup">${mark}<div><div class="brand-word">${DEFAULT_LIFECYCLE_BRAND.wordmark}</div><div class="brand-sub">${escapeHtml(subtitle).replace(' · ', ' <span>·</span> ')}</div></div></div>`;

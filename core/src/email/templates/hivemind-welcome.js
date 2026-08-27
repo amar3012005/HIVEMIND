@@ -7,6 +7,8 @@
  * gradients, logos, graph, and alternating layouts across Gmail and Outlook.
  */
 
+import { emailBrandLockup } from './cartesia-lifecycle.js';
+
 const BLUE = '#117dff';
 const BORDER = '#e7e4dd';
 const MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
@@ -45,8 +47,7 @@ function accountWelcome({ name, appUrl, year, orgName, accountType, welcomeKind,
   return `<tr><td style="height:5px;background:${BLUE};font-size:1px;line-height:1px">&nbsp;</td></tr>
   <tr><td class="hm-welcome" style="padding:42px 52px 38px;background:#ffffff;text-align:left">
     <div style="font:700 9px/14px ${MONO};letter-spacing:2.5px;color:${BLUE}">HIVEMIND / SYSTEM MESSAGE</div>
-    <div style="margin-top:17px;font-size:27px;line-height:31px;font-weight:700;color:#0a0a0a">HIVEMIND</div>
-    <div style="margin-top:5px;font:9px/14px ${MONO};letter-spacing:2px;color:#8a8a8a">SOVEREIGN MEMORY ENGINE</div>
+    <div style="margin-top:17px">${emailBrandLockup({ compact: true })}</div>
     <div style="margin-top:42px;font:700 8px/12px ${MONO};letter-spacing:2px;color:${BLUE}">${state}</div>
     <h1 class="hm-welcome-title" style="margin:20px 0 0;font-size:29px;line-height:35px;letter-spacing:-.4px;color:#0a0a0a">${title}</h1>
     <p style="margin:22px 0 0;max-width:560px;font-size:15px;line-height:27px;color:#525252">${copy}</p>

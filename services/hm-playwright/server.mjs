@@ -210,12 +210,12 @@ function sendBinary(res, status, body, contentType) {
   res.end(body);
 }
 
-async function readJson(req) {
+async function readJson(req, maxBytes = MAX_BODY_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw Object.assign(new Error('request_too_large'), { status: 413 });
+    if (size > maxBytes) throw Object.assign(new Error('request_too_large'), { status: 413 });
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
@@ -553,7 +553,11 @@ const server = http.createServer(async (req, res) => {
   if (isPdfRoute) {
     if (req.method !== 'POST') return send(res, 404, { error: 'not_found' });
     await acquire();
-    try { return sendBinary(res, 200, await renderPdf(await readJson(req)), 'application/pdf'); }
+    // PDF decks intentionally allow a larger HTML body than crawler/session
+    // commands. Previously this route still passed through the generic 64 KiB
+    // reader, so a valid 131 KiB Day-0 deck was rejected before renderPdf's
+    // own 180 KiB contract could run.
+    try { return sendBinary(res, 200, await renderPdf(await readJson(req, MAX_PDF_HTML_BYTES + 4096)), 'application/pdf'); }
     catch (error) { return send(res, error.status || 500, { error: String(error.message || error).slice(0, 500) }); }
     finally { release(); }
   }

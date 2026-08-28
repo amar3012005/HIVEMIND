@@ -17,6 +17,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { MemoryGraphEngine } from './graph-engine.js';
 
 // ---------------------------------------------------------------------------
 // StigmergicCoT
@@ -31,9 +32,10 @@ export class StigmergicCoT {
    * @param {object} opts.store — PrismaGraphStore or InMemoryGraphStore
    * @param {number} [opts.traceTTLMinutes=30] — TTL for traces before evaporation
    */
-  constructor({ store, traceTTLMinutes = 30 } = {}) {
+  constructor({ store, graphEngine = null, traceTTLMinutes = 30 } = {}) {
     if (!store) throw new Error('StigmergicCoT requires a store');
     this.store = store;
+    this.graphEngine = graphEngine || new MemoryGraphEngine({ store, predictCalibrate: false });
     this.traceTTLMinutes = traceTTLMinutes;
   }
 
@@ -77,17 +79,18 @@ export class StigmergicCoT {
 
     let chainDepth = 1;
 
-    // Link to parent via Extends
+    // Trace topology is structural, not a semantic claim relationship.
     if (parentThoughtId) {
-      await this.store.createRelationship({
+      await this.graphEngine.applyValidatedRelationship({
         id: uuidv4(),
         from_id: thought.id,
         to_id: parentThoughtId,
-        type: 'Extends',
+        type: 'PartOf',
+        org_id: orgId,
         confidence,
         created_at: new Date().toISOString(),
         metadata: { chain_type: 'cot' }
-      });
+      }, { store: this.store, user_id: userId, org_id: orgId });
 
       // Calculate chain depth by traversing
       chainDepth = await this._getChainDepth(parentThoughtId) + 1;
@@ -143,15 +146,16 @@ export class StigmergicCoT {
 
     // Link to target memory if provided
     if (targetMemoryId) {
-      await this.store.createRelationship({
+      await this.graphEngine.applyValidatedRelationship({
         id: uuidv4(),
         from_id: trace.id,
         to_id: targetMemoryId,
-        type: 'Derives',
+        type: 'PartOf',
+        org_id: orgId,
         confidence: success ? 1.0 : 0.5,
         created_at: new Date().toISOString(),
         metadata: { trace_type: traceType }
-      });
+      }, { store: this.store, user_id: userId, org_id: orgId });
     }
 
     return { traceId: trace.id, traceType };

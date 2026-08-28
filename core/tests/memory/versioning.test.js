@@ -19,6 +19,8 @@ test('Updates transitions old node to is_latest=false', async () => {
     org_id: '00000000-0000-4000-8000-000000000022',
     project: 'alpha',
     content: 'The API now listens on port 3000',
+    claim_subject: 'api', claim_predicate: 'listen_port', claim_qualifiers: { object: 3000 },
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' }
   });
 
@@ -27,6 +29,8 @@ test('Updates transitions old node to is_latest=false', async () => {
     org_id: '00000000-0000-4000-8000-000000000022',
     project: 'alpha',
     content: 'Updated: the API now listens on port 3010',
+    claim_subject: 'api', claim_predicate: 'listen_port', claim_qualifiers: { object: 3010 },
+    defer_entity_linking: true,
     relationship: { type: 'Updates', target_id: base.memoryId },
     source_metadata: { source_type: 'manual' }
   });
@@ -50,10 +54,14 @@ test('Updates synchronizes indexed lifecycle metadata after the canonical transa
   };
   const target = await engine.ingestMemory({
     ...tenant, content: 'The approval policy is version one', smartIngest: false,
+    claim_subject: 'approval-policy', claim_predicate: 'version', claim_qualifiers: { object: 1 },
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' },
   });
   const source = await engine.ingestMemory({
     ...tenant, content: 'The approval policy is version two', smartIngest: false,
+    claim_subject: 'approval-policy', claim_predicate: 'version', claim_qualifiers: { object: 2 },
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' },
   });
   const patches = [];
@@ -80,6 +88,7 @@ test('inferred Updates without shared entity evidence remain non-destructive', a
     org_id: '00000000-0000-4000-8000-000000000032',
     project: 'alpha',
     content: 'The API now listens on port 3000',
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' }
   });
 
@@ -88,10 +97,11 @@ test('inferred Updates without shared entity evidence remain non-destructive', a
     org_id: '00000000-0000-4000-8000-000000000032',
     project: 'alpha',
     content: 'Updated: the API now listens on port 3010',
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' }
   });
 
-  assert.equal(inferred.operation, 'updated');
+  assert.equal(inferred.operation, 'created');
   assert.equal((await store.getMemory(base.memoryId)).is_latest, true);
   assert.equal(store.relationships.filter(edge => edge.type === 'Updates').length, 0);
 });
@@ -103,6 +113,7 @@ test('Extends keeps both nodes latest', async () => {
     org_id: '00000000-0000-4000-8000-000000000222',
     project: 'alpha',
     content: 'Security proposal: enforce API keys',
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' }
   });
 
@@ -111,6 +122,7 @@ test('Extends keeps both nodes latest', async () => {
     org_id: '00000000-0000-4000-8000-000000000222',
     project: 'alpha',
     content: 'Security proposal: enforce API keys with request signing details',
+    defer_entity_linking: true,
     relationship: { type: 'Extends', target_id: base.memoryId },
     source_metadata: { source_type: 'manual' }
   });
@@ -125,26 +137,34 @@ test('Extends keeps both nodes latest', async () => {
 
 test('Derives enforces confidence threshold', async () => {
   const { store, engine } = createEngine();
-  const source = await engine.ingestMemory({
+  const source = await store.createMemory({
+    id: '00000000-0000-4000-8000-000000000213',
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
     content: 'Amar works on retrieval',
+    smartIngest: false,
+    skipProcessing: true,
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' }
   });
 
-  const target = await engine.ingestMemory({
+  const target = await store.createMemory({
+    id: '00000000-0000-4000-8000-000000000214',
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
     content: 'Qdrant powers retrieval',
+    smartIngest: false,
+    skipProcessing: true,
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' }
   });
 
-  const low = await engine.applyDerives(source.memoryId, target.memoryId, {
+  const low = await engine.applyDerives(source.id, target.id, {
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
     confidence: 0.5
   });
-  const high = await engine.applyDerives(source.memoryId, target.memoryId, {
+  const high = await engine.applyDerives(source.id, target.id, {
     user_id: '00000000-0000-4000-8000-000000000211',
     org_id: '00000000-0000-4000-8000-000000000222',
     confidence: 0.82
@@ -173,6 +193,8 @@ test('Concurrent ingests preserve is_latest invariant with advisory locking', as
     org_id: '00000000-0000-4000-8000-000000000322',
     project: 'alpha',
     content: 'Current production port is 3000',
+    claim_subject: 'production-api', claim_predicate: 'listen_port', claim_qualifiers: { object: 3000 },
+    defer_entity_linking: true,
     source_metadata: { source_type: 'manual' }
   });
 
@@ -182,6 +204,8 @@ test('Concurrent ingests preserve is_latest invariant with advisory locking', as
       org_id: '00000000-0000-4000-8000-000000000322',
       project: 'alpha',
       content: 'Updated: current production port is 3010',
+      claim_subject: 'production-api', claim_predicate: 'listen_port', claim_qualifiers: { object: 3010 },
+      defer_entity_linking: true,
       relationship: { type: 'Updates', target_id: base.memoryId },
       source_metadata: { source_type: 'manual' }
     }),
@@ -190,6 +214,8 @@ test('Concurrent ingests preserve is_latest invariant with advisory locking', as
       org_id: '00000000-0000-4000-8000-000000000322',
       project: 'alpha',
       content: 'Updated: current production port is 3020',
+      claim_subject: 'production-api', claim_predicate: 'listen_port', claim_qualifiers: { object: 3020 },
+      defer_entity_linking: true,
       relationship: { type: 'Updates', target_id: base.memoryId },
       source_metadata: { source_type: 'manual' }
     })

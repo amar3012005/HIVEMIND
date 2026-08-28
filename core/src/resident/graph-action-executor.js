@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { MemoryGraphEngine } from '../memory/graph-engine.js';
 
 /**
  * Graph Action Executor
@@ -21,6 +22,7 @@ export class GraphActionExecutor {
    */
   constructor({ memoryStore, logger = console }) {
     this.store = memoryStore;
+    this.engine = memoryStore?.engine || new MemoryGraphEngine({ store: memoryStore, predictCalibrate: false });
     this.logger = logger;
   }
 
@@ -274,27 +276,9 @@ export class GraphActionExecutor {
         }
       }
     } else {
-      // SOFT MERGE: mark as not-latest, link to canonical
+      // SOFT MERGE: duplicate lineage is lifecycle metadata, not semantic
+      // Extends/Derives. Keep it queryable without manufacturing graph edges.
       for (const dup of duplicates) {
-        await this._safeCreateRelationship({
-          id: randomUUID(),
-          from_id: dup.id,
-          to_id: canonical.id,
-          type: 'Extends',
-          confidence,
-          metadata: { source: 'turing_graph_action', action: 'merge_duplicate_cluster' },
-          created_by: 'turing',
-        });
-        // Derives edge: canonical was derived from consolidating these sources
-        await this._safeCreateRelationship({
-          id: randomUUID(),
-          from_id: canonical.id,
-          to_id: dup.id,
-          type: 'Derives',
-          confidence,
-          metadata: { source: 'csi-turing', action_type: 'merge_duplicate_cluster' },
-          created_by: 'csi-turing',
-        });
         await this._safeUpdate(dup.id, {
           isLatest: false,
           supersedesId: canonical.id,
@@ -383,21 +367,22 @@ export class GraphActionExecutor {
 
     await this.store.createMemory(riskMemory);
 
-    // Create Derives edges from the promoted risk memory to each evidence source
+    // Provenance direction is source -> synthesis/risk, never the reverse.
     const evidenceIds = content?.evidence_memory_ids || memoryIds;
+    let derivesEdges = 0;
     for (const evidenceId of evidenceIds) {
-      await this._safeCreateRelationship({
+      if (await this._safeCreateRelationship({
         id: randomUUID(),
-        from_id: riskMemory.id,
-        to_id: evidenceId,
+        from_id: evidenceId,
+        to_id: riskMemory.id,
         type: 'Derives',
         confidence,
         metadata: { source: 'csi-turing', action_type: 'promote_known_risk' },
         created_by: 'csi-turing',
-      });
+      })) derivesEdges += 1;
     }
 
-    return { status: 'executed', promoted_memory_id: riskMemory.id, summary, derives_edges: evidenceIds.length };
+    return { status: 'executed', promoted_memory_id: riskMemory.id, summary, derives_edges: derivesEdges };
   }
 
   /**
@@ -409,27 +394,28 @@ export class GraphActionExecutor {
     if (memoryIds.length < 2) return { status: 'skipped', reason: 'need_at_least_2_memories' };
     if (dryRun) return { status: 'dry_run', would_link: memoryIds.length - 1 };
 
-    // Determine relationship type: use Derives for non-standard relationship types
     const suggestedType = content?.relationship_type;
-    const useDerivesEdge = suggestedType && suggestedType !== 'Updates' && suggestedType !== 'Extends';
-    const edgeType = useDerivesEdge ? 'Derives' : 'Extends';
+    const edgeType = suggestedType || 'Extends';
+    if (!['Updates', 'Extends', 'Derives', 'Contradicts'].includes(edgeType)) {
+      return { status: 'skipped', reason: 'unsupported_relationship_type', suggested_type: suggestedType };
+    }
 
     let created = 0;
     for (let i = 1; i < memoryIds.length; i++) {
-      await this._safeCreateRelationship({
+      const persisted = await this._safeCreateRelationship({
         id: randomUUID(),
         from_id: memoryIds[i],
         to_id: memoryIds[0],
         type: edgeType,
         confidence,
         metadata: {
-          source: useDerivesEdge ? 'csi-turing' : 'turing_graph_action',
+          source: edgeType === 'Derives' ? 'csi-turing' : 'turing_graph_action',
           action_type: 'relationship_candidate',
           ...(suggestedType ? { suggested_relationship_type: suggestedType } : {}),
         },
-        created_by: useDerivesEdge ? 'csi-turing' : 'turing',
+        created_by: edgeType === 'Derives' ? 'csi-turing' : 'turing',
       });
-      created++;
+      if (persisted) created++;
     }
     return { status: 'executed', relationships_created: created, edge_type: edgeType };
   }
@@ -475,8 +461,14 @@ export class GraphActionExecutor {
   /** Create a relationship, skipping if it already exists (unique constraint). */
   async _safeCreateRelationship(edge) {
     try {
-      await this.store.createRelationship(edge);
-      return true;
+      const source = await this.store.getMemory(edge.from_id);
+      if (!source) return false;
+      const applied = await this.engine.applyValidatedRelationship(edge, {
+        store: this.store,
+        user_id: source.user_id,
+        org_id: source.org_id,
+      });
+      return Boolean(applied.edgesCreated?.length);
     } catch (err) {
       // Unique constraint = relationship already exists = not an error
       if (err.message?.includes('Unique constraint')) return false;

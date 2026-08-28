@@ -791,7 +791,11 @@ if (externalRefStore && entityResolver) {
 }
 const cognitiveOperator = persistentMemoryStore ? new CognitiveOperator({ store: persistentMemoryStore }) : null;
 const biTemporalEngine = persistentMemoryStore ? new BiTemporalEngine({ store: persistentMemoryStore, prisma }) : null;
-const stigmergicCoT = persistentMemoryStore ? new StigmergicCoT({ store: persistentMemoryStore, traceTTLMinutes: 30 }) : null;
+const stigmergicCoT = persistentMemoryStore ? new StigmergicCoT({
+  store: persistentMemoryStore,
+  graphEngine: persistentMemoryEngine,
+  traceTTLMinutes: 30,
+}) : null;
 const byzantineConsensus = new ByzantineConsensus({ commitThreshold: 80 });
 
 // Profile store
@@ -817,7 +821,7 @@ if (persistentMemoryStore) {
 // Graph Hygiene Scanner
 let hygieneScanner = null;
 if (persistentMemoryStore) {
-  hygieneScanner = new GraphHygieneScanner(persistentMemoryStore, prisma);
+  hygieneScanner = new GraphHygieneScanner(persistentMemoryStore, prisma, persistentMemoryEngine);
 }
 
 // Scheduled connector sync
@@ -1048,7 +1052,7 @@ if (process.env.ENABLE_CONTRADICTION_SCAN === 'true' && prisma && shouldRunRecur
     try {
       if (!contradictionScanner) {
         const { ContradictionScanner } = await import('./resident/contradiction-scanner.js');
-        contradictionScanner = new ContradictionScanner({ prisma, logger: console });
+        contradictionScanner = new ContradictionScanner({ prisma, memoryGraphEngine: persistentMemoryEngine, memoryStore: persistentMemoryStore, logger: console });
       }
       const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
       const orgs = await prisma.memory.groupBy({
@@ -8340,11 +8344,11 @@ exit \$RC
                 factIds.push(childId);
                 if (parentId) {
                   try {
-                    await documentFirstIngestion.memoryGraphEngine.store.createRelationship({
+                    await documentFirstIngestion.memoryGraphEngine.applyValidatedRelationship({
                       id: crypto.randomUUID(), from_id: childId, to_id: parentId,
                       type: 'PartOf', confidence: 1.0, org_id: mOrg,
                       metadata: { source: 'meeting', section: sec.key },
-                    });
+                    }, { user_id: mUser, org_id: mOrg });
                   } catch (edgeErr) { console.warn('[meeting-ingest] PartOf edge failed:', edgeErr.message); }
                 }
               }
@@ -17531,41 +17535,26 @@ exit \$RC
                         }
                         const chunkResult = await ingestRoutedPayloadCanonical(routedChunk, persistentMemoryEngine);
                         const chunkMemoryId = chunkResult?.memoryId;
-                        // Deterministic previous-chunk edge
-                        if (prevChunkId && chunkMemoryId) {
-                          try {
-                            await persistentMemoryStore.createRelationship({
-                              id: crypto.randomUUID(),
-                              from_id: chunkMemoryId,
-                              to_id: prevChunkId,
-                              type: 'Extends',
-                              confidence: 0.99,
-                              metadata: {
-                                auto_structural: true,
-                                source: 'enterprise_chunk_chain',
-                              },
-                              created_by: 'enterprise_ingest',
-                            });
-                            console.log(`[enterprise] Chunk chain edge: ${chunkMemoryId} -> ${prevChunkId}`);
-                          } catch (chainErr) {
-                            console.warn('[enterprise] Chunk chain edge failed:', chainErr.message);
-                          }
-                        }
+                        // Previous-chunk order lives in metadata, not a semantic edge.
                         prevChunkId = chunkMemoryId;
                         const routedTargetId = routedChunk.related_to || routedChunk.relationship?.target_id || routedChunk.relationship?.targetId || null;
                         if (parentId && chunkResult?.memoryId && routedTargetId !== parentId) {
                           try {
-                            await persistentMemoryStore.createRelationship({
+                            await persistentMemoryEngine.applyValidatedRelationship({
                               id: crypto.randomUUID(),
                               from_id: chunkResult.memoryId,
                               to_id: parentId,
-                              type: 'Extends',
-                              confidence: 0.99,
+                              type: 'PartOf',
+                              confidence: 1.0,
                               metadata: {
                                 auto_structural: true,
                                 source: 'enterprise_parent_fallback',
                               },
                               created_by: 'enterprise_ingest',
+                            }, {
+                              store: persistentMemoryStore,
+                              user_id: userId,
+                              org_id: orgId,
                             });
                           } catch (parentEdgeErr) {
                             console.warn('[enterprise] Parent fallback edge failed:', parentEdgeErr.message);
@@ -20782,7 +20771,7 @@ exit \$RC
             const _from = body.from_id || body.fromId;
             const _to = body.to_id || body.toId;
             const _type = body.type;
-            const _VALID_EDGE = new Set(['Updates', 'Extends', 'Contradicts', 'Derives', 'PartOf', 'Mentions', 'RelatedTo']);
+            const _VALID_EDGE = new Set(['Updates', 'Extends', 'Contradicts', 'Derives', 'PartOf']);
             if (!_from || !_to || !_type) {
               return jsonResponse(res, { error: 'from_id, to_id and type are required' }, 400);
             }
@@ -20803,7 +20792,7 @@ exit \$RC
               // legacy in-memory facade; accepting its result here acknowledged a
               // relationship that disappeared immediately and never reached
               // Postgres or a tenant Memory Box.
-              const rel = await persistentMemoryStore.createRelationship({
+              const applied = await persistentMemoryEngine.applyValidatedRelationship({
                 from_id: _from,
                 to_id: _to,
                 type: _type,
@@ -20811,8 +20800,15 @@ exit \$RC
                 metadata: body.metadata,
                 created_by: userId,
                 org_id: orgId,
+              }, {
+                store: persistentMemoryStore,
+                user_id: userId,
+                org_id: orgId,
               });
-              return jsonResponse(res, { success: true, relationship: rel });
+              if (!applied.edgesCreated?.length) {
+                return jsonResponse(res, { error: applied.reason || 'relationship proposal rejected' }, 422);
+              }
+              return jsonResponse(res, { success: true, relationship: applied.edgesCreated[0] });
             } catch (relErr) {
               return jsonResponse(res, { error: relErr.message }, 500);
             }
@@ -22633,7 +22629,7 @@ exit \$RC
                     edgesProposed += 1;
 
                     if (!backfillDryRun) {
-                      await persistentMemoryStore.createRelationship({
+                      const applied = await persistentMemoryEngine.applyValidatedRelationship({
                         id: crypto.randomUUID(),
                         from_id: relationshipType === 'Derives' ? relationshipTarget : orphan.id,
                         to_id: relationshipType === 'Derives' ? orphan.id : relationshipTarget,
@@ -22645,8 +22641,12 @@ exit \$RC
                           reason: relationship?.reason || 'router_replay',
                         },
                         created_by: 'graph_backfill',
+                      }, {
+                        store: persistentMemoryStore,
+                        user_id: orphan.userId || userId,
+                        org_id: orphan.orgId || orgId,
                       });
-                      edgesApplied += 1;
+                      edgesApplied += applied.edgesCreated?.length || 0;
                     }
 
                     results.push({
@@ -23537,14 +23537,14 @@ exit \$RC
                     if (t.id === summaryId) continue;
                     if (!(t.tags || []).some(tag => tag === 'tara-turn' || tag === 'tara-insight')) continue;
                     try {
-                      await persistentMemoryStore.createRelationship({
+                      await persistentMemoryEngine.applyValidatedRelationship({
                         from_id: t.id,
                         to_id: summaryId,
                         type: 'PartOf',
                         confidence: 1.0,
                         metadata: { reason: 'voice-session-rollup' },
                         created_by: 'tara-end-session',
-                      });
+                      }, { store: persistentMemoryStore, user_id: userId, org_id: orgId });
                     } catch { /* idempotency conflicts are fine */ }
                   }
                 }

@@ -1077,15 +1077,26 @@ async function expandCandidatesViaGraph(store, {
 }) {
   const expandedMemoryIds = new Set(initialCandidates.map(c => c.memory?.id).filter(Boolean));
   const expandedCandidates = [];
-  const relationshipTypes = ['Derives', 'Extends', 'Updates'];
+  const relationshipTypes = ['Updates', 'Contradicts', 'Derives', 'PartOf', 'Extends'];
+  const edgePriority = { Updates: 5, Contradicts: 4, Derives: 3, PartOf: 2, Extends: 1 };
 
   // Build relationship lookup for quick access to edge metadata
   const relationshipLookup = new Map();
   for (const edge of relationships) {
     const key = `${edge.from_id}-${edge.to_id}`;
-    relationshipLookup.set(key, edge);
+    const current = relationshipLookup.get(key);
+    if (!current
+      || (edgePriority[edge.type] || 0) > (edgePriority[current.type] || 0)
+      || ((edgePriority[edge.type] || 0) === (edgePriority[current.type] || 0)
+        && Number(edge.confidence || 0) > Number(current.confidence || 0))) {
+      relationshipLookup.set(key, edge);
+    }
     const reverseKey = `${edge.to_id}-${edge.from_id}`;
-    if (!relationshipLookup.has(reverseKey)) {
+    const reverseCurrent = relationshipLookup.get(reverseKey);
+    if (!reverseCurrent
+      || (edgePriority[edge.type] || 0) > (edgePriority[reverseCurrent.type] || 0)
+      || ((edgePriority[edge.type] || 0) === (edgePriority[reverseCurrent.type] || 0)
+        && Number(edge.confidence || 0) > Number(reverseCurrent.confidence || 0))) {
       relationshipLookup.set(reverseKey, edge);
     }
   }
@@ -2110,19 +2121,12 @@ async function _recallPersistedMemoriesImpl(store, {
 
   // Apply fact-memory boost before slicing to contextLimit
   // Items have shape { memory, score, vectorScore, ... }
-  // Phase 5 (GRAPH_MEMORY_UPGRADE): graph-structure-aware boost.
-  // Hubs are the most-cited node in their cluster — preferred representative.
-  // Bridges connect topics — small lift so they surface for cross-topic queries.
-  // Strength reflects recall reinforcement (Phase 6) — multiplicative.
+  // Recall reinforcement is allowed to affect ranking. Raw graph degree and
+  // hub/bridge labels are not: duplicated/noisy edges must not create authority.
   const applyClusterBoost = (item) => {
     const mem = item.memory || item;
-    const role = mem.clusterRole || mem.cluster_role;
-    const hubScore = Number.isFinite(mem.hubScore) ? mem.hubScore : (Number.isFinite(mem.hub_score) ? mem.hub_score : 0);
     const strength = Number.isFinite(mem.strength) ? mem.strength : 1.0;
     let mult = 1.0;
-    if (role === 'hub') mult *= 1.20;
-    else if (role === 'bridge') mult *= 1.05;
-    if (hubScore > 0) mult *= (1 + 0.10 * Math.min(1, hubScore));
     mult *= (0.85 + 0.15 * Math.max(0.1, Math.min(1.0, strength)));
     return { ...item, score: (item.score || 0) * mult };
   };

@@ -10,8 +10,9 @@
  * (gated behind RERANK_ENABLED, agent path). That one is a precision pass that
  * calls an external model; this one is pure scoring and never makes network calls.
  *
- * Combines: vector score, recency, confirmation count, relationship density,
- * query-term overlap (BM25-like), and source authority.
+ * Combines vector score, recency, confirmation count, query-term overlap
+ * (BM25-like), and source authority. Raw graph degree is intentionally not a
+ * ranking signal: noisy or duplicated edges must never manufacture authority.
  *
  * No external model needed — purely algorithmic.
  */
@@ -23,7 +24,6 @@ export class ResultReranker {
       termOverlap: options.termOverlapWeight ?? 0.25,
       recency: options.recencyWeight ?? 0.15,
       authority: options.authorityWeight ?? 0.10,
-      relationshipDensity: options.relationshipDensityWeight ?? 0.10,
     };
   }
 
@@ -50,7 +50,6 @@ export class ResultReranker {
         termOverlap: this._computeTermOverlap(queryTerms, result.content || ''),
         recency: this._computeRecency(result.created_at || result.document_date, now),
         authority: this._computeAuthority(result),
-        relationshipDensity: this._computeRelationshipDensity(result),
       };
 
       const combinedScore = Object.entries(this.weights).reduce(
@@ -141,12 +140,4 @@ export class ResultReranker {
     return Math.min(1, Math.max(0, authority));
   }
 
-  _computeRelationshipDensity(result) {
-    // Results with more relationships are more connected = more authoritative
-    const relCount = result.relationships?.length || result.metadata?.relationship_count || 0;
-    if (relCount === 0) return 0.3;
-    if (relCount <= 2) return 0.5;
-    if (relCount <= 5) return 0.7;
-    return 0.9;
-  }
 }

@@ -216,8 +216,12 @@ async function ensureSchema() {
       to_id uuid NOT NULL,
       type text,
       confidence real NOT NULL DEFAULT 1,
+      metadata jsonb NOT NULL DEFAULT '{}',
+      created_by text NOT NULL DEFAULT 'system',
       created_at timestamptz NOT NULL DEFAULT now()
     );
+    ALTER TABLE relationships ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}';
+    ALTER TABLE relationships ADD COLUMN IF NOT EXISTS created_by text NOT NULL DEFAULT 'system';
     CREATE INDEX IF NOT EXISTS rel_from_idx ON relationships(from_id);
     CREATE INDEX IF NOT EXISTS rel_to_idx   ON relationships(to_id);
     -- ONE ROW PER LOGICAL EDGE. The table's only unique constraint was the primary key, so a
@@ -1136,6 +1140,22 @@ function routesFor(ctx) {
       }
       for (const rel of (b.rels || [])) {
         if (!rel?.fromId || !rel?.toId) continue;
+        const semantic = ['Updates', 'Extends', 'Derives', 'Contradicts'].includes(rel.type);
+        const certified = rel.metadata?.relationship_policy_version === 'canonical-graph-v1'
+          && rel.metadata?.relationship_validation_status === 'validated';
+        if ((semantic && !certified) || (rel.type === 'Mentions' && rel.metadata?.entity_projection !== true)) {
+          throw new Error(`relationship_policy_rejected:${rel.type || 'unknown'}`);
+        }
+        if (semantic) {
+          const { rows: budgetRows } = await db().query(
+            `SELECT EXISTS(SELECT 1 FROM relationships WHERE org_id=$1 AND from_id=$2 AND to_id=$3 AND type=$4) AS exists,
+                    (SELECT count(*)::int FROM relationships WHERE org_id=$1 AND from_id=$2 AND type = ANY($5::text[])) AS semantic_out`,
+            [org, rel.fromId, rel.toId, rel.type, ['Updates', 'Extends', 'Derives', 'Contradicts']],
+          );
+          if (!budgetRows[0]?.exists && Number(budgetRows[0]?.semantic_out || 0) >= 10) {
+            throw new Error('relationship_policy_rejected:semantic-edge-budget-exhausted');
+          }
+        }
         amr.addEdge(rel);
 
         // SQL MIRROR for edges, same reason as the memories mirror in /v1/write: the external agent
@@ -1147,10 +1167,11 @@ function routesFor(ctx) {
           await db().query(
             // Conflict on the LOGICAL edge. Conflicting on `id` made every distinct id a new
             // row, which is exactly how the duplicates arose.
-            `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET confidence=EXCLUDED.confidence`,
+            `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence, metadata, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET confidence=EXCLUDED.confidence, metadata=EXCLUDED.metadata, created_by=EXCLUDED.created_by`,
             [rel.id || edgeId(org, rel.fromId, rel.toId, rel.type || 'Mentions'),
-             org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
+             org, rel.fromId, rel.toId, rel.type || 'PartOf', rel.confidence ?? 1,
+             JSON.stringify(rel.metadata || {}), rel.createdBy || 'system']);
         } catch (e) {
           console.warn(`[embedded-agent] relationship mirror failed ${rel.fromId}->${rel.toId} org=${org}: ${e.message}`);
         }
@@ -1259,6 +1280,22 @@ function routesFor(ctx) {
     '/v1/edge': async (b) => {
       const rel = b.rel;
       if (rel?.fromId && rel?.toId) {
+        const semantic = ['Updates', 'Extends', 'Derives', 'Contradicts'].includes(rel.type);
+        const certified = rel.metadata?.relationship_policy_version === 'canonical-graph-v1'
+          && rel.metadata?.relationship_validation_status === 'validated';
+        if ((semantic && !certified) || (rel.type === 'Mentions' && rel.metadata?.entity_projection !== true)) {
+          throw new Error(`relationship_policy_rejected:${rel.type || 'unknown'}`);
+        }
+        if (semantic) {
+          const { rows: budgetRows } = await db().query(
+            `SELECT EXISTS(SELECT 1 FROM relationships WHERE org_id=$1 AND from_id=$2 AND to_id=$3 AND type=$4) AS exists,
+                    (SELECT count(*)::int FROM relationships WHERE org_id=$1 AND from_id=$2 AND type = ANY($5::text[])) AS semantic_out`,
+            [org, rel.fromId, rel.toId, rel.type, ['Updates', 'Extends', 'Derives', 'Contradicts']],
+          );
+          if (!budgetRows[0]?.exists && Number(budgetRows[0]?.semantic_out || 0) >= 10) {
+            throw new Error('relationship_policy_rejected:semantic-edge-budget-exhausted');
+          }
+        }
         amr.addEdge(rel);
 
         // SQL MIRROR for edges, same reason as the memories mirror in /v1/write: the external agent
@@ -1270,10 +1307,11 @@ function routesFor(ctx) {
           await db().query(
             // Conflict on the LOGICAL edge. Conflicting on `id` made every distinct id a new
             // row, which is exactly how the duplicates arose.
-            `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
-             ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET confidence=EXCLUDED.confidence`,
+            `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence, metadata, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (org_id, from_id, to_id, type) DO UPDATE SET confidence=EXCLUDED.confidence, metadata=EXCLUDED.metadata, created_by=EXCLUDED.created_by`,
             [rel.id || edgeId(org, rel.fromId, rel.toId, rel.type || 'Mentions'),
-             org, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
+             org, rel.fromId, rel.toId, rel.type || 'PartOf', rel.confidence ?? 1,
+             JSON.stringify(rel.metadata || {}), rel.createdBy || 'system']);
         } catch (e) {
           console.warn(`[embedded-agent] relationship mirror failed ${rel.fromId}->${rel.toId} org=${org}: ${e.message}`);
         }
@@ -1414,6 +1452,13 @@ function routesFor(ctx) {
     // BFS depth so concurrent recalls cannot fill the tenant transport queue.
     '/v1/mem-relationships-batch': async (b) => {
       const ids = [...new Set((Array.isArray(b.ids) ? b.ids : []).filter(Boolean))].slice(0, 25);
+      const { rows: mirrorRows } = ids.length ? await db().query(
+        `SELECT id, from_id, to_id, type, confidence, metadata, created_by, created_at
+           FROM relationships
+          WHERE org_id=$1 AND (from_id = ANY($2::uuid[]) OR to_id = ANY($2::uuid[]))`,
+        [org, ids],
+      ) : { rows: [] };
+      const mirrorByKey = new Map(mirrorRows.map((row) => [`${row.from_id}:${row.to_id}:${row.type}`, row]));
       const peerTitle = (rec) => rec?.title || (rec?.content || '').slice(0, 60) || '(untitled)';
       const peerAccess = (rec, prefix) => ({
         [`${prefix}_user_id`]: rec?.user_id || null,
@@ -1425,20 +1470,24 @@ function routesFor(ctx) {
       const relationships = {};
       for (const memId of ids) {
         const { out: outE, in: inE } = amr.edgesOf(memId);
-        const out = outE.slice(0, 200).map((e) => ({
-          id: `e:${memId}:${e.toId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
-          created_by: null, created_at: null, metadata: {}, direction: 'out',
+        const out = outE.slice(0, 200).map((e) => {
+          const mirror = mirrorByKey.get(`${memId}:${e.toId}:${e.type}`);
+          return ({
+          id: mirror?.id || `e:${memId}:${e.toId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
+          created_by: mirror?.created_by || null, created_at: mirror?.created_at || null, metadata: mirror?.metadata || {}, direction: 'out',
           target_id: e.toId, target_title: peerTitle(e.peer), target_memory_type: e.peer?.memory_type || null,
           target_is_latest: e.peer?.is_latest ?? null, target_deleted: !!(e.peer?.deleted_at),
           ...peerAccess(e.peer, 'target'),
-        }));
-        const inn = inE.slice(0, 200).map((e) => ({
-          id: `e:${e.fromId}:${memId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
-          created_by: null, created_at: null, metadata: {}, direction: 'in',
+        }); });
+        const inn = inE.slice(0, 200).map((e) => {
+          const mirror = mirrorByKey.get(`${e.fromId}:${memId}:${e.type}`);
+          return ({
+          id: mirror?.id || `e:${e.fromId}:${memId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
+          created_by: mirror?.created_by || null, created_at: mirror?.created_at || null, metadata: mirror?.metadata || {}, direction: 'in',
           source_id: e.fromId, source_title: peerTitle(e.peer), source_memory_type: e.peer?.memory_type || null,
           source_is_latest: e.peer?.is_latest ?? null, source_deleted: !!(e.peer?.deleted_at),
           ...peerAccess(e.peer, 'source'),
-        }));
+        }); });
         const by_type = {};
         for (const e of [...out, ...inn]) {
           const t = e.type || 'Other';
@@ -1456,24 +1505,34 @@ function routesFor(ctx) {
       const memId = b.memoryId;
       const peerTitle = (rec) => rec?.title || (rec?.content || '').slice(0, 60) || '(untitled)';
       const { out: outE, in: inE } = amr.edgesOf(memId);
-      const enrichOut = outE.slice(0, 200).map((e) => ({
-        id: `e:${memId}:${e.toId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
-        created_by: null, created_at: null, metadata: {}, direction: 'out',
+      const { rows: mirrorRows } = await db().query(
+        `SELECT id, from_id, to_id, type, metadata, created_by, created_at
+           FROM relationships WHERE org_id=$1 AND (from_id=$2::uuid OR to_id=$2::uuid)`,
+        [org, memId],
+      );
+      const mirrorByKey = new Map(mirrorRows.map((row) => [`${row.from_id}:${row.to_id}:${row.type}`, row]));
+      const enrichOut = outE.slice(0, 200).map((e) => {
+        const mirror = mirrorByKey.get(`${memId}:${e.toId}:${e.type}`);
+        return ({
+        id: mirror?.id || `e:${memId}:${e.toId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
+        created_by: mirror?.created_by || null, created_at: mirror?.created_at || null, metadata: mirror?.metadata || {}, direction: 'out',
         target_id: e.toId, target_title: peerTitle(e.peer), target_memory_type: e.peer?.memory_type || null,
         target_is_latest: e.peer?.is_latest ?? null, target_deleted: !!(e.peer?.deleted_at),
         target_user_id: e.peer?.user_id || null, target_scope: e.peer?.scope || null,
         target_project: e.peer?.project || null, target_project_ids: Array.isArray(e.peer?.project_ids) ? e.peer.project_ids : [],
         target_primary_team_id: e.peer?.primary_team_id || null,
-      }));
-      const enrichIn = inE.slice(0, 200).map((e) => ({
-        id: `e:${e.fromId}:${memId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
-        created_by: null, created_at: null, metadata: {}, direction: 'in',
+      }); });
+      const enrichIn = inE.slice(0, 200).map((e) => {
+        const mirror = mirrorByKey.get(`${e.fromId}:${memId}:${e.type}`);
+        return ({
+        id: mirror?.id || `e:${e.fromId}:${memId}:${e.type}`, type: e.type || 'Mentions', confidence: e.confidence,
+        created_by: mirror?.created_by || null, created_at: mirror?.created_at || null, metadata: mirror?.metadata || {}, direction: 'in',
         source_id: e.fromId, source_title: peerTitle(e.peer), source_memory_type: e.peer?.memory_type || null,
         source_is_latest: e.peer?.is_latest ?? null, source_deleted: !!(e.peer?.deleted_at),
         source_user_id: e.peer?.user_id || null, source_scope: e.peer?.scope || null,
         source_project: e.peer?.project || null, source_project_ids: Array.isArray(e.peer?.project_ids) ? e.peer.project_ids : [],
         source_primary_team_id: e.peer?.primary_team_id || null,
-      }));
+      }); });
       const by_type = {};
       for (const e of [...enrichOut, ...enrichIn]) {
         const t = e.type || 'Other';

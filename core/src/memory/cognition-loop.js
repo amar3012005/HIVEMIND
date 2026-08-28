@@ -26,7 +26,7 @@
 
 import crypto from 'crypto';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
-import { orgIsRemote, amrWrite, amrAddEdge, amrListRecent } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrWrite, amrListRecent } from '../vector/mneme/driver.js';
 import { remoteList } from '../vector/mneme/remote-backend.js';
 import { chatCompletion } from '../knowledge/enterprise/litellm-client.js';
 import { ClusterIndex } from './cluster-index.js';
@@ -408,6 +408,17 @@ export class CognitionLoop {
     this._intervalMs   = Number(process.env.COGNITION_INTERVAL_MS || 60 * 60 * 1000); // 1h
     // ClusterIndex: durable cluster-state for dirty-scheduling (Move 1)
     this.clusterIndex  = new ClusterIndex({ prisma });
+  }
+
+  async _applyRelationship(edge, { orgId, userId }) {
+    if (!this.engine?.applyValidatedRelationship) {
+      throw new Error('canonical_relationship_dispatcher_unavailable');
+    }
+    return this.engine.applyValidatedRelationship(edge, {
+      store: this.store,
+      org_id: orgId,
+      user_id: userId,
+    });
   }
 
   start() {
@@ -2185,17 +2196,15 @@ Output JSON only:
           const extendTags = (await this.prisma.memory.findUnique({ where: { id: newId }, select: { tags: true } }))?.tags || [];
 
           // Extends edge: new → existing (new extends the prior)
-          await this.prisma.relationship.create({
-            data: {
+          await this._applyRelationship({
               id:         crypto.randomUUID(),
-              fromId:     newId,
-              toId:       existing.id,
+              from_id:    newId,
+              to_id:      existing.id,
               type:       'Extends',
               confidence: finalConf,
-              createdBy:  'cognition-loop',
+              created_by: 'cognition-loop',
               metadata:   { reason: 'delta_extend', topic: tag, revision: newRev },
-            },
-          }).catch(() => {});
+          }, { orgId, userId }).catch(() => {});
 
           // Update cluster-index with new synthesis id and revision
           await this._upsertClusterIndexWithRetry({
@@ -2339,17 +2348,15 @@ Output JSON only:
           const contradictTags = (await this.prisma.memory.findUnique({ where: { id: newId }, select: { tags: true } }))?.tags || [];
 
           // Explicit Updates edge
-          await this.prisma.relationship.create({
-            data: {
+          await this._applyRelationship({
               id:         crypto.randomUUID(),
-              fromId:     newId,
-              toId:       existing.id,
+              from_id:    newId,
+              to_id:      existing.id,
               type:       'Updates',
               confidence: finalConf,
-              createdBy:  'cognition-loop',
+              created_by: 'cognition-loop',
               metadata:   { reason: 'delta_contradict', topic: tag },
-            },
-          }).catch(() => {});
+          }, { orgId, userId }).catch(() => {});
 
           // Update cluster-index: new synthesis row, revision reset to 1
           await this._upsertClusterIndexWithRetry({
@@ -2568,7 +2575,7 @@ Output JSON only:
         }
 
         // Derives edges to evidence sources
-        await this._linkDerivesEdges(newId, members, sourceType, tag);
+        await this._linkDerivesEdges(newId, members, sourceType, tag, { orgId, userId });
       }
 
       if (newId) await this._embedSynthMemory({ id: newId, userId, orgId, project, title, content, tags: finalTags, sourceType, visibility: synthVisibility });
@@ -2611,7 +2618,7 @@ Output JSON only:
         project:           project || null,
         projectIds:        [],
       }, vec, []);
-      await this._linkDerivesEdges(id, members, sourceType, tag);
+      await this._linkDerivesEdges(id, members, sourceType, tag, { orgId, userId });
       return { id };
     }
 
@@ -2667,7 +2674,7 @@ Output JSON only:
     });
 
     if (created) {
-      await this._linkDerivesEdges(created.id, members, sourceType, tag);
+      await this._linkDerivesEdges(created.id, members, sourceType, tag, { orgId, userId });
       await this._embedSynthMemory({ id: created.id, userId, orgId, project, title, content, tags: Array.from(unionedTags), sourceType, visibility });
     }
     return created;
@@ -2708,64 +2715,27 @@ Output JSON only:
     }
   }
 
-  // Derives edges to all source members
-  async _linkDerivesEdges(synthId, members, sourceType, tag) {
-    // H9: one batched insert instead of N serial create() round-trips. Canonical
-    // clusters can have 30-300 members; per-row inserts serialized relationship
-    // writes and cost ~3s+/tick at scale. createMany + skipDuplicates collapses it
-    // to a single statement. (Members are real memory ids → FK-valid; a rare bad
-    // row would fail the batch, so we fall back to per-row on batch error.)
+  // Persist a bounded set of strongest provenance edges. The synthesis memory
+  // retains the complete evidence-id list; graph traversal needs a sparse,
+  // useful neighbourhood rather than hundreds of equivalent spokes.
+  async _linkDerivesEdges(synthId, members, sourceType, tag, { orgId = currentOrg(), userId = null } = {}) {
     const confidence = sourceType === 'canonical-fact' ? 0.88 : 0.82;
-    const rows = members
+    const sourceIds = members
       .filter(src => src?.id)
-      .map(src => ({
-        id:         crypto.randomUUID(),
-        fromId:     synthId,
-        toId:       src.id,
-        type:       'Derives',
-        confidence,
-        createdBy:  'cognition-loop',
-        metadata:   { reason: sourceType, topic: tag, source_count: members.length },
-      }));
-    if (rows.length) {
-      // Remote orgs: central relationship table holds 0 rows for this org.
-      // _linkDerivesEdges runs inside a runWithOrg(orgId) scope so currentOrg()
-      // is always the correct tenant — use it to detect remote without adding orgId param.
-      const edgeOrgId = currentOrg();
-      if (edgeOrgId && orgIsRemote(edgeOrgId)) {
-        for (const row of rows) {
-          await amrAddEdge({
-            id:         row.id,
-            fromId:     row.fromId,
-            toId:       row.toId,
-            type:       'Derives',
-            confidence: row.confidence,
-            orgId:      edgeOrgId,
-          }).catch(() => {});
-        }
-        // Central prisma path skipped for remote — return after agent outbox flush.
-        return;
-      }
-      try {
-        await this.prisma.relationship.createMany({ data: rows, skipDuplicates: true });
-      } catch (batchErr) {
-        // Fall back to per-row so one bad FK/dup doesn't drop every Derives edge.
-        this.logger.warn?.(`[cognition] Derives createMany failed (${batchErr.message}) — per-row fallback`);
-        for (const data of rows) {
-          await this.prisma.relationship.create({ data }).catch(() => {});
-        }
-      }
-    }
-    // WS4 — cross-synthesis derivation edges. When this synthesis shares source
-    // evidence with an EXISTING synthesis, the two are derivationally related:
-    // record synth --Derives--> priorSynth so "show its work" can walk a full
-    // chain (raw fact → canonical → bridge → principle), not just synth→source.
-    // Reuses the Derives type (no enum migration) — distinguished by
-    // created_by='cross-synthesis' + metadata.kind. Grounded: only links on
-    // real shared evidence, never centroid coincidence.
-    try {
-      await this._linkCrossSynthesisEdges(synthId, members.map((m) => m.id), sourceType, tag);
-    } catch { /* best-effort enrichment */ }
+      .sort((a, b) => Number(b.importanceScore || b.importance_score || b.confidence || 0)
+        - Number(a.importanceScore || a.importance_score || a.confidence || 0))
+      .slice(0, 10)
+      .map(src => src.id);
+    if (sourceIds.length) await this._applyRelationship({
+      source_ids: sourceIds,
+      to_id: synthId,
+      type: 'Derives',
+      confidence,
+      created_by: 'cognition-loop',
+      metadata: { reason: sourceType, topic: tag, source_count: members.length, persisted_source_count: sourceIds.length },
+    }, { orgId, userId });
+    // Do not add synthesis-to-synthesis edges merely because their evidence
+    // sets overlap. Traversal can meet at the shared source nodes.
   }
 
   /**
@@ -2775,7 +2745,7 @@ Output JSON only:
    * @param {string} sourceType     'canonical-fact' | 'bridge' | 'principle'
    * @param {string} tag
    */
-  async _linkCrossSynthesisEdges(synthId, evidenceIds, sourceType, tag) {
+  async _linkCrossSynthesisEdges(synthId, evidenceIds, sourceType, tag, { orgId = currentOrg(), userId = null } = {}) {
     if (!Array.isArray(evidenceIds) || evidenceIds.length === 0) return;
     // Find OTHER latest syntheses whose evidence overlaps ours.
     const overlapping = await this.prisma.memory.findMany({
@@ -2793,17 +2763,15 @@ Output JSON only:
       // principle generalizes canonicals → Implies; everything else → depends_on.
       const kind = sourceType === 'principle' ? 'implies' : 'depends_on';
       try {
-        await this.prisma.relationship.create({
-          data: {
+        await this._applyRelationship({
             id:         crypto.randomUUID(),
-            fromId:     synthId,
-            toId:       other.id,
+            from_id:    other.id,
+            to_id:      synthId,
             type:       'Derives',
             confidence: 0.75,
-            createdBy:  'cross-synthesis',
+            created_by: 'cross-synthesis',
             metadata:   { kind, reason: sourceType, topic: tag },
-          },
-        });
+        }, { orgId, userId });
       } catch { /* unique (from,to,Derives) dup — skip */ }
     }
   }
@@ -2866,21 +2834,14 @@ Output JSON only:
             tag, members: chunk, content, partIndex: ci, partCount: chunks.length,
           });
           if (!created) continue;
-          for (const src of chunk) {
-            try {
-              await this.prisma.relationship.create({
-                data: {
-                  id:         crypto.randomUUID(),
-                  fromId:     created.id,
-                  toId:       src.id,
-                  type:       'Derives',
-                  confidence: 0.9,
-                  createdBy:  'cognition-drift-compact',
-                  metadata:   { reason: 'drift_compaction', topic: tag, part: ci + 1, parts: chunks.length },
-                },
-              });
-            } catch { /* race — skip */ }
-          }
+          await this._applyRelationship({
+            source_ids: chunk.map(src => src.id),
+            to_id: created.id,
+            type: 'Derives',
+            confidence: 0.9,
+            created_by: 'cognition-drift-compact',
+            metadata: { reason: 'drift_compaction', topic: tag, part: ci + 1, parts: chunks.length },
+          }, { orgId, userId: chunk[0].userId });
 
           // P3: demote folded sources + purge their vectors. The summary is
           // lossless (every source embedded verbatim) so this is zero info

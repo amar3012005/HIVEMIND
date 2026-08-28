@@ -88,9 +88,10 @@ export class GraphHygieneScanner {
   /**
    * @param {import('../memory/prisma-graph-store.js').PrismaGraphStore} store
    */
-  constructor(store, prisma) {
+  constructor(store, prisma, memoryGraphEngine = null) {
     this.store = store;
     this.prisma = prisma || store.client || null;
+    this.engine = memoryGraphEngine;
   }
 
   /**
@@ -725,7 +726,7 @@ export class GraphHygieneScanner {
   /**
    * Find facts that were updated/corrected over time. Groups memories by a
    * fact-key (normalized title + extracted-fact tag) and proposes Updates
-   * edges from older → newer where content differs but semantic overlap is
+   * edges from newer → older where content differs but semantic overlap is
    * high (same topic, different value).
    *
    * Output proposals have category='updates' + suggestedAction='link_update_chain'.
@@ -813,8 +814,8 @@ export class GraphHygieneScanner {
             fact_key: key,
             similarity: sim,
             age_days: ageDays,
-            from_id: older.id,
-            to_id: newer.id,
+            from_id: newer.id,
+            to_id: older.id,
             edge_type: 'Updates',
           },
         });
@@ -854,7 +855,7 @@ export class GraphHygieneScanner {
   }
 
   /**
-   * Link two memories as Updates chain — create `Updates` edge from older→newer,
+   * Link two memories as Updates chain — create `Updates` edge from newer→older,
    * flip older's isLatest=false so retrieval surfaces newer state. Idempotent
    * via the upserted (from_id, to_id, type) unique key in prisma-graph-store.
    */
@@ -865,13 +866,14 @@ export class GraphHygieneScanner {
     if (!fromId || !toId) {
       throw new Error('link_update_chain requires metadata.from_id and metadata.to_id');
     }
-    // Create idempotent Updates edge via store's upsert path
-    await this.memoryStore.createRelationship({
+    const source = await this.store.getMemory(fromId);
+    if (!source || !this.engine?.applyValidatedRelationship) throw new Error('canonical relationship dispatcher unavailable');
+    await this.engine.applyValidatedRelationship({
       id: randomUUID(),
       from_id: fromId,
       to_id: toId,
       type: 'Updates',
-      confidence: proposal.confidence || 0.7,
+      confidence: Math.max(0.85, proposal.confidence || 0),
       metadata: {
         source: 'graph-hygiene-scanner',
         proposal_id: proposal.id,
@@ -881,14 +883,7 @@ export class GraphHygieneScanner {
         linked_at: new Date().toISOString(),
       },
       created_by: 'hygiene-scanner',
-    });
-    // Older memory is no longer "latest" of this fact-key chain
-    try {
-      await this.memoryStore.updateMemory(fromId, { is_latest: false });
-    } catch (err) {
-      // updateMemory might not exist on all stores — non-fatal, edge alone is meaningful
-      console.warn('[hygiene-scanner] link_update_chain isLatest flip failed:', err.message);
-    }
+    }, { store: this.store, user_id: source.user_id, org_id: source.org_id });
     return { status: 'executed', from_id: fromId, to_id: toId, edge_type: 'Updates' };
   }
 
@@ -907,21 +902,6 @@ export class GraphHygieneScanner {
     const affectedIds = [canonical.id];
 
     for (const dup of others) {
-      // Create Derives edge so the version chain is traceable
-      try {
-        await this.store.createRelationship({
-          id: randomUUID(),
-          from_id: canonical.id,
-          to_id: dup.id,
-          type: 'Derives',
-          confidence: proposal.confidence,
-          metadata: { source: 'hygiene-scanner', action: 'archive_duplicates' },
-          created_by: 'hygiene-scanner',
-        });
-      } catch (relErr) {
-        // Relationship may already exist — non-fatal
-      }
-
       // Mark dup as not-latest + low importance + add superseded-by tag
       await this.store.updateMemory(dup.id, {
         isLatest: false,
@@ -945,17 +925,6 @@ export class GraphHygieneScanner {
     let merged = 0;
 
     for (const dup of others) {
-      // Create Derives edge: canonical derives from the duplicate
-      await this.store.createRelationship({
-        id: randomUUID(),
-        from_id: canonical.id,
-        to_id: dup.id,
-        type: 'Derives',
-        confidence: proposal.confidence,
-        metadata: { source: 'hygiene-scanner', action: 'merge_duplicate' },
-        created_by: 'hygiene-scanner',
-      });
-
       // Mark duplicate as not-latest
       await this.store.updateMemory(dup.id, {
         isLatest: false,

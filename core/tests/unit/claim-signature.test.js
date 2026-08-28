@@ -61,3 +61,57 @@ test('genuine spec change on the same product is an update', () => {
   );
   assert.equal(r.relation, 'update');
 });
+
+test('structured claim identity overrides sparse prose and proves an update', () => {
+  const r = assessClaimRelation(
+    {
+      claim_subject: 'customer-data-retention',
+      claim_predicate: 'retention_period',
+      claim_qualifiers: { object: '13 months', jurisdiction: 'EU' },
+      content: 'The new period applies.',
+    },
+    {
+      claimSubject: 'customer-data-retention',
+      claimPredicate: 'retention_period',
+      claimQualifiers: { object: '12 months', jurisdiction: 'EU' },
+      content: 'The old period applied.',
+    },
+  );
+  assert.equal(r.relation, 'update');
+  assert.deepEqual(r.sharedSpecific, ['customer-data-retention']);
+});
+
+test('different structured predicates cannot supersede one another', () => {
+  const r = assessClaimRelation(
+    {
+      claim_subject: 'project-zephyr',
+      claim_predicate: 'deployment_region',
+      claim_qualifiers: { object: 'Berlin' },
+      content: 'Berlin.',
+    },
+    {
+      claim_subject: 'project-zephyr',
+      claim_predicate: 'budget_owner',
+      claim_qualifiers: { object: 'Amar' },
+      content: 'Amar.',
+    },
+  );
+  assert.equal(r.relation, 'topical');
+  assert.match(r.reason, /different structured predicates/);
+});
+
+test('equal structured objects corroborate without creating a new version', () => {
+  const r = assessClaimRelation(
+    {
+      metadata: { claim: { subject: 'project-zephyr', predicate: 'deployment_region', qualifiers: { object: 'Berlin' } } },
+      content: 'Deployment is in Berlin.',
+    },
+    {
+      claim_subject: 'project-zephyr',
+      claim_predicate: 'deployment_region',
+      claim_qualifiers: { object: 'berlin' },
+      content: 'Berlin is the deployment region.',
+    },
+  );
+  assert.equal(r.relation, 'corroboration');
+});

@@ -294,7 +294,9 @@ export async function persistCanonicalLinks({
           metadata: { entity_kind: ent.entityKind || null, aliases: Array.isArray(ent.aliases) ? ent.aliases : [] },
         }, null);
         for (const memoryId of memoryIds) {
-          amrAddEdge({ fromId: memoryId, toId: ent.id, type: 'Mentions', confidence: confidence ?? 1.0, orgId: organizationId });
+          await amrAddEdge({ fromId: memoryId, toId: ent.id, type: 'Mentions', confidence: confidence ?? 1.0,
+            metadata: { entity_projection: true, canonical_entity_id: ent.id },
+            createdBy: 'canonical-entity-persister', orgId: organizationId });
         }
       } catch (e) {
         logger.warn?.(`[canonical-entities] shard mirror failed for ${entityId}: ${e.message} `

@@ -180,17 +180,8 @@ export class EnterpriseChatService {
       },
     });
 
-    if (previousTurnId) {
-      await this.memoryStore.createRelationship({
-        id: crypto.randomUUID(),
-        from_id: turnId,
-        to_id: previousTurnId,
-        type: 'Extends',
-        confidence: 1.0,
-        metadata: { source: 'enterprise_chat_chain', session_id: payload.sid },
-        created_by: 'enterprise_chat',
-      }).catch(() => {});
-    }
+    // Turn order is already deterministic in session_id + turn_number metadata;
+    // do not turn chronology into a semantic Extends relationship.
 
     return { ...created, turn_number: turnNumber };
   }

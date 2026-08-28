@@ -24,7 +24,17 @@ const RELATIONSHIP_ALIASES = new Map([
   ['synthesize', 'Derives'],
   ['synthesizes', 'Derives'],
   ['synthesis', 'Derives'],
+  ['contradict', 'Contradicts'],
+  ['contradicts', 'Contradicts'],
+  ['conflicts', 'Contradicts'],
+  ['partof', 'PartOf'],
+  ['part_of', 'PartOf'],
+  ['part-of', 'PartOf'],
+  ['mentions', 'Mentions'],
 ]);
+
+export const RELATIONSHIP_POLICY_VERSION = 'canonical-graph-v1';
+export const SEMANTIC_RELATIONSHIP_TYPES = Object.freeze(['Updates', 'Extends', 'Derives', 'Contradicts']);
 
 function uniqueStrings(values = []) {
   return [...new Set(values.filter(Boolean).map(value => String(value).trim()).filter(Boolean))];
@@ -67,7 +77,7 @@ export function normalizeRelationshipType(type) {
   if (!type) return null;
   const canonical = RELATIONSHIP_ALIASES.get(String(type).trim().toLowerCase());
   if (canonical) return canonical;
-  if (['Updates', 'Extends', 'Derives'].includes(type)) return type;
+  if (['Updates', 'Extends', 'Derives', 'Contradicts', 'PartOf', 'Mentions'].includes(type)) return type;
   return null;
 }
 
@@ -76,7 +86,85 @@ export function relationshipOperationForType(type) {
   if (canonical === 'Updates') return 'updated';
   if (canonical === 'Extends') return 'extended';
   if (canonical === 'Derives') return 'derived';
+  if (canonical === 'Contradicts') return 'contradicted';
+  if (canonical === 'PartOf') return 'attached';
   return 'created';
+}
+
+function _sameTenant(memories = [], orgId, userId) {
+  return memories.every((memory) => memory
+    && (!orgId || memory.org_id === orgId)
+    && (!userId || memory.user_id === userId));
+}
+
+/**
+ * The single deterministic admission policy for durable graph edges.
+ * Models and heuristics may propose relationships; only this function certifies
+ * a proposal for persistence. Entity co-occurrence remains an entity index and
+ * is never promoted to a permanent memory-to-memory edge.
+ */
+export function validateRelationshipProposal({
+  type,
+  sourceMemory = null,
+  targetMemory = null,
+  sourceMemories = [],
+  confidence = 1,
+  orgId = null,
+  userId = null,
+  hubSlugs = [],
+} = {}) {
+  const canonical = normalizeRelationshipType(type);
+  const score = Number.isFinite(Number(confidence)) ? Number(confidence) : 0;
+  const sources = sourceMemories.length ? sourceMemories : (sourceMemory ? [sourceMemory] : []);
+  const all = [...sources, targetMemory].filter(Boolean);
+
+  if (!canonical) return { ok: false, type: null, reason: 'unsupported-relationship-type' };
+  if (canonical === 'Mentions') {
+    return { ok: false, type: canonical, reason: 'co-mention-is-entity-metadata-not-memory-edge' };
+  }
+  if (!_sameTenant(all, orgId, userId)) {
+    return { ok: false, type: canonical, reason: 'tenant-scope-violation' };
+  }
+  if (!targetMemory || sources.length === 0 || sources.some(source => source.id === targetMemory.id)) {
+    return { ok: false, type: canonical, reason: 'missing-or-self-referential-endpoint' };
+  }
+  if (canonical === 'PartOf') {
+    return { ok: true, type: canonical, reason: 'validated-structural-membership' };
+  }
+
+  const threshold = canonical === 'Updates' ? 0.85 : 0.75;
+  if (score < threshold) {
+    return { ok: false, type: canonical, reason: `confidence-below-${threshold}` };
+  }
+
+  if (canonical === 'Derives') {
+    return { ok: true, type: canonical, reason: 'validated-source-provenance' };
+  }
+
+  const semantic = validateSupersedingEdge(sourceMemory || sources[0], targetMemory, {
+    hubSlugs,
+    requireChangeEvidence: canonical === 'Updates' || canonical === 'Contradicts',
+  });
+  if (!semantic.ok) return { ok: false, type: canonical, reason: semantic.reason, sharedSpecific: semantic.sharedSpecific };
+  return { ok: true, type: canonical, reason: semantic.reason, sharedSpecific: semantic.sharedSpecific };
+}
+
+export function certifyRelationshipMetadata(metadata = {}, verdict = {}, { createdBy = 'canonical-relationship-dispatcher' } = {}) {
+  if (!verdict?.ok || !verdict?.type) throw new Error('Cannot certify a rejected relationship proposal');
+  return {
+    ...(metadata || {}),
+    relationship_policy_version: RELATIONSHIP_POLICY_VERSION,
+    relationship_validation_status: 'validated',
+    relationship_validation_reason: verdict.reason || 'validated',
+    relationship_validated_by: createdBy,
+  };
+}
+
+export function hasCanonicalRelationshipCertification(edge = {}) {
+  if (!SEMANTIC_RELATIONSHIP_TYPES.includes(normalizeRelationshipType(edge.type))) return true;
+  const metadata = edge.metadata || {};
+  return metadata.relationship_policy_version === RELATIONSHIP_POLICY_VERSION
+    && metadata.relationship_validation_status === 'validated';
 }
 
 export function inferMemorySemanticRole(memory = {}) {

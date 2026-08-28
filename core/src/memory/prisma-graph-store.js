@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import { computeTokenSimilarity } from './conflict-detector.js';
-import { normalizeRelationshipType } from './relationship-semantics.js';
+import {
+  hasCanonicalRelationshipCertification,
+  normalizeRelationshipType,
+} from './relationship-semantics.js';
 import { normalizeTagsArray } from './entity-normalize.js';
 import { signMemory, sha256Hex, canonical as pqcCanonical } from '../security/pqc-signer.js';
 import { isMnemeOrg, orgIsRemote, amrLexical, amrLexicalRemote, amrRecall, withAmrLock, amrAddEdge, amrWrite, amrUpdate, amrDelete, mnemeMode, amrMemEdgeCounts, amrMemRelationships, amrMemRelationshipsBatch, amrGraph } from '../vector/mneme/driver.js';
@@ -1597,8 +1600,20 @@ export class PrismaGraphStore {
   }
 
   async getRelationships(memoryId, type = null) {
+    const orgId = currentOrg();
+    if (!orgId) throw new Error('relationship_org_scope_required');
+    if (orgIsRemote(orgId)) {
+      return this._getRelatedMemoriesRemote(memoryId, {
+        maxDepth: 1,
+        minConfidence: 0,
+        relationship: type,
+        org_id: orgId,
+      });
+    }
     const where = {
       OR: [{ fromId: memoryId }, { toId: memoryId }],
+      fromMemory: { orgId },
+      toMemory: { orgId },
     };
     if (type) where.type = normalizeRelationshipType(type) || type;
     const records = await this.client.relationship.findMany({ where });
@@ -1616,10 +1631,22 @@ export class PrismaGraphStore {
     // async ingest worker is exactly where AsyncLocalStorage is least reliable, so callers there
     // pass org_id explicitly; this makes the remaining gap audible instead of silent. Never throw
     // — a lost edge must not fail an ingest — but never let it pass unnoticed either.
-    if (!_remoteOrg) {
-      console.warn('[graph-store] createRelationship with no resolvable org '
-        + `(from=${String(edge.from_id).slice(0, 8)} type=${edge.type}) — routing CENTRAL. `
-        + 'If this org is .amr, the edge will NOT reach its shard: pass org_id at the call site.');
+    if (!_remoteOrg) throw new Error('relationship_org_scope_required');
+    if (type === 'Mentions' && edge.metadata?.entity_projection !== true) {
+      throw new Error('relationship_policy_rejected:Mentions:use-canonical-entity-links');
+    }
+    if (!hasCanonicalRelationshipCertification({ ...edge, type })) {
+      throw new Error(`relationship_policy_uncertified:${type}`);
+    }
+    if (['Updates', 'Extends', 'Derives', 'Contradicts'].includes(type)) {
+      const uniqueWhere = { fromId_toId_type: { fromId: edge.from_id, toId: edge.to_id, type } };
+      const existing = await this.client.relationship.findUnique({ where: uniqueWhere, select: { id: true } });
+      if (!existing) {
+        const semanticOut = await this.client.relationship.count({
+          where: { fromId: edge.from_id, type: { in: ['Updates', 'Extends', 'Derives', 'Contradicts'] } },
+        });
+        if (semanticOut >= 10) throw new Error('relationship_policy_rejected:semantic-edge-budget-exhausted');
+      }
     }
     if (orgIsRemote(_remoteOrg)) {
       // Central path generates `id` via Prisma's @default(uuid()) at the upsert below; this branch
@@ -1627,7 +1654,9 @@ export class PrismaGraphStore {
       // `id: undefined` straight to the agent's NOT-NULL, no-default `id` column — a guaranteed
       // "null value in column id violates not-null constraint" on every remote-org edge write.
       const _edgeId = edge.id || crypto.randomUUID();
-      amrAddEdge({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: _remoteOrg });
+      await amrAddEdge({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type,
+        confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {},
+        createdBy: edge.created_by || 'system', orgId: _remoteOrg });
       return mapRelationshipRecord({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });
     }
     const created = await this.client.relationship.upsert({
@@ -1656,7 +1685,9 @@ export class PrismaGraphStore {
     // Dual mode: PG has the row (above); mirror the typed edge into the .amr shard for graph-recall.
     // No-op when no .amr org / sole mode (sole already routes the upsert to .amr via the proxy).
     if (mnemeMode() === 'dual') {
-      amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, orgId: edge.org_id || currentOrg() });
+      Promise.resolve(amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type,
+        confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {},
+        createdBy: edge.created_by || 'system', orgId: edge.org_id || currentOrg() })).catch(() => {});
     }
 
     return mapRelationshipRecord(created);

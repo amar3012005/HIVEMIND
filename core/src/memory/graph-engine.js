@@ -16,8 +16,10 @@ import {
   inferMemorySemanticRole,
   normalizeRelationshipDescriptor,
   normalizeRelationshipType,
+  relationshipOperationForType,
+  certifyRelationshipMetadata,
+  validateRelationshipProposal,
   validateSupersedingEdge,
-  relationshipValidatorMode,
 } from './relationship-semantics.js';
 import { clusterHash } from './cluster-hash.js';
 import { normalizeEntity, normalizeTagsArray } from './entity-normalize.js';
@@ -1408,17 +1410,17 @@ export class MemoryGraphEngine {
                 }),
               },
             });
-            // Create Extends relationship: fact → parent
-            await store.createRelationship({
+            // Structural membership: extracted fact → parent memory.
+            await this.applyValidatedRelationship({
               id: crypto.randomUUID ? crypto.randomUUID() : `rel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               from_id: factId,
               to_id: baseMemory.id,
-              type: 'Extends',
+              type: 'PartOf',
               confidence: 0.9,
               metadata: buildSemanticMetadata({
                 semanticRole: 'relationship',
                 relationship: {
-                  type: 'Extends',
+                  type: 'PartOf',
                   sourceId: factId,
                   targetId: baseMemory.id,
                   confidence: 0.9,
@@ -1432,6 +1434,10 @@ export class MemoryGraphEngine {
                 confidence: 0.9,
               }),
               created_by: 'memory_processor',
+            }, {
+              store,
+              user_id: baseMemory.user_id,
+              org_id: baseMemory.org_id,
             });
             factMemoryIds.push(factId);
           }
@@ -1712,7 +1718,7 @@ export class MemoryGraphEngine {
               const isReconciled = edgeType !== 'Contradicts';
 
               try {
-                await store.createRelationship({
+                const applied = await this.applyValidatedRelationship({
                   id: crypto.randomUUID ? crypto.randomUUID() : `crel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                   from_id: baseMemory.id,
                   to_id: c.memory.id,
@@ -1735,21 +1741,15 @@ export class MemoryGraphEngine {
                     confidence: c.confidence,
                   }),
                   created_by: isReconciled ? 'turing-reconciliation' : 'conflict-detector',
+                }, {
+                  store,
+                  user_id: baseMemory.user_id,
+                  org_id: baseMemory.org_id,
                 });
+                if (applied.edgesCreated?.length) result.edgesCreated.push(...applied.edgesCreated);
               } catch { /* Edge already exists — skip duplicate */ }
 
-              // If reconciled to Updates: mark old memory as superseded
-              // H2: skip demotion if the target is a synthesis — only cognition-loop demotes syntheses.
-              if (edgeType === 'Updates') {
-                if (c.memory.memory_type === 'synthesis' || c.memory.memoryType === 'synthesis') {
-                  console.log(`[conflict-reconciliation] H2: synthesis demotion SKIPPED for ${c.memory.id.slice(0,8)} — cognition-loop owns synthesis demotion`);
-                } else {
-                  try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch {}
-                }
-              }
-
               if (isReconciled) {
-                result.edgesCreated.push({ type: edgeType, from: baseMemory.id, to: c.memory.id, reconciled: true, reasoning });
                 console.log(`[conflict-reconciliation] ${baseMemory.id} → ${c.memory.id}: Contradicts → ${edgeType} (${reasoning})`);
               }
             }
@@ -1778,21 +1778,18 @@ export class MemoryGraphEngine {
         // When the router detected multiple moderately-similar source memories,
         // create Derives edges: source → new memory (synthesis relationship).
         if (effectiveRelationshipType !== 'Derives' && input._derives_from && Array.isArray(input._derives_from)) {
-          for (const source of input._derives_from) {
-            try {
-              await store.createRelationship({
-                id: crypto.randomUUID ? crypto.randomUUID() : `drel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                from_id: source.id,
-                to_id: baseMemory.id,
-                type: 'Derives',
-                confidence: source.score || 0.6,
-                metadata: { auto_derived: true, source: 'smart_ingest_router' },
-                created_at: nowIso(),
-              });
-              result.edgesCreated.push({ type: 'Derives', from: source.id, to: baseMemory.id });
-            } catch (err) {
-              // Non-fatal: edge creation should never block ingest
-            }
+          const sourceIds = input._derives_from.filter(source => Number(source?.score || 0) >= this.deriveThreshold).map(source => source.id);
+          if (sourceIds.length) {
+            const minConfidence = Math.min(...input._derives_from.filter(source => sourceIds.includes(source.id)).map(source => Number(source.score)));
+            const applied = await this.applyDerivesFromSources(sourceIds, baseMemory.id, {
+              store,
+              user_id: baseMemory.user_id,
+              org_id: baseMemory.org_id,
+              confidence: minConfidence,
+              startedAt,
+              reason: 'smart_ingest_router',
+            });
+            if (applied.edgesCreated?.length) result.edgesCreated.push(...applied.edgesCreated);
           }
         }
 
@@ -2343,7 +2340,7 @@ OUTPUT JSON only.`;
       }
       const isReconciled = edgeType !== 'Contradicts';
       try {
-        await store.createRelationship({
+        const applied = await this.applyValidatedRelationship({
           id: crypto.randomUUID ? crypto.randomUUID() : `kbrel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           from_id: baseMemory.id,
           to_id: c.memory.id,
@@ -2356,10 +2353,12 @@ OUTPUT JSON only.`;
             reason: reasoning || 'contradiction_detection',
           },
           created_by: isReconciled ? 'turing-reconciliation' : 'conflict-detector',
-        });
-        if (edgeType === 'Contradicts') out.contradicts++;
-        else if (edgeType === 'Updates') out.updates++;
-        else out.extends++;
+        }, { store, user_id: baseMemory.user_id, org_id: baseMemory.org_id });
+        if (applied.edgesCreated?.length) {
+          if (edgeType === 'Contradicts') out.contradicts++;
+          else if (edgeType === 'Updates') out.updates++;
+          else out.extends++;
+        }
       } catch { /* edge already exists — skip duplicate */ }
 
       // Reconciled-to-Updates supersedes the older memory (skip syntheses — cognition owns those).
@@ -2367,19 +2366,7 @@ OUTPUT JSON only.`;
       // is_latest unless the two memories provably share a specific subject
       // and attribute (validateSupersedingEdge). The edge itself stands for
       // graph context; only the destructive flip is withheld.
-      if (edgeType === 'Updates' && !(c.memory.memory_type === 'synthesis' || c.memory.memoryType === 'synthesis')) {
-        const _mode = relationshipValidatorMode();
-        const verdict = _mode === 'off' ? { ok: true, reason: 'validator-off' } : validateSupersedingEdge(baseMemory, c.memory, { requireChangeEvidence: true });
-        if (_mode === 'shadow' && !verdict.ok) {
-          console.log(`[rel-validator][shadow] kb-enrich WOULD-WITHHOLD supersede ${String(c.memory.id).slice(0, 8)}: ${verdict.reason} (acting anyway — shadow)`);
-        }
-        const withhold = _mode === 'enforce' && !verdict.ok;
-        if (!withhold) {
-          try { await store.updateMemory(c.memory.id, { is_latest: false }); } catch { /* best-effort */ }
-        } else {
-          console.log(`[rel-validator][enforce] kb-enrich supersede WITHHELD ${String(c.memory.id).slice(0, 8)}: ${verdict.reason}`);
-        }
-      }
+      // The dispatcher atomically owns Updates demotion; no second side effect.
     }
     return out;
   }
@@ -3147,7 +3134,15 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       const cand = candidates[l.index];
       const confidence = Math.min(Math.max(l.confidence, 0.55), 0.95);
       const edgeType = VALID_EDGE_TYPES.has(l.type) ? l.type : 'Mentions';
-      const isSupersede = edgeType === 'Updates';
+      // Co-occurrence is already persisted in CanonicalEntity/MemoryEntityLink.
+      // It is searchable metadata, not a durable memory-to-memory relationship.
+      if (edgeType === 'Mentions') continue;
+      // A linker candidate is only a semantic neighbour. It is not source
+      // provenance. Admit Derives here only when the canonical ingest router
+      // explicitly placed that candidate in the derive band; otherwise the
+      // model could turn ordinary co-occurrence into a permanent provenance
+      // edge simply by labelling it "Derives".
+      if (edgeType === 'Derives' && cand?._searchMethod !== 'router_derive_band') continue;
 
       // Negation guard: a memory that explicitly says it is UNRELATED to the
       // shared entity ("unrelated to X", "not related to X", "nothing to do
@@ -3171,7 +3166,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       }
 
       try {
-        await writeStore.createRelationship({
+        const applied = await this.applyValidatedRelationship({
           id: uuidv4(),
           from_id: baseMemory.id,
           to_id: cand.id,
@@ -3186,8 +3181,13 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
             extraction_model: process.env.ENTITY_LINKER_MODEL || MEMORY_INGEST_MODEL,
             classification_source: 'llm',
           },
+        }, {
+          store: writeStore,
+          user_id: baseMemory.user_id,
+          org_id: baseMemory.org_id,
         });
-        edgeWrites += 1;
+        edgeWrites += applied.edgesCreated?.length || 0;
+        continue; // dispatcher owns Updates demotion and all semantic side effects
       } catch (edgeErr) {
         const msg = String(edgeErr.message || '');
         // Foreign-key violation = candidate memory was deleted between
@@ -3205,66 +3205,12 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
           txnPoisoned = true;
           break;
         }
-        // Fallback to Extends + subtype if enum missing (mid-rollout).
-        try {
-          await writeStore.createRelationship({
-            id: uuidv4(),
-            from_id: baseMemory.id,
-            to_id: cand.id,
-          org_id: baseMemory.org_id,
-            type: 'Extends',
-            confidence,
-            created_by: 'entity_co_mention_llm',
-            created_at: nowIso(),
-            metadata: {
-              subtype: edgeType,
-              shared_entities: [l.entity],
-              reason: (l.reason || '').slice(0, 200),
-              fallback_reason: edgeErr.message,
-            },
-          });
-          edgeWrites += 1;
-        } catch (fb) {
-          edgeWriteFailures += 1;
-          // If fallback also hits FK or 25P02 → abort loop.
-          if (/Foreign key|transaction is aborted/i.test(String(fb.message)) || fb.code === '23503' || fb.code === '25P02') {
-            txnPoisoned = true;
-            break;
-          }
-        }
+        // Never manufacture an Extends edge when a proposal fails validation.
+        edgeWriteFailures += 1;
       }
 
-      // When the LLM said "Updates", flip the old memory's is_latest
-      // flag so retrieval + the graph view treat it as superseded.
-      // Same canonical behaviour as the regex-based supersede path in
-      // graph-engine, just driven by LLM intent instead.
-      // H2: never demote a synthesis via entity-co-mention — only cognition-loop may do that.
-      if (isSupersede) {
-        if (cand.memory_type === 'synthesis' || cand.memoryType === 'synthesis') {
-          console.log(`[entity-co-mention] H2: synthesis supersede SKIPPED for ${cand.id.slice(0, 8)} — cognition-loop owns synthesis demotion`);
-        } else {
-          // STRICT VALIDATOR gate: is_latest demotion requires a provably
-          // shared specific subject + attribute overlap — the LLM's Updates
-          // vote alone is not enough (prevents cross-product false
-          // supersessions that share only a generic org entity).
-          const _mode = relationshipValidatorMode();
-          const verdict = _mode === 'off' ? { ok: true, reason: 'validator-off' } : validateSupersedingEdge(baseMemory, cand, { requireChangeEvidence: true });
-          if (_mode === 'shadow' && !verdict.ok) {
-            console.log(`[rel-validator][shadow] co-mention WOULD-WITHHOLD supersede ${cand.id.slice(0, 8)}: ${verdict.reason} (acting anyway — shadow)`);
-          }
-          const withhold = _mode === 'enforce' && !verdict.ok;
-          if (withhold) {
-            console.log(`[rel-validator][enforce] co-mention supersede WITHHELD ${cand.id.slice(0, 8)}: ${verdict.reason}`);
-          } else {
-            try {
-              await writeStore.updateMemory(cand.id, { is_latest: false });
-              console.log(`[entity-co-mention] supersede: ${cand.id.slice(0, 8)} → is_latest=false (by ${baseMemory.id.slice(0, 8)})`);
-            } catch (supErr) {
-              console.warn('[entity-co-mention] supersede update failed:', supErr.message);
-            }
-          }
-        }
-      }
+      // Rejected proposals have no durable side effect. In particular, never
+      // demote a target after the canonical dispatcher refused an Updates edge.
     }
     const relationshipWriteFailed = edgeWriteFailures > 0 || txnPoisoned;
     if (parsed && !linkLastErr && !relationshipWriteFailed) {
@@ -3351,7 +3297,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
     const partOfEdgeIds = [];
     for (const childId of childIds) {
       try {
-        const edge = await this.store.createRelationship({
+        const applied = await this.applyValidatedRelationship({
           id: uuidv4(),
           from_id: childId,
           to_id: parentId,
@@ -3363,34 +3309,10 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
             ingest_tree: true,
             parent_role: tree.parent.metadata?.semantic_role || 'document',
           },
-        });
-        partOfEdgeIds.push(edge?.id || null);
+        }, { user_id: tree.parent.user_id, org_id: tree.parent.org_id });
+        partOfEdgeIds.push(applied.edgesCreated?.[0]?.id || null);
       } catch (edgeErr) {
-        // Edge already exists or constraint violation — non-fatal.
-        // If this is a stale Prisma client without the new enum, fall back
-        // to legacy Extends + metadata.subtype='PartOf' so ingest never
-        // crashes mid-deploy. Once all containers reload the new client,
-        // this fallback is dead code.
-        try {
-          const edge2 = await this.store.createRelationship({
-            id: uuidv4(),
-            from_id: childId,
-            to_id: parentId,
-            type: 'Extends',
-            confidence: 1.0,
-            created_by: 'ingest_tree',
-            created_at: nowIso(),
-            metadata: {
-              ingest_tree: true,
-              subtype: 'PartOf',
-              parent_role: tree.parent.metadata?.semantic_role || 'document',
-              fallback_reason: edgeErr.message,
-            },
-          });
-          partOfEdgeIds.push(edge2?.id || null);
-        } catch (edge2Err) {
-          console.warn('[ingest-tree] PartOf edge failed (both native + fallback):', edge2Err.message);
-        }
+        console.warn('[ingest-tree] PartOf edge failed:', edgeErr.message);
       }
     }
 
@@ -3427,6 +3349,12 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         throw new Error('Tenant scope violation in applyUpdate');
       }
 
+      const verdict = validateRelationshipProposal({
+        type: 'Updates', sourceMemory: source, targetMemory: target,
+        confidence, orgId: org_id, userId: user_id,
+      });
+      if (!verdict.ok) throw new Error(`relationship_policy_rejected:Updates:${verdict.reason}`);
+
       const sourceEffectiveAt = source.valid_from || source.document_date || source.created_at || nowIso();
       const targetEffectiveAt = target.valid_from || target.document_date || target.created_at || sourceEffectiveAt;
       const sourceEffectiveMs = new Date(sourceEffectiveAt).getTime();
@@ -3450,7 +3378,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         type: 'Updates',
         confidence,
         created_at: nowIso(),
-        metadata: buildSemanticMetadata({
+        metadata: certifyRelationshipMetadata(buildSemanticMetadata({
           semanticRole: 'relationship',
           relationship: {
             type: 'Updates',
@@ -3465,7 +3393,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
           sourceMetadata: source.source_metadata || null,
           reason: 'Updates',
           confidence,
-        })
+        }), verdict)
       });
 
       await this._recordVersionSnapshot(store, target, {
@@ -3520,6 +3448,12 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         throw new Error('Tenant scope violation in applyExtends');
       }
 
+      const verdict = validateRelationshipProposal({
+        type: 'Extends', sourceMemory: source, targetMemory: target,
+        confidence, orgId: org_id, userId: user_id,
+      });
+      if (!verdict.ok) throw new Error(`relationship_policy_rejected:Extends:${verdict.reason}`);
+
       const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
         id: uuidv4(),
@@ -3528,7 +3462,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         type: 'Extends',
         confidence,
         created_at: nowIso(),
-        metadata: buildSemanticMetadata({
+        metadata: certifyRelationshipMetadata(buildSemanticMetadata({
           semanticRole: 'relationship',
           relationship: {
             type: 'Extends',
@@ -3543,7 +3477,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
           sourceMetadata: source.source_metadata || null,
           reason: 'Extends',
           confidence,
-        })
+        }), verdict)
       });
 
       await this._recordVersionSnapshot(store, source, {
@@ -3593,6 +3527,12 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         }
       }
 
+      const verdict = validateRelationshipProposal({
+        type: 'Derives', sourceMemory: sources[0], sourceMemories: sources, targetMemory: target,
+        confidence, orgId: org_id, userId: user_id,
+      });
+      if (!verdict.ok) throw new Error(`relationship_policy_rejected:Derives:${verdict.reason}`);
+
       const edges = [];
       for (const sourceIdValue of uniqueSourceIds) {
         const edge = await store.createRelationship({
@@ -3602,7 +3542,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
           type: 'Derives',
           confidence,
           created_at: nowIso(),
-          metadata: buildSemanticMetadata({
+          metadata: certifyRelationshipMetadata(buildSemanticMetadata({
             semanticRole: 'relationship',
             relationship: {
               type: 'Derives',
@@ -3621,7 +3561,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
             sourceMetadata: sources.find(source => source.id === sourceIdValue)?.source_metadata || null,
             reason,
             confidence,
-          }),
+          }), verdict),
         });
         edges.push(edge);
       }
@@ -3640,6 +3580,72 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         edgesCreated: edges,
         processingMs: Date.now() - startedAt
       };
+    });
+  }
+
+  /** Single durable entrypoint for every semantic or structural edge proposal. */
+  async applyValidatedRelationship(edge = {}, {
+    store: storeOverride,
+    user_id = null,
+    org_id = null,
+    startedAt = Date.now(),
+  } = {}) {
+    const store = storeOverride || this.store;
+    const type = normalizeRelationshipType(edge.type);
+    const sourceIds = [...new Set((edge.source_ids || edge.sourceIds || [edge.from_id || edge.fromId]).filter(Boolean))];
+    const targetId = edge.to_id || edge.toId || edge.target_id || edge.targetId;
+    if (!type || sourceIds.length === 0 || !targetId) {
+      return { operation: 'relationship_rejected', edgesCreated: [], reason: 'invalid-relationship-envelope' };
+    }
+
+    if (type === 'Updates') {
+      return this.applyUpdate(sourceIds[0], targetId, { store, user_id, org_id, confidence: edge.confidence ?? 1, startedAt });
+    }
+    if (type === 'Extends') {
+      return this.applyExtends(sourceIds[0], targetId, { store, user_id, org_id, confidence: edge.confidence ?? 1, startedAt });
+    }
+    if (type === 'Derives') {
+      return this.applyDerivesFromSources(sourceIds, targetId, {
+        store, user_id, org_id, confidence: edge.confidence ?? 1, startedAt,
+        reason: edge.reason || edge.metadata?.reason || 'Derives',
+      });
+    }
+
+    return store.transaction(async tx => {
+      const sources = await Promise.all(sourceIds.map(id => tx.getMemory(id)));
+      const target = await tx.getMemory(targetId);
+      const verdict = validateRelationshipProposal({
+        type, sourceMemory: sources[0], sourceMemories: sources, targetMemory: target,
+        confidence: edge.confidence ?? 1, orgId: org_id, userId: user_id,
+      });
+      if (!verdict.ok) {
+        return { operation: 'relationship_rejected', edgesCreated: [], reason: verdict.reason };
+      }
+      const metadata = certifyRelationshipMetadata({
+        ...buildSemanticMetadata({
+          semanticRole: type === 'PartOf' ? 'structure' : 'relationship',
+          relationship: { type, sourceIds, targetId, confidence: edge.confidence ?? 1, reason: edge.reason || null },
+          sourceIds,
+          sourceMemory: sources[0],
+          targetMemory: target,
+          reason: edge.reason || null,
+          confidence: edge.confidence ?? 1,
+        }),
+        ...(edge.metadata || {}),
+      }, verdict);
+      const created = await tx.createRelationship({
+        ...edge,
+        id: edge.id || uuidv4(),
+        from_id: sourceIds[0],
+        to_id: targetId,
+        type,
+        org_id,
+        confidence: edge.confidence ?? 1,
+        created_at: edge.created_at || nowIso(),
+        created_by: edge.created_by || 'canonical-relationship-dispatcher',
+        metadata,
+      });
+      return { operation: relationshipOperationForType(type), edgesCreated: [created], reason: verdict.reason };
     });
   }
 

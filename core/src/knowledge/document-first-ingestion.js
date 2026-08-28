@@ -38,7 +38,6 @@ function assertKbAllowedForOrg(orgId) {
 import { resolveCollectionForOrg, PER_TENANT } from '../vector/container-router.js';
 import { normalizeEntity, normalizeTagsArray } from '../memory/entity-normalize.js';
 import { persistCanonicalLinks } from '../memory/canonical-entity-persister.js';
-import { validateSupersedingEdge, computeHubEntitySlugs, relationshipValidatorMode } from '../memory/relationship-semantics.js';
 import { validateEnvelope, normalizeProvenance, detectMode } from './canonical-ingest.js';
 import { isStructuredSourceNoise } from '../memory/durable-content.js';
 import { countPages } from './page-count.js';
@@ -1585,11 +1584,14 @@ Output the JSON object and nothing else.`;
         // the bulk of the "Derives noise"). Cross-fact relationships come from the co-mention linker.
         if (t.memoryId) {
           try {
-            await this.memoryGraphEngine.store.createRelationship({
+            await this.memoryGraphEngine.applyValidatedRelationship({
               org_id: orgId, // residency: worker context may not carry the org — see createRelationship
               id: crypto.randomUUID(), from_id: factId, to_id: t.memoryId,
-              type: 'Derives', confidence: 0.9,
+              type: 'PartOf', confidence: 1.0,
               metadata: { created_by: 'kb_distill_v2', document_id: documentId },
+            }, {
+              user_id: userId,
+              org_id: orgId,
             });
           } catch { /* best-effort */ }
         }
@@ -2406,12 +2408,15 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         const toId = idByIdx[rel.to];
         if (!toId || toId === fromId) continue;
         try {
-          await this.memoryGraphEngine.store.createRelationship({
+          await this.memoryGraphEngine.applyValidatedRelationship({
             org_id: orgId, // residency: worker context may not carry the org — see createRelationship
             id: crypto.randomUUID(), from_id: fromId, to_id: toId, type: rel.type,
-            confidence: rel.type === 'Derives' ? 0.6 : 0.85,
+            confidence: rel.type === 'Derives' ? 0.8 : 0.9,
             metadata: { created_by: 'kb_unified_v2', document_id: documentId, intra_window: true,
               ...(rel.type === 'Derives' ? { inferred: true } : {}) },
+          }, {
+            user_id: userId,
+            org_id: orgId,
           });
         } catch { /* best-effort; dup/FK tolerated */ }
       }
@@ -2481,7 +2486,6 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
       }
     }
     if (!byEntity.size) return 0;
-    const MAX_EDGES_PER_FACT = Number(process.env.KB_ALGO_LINK_MAX_EDGES || 3);
     const poolById = new Map((pool || []).map((m) => [m.id, m]));
     let created = 0;
     for (const f of facts) {
@@ -2491,21 +2495,9 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         for (const peerId of (byEntity.get(t) || [])) shared.set(peerId, (shared.get(peerId) || 0) + 1);
       }
       const ranked = [...shared.entries()].sort((a, b) => b[1] - a[1]);
-      // (a) Mentions edges — co-mention topology (cap per fact). skipMentions when the co-mention
-      // LLM (llm mode) already produces Mentions; this pass then only adds deterministic evolution.
-      if (!skipMentions) {
-        for (const [peerId, n] of ranked.slice(0, MAX_EDGES_PER_FACT)) {
-          try {
-            await store.createRelationship({
-              org_id: orgId, // residency: worker context may not carry the org — see createRelationship
-              id: crypto.randomUUID(), from_id: f.id, to_id: peerId, type: 'Mentions',
-              confidence: Math.min(0.9, 0.6 + n * 0.1),
-              metadata: { created_by: 'kb_algo_link_v1', document_id: documentId, shared_entities: n },
-            });
-            created++;
-          } catch { /* best-effort; dup/FK tolerated */ }
-        }
-      }
+      // Co-mentions stay in CanonicalEntity/MemoryEntityLink and are not
+      // persisted as memory-to-memory edges. `ranked` remains the bounded
+      // candidate pool for deterministic evolution checks below.
       // (b) EVOLUTION edges — Updates / Extends / Contradicts + is_latest supersession. The
       // co-mention LLM used to emit these; the unified path never had the enrich pass, so `algo`
       // mode would have dropped them. detectAndLinkContradictionsFor is ALGORITHMIC (token-sim +
@@ -2634,47 +2626,14 @@ Judge MEANING, not shared words ("HQ in Berlin" vs "relocated ops to Munich" = U
     }
     const source = factById.get(pair.fromId);
     if (!source?.user_id || !source?.org_id) throw new Error('curated relationship source scope missing');
-    // STRICT VALIDATOR for the destructive types: the gray-zone LLM's opinion
-    // alone must not create Updates (demotes is_latest) or Contradicts. Same
-    // canonical subject required beyond the corpus-dominant hub entity (e.g.
-    // the manufacturer org tagging every fact), no exclusive-subject conflict
-    // (SolvisPia vs SolvisLea), and a same-attribute content overlap. On
-    // failure the edge is DOWNGRADED to Mentions with the refusal reason kept
-    // in metadata — shared-entity context is preserved, nothing is demoted.
-    if (type === 'Updates' || type === 'Contradicts') {
-      const _mode = relationshipValidatorMode();
-      if (_mode !== 'off') {
-        const target = factById.get(pair.toId);
-        const hubSlugs = computeHubEntitySlugs([...factById.values()]);
-        const verdict = validateSupersedingEdge(source, target || {}, { hubSlugs, requireChangeEvidence: type === 'Updates' });
-        if (!verdict.ok) {
-          const downgradeType = verdict.reason.startsWith('no-change-evidence') ? 'Extends' : 'Mentions';
-          if (_mode === 'shadow') {
-            // Observe-only: create the ORIGINAL edge type but tag the shadow verdict
-            // so we can measure precision without changing graph behaviour yet.
-            ingestDiagnostic.info(`[rel-validator][shadow] kb-hybrid WOULD-DOWNGRADE ${type}→${downgradeType} (${pair.fromId.slice(0,8)}→${pair.toId.slice(0,8)}): ${verdict.reason}`);
-          } else { // enforce
-            return store.createRelationship({
-              id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type: downgradeType, confidence: 0.6,
-              metadata: { created_by: 'kb_hybrid_v1', document_id: documentId, downgraded_from: type, downgrade_reason: verdict.reason },
-            });
-          }
-        }
-      }
-    }
-    if (type === 'Updates') {
-      return this.memoryGraphEngine.applyUpdate(pair.fromId, pair.toId, {
-        user_id: source.user_id, org_id: source.org_id, confidence: 0.8,
-      });
-    }
-    if (type === 'Extends') {
-      return this.memoryGraphEngine.applyExtends(pair.fromId, pair.toId, {
-        user_id: source.user_id, org_id: source.org_id, confidence: 0.8,
-      });
-    }
-    return store.createRelationship({
-      id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type, confidence: 0.8,
+    return this.memoryGraphEngine.applyValidatedRelationship({
+      id: crypto.randomUUID(), from_id: pair.fromId, to_id: pair.toId, type,
+      confidence: type === 'Updates' ? 0.9 : 0.8,
       metadata: { created_by: 'kb_hybrid_v1', document_id: documentId },
+    }, {
+      store,
+      user_id: source.user_id,
+      org_id: source.org_id,
     });
   }
 
@@ -3040,7 +2999,10 @@ Every item must include a non-empty content field and one or more valid support_
         const createPartOf = async (childId) => {
           const base = { id: crypto.randomUUID(), from_id: childId, to_id: docParentId, confidence: 1.0, created_by: 'document_first_ingestion', created_at: new Date().toISOString() };
           try {
-            await this.memoryGraphEngine.store.createRelationship({ ...base, type: 'PartOf', metadata: { ingest_tree: true, document_id: documentId, parent_role: 'document' } });
+            await this.memoryGraphEngine.applyValidatedRelationship(
+              { ...base, type: 'PartOf', metadata: { ingest_tree: true, document_id: documentId, parent_role: 'document' } },
+              { user_id: userId, org_id: orgId },
+            );
           } catch (err) {
             this.logger.warn?.(`[doc-first] PartOf ${String(childId).slice(0, 8)}→${String(docParentId).slice(0, 8)} failed: ${err.message}`);
           }
@@ -3110,16 +3072,7 @@ Every item must include a non-empty content field and one or more valid support_
           contradicts += r.contradicts; updates += r.updates; extendsN += r.extends;
         }
       } catch (relErr) { this.logger.warn?.(`[kb-enrich] rel-detect ${String(rec.factId).slice(0, 8)}: ${relErr.message}`); }
-      // Connectivity fallback: a Mentions edge to the nearest neighbour (cheap graph link).
-      if (top.score >= RELATE_MIN && this.memoryGraphEngine.store?.createRelationship) {
-        await this.memoryGraphEngine.store.createRelationship({
-          org_id: orgId, // residency: worker context may not carry the org — see createRelationship
-          id: crypto.randomUUID(), from_id: rec.factId, to_id: top.id,
-          type: 'Mentions', confidence: Number(top.score.toFixed(2)),
-          metadata: { created_by: 'kb_enrich', kind: 'semantic_related', document_id: documentId },
-        }).catch(() => {});
-        related++;
-      }
+      // Vector proximity is a retrieval signal, never a permanent graph edge.
     }
     this.logger.info?.(`[kb-enrich] doc ${String(documentId).slice(0, 8)}: suppressed=${suppressed} related=${related} contradicts=${contradicts} updates=${updates} extends=${extendsN} of ${enrichRecs.length}`);
   }
@@ -5743,12 +5696,15 @@ Every item must include a non-empty content field and one or more valid support_
             let _written = 0;
             for (const e of _edges) {
               try {
-                await this.memoryGraphEngine.store.createRelationship({
+                await this.memoryGraphEngine.applyValidatedRelationship({
                   org_id: orgId, // residency: worker context may not carry the org — see createRelationship
                   id: crypto.randomUUID(), from_id: uFacts[e.from].id, to_id: uFacts[e.to].id, type: e.type,
-                  confidence: e.type === 'Derives' ? 0.6 : 0.8,
+                  confidence: e.type === 'Updates' ? 0.9 : 0.8,
                   metadata: { created_by: 'kb_doc_relations_5b', document_id: documentId,
                     ...(e.type === 'Derives' ? { inferred: true } : {}) },
+                }, {
+                  user_id: userId,
+                  org_id: orgId,
                 });
                 _written += 1;
               } catch { /* dup/FK tolerated */ }
@@ -6271,7 +6227,7 @@ Every item must include a non-empty content field and one or more valid support_
           // never crashes mid-rollout.
           const createPartOf = async (childId) => {
             try {
-              await this.memoryGraphEngine.store.createRelationship({
+              await this.memoryGraphEngine.applyValidatedRelationship({
                 org_id: orgId, // residency: worker context may not carry the org — see createRelationship
                 id: crypto.randomUUID(),
                 from_id: childId,
@@ -6281,23 +6237,12 @@ Every item must include a non-empty content field and one or more valid support_
                 created_by: 'document_first_ingestion',
                 created_at: new Date().toISOString(),
                 metadata: { ingest_tree: true, document_id: documentId, parent_role: 'document' },
+              }, {
+                user_id: userId,
+                org_id: orgId,
               });
             } catch (err) {
-              try {
-                await this.memoryGraphEngine.store.createRelationship({
-                  org_id: orgId, // residency: worker context may not carry the org — see createRelationship
-                  id: crypto.randomUUID(),
-                  from_id: childId,
-                  to_id: docParentId,
-                  type: 'Extends',
-                  confidence: 1.0,
-                  created_by: 'document_first_ingestion',
-                  created_at: new Date().toISOString(),
-                  metadata: { ingest_tree: true, subtype: 'PartOf', document_id: documentId, parent_role: 'document', fallback_reason: err.message },
-                });
-              } catch (err2) {
-                ingestDiagnostic.warn(`[doc-first] PartOf edge ${childId.slice(0, 8)}→${docParentId.slice(0, 8)} failed (native + fallback):`, err2.message);
-              }
+              ingestDiagnostic.warn(`[doc-first] PartOf edge ${childId.slice(0, 8)}→${docParentId.slice(0, 8)} failed:`, err.message);
             }
           };
           const edgeTasks = persistedChildIds.map(childId => createPartOf(childId));

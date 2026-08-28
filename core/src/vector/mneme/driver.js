@@ -397,18 +397,16 @@ export function amrBumpRecall(orgId, ids) {
 
 // REMOTE ORGS: was fire-and-forget (lost on agent-down). Now durable via outbox.
 // Ordering: seq guarantees this edge op lands AFTER the write op for the same memory.
-export function amrAddEdge(rel) {
+export async function amrAddEdge(rel) {
   if (process.env.MNEME_DEBUG_ROUTING === '1') console.log('[amrAddEdge] from', rel?.fromId?.slice?.(0,8), 'to', rel?.toId?.slice?.(0,8), 'org', rel?.orgId?.slice?.(0,8), 'remote', rel?.orgId ? orgIsRemote(rel.orgId) : 'no-org');
   if (!rel?.fromId || !rel?.toId) return;
   if (rel.orgId && orgIsRemote(rel.orgId)) {
     // Use fromId as the partition key so edge ops for a given memory are ordered
     // after its write op (which was enqueued with recordId=record.id=fromId).
     const recordId = rel.fromId;
-    _getEnqueuePush().then((enqueue) => {
-      if (enqueue) return enqueue(rel.orgId, 'edge', recordId, { rel });
-      return remoteAddEdge(rel.orgId, rel);
-    }).catch(() => remoteAddEdge(rel.orgId, rel));
-    return;
+    const enqueue = await _getEnqueuePush().catch(() => null);
+    if (enqueue) return enqueue(rel.orgId, 'edge', recordId, { rel });
+    return remoteAddEdge(rel.orgId, rel);
   }
   if (!anyMnemeOrg()) return;
   for (const a of allActiveAdapters()) {
@@ -416,7 +414,7 @@ export function amrAddEdge(rel) {
       try {
         a.relationship.create({ data: { id: rel.id, fromId: rel.fromId, toId: rel.toId, type: rel.type, confidence: rel.confidence ?? 1 } });
       } catch { /* edge mirror best-effort; PG is source of truth */ }
-      return;
+      return true;
     }
   }
 }

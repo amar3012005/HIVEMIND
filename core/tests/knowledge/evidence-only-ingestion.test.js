@@ -234,7 +234,11 @@ test('one document parent completes a fourteen-memory promotion and keeps child 
         parentWrites.push(payload);
         return { memoryId: 'parent-1' };
       },
-      store: { createRelationship: async (edge) => relationships.push(edge) },
+      applyValidatedRelationship: async (edge) => {
+        relationships.push(edge);
+        return { operation: 'attached', edgesCreated: [edge] };
+      },
+      store: {},
     },
     smartIngestRouter: null, embeddingService: null,
     logger: { info() {}, warn() {}, error() {} },

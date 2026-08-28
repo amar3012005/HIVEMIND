@@ -103,6 +103,42 @@ function _setsOverlap(a, b) {
   return false;
 }
 
+function _claimField(memory, snake, camel) {
+  const short = snake.replace(/^claim_/, '');
+  return memory?.[snake]
+    ?? memory?.[camel]
+    ?? memory?.metadata?.claim?.[snake]
+    ?? memory?.metadata?.claim?.[camel]
+    ?? memory?.metadata?.claim?.[short]
+    ?? null;
+}
+
+function _canonicalClaimToken(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function _stableQualifierObject(memory) {
+  const qualifiers = _claimField(memory, 'claim_qualifiers', 'claimQualifiers');
+  if (!qualifiers || typeof qualifiers !== 'object' || Array.isArray(qualifiers)) return null;
+  const value = qualifiers.object ?? qualifiers.value ?? qualifiers.target ?? null;
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'object') {
+    return JSON.stringify(value, Object.keys(value).sort()).normalize('NFKC').toLowerCase();
+  }
+  return String(value).normalize('NFKC').trim().toLowerCase();
+}
+
+function _structuredClaim(memory) {
+  const subject = _canonicalClaimToken(_claimField(memory, 'claim_subject', 'claimSubject'));
+  const predicate = _canonicalClaimToken(_claimField(memory, 'claim_predicate', 'claimPredicate'));
+  return { subject, predicate, object: _stableQualifierObject(memory) };
+}
+
 /**
  * Compare the value slots of two claims.
  * @returns {'equal'|'different'|'incomparable'}
@@ -163,6 +199,10 @@ export function assessClaimRelation(from = {}, to = {}, { hubSlugs = [] } = {}) 
 
   const fromEnts = ents(from.tags);
   const toEnts = ents(to.tags);
+  const fromClaim = _structuredClaim(from);
+  const toClaim = _structuredClaim(to);
+  if (fromClaim.subject) fromEnts.add(fromClaim.subject);
+  if (toClaim.subject) toEnts.add(toClaim.subject);
   const fromSlots = extractValueSlots(from.content);
   const toSlots = extractValueSlots(to.content);
 
@@ -193,6 +233,17 @@ export function assessClaimRelation(from = {}, to = {}, { hubSlugs = [] } = {}) 
     sharedSpecific = [];
   } else {
     return { relation: 'topical', reason: 'subject evidence on one side only', sharedSpecific: [] };
+  }
+
+  if (fromClaim.predicate && toClaim.predicate && fromClaim.predicate !== toClaim.predicate) {
+    return { relation: 'topical', reason: 'different structured predicates', sharedSpecific };
+  }
+
+  if (fromClaim.predicate && toClaim.predicate && fromClaim.object !== null && toClaim.object !== null) {
+    if (fromClaim.object === toClaim.object) {
+      return { relation: 'corroboration', reason: 'same structured claim object', sharedSpecific };
+    }
+    return { relation: 'update', reason: 'same structured claim, object differs', sharedSpecific };
   }
 
   const valueCmp = compareValueSlots(fromSlots, toSlots);

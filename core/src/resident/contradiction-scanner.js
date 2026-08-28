@@ -35,10 +35,12 @@ const MAX_ENTITIES_PER_SCAN = 20;
 const MAX_MEMORIES_PER_ENTITY = 5;
 
 export class ContradictionScanner {
-  constructor({ prisma, logger = console, model = null }) {
+  constructor({ prisma, memoryGraphEngine = null, memoryStore = null, logger = console, model = null }) {
     this.prisma = prisma;
     this.logger = logger;
     this.model = model || getDefaultModel();
+    this.memoryGraphEngine = memoryGraphEngine;
+    this.memoryStore = memoryStore;
   }
 
   async scanForOrg(orgId) {
@@ -122,29 +124,17 @@ export class ContradictionScanner {
     let written = 0;
     for (const p of proposals) {
       try {
-        await this.prisma.relationship.upsert({
-          where: {
-            fromId_toId_type: {
-              fromId: p.memoryAId,
-              toId: p.memoryBId,
-              type: 'Contradicts',
-            },
-          },
-          create: {
-            fromId: p.memoryAId,
-            toId: p.memoryBId,
-            type: 'Contradicts',
-            confidence: p.confidence,
-            createdBy: 'contradiction_scanner_v1',
-            inferenceModel: this.model,
-            metadata: { entity: p.entityName, explanation: p.explanation },
-          },
-          update: {
-            confidence: p.confidence,
-            metadata: { entity: p.entityName, explanation: p.explanation },
-          },
-        });
-        written++;
+        const source = await this.memoryStore?.getMemory(p.memoryBId);
+        if (!source || !this.memoryGraphEngine?.applyValidatedRelationship) continue;
+        const applied = await this.memoryGraphEngine.applyValidatedRelationship({
+          from_id: p.memoryBId,
+          to_id: p.memoryAId,
+          type: 'Contradicts',
+          confidence: p.confidence,
+          created_by: 'contradiction_scanner_v1',
+          metadata: { entity: p.entityName, explanation: p.explanation, inference_model: this.model },
+        }, { store: this.memoryStore, user_id: source.user_id, org_id: source.org_id });
+        written += applied.edgesCreated?.length || 0;
       } catch (err) {
         this.logger.warn?.(`[contradiction-scanner] emit failed: ${err.message}`);
       }

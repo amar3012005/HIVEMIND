@@ -15,6 +15,7 @@ const agentWorkflow = fs.readFileSync(
   new URL('../../../.github/workflows/publish-memory-box-agent.yml', import.meta.url),
   'utf8',
 );
+const agentServer = fs.readFileSync(new URL('../../../byod/agent/server.mjs', import.meta.url), 'utf8');
 
 test('standalone BYOD publisher includes the storage manifest verifier', () => {
   assert.match(publisher, /stage-byod-bundle\.sh/);
@@ -65,4 +66,12 @@ test('agent publishing emits only a multi-architecture immutable candidate', () 
   assert.match(agentWorkflow, /docker logout ghcr\.io/);
   assert.match(agentWorkflow, /imagetools inspect/);
   assert.match(agentWorkflow, /actions\/upload-artifact@v4/);
+});
+
+test('BYOD rejects uncertified semantic graph edges and returns validation receipts', () => {
+  assert.match(agentServer, /relationship_policy_rejected/);
+  assert.match(agentServer, /relationship_policy_version/);
+  assert.match(agentServer, /relationship_validation_status/);
+  assert.match(agentServer, /metadata:\s*r\.metadata\s*\|\|\s*\{\}/);
+  assert.match(agentServer, /created_by:\s*r\.created_by\s*\|\|\s*null/);
 });

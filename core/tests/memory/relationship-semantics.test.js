@@ -2,6 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildObservationPayload } from '../../src/memory/observation-store.js';
 import { InMemoryGraphStore, MemoryGraphEngine } from '../../src/memory/graph-engine.js';
+import {
+  certifyRelationshipMetadata,
+  hasCanonicalRelationshipCertification,
+  validateRelationshipProposal,
+} from '../../src/memory/relationship-semantics.js';
+
+test('canonical relationship policy rejects memory co-mentions and weak derivations', () => {
+  const tenant = { org_id: 'org-a', user_id: 'user-a' };
+  const source = { id: 'source', ...tenant, content: 'Amar met Kruti.' };
+  const target = { id: 'target', ...tenant, content: 'Kruti joined marketing.' };
+  assert.equal(validateRelationshipProposal({ type: 'Mentions', sourceMemory: source, targetMemory: target, orgId: 'org-a', userId: 'user-a' }).ok, false);
+  assert.equal(validateRelationshipProposal({ type: 'Derives', sourceMemory: source, targetMemory: target, confidence: 0.6, orgId: 'org-a', userId: 'user-a' }).ok, false);
+});
+
+test('canonical relationship certification is explicit and machine-checkable', () => {
+  const verdict = { ok: true, type: 'Derives', reason: 'validated-source-provenance' };
+  const metadata = certifyRelationshipMetadata({ source: 'test' }, verdict);
+  assert.equal(hasCanonicalRelationshipCertification({ type: 'Derives', metadata }), true);
+  assert.equal(hasCanonicalRelationshipCertification({ type: 'Derives', metadata: {} }), false);
+});
 
 test('buildObservationPayload includes normalized derive semantics', () => {
   const payload = buildObservationPayload({
@@ -43,6 +63,7 @@ test('ingestMemory persists explicit Derives semantics and creates derive edges'
     content: 'Source A explains the first half of the topic.',
     source_metadata: { source_type: 'manual' },
     skipProcessing: true,
+    defer_entity_linking: true,
   });
 
   const sourceB = await engine.ingestMemory({
@@ -52,6 +73,7 @@ test('ingestMemory persists explicit Derives semantics and creates derive edges'
     content: 'Source B explains the second half of the topic.',
     source_metadata: { source_type: 'manual' },
     skipProcessing: true,
+    defer_entity_linking: true,
   });
 
   const derived = await engine.ingestMemory({
@@ -66,6 +88,7 @@ test('ingestMemory persists explicit Derives semantics and creates derive edges'
     },
     source_metadata: { source_type: 'manual' },
     skipProcessing: true,
+    defer_entity_linking: true,
   });
 
   const stored = await store.getMemory(derived.memoryId);
@@ -78,7 +101,7 @@ test('ingestMemory persists explicit Derives semantics and creates derive edges'
   assert.ok(deriveEdges.every(edge => edge.metadata.semantic_relationship.type === 'Derives'));
 });
 
-test('LLM co-mention linker preserves Derives edge type', async () => {
+test('LLM co-mention linker does not mint semantic memory edges from co-occurrence', async () => {
   const store = new InMemoryGraphStore();
   const memoryChatClient = async () => new Response(JSON.stringify({
     choices: [{
@@ -129,10 +152,27 @@ test('LLM co-mention linker preserves Derives edge type', async () => {
   await engine._attachEntityCoMentionEdges(derived, store, [source]);
 
   const deriveEdges = store.relationships.filter(edge => edge.type === 'Derives');
-  assert.equal(deriveEdges.length, 1);
-  assert.equal(deriveEdges[0].from_id, derived.id);
-  assert.equal(deriveEdges[0].to_id, source.id);
-  assert.equal(deriveEdges[0].metadata.classification_source, 'llm');
+  assert.equal(deriveEdges.length, 0);
+  const stored = await store.getMemory(derived.id);
+  assert.ok(stored.tags.includes('entity:project-zephyr'));
+});
+
+test('validated dispatcher atomically versions structured claims and certifies the edge', async () => {
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
+  const tenant = { user_id: '00000000-0000-4000-8000-000000009501', org_id: '00000000-0000-4000-8000-000000009502' };
+  const oldMemory = await store.createMemory({ id: '00000000-0000-4000-8000-000000009503', ...tenant,
+    content: 'Retention is 12 months.', claim_subject: 'customer-data', claim_predicate: 'retention',
+    claim_qualifiers: { object: '12 months' }, is_latest: true, version: 1, tags: [], created_at: new Date().toISOString() });
+  const newMemory = await store.createMemory({ id: '00000000-0000-4000-8000-000000009504', ...tenant,
+    content: 'Retention is now 13 months.', claim_subject: 'customer-data', claim_predicate: 'retention',
+    claim_qualifiers: { object: '13 months' }, is_latest: true, version: 1, tags: [], created_at: new Date().toISOString() });
+
+  const applied = await engine.applyValidatedRelationship({ from_id: newMemory.id, to_id: oldMemory.id,
+    type: 'Updates', confidence: 0.95 }, tenant);
+  assert.equal(applied.edgesCreated.length, 1);
+  assert.equal((await store.getMemory(oldMemory.id)).is_latest, false);
+  assert.equal(applied.edgesCreated[0].metadata.relationship_validation_status, 'validated');
 });
 
 test('malformed entity-link output retains structured entities and explicit type', async () => {

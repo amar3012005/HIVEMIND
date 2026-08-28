@@ -120,21 +120,11 @@ export class MemorySynthesizer {
     });
     const realId = result?.memoryId || synthesisId;
 
-    // Derives edges
-    for (const src of sourceMemories) {
-      try {
-        await this.prisma.relationship.upsert({
-          where: { fromId_toId_type: { fromId: realId, toId: src.id, type: 'Derives' } },
-          create: {
-            fromId: realId, toId: src.id, type: 'Derives',
-            confidence: 0.85, createdBy: 'memory_synthesizer_v1',
-            inferenceModel: this.model,
-            metadata: { topic: topic.topicKey },
-          },
-          update: { confidence: 0.85 },
-        });
-      } catch { /* dup ok */ }
-    }
+    await this.memoryGraphEngine.applyDerivesFromSources(
+      sourceMemories.map(src => src.id),
+      realId,
+      { user_id: userId, org_id: orgId, confidence: 0.85, reason: 'memory_synthesizer_v1' },
+    );
 
     // Mark topic synthesized
     await this.prisma.topicState.update({

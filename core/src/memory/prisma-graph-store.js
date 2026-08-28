@@ -1685,9 +1685,15 @@ export class PrismaGraphStore {
     // Dual mode: PG has the row (above); mirror the typed edge into the .amr shard for graph-recall.
     // No-op when no .amr org / sole mode (sole already routes the upsert to .amr via the proxy).
     if (mnemeMode() === 'dual') {
-      Promise.resolve(amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type,
+      // Await durable admission. Returning before this promise settled meant a
+      // successful managed write could be acknowledged while the AMR mirror
+      // was still absent (or had already failed). amrAddEdge owns the durable
+      // outbox/remote path, so awaiting it keeps both storage projections on
+      // the same write contract without coupling the caller to transport
+      // implementation details.
+      await amrAddEdge({ id: created.id, fromId: edge.from_id, toId: edge.to_id, type,
         confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {},
-        createdBy: edge.created_by || 'system', orgId: edge.org_id || currentOrg() })).catch(() => {});
+        createdBy: edge.created_by || 'system', orgId: edge.org_id || currentOrg() });
     }
 
     return mapRelationshipRecord(created);

@@ -315,6 +315,36 @@ test('maintenance quarantine is persisted in the agent registry and survives mod
   assert.deepEqual(second.remoteAgentOrgIds(), ['org']);
 });
 
+test('agent routing refreshes an existing tenant after the broker rewrites its projection', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-remote-projection-refresh-'));
+  const registry = join(directory, 'agents.json');
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  process.env.MNEME_AGENT_REGISTRY_FILE = registry;
+  await writeFile(registry, JSON.stringify({
+    org: { url: 'http://100.64.0.1:8787', token: 'old-token', kind: 'selfhost' },
+  }));
+
+  const backend = await import(`../../src/vector/mneme/remote-backend.js?projection-refresh=${Date.now()}`);
+  assert.equal(backend.agentFor('org').token, 'old-token');
+
+  // The production loader intentionally limits stat calls to one every two seconds.
+  await new Promise((resolve) => setTimeout(resolve, 2_050));
+  await writeFile(registry, JSON.stringify({
+    org: { url: 'https://mb-org.example.com', token: 'new-token', kind: 'selfhost', transport: 'cloudflare' },
+  }));
+
+  assert.deepEqual(backend.agentFor('org'), {
+    url: 'https://mb-org.example.com',
+    token: 'new-token',
+    fallbackTokens: [],
+    pgUrl: '',
+    qdrantUrl: '',
+    kind: 'selfhost',
+    maintenanceQuarantinedUntil: 0,
+    releaseStatus: null,
+  });
+});
+
 test('meeting recovery enumerates embedded and self-host agents independently of vector-maintenance quarantine', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hm-meeting-agent-enumeration-'));
   const registry = join(directory, 'agents.json');

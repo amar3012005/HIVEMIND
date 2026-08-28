@@ -54,6 +54,11 @@ test('broker enforces expiring tenant credentials and stores only credential has
   assert.doesNotMatch(source, /await authenticate\(body\)/);
 });
 
+test('broker writes the shared registry as the same uid used by Core', () => {
+  const compose = fs.readFileSync(path.join(root, 'infra/docker-compose.hetzner.yml'), 'utf8');
+  assert.match(compose, /byod-broker:[\s\S]*?user: "1001:1001"[\s\S]*?MNEME_AGENT_REGISTRY_FILE: \/app\/data\/byod-agents\.json/);
+});
+
 test('endpoint policy binds managed hostnames and rejects custom HTTPS resolving privately', async () => {
   const previous = { ...process.env };
   process.env.CLOUDFLARE_MEMORY_BOX_DOMAIN = 'example.com';

@@ -283,6 +283,10 @@ services:
     build: { context: ../byod/broker }
     image: hivemind/byod-broker:${VERSION:-latest}
     container_name: hm-byod-broker
+    # Core and Control run as nodejs (1001:1001) and consume the broker's
+    # mode-0600 compatibility projection from the shared data volume. Running
+    # the writer with the same identity keeps every atomic rename readable.
+    user: "1001:1001"
     restart: unless-stopped
     mem_limit: 256m
     memswap_limit: 384m

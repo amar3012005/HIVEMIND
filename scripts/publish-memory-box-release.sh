@@ -30,6 +30,10 @@ SOURCE_SHA="$(VERIFIED="$VERIFIED" node -e 'const m=JSON.parse(process.env.VERIF
 PUBLIC_KEY_SHA="$(VERIFIED="$VERIFIED" node -e 'const m=JSON.parse(process.env.VERIFIED);process.stdout.write(m.public_key_sha256)')"
 [[ "$MANIFEST_CHANNEL" == "$CHANNEL" ]] || { echo "manifest channel does not match promotion channel" >&2; exit 1; }
 [[ "$(sha256sum "$BUNDLE" | awk '{print $1}')" == "$EXPECTED_BUNDLE_SHA" ]] || { echo "bundle digest mismatch" >&2; exit 1; }
+for required in setup.sh hivemind-memory-box memory-box-common.sh doctor.sh backup.sh storage-manifest.mjs storage-restore-drill.sh; do
+  tar -tzf "$BUNDLE" | sed 's#^\./##' | grep -Fxq "$required" \
+    || { echo "signed bundle is missing required runtime file: $required" >&2; exit 1; }
+done
 [[ -f "$RESTORE_RECEIPT" ]] || { echo "BYOD_RESTORE_DRILL_RECEIPT must name a successful restore-drill receipt" >&2; exit 1; }
 RELEASE="$RELEASE" IMAGE="$IMAGE" SOURCE_SHA="$SOURCE_SHA" node -e '
   const fs=require("fs"),r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));

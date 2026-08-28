@@ -226,7 +226,10 @@ export function clearRemoteAgentMaintenanceQuarantine(orgId) {
   return true;
 }
 export function agentFor(orgId) {
-  if (!_registry.has(orgId)) _loadFile(); // pick up a fresh enrollment from the shared file
+  // Always give the throttled file loader a chance to observe a broker rewrite.
+  // Checking only on a cache miss pins an existing tenant to stale endpoint and
+  // token data until Core restarts after a transport migration or token rotation.
+  _loadFile();
   return _registry.get(orgId) || null;
 }
 export function isRemoteReady(orgId) { return !!agentFor(orgId); }

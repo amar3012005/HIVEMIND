@@ -130,8 +130,12 @@ async function ensureSchema() {
       to_id uuid NOT NULL,
       type text,
       confidence real NOT NULL DEFAULT 1,
+      metadata jsonb NOT NULL DEFAULT '{}',
+      created_by text NOT NULL DEFAULT 'system',
       created_at timestamptz NOT NULL DEFAULT now()
     );
+    ALTER TABLE relationships ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}';
+    ALTER TABLE relationships ADD COLUMN IF NOT EXISTS created_by text NOT NULL DEFAULT 'system';
     CREATE INDEX IF NOT EXISTS rel_from_idx ON relationships(from_id);
     CREATE INDEX IF NOT EXISTS rel_to_idx   ON relationships(to_id);
     -- KB layer (self-host): documents + evidence segments live here, never central. Segment vectors
@@ -685,12 +689,29 @@ const routes = {
     }
     for (const rel of (b.rels || [])) {
       if (rel?.fromId && rel?.toId) {
+        const semantic = ['Updates', 'Extends', 'Derives', 'Contradicts'].includes(rel.type);
+        const certified = rel.metadata?.relationship_policy_version === 'canonical-graph-v1'
+          && rel.metadata?.relationship_validation_status === 'validated';
+        if ((semantic && !certified) || (rel.type === 'Mentions' && rel.metadata?.entity_projection !== true)) {
+          throw new Error(`relationship_policy_rejected:${rel.type || 'unknown'}`);
+        }
+        if (semantic) {
+          const { rows: budgetRows } = await pg.query(
+            `SELECT EXISTS(SELECT 1 FROM relationships WHERE org_id=$1 AND from_id=$2 AND to_id=$3 AND type=$4) AS exists,
+                    (SELECT count(*)::int FROM relationships WHERE org_id=$1 AND from_id=$2 AND type = ANY($5::text[])) AS semantic_out`,
+            [ORG, rel.fromId, rel.toId, rel.type, ['Updates', 'Extends', 'Derives', 'Contradicts']],
+          );
+          if (!budgetRows[0]?.exists && Number(budgetRows[0]?.semantic_out || 0) >= 10) {
+            throw new Error('relationship_policy_rejected:semantic-edge-budget-exhausted');
+          }
+        }
         // id has no DEFAULT and is NOT NULL — a caller that omits it (the engine's remote-org edge
         // path did, until fixed) must not 500 the whole write; generate one server-side.
         await pg.query(
-          `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
-           ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
-          [rel.id || randomUUID(), ORG, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]
+          `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence, metadata, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence, metadata=EXCLUDED.metadata, created_by=EXCLUDED.created_by`,
+          [rel.id || randomUUID(), ORG, rel.fromId, rel.toId, rel.type || 'PartOf', rel.confidence ?? 1,
+            JSON.stringify(rel.metadata || {}), rel.createdBy || 'system']
         );
       }
     }
@@ -938,12 +959,29 @@ const routes = {
   '/v1/edge': async (b) => {
     const rel = b.rel;
     if (rel?.fromId && rel?.toId) {
+      const semantic = ['Updates', 'Extends', 'Derives', 'Contradicts'].includes(rel.type);
+      const certified = rel.metadata?.relationship_policy_version === 'canonical-graph-v1'
+        && rel.metadata?.relationship_validation_status === 'validated';
+      if ((semantic && !certified) || (rel.type === 'Mentions' && rel.metadata?.entity_projection !== true)) {
+        throw new Error(`relationship_policy_rejected:${rel.type || 'unknown'}`);
+      }
+      if (semantic) {
+        const { rows: budgetRows } = await pg.query(
+          `SELECT EXISTS(SELECT 1 FROM relationships WHERE org_id=$1 AND from_id=$2 AND to_id=$3 AND type=$4) AS exists,
+                  (SELECT count(*)::int FROM relationships WHERE org_id=$1 AND from_id=$2 AND type = ANY($5::text[])) AS semantic_out`,
+          [ORG, rel.fromId, rel.toId, rel.type, ['Updates', 'Extends', 'Derives', 'Contradicts']],
+        );
+        if (!budgetRows[0]?.exists && Number(budgetRows[0]?.semantic_out || 0) >= 10) {
+          throw new Error('relationship_policy_rejected:semantic-edge-budget-exhausted');
+        }
+      }
       // id has no DEFAULT and is NOT NULL — a caller that omits it (the engine's remote-org edge
       // path did, until fixed) must not 500 the whole write; generate one server-side.
       await pg.query(
-        `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence) VALUES ($1,$2,$3,$4,$5,$6)
-         ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence`,
-        [rel.id || randomUUID(), ORG, rel.fromId, rel.toId, rel.type || 'Mentions', rel.confidence ?? 1]);
+        `INSERT INTO relationships (id, org_id, from_id, to_id, type, confidence, metadata, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (id) DO UPDATE SET type=EXCLUDED.type, confidence=EXCLUDED.confidence, metadata=EXCLUDED.metadata, created_by=EXCLUDED.created_by`,
+        [rel.id || randomUUID(), ORG, rel.fromId, rel.toId, rel.type || 'PartOf', rel.confidence ?? 1,
+          JSON.stringify(rel.metadata || {}), rel.createdBy || 'system']);
     }
     return { ok: true };
   },
@@ -1903,11 +1941,11 @@ const routes = {
     if (!b.memoryId) return { error: 'memoryId required' };
     const memId = b.memoryId;
     const { rows: outRels } = await pg.query(
-      'SELECT id, from_id, to_id, type, confidence, created_at FROM relationships WHERE org_id=$1 AND from_id=$2::uuid ORDER BY confidence DESC, created_at DESC LIMIT 200',
+      'SELECT id, from_id, to_id, type, confidence, metadata, created_by, created_at FROM relationships WHERE org_id=$1 AND from_id=$2::uuid ORDER BY confidence DESC, created_at DESC LIMIT 200',
       [ORG, memId]
     );
     const { rows: inRels } = await pg.query(
-      'SELECT id, from_id, to_id, type, confidence, created_at FROM relationships WHERE org_id=$1 AND to_id=$2::uuid ORDER BY confidence DESC, created_at DESC LIMIT 200',
+      'SELECT id, from_id, to_id, type, confidence, metadata, created_by, created_at FROM relationships WHERE org_id=$1 AND to_id=$2::uuid ORDER BY confidence DESC, created_at DESC LIMIT 200',
       [ORG, memId]
     );
     // Batch-fetch peer memory titles.
@@ -1927,9 +1965,9 @@ const routes = {
         id: r.id,
         type: r.type || 'Mentions',
         confidence: r.confidence,
-        created_by: null,
+        created_by: r.created_by || null,
         created_at: r.created_at,
-        metadata: {},
+        metadata: r.metadata || {},
         direction: 'out',
         target_id: r.to_id,
         target_title: peerTitle(p),
@@ -1944,9 +1982,9 @@ const routes = {
         id: r.id,
         type: r.type || 'Mentions',
         confidence: r.confidence,
-        created_by: null,
+        created_by: r.created_by || null,
         created_at: r.created_at,
-        metadata: {},
+        metadata: r.metadata || {},
         direction: 'in',
         source_id: r.from_id,
         source_title: peerTitle(p),

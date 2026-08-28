@@ -15,6 +15,9 @@ test('Control Plane delegates lifecycle writes to the dedicated broker', () => {
   assert.match(source, /pathname === '\/v1\/selfhost\/bootstrap'/);
   assert.match(source, /pathname === '\/v1\/selfhost\/canary-bootstrap'/);
   assert.match(source, /MEMORY_BOX_CANARY_ORG_ALLOWLIST/);
+  assert.match(source, /const canaryEligible = process\.env\.MEMORY_BOX_CANARY_ENROLLMENT_ENABLED === 'true' && canaryAllowlist\.has\(orgId\)/);
+  assert.match(source, /releaseChannel === 'canary' && !canaryEligible/);
+  assert.match(source, /releaseChannel === 'stable' && canaryEligible \? \{ canary_eligible: true \} : \{\}/);
   assert.match(source, /channel: releaseChannel/);
   assert.match(source, /scopes: \['selfhost:bootstrap'\]/);
   assert.match(source, /memoryBoxBrokerRequest\(pathname, body\)/);

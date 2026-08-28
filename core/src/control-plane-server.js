@@ -3875,21 +3875,22 @@ const server = http.createServer(async (req, res) => {
     if (!membership) return;
     const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { hostingMode: true } }).catch(() => null);
     if (org?.hostingMode !== 'self_host') return jsonResponse(res, { error: 'Memory Box enrollment is available only for self-hosted organizations' }, 409);
-    if (releaseChannel === 'canary') {
-      const allowlist = new Set(String(process.env.MEMORY_BOX_CANARY_ORG_ALLOWLIST || '').split(',').map((value) => value.trim()).filter(Boolean));
-      if (process.env.MEMORY_BOX_CANARY_ENROLLMENT_ENABLED !== 'true' || !allowlist.has(orgId)) {
-        return jsonResponse(res, { error: 'Memory Box canary enrollment is not enabled for this organization' }, 403);
-      }
+    const canaryAllowlist = new Set(String(process.env.MEMORY_BOX_CANARY_ORG_ALLOWLIST || '').split(',').map((value) => value.trim()).filter(Boolean));
+    const canaryEligible = process.env.MEMORY_BOX_CANARY_ENROLLMENT_ENABLED === 'true' && canaryAllowlist.has(orgId);
+    if (releaseChannel === 'canary' && !canaryEligible) {
+      return jsonResponse(res, { error: 'Memory Box canary enrollment is not enabled for this organization' }, 403);
     }
     try {
       const readiness = await memoryBoxBrokerRequest('/v1/selfhost/readiness', { orgId, channel: releaseChannel });
       if (readiness.status !== 200 || readiness.payload?.ready !== true) {
         return jsonResponse(res, { error: 'Automatic Memory Box setup is not currently available',
-          code: 'memory_box_automatic_setup_unavailable', readiness: readiness.payload || null }, 503);
+          code: 'memory_box_automatic_setup_unavailable', readiness: readiness.payload || null,
+          ...(releaseChannel === 'stable' && canaryEligible ? { canary_eligible: true } : {}) }, 503);
       }
     } catch (error) {
       return jsonResponse(res, { error: 'Automatic Memory Box setup is not currently available',
-        code: 'memory_box_automatic_setup_unavailable' }, 503);
+        code: 'memory_box_automatic_setup_unavailable',
+        ...(releaseChannel === 'stable' && canaryEligible ? { canary_eligible: true } : {}) }, 503);
     }
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
     const issued = await createPersistedApiKey(prisma, {

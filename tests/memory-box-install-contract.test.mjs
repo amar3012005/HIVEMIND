@@ -75,6 +75,13 @@ test('upgrade, rollback and backup preserve the governed runtime contract', () =
   assert.match(backup, /hm_compose_prefix/);
 });
 
+test('release promotion refuses bundles missing recovery and doctor runtime files', () => {
+  const publish = fs.readFileSync(path.resolve(BYOD, '..', 'scripts', 'publish-memory-box-release.sh'), 'utf8');
+  assert.match(publish, /storage-manifest\.mjs/);
+  assert.match(publish, /storage-restore-drill\.sh/);
+  assert.match(publish, /signed bundle is missing required runtime file/);
+});
+
 test('protected configuration is parsed as data and cannot execute shell syntax', () => {
   const common = path.join(BYOD, 'memory-box-common.sh');
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-box-env-'));

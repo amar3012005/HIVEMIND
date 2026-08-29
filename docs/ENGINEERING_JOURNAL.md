@@ -778,3 +778,29 @@ slides that find no unique anchor get a page instead of `null`.
   fact shortfalls; one embedding attempt hit the 1s primary timeout and healed
   through fallback with zero failed segments. Evidence remained persisted and
   recallable. These are not parser failures and were not hidden in acceptance.
+
+## 2026-08-29 UTC — Day 1 Cloudflare Workflow local-cloud canary passed
+
+- State: Committed and locally accepted; not production-released.
+- Branch/commit: `codex/d1-workflow-production` at pushed SHA `ceb9beed`.
+- Feature control: isolated Flagship app `hivemind-local-development`; production
+  Flagship configuration was not changed. Backend remains fail-closed behind
+  `HIVEMIND_D1_WORKFLOW_ENABLED=true` in the local-only Compose overlay.
+- Real E2E evidence: Workflow instance
+  `d1-local7-251af4c6-7ea0-4e44-9fe1-4074028bf3b2` reused room
+  `daa06ae7-fe9e-4798-bea1-a0d886de64a3` and sealed turn
+  `3cd03bde-b9e0-43a7-9f54-e7c2b06cac76`; it rendered through the canonical
+  Day 0 `hm-playwright /v1/pdf` path and Cloudflare Email accepted delivery.
+  Evidence hash `3e4912694bd0a7987b5d0cbd07b32a53ad31a7ce798258f7cd79465feef90c04`,
+  length 4,831 bytes. A repeated deterministic start returned the completed
+  instance and same provider receipt; it created no duplicate delivery.
+- Verification: `node --test core/tests/unit/day1-first-move.test.mjs` passed
+  9/9; Worker `npm run check` passed; merged local Compose configuration passed
+  `docker compose ... config --quiet`.
+- Local iteration rule: Core source is bind-mounted into the uniquely named
+  Day 1 control-plane image, so ordinary JS changes use `docker compose up -d
+  --no-deps --force-recreate control-plane` without rebuilding. Rebuild only
+  when dependencies, Dockerfile, native modules, or build artifacts change.
+- Production rule: rebase onto current `origin/singulance-main`, pass the
+  production protocols/governor, then run one controlled canary before calling
+  this feature production-accepted.

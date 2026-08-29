@@ -3998,6 +3998,49 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
+  // Local preview only. This route is deliberately impossible to enable in a
+  // normal deployment: the compose-only HIVEMIND_LOCAL_AUTH_BYPASS flag must
+  // be set explicitly. It creates a synthetic local user/workspace and uses
+  // the normal signed session cookie so the frontend exercises real auth and
+  // bootstrap code without any third-party identity provider.
+  if (pathname === '/auth/local-preview' && req.method === 'GET') {
+    if (process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') {
+      return jsonResponse(res, { error: 'Not found' }, 404);
+    }
+    try {
+      const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
+      const user = await upsertUserFromZitadel({
+        sub: 'local-preview-user',
+        email: process.env.HIVEMIND_LOCAL_PREVIEW_EMAIL || 'local-preview@singulancelabs.test',
+        name: 'Local Preview',
+        locale: 'en',
+      });
+      let { org } = await resolveCurrentOrg(user.id);
+      if (!org) {
+        org = await prisma.organization.upsert({
+          where: { zitadelOrgId: 'local-preview-org' },
+          update: {},
+          create: {
+            zitadelOrgId: 'local-preview-org',
+            name: 'Local Preview',
+            slug: 'local-preview',
+            plan: 'free',
+            hostingMode: 'managed',
+          },
+        });
+        await prisma.userOrganization.upsert({
+          where: { userId_orgId: { userId: user.id, orgId: org.id } },
+          update: { isActive: true, role: 'admin', roles: ['admin'], joinedAt: new Date() },
+          create: { userId: user.id, orgId: org.id, role: 'admin', roles: ['admin'], isActive: true, joinedAt: new Date() },
+        });
+      }
+      const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: org.id });
+      return redirect(res, returnTo, [makeSessionCookie(sessionId)]);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 500);
+    }
+  }
+
   if (pathname === '/auth/google' && req.method === 'GET') {
     const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
     console.log(`[google-auth] Login initiated, returnTo: ${returnTo}`);

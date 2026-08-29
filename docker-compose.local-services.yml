@@ -24,7 +24,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       HIVEMIND_CORE_API_BASE_URL: http://api:3000
       HIVEMIND_API_URL: http://api:3000
+      HIVEMIND_CORE_API_PUBLIC_URL: https://preview.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_PUBLIC_URL: https://api.preview.singulancelabs.com
+      HIVEMIND_FRONTEND_URL: https://next.preview.singulancelabs.com
+      HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT: https://next.preview.singulancelabs.com/hivemind/app/overview
+      HIVEMIND_LOCAL_AUTH_BYPASS: "true"
       HIVEMIND_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}

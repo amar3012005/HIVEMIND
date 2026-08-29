@@ -4086,8 +4086,8 @@ const server = http.createServer(async (req, res) => {
       });
       await prisma.userOrganization.upsert({
         where: { userId_orgId: { userId: user.id, orgId: org.id } },
-        update: { isActive: true, role: 'owner', roles: ['owner'], joinedAt: new Date() },
-        create: { userId: user.id, orgId: org.id, role: 'owner', roles: ['owner'], isActive: true, joinedAt: new Date() },
+        update: { isActive: true, role: 'owner', roles: ['org_owner'], joinedAt: new Date() },
+        create: { userId: user.id, orgId: org.id, role: 'owner', roles: ['org_owner'], isActive: true, joinedAt: new Date() },
       });
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: org.id });
       return redirect(res, authState.returnTo || CONFIG.postLoginRedirect, [makeSessionCookie(sessionId)]);

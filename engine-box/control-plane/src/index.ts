@@ -13,6 +13,7 @@ type EnrollmentRequest = {
   installation_id: string;
   release_channel: 'canary' | 'stable';
   release_key: string;
+  license_key: string;
   expires_at: string;
 };
 
@@ -38,7 +39,7 @@ export class InstallationState implements DurableObject {
   }
 
   private async issue(input: EnrollmentRequest): Promise<Response> {
-    if (!input.organization_id || !input.installation_id || !input.release_key || !isFuture(input.expires_at)) return json({ error: 'invalid_enrollment' }, 400);
+    if (!input.organization_id || !input.installation_id || !input.release_key || !input.license_key || !isFuture(input.expires_at)) return json({ error: 'invalid_enrollment' }, 400);
     const existing = await this.state.storage.get<EnrollmentRequest>('enrollment');
     if (existing && existing.organization_id !== input.organization_id) return json({ error: 'installation_id_already_bound' }, 409);
     const nonce = randomToken(32);
@@ -58,9 +59,12 @@ export class InstallationState implements DurableObject {
     await this.state.storage.put({ state: 'redeemed', installation_token_hash: await sha256(installation_token), redeemed_at: new Date().toISOString() });
     return json({
       installation_token,
+      installation_id: enrollment.installation_id,
       manifest_url: artifactUrl(this.env, `${enrollment.release_key}/release.json`),
       signature_url: artifactUrl(this.env, `${enrollment.release_key}/release.sig`),
       public_key_url: artifactUrl(this.env, `${enrollment.release_key}/release.pub`),
+      license_url: artifactUrl(this.env, `${enrollment.license_key}/license.json`),
+      license_signature_url: artifactUrl(this.env, `${enrollment.license_key}/license.sig`),
       status_url: `/v1/engine-box/enroll/${encodeURIComponent(enrollment.installation_id)}/status`,
     });
   }

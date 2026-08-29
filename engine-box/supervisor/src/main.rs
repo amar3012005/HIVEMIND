@@ -19,6 +19,7 @@ fn run() -> Result<(), String> {
         "validate-release" => validate_release(PathBuf::from(root).join("release.json")),
         "install" => {
             let release = load_release(PathBuf::from(&root).join("release.json"))?;
+            verify_license_signature(&root)?;
             let compose = PathBuf::from(&root).join("compose.yaml");
             if !compose.exists() { return Err("compose.yaml is not installed with this release".into()); }
             render_environment(&root, &release)?;
@@ -56,7 +57,8 @@ fn render_environment(root: &str, release: &Release) -> Result<(), String> {
         ("hm-ingestion-worker", "HM_INGESTION_IMAGE"), ("hm-mcp", "HM_MCP_IMAGE"), ("cloudflared", "CLOUDFLARED_IMAGE"),
         ("oauth2-proxy", "OAUTH2_PROXY_IMAGE"), ("caddy", "CADDY_IMAGE"),
     ];
-    let mut lines = vec!["POSTGRES_USER=hivemind".to_string(), "ENGINE_BOX_CORE_PORT=8787".to_string()];
+    let lease_expiry = lease_expiry(root)?;
+    let mut lines = vec!["POSTGRES_USER=hivemind".to_string(), "ENGINE_BOX_CORE_PORT=8787".to_string(), format!("ENGINE_BOX_LEASE_EXPIRES_AT={lease_expiry}")];
     for (name, variable) in expected {
         let image = release.images.iter().find(|candidate| candidate.name == name)
             .ok_or_else(|| format!("release manifest lacks required image: {name}"))?;
@@ -73,6 +75,24 @@ fn render_environment(root: &str, release: &Release) -> Result<(), String> {
     }
     fs::write(PathBuf::from(root).join(".env"), format!("{}\n", lines.join("\n"))).map_err(|e| format!("cannot write runtime environment: {e}"))?;
     Ok(())
+}
+
+fn lease_expiry(root: &str) -> Result<String, String> {
+    let raw = fs::read(PathBuf::from(root).join("license.json")).map_err(|e| format!("cannot read signed license lease: {e}"))?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| format!("invalid signed license lease: {e}"))?;
+    value.get("expires_at").and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "signed license lease has no expires_at".into())
+}
+
+fn verify_license_signature(root: &str) -> Result<(), String> {
+    let mut command = Command::new("openssl");
+    command.args([
+        "pkeyutl", "-verify", "-pubin", "-inkey", &format!("{root}/release.pub"), "-rawin",
+        "-in", &format!("{root}/license.json"), "-sigfile", &format!("{root}/license.sig"),
+    ]);
+    run_checked(&mut command).map_err(|_| "signed license lease verification failed".to_string())
 }
 
 fn compose_command<const N: usize>(root: &str, args: [&str; N]) -> Result<(), String> {

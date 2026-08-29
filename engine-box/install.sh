@@ -60,11 +60,20 @@ PY
 manifest_url="$(json_field "$tmp_dir/bootstrap.json" manifest_url)" || die 'bootstrap response is invalid'
 signature_url="$(json_field "$tmp_dir/bootstrap.json" signature_url)" || die 'bootstrap response is invalid'
 public_key_url="$(json_field "$tmp_dir/bootstrap.json" public_key_url)" || die 'bootstrap response is invalid'
+license_url="$(json_field "$tmp_dir/bootstrap.json" license_url)" || die 'bootstrap response is invalid'
+license_signature_url="$(json_field "$tmp_dir/bootstrap.json" license_signature_url)" || die 'bootstrap response is invalid'
 curl --fail --silent --show-error "$manifest_url" -o "$tmp_dir/release.json"
 curl --fail --silent --show-error "$signature_url" -o "$tmp_dir/release.sig"
 curl --fail --silent --show-error "$public_key_url" -o "$tmp_dir/release.pub"
 openssl pkeyutl -verify -pubin -inkey "$tmp_dir/release.pub" -rawin -in "$tmp_dir/release.json" -sigfile "$tmp_dir/release.sig" >/dev/null \
   || die 'release manifest signature verification failed'
+curl --fail --silent --show-error "$license_url" -o "$tmp_dir/license.json"
+curl --fail --silent --show-error "$license_signature_url" -o "$tmp_dir/license.sig"
+openssl pkeyutl -verify -pubin -inkey "$tmp_dir/release.pub" -rawin -in "$tmp_dir/license.json" -sigfile "$tmp_dir/license.sig" >/dev/null \
+  || die 'license signature verification failed'
+license_installation_id="$(json_field "$tmp_dir/license.json" installation_id)" || die 'license is invalid'
+bootstrap_installation_id="$(json_field "$tmp_dir/bootstrap.json" installation_id)" || die 'bootstrap response is invalid'
+[ "$license_installation_id" = "$bootstrap_installation_id" ] || die 'license does not belong to this installation'
 
 supervisor_url="$(json_field "$tmp_dir/release.json" supervisor.url)" || die 'release manifest lacks supervisor artifact'
 supervisor_sha="$(json_field "$tmp_dir/release.json" supervisor.sha256)" || die 'release manifest lacks supervisor checksum'
@@ -76,6 +85,8 @@ install -m 0700 "$tmp_dir/hm-supervisor" "$INSTALL_ROOT/hm-supervisor"
 install -m 0600 "$tmp_dir/release.json" "$INSTALL_ROOT/release.json"
 install -m 0600 "$tmp_dir/release.sig" "$INSTALL_ROOT/release.sig"
 install -m 0644 "$tmp_dir/release.pub" "$INSTALL_ROOT/release.pub"
+install -m 0600 "$tmp_dir/license.json" "$INSTALL_ROOT/license.json"
+install -m 0600 "$tmp_dir/license.sig" "$INSTALL_ROOT/license.sig"
 bundle_url="$(json_field "$tmp_dir/release.json" bundle.url)" || die 'release manifest lacks appliance bundle'
 bundle_sha="$(json_field "$tmp_dir/release.json" bundle.sha256)" || die 'release manifest lacks appliance bundle checksum'
 curl --fail --silent --show-error "$bundle_url" -o "$tmp_dir/engine-box.tar.gz"

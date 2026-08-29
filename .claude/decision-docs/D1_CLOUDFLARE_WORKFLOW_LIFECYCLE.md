@@ -357,6 +357,15 @@ company team. Email uses the same public avatar endpoint as Day 0; PDF embeds
 the generated SVG directly so print rendering does not depend on a remote image
 request. Names and roles remain tied to their persisted employee IDs/seeds.
 
+Email remains a fixed-table, client-safe layout at desktop sizes and collapses
+to the viewport below 620px. At mobile widths, typography and cell padding
+tighten, long tables remain horizontally scrollable where supported and wrap
+safely elsewhere, character roles hide before names or portraits, and a second
+360px breakpoint keeps six portraits inside the content width. The email logo
+is the canonical HTTPS PNG plus text wordmark with explicit dimensions; the PDF
+uses the matching inline Singulance vector mark. Both logo paths must be covered
+by renderer tests, and the public PNG must return HTTP 200 before release.
+
 The presentation layer is episode-reusable. Future lifecycle playbooks call the
 generic `renderLifecycleCompletionEmail` and
 `renderLifecycleCompletionPortraitReport` contracts with episode labels,

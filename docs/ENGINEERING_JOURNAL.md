@@ -810,3 +810,27 @@ slides that find no unique anchor get a page instead of `null`.
 - Next: merge the branch into `singulance-main`; restart Codex so the new global
   MCP connection loads the user-level bearer token; use `memory_health` and
   `memory_search` at the start of future HIVEMIND tasks.
+
+## 2026-08-29 UTC — `singulance-local` integration line established
+
+- State: Committed; local integration branch created; production unchanged.
+- Branch: `singulance-local`, permanently checked out at
+  `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-local-main`.
+- Commits: `0dc20707` established the protocol; merge `b476710a` integrated the
+  already-tested `codex/local-preview-setup` history.
+- Decision: `singulance-main` remains production truth. Production flows into
+  `singulance-local`; private session branches rebase on `singulance-local` and
+  merge serially through the clean permanent worktree. The shared local branch
+  is never rebased, force-pushed, or deployed to production.
+- Verification: `git diff --check` passed; `node --check` passed for
+  `core/src/control-plane-server.js` and `core/src/email/email-service.js`.
+  The currently deployed local control-plane contains the integrated preview
+  source, is healthy, and the public preview email-auth request returned HTTP
+  202 with correct CORS and successful email-gateway acceptance.
+- Docker finding: a canonical-worktree image rebuild reached the final image
+  permission layer but stalled after Docker reported a missing BuildKit
+  snapshot while calculating cache usage. The build was interrupted without
+  replacing the healthy running container. No Docker cache was deleted because
+  destructive cache cleanup was not required to establish the branch.
+- Production: no production branch, server, container, Worker, DNS record, or
+  customer data changed.

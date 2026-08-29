@@ -97,6 +97,8 @@ infra/secrets/
 .dev.vars
 .dev.vars.*
 .wrangler/
+output/
+tmp/
 backups/
 *.rollback
 .last-*

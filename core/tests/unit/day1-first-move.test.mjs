@@ -126,19 +126,44 @@ test('README rendering preserves content while escaping executable HTML', () => 
   assert.match(html, /<strong>signal<\/strong>/);
 });
 
+test('README rendering produces safe tables and preserves international characters', () => {
+  const html = renderRoomReadme(`# 市場調査 — نتائج البحث 🚀
+
+| Region | Signal | Owner |
+|:--|--:|:--:|
+| भारत | **強い** | Léa & Omar |
+| الخليج | 82% | Zoë |
+
+Long token: https://example.test/${'segment/'.repeat(20)}`);
+  assert.match(html, /<table class="data-table">/);
+  assert.match(html, /<th style="text-align:left">Region<\/th>/);
+  assert.match(html, /<td style="text-align:right"><strong>強い<\/strong><\/td>/);
+  assert.match(html, /市場調査 — نتائج البحث 🚀/u);
+  assert.match(html, /Léa &amp; Omar/u);
+  assert.doesNotMatch(html, /\|:--\|/);
+});
+
 test('email and portrait report contain the exact sealed room output', () => {
   const input = {
     companyName: 'SOLVIS',
     taskTitle: 'Validate Market Need for Sovereign AI',
     output: '# Research findings\n\nThe verified demand signal remains **strong**.',
     roomUrl: 'https://next.singulancelabs.com/hivemind/app/employees/rooms/11111111-1111-1111-1111-111111111111',
+    characters: [
+      { id: 'agent-research', name: 'Léa', role: 'Researcher' },
+      { id: 'agent-skeptic', name: 'Omar', role: 'Risk & Compliance' },
+    ],
   };
   const email = renderDayOneEmail(input);
   const report = renderDayOnePortraitReport(input);
   assert.match(email.text, /# Research findings\n\nThe verified demand signal remains \*\*strong\*\*\./);
   assert.match(email.html, /The verified demand signal remains <strong>strong<\/strong>\./);
+  assert.match(email.html, /class="character-strip"/);
+  assert.match(email.html, /humation-avatar\.svg\?seed=agent-research&amp;role=Researcher/);
   assert.match(report, /@page\{size:A4 portrait/);
   assert.match(report, /The verified demand signal remains <strong>strong<\/strong>\./);
+  assert.match(report, /aria-label="Léa"/u);
+  assert.match(report, /class="character-strip"/);
   assert.doesNotMatch(report, /re-synthesi|summary generated/i);
 });
 

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { CARTESIA, escapeHtml, lifecycleEmailShell, lifecycleSubject, brandLockup } from '../email/templates/cartesia-lifecycle.js';
 import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
+import { humationAvatarPublicUrl, renderHumationAvatarSvg, resolveHumationLane } from '../email/humation-avatar.js';
 
 export const DAY_ONE_VERSION = 'day-1-first-move-v1';
 const SENDING_LEASE_MS = 10 * 60 * 1000;
@@ -81,7 +82,13 @@ export function renderRoomReadme(markdown = '') {
     if (list) html.push(`<${list.type}>${list.items.map((item) => `<li>${inlineMarkdown(item)}</li>`).join('')}</${list.type}>`);
     list = null;
   };
-  for (const line of lines) {
+  const tableCells = (line) => String(line).trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => cell.replace(/\\\|/g, '|').trim());
+  // Accept strict GFM dividers and the shorter dividers commonly emitted by
+  // LLMs; the header/body shape is still required, so ordinary pipe prose is
+  // not promoted into a table.
+  const tableDivider = (line) => tableCells(line).every((cell) => /^:?-+:?$/.test(cell));
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (/^```/.test(line)) {
       flushParagraph(); flushList();
       if (code) { html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`); codeLines = []; }
@@ -89,6 +96,21 @@ export function renderRoomReadme(markdown = '') {
       continue;
     }
     if (code) { codeLines.push(line); continue; }
+    if (line.includes('|') && lines[index + 1]?.includes('|') && tableDivider(lines[index + 1])) {
+      flushParagraph(); flushList();
+      const headers = tableCells(line);
+      const alignments = tableCells(lines[index + 1]).map((cell) => cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : 'left');
+      const rows = [];
+      index += 2;
+      while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+        rows.push(tableCells(lines[index]));
+        index += 1;
+      }
+      index -= 1;
+      html.push(`<div class="table-scroll"><table class="data-table"><thead><tr>${headers.map((cell, cellIndex) => `<th style="text-align:${alignments[cellIndex] || 'left'}">${inlineMarkdown(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${headers.map((_, cellIndex) => `<td style="text-align:${alignments[cellIndex] || 'left'}">${inlineMarkdown(row[cellIndex] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) { flushParagraph(); flushList(); html.push('<hr>'); continue; }
     const heading = line.match(/^(#{1,4})\s+(.+)$/);
     if (heading) {
       flushParagraph(); flushList();
@@ -116,16 +138,31 @@ export function renderRoomReadme(markdown = '') {
 }
 
 function readmeStyles() {
-  return `.readme{font:14px/1.65 ${CARTESIA.sans};color:${CARTESIA.ink}}.readme h2{margin:26px 0 10px;font-size:24px;line-height:1.15;letter-spacing:-.6px}.readme h3{margin:22px 0 8px;font-size:18px}.readme h4{margin:18px 0 6px;font-size:15px}.readme p{margin:0 0 13px}.readme ul,.readme ol{margin:0 0 15px;padding-left:22px}.readme li{margin:5px 0}.readme blockquote{margin:16px 0;padding:10px 16px;border-left:3px solid ${CARTESIA.blue};background:#f5f8ff}.readme code{font-family:${CARTESIA.mono};font-size:.88em;background:#f2f4f7;padding:2px 4px}.readme pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#09101f;color:#e8f2ff;padding:16px}.readme pre code{background:transparent;padding:0}.readme a{color:${CARTESIA.blue}}`;
+  return `.readme{font:14px/1.65 ${CARTESIA.sans};color:${CARTESIA.ink};overflow-wrap:anywhere;word-break:normal}.readme h2{margin:26px 0 10px;font-size:24px;line-height:1.15;letter-spacing:-.6px}.readme h3{margin:22px 0 8px;font-size:18px}.readme h4{margin:18px 0 6px;font-size:15px}.readme p{margin:0 0 13px}.readme ul,.readme ol{margin:0 0 15px;padding-left:22px}.readme li{margin:5px 0}.readme blockquote{margin:16px 0;padding:10px 16px;border-left:3px solid ${CARTESIA.blue};background:#f5f8ff}.readme code{font-family:${CARTESIA.mono};font-size:.88em;background:#f2f4f7;padding:2px 4px;overflow-wrap:anywhere}.readme pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#09101f;color:#e8f2ff;padding:16px}.readme pre code{background:transparent;padding:0}.readme a{color:${CARTESIA.blue};overflow-wrap:anywhere}.readme hr{margin:22px 0;border:0;border-top:1px solid ${CARTESIA.line}}.table-scroll{width:100%;margin:16px 0;overflow-x:auto}.data-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:11px;line-height:16px}.data-table th,.data-table td{padding:8px 7px;border:1px solid ${CARTESIA.line};vertical-align:top;overflow-wrap:anywhere;word-break:break-word}.data-table th{background:${CARTESIA.paper};font-weight:800;color:${CARTESIA.ink}}.data-table tr{break-inside:avoid;page-break-inside:avoid}`;
 }
 
-export function renderDayOneEmail({ companyName, taskTitle, output, roomUrl }) {
-  const body = `<tr><td class="section" style="background:${CARTESIA.paper}"><div class="eyebrow">DAY 1 · FIRST MOVE COMPLETE</div><h1 class="h1">Your HyperAgents<br>worked while you slept.</h1><p class="copy">The research room completed <strong style="color:${CARTESIA.ink}">${escapeHtml(taskTitle)}</strong> for ${escapeHtml(companyName)}. The report below is the room's sealed output, unchanged.</p></td></tr><tr><td class="section"><div class="readme">${renderRoomReadme(output)}</div><a class="action" href="${escapeHtml(roomUrl)}">OPEN THE RESEARCH ROOM →</a></td></tr>`;
+function workflowCharacters(characters = [], { email = false, publicApiUrl = '' } = {}) {
+  return (Array.isArray(characters) ? characters : []).slice(0, 6).map((member) => {
+    const character = { id: member?.id || member?.slug || member?.name, slug: member?.slug, name: clean(member?.name || 'HyperAgent', 72), role: clean(member?.jobTitle || member?.title || member?.role || member?.roleArchetype || 'Company Specialist', 96) };
+    character.roleArchetype = resolveHumationLane(member?.lane || member?.archetype || character.role);
+    return { ...character, portrait: email ? `<img src="${escapeHtml(humationAvatarPublicUrl(character, publicApiUrl))}" width="54" height="54" alt="${escapeHtml(character.name)}">` : renderHumationAvatarSvg(character, { size: 72 }) };
+  });
+}
+
+function characterStrip(characters, options = {}) {
+  const people = workflowCharacters(characters, options);
+  if (!people.length) return '';
+  return `<table role="presentation" class="character-strip"><tr>${people.map((person) => `<td class="character"><div class="character-avatar">${person.portrait}</div><div class="character-name">${escapeHtml(person.name)}</div><div class="character-role">${escapeHtml(person.role)}</div></td>`).join('')}</tr></table>`;
+}
+
+/** Reusable completion renderer for future lifecycle episodes. */
+export function renderLifecycleCompletionEmail({ companyName, taskTitle, output, roomUrl, characters = [], dayLabel = 'DAY 1', episodeLabel = 'FIRST MOVE COMPLETE', headline = 'Your HyperAgents<br>worked while you slept.', publicApiUrl = '' }) {
+  const body = `<tr><td class="section" style="background:${CARTESIA.paper}"><div class="eyebrow">${escapeHtml(dayLabel)} · ${escapeHtml(episodeLabel)}</div><h1 class="h1">${headline}</h1><p class="copy">The research room completed <strong style="color:${CARTESIA.ink}">${escapeHtml(taskTitle)}</strong> for ${escapeHtml(companyName)}. The report below is the room's sealed output, unchanged.</p>${characterStrip(characters, { email: true, publicApiUrl })}</td></tr><tr><td class="section"><div class="readme" dir="auto">${renderRoomReadme(output)}</div><a class="action" href="${escapeHtml(roomUrl)}">OPEN THE RESEARCH ROOM →</a></td></tr>`;
   const html = lifecycleEmailShell({
     title: `Day 1 - ${taskTitle}`,
     preheader: `Your HyperAgents completed research for ${companyName}.`,
     body,
-  }).replace('</style>', `${readmeStyles()}</style>`);
+  }).replace('</style>', `${readmeStyles()}.character-strip{width:100%;table-layout:fixed;margin-top:22px}.character{width:16.66%;padding:0 5px;text-align:center;vertical-align:top}.character-avatar{width:54px;height:54px;margin:0 auto 6px;border-radius:50%;overflow:hidden;background:#fff4f8;border:1px solid #f6c5dc}.character-avatar img,.character-avatar svg{display:block;width:100%;height:100%}.character-name{font-size:10px;line-height:13px;font-weight:800}.character-role{margin-top:2px;font:700 6px/9px ${CARTESIA.mono};color:${CARTESIA.muted};overflow-wrap:anywhere}@media only screen and (max-width:620px){.character-role{display:none}.character-avatar{width:42px;height:42px}.character{padding:0 2px}}</style>`);
   return {
     subject: lifecycleSubject(companyName, 1, `Your HyperAgents completed ${taskTitle}`),
     text: `Your HyperAgents worked while you slept.\n\n${taskTitle}\n\n${output}\n\nOpen the research room: ${roomUrl}`,
@@ -133,12 +170,18 @@ export function renderDayOneEmail({ companyName, taskTitle, output, roomUrl }) {
   };
 }
 
-export function renderDayOnePortraitReport({ companyName, taskTitle, output, roomUrl, completedAt }) {
+export function renderDayOneEmail(input) { return renderLifecycleCompletionEmail(input); }
+
+/** Reusable portrait-report renderer paired with the lifecycle email renderer. */
+export function renderLifecycleCompletionPortraitReport({ companyName, taskTitle, output, roomUrl, completedAt, characters = [], dayLabel = 'DAY-1 / RESEARCH' }) {
   const readme = renderRoomReadme(output);
+  const people = characterStrip(characters, { email: false });
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(taskTitle)}</title><style>
-  @page{size:A4 portrait;margin:0}*{box-sizing:border-box}body{margin:0;background:${CARTESIA.paper};color:${CARTESIA.ink};font-family:${CARTESIA.sans}}.page{min-height:297mm;padding:17mm 17mm 20mm;background:linear-gradient(180deg,#f4f8ff 0,#fff 34mm,#fff 100%)}.head{display:flex;align-items:center;justify-content:space-between;padding-bottom:9mm;border-bottom:1px solid ${CARTESIA.line}}.brand-lockup{display:flex;align-items:center;gap:3mm}.brand-lockup svg{width:11mm;height:11mm}.brand-word{font-size:18px;font-weight:800;letter-spacing:-.6px}.brand-sub{margin-top:2px;font:700 6px/9px ${CARTESIA.mono};letter-spacing:1.3px;color:#999}.brand-sub span{color:${CARTESIA.blue}}.folio{font:700 7px/10px ${CARTESIA.mono};letter-spacing:1.5px;color:${CARTESIA.blue}}.intro{padding:13mm 0 10mm;border-bottom:1px solid ${CARTESIA.line}}.eyebrow{font:700 7px/11px ${CARTESIA.mono};letter-spacing:1.8px;color:${CARTESIA.blue}}h1{margin:4mm 0 0;max-width:160mm;font-size:33px;line-height:1.04;letter-spacing:-1.3px}.meta{margin-top:5mm;color:${CARTESIA.body};font-size:11px;line-height:17px}.report{padding-top:9mm}${readmeStyles()}.foot{margin-top:12mm;padding-top:5mm;border-top:1px solid ${CARTESIA.line};display:flex;justify-content:space-between;font:700 6px/9px ${CARTESIA.mono};letter-spacing:1.1px;color:#999}.foot a{color:${CARTESIA.blue};text-decoration:none}
-  </style></head><body><main class="page"><header class="head">${brandLockup({ compact: true })}<div class="folio">DAY-1 / RESEARCH</div></header><section class="intro"><div class="eyebrow">HIVEMIND · FIRST MOVE COMPLETE</div><h1>${escapeHtml(taskTitle)}</h1><div class="meta">Prepared for <strong>${escapeHtml(companyName)}</strong>${completedAt ? ` · ${escapeHtml(new Date(completedAt).toISOString().slice(0, 10))}` : ''}<br>The report below is the room's sealed output, unchanged.</div></section><article class="report readme">${readme}</article><footer class="foot"><span>SINGULANCE · YOUR COMPANY, IN MOTION</span><a href="${escapeHtml(roomUrl)}">OPEN RESEARCH ROOM →</a></footer></main></body></html>`;
+  @page{size:A4 portrait;margin:0}*{box-sizing:border-box}body{margin:0;background:${CARTESIA.paper};color:${CARTESIA.ink};font-family:Arial,"Noto Sans","Segoe UI Symbol",sans-serif;overflow-wrap:anywhere}.page{padding:12mm 15mm 14mm;background:linear-gradient(180deg,#f4f8ff 0,#fff 30mm,#fff 100%)}.head{display:flex;align-items:center;justify-content:space-between;padding-bottom:5mm;border-bottom:1px solid ${CARTESIA.line}}.brand-lockup{display:flex;align-items:center;gap:3mm}.brand-lockup svg{width:10mm;height:10mm}.brand-word{font-size:18px;font-weight:800;letter-spacing:-.6px}.brand-sub{margin-top:2px;font:700 6px/9px ${CARTESIA.mono};letter-spacing:1.3px;color:#999}.brand-sub span{color:${CARTESIA.blue}}.folio{font:700 7px/10px ${CARTESIA.mono};letter-spacing:1.5px;color:${CARTESIA.blue}}.intro{padding:8mm 0 6mm;border-bottom:1px solid ${CARTESIA.line}}.eyebrow{font:700 7px/11px ${CARTESIA.mono};letter-spacing:1.8px;color:${CARTESIA.blue}}h1{margin:3mm 0 0;max-width:165mm;font-size:30px;line-height:1.04;letter-spacing:-1.2px}.meta{margin-top:3mm;color:${CARTESIA.body};font-size:10px;line-height:15px}.character-strip{width:100%;table-layout:fixed;margin-top:4mm}.character{text-align:center;vertical-align:top;padding:0 1.5mm}.character-avatar{width:12mm;height:12mm;margin:0 auto 1mm;border-radius:50%;overflow:hidden;background:#fff4f8;border:1px solid #f6c5dc}.character-avatar svg{display:block;width:100%;height:100%}.character-name{font-size:7px;line-height:9px;font-weight:800}.character-role{margin-top:1px;font-size:5px;line-height:7px;color:${CARTESIA.muted}}.report{padding-top:6mm}${readmeStyles()}.foot{margin-top:8mm;padding-top:3mm;border-top:1px solid ${CARTESIA.line};display:flex;justify-content:space-between;font:700 6px/9px ${CARTESIA.mono};letter-spacing:1.1px;color:#999;break-inside:avoid;page-break-inside:avoid}.foot a{color:${CARTESIA.blue};text-decoration:none}
+  </style></head><body><main class="page"><header class="head">${brandLockup({ compact: true })}<div class="folio">${escapeHtml(dayLabel)}</div></header><section class="intro"><div class="eyebrow">HIVEMIND · FIRST MOVE COMPLETE</div><h1>${escapeHtml(taskTitle)}</h1><div class="meta">Prepared for <strong>${escapeHtml(companyName)}</strong>${completedAt ? ` · ${escapeHtml(new Date(completedAt).toISOString().slice(0, 10))}` : ''}<br>The report below is the room's sealed output, unchanged.</div>${people}</section><article class="report readme" dir="auto">${readme}</article><footer class="foot"><span>SINGULANCE · YOUR COMPANY, IN MOTION</span><a href="${escapeHtml(roomUrl)}">OPEN RESEARCH ROOM →</a></footer></main></body></html>`;
 }
+
+export function renderDayOnePortraitReport(input) { return renderLifecycleCompletionPortraitReport(input); }
 
 function workflowUrl(pathname = '') {
   const base = String(process.env.HIVEMIND_D1_WORKFLOW_URL || '').replace(/\/$/, '');
@@ -335,8 +378,9 @@ export async function deliverDayOneFirstMove({
     const taskTitle = clean(task.title || 'Your first research move', 160);
     const appBase = String(process.env.HIVEMIND_APP_URL || DEFAULT_APP_URL.replace(/\/employees$/, '')).replace(/\/$/, '');
     const roomUrl = `${appBase}/employees/rooms/${state.room_id}`;
-    const rendered = renderDayOneEmail({ companyName, taskTitle, output, roomUrl });
-    const reportHtml = renderDayOnePortraitReport({ companyName, taskTitle, output, roomUrl, completedAt: turn.sealedAt });
+    const characters = Array.isArray(company.team) ? company.team : [];
+    const rendered = renderDayOneEmail({ companyName, taskTitle, output, roomUrl, characters });
+    const reportHtml = renderDayOnePortraitReport({ companyName, taskTitle, output, roomUrl, completedAt: turn.sealedAt, characters });
     const pdf = await renderPdf(reportHtml);
     const slug = companyName.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 60) || 'company';
     const delivery = await sendEmail({

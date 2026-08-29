@@ -3491,7 +3491,7 @@ Every item must include a non-empty content field and one or more valid support_
     const _tSeg = Date.now();
     emit('segmenting', 40);
     let segments;
-    let _segmentsNeedEmbed = false; // true only when segments were freshly created this request
+    let _segmentsWereCreated = false;
     if (orgIsRemote(orgId)) {
       // Always rebuild in-memory for remote — there are no central DB rows to dedup against.
       segments = await this._createSegments({
@@ -3501,7 +3501,7 @@ Every item must include a non-empty content field and one or more valid support_
         parseResult,
         docScope: _segDocScope,
       });
-      _segmentsNeedEmbed = segments.length > 0;
+      _segmentsWereCreated = segments.length > 0;
     } else {
       segments = await this.db.knowledgeSegment.findMany({
         where: { documentId: knowledgeDoc.id },
@@ -3515,7 +3515,7 @@ Every item must include a non-empty content field and one or more valid support_
           parseResult,
           docScope: _segDocScope,
         });
-        _segmentsNeedEmbed = segments.length > 0;
+        _segmentsWereCreated = segments.length > 0;
       }
     }
     // Defence in depth: stamp scope onto ANY segment a non-semantic tier
@@ -3550,23 +3550,52 @@ Every item must include a non-empty content field and one or more valid support_
     emit('segmented', 45, { segments: segments.length });
     let _msEmbed = 0;
     let _evEmbedCov = null; // P1b/P3: evidence-embed coverage {total,embedded,failed,healed}
-    if (_segmentsNeedEmbed) {
+    // A retry must reconcile durable evidence rows whose first vector write
+    // failed. The old fresh-row flag skipped every existing segment, so BullMQ
+    // could retry successfully without ever retrying the missing vector.
+    const _segmentsToEmbed = orgIsRemote(orgId)
+      ? segments
+      : segments.filter((segment) => segment?.vectorStored !== true);
+    const _alreadyEmbedded = Math.max(0, segments.length - _segmentsToEmbed.length);
+    if (_segmentsToEmbed.length) {
       // Step 5: Embed segments.
       // Central path: store vector in Qdrant + update DB row (vectorStored=true).
       // Remote path: embed and push segment + vector to the agent via amrKbSegment.
       const _tEmbed = Date.now();
-      emit('embedding', 50, { segments: segments.length, processed: 0, total: segments.length });
-      _evEmbedCov = await this._embedSegments(segments, orgId, {
+      emit('embedding', 50, { segments: segments.length, processed: 0, total: _segmentsToEmbed.length });
+      const _pendingCoverage = await this._embedSegments(_segmentsToEmbed, orgId, {
         onProgress: ({ processed, total }) => emit(
           'embedding',
           50 + Math.floor(20 * (total > 0 ? processed / total : 1)),
           { segments: segments.length, processed, total },
         ),
       });
+      _evEmbedCov = {
+        total: segments.length,
+        embedded: _alreadyEmbedded + Number(_pendingCoverage?.embedded || 0),
+        failed: Number(_pendingCoverage?.failed || 0),
+        healed: _segmentsWereCreated ? 0 : Number(_pendingCoverage?.embedded || 0),
+      };
       _msEmbed = Date.now() - _tEmbed;
+    } else {
+      _evEmbedCov = { total: segments.length, embedded: segments.length, failed: 0, healed: 0 };
     }
     const _msSeg = Date.now() - _tSeg;
     emit('embedded', 70, { segments: segments.length, embed_ms: _msEmbed });
+
+    // Both upload modes require semantic evidence durability. Stop before
+    // promotion and before the queue can settle usage/ready state; BullMQ will
+    // retry and the vectorStored=false rows above become the reconciliation set.
+    if (Number(_evEmbedCov?.failed || 0) > 0
+      || Number(_evEmbedCov?.embedded || 0) !== segments.length) {
+      const err = new Error(
+        `Evidence indexing incomplete: semantic=${Number(_evEmbedCov?.embedded || 0)}/${segments.length}`,
+      );
+      err.code = 'EVIDENCE_INDEX_INCOMPLETE';
+      err.retryable = true;
+      err.coverage = _evEmbedCov;
+      throw err;
+    }
 
     // ── PERSIST THE GRID (P3) ────────────────────────────────────────────────
     // A spreadsheet's questions are "how many", "which is highest", "what is the
@@ -4957,7 +4986,9 @@ Every item must include a non-empty content field and one or more valid support_
    * @param {string} [callerOrgId] - orgId hint; falls back to segment.orgId
    */
   async _embedSegments(segments, callerOrgId, { workload = 'ingestion', onProgress = null } = {}) {
-    if (!this.embeddingService) return;
+    if (!this.embeddingService) {
+      return { total: segments.length, embedded: 0, failed: segments.length, healed: 0 };
+    }
 
     // Legacy: a dedicated hivemind_evidence collection. Per-tenant: evidence
     // lives in the org container alongside memory, separated by layer=evidence.
@@ -5080,6 +5111,10 @@ Every item must include a non-empty content field and one or more valid support_
       for (const [collectionName, rows] of byCollection) {
         const points = rows.map((row) => row.point);
         try {
+          if (typeof this.embeddingService.ensureCollection === 'function') {
+            const ready = await this.embeddingService.ensureCollection(collectionName);
+            if (ready === false) throw new Error(`Qdrant collection ${collectionName} is unavailable`);
+          }
           if (typeof this.embeddingService.storeVectors === 'function') {
             await this.embeddingService.storeVectors({ collectionName, points });
           } else {
@@ -5097,11 +5132,16 @@ Every item must include a non-empty content field and one or more valid support_
       // ONE update instead of 45.
       if (_embeddedIds.length) {
         try {
-          await this.db.knowledgeSegment.updateMany({
+          const marked = await this.db.knowledgeSegment.updateMany({
             where: { id: { in: _embeddedIds } }, data: { vectorStored: true },
           });
+          const markedCount = Number.isFinite(Number(marked?.count))
+            ? Math.max(0, Math.min(_embeddedIds.length, Number(marked.count)))
+            : _embeddedIds.length;
+          _failed += Math.max(0, _embeddedIds.length - markedCount);
         } catch (error) {
           ingestDiagnostic.error(`[DocumentFirstIngestion] vectorStored updateMany failed: ${error.message}`);
+          _failed += _embeddedIds.length;
         }
       }
     }

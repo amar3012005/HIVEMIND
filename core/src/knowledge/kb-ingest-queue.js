@@ -89,6 +89,23 @@ export function latchQueuedIngestMode({ durableMode, queuedMode }) {
   return { ok: true, value: durable.value };
 }
 
+/** Completion is forbidden while any persisted evidence lacks its vector. */
+export function requireCompleteEvidenceEmbedding(result = {}) {
+  const coverage = result?.coverage?.evidence_embed;
+  if (!coverage) return result;
+  const failed = Number(coverage?.failed || 0);
+  const expected = Number(result?.segmentCount || coverage?.total || 0);
+  const total = Number(coverage?.total || expected);
+  const embedded = Number(coverage?.embedded || 0);
+  const missing = Math.max(failed, expected - embedded, total - embedded, 0);
+  if (missing <= 0) return result;
+  const error = new Error(`${missing}/${Math.max(expected, total, missing)} evidence segments were not embedded`);
+  error.code = 'PARTIAL_EMBEDDING';
+  error.retryable = true;
+  error.coverage = coverage;
+  throw error;
+}
+
 function unrecoverable(queue, error) {
   const UnrecoverableError = queue?._bullmq?.UnrecoverableError;
   if (!UnrecoverableError) return error;
@@ -672,6 +689,11 @@ export class KbIngestQueue {
         // after a parser or model fix. Bounded by _sweepRawFiles().
         throw failed;
       }
+      // Defense in depth: document-first ingestion already fails closed on
+      // incomplete evidence vectors. Keep the durable queue independently
+      // strict so no alternate processUpload implementation can settle usage
+      // or expose `ready` with partial semantic coverage.
+      requireCompleteEvidenceEmbedding(result);
       const _evidenceOnly = _promoted === 0 && _segs > 0;
       const _evidenceOnlyReason = result?.evidenceOnlyReason
         || (_evidenceOnly ? (metadata?.ingest_mode === 'evidence' ? 'user_selected' : 'extraction_yield_zero') : null);
@@ -693,9 +715,6 @@ export class KbIngestQueue {
         evidenceOnlyReason: _evidenceOnlyReason, coverage: result.coverage || null, filename,
       });
       this._counters.processed++;
-      // P3 no-silent-partial: if any evidence segment did NOT embed even after the
-      // ingest-time heal, say so LOUD. The doc still indexes (evidence-only stays a
-      // success), but a partial-embed must never be reported as fully clean.
       const _ee = result?.coverage?.evidence_embed;
       const _embedding = {
         route: String(process.env.CLOUDFLARE_AI_GATEWAY_ENABLED || '').toLowerCase() === 'true'
@@ -719,16 +738,7 @@ export class KbIngestQueue {
         warnings: terminalIngestWarnings(result?.coverage),
         duration_ms: Math.max(0, Date.now() - Number(job.timestamp || Date.now())),
       };
-      if (_ee && Number(_ee.failed) > 0) {
-        this.logger.error?.(knowledgeIngestEvent('failed', {
-          ..._terminal,
-          error_code: 'PARTIAL_EMBEDDING',
-          message: `${_ee.failed}/${_ee.total} evidence segments were not embedded`,
-          retryable: true,
-        }));
-      } else {
-        this.logger.info?.(knowledgeIngestEvent('completed', _terminal));
-      }
+      this.logger.info?.(knowledgeIngestEvent('completed', _terminal));
       if (filePath) try { fs.unlinkSync(filePath); } catch { /* best-effort */ }
       return { documentId: result.documentId, segmentCount: result.segmentCount, promotedCount: result.promotedCount };
     } catch (error) {

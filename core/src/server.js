@@ -2385,6 +2385,11 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
             workload: 'ingestion', ...options,
           });
         },
+        ensureCollection: async (collectionName) => {
+          const ready = await qdrantClient.ensureCollection(collectionName);
+          if (!ready) throw new Error(`Qdrant collection ${collectionName} could not be prepared`);
+          return true;
+        },
         // BATCHED upsert: Qdrant accepts many points per PUT. The single-point path
         // below, called once per segment with wait=true, was ~1/3 of a 630s embed stage.
         storeVectors: async ({ collectionName, points }) => {

@@ -458,6 +458,95 @@ test('intentional evidence ingest fails closed when semantic indexing is incompl
   }
 });
 
+test('memories plus evidence also stops before promotion when evidence indexing is incomplete', async () => {
+  const db = {
+    sourceArtifact: {
+      upsert: async () => ({ id: '44444444-4444-4444-8444-444444444444', payload: {} }),
+      update: async () => ({}),
+    },
+    knowledgeDocument: { findFirst: async () => null, upsert: async () => ({ id: '33333333-3333-4333-8333-333333333333' }) },
+    knowledgeSegment: { findMany: async () => [], count: async () => 0 },
+    memoryEvidenceLink: { count: async () => 0 },
+  };
+  const service = new DocumentFirstIngestionService({
+    db, memoryGraphEngine: {}, smartIngestRouter: null, embeddingService: null,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  service._parseDocument = async () => ({
+    success: true, text: 'Evidence text.', markdown: 'Evidence text.', wordCount: 2,
+    pages: 1, engine: 'test-parser', metadata: { pages: 1 }, tables: [],
+  });
+  service._createSegments = async () => [{
+    id: '55555555-5555-4555-8555-555555555555', content: 'Evidence text.', segmentIndex: 0, metadata: {},
+  }];
+  service._embedSegments = async () => ({ total: 1, embedded: 0, failed: 1, healed: 0 });
+  service._promoteMemoriesGuarded = async () => assert.fail('promotion must wait for evidence reconciliation');
+
+  const oldSkip = process.env.KB_SKIP_UNCHANGED;
+  process.env.KB_SKIP_UNCHANGED = '0';
+  try {
+    await assert.rejects(service.ingestKnowledgeDocument({
+      userId: '11111111-1111-4111-8111-111111111111',
+      orgId: '22222222-2222-4222-8222-222222222222',
+      filename: 'incomplete-both.txt', fileBuffer: Buffer.from('Evidence text.'), contentType: 'text/plain',
+      metadata: { scope: 'organization', document_type: 'general', ingest_mode: 'both' },
+    }), (error) => error?.code === 'EVIDENCE_INDEX_INCOMPLETE');
+  } finally {
+    if (oldSkip === undefined) delete process.env.KB_SKIP_UNCHANGED;
+    else process.env.KB_SKIP_UNCHANGED = oldSkip;
+  }
+});
+
+test('durable retry embeds only persisted segments still missing vectors', async () => {
+  const documentId = '33333333-3333-4333-8333-333333333333';
+  const pending = {
+    id: '55555555-5555-4555-8555-555555555555', documentId,
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    content: 'Persisted evidence awaiting a vector.', contentHash: 'pending-vector',
+    segmentType: 'paragraph', segmentIndex: 0, vectorStored: false, metadata: {},
+  };
+  const db = {
+    sourceArtifact: {
+      upsert: async () => ({ id: '44444444-4444-4444-8444-444444444444', payload: {} }),
+      update: async () => ({}),
+    },
+    knowledgeDocument: { findFirst: async () => null, upsert: async () => ({ id: documentId }) },
+    knowledgeSegment: { findMany: async () => [pending], count: async () => 1 },
+    memoryEvidenceLink: { count: async () => 0 },
+  };
+  const service = new DocumentFirstIngestionService({
+    db, memoryGraphEngine: {}, smartIngestRouter: null, embeddingService: {},
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  service._parseDocument = async () => ({
+    success: true, text: pending.content, markdown: pending.content, wordCount: 6,
+    pages: 1, engine: 'test-parser', metadata: { pages: 1 }, tables: [],
+  });
+  service._createSegments = async () => assert.fail('retry must reuse persisted segments');
+  let embeddedSegments = [];
+  service._embedSegments = async (segments) => {
+    embeddedSegments = segments;
+    return { total: segments.length, embedded: segments.length, failed: 0, healed: 0 };
+  };
+  service._promoteMemoriesGuarded = async () => assert.fail('evidence-only must not promote');
+
+  const oldSkip = process.env.KB_SKIP_UNCHANGED;
+  process.env.KB_SKIP_UNCHANGED = '0';
+  try {
+    const result = await service.ingestKnowledgeDocument({
+      userId: pending.userId, orgId: pending.orgId,
+      filename: 'retry.txt', fileBuffer: Buffer.from(pending.content), contentType: 'text/plain',
+      metadata: { scope: 'organization', document_type: 'general', ingest_mode: 'evidence' },
+    });
+    assert.deepEqual(embeddedSegments.map((segment) => segment.id), [pending.id]);
+    assert.deepEqual(result.coverage.evidence_embed, { total: 1, embedded: 1, failed: 0, healed: 1 });
+  } finally {
+    if (oldSkip === undefined) delete process.env.KB_SKIP_UNCHANGED;
+    else process.env.KB_SKIP_UNCHANGED = oldSkip;
+  }
+});
+
 test('central vector batch failure is never marked stored or reported embedded', async () => {
   const updated = [];
   const service = new DocumentFirstIngestionService({
@@ -485,6 +574,7 @@ test('large evidence embedding uses provider batches of at most twenty and one v
   const embedBatchSizes = [];
   const stored = [];
   const updated = [];
+  const calls = [];
   const service = new DocumentFirstIngestionService({
     db: { knowledgeSegment: { updateMany: async (query) => updated.push(query) } },
     memoryGraphEngine: {}, smartIngestRouter: null,
@@ -495,7 +585,8 @@ test('large evidence embedding uses provider batches of at most twenty and one v
         const vectors = rows.map(() => Array(1024).fill(0.1));
         return Array.isArray(input) ? vectors : vectors[0];
       },
-      storeVectors: async ({ points }) => stored.push(...points),
+      ensureCollection: async (collectionName) => { calls.push(`ensure:${collectionName}`); return true; },
+      storeVectors: async ({ collectionName, points }) => { calls.push(`store:${collectionName}`); stored.push(...points); },
     },
     logger: { info() {}, warn() {}, error() {} },
   });
@@ -512,9 +603,35 @@ test('large evidence embedding uses provider batches of at most twenty and one v
   const coverage = await service._embedSegments(segments, '22222222-2222-4222-8222-222222222222');
   assert.deepEqual(embedBatchSizes.sort((a, b) => b - a), [20, 20, 5]);
   assert.equal(stored.length, 45);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0], /^ensure:/);
+  assert.equal(calls[1], calls[0].replace('ensure:', 'store:'));
   assert.deepEqual(coverage, { total: 45, embedded: 45, failed: 0, healed: 0 });
   assert.equal(updated.length, 1);
   assert.equal(updated[0].where.id.in.length, 45);
+});
+
+test('a vector marker write failure remains incomplete even when Qdrant accepted the batch', async () => {
+  const service = new DocumentFirstIngestionService({
+    db: { knowledgeSegment: { updateMany: async () => { throw new Error('postgres unavailable'); } } },
+    memoryGraphEngine: {}, smartIngestRouter: null,
+    embeddingService: {
+      embed: async () => Array(1024).fill(0.1),
+      ensureCollection: async () => true,
+      storeVectors: async () => {},
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  const coverage = await service._embedSegments([{
+    id: '55555555-5555-4555-8555-555555555557',
+    userId: '11111111-1111-4111-8111-111111111111',
+    orgId: '22222222-2222-4222-8222-222222222222',
+    documentId: '33333333-3333-4333-8333-333333333333',
+    content: 'Evidence with an uncommitted vector marker.', contentHash: 'marker-failure',
+    segmentType: 'paragraph', segmentIndex: 0,
+  }], '22222222-2222-4222-8222-222222222222');
+
+  assert.deepEqual(coverage, { total: 1, embedded: 0, failed: 1, healed: 0 });
 });
 
 test('invalid evidence vectors never reach Qdrant and remain recoverable', async () => {

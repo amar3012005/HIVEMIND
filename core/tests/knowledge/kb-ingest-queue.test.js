@@ -8,6 +8,7 @@ import {
   knowledgeIngestEvent,
   latchQueuedIngestMode,
   terminalIngestWarnings,
+  requireCompleteEvidenceEmbedding,
 } from '../../src/knowledge/kb-ingest-queue.js';
 
 test('queue lifecycle events use the canonical knowledge.ingest namespace', () => {
@@ -84,4 +85,26 @@ test('worker fails a tampered queued mode before it can enter ingestion', async 
   await assert.rejects(queue._process(job), (error) => error.code === 'INGEST_MODE_MISMATCH');
   assert.equal(failures.length, 1);
   assert.equal(failures[0][2].code, 'INGEST_MODE_MISMATCH');
+});
+
+test('durable completion gate rejects partial evidence embedding coverage', () => {
+  assert.throws(() => requireCompleteEvidenceEmbedding({
+    documentId: 'doc-1', segmentCount: 3,
+    coverage: { evidence_embed: { total: 3, embedded: 2, failed: 1, healed: 0 } },
+  }), (error) => {
+    assert.equal(error.code, 'PARTIAL_EMBEDDING');
+    assert.equal(error.retryable, true);
+    assert.match(error.message, /1\/3 evidence segments/);
+    return true;
+  });
+
+  assert.doesNotThrow(() => requireCompleteEvidenceEmbedding({
+    documentId: 'doc-1', segmentCount: 3,
+    coverage: { evidence_embed: { total: 3, embedded: 3, failed: 0, healed: 1 } },
+  }));
+
+  assert.throws(() => requireCompleteEvidenceEmbedding({
+    documentId: 'doc-1', segmentCount: 3,
+    coverage: { evidence_embed: { total: 3, embedded: 2, failed: 0, healed: 0 } },
+  }), (error) => error.code === 'PARTIAL_EMBEDDING');
 });

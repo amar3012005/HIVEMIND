@@ -162,6 +162,7 @@ async function projectAcceptedEmail({ to, rendered, templateId, result, notifica
       error: error?.name || 'projection_error',
     });
     return { ...result, platformNotification: { created: 0, error: 'projection_failed' } };
+  }
 }
 
 function cloudflareError(payload, fallback) {

@@ -12,7 +12,9 @@ services:
       HIVEMIND_D1_WORKFLOW_ENABLED: "${HIVEMIND_D1_WORKFLOW_ENABLED:-false}"
       HIVEMIND_D1_WORKFLOW_SECRET: "${HIVEMIND_D1_WORKFLOW_SECRET:-local-day1-test-secret}"
       HIVEMIND_D1_WORKFLOW_URL: "${HIVEMIND_D1_WORKFLOW_URL:-http://host.docker.internal:8787}"
-      HIVEMIND_ADMIN_SECRET: "${HIVEMIND_ADMIN_SECRET:-}"
+      # Preserve the local-stack development default when the optional Day-1
+      # overlay is used without an explicit shell override.
+      HIVEMIND_ADMIN_SECRET: "${HIVEMIND_ADMIN_SECRET:-local-day1-admin-secret-not-for-production}"
       PLAYWRIGHT_SERVICE_TOKEN: "${PLAYWRIGHT_SERVICE_TOKEN:-}"
       HIVEMIND_PLAYWRIGHT_PDF_URL: "${HIVEMIND_PLAYWRIGHT_PDF_URL:-}"
       CLOUDFLARE_EMAIL_API_TOKEN: "${CLOUDFLARE_EMAIL_API_TOKEN:-}"

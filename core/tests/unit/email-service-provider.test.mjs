@@ -8,6 +8,9 @@ const originalEnv = {
   CLOUDFLARE_EMAIL_FROM: process.env.CLOUDFLARE_EMAIL_FROM,
   SYSTEM_EMAIL_NANGO_CONNECTION_ID: process.env.SYSTEM_EMAIL_NANGO_CONNECTION_ID,
   SYSTEM_EMAIL_FROM: process.env.SYSTEM_EMAIL_FROM,
+  HIVEMIND_LOCAL_MODE: process.env.HIVEMIND_LOCAL_MODE,
+  HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL: process.env.HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL,
+  HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN: process.env.HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN,
 };
 
 const {
@@ -54,6 +57,25 @@ test('every accepted system email invokes the platform notification projection o
   assert.equal(projections.length, 1);
   assert.equal(projections[0].result.messageId, '<receipt-1@singulancelabs.com>');
   assert.deepEqual(projections[0].notification, { orgId: 'org-1', userId: 'user-1' });
+});
+
+test('local preview gateway also projects an accepted email into platform notifications', async () => {
+  setEnv({
+    HIVEMIND_LOCAL_MODE: 'true',
+    HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL: 'https://preview-email.example.test/send',
+    HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN: 'preview-token',
+  });
+  global.fetch = async () => new Response(JSON.stringify({ ok: true, messageId: 'preview-receipt-1' }), { status: 200 });
+  let projected = 0;
+  configureSystemEmailNotificationSink(async ({ result }) => {
+    projected += 1;
+    assert.equal(result.provider, 'cloudflare_preview_gateway');
+    return { created: 1 };
+  });
+  const result = await sendSystemEmail({ templateId: 'welcome_login', to: 'owner@example.com' });
+  assert.equal(result.ok, true);
+  assert.equal(result.platformNotification.created, 1);
+  assert.equal(projected, 1);
 });
 
 test('Cloudflare is the primary transactional provider and reports queued delivery', async () => {

@@ -8,6 +8,7 @@ readonly RELEASE_BASE="${ENGINE_BOX_RELEASE_BASE:-https://get.singulancelabs.com
 readonly MIN_DISK_GB="${ENGINE_BOX_MIN_DISK_GB:-80}"
 readonly MIN_MEMORY_MB="${ENGINE_BOX_MIN_MEMORY_MB:-16384}"
 ENROLL_CODE=""
+REPAIR=false
 
 log(){ printf '[engine-box] %s\n' "$*"; }
 die(){ printf '[engine-box] error: %s\n' "$*" >&2; exit 1; }
@@ -15,12 +16,11 @@ die(){ printf '[engine-box] error: %s\n' "$*" >&2; exit 1; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --enroll) ENROLL_CODE="${2:-}"; shift 2 ;;
-    --repair) shift ;;
+    --repair) REPAIR=true; shift ;;
     *) die "unknown argument: $1" ;;
   esac
 done
 
-[ -n "$ENROLL_CODE" ] || die '--enroll requires an organization-bound, one-time code'
 [ "$(uname -s)" = Linux ] || die 'Engine Box supports Linux only'
 case "$(uname -m)" in x86_64|aarch64|arm64) ;; *) die "unsupported architecture: $(uname -m)" ;; esac
 command -v docker >/dev/null 2>&1 || die 'Docker Engine is required'
@@ -33,6 +33,16 @@ available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
 [ "$available_kb" -ge $((MIN_DISK_GB * 1024 * 1024)) ] || die "at least ${MIN_DISK_GB}GB free disk is required"
 memory_kb="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
 [ "$memory_kb" -ge $((MIN_MEMORY_MB * 1024)) ] || die "at least ${MIN_MEMORY_MB}MB RAM is required"
+
+if [ "$REPAIR" = true ]; then
+  [ -x "$INSTALL_ROOT/hm-supervisor" ] || die 'no existing Engine Box supervisor exists to repair'
+  [ -f "$INSTALL_ROOT/release.json" ] || die 'no verified local release exists to repair'
+  [ -f "$INSTALL_ROOT/license.json" ] || die 'no signed local licence lease exists to repair'
+  log 'repairing from the verified local release; customer volumes and credentials are preserved'
+  exec "$INSTALL_ROOT/hm-supervisor" install --root "$INSTALL_ROOT"
+fi
+
+[ -n "$ENROLL_CODE" ] || die '--enroll requires an organization-bound, one-time code'
 
 umask 077
 tmp_dir="$(mktemp -d)"

@@ -120,6 +120,14 @@ import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
 import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
+import {
+  deliverDayOneFirstMove,
+  isAuthorizedDayOneRequest,
+  listEligibleDayOneCompanies,
+  notifyDayOneWorkflowCompletion,
+  prepareDayOneFirstMove,
+  scheduleDayOneWorkflow,
+} from './lifecycle/day1-first-move.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -3104,6 +3112,41 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  // Cloudflare Workflows is the durable clock for Day 1. These endpoints are
+  // deliberately service-token-only; browser sessions and generic API keys
+  // cannot start complimentary autonomous work or deliver lifecycle mail.
+  if (pathname.startsWith('/internal/lifecycle/day1/')) {
+    if (!isAuthorizedDayOneRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    const body = await parseBody(req).catch(() => ({}));
+    if (pathname === '/internal/lifecycle/day1/eligible') {
+      const companies = await listEligibleDayOneCompanies({ prisma, limit: body.limit });
+      return jsonResponse(res, { companies });
+    }
+    const orgId = String(body.org_id || '');
+    const hqRoomId = String(body.hq_room_id || '');
+    if (!/^[0-9a-f-]{36}$/i.test(orgId) || !/^[0-9a-f-]{36}$/i.test(hqRoomId)) {
+      return jsonResponse(res, { error: 'org_id and hq_room_id are required' }, 400);
+    }
+    try {
+      if (pathname === '/internal/lifecycle/day1/prepare') {
+        const result = await prepareDayOneFirstMove({
+          prisma, orgId, hqRoomId,
+          workflowInstanceId: String(body.workflow_instance_id || ''),
+          dispatchTurn: dispatchHyperRoomTurn,
+        });
+        return jsonResponse(res, result, result.status === 'sent' ? 200 : 202);
+      }
+      if (pathname === '/internal/lifecycle/day1/deliver') {
+        return jsonResponse(res, await deliverDayOneFirstMove({ prisma, orgId, hqRoomId }));
+      }
+      return jsonResponse(res, { error: 'Not found' }, 404);
+    } catch (error) {
+      const retryable = ['day1_turn_not_ready', 'day1_turn_not_complete', 'day1_delivery_in_progress'].includes(error.message);
+      return jsonResponse(res, { error: error.message, retryable }, retryable ? 409 : 422);
+    }
+  }
 
   // Attach SSO context early (subdomain-based org routing; no-op on non-subdomain hosts)
   if (prisma) await attachSsoContext(req, prisma);
@@ -10816,6 +10859,16 @@ Write the persona now.`;
               // failed; the notification can be reconciled independently.
               console.warn('[hyper-company] day-0 notification failed:', notificationError.message);
             });
+            // The email receipt is the Day-0 lifecycle boundary. Hand Day 1 to
+            // Cloudflare's durable clock only after that receipt exists. A
+            // transient workflow handoff does not rewrite a delivered Day-0
+            // email; the handoff is independently observable and retryable.
+            const dayOne = await scheduleDayOneWorkflow({
+              orgId, hqRoomId: roomId, onboardedAt: dashboardCompany.onboarded_at,
+            });
+            if (!dayOne.ok && !dayOne.skipped) {
+              console.warn('[hyper-company] day-1 workflow scheduling failed:', dayOne.reason);
+            }
           } catch (error) {
             console.warn('[hyper-company] day-0 report failed:', error.message);
             await prisma.$executeRawUnsafe(
@@ -13006,6 +13059,18 @@ Write the persona now.`;
           try {
             await recordHqActivity(prisma, body.turn_id, body.event);
           } catch (e) { console.warn('[hq-activity] hook failed:', e.message); }
+
+          // A Day-1 Workflow may already be waiting for this seal. Workflows
+          // buffers early events, so this is safe even when the room finishes
+          // before the instance reaches waitForEvent. Delivery remains gated
+          // by the persisted sealed turn inside deliverDayOneFirstMove.
+          void notifyDayOneWorkflowCompletion({
+            prisma,
+            turnId: body.turn_id,
+            status: body.event.status || 'complete',
+          }).then((result) => {
+            if (!result.ok && !result.skipped) console.warn('[day1] completion event failed:', result.reason);
+          }).catch((error) => console.warn('[day1] completion event failed:', error.message));
         }
 
         // ── CSI artifact persistence (best-effort, must never delay/break the append path) ──

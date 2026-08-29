@@ -17,10 +17,16 @@ type Env = {
   FLAGS: Flagship;
   HIVEMIND_CONTROL_URL: string;
   HIVEMIND_D1_WORKFLOW_SECRET: string;
+  HIVEMIND_D1_INSTANCE_PREFIX?: string;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY1_FLAG = 'day1_first_move_v1';
+
+function instanceId(env: Env, hqRoomId: string): string {
+  const prefix = String(env.HIVEMIND_D1_INSTANCE_PREFIX || 'd1').replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'd1';
+  return `${prefix}-${hqRoomId}`;
+}
 
 async function dayOneEnabled(env: Env, orgId: string): Promise<boolean> {
   if (!UUID.test(orgId) || !env.FLAGS) return false;
@@ -70,6 +76,10 @@ export class DayOneWorkflow extends WorkflowEntrypoint<Env, Params> {
     if (!await dayOneEnabled(this.env, params.org_id)) throw new NonRetryableError('day1_feature_disabled');
     const target = Date.parse(params.target_at);
     if (target > Date.now()) await step.sleepUntil('wait until Day 1', target);
+    // A rollout can be paused while an instance is sleeping. Re-evaluate at
+    // the irreversible execution boundary instead of trusting the value from
+    // instance creation time.
+    if (!await dayOneEnabled(this.env, params.org_id)) throw new NonRetryableError('day1_feature_disabled');
 
     const prepared = await step.do(
       'claim and start the research room',
@@ -85,15 +95,17 @@ export class DayOneWorkflow extends WorkflowEntrypoint<Env, Params> {
     // The room's canonical seal event wakes this instance. Events sent before
     // this line are buffered by Workflows. The timeout is also a recovery net:
     // delivery below re-reads the persisted turn and refuses unsealed output.
-    try {
-      const completed = await step.waitForEvent<RoomCompleted>('wait for the sealed room output', {
-        type: 'room-completed',
-        timeout: '12 hours',
-      });
-      if (completed.payload.status !== 'complete') throw new NonRetryableError('day1_room_failed');
-    } catch (error) {
-      if (error instanceof NonRetryableError) throw error;
-      console.warn('Day-1 room event timed out; reconciling from persisted turn state');
+    if (prepared.status !== 'completed') {
+      try {
+        const completed = await step.waitForEvent<RoomCompleted>('wait for the sealed room output', {
+          type: 'room-completed',
+          timeout: '7 days',
+        });
+        if (completed.payload.status !== 'complete') throw new NonRetryableError('day1_room_failed');
+      } catch (error) {
+        if (error instanceof NonRetryableError) throw error;
+        console.warn('Day-1 room event timed out; reconciling from persisted turn state');
+      }
     }
 
     if (!await dayOneEnabled(this.env, params.org_id)) throw new NonRetryableError('day1_feature_disabled');
@@ -116,7 +128,7 @@ export default {
       const params = await request.json<Params>().catch(() => null);
       if (!validParams(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
       if (!await dayOneEnabled(env, params.org_id)) return Response.json({ error: 'feature_disabled' }, { status: 403 });
-      const id = `d1-${params.hq_room_id}`;
+      const id = instanceId(env, params.hq_room_id);
       try {
         const instance = await env.DAY1_WORKFLOW.create({
           id,
@@ -126,7 +138,12 @@ export default {
         return Response.json({ ok: true, created: true, instance_id: instance.id, status: await instance.status() }, { status: 202 });
       } catch {
         const instance = await env.DAY1_WORKFLOW.get(id);
-        return Response.json({ ok: true, created: false, instance_id: instance.id, status: await instance.status() });
+        const status = await instance.status();
+        if (status.status === 'errored' || status.status === 'terminated') {
+          await instance.restart();
+          return Response.json({ ok: true, created: false, restarted: true, instance_id: instance.id, status: await instance.status() }, { status: 202 });
+        }
+        return Response.json({ ok: true, created: false, restarted: false, instance_id: instance.id, status });
       }
     }
     if (request.method === 'POST' && url.pathname === '/event') {
@@ -151,7 +168,7 @@ export default {
       for (const params of eligible.companies || []) {
         if (!validParams(params)) continue;
         if (!await dayOneEnabled(env, params.org_id)) continue;
-        const id = `d1-${params.hq_room_id}`;
+        const id = instanceId(env, params.hq_room_id);
         try {
           await env.DAY1_WORKFLOW.create({ id, params, retention: { successRetention: '30 days', errorRetention: '30 days' } });
         } catch {

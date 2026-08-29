@@ -234,7 +234,10 @@ export async function prepareDayOneFirstMove({ prisma, orgId, hqRoomId, workflow
   const company = typeof hq.company === 'string' ? JSON.parse(hq.company) : hq.company;
   const prior = company.day1_first_move || {};
   if (prior.status === 'sent') return { status: 'sent', turn_id: prior.turn_id, room_id: prior.room_id };
-  if (prior.workflow_instance_id && prior.workflow_instance_id !== workflowInstanceId) throw new Error('day1_workflow_conflict');
+  const recoveringFailedLifecycle = prior.status === 'failed';
+  if (prior.workflow_instance_id && prior.workflow_instance_id !== workflowInstanceId && !recoveringFailedLifecycle) {
+    throw new Error('day1_workflow_conflict');
+  }
   let task = (company.tasks || []).find((item) => item.id === prior.task_id) || selectDayOneResearchTask(company.tasks || []);
   if (!task) throw new Error('day1_research_task_not_found');
 

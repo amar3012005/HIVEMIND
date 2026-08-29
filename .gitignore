@@ -94,6 +94,9 @@ infra/secrets/
 
 # ── Local ops artifacts — never commit (repo-hygiene, added 2026-07-23) ──
 .env
+.dev.vars
+.dev.vars.*
+.wrangler/
 backups/
 *.rollback
 .last-*

@@ -92,6 +92,17 @@ test('prepare starts the research task once and reuses its durable room turn on 
     assert.equal(dispatches, 1);
     assert.equal(hq.company.tasks[0].status, 'todo');
     assert.equal(hq.company.tasks[1].status, 'active');
+    const existingTurn = turns.values().next().value;
+    existingTurn.status = 'complete';
+    existingTurn.sealedAt = new Date();
+    hq.company.day1_first_move.status = 'failed';
+    hq.company.day1_first_move.failure_reason = 'delivery_transport_failed';
+    const recovered = await prepareDayOneFirstMove({ ...args, workflowInstanceId: `d1-recovery-${hq.id}` });
+    assert.equal(recovered.status, 'completed');
+    assert.equal(recovered.turn_id, first.turn_id);
+    assert.equal(hq.company.day1_first_move.workflow_instance_id, `d1-recovery-${hq.id}`);
+    assert.equal(dispatches, 1);
+    assert.equal(hq.company.tasks[1].status, 'done');
   } finally {
     if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
   }

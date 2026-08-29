@@ -640,6 +640,20 @@ Rules for all future days:
 
 ## 16. Definition of done
 
+### Local cloud canary evidence (2026-08-29)
+
+The isolated `hivemind-day1-lifecycle-local` Workflow completed an end-to-end
+canary against the preview control plane with the development Flagship app.
+It recovered the already-sealed HyperAgent turn instead of creating a new room
+or turn, rendered the attachment through the canonical Day 0 `hm-playwright`
+PDF service, and received a Cloudflare Email provider receipt. Repeating the
+same deterministic Workflow start returned the completed instance and the same
+receipt, with no second delivery. The persisted output evidence was 4,831 bytes
+with SHA-256 `3e4912694bd0a7987b5d0cbd07b32a53ad31a7ce798258f7cd79465feef90c04`.
+
+This proves the local/preview path only. It does not satisfy production
+acceptance and does not authorize changing the production Flagship default.
+
 D1 is done only when one controlled production canary proves all of the following:
 
 - correct company selected;

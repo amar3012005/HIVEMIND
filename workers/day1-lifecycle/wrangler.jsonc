@@ -14,7 +14,8 @@
   "flagship": [
     {
       "binding": "FLAGS",
-      "app_id": "2e89fbd3-7496-459b-a507-f1017d444dd9"
+      "app_id": "2e89fbd3-7496-459b-a507-f1017d444dd9",
+      "remote": true
     }
   ],
   "triggers": {
@@ -26,5 +27,28 @@
       "binding": "DAY1_WORKFLOW",
       "class_name": "DayOneWorkflow"
     }
-  ]
+  ],
+  "env": {
+    "local": {
+      "name": "hivemind-day1-lifecycle-local",
+      "vars": {
+        "HIVEMIND_CONTROL_URL": "https://preview-api.singulancelabs.com",
+        "HIVEMIND_D1_INSTANCE_PREFIX": "d1-local7"
+      },
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
+          "remote": true
+        }
+      ],
+      "workflows": [
+        {
+          "name": "hivemind-day1-lifecycle-local",
+          "binding": "DAY1_WORKFLOW",
+          "class_name": "DayOneWorkflow"
+        }
+      ]
+    }
+  }
 }

@@ -21,6 +21,11 @@ work branch   -> review/rebase -> singulance-main -> quick-deploy -> production
   conflicts locally, then merging or fast-forwarding into `singulance-main`.
 - Production only pulls `singulance-main` and runs `/root/quick-deploy.sh`.
 
+Local multi-worktree integration is governed separately by
+[`LOCAL_INTEGRATION_PROTOCOL.md`](LOCAL_INTEGRATION_PROTOCOL.md). Its shared
+branch is `singulance-local`; it is for tested local Docker preview builds only
+and is never a production deploy source.
+
 ## Why This Exists
 
 Recent deploy failures came from shared mutable state:

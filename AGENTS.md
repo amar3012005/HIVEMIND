@@ -232,6 +232,18 @@ commits with [`docs/PRODUCTION_RELEASE.md`](docs/PRODUCTION_RELEASE.md). Stop ra
 a dirty checkout, stale frontend gitlink, mutable image tag, unpushed commit, or conflicting session.
 SINGULANCE production is only `ssh singulance`; never use `myserver` for this release path.
 
+## Mandatory Local Integration Rule
+
+Before local feature work or rebuilding the shared local Docker preview stack,
+read and follow [`docs/LOCAL_INTEGRATION_PROTOCOL.md`](docs/LOCAL_INTEGRATION_PROTOCOL.md).
+All session worktrees branch from and rebase onto `origin/singulance-local`.
+Completed session branches merge serially in the clean permanent
+`HIVEMIND-local-main` integration worktree. Only that worktree may rebuild the
+shared local containers. Never commit directly to, rebase, or force-push
+`singulance-local`, and never deploy it to production. First merge current
+`origin/singulance-main` into it so the local integration line is never behind
+production.
+
 ## Mandatory Engineering Journal
 
 Read and maintain [`docs/ENGINEERING_JOURNAL.md`](docs/ENGINEERING_JOURNAL.md).

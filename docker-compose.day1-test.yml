@@ -1,0 +1,14 @@
+# Local-only Day-1 lifecycle safety overlay.
+# The master gate defaults off. Never place production credentials in this file.
+services:
+  control-plane:
+    environment:
+      HIVEMIND_D1_WORKFLOW_ENABLED: "${HIVEMIND_D1_WORKFLOW_ENABLED:-false}"
+      HIVEMIND_D1_WORKFLOW_SECRET: "${HIVEMIND_D1_WORKFLOW_SECRET:-local-day1-test-secret}"
+      HIVEMIND_D1_WORKFLOW_URL: "${HIVEMIND_D1_WORKFLOW_URL:-http://host.docker.internal:8787}"
+      EMPLOYEES_SIDECAR_URL: "http://employees:8060"
+  employees:
+    env_file:
+      - ./core/.env
+    environment:
+      HIVEMIND_MASTER_API_KEY: "${API_MASTER_KEY:-local-api-master-key-change-me}"

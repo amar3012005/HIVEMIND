@@ -9,8 +9,14 @@
     "head_sampling_rate": 1
   },
   "vars": {
-    "HIVEMIND_CONTROL_URL": "https://admin.hivemind.singulancelabs.com"
+    "HIVEMIND_CONTROL_URL": "https://api.singulancelabs.com"
   },
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "2e89fbd3-7496-459b-a507-f1017d444dd9"
+    }
+  ],
   "triggers": {
     "crons": ["*/15 * * * *"]
   },

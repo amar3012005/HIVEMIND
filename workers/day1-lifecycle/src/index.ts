@@ -14,11 +14,23 @@ type EligibleResult = { companies: Params[] };
 
 type Env = {
   DAY1_WORKFLOW: Workflow<Params>;
+  FLAGS: Flagship;
   HIVEMIND_CONTROL_URL: string;
   HIVEMIND_D1_WORKFLOW_SECRET: string;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DAY1_FLAG = 'day1_first_move_v1';
+
+async function dayOneEnabled(env: Env, orgId: string): Promise<boolean> {
+  if (!UUID.test(orgId) || !env.FLAGS) return false;
+  const details = await env.FLAGS.getBooleanDetails(DAY1_FLAG, false, {
+    targetingKey: orgId,
+    org_id: orgId,
+  });
+  console.log(JSON.stringify({ event: 'day1_flag_evaluation', org_id: orgId, value: details.value, variant: details.variant, reason: details.reason, error_code: details.errorCode }));
+  return details.value === true;
+}
 
 function authorized(request: Request, env: Env): boolean {
   const auth = request.headers.get('authorization') || '';
@@ -55,6 +67,7 @@ export class DayOneWorkflow extends WorkflowEntrypoint<Env, Params> {
   async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
     if (!validParams(event.payload)) throw new NonRetryableError('invalid_day1_payload');
     const params = event.payload;
+    if (!await dayOneEnabled(this.env, params.org_id)) throw new NonRetryableError('day1_feature_disabled');
     const target = Date.parse(params.target_at);
     if (target > Date.now()) await step.sleepUntil('wait until Day 1', target);
 
@@ -83,6 +96,7 @@ export class DayOneWorkflow extends WorkflowEntrypoint<Env, Params> {
       console.warn('Day-1 room event timed out; reconciling from persisted turn state');
     }
 
+    if (!await dayOneEnabled(this.env, params.org_id)) throw new NonRetryableError('day1_feature_disabled');
     return step.do(
       'render and send the Day 1 report',
       { retries: { limit: 24, delay: '2 minutes', backoff: 'constant' }, timeout: '2 minutes' },
@@ -101,6 +115,7 @@ export default {
     if (request.method === 'POST' && url.pathname === '/start') {
       const params = await request.json<Params>().catch(() => null);
       if (!validParams(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
+      if (!await dayOneEnabled(env, params.org_id)) return Response.json({ error: 'feature_disabled' }, { status: 403 });
       const id = `d1-${params.hq_room_id}`;
       try {
         const instance = await env.DAY1_WORKFLOW.create({
@@ -115,8 +130,9 @@ export default {
       }
     }
     if (request.method === 'POST' && url.pathname === '/event') {
-      const body = await request.json<{ instance_id?: string; turn_id?: string; status?: string }>().catch(() => ({} as { instance_id?: string; turn_id?: string; status?: string }));
-      if (!body.instance_id || !UUID.test(String(body.turn_id || ''))) return Response.json({ error: 'invalid_event' }, { status: 400 });
+      const body = await request.json<{ instance_id?: string; org_id?: string; turn_id?: string; status?: string }>().catch(() => ({} as { instance_id?: string; org_id?: string; turn_id?: string; status?: string }));
+      if (!body.instance_id || !UUID.test(String(body.org_id || '')) || !UUID.test(String(body.turn_id || ''))) return Response.json({ error: 'invalid_event' }, { status: 400 });
+      if (!await dayOneEnabled(env, body.org_id!)) return Response.json({ error: 'feature_disabled' }, { status: 403 });
       const instance = await env.DAY1_WORKFLOW.get(body.instance_id);
       await instance.sendEvent({ type: 'room-completed', payload: { turn_id: body.turn_id, status: body.status || 'complete' } });
       return Response.json({ ok: true, instance_id: instance.id, status: await instance.status() });
@@ -134,6 +150,7 @@ export default {
       const eligible = await control<EligibleResult>(env, '/internal/lifecycle/day1/eligible', { limit: 100 });
       for (const params of eligible.companies || []) {
         if (!validParams(params)) continue;
+        if (!await dayOneEnabled(env, params.org_id)) continue;
         const id = `d1-${params.hq_room_id}`;
         try {
           await env.DAY1_WORKFLOW.create({ id, params, retention: { successRetention: '30 days', errorRetention: '30 days' } });

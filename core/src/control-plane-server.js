@@ -2077,7 +2077,20 @@ async function getCurrentSession(req) {
     return null;
   }
   const session = await sessionStore.getSession(sessionId);
-  return session ? { sessionId, session } : null;
+  if (!session) return null;
+  // Bootstrap calls getCurrentSession directly. Apply the local-preview
+  // boundary here as well so it can never advertise a historical org to the
+  // frontend before a protected route has a chance to reject that session.
+  if (process.env.HIVEMIND_LOCAL_MODE === 'true') {
+    const org = session.orgId
+      ? await prisma.organization.findUnique({ where: { id: session.orgId }, select: { zitadelOrgId: true } }).catch(() => null)
+      : null;
+    if (org?.zitadelOrgId !== 'local-preview-org') {
+      await sessionStore.destroySession(sessionId);
+      return null;
+    }
+  }
+  return { sessionId, session };
 }
 
 async function requireSession(req, res) {

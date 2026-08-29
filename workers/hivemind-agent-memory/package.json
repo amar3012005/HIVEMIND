@@ -1,0 +1,25 @@
+{
+  "name": "hivemind-agent-memory",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "types": "wrangler types",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "agents": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "latest",
+    "@types/node": "latest",
+    "typescript": "latest",
+    "vitest": "latest",
+    "wrangler": "latest"
+  }
+}

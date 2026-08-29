@@ -5,6 +5,12 @@ durable handoff so a fresh session rehydrates instead of restarting. It
 complements (does not replace) HIVEMIND recall and the auto-memory index at
 `/root/.claude/projects/-root-hivemind/memory/MEMORY.md`.
 
+Every worktree must also query the global MCP server `hivemind-agent-memory`.
+Its Cloudflare Agent/SQLite ledger is the cross-worktree durable index for
+decisions, architecture gaps, patches, incidents, requirements, and releases.
+Git and these reviewed documents remain authoritative; remote memory makes them
+discoverable across parallel sessions.
+
 | File | What it holds |
 |---|---|
 | [session-context.md](session-context.md) | Current state of recall, chat, ingestion, connectors + deploy topology + Solvis test data |

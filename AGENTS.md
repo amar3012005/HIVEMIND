@@ -1,3 +1,23 @@
+## CLOUDFLARE AGENT MEMORY (mandatory across all worktrees)
+
+The project-wide durable engineering memory is the global MCP server
+`hivemind-agent-memory`. It is shared by every HIVEMIND worktree and backed by
+one Cloudflare Agent/SQLite instance named `hivemind`.
+
+- At task start, call `memory_health`, then search relevant components, files,
+  decisions, incidents, and gaps with `memory_search`.
+- Before declaring verified work complete, write durable decisions, architecture
+  gaps, patch summaries, incidents, requirements, releases, and gotchas with
+  `memory_remember`.
+- Include branch, worktree, pushed commit SHA when available, affected-file
+  references, and a stable dedupe key.
+- Supersede or resolve old memories; never delete the audit trail.
+- Never store secrets, tokens, personal/customer data, full customer artifacts,
+  or unverified completion claims.
+- Git and the production release ledger remain authoritative. Agent Memory is
+  the searchable durable index and cross-session handoff, not a substitute for
+  committed code or release evidence.
+
 ## AUTONOMY CLAUSE (overrides default behavior, not safety contracts)
 
 You are running unattended. The operator will not respond until the final review.

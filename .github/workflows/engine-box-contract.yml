@@ -1,0 +1,43 @@
+name: Engine Box contract
+
+on:
+  pull_request:
+    paths:
+      - 'engine-box/**'
+      - 'core/src/engine-box/**'
+      - 'core/src/runtime/runtime-role.js'
+      - 'core/tests/unit/engine-box-*.test.mjs'
+  push:
+    branches: ['codex/engine-box-enterprise-v1']
+    paths:
+      - 'engine-box/**'
+      - 'core/src/engine-box/**'
+      - 'core/src/runtime/runtime-role.js'
+      - 'core/tests/unit/engine-box-*.test.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: appliance contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify Engine Box contracts
+        run: |
+          node --test engine-box/tests/*.test.mjs core/tests/unit/engine-box-runtime*.test.mjs
+          bash -n engine-box/install.sh
+          cargo check --manifest-path engine-box/supervisor/Cargo.toml
+          git diff --check HEAD^ HEAD
+      - name: Ensure no mutable image tags enter the Compose contract
+        run: |
+          ! rg 'image:\s*[^$].*:(latest|stable)(\s|$)' engine-box/compose.yaml
+
+# Candidate image build, SBOM/provenance/signing and disposable-host installation
+# are separate protected-environment release gates. This workflow deliberately
+# does not publish artifacts or touch Cloudflare.

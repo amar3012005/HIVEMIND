@@ -374,6 +374,21 @@ test('Hop-0 resolves exact tenant entities and aliases without language keyword 
   assert.ok(receivedWhere.OR.some((clause) => clause.canonicalName?.equals === 'groundbreaking thing with csi'));
 });
 
+test('entity resolution unifies the ingestion CanonicalEntity registry with legacy Entity rows', async () => {
+  const prisma = {
+    entity: { findMany: async () => [] },
+    canonicalEntity: {
+      findMany: async ({ where }) => {
+        assert.equal(where.organizationId, 'org-1');
+        assert.ok(where.OR.some((clause) => clause.aliases?.hasSome?.includes('Paolo')));
+        return [{ canonicalName: 'Paolo Rossi' }];
+      },
+    },
+  };
+  const entities = await resolveCanonicalEntities({ prisma, orgId: 'org-1', query: 'Who is Paolo?' });
+  assert.deepEqual(entities, ['Paolo Rossi']);
+});
+
 test('Hop-0 resolves implicit source artifacts before broad recall', async () => {
   const router = new RecallRouter({
     persistentMemoryStore: emptyStore(),

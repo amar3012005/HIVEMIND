@@ -246,21 +246,39 @@ function entityQueryForms(query) {
 
 export async function resolveCanonicalEntities({ prisma, orgId, query } = {}) {
   const candidates = entityQueryForms(query);
-  if (!prisma?.entity || !orgId || !candidates.length) return [];
-  const entities = await prisma.entity.findMany({
-    where: {
-      orgId,
-      isActive: true,
-      OR: [
-        ...candidates.map((name) => ({ canonicalName: { equals: name, mode: 'insensitive' } })),
-        { aliases: { hasSome: candidates } },
-      ],
-    },
-    orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }],
-    select: { canonicalName: true },
-    take: 8,
-  });
-  return [...new Set(entities.map((entity) => entity.canonicalName).filter(Boolean))];
+  if (!orgId || !candidates.length) return [];
+  // Ingestion's canonical projection writes CanonicalEntity, while the older
+  // graph extractor writes Entity. Recall must treat both registries as one
+  // logical namespace; querying only Entity made newly ingested people such as
+  // Paolo invisible even though their canonical row already existed.
+  const [legacy, canonical] = await Promise.all([
+    prisma?.entity?.findMany ? prisma.entity.findMany({
+      where: {
+        orgId,
+        isActive: true,
+        OR: [
+          ...candidates.map((name) => ({ canonicalName: { equals: name, mode: 'insensitive' } })),
+          { aliases: { hasSome: candidates } },
+        ],
+      },
+      orderBy: [{ mentionCount: 'desc' }, { lastSeenAt: 'desc' }],
+      select: { canonicalName: true },
+      take: 8,
+    }).catch(() => []) : [],
+    prisma?.canonicalEntity?.findMany ? prisma.canonicalEntity.findMany({
+      where: {
+        organizationId: orgId,
+        OR: [
+          ...candidates.map((name) => ({ canonicalName: { equals: name, mode: 'insensitive' } })),
+          { aliases: { hasSome: candidates } },
+        ],
+      },
+      orderBy: [{ updatedAt: 'desc' }],
+      select: { canonicalName: true },
+      take: 8,
+    }).catch(() => []) : [],
+  ]);
+  return [...new Set([...legacy, ...canonical].map((entity) => entity.canonicalName).filter(Boolean))].slice(0, 12);
 }
 
 export function canonicalEntityLexicalQuery(entities = []) {

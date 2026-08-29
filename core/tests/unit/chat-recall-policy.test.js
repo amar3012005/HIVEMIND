@@ -6,7 +6,7 @@ import {
   chooseRecallEscalation,
 } from '../../src/agent/chat-recall-policy.js';
 import { resolveAnswerModel } from '../../src/agent/react-agent-v2.js';
-import { answerStep, buildChatCitationSources } from '../../src/agent/react-agent-v2.js';
+import { answerStep, buildChatCitationSources, groundedRecallFallback } from '../../src/agent/react-agent-v2.js';
 
 test('explicit document anchor accepts exact document-backed memory coverage', () => {
   const plan = { named_entities: [], source: { document_id: 'doc-1', title: 'HIVEMIND Brochure.pdf' } };
@@ -162,6 +162,25 @@ test('validated claim citations become server-owned public document sources', ()
     source_type: 'document_evidence',
     score: 0.91,
   }]);
+});
+
+test('deterministic synthesis fallback never substitutes unrelated recalled passages', () => {
+  const evidence = { recall_packets: [{
+    sourceSections: [
+      { segment_id: 'seg-paolo', content: 'Paolo owns sponsor alignment for the Italy beachhead.' },
+      { segment_id: 'seg-noise', content: 'The platform uses a usage-based pricing model.' },
+    ],
+    citations: [
+      { id: 'C1', segment_id: 'seg-paolo', title: 'Italy Sales Guide.pdf' },
+      { id: 'C2', segment_id: 'seg-noise', title: 'Pricing Notes.pdf' },
+    ],
+  }] };
+  const answer = groundedRecallFallback(evidence, 'en', 'Who is Paolo?');
+  assert.match(answer.response, /Paolo owns sponsor alignment/);
+  assert.doesNotMatch(answer.response, /usage-based pricing/);
+  assert.deepEqual(answer.claims.flatMap((claim) => claim.citation_ids), ['P1-C1']);
+
+  assert.equal(groundedRecallFallback(evidence, 'en', 'Who is Kruti?'), null);
 });
 
 test('empty fast recall is incomplete and escalates once to explain', () => {

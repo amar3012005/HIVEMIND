@@ -176,7 +176,7 @@ export class EntityResolver {
    * match above AUTO_LINK_FLOOR. Queues fuzzy candidates above REVIEW_FLOOR
    * for human review.
    */
-  async resolveAndLink({ memoryId, candidates = [], organizationId, role = 'subject', userId }) {
+  async resolveAndLink({ memoryId, candidates = [], organizationId, role = 'subject', userId, linkMemory = true }) {
     if (!memoryId || !organizationId) return [];
     const results = [];
     for (const cand of candidates) {
@@ -190,14 +190,16 @@ export class EntityResolver {
       });
 
       if (match && match.confidence >= AUTO_LINK_FLOOR) {
-        await this._link({ memoryId, entityId: match.entity.id, role, confidence: match.confidence });
+        if (linkMemory) await this._link({ memoryId, entityId: match.entity.id, role, confidence: match.confidence });
         // Merge new aliases / email_domains / external_refs into existing entity.
         await this._enrichEntity(match.entity.id, { name: cand.name, email: cand.email, domain, externalRefs });
         results.push({ entityId: match.entity.id, role, confidence: match.confidence, action: 'linked', reason: match.reason });
         continue;
       }
       if (match && match.confidence >= REVIEW_FLOOR) {
-        const reviewId = await this._queueReview({ organizationId, memoryId, candidate: cand, proposedEntityId: match.entity.id, confidence: match.confidence, reason: match.reason });
+        const reviewId = linkMemory
+          ? await this._queueReview({ organizationId, memoryId, candidate: cand, proposedEntityId: match.entity.id, confidence: match.confidence, reason: match.reason })
+          : null;
         results.push({ reviewCandidateId: reviewId, entityId: match.entity.id, confidence: match.confidence, action: 'review', reason: match.reason });
         continue;
       }
@@ -221,7 +223,7 @@ export class EntityResolver {
           orderBy: { createdAt: 'asc' }, // oldest wins — the canonical original
         }).catch(() => null);
         if (existing) {
-          await this._link({ memoryId, entityId: existing.id, role, confidence: 0.9 });
+          if (linkMemory) await this._link({ memoryId, entityId: existing.id, role, confidence: 0.9 });
           await this._enrichEntity(existing.id, { name: cand.name, email: cand.email, domain, externalRefs });
           results.push({ entityId: existing.id, role, confidence: 0.9, action: 'linked', reason: 'normalized_name_reuse' });
           continue;
@@ -242,7 +244,7 @@ export class EntityResolver {
           metadata: cand.metadata || {},
         },
       });
-      await this._link({ memoryId, entityId: created.id, role, confidence: 1.00 });
+      if (linkMemory) await this._link({ memoryId, entityId: created.id, role, confidence: 1.00 });
       results.push({ entityId: created.id, role, confidence: 1.00, action: 'created' });
     }
     return results;

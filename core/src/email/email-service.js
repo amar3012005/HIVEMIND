@@ -113,6 +113,7 @@ function validFromHeader(value) {
 }
 
 function configuredProviders() {
+  const previewGateway = { url: process.env.HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL || '', token: process.env.HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN || '' };
   const cloudflare = {
     token: process.env.CLOUDFLARE_EMAIL_API_TOKEN || '',
     accountId: process.env.CLOUDFLARE_ACCOUNT_ID || '',
@@ -123,9 +124,21 @@ function configuredProviders() {
     from: process.env.SYSTEM_EMAIL_FROM || '',
   };
   return {
+    // Preview delivery is an explicit local-runtime capability. Merely
+    // providing a URL/token can never divert a production mail send.
+    previewGateway: process.env.HIVEMIND_LOCAL_MODE === 'true' && previewGateway.url && previewGateway.token ? previewGateway : null,
     cloudflare: cloudflare.token && cloudflare.accountId && cloudflare.from ? cloudflare : null,
     gmail: gmail.connectionId ? gmail : null,
   };
+}
+
+async function sendWithPreviewGateway({ config, to, rendered, templateId, attachments = [] }) {
+  try {
+    const res = await fetch(config.url, { method: 'POST', headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ to, subject: rendered.subject, html: rendered.html, text: rendered.text, attachments: normalizeAttachments(attachments) }), signal: AbortSignal.timeout(SEND_TIMEOUT_MS) });
+    const payload = await res.json().catch(() => null);
+    if (res.ok && payload?.ok) return { ok: true, provider: 'cloudflare_preview_gateway', deliveryStatus: 'queued', messageId: payload.messageId || null };
+    return { ok: false, provider: 'cloudflare_preview_gateway', error: payload?.error || `http_${res.status}`, permanent: res.status >= 400 && res.status < 500 };
+  } catch { return { ok: false, provider: 'cloudflare_preview_gateway', retryable: true, error: 'request_failed' }; }
 }
 
 function cloudflareError(payload, fallback) {
@@ -379,7 +392,7 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
 
   const providers = configuredProviders();
   const gmail = connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
-  if (!providers.cloudflare && !gmail) {
+  if (!providers.previewGateway && !providers.cloudflare && !gmail) {
     if (!_warnedNoProvider) {
       log('warn', 'no_provider', { hint: 'set CLOUDFLARE_EMAIL_API_TOKEN/CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_EMAIL_FROM or SYSTEM_EMAIL_NANGO_CONNECTION_ID' });
       _warnedNoProvider = true;
@@ -406,6 +419,11 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
     ...(thread?.inReplyTo ? { 'In-Reply-To': thread.inReplyTo, References: thread.references || thread.inReplyTo } : {}),
   };
 
+  if (providers.previewGateway) {
+    const previewResult = await sendWithPreviewGateway({ config: providers.previewGateway, to, rendered, templateId, attachments });
+    if (previewResult.ok || previewResult.permanent || (!providers.cloudflare && !gmail)) return { ...previewResult, messageId: previewResult.messageId || mintedMessageId };
+  }
+
   if (providers.cloudflare) {
     const cloudflareResult = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, threadHeaders, attachments });
     // Cloudflare rejects our self-minted Message-ID (see sendWithCloudflare) —
@@ -424,7 +442,11 @@ export async function sendRenderedSystemEmail({ to, rendered, from, connectionId
   if (!rendered?.subject || !rendered?.html) return { ok: false, skipped: true, error: 'invalid_rendered_message' };
   const providers = configuredProviders();
   const gmail = connectionId ? { ...providers.gmail, connectionId } : providers.gmail;
-  if (!providers.cloudflare && !gmail) return { ok: false, skipped: true, error: 'no_email_provider' };
+  if (!providers.previewGateway && !providers.cloudflare && !gmail) return { ok: false, skipped: true, error: 'no_email_provider' };
+  if (providers.previewGateway) {
+    const result = await sendWithPreviewGateway({ config: providers.previewGateway, to, rendered, templateId, attachments });
+    if (result.ok || result.permanent || (!providers.cloudflare && !gmail)) return result;
+  }
   if (providers.cloudflare) {
     const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders: {} });
     if (result.ok || result.permanent || !gmail) return result;

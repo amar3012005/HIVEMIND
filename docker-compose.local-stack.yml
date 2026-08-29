@@ -97,7 +97,7 @@ services:
     environment:
       POSTGRES_USER: hivemind
       POSTGRES_PASSWORD: hivemind_dev_password
-      POSTGRES_DB: hivemind
+      POSTGRES_DB: hivemind_app
       POSTGRES_INITDB_ARGS: "-E UTF8"
     ports:
       - "5432:5432"

@@ -2085,7 +2085,20 @@ async function getCurrentSession(req) {
     return null;
   }
   const session = await sessionStore.getSession(sessionId);
-  return session ? { sessionId, session } : null;
+  if (!session) return null;
+  // Bootstrap calls getCurrentSession directly. Apply the local-preview
+  // boundary here as well so it can never advertise a historical org to the
+  // frontend before a protected route has a chance to reject that session.
+  if (process.env.HIVEMIND_LOCAL_MODE === 'true') {
+    const org = session.orgId
+      ? await prisma.organization.findUnique({ where: { id: session.orgId }, select: { zitadelOrgId: true } }).catch(() => null)
+      : null;
+    if (org?.zitadelOrgId !== 'local-preview-org') {
+      await sessionStore.destroySession(sessionId);
+      return null;
+    }
+  }
+  return { sessionId, session };
 }
 
 async function requireSession(req, res) {
@@ -2093,6 +2106,22 @@ async function requireSession(req, res) {
   if (!current) {
     jsonResponse(res, { error: 'Unauthorized' }, 401);
     return null;
+  }
+  // A browser can retain a signed cookie from an earlier local experiment.
+  // In local mode that session must never quietly select a historical org:
+  // force it through the email-verified preview login, which issues the
+  // dedicated local-preview owner session.
+  if (process.env.HIVEMIND_LOCAL_MODE === 'true') {
+    const org = current.session.orgId
+      ? await prisma.organization.findUnique({ where: { id: current.session.orgId }, select: { zitadelOrgId: true } }).catch(() => null)
+      : null;
+    if (org?.zitadelOrgId !== 'local-preview-org') {
+      await sessionStore.destroySession(current.sessionId);
+      jsonResponse(res, { error: 'Local preview sign-in required', code: 'LOCAL_PREVIEW_SESSION_REQUIRED' }, 401, {
+        'Set-Cookie': clearSessionCookie(),
+      });
+      return null;
+    }
   }
   return current;
 }
@@ -4040,7 +4069,76 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
+  // ─── Local preview email sign-in ──────────────────────────────
+  if (pathname === '/auth/local-preview/request' && req.method === 'POST') {
+    if (process.env.HIVEMIND_LOCAL_MODE !== 'true' || process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') {
+      return jsonResponse(res, { error: 'Not found' }, 404);
+    }
+    try {
+      const body = await parseBody(req);
+      const email = String(body?.email || '').trim().toLowerCase();
+      const allowlist = new Set(String(process.env.HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST || '').split(',').map((entry) => entry.trim().toLowerCase()).filter(Boolean));
+      if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) || !allowlist.has(email)) {
+        return jsonResponse(res, { ok: true, message: 'If this address is approved for preview, a sign-in link is on its way.' }, 202);
+      }
+      let returnTo = CONFIG.postLoginRedirect;
+      try {
+        const candidate = new URL(String(body?.return_to || ''));
+        const approved = new URL(CONFIG.postLoginRedirect);
+        if (candidate.origin === approved.origin && candidate.pathname.startsWith('/hivemind/')) returnTo = candidate.toString();
+      } catch {}
+      const state = await sessionStore.createAuthState({ kind: 'local_preview_email', email, returnTo });
+      const baseUrl = (process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`).replace(/\/$/, '');
+      const loginUrl = `${baseUrl}/auth/local-preview/verify?state=${encodeURIComponent(state)}`;
+      const delivery = await sendRenderedSystemEmail({ templateId: 'local_preview_sign_in', to: email, rendered: {
+        subject: 'Your Singulance local preview sign-in link',
+        text: `Open this one-time sign-in link to continue to local preview:\n\n${loginUrl}\n\nThis link expires shortly.`,
+        html: `<p>Open this one-time link to continue to local preview.</p><p><a href="${loginUrl}">Sign in to local preview</a></p><p>This link expires shortly.</p>`,
+      } });
+      if (!delivery.ok) return jsonResponse(res, { error: 'Preview email delivery is unavailable.' }, 503);
+      return jsonResponse(res, { ok: true, message: 'Check your email for a one-time sign-in link.' }, 202);
+    } catch {
+      return jsonResponse(res, { error: 'Unable to start preview sign-in' }, 500);
+    }
+  }
+
+  if (pathname === '/auth/local-preview/verify' && req.method === 'GET') {
+    if (process.env.HIVEMIND_LOCAL_MODE !== 'true' || process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') return jsonResponse(res, { error: 'Not found' }, 404);
+    try {
+      const authState = await sessionStore.consumeAuthState(url.searchParams.get('state') || '');
+      if (!authState || authState.kind !== 'local_preview_email' || !authState.email) return jsonResponse(res, { error: 'This preview sign-in link is invalid or has expired.' }, 400);
+      const user = await upsertUserFromZitadel({
+        sub: `local-preview:${authState.email}`,
+        email: authState.email,
+        name: authState.email.split('@')[0] || 'Local Preview',
+        locale: 'en',
+      });
+      // Always pin preview sessions to a dedicated local organization. Reusing
+      // the user's first historical membership could select a stale/inactive
+      // organization and made the HyperAgent onboarding permission checks fail.
+      const org = await prisma.organization.upsert({
+        where: { zitadelOrgId: 'local-preview-org' },
+        update: { name: 'Local Preview', slug: 'local-preview', plan: 'scale', hostingMode: 'managed' },
+        create: {
+          zitadelOrgId: 'local-preview-org',
+          name: 'Local Preview',
+          slug: 'local-preview',
+          plan: 'scale',
+          hostingMode: 'managed',
+        },
+      });
+      await prisma.userOrganization.upsert({
+        where: { userId_orgId: { userId: user.id, orgId: org.id } },
+        update: { isActive: true, role: 'owner', roles: ['org_owner'], joinedAt: new Date() },
+        create: { userId: user.id, orgId: org.id, role: 'owner', roles: ['org_owner'], isActive: true, joinedAt: new Date() },
+      });
+      const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: org.id });
+      return redirect(res, authState.returnTo || CONFIG.postLoginRedirect, [makeSessionCookie(sessionId)]);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message }, 500);
+    }
+  }
+
   if (pathname === '/auth/google' && req.method === 'GET') {
     const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
     console.log(`[google-auth] Login initiated, returnTo: ${returnTo}`);

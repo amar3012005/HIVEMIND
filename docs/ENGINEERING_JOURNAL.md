@@ -820,3 +820,12 @@ slides that find no unique anchor get a page instead of `null`.
 - Production E2E: exact Flagship canary only, one existing task, one sealed deterministic turn, one Cloudflare Workflow instance, one accepted email/PDF, persisted report SHA-256 and length, and a duplicate trigger no-op. No arbitrary customer organization was used.
 - Local isolation: `singulance-local`, preview environment files, and local Docker settings were not merged into or referenced by production configuration.
 - Agent Memory note: the globally configured memory MCP was not exposed to this already-running Codex task, so Git, tests, the release manifest, this journal, and runtime receipts are the authoritative record. Record/supersede this release in Agent Memory when the connector is available.
+
+## 2026-08-29 UTC — canonical email colors and platform notification parity
+
+- State: Committed and accepted release.
+- Branch/worktree: `codex/humation-email-colors` in `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-email-colors`; commit `d843a66885878a605c4bc6d9589e207d568433b4`, fast-forwarded to `origin/singulance-main`.
+- Root cause: Humation SVGs exposed the correct palette through CSS custom properties, but some mailbox renderers/image proxies ignore those properties and use black/white fallbacks. Email wrappers also used one generic pink ring. Because the public URL was immutable, mailbox proxies could retain the old result.
+- Decision: direct path fills are the email-safe source of truth; lane ring/background metadata comes from the same shared palette; version the immutable URL whenever avatar bytes change. Every accepted canonical email also projects into the existing organization-scoped platform inbox, deduplicated by provider receipt.
+- Verification: 30/30 focused tests. Governed release manifest `/root/releases/manifests/d843a668/20260829T202438Z/RELEASE_MANIFEST.json`; no migrations. One operator-owned Cloudflare send was delivered and created exactly one unread platform notification. Five live lane endpoints returned direct expected fills and no CSS-variable fills. Three affected containers healthy on the exact revision; fresh critical log scan empty.
+- Scope boundary: recipients without a registered platform account have no platform inbox, so invitation/external-only email cannot create an in-app notification until they join. No local-preview or frontend settings were changed.

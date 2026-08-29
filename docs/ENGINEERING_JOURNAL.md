@@ -810,3 +810,13 @@ slides that find no unique anchor get a page instead of `null`.
 - Next: merge the branch into `singulance-main`; restart Codex so the new global
   MCP connection loads the user-level bearer token; use `memory_health` and
   `memory_search` at the start of future HIVEMIND tasks.
+
+## 2026-08-29 UTC — Day 1 durable lifecycle accepted through production canary
+
+- State: Committed and accepted release.
+- Branch/worktree: `codex/d1-production-release` in `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-d1-release`; feature commits through `6f9087886c91fd2b9f19e76ca5337a66b98f8703`, fast-forwarded to `origin/singulance-main`.
+- Decision: a Room verifier status of `blocked` means the sealed report contains explicit evidence gaps, not that no report exists. Day 1 therefore delivers sealed `complete` and `blocked` final reports verbatim, while failed or unsealed turns remain non-deliverable. This matches the requirement to send whatever report the HyperAgents Room actually produced without hiding its caveats.
+- Verification: 12/12 focused backend tests; Worker TypeScript check; Wrangler production dry-run. Governed release manifest `/root/releases/manifests/6f908788/20260829T200403Z/RELEASE_MANIFEST.json`; no migrations; three selected services healthy on the exact revision.
+- Production E2E: exact Flagship canary only, one existing task, one sealed deterministic turn, one Cloudflare Workflow instance, one accepted email/PDF, persisted report SHA-256 and length, and a duplicate trigger no-op. No arbitrary customer organization was used.
+- Local isolation: `singulance-local`, preview environment files, and local Docker settings were not merged into or referenced by production configuration.
+- Agent Memory note: the globally configured memory MCP was not exposed to this already-running Codex task, so Git, tests, the release manifest, this journal, and runtime receipts are the authoritative record. Record/supersede this release in Agent Memory when the connector is available.

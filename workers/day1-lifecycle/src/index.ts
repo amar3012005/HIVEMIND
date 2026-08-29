@@ -18,6 +18,7 @@ type Env = {
   HIVEMIND_CONTROL_URL: string;
   HIVEMIND_D1_WORKFLOW_SECRET: string;
   HIVEMIND_D1_INSTANCE_PREFIX?: string;
+  HIVEMIND_D1_RECONCILE_LIMIT?: string;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -164,19 +165,30 @@ export default {
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil((async () => {
+      const startLimit = Math.max(1, Math.min(25, Number(env.HIVEMIND_D1_RECONCILE_LIMIT) || 5));
+      let started = 0;
       const eligible = await control<EligibleResult>(env, '/internal/lifecycle/day1/eligible', { limit: 100 });
       for (const params of eligible.companies || []) {
+        if (started >= startLimit) break;
         if (!validParams(params)) continue;
         if (!await dayOneEnabled(env, params.org_id)) continue;
         const id = instanceId(env, params.hq_room_id);
         try {
           await env.DAY1_WORKFLOW.create({ id, params, retention: { successRetention: '30 days', errorRetention: '30 days' } });
+          started += 1;
         } catch {
           // Deterministic instance IDs make the 15-minute reconciliation safe:
-          // an existing scheduled/running instance is the desired outcome.
-          await env.DAY1_WORKFLOW.get(id);
+          // an existing scheduled/running instance is the desired outcome,
+          // while terminal failures can be resumed without minting a new ID.
+          const instance = await env.DAY1_WORKFLOW.get(id);
+          const status = await instance.status();
+          if (status.status === 'errored' || status.status === 'terminated') {
+            await instance.restart();
+            started += 1;
+          }
         }
       }
+      console.log(JSON.stringify({ event: 'day1_reconciliation_complete', scanned: eligible.companies?.length || 0, started, start_limit: startLimit }));
     })());
   },
 } satisfies ExportedHandler<Env>;

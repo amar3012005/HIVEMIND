@@ -9,7 +9,8 @@
     "head_sampling_rate": 1
   },
   "vars": {
-    "HIVEMIND_CONTROL_URL": "https://api.singulancelabs.com"
+    "HIVEMIND_CONTROL_URL": "https://api.singulancelabs.com",
+    "HIVEMIND_D1_RECONCILE_LIMIT": "5"
   },
   "flagship": [
     {
@@ -33,7 +34,8 @@
       "name": "hivemind-day1-lifecycle-local",
       "vars": {
         "HIVEMIND_CONTROL_URL": "https://preview-api.singulancelabs.com",
-        "HIVEMIND_D1_INSTANCE_PREFIX": "d1-local7"
+        "HIVEMIND_D1_INSTANCE_PREFIX": "d1-local7",
+        "HIVEMIND_D1_RECONCILE_LIMIT": "100"
       },
       "flagship": [
         {

@@ -25,7 +25,7 @@ services:
       HIVEMIND_CORE_API_BASE_URL: http://api:3000
       HIVEMIND_API_URL: http://api:3000
       HIVEMIND_CORE_API_PUBLIC_URL: https://preview.singulancelabs.com
-      HIVEMIND_CONTROL_PLANE_PUBLIC_URL: https://api.preview.singulancelabs.com
+      HIVEMIND_CONTROL_PLANE_PUBLIC_URL: https://preview-api.singulancelabs.com
       HIVEMIND_FRONTEND_URL: https://next.preview.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT: https://next.preview.singulancelabs.com/hivemind/app/overview
       HIVEMIND_LOCAL_AUTH_BYPASS: "true"
@@ -79,7 +79,7 @@ services:
       HIVEMIND_CORE_URL: http://api:3000
       HIVEMIND_CP_URL: http://control-plane:3000
       HIVEMIND_PUBLIC_CORE_URL: https://preview.singulancelabs.com
-      HIVEMIND_PUBLIC_CP_URL: https://api.preview.singulancelabs.com
+      HIVEMIND_PUBLIC_CP_URL: https://preview-api.singulancelabs.com
       DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
       REDIS_URL: redis://redis:6379/0
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}

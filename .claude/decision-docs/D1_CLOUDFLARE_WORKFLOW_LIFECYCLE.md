@@ -365,6 +365,11 @@ safely elsewhere, character roles hide before names or portraits, and a second
 is the canonical HTTPS PNG plus text wordmark with explicit dimensions; the PDF
 uses the matching inline Singulance vector mark. Both logo paths must be covered
 by renderer tests, and the public PNG must return HTTP 200 before release.
+These guarantees live in `lifecycleEmailShell` and its exported
+`lifecycleRichContentStyles`, not in the Day 1 episode. Every lifecycle email
+must use that shell; structured sections opt in with the `rich-content` class
+and the shared `table-scroll`, `data-table`, and character classes. Episode
+templates may add presentation details but must not replace these base rules.
 
 The presentation layer is episode-reusable. Future lifecycle playbooks call the
 generic `renderLifecycleCompletionEmail` and

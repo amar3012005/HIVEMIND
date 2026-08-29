@@ -90,7 +90,7 @@ services:
       hm-extract: { condition: service_started }
       hm-model-router: { condition: service_started }
     secrets: [postgres_password]
-    command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/server.mjs"]
+    command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/lean-server.mjs"]
 
   hm-auth:
     <<: *engine-service

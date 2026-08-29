@@ -971,3 +971,15 @@ slides that find no unique anchor get a page instead of `null`.
 - Safety decision: public pages remain discoverable while training/fine-tuning
   is disallowed by content signals and private hosts are `noindex`. A Cloudflare
   crawler guard remains deferred until production Worker verification.
+## 2026-08-30 UTC — public AI discovery policy accepted in production
+
+- State: committed and accepted. Parent `fe71aa3c173359659e0a3144df9aef3c0fde6eda`;
+  Da-vinci `main` `93b15206d276c798993d57a63fd5694ff9609685`; Worker
+  `hivemind-web` version `acc99047-4b86-41ca-b1b4-d00c55d6c75e`.
+- Verification: public robots/llms/source-guide paths returned 200; private
+  discovery paths returned 403; private login HTML returned `noindex`; API
+  health returned 200.
+- Cloudflare WAF ruleset `06fb27e2007640bea0a590a353797322` blocks only four
+  discovery paths on private Worker hostnames. Public marketing traffic remains
+  available. The governed canonical service release `40e3b3d1` completed with
+  Core, Control Plane, and Employees healthy; no migrations occurred.

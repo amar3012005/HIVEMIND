@@ -47,3 +47,18 @@ verification, and its independent rollback control.
 - Release rule: deploy only from a clean, current `singulance-main` promotion;
   verify public crawler access and private-host `noindex` behavior before
   enabling any narrow crawler guard.
+## feature-20260830T004500Z — Public AI discovery policy
+
+- Production status: deployed and verified. Public `singulancelabs.com` serves
+  `robots.txt`, `llms.txt`, `llms-full.txt`, and sitemap guidance for indexing,
+  citation, retrieval, and direct AI-user visits; training/fine-tuning is
+  declined.
+- Privacy boundary: `next.singulancelabs.com`,
+  `admin.hivemind.singulancelabs.com`, and `icarus.singulancelabs.com` deny
+  discovery-file paths through Cloudflare WAF ruleset
+  `06fb27e2007640bea0a590a353797322`; application HTML remains `noindex`.
+- Release: parent `fe71aa3c173359659e0a3144df9aef3c0fde6eda`; frontend
+  `93b15206d276c798993d57a63fd5694ff9609685`; Worker `hivemind-web` version
+  `acc99047-4b86-41ca-b1b4-d00c55d6c75e`.
+- Rollback: roll back the Worker and disable/delete only that WAF ruleset; no
+  database or customer data changed.

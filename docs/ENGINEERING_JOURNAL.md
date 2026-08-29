@@ -916,3 +916,41 @@ slides that find no unique anchor get a page instead of `null`.
   `{shared:true,mobile:true,logo:true,table:true}`. Commit `e2ae0741` adds the
   missing `HIVEMIND_ADMIN_SECRET` Compose mapping; a random local-only value is
   stored in the Windows user environment and is neither printed nor committed.
+## 2026-08-29 UTC — Day 1 durable lifecycle accepted through production canary
+
+- State: Committed and accepted release.
+- Branch/worktree: `codex/d1-production-release` in `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-d1-release`; feature commits through `6f9087886c91fd2b9f19e76ca5337a66b98f8703`, fast-forwarded to `origin/singulance-main`.
+- Decision: a Room verifier status of `blocked` means the sealed report contains explicit evidence gaps, not that no report exists. Day 1 therefore delivers sealed `complete` and `blocked` final reports verbatim, while failed or unsealed turns remain non-deliverable. This matches the requirement to send whatever report the HyperAgents Room actually produced without hiding its caveats.
+- Verification: 12/12 focused backend tests; Worker TypeScript check; Wrangler production dry-run. Governed release manifest `/root/releases/manifests/6f908788/20260829T200403Z/RELEASE_MANIFEST.json`; no migrations; three selected services healthy on the exact revision.
+- Production E2E: exact Flagship canary only, one existing task, one sealed deterministic turn, one Cloudflare Workflow instance, one accepted email/PDF, persisted report SHA-256 and length, and a duplicate trigger no-op. No arbitrary customer organization was used.
+- Local isolation: `singulance-local`, preview environment files, and local Docker settings were not merged into or referenced by production configuration.
+- Agent Memory note: the globally configured memory MCP was not exposed to this already-running Codex task, so Git, tests, the release manifest, this journal, and runtime receipts are the authoritative record. Record/supersede this release in Agent Memory when the connector is available.
+
+## 2026-08-29 UTC — canonical email colors and platform notification parity
+
+- State: Committed and accepted release.
+- Branch/worktree: `codex/humation-email-colors` in `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-email-colors`; commit `d843a66885878a605c4bc6d9589e207d568433b4`, fast-forwarded to `origin/singulance-main`.
+- Root cause: Humation SVGs exposed the correct palette through CSS custom properties, but some mailbox renderers/image proxies ignore those properties and use black/white fallbacks. Email wrappers also used one generic pink ring. Because the public URL was immutable, mailbox proxies could retain the old result.
+- Decision: direct path fills are the email-safe source of truth; lane ring/background metadata comes from the same shared palette; version the immutable URL whenever avatar bytes change. Every accepted canonical email also projects into the existing organization-scoped platform inbox, deduplicated by provider receipt.
+- Verification: 30/30 focused tests. Governed release manifest `/root/releases/manifests/d843a668/20260829T202438Z/RELEASE_MANIFEST.json`; no migrations. One operator-owned Cloudflare send was delivered and created exactly one unread platform notification. Five live lane endpoints returned direct expected fills and no CSS-variable fills. Three affected containers healthy on the exact revision; fresh critical log scan empty.
+- Scope boundary: recipients without a registered platform account have no platform inbox, so invitation/external-only email cannot create an in-app notification until they join. No local-preview or frontend settings were changed.
+
+## 2026-08-29 UTC — Day 1 lifecycle promoted to default-on
+
+- State: Committed and accepted release.
+- Branch/worktree: `codex/humation-email-colors` in `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-email-colors`; feature-registry commit `f48d42b33c2f6890cc86cebe41360ac2e0c33914`.
+- Decision: enable Flagship flag `day1_first_move_v1` for every context by using
+  the `on` default variation with no targeting rules. Preserve two independent
+  rollback controls: Flagship disable and the backend
+  `HIVEMIND_D1_WORKFLOW_ENABLED` master gate. Keep reconciliation bounded to
+  five organizations per cron run.
+- Production verification: three eligible organizations started through the
+  authenticated deterministic lifecycle endpoint and all three Cloudflare
+  Workflow instances completed. PostgreSQL recorded three linked
+  `lifecycle.email.sent` notifications with three distinct dedupe keys and zero
+  duplicate-key groups.
+- Local acceptance: `singulance-local` commit
+  `b15b4ceb5d354f9281626cad9bd863c153a1ae6c`; 30/30 focused tests passed and
+  `hivemind-control-plane-local` rebuilt with its existing Day-1 overlay and
+  reached healthy. No production database or local deployment setting crossed
+  the branch boundary.

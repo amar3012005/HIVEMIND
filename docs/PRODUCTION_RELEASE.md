@@ -675,3 +675,24 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Fail-closed gate: automatic managed Cloudflare bootstrap remains unavailable until the protected offline Ed25519 signer publishes the stable signed release and a dedicated Cloudflare token with Tunnel and DNS Edit permissions is installed. The UI exposes the signed advanced compatibility path; existing custom HTTPS/Tailscale installations remain operational.
 - Rollback: canonical per-service `rollback` tags exist for Core, Control Plane, Employees, and BYOD Broker; the additive DB migration is compatible with code rollback. No destructive customer canary was run.
 - Operational note: production disk had 24 GB free after image builds, so the final canonical release used `RELEASE_MIN_DISK_GB=20`; schedule image-cache cleanup before the next multi-service build.
+
+## 6f908788 — Day 1 Cloudflare Workflow canary (Core, Control Plane, Employees)
+
+- Canonical SHA: `6f9087886c91fd2b9f19e76ca5337a66b98f8703`. Migration: none. Manifest: `/root/releases/manifests/6f908788/20260829T200403Z/RELEASE_MANIFEST.json`.
+- Cloudflare Worker: `hivemind-day1-lifecycle`, version `cf1d4048-ac88-4bbc-9cba-b5c66a996d89`; cron `*/15 * * * *`; production reconciliation cap `5`.
+- Flagship: `day1_first_move_v1` is enabled with default variation `off` and one exact operator-owned canary `org_id` rule. A non-canary evaluation returned `false`/`DEFAULT` before the run.
+- E2E: one pre-existing research task produced exactly one deterministic turn. The turn sealed as `blocked` because its verifier recorded evidence gaps, while still persisting a complete final report. The lifecycle was corrected to deliver sealed `complete` or `blocked` reports verbatim and continue rejecting failed or unsealed turns. Cloudflare Workflow completed in 3 seconds and the email provider accepted one Day 1 email with portrait PDF (`output_sha256=a07da10e36ffd52a37683293e4bd7e0721190ba1c2982bd0aa057dab41ea9ecd`, `output_length=5171`).
+- Idempotency: a second `/start` returned `created:false`, `restarted:false`, the same instance/turn/report hash/provider receipt, and the database retained exactly one turn for the deterministic idempotency key.
+- Runtime: `hm-core`, `hm-control`, and `hm-employees` are healthy on immutable `sha-6f908788` images. Public API health is green; fresh Day 1 logs contain one provider `sent` event and no Day 1 error.
+- Isolation: production Compose does not reference `env.local` or `docker-compose.day1-test.yml`. Preview API, preview Flagship app, local instance prefix, and local reconciliation limit were not copied into production.
+- Rollback: backend env backup `/root/hivemind/.env.pre-day1-20260829T195023Z`; canonical per-service rollback images preserved. Immediate kill switch is Flagship disable/default-off; backend master gate is `HIVEMIND_D1_WORKFLOW_ENABLED`.
+
+## d843a668 — Humation email colors and universal email notifications (Core, Control Plane, Employees)
+
+- Canonical SHA: `d843a66885878a605c4bc6d9589e207d568433b4`. Migration: none. Manifest: `/root/releases/manifests/d843a668/20260829T202438Z/RELEASE_MANIFEST.json`.
+- Email rendering: the shared Humation renderer now replaces SVG CSS-variable fills with direct canonical lane colors, uses lane-colored rings/backgrounds in Day 0 and reusable lifecycle emails/PDFs, and adds immutable avatar asset version `v=2` to invalidate mailbox image-proxy caches.
+- Notification invariant: every provider-accepted canonical system email invokes the centralized workspace-notification projection. Exact lifecycle org/user context wins; generic sends resolve all active platform workspaces belonging to the registered recipient. External-only recipients remain email-only because they have no platform inbox. Provider acceptance remains authoritative if projection fails.
+- Tests: 30/30 focused email, Day 0/Day 1, avatar, and notification-projection tests; syntax checks for every changed runtime module; `git diff --check` clean.
+- Production E2E: one operator-owned verification email containing Strategist, Builder, Skeptic, Researcher, and Communicator avatars was reported `delivered` by Cloudflare. The same send created exactly one unread `email.sent` notification with palette version `2`. Each live public SVG contains its exact direct lane fill and zero `fill=var(--hm-...)` occurrences.
+- Runtime: `hm-core`, `hm-control`, and `hm-employees` healthy on immutable `sha-d843a668`; public API health green; fresh critical/error-projection scan empty. Existing Day 1 deterministic turn remained exactly one and sealed.
+- Isolation and rollback: no frontend, local Docker, preview, or `singulance-local` configuration changed. Canonical per-service rollback images were preserved by the governor.

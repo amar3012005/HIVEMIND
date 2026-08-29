@@ -7,6 +7,7 @@ import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, r
 export const DAY_ONE_VERSION = 'day-1-first-move-v1';
 const SENDING_LEASE_MS = 10 * 60 * 1000;
 const DEFAULT_APP_URL = 'https://next.singulancelabs.com/hivemind/app/employees';
+const DELIVERABLE_ROOM_STATUSES = new Set(['complete', 'blocked']);
 
 export function isDayOneWorkflowEnabled() {
   return process.env.HIVEMIND_D1_WORKFLOW_ENABLED === 'true';
@@ -256,9 +257,12 @@ export async function notifyDayOneWorkflowCompletion({ prisma, turnId, status = 
   const company = typeof row.company === 'string' ? JSON.parse(row.company) : row.company;
   const state = company.day1_first_move || {};
   if (!state.workflow_instance_id) return { ok: false, skipped: true, reason: 'workflow_instance_missing' };
-  state.status = status === 'complete' ? 'completed' : 'failed';
+  const deliverable = DELIVERABLE_ROOM_STATUSES.has(status);
+  state.status = deliverable ? 'completed' : 'failed';
+  state.room_status = status;
   state.completed_at = new Date().toISOString();
-  if (status !== 'complete') state.failure_reason = 'room_turn_failed';
+  if (!deliverable) state.failure_reason = 'room_turn_failed';
+  else delete state.failure_reason;
   await prisma.$executeRawUnsafe(
     `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day1_first_move}', $1::jsonb, true) WHERE id = $2::uuid`,
     JSON.stringify(state), row.id,
@@ -312,8 +316,9 @@ export async function prepareDayOneFirstMove({ prisma, orgId, hqRoomId, workflow
     created = true;
   }
   task.room_id = room.id;
-  task.status = turn.status === 'complete' ? 'done' : 'active';
-  company.day1_first_move = { ...preparing, status: turn.status === 'complete' ? 'completed' : 'running', room_id: room.id, turn_id: turn.id, started_at: prior.started_at || new Date().toISOString() };
+  const turnDeliverable = Boolean(turn.sealedAt) && DELIVERABLE_ROOM_STATUSES.has(turn.status);
+  task.status = turnDeliverable ? 'done' : 'active';
+  company.day1_first_move = { ...preparing, status: turnDeliverable ? 'completed' : 'running', room_id: room.id, turn_id: turn.id, started_at: prior.started_at || new Date().toISOString() };
   await prisma.$executeRawUnsafe(
     `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company}', $1::jsonb, true) WHERE id = $2::uuid AND org_id = $3::uuid`,
     JSON.stringify(company), hq.id, orgId,
@@ -348,7 +353,7 @@ export async function deliverDayOneFirstMove({
   };
   if (!state.turn_id || !state.room_id) throw new Error('day1_turn_not_ready');
   const turn = await prisma.hyperTurn.findFirst({ where: { id: state.turn_id, roomId: state.room_id } });
-  if (!turn?.sealedAt || turn.status !== 'complete') throw new Error('day1_turn_not_complete');
+  if (!turn?.sealedAt || !DELIVERABLE_ROOM_STATUSES.has(turn.status)) throw new Error('day1_turn_not_complete');
   const output = extractSealedRoomOutput(turn.lines);
   if (!output) throw new Error('day1_sealed_output_missing');
   const outputSha256 = crypto.createHash('sha256').update(output, 'utf8').digest('hex');

@@ -127,6 +127,43 @@ test('Day 1 takes the sealed final report verbatim', () => {
   assert.equal(extractSealedRoomOutput(lines), expected);
 });
 
+test('Day 1 delivers a sealed blocked research report with its evidence gaps intact', async () => {
+  const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
+  const output = '# Research result\n\n## Gaps to Confirm\n\n- Public evidence was insufficient.';
+  const company = {
+    company: 'Canary Co',
+    tasks: [{ id: 'research-1', title: 'Validate evidence' }],
+    day1_first_move: { status: 'completed', task_id: 'research-1', room_id: 'room-1', turn_id: 'turn-1', room_status: 'blocked' },
+  };
+  const hq = { id: 'hq-1', user_id: 'user-1', company };
+  let sends = 0;
+  const prisma = {
+    async $queryRawUnsafe(sql, ...args) {
+      if (sql.includes('SELECT id, user_id')) return [hq];
+      if (sql.includes('UPDATE "hivemind"."hyper_rooms"')) {
+        company.day1_first_move = JSON.parse(args[0]);
+        return [{ id: hq.id }];
+      }
+      return [];
+    },
+    async $executeRawUnsafe(_sql, value) { company.day1_first_move = JSON.parse(value); return 1; },
+    hyperTurn: { findFirst: async () => ({ id: 'turn-1', roomId: 'room-1', status: 'blocked', sealedAt: new Date(), lines: [{ t: 'final_report', text: output }, { t: 'seal', status: 'blocked' }] }) },
+    user: { findUnique: async () => ({ email: 'canary@example.test' }) },
+  };
+  try {
+    const result = await deliverDayOneFirstMove({
+      prisma, orgId: 'org-1', hqRoomId: 'hq-1',
+      renderPdf: async () => Buffer.from('pdf'),
+      sendEmail: async ({ rendered }) => { sends += 1; assert.match(rendered.text, /Public evidence was insufficient/); return { ok: true, provider: 'cloudflare', messageId: 'msg-blocked-1' }; },
+    });
+    assert.equal(result.status, 'sent');
+    assert.equal(sends, 1);
+  } finally {
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
+  }
+});
+
 test('README rendering preserves content while escaping executable HTML', () => {
   const html = renderRoomReadme('# Findings\n\n<script>alert(1)</script>\n\n1. Verified **signal**');
   assert.match(html, /<h2>Findings<\/h2>/);

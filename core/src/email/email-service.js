@@ -141,7 +141,6 @@ async function sendWithPreviewGateway({ config, to, rendered, templateId, attach
     return { ok: false, provider: 'cloudflare_preview_gateway', error: payload?.error || `http_${res.status}`, permanent: res.status >= 400 && res.status < 500 };
   } catch { return { ok: false, provider: 'cloudflare_preview_gateway', retryable: true, error: 'request_failed' }; }
 }
-
 /** Configure the process-local projection of accepted email into the platform inbox. */
 export function configureSystemEmailNotificationSink(sink) {
   _notificationSink = typeof sink === 'function' ? sink : null;

@@ -1,0 +1,107 @@
+# Local-only extension for the complete Singulance backend.
+# Run with the base stack:
+#   docker compose -f docker-compose.local-stack.yml -f docker-compose.local-services.yml up -d --build
+#
+# It deliberately uses only local Postgres, Qdrant, Redis, and local development
+# credentials. No production database, API keys, Slack credentials, or services are used.
+
+services:
+  control-plane:
+    image: hivemind-control-plane-local:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.control-plane
+    container_name: hivemind-control-plane-local
+    env_file:
+      - ./core/.env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: dev_api_key_hivemind_2026
+      QDRANT_COLLECTION: hivemind_memories
+      REDIS_URL: redis://redis:6379/0
+      HIVEMIND_CORE_API_BASE_URL: http://api:3000
+      HIVEMIND_API_URL: http://api:3000
+      HIVEMIND_CONTROL_PLANE_PUBLIC_URL: https://api.preview.singulancelabs.com
+      HIVEMIND_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
+      HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+      HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:-local-admin-secret-change-me}
+      HIVEMIND_PLATFORM_ADMIN_PASSCODE: ${HIVEMIND_PLATFORM_ADMIN_PASSCODE:-local-platform-admin-passcode-change-me}
+      SESSION_SECRET: ${SESSION_SECRET:-local-session-secret-change-me}
+      API_MASTER_KEY: ${API_MASTER_KEY:-local-api-master-key-change-me}
+      # Prevent local employee/config activity from using external provider credentials.
+      GROQ_API_KEY: ""
+      MISTRAL_API_KEY: ""
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      OPENROUTER_API_KEY: ""
+      SLACK_CLIENT_ID: ""
+      SLACK_CLIENT_SECRET: ""
+    ports:
+      - "3001:3000"
+    networks:
+      - hivemind-network
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  employees:
+    image: hivemind-employees-local:latest
+    build:
+      context: ./employees-service
+      dockerfile: Dockerfile
+    container_name: hivemind-employees-local
+    environment:
+      PORT: 8060
+      LOG_LEVEL: info
+      REPLICA_ID: local-1
+      REPLICA_COUNT: 1
+      HIVEMIND_CORE_URL: http://api:3000
+      HIVEMIND_CP_URL: http://control-plane:3000
+      HIVEMIND_PUBLIC_CORE_URL: https://preview.singulancelabs.com
+      HIVEMIND_PUBLIC_CP_URL: https://api.preview.singulancelabs.com
+      DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
+      REDIS_URL: redis://redis:6379/0
+      HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
+      GROQ_API_KEY: ""
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      OPENROUTER_API_KEY: ""
+      SLACK_CLIENT_ID: ""
+      SLACK_CLIENT_SECRET: ""
+    ports:
+      - "8060:8060"
+    networks:
+      - hivemind-network
+    depends_on:
+      api:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8060/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    restart: unless-stopped

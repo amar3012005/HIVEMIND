@@ -308,6 +308,10 @@ Security rules:
 - the email recipient is loaded from the authoritative workspace owner record;
 - report HTML escapes untrusted room Markdown;
 - the Workflow carries identifiers and timestamps, not tenant report contents.
+- backend execution requires the exact master gate `HIVEMIND_D1_WORKFLOW_ENABLED=true`;
+- Worker execution requires Cloudflare Flagship `day1_first_move_v1=true` for the exact organization context;
+- both gates default off and either gate independently stops new execution;
+- production rollout uses an exact `org_id` canary rule while the flag's default variation remains off.
 
 ## 7. Idempotency and retry design
 

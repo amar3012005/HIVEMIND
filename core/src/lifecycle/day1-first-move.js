@@ -7,6 +7,14 @@ export const DAY_ONE_VERSION = 'day-1-first-move-v1';
 const SENDING_LEASE_MS = 10 * 60 * 1000;
 const DEFAULT_APP_URL = 'https://next.singulancelabs.com/hivemind/app/employees';
 
+export function isDayOneWorkflowEnabled() {
+  return process.env.HIVEMIND_D1_WORKFLOW_ENABLED === 'true';
+}
+
+function requireDayOneWorkflowEnabled() {
+  if (!isDayOneWorkflowEnabled()) throw new Error('day1_feature_disabled');
+}
+
 function clean(value, limit = 400) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
 }
@@ -161,6 +169,7 @@ async function workflowFetch(pathname, body, { fetchImpl = globalThis.fetch, att
 }
 
 export async function scheduleDayOneWorkflow({ orgId, hqRoomId, onboardedAt, fetchImpl } = {}) {
+  if (!isDayOneWorkflowEnabled()) return { ok: false, skipped: true, reason: 'feature_disabled' };
   const onboarded = Date.parse(onboardedAt || '');
   const targetAt = new Date(Math.max(Date.now(), Number.isFinite(onboarded) ? onboarded + 24 * 60 * 60 * 1000 : Date.now() + 24 * 60 * 60 * 1000)).toISOString();
   return { target_at: targetAt, ...await workflowFetch('/start', { org_id: orgId, hq_room_id: hqRoomId, target_at: targetAt }, { fetchImpl }) };
@@ -168,6 +177,7 @@ export async function scheduleDayOneWorkflow({ orgId, hqRoomId, onboardedAt, fet
 
 /** Reconciliation source for Cloudflare's cron trigger; no report body leaves Postgres. */
 export async function listEligibleDayOneCompanies({ prisma, limit = 100 } = {}) {
+  requireDayOneWorkflowEnabled();
   const rows = await prisma.$queryRawUnsafe(
     `SELECT id, org_id, "agent_connectors"->'_company' AS company
        FROM "hivemind"."hyper_rooms"
@@ -189,6 +199,7 @@ export async function listEligibleDayOneCompanies({ prisma, limit = 100 } = {}) 
 }
 
 export async function notifyDayOneWorkflowCompletion({ prisma, turnId, status = 'complete', fetchImpl } = {}) {
+  if (!isDayOneWorkflowEnabled()) return { ok: false, skipped: true, reason: 'feature_disabled' };
   const rows = await prisma.$queryRawUnsafe(
     `SELECT hq.id, hq.org_id, hq."agent_connectors"->'_company' AS company
        FROM "hivemind"."hyper_rooms" hq
@@ -208,10 +219,11 @@ export async function notifyDayOneWorkflowCompletion({ prisma, turnId, status = 
     `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day1_first_move}', $1::jsonb, true) WHERE id = $2::uuid`,
     JSON.stringify(state), row.id,
   );
-  return workflowFetch('/event', { instance_id: state.workflow_instance_id, turn_id: turnId, status }, { fetchImpl, attempts: 5 });
+  return workflowFetch('/event', { instance_id: state.workflow_instance_id, org_id: String(row.org_id), turn_id: turnId, status }, { fetchImpl, attempts: 5 });
 }
 
 export async function prepareDayOneFirstMove({ prisma, orgId, hqRoomId, workflowInstanceId, dispatchTurn } = {}) {
+  requireDayOneWorkflowEnabled();
   const rows = await prisma.$queryRawUnsafe(
     `SELECT id, user_id, "agent_connectors"->'_company' AS company FROM "hivemind"."hyper_rooms"
       WHERE id = $1::uuid AND org_id = $2::uuid AND "agent_connectors" ? '_company' AND archived_at IS NULL LIMIT 1`,
@@ -267,7 +279,14 @@ export async function prepareDayOneFirstMove({ prisma, orgId, hqRoomId, workflow
   return { status: company.day1_first_move.status, task_id: task.id, task_title: task.title, room_id: room.id, turn_id: turn.id };
 }
 
-export async function deliverDayOneFirstMove({ prisma, orgId, hqRoomId } = {}) {
+export async function deliverDayOneFirstMove({
+  prisma,
+  orgId,
+  hqRoomId,
+  renderPdf = renderDayZeroOnboardingPdf,
+  sendEmail = sendRenderedSystemEmail,
+} = {}) {
+  requireDayOneWorkflowEnabled();
   const rows = await prisma.$queryRawUnsafe(
     `SELECT id, user_id, "agent_connectors"->'_company' AS company FROM "hivemind"."hyper_rooms"
       WHERE id = $1::uuid AND org_id = $2::uuid AND "agent_connectors" ? '_company' LIMIT 1`,
@@ -276,12 +295,17 @@ export async function deliverDayOneFirstMove({ prisma, orgId, hqRoomId } = {}) {
   const hq = rows?.[0];
   const company = typeof hq?.company === 'string' ? JSON.parse(hq.company) : hq?.company;
   const state = company?.day1_first_move || {};
-  if (state.status === 'sent') return { ok: true, accepted: false, status: 'sent', message_id: state.message_id || null };
+  if (state.status === 'sent') return {
+    ok: true, accepted: false, status: 'sent', message_id: state.message_id || null,
+    output_sha256: state.output_sha256 || null, output_length: state.output_length || null,
+  };
   if (!state.turn_id || !state.room_id) throw new Error('day1_turn_not_ready');
   const turn = await prisma.hyperTurn.findFirst({ where: { id: state.turn_id, roomId: state.room_id } });
   if (!turn?.sealedAt || turn.status !== 'complete') throw new Error('day1_turn_not_complete');
   const output = extractSealedRoomOutput(turn.lines);
   if (!output) throw new Error('day1_sealed_output_missing');
+  const outputSha256 = crypto.createHash('sha256').update(output, 'utf8').digest('hex');
+  const outputLength = Buffer.byteLength(output, 'utf8');
   const claimedAt = new Date().toISOString();
   const sendingState = { ...state, status: 'sending', delivery_claimed_at: claimedAt };
   const claimed = await prisma.$queryRawUnsafe(
@@ -310,19 +334,19 @@ export async function deliverDayOneFirstMove({ prisma, orgId, hqRoomId } = {}) {
     const roomUrl = `${appBase}/employees/rooms/${state.room_id}`;
     const rendered = renderDayOneEmail({ companyName, taskTitle, output, roomUrl });
     const reportHtml = renderDayOnePortraitReport({ companyName, taskTitle, output, roomUrl, completedAt: turn.sealedAt });
-    const pdf = await renderDayZeroOnboardingPdf(reportHtml);
+    const pdf = await renderPdf(reportHtml);
     const slug = companyName.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 60) || 'company';
-    const delivery = await sendRenderedSystemEmail({
+    const delivery = await sendEmail({
       templateId: 'day1_first_move', to: owner.email, rendered,
       attachments: [{ filename: `${slug}-day-1-research-report.pdf`, type: 'application/pdf', content: pdf }],
     });
     if (!delivery.ok) throw new Error(`day1_delivery_${delivery.error || delivery.reason || 'failed'}`);
-    Object.assign(state, { status: 'sent', sent_at: new Date().toISOString(), provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null });
+    Object.assign(state, { status: 'sent', sent_at: new Date().toISOString(), provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null, output_sha256: outputSha256, output_length: outputLength });
     await prisma.$executeRawUnsafe(
       `UPDATE "hivemind"."hyper_rooms" SET "agent_connectors" = jsonb_set("agent_connectors", '{_company,day1_first_move}', $1::jsonb, true) WHERE id = $2::uuid`,
       JSON.stringify(state), hq.id,
     );
-    return { ok: true, accepted: true, status: 'sent', provider: delivery.provider, message_id: delivery.messageId || null, room_id: state.room_id, turn_id: state.turn_id };
+    return { ok: true, accepted: true, status: 'sent', provider: delivery.provider, message_id: delivery.messageId || null, room_id: state.room_id, turn_id: state.turn_id, output_sha256: outputSha256, output_length: outputLength };
   } catch (error) {
     Object.assign(state, { status: 'failed', failed_at: new Date().toISOString(), failure_reason: String(error.message || 'delivery_failed').slice(0, 240) });
     await prisma.$executeRawUnsafe(

@@ -123,6 +123,7 @@ import { createWorkspaceNotification } from './workspace/notifications.js';
 import {
   deliverDayOneFirstMove,
   isAuthorizedDayOneRequest,
+  isDayOneWorkflowEnabled,
   listEligibleDayOneCompanies,
   notifyDayOneWorkflowCompletion,
   prepareDayOneFirstMove,
@@ -3118,6 +3119,7 @@ const server = http.createServer(async (req, res) => {
   // cannot start complimentary autonomous work or deliver lifecycle mail.
   if (pathname.startsWith('/internal/lifecycle/day1/')) {
     if (!isAuthorizedDayOneRequest(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    if (!isDayOneWorkflowEnabled()) return jsonResponse(res, { error: 'day1_feature_disabled', retryable: false }, 403);
     if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
     const body = await parseBody(req).catch(() => ({}));
     if (pathname === '/internal/lifecycle/day1/eligible') {

@@ -35,7 +35,7 @@ try {
       select: { canonicalName: true, aliases: true, metadata: true },
       take: 20000,
     }),
-    amrFindByTags(organizationId, [`doc-id:${documentId}`], 500, false),
+    amrFindByTags(organizationId, [`doc-id:${documentId}`], 500, true),
   ]);
   const sourceEntities = entityRows.filter((entity) =>
     Array.isArray(entity.metadata?.source_document_ids)

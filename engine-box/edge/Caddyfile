@@ -1,0 +1,27 @@
+{
+  # Customer-issued certificates can replace `tls internal` through the local
+  # admin wizard. Until then the appliance is loopback-only and uses a private
+  # local CA rather than exposing plaintext HTTP.
+  auto_https disable_redirects
+}
+
+:8787 {
+  tls internal
+
+  handle_path /oauth2/* {
+    reverse_proxy hm-auth:4180
+  }
+
+  @health path /health /ready
+  handle @health {
+    reverse_proxy hm-core:3000
+  }
+
+  # The identity profile is mandatory for a network-facing deployment. The
+  # supervisor only starts it after OIDC discovery, JWKS and RBAC mapping pass.
+  forward_auth hm-auth:4180 {
+    uri /oauth2/auth
+    copy_headers X-Auth-Request-User X-Auth-Request-Email X-Auth-Request-Groups
+  }
+  reverse_proxy hm-core:3000
+}

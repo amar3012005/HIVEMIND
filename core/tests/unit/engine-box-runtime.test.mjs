@@ -10,6 +10,6 @@ test('Engine Box boot needs explicit mode and does not silently enable hosted ca
 });
 
 test('Engine Box readiness degrades safely after lease expiry', () => {
-  const services = Object.fromEntries(['postgres', 'qdrant', 'redis', 'core', 'ingestion', 'hm_extract', 'mcp'].map((name) => [name, 'ready']));
+  const services = Object.fromEntries(['postgres', 'qdrant', 'redis', 'core', 'ingestion', 'hm_extract', 'mcp', 'edge'].map((name) => [name, 'ready']));
   assert.equal(engineBoxReadiness({ services, modelRoute: { execution: 'local' }, license: { expiresAt: '2020-01-01T00:00:00Z' } }).state, 'DEGRADED');
 });

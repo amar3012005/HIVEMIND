@@ -1,0 +1,10 @@
+{
+  # Bootstrap is loopback-only: Compose binds hm-edge to 127.0.0.1. The local
+  # setup wizard replaces this with Caddyfile after OIDC verification.
+  auto_https disable_redirects
+}
+
+:8787 {
+  tls internal
+  reverse_proxy hm-core:3000
+}

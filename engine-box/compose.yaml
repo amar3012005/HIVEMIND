@@ -91,7 +91,36 @@ services:
       hm-model-router: { condition: service_started }
     secrets: [postgres_password]
     command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/server.mjs"]
-    ports: ["127.0.0.1:${ENGINE_BOX_CORE_PORT:-8787}:3000"]
+
+  hm-auth:
+    <<: *engine-service
+    image: ${OAUTH2_PROXY_IMAGE:?manifest must pin OAUTH2_PROXY_IMAGE}
+    profiles: [identity]
+    read_only: true
+    tmpfs: [/tmp]
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${ENGINE_BOX_OIDC_ISSUER:?identity profile requires ENGINE_BOX_OIDC_ISSUER}
+      OAUTH2_PROXY_CLIENT_ID: ${ENGINE_BOX_OIDC_CLIENT_ID:?identity profile requires ENGINE_BOX_OIDC_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      OAUTH2_PROXY_COOKIE_SECRET_FILE: /run/secrets/oidc_cookie_secret
+      OAUTH2_PROXY_REDIRECT_URL: ${ENGINE_BOX_OIDC_REDIRECT_URL:?identity profile requires ENGINE_BOX_OIDC_REDIRECT_URL}
+      OAUTH2_PROXY_EMAIL_DOMAINS: '*'
+      OAUTH2_PROXY_REVERSE_PROXY: 'true'
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+    secrets: [oidc_client_secret, oidc_cookie_secret]
+
+  hm-edge:
+    <<: *engine-service
+    image: ${CADDY_IMAGE:?manifest must pin CADDY_IMAGE}
+    read_only: true
+    tmpfs: [/config, /tmp]
+    volumes:
+      - ./edge/Caddyfile.bootstrap:/etc/caddy/Caddyfile:ro
+      - edge_data:/data
+    depends_on:
+      hm-core: { condition: service_started }
+    ports: ["127.0.0.1:${ENGINE_BOX_CORE_PORT:-8787}:8787"]
 
   hm-ingestion:
     <<: *engine-service
@@ -133,6 +162,7 @@ volumes:
   postgres_data: {}
   qdrant_data: {}
   redis_data: {}
+  edge_data: {}
 
 networks:
   engine_internal:
@@ -143,3 +173,7 @@ secrets:
     file: ./secrets/postgres_password
   cloudflare_tunnel_token:
     file: ./secrets/cloudflare_tunnel_token
+  oidc_client_secret:
+    file: ./secrets/oidc_client_secret
+  oidc_cookie_secret:
+    file: ./secrets/oidc_cookie_secret

@@ -54,6 +54,7 @@ fn render_environment(root: &str, release: &Release) -> Result<(), String> {
         ("hm-extract", "HM_EXTRACT_IMAGE"), ("hm-playwright", "HM_PLAYWRIGHT_IMAGE"),
         ("hm-model-router", "HM_MODEL_ROUTER_IMAGE"), ("hm-core-engine", "HM_CORE_IMAGE"),
         ("hm-ingestion-worker", "HM_INGESTION_IMAGE"), ("hm-mcp", "HM_MCP_IMAGE"), ("cloudflared", "CLOUDFLARED_IMAGE"),
+        ("oauth2-proxy", "OAUTH2_PROXY_IMAGE"), ("caddy", "CADDY_IMAGE"),
     ];
     let mut lines = vec!["POSTGRES_USER=hivemind".to_string(), "ENGINE_BOX_CORE_PORT=8787".to_string()];
     for (name, variable) in expected {

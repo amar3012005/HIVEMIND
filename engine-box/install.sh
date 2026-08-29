@@ -94,7 +94,9 @@ cp "$tmp_dir/bundle/compose.yaml" "$INSTALL_ROOT/compose.yaml"
 cp "$tmp_dir/bundle/model-catalog.json" "$INSTALL_ROOT/model-catalog.json"
 cp "$tmp_dir/bundle/model-catalog.sig" "$INSTALL_ROOT/model-catalog.sig"
 if [ ! -f "$INSTALL_ROOT/secrets/postgres_password" ]; then openssl rand -base64 36 > "$INSTALL_ROOT/secrets/postgres_password"; fi
+if [ ! -f "$INSTALL_ROOT/secrets/oidc_cookie_secret" ]; then openssl rand -base64 32 > "$INSTALL_ROOT/secrets/oidc_cookie_secret"; fi
 if [ ! -f "$INSTALL_ROOT/secrets/cloudflare_tunnel_token" ]; then : > "$INSTALL_ROOT/secrets/cloudflare_tunnel_token"; fi
-chmod 0600 "$INSTALL_ROOT/secrets/postgres_password" "$INSTALL_ROOT/secrets/cloudflare_tunnel_token"
+if [ ! -f "$INSTALL_ROOT/secrets/oidc_client_secret" ]; then : > "$INSTALL_ROOT/secrets/oidc_client_secret"; fi
+chmod 0600 "$INSTALL_ROOT/secrets/postgres_password" "$INSTALL_ROOT/secrets/oidc_cookie_secret" "$INSTALL_ROOT/secrets/cloudflare_tunnel_token" "$INSTALL_ROOT/secrets/oidc_client_secret"
 log 'verified bootstrap installed; supervisor now owns configuration, image pulls, health checks and rollback'
 exec "$INSTALL_ROOT/hm-supervisor" install --root "$INSTALL_ROOT"

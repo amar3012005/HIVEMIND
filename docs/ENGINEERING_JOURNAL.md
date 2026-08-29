@@ -954,3 +954,20 @@ slides that find no unique anchor get a page instead of `null`.
   `hivemind-control-plane-local` rebuilt with its existing Day-1 overlay and
   reached healthy. No production database or local deployment setting crossed
   the branch boundary.
+
+## 2026-08-30 UTC — public AI discovery policy integrated locally
+
+- State: committed local integration; production unchanged.
+- Branch/worktree: `codex/ai-crawl-visibility-local` in
+  `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-ai-crawl-visibility-local`,
+  integrated serially in the permanent
+  `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-local-main` worktree.
+- Source: parent candidate `7f23ecd5402a5ad0a45752ccfc87ae505ad9be82` and
+  frontend source `880962c7215732d004c6abb21b9fcc81bdd48ed0`. This adds public
+  AI discovery files and prevents them from being served on private hosts.
+- Merged-state verification: `npm run test:ai-discovery` passed 3/3. The full
+  CRA build passed earlier on the same immutable frontend SHA. No shared Docker
+  service was rebuilt or recreated.
+- Safety decision: public pages remain discoverable while training/fine-tuning
+  is disallowed by content signals and private hosts are `noindex`. A Cloudflare
+  crawler guard remains deferred until production Worker verification.

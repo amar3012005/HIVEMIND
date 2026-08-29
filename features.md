@@ -29,3 +29,21 @@ verification, and its independent rollback control.
 - Rollback: disable the Flagship flag for immediate evaluation rollback, or set
   `HIVEMIND_D1_WORKFLOW_ENABLED=false` as the backend master kill switch. The
   reconciliation scheduler remains throttled to five organizations per cron run.
+
+## feature-20260830T001000Z — Public AI discovery policy
+
+- Local status: integrated and verified in the permanent `singulance-local`
+  worktree; production remains unchanged pending governed promotion.
+- Capability: public marketing hosts expose `robots.txt`, `llms.txt`,
+  `llms-full.txt`, and sitemap policy for search, retrieval, citation, and AI
+  user visits. Training/fine-tuning is disallowed; authenticated, preview, and
+  administrative hosts do not expose discovery assets and are `noindex`.
+- Source: frontend commit `880962c7215732d004c6abb21b9fcc81bdd48ed0`, integrated
+  through local session `ef793da9376dffa7e03ec4b683762bdd65859fe7`.
+- Local verification: `npm run test:ai-discovery` passed 3/3 against the merged
+  checkout. The full production build previously passed on the identical
+  immutable frontend SHA; no shared Docker container was changed for this
+  edge-worker/static-asset-only feature.
+- Release rule: deploy only from a clean, current `singulance-main` promotion;
+  verify public crawler access and private-host `noindex` behavior before
+  enabling any narrow crawler guard.

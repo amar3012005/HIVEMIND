@@ -909,3 +909,10 @@ slides that find no unique anchor get a page instead of `null`.
   shared local Docker and preview Cloudflare deployments originate only from
   `singulance-local`. Production remains exclusively `singulance-main` via the
   production release protocol and deployment governor.
+- Local deployment: recreated only `hivemind-control-plane-local` with the
+  existing image and no build. Its `/app/src` bind mount now resolves to the
+  permanent `HIVEMIND-local-main` worktree, health returned `ok`, and an in-
+  container render check returned
+  `{shared:true,mobile:true,logo:true,table:true}`. Commit `e2ae0741` adds the
+  missing `HIVEMIND_ADMIN_SECRET` Compose mapping; a random local-only value is
+  stored in the Windows user environment and is neither printed nor committed.

@@ -778,3 +778,35 @@ slides that find no unique anchor get a page instead of `null`.
   fact shortfalls; one embedding attempt hit the 1s primary timeout and healed
   through fallback with zero failed segments. Evidence remained persisted and
   recallable. These are not parser failures and were not hidden in acceptance.
+## 2026-08-29 UTC — shared Cloudflare Agent Memory deployed
+
+- State: Committed and Worker deployed; repository integration pending.
+- Branch: `codex/cloudflare-agent-memory`.
+- Commits: `f9926c93` (service and project-wide memory discipline), `ac424cab`
+  (generate runtime types during checks instead of tracking the generated file).
+- Decision: use one Cloudflare Agents SDK instance named `hivemind`, backed by
+  Durable Object SQLite, as the cross-worktree engineering-memory index. Expose
+  it through an authenticated stateless MCP endpoint. Git, decision documents,
+  and release ledgers remain authoritative; remote memory does not replace them.
+- Managed-product finding: `wrangler agent-memory namespace list --json`
+  returned Cloudflare API code `10018 Not allowed`; the account token exposes
+  the private-beta permission but the account is not enabled. The Agent/SQLite
+  fallback uses stable public Workers and Agents SDK primitives and is isolated
+  behind a bearer secret.
+- Deployment: Worker `hivemind-agent-memory`, version
+  `6acf23c5-4868-412c-905b-c9b27d15e371`, endpoint `/mcp`. The token is stored
+  as a Worker secret and as the Windows user environment variable
+  `HIVEMIND_AGENT_MEMORY_TOKEN`; it is not committed or logged. Codex global MCP
+  entry `hivemind-agent-memory` reads that variable, so all worktrees inherit it
+  after process restart.
+- Verification: `npm run check` passed; `wrangler deploy --dry-run` passed with
+  69 ms measured Worker startup on deployment. Local MCP acceptance returned
+  401 without auth, initialized with auth, listed six tools, persisted a record,
+  retrieved it by FTS, and updated health from 0 to 1. Remote acceptance returned
+  401 without auth, persisted decision ID
+  `5f47afd5-46ba-4487-9137-19a899321adf`, retrieved it by FTS, and reported
+  `{ok:true, project:"hivemind", total:1, active:1, schema_version:1}`.
+- Production: no SINGULANCE application containers or customer data changed.
+- Next: merge the branch into `singulance-main`; restart Codex so the new global
+  MCP connection loads the user-level bearer token; use `memory_health` and
+  `memory_search` at the start of future HIVEMIND tasks.

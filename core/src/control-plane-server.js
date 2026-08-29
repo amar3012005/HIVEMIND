@@ -2086,6 +2086,22 @@ async function requireSession(req, res) {
     jsonResponse(res, { error: 'Unauthorized' }, 401);
     return null;
   }
+  // A browser can retain a signed cookie from an earlier local experiment.
+  // In local mode that session must never quietly select a historical org:
+  // force it through the email-verified preview login, which issues the
+  // dedicated local-preview owner session.
+  if (process.env.HIVEMIND_LOCAL_MODE === 'true') {
+    const org = current.session.orgId
+      ? await prisma.organization.findUnique({ where: { id: current.session.orgId }, select: { zitadelOrgId: true } }).catch(() => null)
+      : null;
+    if (org?.zitadelOrgId !== 'local-preview-org') {
+      await sessionStore.destroySession(current.sessionId);
+      jsonResponse(res, { error: 'Local preview sign-in required', code: 'LOCAL_PREVIEW_SESSION_REQUIRED' }, 401, {
+        'Set-Cookie': clearSessionCookie(),
+      });
+      return null;
+    }
+  }
   return current;
 }
 

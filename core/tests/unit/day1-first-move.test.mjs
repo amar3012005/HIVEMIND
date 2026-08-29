@@ -12,6 +12,15 @@ import {
   scheduleDayOneWorkflow,
   selectDayOneResearchTask,
 } from '../../src/lifecycle/day1-first-move.js';
+import { lifecycleEmailShell } from '../../src/email/templates/cartesia-lifecycle.js';
+
+test('shared lifecycle email shell owns the responsive rich-content contract', () => {
+  const html = lifecycleEmailShell({ title: 'Shared', preheader: 'Shared', body: '<tr><td class="section rich-content">Content</td></tr>' });
+  assert.match(html, /\.rich-content\{overflow-wrap:anywhere/);
+  assert.match(html, /\.data-table th,\.data-table td/);
+  assert.match(html, /@media only screen and \(max-width:360px\)/);
+  assert.match(html, /https:\/\/singulancelabs\.com\/images\/singulance-orbit\.png/);
+});
 
 test('Day 1 selects the first pending research-tagged task, not a generic todo', () => {
   const tasks = [

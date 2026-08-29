@@ -804,3 +804,34 @@ slides that find no unique anchor get a page instead of `null`.
 - Production rule: rebase onto current `origin/singulance-main`, pass the
   production protocols/governor, then run one controlled canary before calling
   this feature production-accepted.
+
+## 2026-08-29 UTC — reusable lifecycle email/PDF renderer visually accepted
+
+- State: Committed and locally accepted; not production-released.
+- Branch/commits: `codex/d1-workflow-production` at pushed SHAs `98d8bb92`
+  (renderer), `43131bba` (mobile/logo hardening), and `1274e12e` (shared
+  lifecycle-email robustness contract).
+- Rendering contract: Day 1 now wraps reusable lifecycle-completion email and
+  portrait-report renderers. Pipe tables are semantic and aligned; long cells,
+  code, and URLs wrap; unsafe HTML remains escaped; UTF-8 content is preserved.
+- Identity: persisted company-team IDs deterministically produce the exact
+  Humation characters used by Day 0. Email uses the public SVG endpoint; PDF
+  embeds the same generated SVG directly. Names and roles appear in the hero.
+- Visual verification: the canonical local `hm-playwright /v1/pdf` renderer
+  produced a one-page A4 QA report with no clipping or orphan page. Latin,
+  Japanese, Indic, Arabic, currency, symbols, and emoji rendered; a four-column
+  table remained legible; the long URL wrapped; all four portraits rendered.
+- Mobile/logo verification: email CSS includes 620px and 360px breakpoints for
+  compact typography, portraits, and table cells, with safe wrapping plus
+  horizontal touch scrolling where supported. The canonical logo PNG returned
+  HTTP 200 as `image/png`; tests also require the email PNG URL and the PDF's
+  inline Singulance mark.
+- Automated verification: `node --test tests/unit/day1-first-move.test.mjs`
+  passed 10/10. A fresh Node import inside `hivemind-control-plane-local`
+  confirmed `{table:true, avatar:true, unicode:true}` against the bind-mounted
+  production module. The preview avatar endpoint returned HTTP 200 SVG.
+- Reuse rule: future lifecycle episodes must call the shared completion
+  renderers with episode metadata, sealed output, destination URL, and
+  participating characters. They must not fork the parser or PDF service.
+  Mobile, Unicode, image, table, character, and logo resilience is centralized
+  in `lifecycleEmailShell`/`lifecycleRichContentStyles`; it is not Day-1 CSS.

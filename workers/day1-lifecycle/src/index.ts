@@ -23,6 +23,7 @@ type Env = {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DAY1_FLAG = 'day1_first_move_v1';
+const DELIVERABLE_ROOM_STATUSES = new Set(['complete', 'blocked']);
 
 function instanceId(env: Env, hqRoomId: string): string {
   const prefix = String(env.HIVEMIND_D1_INSTANCE_PREFIX || 'd1').replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'd1';
@@ -102,7 +103,7 @@ export class DayOneWorkflow extends WorkflowEntrypoint<Env, Params> {
           type: 'room-completed',
           timeout: '7 days',
         });
-        if (completed.payload.status !== 'complete') throw new NonRetryableError('day1_room_failed');
+        if (!DELIVERABLE_ROOM_STATUSES.has(completed.payload.status)) throw new NonRetryableError('day1_room_failed');
       } catch (error) {
         if (error instanceof NonRetryableError) throw error;
         console.warn('Day-1 room event timed out; reconciling from persisted turn state');

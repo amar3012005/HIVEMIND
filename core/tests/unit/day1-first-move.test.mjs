@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   extractSealedRoomOutput,
+  deliverDayOneFirstMove,
+  isDayOneWorkflowEnabled,
   isResearchTask,
   renderDayOneEmail,
   renderDayOnePortraitReport,
@@ -10,6 +12,15 @@ import {
   scheduleDayOneWorkflow,
   selectDayOneResearchTask,
 } from '../../src/lifecycle/day1-first-move.js';
+import { lifecycleEmailShell } from '../../src/email/templates/cartesia-lifecycle.js';
+
+test('shared lifecycle email shell owns the responsive rich-content contract', () => {
+  const html = lifecycleEmailShell({ title: 'Shared', preheader: 'Shared', body: '<tr><td class="section rich-content">Content</td></tr>' });
+  assert.match(html, /\.rich-content\{overflow-wrap:anywhere/);
+  assert.match(html, /\.data-table th,\.data-table td/);
+  assert.match(html, /@media only screen and \(max-width:360px\)/);
+  assert.match(html, /https:\/\/singulancelabs\.com\/images\/singulance-orbit\.png/);
+});
 
 test('Day 1 selects the first pending research-tagged task, not a generic todo', () => {
   const tasks = [
@@ -21,7 +32,34 @@ test('Day 1 selects the first pending research-tagged task, not a generic todo',
   assert.equal(selectDayOneResearchTask(tasks)?.id, 'research');
 });
 
+test('Day 1 backend master gate is fail-closed and accepts exact true only', () => {
+  const previous = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  try {
+    delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+    assert.equal(isDayOneWorkflowEnabled(), false);
+    process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'TRUE';
+    assert.equal(isDayOneWorkflowEnabled(), false);
+    process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
+    assert.equal(isDayOneWorkflowEnabled(), true);
+  } finally {
+    if (previous === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previous;
+  }
+});
+
+test('Day 1 scheduling is skipped while the backend master gate is off', async () => {
+  const previous = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  try {
+    const result = await scheduleDayOneWorkflow({ orgId: 'org', hqRoomId: 'hq' });
+    assert.deepEqual(result, { ok: false, skipped: true, reason: 'feature_disabled' });
+  } finally {
+    if (previous === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previous;
+  }
+});
+
 test('prepare starts the research task once and reuses its durable room turn on retry', async () => {
+  const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
   const company = {
     company: 'SOLVIS', mission: 'Efficient heating', team: [{ id: 'agent-1' }],
     tasks: [
@@ -53,15 +91,30 @@ test('prepare starts the research task once and reuses its durable room turn on 
   };
   const dispatchTurn = async () => { dispatches += 1; return { ok: true }; };
   const args = { prisma, orgId: hq.org_id, hqRoomId: hq.id, workflowInstanceId: `d1-${hq.id}`, dispatchTurn };
-  const first = await prepareDayOneFirstMove(args);
-  const second = await prepareDayOneFirstMove(args);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(first.task_id, 'research-1');
-  assert.equal(first.room_id, '44444444-4444-4444-4444-444444444444');
-  assert.equal(second.turn_id, first.turn_id);
-  assert.equal(dispatches, 1);
-  assert.equal(hq.company.tasks[0].status, 'todo');
-  assert.equal(hq.company.tasks[1].status, 'active');
+  try {
+    const first = await prepareDayOneFirstMove(args);
+    const second = await prepareDayOneFirstMove(args);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(first.task_id, 'research-1');
+    assert.equal(first.room_id, '44444444-4444-4444-4444-444444444444');
+    assert.equal(second.turn_id, first.turn_id);
+    assert.equal(dispatches, 1);
+    assert.equal(hq.company.tasks[0].status, 'todo');
+    assert.equal(hq.company.tasks[1].status, 'active');
+    const existingTurn = turns.values().next().value;
+    existingTurn.status = 'complete';
+    existingTurn.sealedAt = new Date();
+    hq.company.day1_first_move.status = 'failed';
+    hq.company.day1_first_move.failure_reason = 'delivery_transport_failed';
+    const recovered = await prepareDayOneFirstMove({ ...args, workflowInstanceId: `d1-recovery-${hq.id}` });
+    assert.equal(recovered.status, 'completed');
+    assert.equal(recovered.turn_id, first.turn_id);
+    assert.equal(hq.company.day1_first_move.workflow_instance_id, `d1-recovery-${hq.id}`);
+    assert.equal(dispatches, 1);
+    assert.equal(hq.company.tasks[1].status, 'done');
+  } finally {
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
+  }
 });
 
 test('Day 1 takes the sealed final report verbatim', () => {
@@ -82,25 +135,105 @@ test('README rendering preserves content while escaping executable HTML', () => 
   assert.match(html, /<strong>signal<\/strong>/);
 });
 
+test('README rendering produces safe tables and preserves international characters', () => {
+  const html = renderRoomReadme(`# 市場調査 — نتائج البحث 🚀
+
+| Region | Signal | Owner |
+|:--|--:|:--:|
+| भारत | **強い** | Léa & Omar |
+| الخليج | 82% | Zoë |
+
+Long token: https://example.test/${'segment/'.repeat(20)}`);
+  assert.match(html, /<table class="data-table">/);
+  assert.match(html, /<th style="text-align:left">Region<\/th>/);
+  assert.match(html, /<td style="text-align:right"><strong>強い<\/strong><\/td>/);
+  assert.match(html, /市場調査 — نتائج البحث 🚀/u);
+  assert.match(html, /Léa &amp; Omar/u);
+  assert.doesNotMatch(html, /\|:--\|/);
+});
+
 test('email and portrait report contain the exact sealed room output', () => {
   const input = {
     companyName: 'SOLVIS',
     taskTitle: 'Validate Market Need for Sovereign AI',
     output: '# Research findings\n\nThe verified demand signal remains **strong**.',
     roomUrl: 'https://next.singulancelabs.com/hivemind/app/employees/rooms/11111111-1111-1111-1111-111111111111',
+    characters: [
+      { id: 'agent-research', name: 'Léa', role: 'Researcher' },
+      { id: 'agent-skeptic', name: 'Omar', role: 'Risk & Compliance' },
+    ],
   };
   const email = renderDayOneEmail(input);
   const report = renderDayOnePortraitReport(input);
   assert.match(email.text, /# Research findings\n\nThe verified demand signal remains \*\*strong\*\*\./);
   assert.match(email.html, /The verified demand signal remains <strong>strong<\/strong>\./);
+  assert.match(email.html, /class="character-strip"/);
+  assert.match(email.html, /humation-avatar\.svg\?seed=agent-research&amp;role=Researcher/);
+  assert.match(email.html, /https:\/\/singulancelabs\.com\/images\/singulance-orbit\.png/);
+  assert.match(email.html, /@media only screen and \(max-width:360px\)/);
+  assert.match(email.html, /-webkit-overflow-scrolling:touch/);
   assert.match(report, /@page\{size:A4 portrait/);
   assert.match(report, /The verified demand signal remains <strong>strong<\/strong>\./);
+  assert.match(report, /aria-label="Léa"/u);
+  assert.match(report, /class="character-strip"/);
+  assert.match(report, /aria-label="Singulance"/);
   assert.doesNotMatch(report, /re-synthesi|summary generated/i);
+});
+
+test('delivery persists exact output evidence and a duplicate retry sends nothing', async () => {
+  const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
+  const output = '# Verified finding\n\nA source-backed result.';
+  const company = {
+    company: 'Canary Co',
+    tasks: [{ id: 'research-1', title: 'Validate demand' }],
+    day1_first_move: { status: 'completed', task_id: 'research-1', room_id: 'room-1', turn_id: 'turn-1' },
+  };
+  const hq = { id: 'hq-1', user_id: 'user-1', company };
+  let sends = 0;
+  const prisma = {
+    async $queryRawUnsafe(sql, ...args) {
+      if (sql.includes('SELECT id, user_id')) return [hq];
+      if (sql.includes('UPDATE "hivemind"."hyper_rooms"')) {
+        company.day1_first_move = JSON.parse(args[0]);
+        return [{ id: hq.id }];
+      }
+      return [];
+    },
+    async $executeRawUnsafe(_sql, value) { company.day1_first_move = JSON.parse(value); return 1; },
+    hyperTurn: { findFirst: async () => ({ id: 'turn-1', roomId: 'room-1', status: 'complete', sealedAt: new Date('2026-08-29T12:00:00Z'), lines: [{ t: 'final_report', text: output }, { t: 'seal', status: 'complete' }] }) },
+    user: { findUnique: async () => ({ email: 'canary@example.test' }) },
+  };
+  try {
+    const args = {
+      prisma, orgId: 'org-1', hqRoomId: 'hq-1',
+      renderPdf: async (html) => { assert.match(html, /A source-backed result\./); return Buffer.from('portrait-pdf'); },
+      sendEmail: async ({ rendered, attachments }) => {
+        sends += 1;
+        assert.match(rendered.text, /A source-backed result\./);
+        assert.equal(attachments[0].type, 'application/pdf');
+        return { ok: true, provider: 'cloudflare', deliveryStatus: 'accepted', messageId: 'msg-canary-1' };
+      },
+    };
+    const first = await deliverDayOneFirstMove(args);
+    const duplicate = await deliverDayOneFirstMove(args);
+    assert.equal(first.accepted, true);
+    assert.equal(first.output_sha256, 'a4e7885f4b020f48a3e77dcecc8384743abd2164e608499b2aeabbd653a771f6');
+    assert.equal(first.output_length, Buffer.byteLength(output));
+    assert.equal(company.day1_first_move.output_sha256, first.output_sha256);
+    assert.equal(duplicate.accepted, false);
+    assert.equal(duplicate.message_id, 'msg-canary-1');
+    assert.equal(sends, 1);
+  } finally {
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
+  }
 });
 
 test('Day 0 schedules a deterministic Day 1 handoff without report persistence', async () => {
   const previousUrl = process.env.HIVEMIND_D1_WORKFLOW_URL;
   const previousSecret = process.env.HIVEMIND_D1_WORKFLOW_SECRET;
+  const previousEnabled = process.env.HIVEMIND_D1_WORKFLOW_ENABLED;
+  process.env.HIVEMIND_D1_WORKFLOW_ENABLED = 'true';
   process.env.HIVEMIND_D1_WORKFLOW_URL = 'https://workflow.example.test';
   process.env.HIVEMIND_D1_WORKFLOW_SECRET = 'unit-secret';
   let request = null;
@@ -122,5 +255,6 @@ test('Day 0 schedules a deterministic Day 1 handoff without report persistence',
   } finally {
     if (previousUrl === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_URL; else process.env.HIVEMIND_D1_WORKFLOW_URL = previousUrl;
     if (previousSecret === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_SECRET; else process.env.HIVEMIND_D1_WORKFLOW_SECRET = previousSecret;
+    if (previousEnabled === undefined) delete process.env.HIVEMIND_D1_WORKFLOW_ENABLED; else process.env.HIVEMIND_D1_WORKFLOW_ENABLED = previousEnabled;
   }
 });

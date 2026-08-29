@@ -1,0 +1,31 @@
+# Local-only Day-1 lifecycle safety overlay.
+# The master gate defaults off. Never place production credentials in this file.
+services:
+  api:
+    environment:
+      HIVEMIND_MASTER_API_KEY: "local-day1-internal-key"
+  control-plane:
+    image: hivemind-control-plane-day1-local:latest
+    volumes:
+      - "${HIVEMIND_D1_CORE_SRC:-./core/src}:/app/src:ro"
+    environment:
+      HIVEMIND_D1_WORKFLOW_ENABLED: "${HIVEMIND_D1_WORKFLOW_ENABLED:-false}"
+      HIVEMIND_D1_WORKFLOW_SECRET: "${HIVEMIND_D1_WORKFLOW_SECRET:-local-day1-test-secret}"
+      HIVEMIND_D1_WORKFLOW_URL: "${HIVEMIND_D1_WORKFLOW_URL:-http://host.docker.internal:8787}"
+      PLAYWRIGHT_SERVICE_TOKEN: "${PLAYWRIGHT_SERVICE_TOKEN:-}"
+      HIVEMIND_PLAYWRIGHT_PDF_URL: "${HIVEMIND_PLAYWRIGHT_PDF_URL:-}"
+      CLOUDFLARE_EMAIL_API_TOKEN: "${CLOUDFLARE_EMAIL_API_TOKEN:-}"
+      CLOUDFLARE_ACCOUNT_ID: "${CLOUDFLARE_ACCOUNT_ID:-}"
+      CLOUDFLARE_EMAIL_FROM: "${CLOUDFLARE_EMAIL_FROM:-}"
+      EMPLOYEES_SIDECAR_URL: "http://employees:8060"
+      HIVEMIND_MASTER_API_KEY: "local-day1-internal-key"
+      API_MASTER_KEY: "local-day1-internal-key"
+  employees:
+    env_file:
+      - ./core/.env
+      - ./core/.env.day1-local
+    environment:
+      HIVEMIND_MASTER_API_KEY: "local-day1-internal-key"
+      # A non-secret sentinel selects OpenRouter; AI Gateway strips it and
+      # authenticates with the configured BYOK alias + Gateway token.
+      OPENROUTER_API_KEY: "cloudflare-byok-via-gateway"

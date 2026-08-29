@@ -834,3 +834,60 @@ slides that find no unique anchor get a page instead of `null`.
   destructive cache cleanup was not required to establish the branch.
 - Production: no production branch, server, container, Worker, DNS record, or
   customer data changed.
+
+## 2026-08-29 UTC — Day 1 Cloudflare Workflow local-cloud canary passed
+
+- State: Committed and locally accepted; not production-released.
+- Branch/commit: `codex/d1-workflow-production` at pushed SHA `ceb9beed`.
+- Feature control: isolated Flagship app `hivemind-local-development`; production
+  Flagship configuration was not changed. Backend remains fail-closed behind
+  `HIVEMIND_D1_WORKFLOW_ENABLED=true` in the local-only Compose overlay.
+- Real E2E evidence: Workflow instance
+  `d1-local7-251af4c6-7ea0-4e44-9fe1-4074028bf3b2` reused room
+  `daa06ae7-fe9e-4798-bea1-a0d886de64a3` and sealed turn
+  `3cd03bde-b9e0-43a7-9f54-e7c2b06cac76`; it rendered through the canonical
+  Day 0 `hm-playwright /v1/pdf` path and Cloudflare Email accepted delivery.
+  Evidence hash `3e4912694bd0a7987b5d0cbd07b32a53ad31a7ce798258f7cd79465feef90c04`,
+  length 4,831 bytes. A repeated deterministic start returned the completed
+  instance and same provider receipt; it created no duplicate delivery.
+- Verification: `node --test core/tests/unit/day1-first-move.test.mjs` passed
+  9/9; Worker `npm run check` passed; merged local Compose configuration passed
+  `docker compose ... config --quiet`.
+- Local iteration rule: Core source is bind-mounted into the uniquely named
+  Day 1 control-plane image, so ordinary JS changes use `docker compose up -d
+  --no-deps --force-recreate control-plane` without rebuilding. Rebuild only
+  when dependencies, Dockerfile, native modules, or build artifacts change.
+- Production rule: rebase onto current `origin/singulance-main`, pass the
+  production protocols/governor, then run one controlled canary before calling
+  this feature production-accepted.
+
+## 2026-08-29 UTC — reusable lifecycle email/PDF renderer visually accepted
+
+- State: Committed and locally accepted; not production-released.
+- Branch/commits: `codex/d1-workflow-production` at pushed SHAs `98d8bb92`
+  (renderer), `43131bba` (mobile/logo hardening), and `1274e12e` (shared
+  lifecycle-email robustness contract).
+- Rendering contract: Day 1 now wraps reusable lifecycle-completion email and
+  portrait-report renderers. Pipe tables are semantic and aligned; long cells,
+  code, and URLs wrap; unsafe HTML remains escaped; UTF-8 content is preserved.
+- Identity: persisted company-team IDs deterministically produce the exact
+  Humation characters used by Day 0. Email uses the public SVG endpoint; PDF
+  embeds the same generated SVG directly. Names and roles appear in the hero.
+- Visual verification: the canonical local `hm-playwright /v1/pdf` renderer
+  produced a one-page A4 QA report with no clipping or orphan page. Latin,
+  Japanese, Indic, Arabic, currency, symbols, and emoji rendered; a four-column
+  table remained legible; the long URL wrapped; all four portraits rendered.
+- Mobile/logo verification: email CSS includes 620px and 360px breakpoints for
+  compact typography, portraits, and table cells, with safe wrapping plus
+  horizontal touch scrolling where supported. The canonical logo PNG returned
+  HTTP 200 as `image/png`; tests also require the email PNG URL and the PDF's
+  inline Singulance mark.
+- Automated verification: `node --test tests/unit/day1-first-move.test.mjs`
+  passed 10/10. A fresh Node import inside `hivemind-control-plane-local`
+  confirmed `{table:true, avatar:true, unicode:true}` against the bind-mounted
+  production module. The preview avatar endpoint returned HTTP 200 SVG.
+- Reuse rule: future lifecycle episodes must call the shared completion
+  renderers with episode metadata, sealed output, destination URL, and
+  participating characters. They must not fork the parser or PDF service.
+  Mobile, Unicode, image, table, character, and logo resilience is centralized
+  in `lifecycleEmailShell`/`lifecycleRichContentStyles`; it is not Day-1 CSS.

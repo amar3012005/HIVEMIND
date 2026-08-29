@@ -1,0 +1,19 @@
+{
+  "release": "engine-box-0.1.0-example",
+  "channel": "canary",
+  "supervisor": {
+    "url": "https://get.singulancelabs.com/engine-box/releases/engine-box-0.1.0-example/hm-supervisor-linux-amd64",
+    "sha256": "replace-with-real-sha256"
+  },
+  "bundle": {
+    "url": "https://get.singulancelabs.com/engine-box/releases/engine-box-0.1.0-example/engine-box-linux-amd64.tar.gz",
+    "sha256": "replace-with-real-sha256"
+  },
+  "images": [
+    {
+      "name": "hm-core-engine",
+      "digest": "sha256:replace-with-real-digest",
+      "image": "ghcr.io/singulancelabs/hm-core-engine@sha256:replace-with-real-digest"
+    }
+  ]
+}

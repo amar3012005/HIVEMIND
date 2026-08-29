@@ -1,0 +1,40 @@
+{
+  "catalogVersion": 1,
+  "routes": [
+    {
+      "routeId": "local-bge-m3",
+      "capability": "embedding",
+      "execution": "local",
+      "provider": "tei",
+      "model": "BAAI/bge-m3",
+      "protocol": "openai-embeddings",
+      "dimension": 1024,
+      "dataEgress": "none",
+      "fallbackGroup": "embedding-1024",
+      "healthPath": "/health"
+    },
+    {
+      "routeId": "customer-reranker",
+      "capability": "rerank",
+      "execution": "customer_gateway",
+      "provider": "customer",
+      "protocol": "openai-compatible",
+      "dataEgress": "customer-controlled",
+      "fallbackGroup": "rerank",
+      "healthPath": "/health"
+    },
+    {
+      "routeId": "cloudflare-openrouter-embed",
+      "capability": "embedding",
+      "execution": "cloudflare_gateway",
+      "provider": "cloudflare-ai-gateway",
+      "model": "openrouter/parasail-bge-m3",
+      "protocol": "openai-embeddings",
+      "dimension": 1024,
+      "dataEgress": "opt_in",
+      "region": "customer-selected",
+      "fallbackGroup": "embedding-1024",
+      "healthPath": "/health"
+    }
+  ]
+}

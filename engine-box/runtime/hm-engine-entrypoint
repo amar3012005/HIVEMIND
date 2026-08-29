@@ -1,0 +1,18 @@
+#!/bin/sh
+# Installed inside the proprietary Core and ingestion images. Database secrets
+# remain Docker secrets and are never written into compose.yaml or a process
+# command line.
+set -eu
+
+if [ -n "${DATABASE_PASSWORD_FILE:-}" ]; then
+  [ -r "$DATABASE_PASSWORD_FILE" ] || { echo "DATABASE_PASSWORD_FILE is not readable" >&2; exit 78; }
+  database_password="$(cat "$DATABASE_PASSWORD_FILE")"
+  : "${POSTGRES_USER:=hivemind}"
+  : "${DATABASE_HOST:=postgres}"
+  : "${DATABASE_PORT:=5432}"
+  : "${DATABASE_NAME:=hivemind}"
+  export DATABASE_URL="postgresql://${POSTGRES_USER}:${database_password}@${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}?schema=hivemind"
+  unset database_password
+fi
+
+exec "$@"

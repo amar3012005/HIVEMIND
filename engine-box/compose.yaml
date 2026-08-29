@@ -1,0 +1,144 @@
+name: hivemind-engine-box
+
+x-engine-service: &engine-service
+  restart: unless-stopped
+  env_file: .env
+  networks: [engine_internal]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+
+services:
+  postgres:
+    <<: *engine-service
+    image: ${POSTGRES_IMAGE:?manifest must pin POSTGRES_IMAGE}
+    environment:
+      POSTGRES_DB: hivemind
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  qdrant:
+    <<: *engine-service
+    image: ${QDRANT_IMAGE:?manifest must pin QDRANT_IMAGE}
+    volumes: [qdrant_data:/qdrant/storage]
+    healthcheck:
+      test: [CMD-SHELL, "wget -qO- http://127.0.0.1:6333/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    <<: *engine-service
+    image: ${REDIS_IMAGE:?manifest must pin REDIS_IMAGE}
+    command: [redis-server, --appendonly, 'yes', --save, '60', '1000']
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  hm-extract:
+    <<: *engine-service
+    image: ${HM_EXTRACT_IMAGE:?manifest must pin HM_EXTRACT_IMAGE}
+    read_only: true
+    tmpfs: [/tmp]
+
+  hm-playwright:
+    <<: *engine-service
+    image: ${HM_PLAYWRIGHT_IMAGE:?manifest must pin HM_PLAYWRIGHT_IMAGE}
+    read_only: true
+    tmpfs: [/tmp]
+    profiles: [browser]
+
+  hm-model-router:
+    <<: *engine-service
+    image: ${HM_MODEL_ROUTER_IMAGE:?manifest must pin HM_MODEL_ROUTER_IMAGE}
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - ./model-catalog.json:/etc/hivemind/model-catalog.json:ro
+      - ./model-catalog.sig:/etc/hivemind/model-catalog.sig:ro
+      - ./release.pub:/etc/hivemind/release.pub:ro
+
+  hm-core:
+    <<: *engine-service
+    image: ${HM_CORE_IMAGE:?manifest must pin HM_CORE_IMAGE}
+    environment:
+      ENGINE_BOX_MODE: 'true'
+      ENGINE_BOX_SOVEREIGN: 'true'
+      ENGINE_BOX_ENABLE: ingestion,recall,chat,mcp,temporal,graph
+      DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+      DATABASE_HOST: postgres
+      DATABASE_PORT: '5432'
+      DATABASE_NAME: hivemind
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379/0
+      KB_EXTRACT_URL: http://hm-extract:8088
+      MODEL_ROUTER_URL: http://hm-model-router:8090
+    depends_on:
+      postgres: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      hm-extract: { condition: service_started }
+      hm-model-router: { condition: service_started }
+    secrets: [postgres_password]
+    command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/server.mjs"]
+    ports: ["127.0.0.1:${ENGINE_BOX_CORE_PORT:-8787}:3000"]
+
+  hm-ingestion:
+    <<: *engine-service
+    image: ${HM_INGESTION_IMAGE:?manifest must pin HM_INGESTION_IMAGE}
+    environment:
+      ENGINE_BOX_MODE: 'true'
+      DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+      DATABASE_HOST: postgres
+      DATABASE_PORT: '5432'
+      DATABASE_NAME: hivemind
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379/0
+      KB_EXTRACT_URL: http://hm-extract:8088
+      MODEL_ROUTER_URL: http://hm-model-router:8090
+    depends_on:
+      hm-core: { condition: service_started }
+    secrets: [postgres_password]
+    command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/workers/engine-box-ingestion-worker.mjs"]
+
+  hm-mcp:
+    <<: *engine-service
+    image: ${HM_MCP_IMAGE:?manifest must pin HM_MCP_IMAGE}
+    environment:
+      ENGINE_BOX_MODE: 'true'
+      CORE_URL: http://hm-core:8787
+    depends_on:
+      hm-core: { condition: service_started }
+
+  cloudflared:
+    <<: *engine-service
+    image: ${CLOUDFLARED_IMAGE:?manifest must pin CLOUDFLARED_IMAGE}
+    # The supervisor renders the token as TUNNEL_TOKEN only after central
+    # enrollment. Empty credentials keep this optional service stopped.
+    command: [tunnel, --no-autoupdate, run, --token, "${CLOUDFLARE_TUNNEL_TOKEN:-}"]
+    secrets: [cloudflare_tunnel_token]
+    profiles: [cloudflare]
+
+volumes:
+  postgres_data: {}
+  qdrant_data: {}
+  redis_data: {}
+
+networks:
+  engine_internal:
+    internal: true
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  cloudflare_tunnel_token:
+    file: ./secrets/cloudflare_tunnel_token

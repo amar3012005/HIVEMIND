@@ -130,3 +130,4 @@ references/obsidian-3d-graph/
 references/paperclip/
 # ICARUS Harness runtime state (local, never commit)
 .icarus/runtime/
+engine-box/supervisor/target/

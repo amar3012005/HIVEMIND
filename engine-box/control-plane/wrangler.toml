@@ -1,0 +1,23 @@
+name = "hivemind-engine-box-control"
+main = "src/index.ts"
+compatibility_date = "2026-08-29"
+workers_dev = false
+
+[[durable_objects.bindings]]
+name = "INSTALLATION"
+class_name = "InstallationState"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["InstallationState"]
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "hivemind-engine-box-releases"
+
+[[analytics_engine_datasets]]
+binding = "LIFECYCLE"
+dataset = "engine_box_lifecycle"
+
+# Secret values are set with `wrangler secret put`, never committed:
+# PORTAL_SERVICE_TOKEN, ENROLLMENT_SIGNING_KEY, INSTALLATION_TOKEN_KEY

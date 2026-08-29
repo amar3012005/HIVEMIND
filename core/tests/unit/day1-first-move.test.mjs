@@ -205,7 +205,9 @@ test('email and portrait report contain the exact sealed room output', () => {
   assert.match(email.text, /# Research findings\n\nThe verified demand signal remains \*\*strong\*\*\./);
   assert.match(email.html, /The verified demand signal remains <strong>strong<\/strong>\./);
   assert.match(email.html, /class="character-strip"/);
-  assert.match(email.html, /humation-avatar\.svg\?seed=agent-research&amp;role=Researcher/);
+  assert.match(email.html, /humation-avatar\.svg\?seed=agent-research&amp;role=Researcher&amp;v=2/);
+  assert.match(email.html, /class="character-avatar" style="background:#e8f8f2;border-color:#10b981"/);
+  assert.match(email.html, /class="character-role" style="color:#10b981"/);
   assert.match(email.html, /https:\/\/singulancelabs\.com\/images\/singulance-orbit\.png/);
   assert.match(email.html, /@media only screen and \(max-width:360px\)/);
   assert.match(email.html, /-webkit-overflow-scrolling:touch/);

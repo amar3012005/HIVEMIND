@@ -86,7 +86,7 @@ import { ROLES, effectiveRoles, hasPermission, assertPermission, canUsePrivilege
 import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
-import { renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
+import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
 import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from './email/templates/day0-company-onboarding.js';
 import { renderDayZeroOnboardingPdf } from './email/day0-company-report-pdf.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
@@ -120,6 +120,7 @@ import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
 import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
+import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
 import {
   deliverDayOneFirstMove,
   isAuthorizedDayOneRequest,
@@ -246,6 +247,7 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
+configureSystemEmailNotificationSink(createEmailNotificationSink(prisma));
 const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, platformCreditAccountDetail, platformCreditIntelligence, replaceModelPrice, upsertModelPolicy } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
 const signupWelcome = createSignupWelcomeDispatcher({ prisma, sendEmail: sendSystemEmail });
@@ -10825,6 +10827,17 @@ Write the persona now.`;
             const delivery = await sendRenderedSystemEmail({
               templateId: 'day0_company_onboarding', to: recipient.email, rendered,
               attachments: [{ filename: `${dashboardCompany.company.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 72) || 'company'}-day-0-onboarding-report.pdf`, type: 'application/pdf', content: pdf }],
+              notification: {
+                orgId,
+                userId: ownerId,
+                type: 'lifecycle.email.sent',
+                title: `Your ${dashboardCompany.company} Day-0 report is in your inbox`,
+                body: 'Your onboarding report and new AI HyperAgents are ready.',
+                resourceType: 'hyper_company',
+                resourceId: roomId,
+                href: appUrl,
+                data: { lifecycle_day: 0, company: dashboardCompany.company },
+              },
             });
             if (!delivery.ok) throw new Error(`day0_report_delivery_${delivery.reason || 'failed'}`);
             const sentAt = new Date().toISOString();
@@ -10835,32 +10848,6 @@ Write the persona now.`;
               JSON.stringify({ version: 'day-0-v2', status: 'sent', claimed_at: claimedAt, sent_at: sentAt, provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null }),
               roomId, orgId,
             );
-            await createWorkspaceNotification(prisma, {
-              orgId,
-              userId: ownerId,
-              type: 'lifecycle.email.sent',
-              title: `Your ${dashboardCompany.company} Day-0 report is in your inbox`,
-              body: `Open ${recipient.email} to read the onboarding report and meet your new AI HyperAgents.`,
-              resourceType: 'hyper_company',
-              resourceId: roomId,
-              dedupeKey: `lifecycle-email:day0:${roomId}`,
-              data: {
-                channel: 'email',
-                provider: delivery.provider,
-                icon: 'gmail',
-                lifecycle_day: 0,
-                sent_at: sentAt,
-                recipient: recipient.email,
-                company: dashboardCompany.company,
-                subject: rendered.subject,
-                href: appUrl,
-              },
-            }).catch((notificationError) => {
-              // Email acceptance is the delivery authority. A transient inbox
-              // projection failure must never rewrite an already-sent email as
-              // failed; the notification can be reconciled independently.
-              console.warn('[hyper-company] day-0 notification failed:', notificationError.message);
-            });
             // The email receipt is the Day-0 lifecycle boundary. Hand Day 1 to
             // Cloudflare's durable clock only after that receipt exists. A
             // transient workflow handoff does not rewrite a delivered Day-0

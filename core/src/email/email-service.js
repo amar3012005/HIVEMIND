@@ -50,6 +50,7 @@ const EMAIL_ASSET_BASE_URL = process.env.HIVEMIND_EMAIL_ASSET_BASE_URL || 'https
 
 let _templates = null;
 let _warnedNoProvider = false;
+let _notificationSink = null;
 
 // Transactional email is deliberately separate from user-connected Gmail. A
 // caller selects an approved template and recipient; this module owns
@@ -126,6 +127,29 @@ function configuredProviders() {
     cloudflare: cloudflare.token && cloudflare.accountId && cloudflare.from ? cloudflare : null,
     gmail: gmail.connectionId ? gmail : null,
   };
+}
+
+/** Configure the process-local projection of accepted email into the platform inbox. */
+export function configureSystemEmailNotificationSink(sink) {
+  _notificationSink = typeof sink === 'function' ? sink : null;
+}
+
+async function projectAcceptedEmail({ to, rendered, templateId, result, notification }) {
+  if (!result?.ok || !_notificationSink) return result;
+  try {
+    const projection = await _notificationSink({ to, rendered, templateId, result, notification });
+    return { ...result, platformNotification: projection || { created: 0 } };
+  } catch (error) {
+    // Provider acceptance is authoritative. Inbox projection is independently
+    // retryable/observable and must never make a delivered email look failed.
+    log('error', 'notification_projection_failed', {
+      templateId,
+      provider: result.provider,
+      recipientDomain: recipientDomain(to),
+      error: error?.name || 'projection_error',
+    });
+    return { ...result, platformNotification: { created: 0, error: 'projection_failed' } };
+  }
 }
 
 function cloudflareError(payload, fallback) {
@@ -372,7 +396,7 @@ function buildRawMessage({ to, from, subject, text, html, threadHeaders, attachm
  *   root on the first send, then passes it back in on every later send.
  * @returns {Promise<{ok: boolean, skipped?: boolean, messageId?: string, error?: string}>}
  */
-export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId, thread, attachments = [] } = {}) {
+export async function sendSystemEmail({ templateId, to, vars = {}, from, connectionId, thread, attachments = [], notification } = {}) {
   if (!to) return { ok: false, skipped: true, error: 'no_recipient' };
   if (!validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
   if (!validFromHeader(from)) return { ok: false, skipped: true, error: 'invalid_sender' };
@@ -411,15 +435,19 @@ export async function sendSystemEmail({ templateId, to, vars = {}, from, connect
     // Cloudflare rejects our self-minted Message-ID (see sendWithCloudflare) —
     // prefer its own returned message_id for thread continuity; only fall
     // back to our mint if Cloudflare's response is somehow missing one.
-    if (cloudflareResult.ok || cloudflareResult.permanent || !gmail) return { ...cloudflareResult, messageId: cloudflareResult.messageId || mintedMessageId };
+    if (cloudflareResult.ok || cloudflareResult.permanent || !gmail) {
+      const result = { ...cloudflareResult, messageId: cloudflareResult.messageId || mintedMessageId };
+      return projectAcceptedEmail({ to, rendered, templateId, result, notification });
+    }
     log('warn', 'provider_fallback', { from: 'cloudflare', to: 'gmail_nango', templateId, recipientDomain: recipientDomain(to) });
   }
   const gmailResult = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, threadHeaders, attachments });
-  return { ...gmailResult, messageId: gmailResult.messageId || mintedMessageId };
+  const result = { ...gmailResult, messageId: gmailResult.messageId || mintedMessageId };
+  return projectAcceptedEmail({ to, rendered, templateId, result, notification });
 }
 
 /** Send a fully rendered branded message through the canonical delivery path. */
-export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [] } = {}) {
+export async function sendRenderedSystemEmail({ to, rendered, from, connectionId, templateId = 'rendered_message', attachments = [], notification } = {}) {
   if (!to || !validEmailAddress(to)) return { ok: false, skipped: true, error: 'invalid_recipient' };
   if (!rendered?.subject || !rendered?.html) return { ok: false, skipped: true, error: 'invalid_rendered_message' };
   const providers = configuredProviders();
@@ -427,9 +455,10 @@ export async function sendRenderedSystemEmail({ to, rendered, from, connectionId
   if (!providers.cloudflare && !gmail) return { ok: false, skipped: true, error: 'no_email_provider' };
   if (providers.cloudflare) {
     const result = await sendWithCloudflare({ config: providers.cloudflare, to, from, rendered, templateId, attachments, threadHeaders: {} });
-    if (result.ok || result.permanent || !gmail) return result;
+    if (result.ok || result.permanent || !gmail) return projectAcceptedEmail({ to, rendered, templateId, result, notification });
   }
-  return sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, attachments, threadHeaders: {} });
+  const result = await sendWithGmail({ connectionId: gmail.connectionId, to, from: from || gmail.from || undefined, rendered, templateId, attachments, threadHeaders: {} });
+  return projectAcceptedEmail({ to, rendered, templateId, result, notification });
 }
 
 /**
@@ -560,5 +589,6 @@ export default {
   queueEmailDelivery,
   queueSystemEmailBundle,
   sendTeamInvitationEmails,
+  configureSystemEmailNotificationSink,
   renderTemplate,
 };

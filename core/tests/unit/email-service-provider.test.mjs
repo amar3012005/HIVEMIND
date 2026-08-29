@@ -11,6 +11,7 @@ const originalEnv = {
 };
 
 const {
+  configureSystemEmailNotificationSink,
   queueSystemEmailBundle,
   queueEmailDelivery,
   sendSystemEmail,
@@ -28,6 +29,31 @@ function setEnv(values) {
 afterEach(() => {
   global.fetch = originalFetch;
   setEnv(originalEnv);
+  configureSystemEmailNotificationSink(null);
+});
+
+test('every accepted system email invokes the platform notification projection once', async () => {
+  setEnv({
+    CLOUDFLARE_EMAIL_API_TOKEN: 'unit-token',
+    CLOUDFLARE_ACCOUNT_ID: 'unit-account',
+    CLOUDFLARE_EMAIL_FROM: 'Support <support@singulancelabs.com>',
+  });
+  global.fetch = async () => new Response(JSON.stringify({
+    success: true,
+    result: { delivered: ['owner@example.com'], queued: [], permanent_bounces: [], message_id: '<receipt-1@singulancelabs.com>' },
+  }), { status: 200 });
+  const projections = [];
+  configureSystemEmailNotificationSink(async (input) => { projections.push(input); return { created: 1 }; });
+  const result = await sendSystemEmail({
+    templateId: 'welcome_login',
+    to: 'owner@example.com',
+    notification: { orgId: 'org-1', userId: 'user-1' },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.platformNotification, { created: 1 });
+  assert.equal(projections.length, 1);
+  assert.equal(projections[0].result.messageId, '<receipt-1@singulancelabs.com>');
+  assert.deepEqual(projections[0].notification, { orgId: 'org-1', userId: 'user-1' });
 });
 
 test('Cloudflare is the primary transactional provider and reports queued delivery', async () => {

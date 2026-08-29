@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { CARTESIA, escapeHtml, lifecycleEmailShell, lifecycleRichContentStyles, lifecycleSubject, brandLockup } from '../email/templates/cartesia-lifecycle.js';
 import { sendRenderedSystemEmail } from '../email/email-service.js';
 import { renderDayZeroOnboardingPdf } from '../email/day0-company-report-pdf.js';
-import { humationAvatarPublicUrl, renderHumationAvatarSvg, resolveHumationLane } from '../email/humation-avatar.js';
+import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, resolveHumationLane } from '../email/humation-avatar.js';
 
 export const DAY_ONE_VERSION = 'day-1-first-move-v1';
 const SENDING_LEASE_MS = 10 * 60 * 1000;
@@ -146,14 +146,15 @@ function workflowCharacters(characters = [], { email = false, publicApiUrl = '' 
   return (Array.isArray(characters) ? characters : []).slice(0, 6).map((member) => {
     const character = { id: member?.id || member?.slug || member?.name, slug: member?.slug, name: clean(member?.name || 'HyperAgent', 72), role: clean(member?.jobTitle || member?.title || member?.role || member?.roleArchetype || 'Company Specialist', 96) };
     character.roleArchetype = resolveHumationLane(member?.lane || member?.archetype || character.role);
-    return { ...character, portrait: email ? `<img src="${escapeHtml(humationAvatarPublicUrl(character, publicApiUrl))}" width="54" height="54" alt="${escapeHtml(character.name)}">` : renderHumationAvatarSvg(character, { size: 72 }) };
+    const visual = humationLaneVisual(character.roleArchetype);
+    return { ...character, ...visual, portrait: email ? `<img src="${escapeHtml(humationAvatarPublicUrl(character, publicApiUrl))}" width="54" height="54" alt="${escapeHtml(character.name)}">` : renderHumationAvatarSvg(character, { size: 72 }) };
   });
 }
 
 function characterStrip(characters, options = {}) {
   const people = workflowCharacters(characters, options);
   if (!people.length) return '';
-  return `<table role="presentation" class="character-strip"><tr>${people.map((person) => `<td class="character"><div class="character-avatar">${person.portrait}</div><div class="character-name">${escapeHtml(person.name)}</div><div class="character-role">${escapeHtml(person.role)}</div></td>`).join('')}</tr></table>`;
+  return `<table role="presentation" class="character-strip"><tr>${people.map((person) => `<td class="character"><div class="character-avatar" style="background:${person.background};border-color:${person.color}">${person.portrait}</div><div class="character-name">${escapeHtml(person.name)}</div><div class="character-role" style="color:${person.color}">${escapeHtml(person.role)}</div></td>`).join('')}</tr></table>`;
 }
 
 /** Reusable completion renderer for future lifecycle episodes. */
@@ -391,6 +392,17 @@ export async function deliverDayOneFirstMove({
     const delivery = await sendEmail({
       templateId: 'day1_first_move', to: owner.email, rendered,
       attachments: [{ filename: `${slug}-day-1-research-report.pdf`, type: 'application/pdf', content: pdf }],
+      notification: {
+        orgId,
+        userId: hq.user_id,
+        type: 'lifecycle.email.sent',
+        title: `${companyName} Day 1 research is in your inbox`,
+        body: `${taskTitle} is complete and its sealed report is ready.`,
+        resourceType: 'hyper_room',
+        resourceId: state.room_id,
+        href: roomUrl,
+        data: { lifecycle_day: 1, company: companyName, task_title: taskTitle },
+      },
     });
     if (!delivery.ok) throw new Error(`day1_delivery_${delivery.error || delivery.reason || 'failed'}`);
     Object.assign(state, { status: 'sent', sent_at: new Date().toISOString(), provider: delivery.provider, delivery_status: delivery.deliveryStatus || 'accepted', message_id: delivery.messageId || null, output_sha256: outputSha256, output_length: outputLength });

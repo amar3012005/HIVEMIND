@@ -1,4 +1,4 @@
-import { humationAvatarPublicUrl, renderHumationAvatarSvg, resolveHumationLane } from '../humation-avatar.js';
+import { humationAvatarPublicUrl, humationLaneVisual, renderHumationAvatarSvg, resolveHumationLane } from '../humation-avatar.js';
 import { CARTESIA, browserChrome, deckPage, escapeHtml, lifecycleDeckShell, lifecycleEmailShell, lifecycleSubject } from './cartesia-lifecycle.js';
 
 function clean(value, limit = 360) {
@@ -79,8 +79,10 @@ export function buildDayZeroOnboardingReport(company = {}, { appUrl, logoUrl, pu
       roleArchetype: lane,
     };
     const avatarSvg = renderHumationAvatarSvg(normalized, { size: 72 });
+    const visual = humationLaneVisual(lane);
     return {
       ...normalized,
+      ...visual,
       oneLiner: clean(member?.oneLiner || member?.focus || member?.summary || firstSentence(member?.persona) || ROLE_ONE_LINERS[lane], 180),
       // Email must use the canonical generated portrait. Persisted avatar URLs
       // can point at legacy monochrome assets; the report deck still keeps the
@@ -146,7 +148,7 @@ function founderWelcome() {
 }
 
 function emailRoster(report) {
-  const rows = report.team.slice(0, 4).map((member) => `<tr><td class="person"><table role="presentation" width="100%"><tr><td width="52"><div class="avatar"><img src="${escapeHtml(member.avatarUrl)}" width="42" height="42" alt="${escapeHtml(member.name)}"></div></td><td><div class="person-name">${escapeHtml(member.name)}</div><div class="person-role">${escapeHtml(member.role.toUpperCase())}</div></td><td class="person-summary" align="right" style="max-width:230px;color:${CARTESIA.body};font-size:11px;line-height:16px">${escapeHtml(member.oneLiner)}</td></tr></table></td></tr>`).join('');
+  const rows = report.team.slice(0, 4).map((member) => `<tr><td class="person"><table role="presentation" width="100%"><tr><td width="52"><div class="avatar" style="background:${member.background};border-color:${member.color}"><img src="${escapeHtml(member.avatarUrl)}" width="42" height="42" alt="${escapeHtml(member.name)}"></div></td><td><div class="person-name">${escapeHtml(member.name)}</div><div class="person-role" style="color:${member.color}">${escapeHtml(member.role.toUpperCase())}</div></td><td class="person-summary" align="right" style="max-width:230px;color:${CARTESIA.body};font-size:11px;line-height:16px">${escapeHtml(member.oneLiner)}</td></tr></table></td></tr>`).join('');
   return rows || `<tr><td style="padding:12px 0;color:${CARTESIA.body};font-size:13px">Your workspace is ready for its first HyperAgent.</td></tr>`;
 }
 
@@ -173,7 +175,7 @@ function cards(items, renderer) {
 }
 
 function rosterWindow(report) {
-  const roster = `<div class="roster">${report.team.map((member) => `<div class="person"><div class="person-avatar">${member.avatarSvg}</div><div><div class="person-name">${escapeHtml(member.name)}</div><div class="person-role">${escapeHtml(member.role.toUpperCase())}</div></div><div class="person-one-line">${escapeHtml(member.oneLiner)}</div></div>`).join('') || '<div class="card-copy">Your first HyperAgent can be recruited from the workspace.</div>'}</div>`;
+  const roster = `<div class="roster">${report.team.map((member) => `<div class="person"><div class="person-avatar" style="background:${member.background};border-color:${member.color}">${member.avatarSvg}</div><div><div class="person-name">${escapeHtml(member.name)}</div><div class="person-role" style="color:${member.color}">${escapeHtml(member.role.toUpperCase())}</div></div><div class="person-one-line">${escapeHtml(member.oneLiner)}</div></div>`).join('') || '<div class="card-copy">Your first HyperAgent can be recruited from the workspace.</div>'}</div>`;
   return browserChrome('hivemind - hyperagents', roster);
 }
 

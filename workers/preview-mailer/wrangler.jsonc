@@ -1,0 +1,8 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "singulance-preview-mailer",
+  "main": "worker.js",
+  "compatibility_date": "2026-08-29",
+  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["preview@admin.singulancelabs.com"] }],
+  "vars": { "FROM_EMAIL": "preview@admin.singulancelabs.com" }
+}

@@ -3997,22 +3997,48 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
-  // Local preview only. This route is deliberately impossible to enable in a
-  // normal deployment: the compose-only HIVEMIND_LOCAL_AUTH_BYPASS flag must
-  // be set explicitly. It creates a synthetic local user/workspace and uses
-  // the normal signed session cookie so the frontend exercises real auth and
-  // bootstrap code without any third-party identity provider.
-  if (pathname === '/auth/local-preview' && req.method === 'GET') {
+  // ─── Local preview email sign-in ──────────────────────────────
+  if (pathname === '/auth/local-preview/request' && req.method === 'POST') {
     if (process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') {
       return jsonResponse(res, { error: 'Not found' }, 404);
     }
     try {
-      const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
+      const body = await parseBody(req);
+      const email = String(body?.email || '').trim().toLowerCase();
+      const allowlist = new Set(String(process.env.HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST || '').split(',').map((entry) => entry.trim().toLowerCase()).filter(Boolean));
+      if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) || !allowlist.has(email)) {
+        return jsonResponse(res, { ok: true, message: 'If this address is approved for preview, a sign-in link is on its way.' }, 202);
+      }
+      let returnTo = CONFIG.postLoginRedirect;
+      try {
+        const candidate = new URL(String(body?.return_to || ''));
+        const approved = new URL(CONFIG.postLoginRedirect);
+        if (candidate.origin === approved.origin && candidate.pathname.startsWith('/hivemind/')) returnTo = candidate.toString();
+      } catch {}
+      const state = await sessionStore.createAuthState({ kind: 'local_preview_email', email, returnTo });
+      const baseUrl = (process.env.HIVEMIND_CONTROL_PLANE_PUBLIC_URL || `${req.headers['x-forwarded-proto'] || 'http'}://${req.headers.host}`).replace(/\/$/, '');
+      const loginUrl = `${baseUrl}/auth/local-preview/verify?state=${encodeURIComponent(state)}`;
+      const delivery = await sendRenderedSystemEmail({ templateId: 'local_preview_sign_in', to: email, rendered: {
+        subject: 'Your Singulance local preview sign-in link',
+        text: `Open this one-time sign-in link to continue to local preview:\n\n${loginUrl}\n\nThis link expires shortly.`,
+        html: `<p>Open this one-time link to continue to local preview.</p><p><a href="${loginUrl}">Sign in to local preview</a></p><p>This link expires shortly.</p>`,
+      } });
+      if (!delivery.ok) return jsonResponse(res, { error: 'Preview email delivery is unavailable.' }, 503);
+      return jsonResponse(res, { ok: true, message: 'Check your email for a one-time sign-in link.' }, 202);
+    } catch {
+      return jsonResponse(res, { error: 'Unable to start preview sign-in' }, 500);
+    }
+  }
+
+  if (pathname === '/auth/local-preview/verify' && req.method === 'GET') {
+    if (process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') return jsonResponse(res, { error: 'Not found' }, 404);
+    try {
+      const authState = await sessionStore.consumeAuthState(url.searchParams.get('state') || '');
+      if (!authState || authState.kind !== 'local_preview_email' || !authState.email) return jsonResponse(res, { error: 'This preview sign-in link is invalid or has expired.' }, 400);
       const user = await upsertUserFromZitadel({
-        sub: 'local-preview-user',
-        email: process.env.HIVEMIND_LOCAL_PREVIEW_EMAIL || 'local-preview@singulancelabs.test',
-        name: 'Local Preview',
+        sub: `local-preview:${authState.email}`,
+        email: authState.email,
+        name: authState.email.split('@')[0] || 'Local Preview',
         locale: 'en',
       });
       let { org } = await resolveCurrentOrg(user.id);
@@ -4035,7 +4061,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: org.id });
-      return redirect(res, returnTo, [makeSessionCookie(sessionId)]);
+      return redirect(res, authState.returnTo || CONFIG.postLoginRedirect, [makeSessionCookie(sessionId)]);
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 500);
     }

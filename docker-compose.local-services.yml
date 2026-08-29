@@ -29,6 +29,11 @@ services:
       HIVEMIND_FRONTEND_URL: https://next.preview.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT: https://next.preview.singulancelabs.com/hivemind/app/overview
       HIVEMIND_LOCAL_AUTH_BYPASS: "true"
+      # Cloudflare Worker gateway: credentials stay in the local Docker
+      # environment and the Worker accepts only the explicit preview allowlist.
+      HIVEMIND_PREVIEW_EMAIL_GATEWAY_URL: https://singulance-preview-mailer.amarsai2005.workers.dev
+      HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN: ${HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN:-}
+      HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST: ${HIVEMIND_LOCAL_PREVIEW_EMAIL_ALLOWLIST:-}
       HIVEMIND_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}

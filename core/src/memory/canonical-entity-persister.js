@@ -5,7 +5,8 @@
 //
 // Design constraints:
 //   • Runs AFTER durable memories commit — never inside the ingest lock/tx.
-//   • Fire-and-forget: never throws, never delays or fails ingestion.
+//   • Runs outside the ingest transaction, but remote projection failures are
+//     reported so a job cannot claim complete graph coverage prematurely.
 //   • Exactly-once creation per name per batch: unique names are resolved
 //     SERIALLY (first mention wins), remaining memories link to the resolved
 //     entity id directly — concurrent facts can't race-create duplicates.
@@ -17,7 +18,7 @@
 
 import { EntityResolver } from './entity-resolver.js';
 import {normalizeEntity, entityMatchVariants } from './entity-normalize.js';
-import { orgIsRemote, amrWrite, amrAddEdge } from '../vector/mneme/driver.js';
+import { orgIsRemote, amrWrite, amrAddEdge, amrUpdateTags, amrHydrateMemories } from '../vector/mneme/driver.js';
 
 // V5 Phase 10 — cached per-org ontology loader (opt-in enterprise config).
 const _ontoCache = new Map(); // orgId → { value, expiresAt }
@@ -87,7 +88,7 @@ export async function persistCanonicalLinks({
   sourceMeta = null,   // { filename, documentId, seenAt }
   logger = console,
 } = {}) {
-  const out = { linked: 0, created: 0, review: 0, skipped: 0 };
+  const out = { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 };
   if (!prisma?.canonicalEntity || !prisma?.memoryEntityLink || !organizationId || !items.length) return out;
   // V5: lock entityKind to the canonical taxonomy (was free-form; 'entity'/synonyms
   // fragmented the registry). All registry lookups + creates below use the
@@ -115,6 +116,7 @@ export async function persistCanonicalLinks({
 
   try {
     const resolver = new EntityResolver({ prisma });
+    const remote = orgIsRemote(organizationId);
 
     // slug → { name (first surface form), memoryIds: [] }
     const bySlug = new Map();
@@ -245,62 +247,58 @@ export async function persistCanonicalLinks({
     } catch (e) { logger.warn?.(`[canonical-entities] source stamp failed for ${entityId}: ${e.message}`); }
   };
 
-  const linkAll = async (entityId, memoryIds, confidence) => {
+  const linkAll = async (entityId, memoryIds, confidence, entitySlug) => {
+      if (remote) {
+        try {
+          const ent = await prisma.canonicalEntity.findUnique({
+            where: { id: entityId },
+            select: { id: true, canonicalName: true, entityKind: true, normalizedName: true, aliases: true },
+          });
+          if (!ent) throw new Error('canonical entity row is unavailable');
+          const written = await amrWrite(organizationId, {
+            id: ent.id,
+            content: ent.canonicalName || null,
+            title: ent.canonicalName || null,
+            layer: 'entity',
+            memoryType: 'canonical_entity',
+            tags: [`entity-slug:${ent.normalizedName || normalizeEntity(ent.canonicalName || '')}`],
+            metadata: { entity_kind: ent.entityKind || null, aliases: Array.isArray(ent.aliases) ? ent.aliases : [] },
+          }, null);
+          if (!written) throw new Error('remote canonical entity projection was not acknowledged');
+        } catch (err) {
+          out.skipped += memoryIds.length;
+          out.projectionFailed += memoryIds.length;
+          logger.warn?.(`[canonical-entities] entity mirror failed ${entityId}: ${err.message}`);
+          return;
+        }
+      }
       for (const memoryId of memoryIds) {
         try {
-          await prisma.memoryEntityLink.upsert({
-            where: { memoryId_entityId_role: { memoryId, entityId, role: 'mentioned' } },
-            update: { confidence },
-            create: { memoryId, entityId, role: 'mentioned', confidence },
-          });
+          if (remote) {
+            const tag = `entity:${entitySlug}`;
+            const hydrated = await amrHydrateMemories(organizationId, [memoryId]);
+            const memory = Array.isArray(hydrated) ? hydrated.find((row) => row?.id === memoryId) : null;
+            if (!memory) throw new Error('remote memory could not be hydrated for entity projection');
+            const tags = [...new Set([...(Array.isArray(memory.tags) ? memory.tags : []), tag])];
+            const tagUpdated = await amrUpdateTags(organizationId, memoryId, tags, { requireAck: true });
+            if (!tagUpdated) throw new Error('remote memory entity-tag projection was not acknowledged');
+            const edgeAdded = await amrAddEdge({ fromId: memoryId, toId: entityId, type: 'Mentions', confidence: confidence ?? 1.0,
+              metadata: { entity_projection: true, canonical_entity_id: entityId },
+              createdBy: 'canonical-entity-persister', orgId: organizationId });
+            if (!edgeAdded) throw new Error('remote memory entity-edge projection was not acknowledged');
+          } else {
+            await prisma.memoryEntityLink.upsert({
+              where: { memoryId_entityId_role: { memoryId, entityId, role: 'mentioned' } },
+              update: { confidence },
+              create: { memoryId, entityId, role: 'mentioned', confidence },
+            });
+          }
           out.linked += 1;
         } catch (err) {
           out.skipped += 1;
+          if (remote) out.projectionFailed += 1;
           logger.warn?.(`[canonical-entities] link failed ${memoryId} → ${entityId}: ${err.message}`);
         }
-      }
-      // ── Entity residency: mirror into the org's .amr slot ────────────────────────────────
-      // canonical_entities is a CENTRAL table with no per-org equivalent, so for an .amr tenant
-      // the memories lived in their own file while the ENTITY NAMES sat in our database. That is
-      // a residency gap, not a tidiness one: "your memory is one file you own" was not true of
-      // the entity graph.
-      //
-      // The entity becomes a layer-4 record (metadata, structurally non-recallable — see
-      // layers.mjs) and each link becomes the shard's own `Mentions` edge, which is exactly what
-      // memory→entity means. No new edge type and no new route: the slot already models this.
-      //
-      // Best-effort and last: Postgres above stays authoritative and nothing reads the shard copy
-      // yet, so a failure here must never cost a link the user would otherwise have.
-      try {
-        if (!orgIsRemote(organizationId)) return;
-        const ent = await prisma.canonicalEntity.findUnique({
-          where: { id: entityId },
-          // Prisma field names verified against schema.prisma: the type field is `entityKind`
-          // (@map entity_kind) and `normalizedName` is the slug the entity lanes already match
-          // on. `entityType` does not exist — selecting it throws, and the catch below would
-          // have swallowed that into a silent "no entities in the slot".
-          select: { id: true, canonicalName: true, entityKind: true, normalizedName: true, aliases: true },
-        }).catch(() => null);
-        if (!ent) return;
-        await amrWrite(organizationId, {
-          id: ent.id,
-          content: ent.canonicalName || null,
-          title: ent.canonicalName || null,
-          layer: 'entity',
-          memoryType: 'canonical_entity',
-          // Carry the slug the hop-0 lane already matches on, so an in-slot entity is reachable
-          // by the same key the tag path uses.
-          tags: [`entity-slug:${ent.normalizedName || normalizeEntity(ent.canonicalName || '')}`],
-          metadata: { entity_kind: ent.entityKind || null, aliases: Array.isArray(ent.aliases) ? ent.aliases : [] },
-        }, null);
-        for (const memoryId of memoryIds) {
-          await amrAddEdge({ fromId: memoryId, toId: ent.id, type: 'Mentions', confidence: confidence ?? 1.0,
-            metadata: { entity_projection: true, canonical_entity_id: ent.id },
-            createdBy: 'canonical-entity-persister', orgId: organizationId });
-        }
-      } catch (e) {
-        logger.warn?.(`[canonical-entities] shard mirror failed for ${entityId}: ${e.message} `
-          + '— Postgres links are authoritative and unaffected');
       }
     };
 
@@ -313,7 +311,7 @@ export async function persistCanonicalLinks({
       const slug = entry.slug;
       const known = existingBySlug.get(`${entry.kind || entityKind}::${slug}`);
       if (known && known !== 'AMBIGUOUS') {
-        await linkAll(known, entry.memoryIds, 1.0);
+        await linkAll(known, entry.memoryIds, 1.0, slug);
         await stampSource(known);
         continue;
       }
@@ -335,14 +333,20 @@ export async function persistCanonicalLinks({
               last_seen_at: sourceMeta.seenAt || new Date().toISOString().slice(0, 10),
             } : {},
           }],
+          linkMemory: !remote,
         });
       } catch (err) {
         out.skipped += entry.memoryIds.length;
+        if (remote) out.projectionFailed += entry.memoryIds.length;
         logger.warn?.(`[canonical-entities] resolve failed for "${entry.name}": ${err.message}`);
         continue;
       }
       const r = results?.[0];
-      if (!r) { out.skipped += entry.memoryIds.length; continue; }
+      if (!r) {
+        out.skipped += entry.memoryIds.length;
+        if (remote) out.projectionFailed += entry.memoryIds.length;
+        continue;
+      }
       if (r.entityId && r.action !== 'created') await stampSource(r.entityId);
       if (r.action === 'review') {
         // Ambiguous — queued for human review; do not fan links out for it.
@@ -352,10 +356,10 @@ export async function persistCanonicalLinks({
       }
       if (r.action === 'created') {
         out.created += 1;
-        existingBySlug.set(slug, r.entityId); // later names in this batch reuse it
+        existingBySlug.set(`${entry.kind || entityKind}::${slug}`, r.entityId); // later names in this batch reuse it
       }
-      out.linked += 1;
-      await linkAll(r.entityId, restMemoryIds, r.confidence ?? 1.0);
+      if (!remote) out.linked += 1;
+      await linkAll(r.entityId, remote ? entry.memoryIds : restMemoryIds, r.confidence ?? 1.0, slug);
     }
 
     if (out.linked || out.created || out.review) {

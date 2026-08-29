@@ -230,9 +230,17 @@ export function wrapPrisma(realPrisma) {
 // REMOTE ORGS: routes through the durable outbox instead of fire-and-forget.
 // The caller does NOT need to await — the push is best-effort on the happy path
 // and durably retried via BullMQ + the MemoryOutbox row if the agent is down.
-export function amrUpdateTags(orgId, id, tags) {
+export function amrUpdateTags(orgId, id, tags, { requireAck = false } = {}) {
   if (!orgId || !id || !Array.isArray(tags)) return;
   if (orgIsRemote(orgId)) {
+    if (requireAck) {
+      return remoteUpdateTags(orgId, id, tags).then(async (ok) => {
+        if (ok) return true;
+        const enqueue = await _getEnqueuePush().catch(() => null);
+        if (enqueue) await enqueue(orgId, 'updateTags', id, { id, tags });
+        return false;
+      });
+    }
     // Durable outbox: seq ensures updateTags lands after the corresponding write.
     _getEnqueuePush().then((enqueue) => {
       if (enqueue) return enqueue(orgId, 'updateTags', id, { id, tags });
@@ -319,6 +327,12 @@ export function amrMemEdgeCounts(orgId, ids) { return orgIsRemote(orgId) ? remot
 // Returns [] for non-remote so the caller keeps the central query.
 export function amrFindByTags(orgId, tags, limit = 200, isLatest = true) {
   return orgIsRemote(orgId) ? remoteFindByTags(orgId, tags, limit, isLatest) : null;
+}
+// Hydrate tenant-owned memory rows without forcing callers through a central
+// Memory table. This is intentionally read-only and returns null for managed
+// orgs so their existing Prisma path remains authoritative.
+export function amrHydrateMemories(orgId, ids) {
+  return orgIsRemote(orgId) ? remoteHydrate(orgId, ids) : null;
 }
 export function amrMemRelationships(orgId, memoryId) { return orgIsRemote(orgId) ? remoteMemRelationships(orgId, memoryId) : null; }
 export function amrMemRelationshipsBatch(orgId, ids) { return orgIsRemote(orgId) ? remoteMemRelationshipsBatch(orgId, ids) : null; }

@@ -1758,20 +1758,22 @@ Output the JSON object and nothing else.`;
       }
       this.logger.info?.(`[kb-distill] doc ${String(documentId).slice(0, 8)}: ${created} facts from ${eligible.length} sections in ${batches.length} LLM calls (failed=${failed})`);
       // Canonical-entity registry pass — AFTER all facts committed, off the hot
-      // path (fire-and-forget). Creates org-scoped CanonicalEntity rows +
+      // path. Creates org-scoped CanonicalEntity rows +
       // MemoryEntityLink rows from the extractor's canonical names; exact names
       // reuse existing entities, ambiguous fuzzy matches go to the review
       // queue. entity: tags above stay as the compatibility fallback.
       if (canonicalItems.length) {
-        persistCanonicalLinks({
+        const projection = await persistCanonicalLinks({
           prisma: this.db, organizationId: orgId, items: canonicalItems, logger: this.logger,
           sourceMeta: {
             filename: metadata?.filename || docTitle || null,
             documentId: documentId || null,
             seenAt: new Date().toISOString().slice(0, 10),
           },
-        })
-          .catch((e) => this.logger.warn?.(`[canonical-entities] ${e.message}`));
+        });
+        if (projection.projectionFailed > 0) {
+          throw new Error(`canonical entity projection incomplete (${projection.projectionFailed} remote links)`);
+        }
       }
       // Phase 2 enrichment — OFF the hot path, flag-gated (default off). Cross-doc
       // dedup + relationship edges, using vectors already computed during embed.
@@ -2435,7 +2437,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     }
     if (_canonItems.length) {
       try {
-        await persistCanonicalLinks({
+        const projection = await persistCanonicalLinks({
           prisma: this.db, organizationId: orgId, items: _canonItems, logger: this.logger,
           // Mandatory entity provenance: which file, which document, when first seen.
           sourceMeta: {
@@ -2444,7 +2446,13 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             seenAt: new Date().toISOString().slice(0, 10),
           },
         });
-      } catch (e) { this.logger.warn?.(`[canonical-entities] ${e.message}`); }
+        if (projection.projectionFailed > 0) {
+          throw new Error(`canonical entity projection incomplete (${projection.projectionFailed} remote links)`);
+        }
+      } catch (e) {
+        this.logger.warn?.(`[canonical-entities] ${e.message}`);
+        if (orgIsRemote(orgId)) throw e;
+      }
     }
     return factObjs;
   }
@@ -4344,9 +4352,17 @@ Every item must include a non-empty content field and one or more valid support_
           }
           if (names.length) items.push({ memoryId: id, entities: names });
         }
-        if (items.length) await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items, logger: this.logger });
+        if (items.length) {
+          const projection = await persistCanonicalLinks({ prisma: this.db, organizationId: orgId, items, logger: this.logger });
+          if (projection.projectionFailed > 0) {
+            throw new Error(`canonical entity projection incomplete (${projection.projectionFailed} remote links)`);
+          }
+        }
       }
-    } catch (e) { this.logger.warn?.(`[canonical-entities][atomic] ${e.message}`); }
+    } catch (e) {
+      this.logger.warn?.(`[canonical-entities][atomic] ${e.message}`);
+      if (orgIsRemote(orgId)) throw e;
+    }
     // V5 Phase 3: async claim structuring for the committed atomic memory (off hot path).
     if (memoryIds.length) this._structureClaimsAsync({ memories: [{ id: memoryIds[0], content: atomicContent }], orgId });
     return {

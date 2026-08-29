@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { persistCanonicalLinks } from '../../src/memory/canonical-entity-persister.js';
+import { EntityResolver } from '../../src/memory/entity-resolver.js';
 
 // Minimal fake prisma implementing exactly what EntityResolver +
 // persistCanonicalLinks touch. In-memory registry keyed by canonicalName.
@@ -99,7 +100,7 @@ test('kill switch CANONICAL_ENTITY_PERSIST=false is a no-op', async () => {
       items: [{ memoryId: 'm1', entities: ['SOLVIS'] }],
     });
     assert.equal(prisma.entities.length, 0);
-    assert.deepEqual(out, { linked: 0, created: 0, review: 0, skipped: 0 });
+    assert.deepEqual(out, { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 });
   } finally { delete process.env.CANONICAL_ENTITY_PERSIST; }
 });
 
@@ -124,5 +125,19 @@ test('missing prisma models → safe no-op', async () => {
     prisma: {}, organizationId: ORG,
     items: [{ memoryId: 'm1', entities: ['SOLVIS'] }],
   });
-  assert.deepEqual(out, { linked: 0, created: 0, review: 0, skipped: 0 });
+  assert.deepEqual(out, { linked: 0, created: 0, review: 0, skipped: 0, projectionFailed: 0 });
+});
+
+test('remote resolution can create a canonical entity without a central memory FK link', async () => {
+  const prisma = makePrisma();
+  const resolver = new EntityResolver({ prisma });
+  const results = await resolver.resolveAndLink({
+    memoryId: 'remote-memory-not-in-postgres',
+    organizationId: ORG,
+    linkMemory: false,
+    candidates: [{ name: 'Paolo Rossi', kind: 'person' }],
+  });
+  assert.equal(results[0].action, 'created');
+  assert.equal(prisma.entities.length, 1);
+  assert.equal(prisma.links.length, 0, 'remote memory must not create a central FK link');
 });

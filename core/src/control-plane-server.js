@@ -3999,7 +3999,7 @@ const server = http.createServer(async (req, res) => {
 
   // ─── Local preview email sign-in ──────────────────────────────
   if (pathname === '/auth/local-preview/request' && req.method === 'POST') {
-    if (process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') {
+    if (process.env.HIVEMIND_LOCAL_MODE !== 'true' || process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') {
       return jsonResponse(res, { error: 'Not found' }, 404);
     }
     try {
@@ -4031,7 +4031,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/auth/local-preview/verify' && req.method === 'GET') {
-    if (process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') return jsonResponse(res, { error: 'Not found' }, 404);
+    if (process.env.HIVEMIND_LOCAL_MODE !== 'true' || process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') return jsonResponse(res, { error: 'Not found' }, 404);
     try {
       const authState = await sessionStore.consumeAuthState(url.searchParams.get('state') || '');
       if (!authState || authState.kind !== 'local_preview_email' || !authState.email) return jsonResponse(res, { error: 'This preview sign-in link is invalid or has expired.' }, 400);
@@ -4041,25 +4041,25 @@ const server = http.createServer(async (req, res) => {
         name: authState.email.split('@')[0] || 'Local Preview',
         locale: 'en',
       });
-      let { org } = await resolveCurrentOrg(user.id);
-      if (!org) {
-        org = await prisma.organization.upsert({
-          where: { zitadelOrgId: 'local-preview-org' },
-          update: {},
-          create: {
-            zitadelOrgId: 'local-preview-org',
-            name: 'Local Preview',
-            slug: 'local-preview',
-            plan: 'free',
-            hostingMode: 'managed',
-          },
-        });
-        await prisma.userOrganization.upsert({
-          where: { userId_orgId: { userId: user.id, orgId: org.id } },
-          update: { isActive: true, role: 'admin', roles: ['admin'], joinedAt: new Date() },
-          create: { userId: user.id, orgId: org.id, role: 'admin', roles: ['admin'], isActive: true, joinedAt: new Date() },
-        });
-      }
+      // Always pin preview sessions to a dedicated local organization. Reusing
+      // the user's first historical membership could select a stale/inactive
+      // organization and made the HyperAgent onboarding permission checks fail.
+      const org = await prisma.organization.upsert({
+        where: { zitadelOrgId: 'local-preview-org' },
+        update: { name: 'Local Preview', slug: 'local-preview', plan: 'scale', hostingMode: 'managed' },
+        create: {
+          zitadelOrgId: 'local-preview-org',
+          name: 'Local Preview',
+          slug: 'local-preview',
+          plan: 'scale',
+          hostingMode: 'managed',
+        },
+      });
+      await prisma.userOrganization.upsert({
+        where: { userId_orgId: { userId: user.id, orgId: org.id } },
+        update: { isActive: true, role: 'owner', roles: ['owner'], joinedAt: new Date() },
+        create: { userId: user.id, orgId: org.id, role: 'owner', roles: ['owner'], isActive: true, joinedAt: new Date() },
+      });
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: org.id });
       return redirect(res, authState.returnTo || CONFIG.postLoginRedirect, [makeSessionCookie(sessionId)]);
     } catch (error) {

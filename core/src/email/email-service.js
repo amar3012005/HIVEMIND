@@ -124,7 +124,9 @@ function configuredProviders() {
     from: process.env.SYSTEM_EMAIL_FROM || '',
   };
   return {
-    previewGateway: previewGateway.url && previewGateway.token ? previewGateway : null,
+    // Preview delivery is an explicit local-runtime capability. Merely
+    // providing a URL/token can never divert a production mail send.
+    previewGateway: process.env.HIVEMIND_LOCAL_MODE === 'true' && previewGateway.url && previewGateway.token ? previewGateway : null,
     cloudflare: cloudflare.token && cloudflare.accountId && cloudflare.from ? cloudflare : null,
     gmail: gmail.connectionId ? gmail : null,
   };

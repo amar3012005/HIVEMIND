@@ -655,6 +655,96 @@ Rules for all future days:
 - avoid daily noise when there is no meaningful completed work;
 - do not send a rewritten marketing summary when a canonical artifact already exists.
 
+### 14.1 Day 3 as the reuse proof
+
+Day 3 should be the second episode implemented on the generic lifecycle rather
+than a copy of Day 1. Its recommended versioned definition is:
+
+```json
+{
+  "id": "growth_experiment",
+  "version": 1,
+  "day": 3,
+  "feature_flag": "day3_growth_experiment_v1",
+  "task_selector": { "required_tags": ["marketing", "growth"] },
+  "owner_room": "marketing_or_growth",
+  "presentation": {
+    "episode_label": "GROWTH EXPERIMENT READY",
+    "headline": "Your HyperAgents prepared the next experiment.",
+    "cta_label": "REVIEW THE EXPERIMENT",
+    "attachment_name": "{company}-day-3-growth-experiment.pdf"
+  },
+  "authority": {
+    "prepare": "autonomous",
+    "launch": "human_approval_required"
+  }
+}
+```
+
+The persisted artifact must contain the hypothesis, audience, channel, asset,
+success metric, budget limit, duration, risks, and supporting evidence. The
+Workflow may prepare and deliver the sealed experiment brief autonomously, but
+must never launch or spend without a separate persisted authority grant.
+
+Before adding Day 3, replace Day-1-specific lifecycle state with a versioned
+episode registry keyed by `episode_id` and `episode_version`. Cloudflare receives
+only the generic envelope:
+
+```json
+{
+  "episode_id": "growth_experiment",
+  "episode_version": 1,
+  "org_id": "<uuid>",
+  "hq_room_id": "<uuid>",
+  "target_at": "<iso-8601>"
+}
+```
+
+The reusable engine owns scheduling, Flagship evaluation, deterministic
+instance identity, room/turn reuse, event waiting, sealed-artifact validation,
+shared email/PDF rendering, provider receipt persistence, retries, and duplicate
+suppression. Episode data owns task selection, room ownership, artifact checks,
+copy, CTA, filename, authority gates, and escalation policy. Adding Day 3 must
+not add a `day3_*` execution branch to the engine.
+
+### 14.2 Canonical local integration and Cloudflare preview releases
+
+All local and Cloudflare-preview deployments follow
+`docs/LOCAL_INTEGRATION_PROTOCOL.md`. The canonical paths are deliberately
+separate:
+
+```text
+session branch -> tested merge -> singulance-local -> local Docker/preview Cloudflare
+accepted commits -> reviewed release branch -> singulance-main -> production
+```
+
+Rules:
+
+- `singulance-local` is the only source for the shared local Docker stack and
+  preview Cloudflare Worker/Workflow deployments;
+- feature sessions never deploy the shared preview directly from their branch;
+- integrate only in the clean `HIVEMIND-local-main` worktree, never in a dirty
+  development checkout;
+- merge current `origin/singulance-main` into `singulance-local` before the
+  session branch so local testing is never older than production;
+- validate the merged commit, then push `singulance-local`, then deploy/recreate
+  only affected local services;
+- use `up -d --no-deps --force-recreate <service>` for bind-mounted source-only
+  changes; use `--build` only for Dockerfile, dependency, native-module, or
+  compiled-artifact changes;
+- local Cloudflare resources must use isolated preview names, preview API URLs,
+  development Flagship apps, environment-specific instance prefixes, and
+  preview/local secrets;
+- `singulance-local` must never be used as a production deploy source and must
+  never automatically merge into `singulance-main`;
+- production promotion selects only locally accepted commits and still follows
+  `docs/PRODUCTION_RELEASE_PROTOCOL.md`, the deployment governor, release
+  presence checks, and the canonical `singulance-main` release path.
+
+Every accepted local integration records the session branch, resulting
+`singulance-local` SHA, exact test commands, container/route evidence, and any
+Cloudflare preview deployment version in `docs/ENGINEERING_JOURNAL.md`.
+
 ## 15. Non-goals for the first release
 
 - No Kubernetes requirement.

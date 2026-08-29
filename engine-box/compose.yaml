@@ -74,6 +74,7 @@ services:
       ENGINE_BOX_MODE: 'true'
       ENGINE_BOX_SOVEREIGN: 'true'
       ENGINE_BOX_ENABLE: ingestion,recall,chat,mcp,temporal,graph
+      HIVEMIND_RUNTIME_ROLE: app
       DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
       DATABASE_HOST: postgres
       DATABASE_PORT: '5432'

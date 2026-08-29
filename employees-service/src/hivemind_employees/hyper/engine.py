@@ -5012,10 +5012,21 @@ class Director:
         if _visual_artifacts_enabled():
             profile_contract = ""
             if self.execution_profile:
+                _profile_outputs = {
+                    str(item).strip().lower()
+                    for item in (self.execution_profile.get("allowed_outputs") or [])
+                    if str(item).strip()
+                }
+                _profile_visual_policy = (
+                    " This profile permits a governed visual artifact when the active request explicitly needs one."
+                    if "artifact" in _profile_outputs else
+                    " This profile is text-only: artifact_intent MUST be null even when the visual path is enabled."
+                )
                 profile_contract = (
                     "\n\nSEMANTIC EXECUTION PROFILE — selected once for this turn before planning. "
                     "Reconcile your output-mode decision with this contract; do not silently downgrade a required "
-                    "artifact to prose:\n" + json.dumps(self.execution_profile, ensure_ascii=False)[:3000]
+                    "artifact to prose:" + _profile_visual_policy + "\n"
+                    + json.dumps(self.execution_profile, ensure_ascii=False)[:3000]
                 )
             sysp += (
                 "\n\nARTIFACT CAPABILITY: artifact_intent may select a designed HTML artifact when "
@@ -5137,7 +5148,22 @@ class Director:
             plan = {}
         if not isinstance(plan, dict):
             plan = {}
-        if _visual_artifacts_enabled() and isinstance(plan.get("artifact_intent"), dict):
+        required_artifacts = [
+            str(item).strip()
+            for item in (self.execution_profile.get("required_artifacts") or [])
+            if str(item).strip()
+        ]
+        allowed_outputs = {
+            str(item).strip().lower()
+            for item in (self.execution_profile.get("allowed_outputs") or [])
+            if str(item).strip()
+        }
+        # A selected execution profile is an output contract. The model may still
+        # receive the optional visual schema for compatibility, but it cannot turn a
+        # text-only turn into an expensive artifact run by filling that field.
+        visual_output_allowed = not self.execution_profile or "artifact" in allowed_outputs
+        if (_visual_artifacts_enabled() and visual_output_allowed
+                and isinstance(plan.get("artifact_intent"), dict)):
             raw_intent = plan["artifact_intent"]
             artifact_kind = str(raw_intent.get("kind") or "interactive_document").strip()
             if artifact_kind not in {"presentation", "interactive_document", "dashboard"}:
@@ -5158,17 +5184,9 @@ class Director:
             }
         else:
             self.artifact_intent = None
-        required_artifacts = [
-            str(item).strip()
-            for item in (self.execution_profile.get("required_artifacts") or [])
-            if str(item).strip()
-        ]
-        allowed_outputs = {
-            str(item).strip().lower()
-            for item in (self.execution_profile.get("allowed_outputs") or [])
-            if str(item).strip()
-        }
-        if (_visual_artifacts_enabled() and self.artifact_intent is None
+        if not visual_output_allowed:
+            plan["artifact_intent"] = None
+        if (_visual_artifacts_enabled() and visual_output_allowed and self.artifact_intent is None
                 and required_artifacts and allowed_outputs == {"artifact"}):
             self.artifact_intent = {
                 "contract": "artifact-intent.v1",
@@ -6369,32 +6387,75 @@ class Director:
         self,
         forced_debate: bool,
         transcript_json: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Render, validate, and at most once repair the selected artifact."""
+    ) -> Dict[str, Any]:
+        """Render, validate, and at most once repair the selected artifact.
+
+        The result is structured on both success and failure so the Room keeps the
+        actual render verdict instead of replacing it with a generic warning.
+        """
+        await self.emit({
+            "t": "artifact_progress", "stage": "direction", "status": "active",
+            "title": "Shaping the visual narrative",
+            "detail": "The director is choosing a composition from verified evidence.",
+        })
         direction = await self._plan_visual_direction(forced_debate, transcript_json)
+        await self.emit({
+            "t": "artifact_progress", "stage": "composition", "status": "active",
+            "title": "Composing the artifact",
+            "detail": "The visual system is turning the narrative into a responsive deliverable.",
+        })
         candidate = await self._synthesize_visual(forced_debate, transcript_json, direction)
         if not candidate:
-            return None
+            return {"ok": False, "attempts": 0, "errors": [
+                "The visual specification could not be produced."
+            ]}
         public_candidate = {key: value for key, value in candidate.items() if not key.startswith("_")}
+        await self.emit({
+            "t": "artifact_progress", "stage": "render", "status": "active",
+            "title": "Checking the rendered artifact",
+            "detail": "Desktop and mobile rendering checks are running before anything is shown.",
+        })
         delivery = await self.emit({"t": "artifact_candidate", "candidate": public_candidate})
         result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
+        errors = [str(item)[:500] for item in ((result or {}).get("errors") or []) if str(item).strip()]
         if isinstance(result, dict) and result.get("ok") is False:
+            await self.emit({
+                "t": "artifact_progress", "stage": "repair", "status": "active",
+                "title": "Repairing the visual artifact",
+                "detail": "The first render did not meet the quality gate; one targeted repair is running.",
+                "errors": errors,
+            })
             candidate = await self._synthesize_visual(
                 forced_debate,
                 transcript_json,
                 direction,
-                repair_errors=[str(item) for item in (result.get("errors") or [])],
+                repair_errors=errors,
                 prior_html=str(candidate.get("html") or ""),
                 prior_spec=candidate.get("_visual_spec") if isinstance(candidate.get("_visual_spec"), dict) else None,
             )
             if not candidate:
-                return None
+                return {"ok": False, "attempts": 1, "errors": errors or [
+                    "The repaired visual specification could not be produced."
+                ]}
             public_candidate = {key: value for key, value in candidate.items() if not key.startswith("_")}
+            await self.emit({
+                "t": "artifact_progress", "stage": "render", "status": "active",
+                "title": "Re-checking the repaired artifact",
+                "detail": "The repaired deliverable is being verified at desktop and mobile sizes.",
+            })
             delivery = await self.emit({"t": "artifact_candidate", "candidate": public_candidate})
             result = (delivery or {}).get("artifact") if isinstance(delivery, dict) else None
+            errors = [str(item)[:500] for item in ((result or {}).get("errors") or []) if str(item).strip()]
         if isinstance(result, dict) and result.get("ok") is True:
-            return {"candidate": public_candidate, "receipt": result}
-        return None
+            await self.emit({
+                "t": "artifact_progress", "stage": "complete", "status": "complete",
+                "title": "Visual artifact ready",
+                "detail": "The rendered deliverable passed its quality checks.",
+            })
+            return {"ok": True, "candidate": public_candidate, "receipt": result}
+        return {"ok": False, "attempts": 2 if candidate else 1, "errors": errors or [
+            "The rendered artifact did not return a verification receipt."
+        ]}
 
     async def _synthesize(self, forced_debate: bool, transcript_json: str) -> str:
         """Write the final deliverable from the gathered board (+ debate). Clean context
@@ -7311,16 +7372,27 @@ class Director:
                 final_text = agent_answer or await self._synthesize(forced_debate, transcript_json)
         if self.artifact_intent:
             visual = await self._produce_visual_artifact(forced_debate, transcript_json)
-            if visual:
+            if visual.get("ok"):
                 artifact_receipt = visual["receipt"]
                 final_text = str(visual["candidate"].get("summary") or "The interactive artifact is ready.")
             else:
+                render_errors = [str(item)[:500] for item in (visual.get("errors") or []) if str(item).strip()]
+                await self.emit({
+                    "t": "artifact_rejected",
+                    "status": "rejected",
+                    "stage": "render",
+                    "attempts": int(visual.get("attempts") or 0),
+                    "errors": render_errors,
+                    "title": "Visual artifact needs a later retry",
+                    "detail": "The grounded text deliverable was retained; the exact render checks are shown below.",
+                })
                 if not final_text:
                     final_text = await self._synthesize(forced_debate, transcript_json)
                 await self.emit({
                     "t": "warning",
                     "code": "artifact_render_failed",
                     "note": "The visual artifact did not pass rendering checks; the grounded text deliverable was retained.",
+                    "errors": render_errors,
                 })
         if not final_text:
             # Every synthesis attempt failed — never return empty at the emit boundary.

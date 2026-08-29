@@ -29,15 +29,45 @@ async def test_visual_producer_repairs_once_and_returns_verified_receipt():
     ])
 
     async def emit(event):
-        assert event["t"] == "artifact_candidate"
-        return next(deliveries)
+        if event["t"] == "artifact_candidate":
+            return next(deliveries)
+        assert event["t"] == "artifact_progress"
+        return None
 
     director._synthesize_visual = synth
     director._plan_visual_direction = direction
     director.emit = emit
     result = await director._produce_visual_artifact(False, "")
 
+    assert result["ok"] is True
     assert result["receipt"]["artifact_id"] == "artifact-1"
     assert len(calls) == 2
     assert calls[1]["errors"] == ["Mobile has horizontal overflow."]
     assert calls[1]["prior"].startswith("<!doctype html>")
+
+
+@pytest.mark.asyncio
+async def test_visual_producer_retains_last_render_errors_on_failure():
+    director = object.__new__(Director)
+
+    async def direction(_forced, _transcript):
+        return {"visual_thesis": "A decision story"}
+
+    async def synth(*_args, **_kwargs):
+        return {"html": "<!doctype html><h1>Board</h1>", "summary": "Ready"}
+
+    async def emit(event):
+        if event["t"] == "artifact_candidate":
+            return {"artifact": {"ok": False, "errors": ["Mobile has horizontal overflow."]}}
+        return None
+
+    director._synthesize_visual = synth
+    director._plan_visual_direction = direction
+    director.emit = emit
+    result = await director._produce_visual_artifact(False, "")
+
+    assert result == {
+        "ok": False,
+        "attempts": 2,
+        "errors": ["Mobile has horizontal overflow."],
+    }

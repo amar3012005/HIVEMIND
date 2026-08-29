@@ -106,6 +106,44 @@ def test_artifact_only_profile_cannot_silently_degrade_to_text(monkeypatch):
     assert plan["execution_engine"] == "debate"
 
 
+def test_text_only_profile_rejects_a_planned_visual_intent(monkeypatch):
+    monkeypatch.setenv("Visual_path_In_Hyperrooms", "true")
+    director, _events = _director(
+        message="Refine the positioning statement for Europe",
+        room_kind="marketing",
+        execution_profile={
+            "contract": "execution-profile.v1",
+            "profile_id": "marketing.copy.v1",
+            "allowed_outputs": ["direct_answer"],
+            "required_artifacts": [],
+        },
+    )
+    payload = {
+        "recall_queries": [], "history_turns_back": 0, "connector_calls": [],
+        "web_query": None, "seo_audit_url": None, "seo_audit_scope": "none",
+        "seo_task": "none", "places_query": None, "needs_debate": False,
+        "method_skills": [], "campaign_method_assignments": [], "work_orders": [],
+        "turn_plan": [], "turn_mode": "task", "execution_engine": "debate",
+        "collaboration_intensity": "light", "response_depth": "direct",
+        "evidence_mode": "standard", "post_output_actions": [],
+        "outreach_request": None, "campaign_request": None,
+        "artifact_intent": {
+            "kind": "presentation", "medium": "html", "purpose": "Wrong route",
+            "audience": "reader", "quality_profile": "editorial",
+            "creative_freedom": "high", "requirements": [],
+        },
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert director.artifact_intent is None
+    assert plan["artifact_intent"] is None
+
+
 def test_source_evidence_excludes_skills_and_agent_work_results():
     director, _events = _director(
         message="Compare two options",

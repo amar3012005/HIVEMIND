@@ -44,6 +44,14 @@ def test_operational_profiles_declare_at_least_one_required_artifact():
             assert profile.is_operational()
 
 
+def test_marketing_copy_profile_is_text_only_and_not_operational():
+    profile = EXECUTION_PROFILES["marketing.copy.v1"]
+    assert profile.allowed_outputs == ("direct_answer",)
+    assert profile.effect == "internal"
+    assert not profile.required_artifacts
+    assert not profile.is_operational()
+
+
 def test_get_execution_profile_unknown_id_returns_none_not_a_default():
     # The CALLER (_select_execution_profile) is responsible for falling back to
     # default_execution_profile() and must know it did — get_execution_profile silently
@@ -75,13 +83,13 @@ def test_every_profile_declares_a_nonempty_disambiguating_when():
         assert manifest_by_id[profile_id] == profile.when, f"{profile_id}'s when did not survive into the manifest"
 
 
-def test_eleven_profiles_cover_every_requested_domain():
+def test_twelve_profiles_cover_every_requested_domain():
     expected_room_kinds = {
         "general", "research", "campaign", "outreach", "marketing", "seo",
         "branding", "fundraising", "product", "design", "legal_finance",
     }
     assert {p.room_kind for p in EXECUTION_PROFILES.values()} == expected_room_kinds
-    assert len(EXECUTION_PROFILES) == 11
+    assert len(EXECUTION_PROFILES) == 12
 
 
 def test_profile_ids_are_unique_and_versioned():

@@ -829,3 +829,23 @@ slides that find no unique anchor get a page instead of `null`.
 - Decision: direct path fills are the email-safe source of truth; lane ring/background metadata comes from the same shared palette; version the immutable URL whenever avatar bytes change. Every accepted canonical email also projects into the existing organization-scoped platform inbox, deduplicated by provider receipt.
 - Verification: 30/30 focused tests. Governed release manifest `/root/releases/manifests/d843a668/20260829T202438Z/RELEASE_MANIFEST.json`; no migrations. One operator-owned Cloudflare send was delivered and created exactly one unread platform notification. Five live lane endpoints returned direct expected fills and no CSS-variable fills. Three affected containers healthy on the exact revision; fresh critical log scan empty.
 - Scope boundary: recipients without a registered platform account have no platform inbox, so invitation/external-only email cannot create an in-app notification until they join. No local-preview or frontend settings were changed.
+
+## 2026-08-29 UTC — Day 1 lifecycle promoted to default-on
+
+- State: Committed and accepted release.
+- Branch/worktree: `codex/humation-email-colors` in `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-email-colors`; feature-registry commit `f48d42b33c2f6890cc86cebe41360ac2e0c33914`.
+- Decision: enable Flagship flag `day1_first_move_v1` for every context by using
+  the `on` default variation with no targeting rules. Preserve two independent
+  rollback controls: Flagship disable and the backend
+  `HIVEMIND_D1_WORKFLOW_ENABLED` master gate. Keep reconciliation bounded to
+  five organizations per cron run.
+- Production verification: three eligible organizations started through the
+  authenticated deterministic lifecycle endpoint and all three Cloudflare
+  Workflow instances completed. PostgreSQL recorded three linked
+  `lifecycle.email.sent` notifications with three distinct dedupe keys and zero
+  duplicate-key groups.
+- Local acceptance: `singulance-local` commit
+  `b15b4ceb5d354f9281626cad9bd863c153a1ae6c`; 30/30 focused tests passed and
+  `hivemind-control-plane-local` rebuilt with its existing Day-1 overlay and
+  reached healthy. No production database or local deployment setting crossed
+  the branch boundary.

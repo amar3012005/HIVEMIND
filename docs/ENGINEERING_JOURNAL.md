@@ -891,3 +891,21 @@ slides that find no unique anchor get a page instead of `null`.
   participating characters. They must not fork the parser or PDF service.
   Mobile, Unicode, image, table, character, and logo resilience is centralized
   in `lifecycleEmailShell`/`lifecycleRichContentStyles`; it is not Day-1 CSS.
+
+## 2026-08-29 UTC — Day 1 lifecycle integrated into `singulance-local`
+
+- State: Locally integrated and validated; production unchanged.
+- Source: pushed session branch `codex/d1-workflow-production` through
+  `66787f09`; merge commit `0ee092bd` in the permanent clean
+  `HIVEMIND-local-main` integration worktree.
+- Conflict resolution: preserved both the existing Cloudflare Agent Memory and
+  local-integration journal history and the Day 1 lifecycle history; combined
+  all ignored local artifact patterns without dropping either side.
+- Merged-state verification: Day 1 unit suite passed 11/11; Worker TypeScript
+  check passed; the three-file local Compose configuration passed `config
+  --quiet` after ignored local environment files were copied into the clean
+  integration worktree without displaying or committing secrets.
+- Policy recorded: Day 3 is a versioned data-defined growth-experiment episode;
+  shared local Docker and preview Cloudflare deployments originate only from
+  `singulance-local`. Production remains exclusively `singulance-main` via the
+  production release protocol and deployment governor.

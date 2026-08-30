@@ -66,10 +66,11 @@ verification, and its independent rollback control.
 
 ## feature-20260830T150000Z — Durable Dreaming and Subject Profiles v2
 
-- Local candidate: implemented on `codex/dream-lifecycle-v2`; integration and
-  shared-runtime acceptance remain pending.
+- Local status: integrated into `singulance-local` at `2b2510a3`; shared backend
+  runtime acceptance remains pending because the parallel ingestion session owns
+  the current `knowledge-workflow-local` API container.
 - Gate: `DREAM_WORKFLOW_V2_ENABLED` plus fail-closed `dream_workflow_v2`.
 - Cloudflare: isolated Workflow, Queue/DLQ, Cron, R2, Flagship, and existing AI Gateway.
 - Data: additive checkpoints, candidates, typed derivation receipts, and immutable generic subject-profile revisions.
 - Compatibility: existing cognition/profile payloads are unchanged; v2 fields and routes are additive.
-- Promotion: local acceptance and `singulance-local` integration are required before production governance.
+- Promotion: shared-runtime local acceptance is required before production governance.

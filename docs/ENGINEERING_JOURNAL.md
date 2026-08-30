@@ -1004,3 +1004,21 @@ slides that find no unique anchor get a page instead of `null`.
   `entity-overdream-guard`, and `recall-dreams-first`) could not load because
   `singulance-amr` has no `win32-x64` prebuilt binary. The remaining focused
   suite passed; these three require the Linux local-container acceptance run.
+
+## 2026-08-30 UTC — durable Dreaming v2 integrated into local truth
+
+- State: pushed to `singulance-local` at merge `2b2510a3`; frontend source is
+  `4f0f24bcf02c06fd509e6148f7e76b32170fc167`. Production remains unchanged.
+- Merged-state checks: focused cognition tests passed 16/16 after Prisma client
+  generation; schema validation, Worker TypeScript, Wrangler local dry-run, and
+  the optimized Da-vinci build passed.
+- Cloudflare local resources created: `hivemind-dream-trigger-local`,
+  `hivemind-dream-trigger-dlq-local`, `hivemind-dream-artifacts-local`, and
+  `hivemind-dream-workflow-local`. Worker version
+  `f01a3baa-b481-4ba0-bdaf-ecb36563198f` is deployed. All eight local Flagship
+  flags default off and target only the documented test organization.
+- Runtime blocker: the shared `hivemind-api` container currently runs the
+  parallel ingestion session's unmerged `knowledge-workflow-local` image.
+  Rebuilding it here would overwrite another session's test runtime, so database
+  migration, shared-secret wiring, browser E2E, restart injection, and local
+  container acceptance are intentionally deferred until that session integrates.

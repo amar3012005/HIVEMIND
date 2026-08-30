@@ -6221,6 +6221,41 @@ exit \$RC
     return jsonResponse(res, { error: 'not_found' }, 404);
   }
 
+  // Durable Dreaming v2 callbacks. This surface is never browser-authenticated:
+  // it accepts only the dedicated Worker service credential and identifiers.
+  if (pathname.startsWith('/internal/dream/')) {
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed', retryable: false }, 405);
+    if (process.env.DREAM_WORKFLOW_V2_ENABLED !== 'true') return jsonResponse(res, { error: 'dream_workflow_disabled', retryable: false }, 403);
+    const expected = String(process.env.HIVEMIND_DREAM_WORKFLOW_SECRET || '');
+    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const expectedBuf = Buffer.from(expected);
+    const suppliedBuf = Buffer.from(supplied);
+    if (!expected || expectedBuf.length !== suppliedBuf.length || !crypto.timingSafeEqual(expectedBuf, suppliedBuf)) {
+      return jsonResponse(res, { error: 'unauthorized', retryable: false }, 401);
+    }
+    let dreamBody;
+    try { dreamBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json_body', retryable: false }, 400); }
+    try {
+      const { DurableDreamLifecycle } = await import('./memory/durable-dream-lifecycle.js');
+      const lifecycle = new DurableDreamLifecycle({ prisma, cognitionLoop, logger: console });
+      if (pathname === '/internal/dream/eligible') {
+        const tenants = await lifecycle.listEligible({ limit: dreamBody?.limit });
+        return jsonResponse(res, { tenants: tenants.map((t) => ({ ...t, trigger_id: t.trigger_key, trigger_key: undefined })) });
+      }
+      if (pathname === '/internal/dream/admit') return jsonResponse(res, await lifecycle.admit(dreamBody), 202);
+      if (pathname === '/internal/dream/stage') return jsonResponse(res, await lifecycle.executeStage(dreamBody));
+      if (pathname === '/internal/dream/cancel') {
+        const run = await prisma.cognitionRun.findUnique({ where: { id: dreamBody?.run_id } });
+        if (!run || run.orgId !== dreamBody?.org_id) return jsonResponse(res, { error: 'run_not_found', retryable: false }, 404);
+        await prisma.cognitionRun.update({ where: { id: run.id }, data: { status: 'cancelled', cancelledAt: new Date(), terminalReason: 'operator_cancelled' } });
+        return jsonResponse(res, { cancelled: true, run_id: run.id });
+      }
+      return jsonResponse(res, { error: 'not_found', retryable: false }, 404);
+    } catch (error) {
+      return jsonResponse(res, { error: error.message, retryable: error.retryable !== false }, error.retryable === false ? 422 : 500);
+    }
+  }
+
   // Native X OAuth callbacks are intentionally outside the user API auth gate.
   // Their random, one-time server-side state resolves the exact org/user owner.
   if (pathname === '/api/x-ads/oauth/oauth2/callback' || pathname === '/api/x-ads/oauth/oauth1/callback') {
@@ -13786,6 +13821,10 @@ exit \$RC
                 lookbackHours: true, synthCount: true, compactCount: true,
                 principleCount: true, reweightedCount: true, runMs: true,
                 error: true, startedAt: true, finishedAt: true, producedMemoryIds: true,
+                workflowInstanceId: true, pipelineVersion: true, currentStage: true, progress: true,
+                candidateCount: true, acceptedCount: true, rejectedCount: true,
+                quarantinedCount: true, publishedCount: true, profileUpdateCount: true,
+                recoveryStatus: true,
               },
             });
             return jsonResponse(res, {
@@ -13797,6 +13836,11 @@ exit \$RC
                 dream_count: (r.producedMemoryIds || []).length,
                 run_ms: r.runMs, error: r.error,
                 started_at: r.startedAt, finished_at: r.finishedAt,
+                workflow_instance_id: r.workflowInstanceId, pipeline_version: r.pipelineVersion,
+                stage: r.currentStage, progress: r.progress, candidate_count: r.candidateCount,
+                accepted_count: r.acceptedCount, rejected_count: r.rejectedCount,
+                quarantined_count: r.quarantinedCount, published_count: r.publishedCount,
+                profile_update_count: r.profileUpdateCount, recovery_status: r.recoveryStatus,
               })),
             });
           } catch (err) {
@@ -13879,12 +13923,72 @@ exit \$RC
             return jsonResponse(res, { error: err.message }, 500);
           }
 
+        case '/api/cognition/subject-profiles':
+          if (req.method !== 'GET') break;
+          try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) return jsonResponse(res, { error: 'Resource not found' }, 404);
+            const profiles = await prisma.subjectProfile.findMany({ where: { orgId, active: true }, orderBy: [{ pinned: 'desc' }, { importance: 'desc' }], take: Math.min(Number(url.searchParams.get('limit')) || 50, 200) });
+            return jsonResponse(res, { profiles: profiles.map((p) => ({ id: p.id, subject_type: p.subjectType, subject_key: p.subjectKey, display_name: p.displayName, aliases: p.aliases, importance: p.importance, pinned: p.pinned, stable: p.stableProjection, dynamic: p.dynamicProjection, projection_version: p.projectionVersion, last_reconciled_at: p.lastReconciledAt })) });
+          } catch (error) { return jsonResponse(res, { error: error.message }, 500); }
+
+        case '/api/cognition/subject-profile':
+          if (req.method !== 'GET') break;
+          try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) return jsonResponse(res, { error: 'Resource not found' }, 404);
+            const profile = await prisma.subjectProfile.findFirst({ where: { id: url.searchParams.get('profile_id'), orgId }, include: { facts: { orderBy: { createdAt: 'desc' }, take: 250 }, revisions: { orderBy: { version: 'desc' }, take: 50 } } });
+            if (!profile) return jsonResponse(res, { error: 'profile not found' }, 404);
+            return jsonResponse(res, { profile });
+          } catch (error) { return jsonResponse(res, { error: error.message }, 500); }
+
+        case '/api/cognition/candidates':
+          if (req.method !== 'GET') break;
+          try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) return jsonResponse(res, { error: 'Resource not found' }, 404);
+            const candidates = await prisma.dreamCandidate.findMany({ where: { orgId, ...(url.searchParams.get('status') ? { publicationStatus: url.searchParams.get('status') } : {}) }, orderBy: { createdAt: 'desc' }, take: Math.min(Number(url.searchParams.get('limit')) || 50, 200) });
+            return jsonResponse(res, { candidates });
+          } catch (error) { return jsonResponse(res, { error: error.message }, 500); }
+
+        case '/api/cognition/candidate-review':
+          if (req.method !== 'POST') break;
+          try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) return jsonResponse(res, { error: 'Resource not found' }, 404);
+            if (!['approved', 'rejected', 'quarantined'].includes(body?.decision)) return jsonResponse(res, { error: 'invalid decision' }, 400);
+            const candidate = await prisma.dreamCandidate.findFirst({ where: { id: body?.candidate_id, orgId } });
+            if (!candidate) return jsonResponse(res, { error: 'candidate not found' }, 404);
+            const updated = await prisma.dreamCandidate.update({ where: { id: candidate.id }, data: { publicationStatus: body.decision, rejectionReasons: body.decision === 'rejected' ? [String(body.reason || 'operator_rejected')] : candidate.rejectionReasons, verifierReceipt: { ...(candidate.verifierReceipt || {}), operator_review: { decision: body.decision, reviewer_id: userId, reviewed_at: new Date().toISOString() } } } });
+            return jsonResponse(res, { candidate: updated });
+          } catch (error) { return jsonResponse(res, { error: error.message }, 500); }
+
+        case '/api/cognition/run-cancel':
+          if (req.method !== 'POST') break;
+          try {
+            if (!await canManageCognition(prisma, { orgId, userId, principal })) return jsonResponse(res, { error: 'Resource not found' }, 404);
+            const run = await prisma.cognitionRun.findFirst({ where: { id: body?.run_id, orgId } });
+            if (!run) return jsonResponse(res, { error: 'run not found' }, 404);
+            await prisma.cognitionRun.update({ where: { id: run.id }, data: { status: 'cancelled', cancelledAt: new Date(), terminalReason: 'operator_cancelled' } });
+            return jsonResponse(res, { cancelled: true, run_id: run.id });
+          } catch (error) { return jsonResponse(res, { error: error.message }, 500); }
+
         case '/api/cognition/synthesize-now':
           // Admin-gated manual trigger — runs one tick immediately.
           if (req.method !== 'POST') break;
           try {
             if (!await canManageCognition(prisma, { orgId, userId, principal })) {
               return jsonResponse(res, { error: 'Resource not found' }, 404);
+            }
+            if (process.env.DREAM_WORKFLOW_V2_ENABLED === 'true') {
+              const endpoint = String(process.env.HIVEMIND_DREAM_WORKER_URL || '').replace(/\/$/, '');
+              const secret = process.env.HIVEMIND_DREAM_WORKFLOW_SECRET;
+              if (!endpoint || !secret) return jsonResponse(res, { error: 'durable dreaming is enabled but its Worker connection is not configured' }, 503);
+              const triggerId = `manual-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+              const response = await fetch(`${endpoint}/start`, {
+                method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
+                body: JSON.stringify({ org_id: orgId, trigger: 'manual', trigger_id: triggerId, requested_at: new Date().toISOString(), pipeline_version: 2, triggered_by: userId }),
+                signal: AbortSignal.timeout(15_000),
+              });
+              const receipt = await response.json().catch(() => ({}));
+              if (!response.ok) return jsonResponse(res, { error: receipt.error || 'durable_dream_enqueue_failed' }, response.status);
+              return jsonResponse(res, { triggered: true, async: true, org_id: orgId, pipeline_version: 2, stage: 'queued', ...receipt }, 202);
             }
             if (!cognitionLoop) {
               return jsonResponse(res, { error: 'cognition loop not running (set ENABLE_COGNITION_LOOP!=false and ensure prisma is wired)' }, 503);

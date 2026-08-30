@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-dream-lifecycle",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": { "HIVEMIND_DREAM_API_URL": "https://api.singulancelabs.com", "HIVEMIND_DREAM_INSTANCE_PREFIX": "dream" },
+  "flagship": [{ "binding": "FLAGS", "app_id": "2e89fbd3-7496-459b-a507-f1017d444dd9", "remote": true }],
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "queues": {
+    "producers": [{ "binding": "DREAM_TRIGGER_QUEUE", "queue": "hivemind-dream-trigger" }],
+    "consumers": [{ "queue": "hivemind-dream-trigger", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 8, "dead_letter_queue": "hivemind-dream-trigger-dlq" }]
+  },
+  "workflows": [{ "name": "hivemind-dream-workflow", "binding": "DREAM_WORKFLOW", "class_name": "DreamWorkflow" }],
+  "r2_buckets": [{ "binding": "DREAM_ARTIFACTS", "bucket_name": "hivemind-dream-artifacts" }],
+  "env": {
+    "local": {
+      "name": "hivemind-dream-lifecycle-local",
+      "vars": { "HIVEMIND_DREAM_API_URL": "https://preview-api.singulancelabs.com", "HIVEMIND_DREAM_INSTANCE_PREFIX": "dream-local" },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "queues": {
+        "producers": [{ "binding": "DREAM_TRIGGER_QUEUE", "queue": "hivemind-dream-trigger-local" }],
+        "consumers": [{ "queue": "hivemind-dream-trigger-local", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 8, "dead_letter_queue": "hivemind-dream-trigger-dlq-local" }]
+      },
+      "workflows": [{ "name": "hivemind-dream-workflow-local", "binding": "DREAM_WORKFLOW", "class_name": "DreamWorkflow" }],
+      "r2_buckets": [{ "binding": "DREAM_ARTIFACTS", "bucket_name": "hivemind-dream-artifacts-local" }]
+    }
+  }
+}

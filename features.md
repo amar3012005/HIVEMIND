@@ -174,6 +174,16 @@ verification, and its independent rollback control.
   into completed runs, including through finalize. Tests passed 8/8 and the
   local provider-outage canary remains terminal error with zero publication.
 
+## feature-20260830T091800Z — Deterministic immutable local API build
+
+- Local status: patch `5bab2ada`, merged at `963dd056`; production unchanged.
+- Build: optional Lightpanda/Puppeteer binary downloads no longer block the API
+  image, while package lifecycle scripts and Prisma generation remain enabled.
+- Runtime proof: immutable image
+  `sha256:cf62435628596297a247387c7dd2ccca46323e215ae49056690fcd70f5918d22`
+  runs healthy from `HIVEMIND-local-main` and contains the merged ingestion and
+  Dreaming terminal-state code.
+
 ## feature-20260830T090000Z — Meta-aware PDF quality and preview-read recovery
 
 - Local status: accepted on `codex/knowledge-ingest-workflow-v1`; production and

@@ -828,6 +828,10 @@ async def create_hyper_work_order(
     depends_on: list | None = None,
     wait_for: Dict[str, Any] | None = None,
     handoff: Dict[str, Any] | None = None,
+    agent_instance_id: str = "",
+    workflow_instance_id: str = "",
+    runtime_mode: str = "off",
+    processing_version: int = 1,
 ) -> Optional[Dict[str, Any]]:
     """Create one tenant-scoped work order, idempotently per turn/order key.
 
@@ -845,11 +849,12 @@ async def create_hyper_work_order(
                 INSERT INTO hivemind.hyper_work_orders (
                   org_id, room_id, turn_id, order_key, plan_step_id, depends_on, kind, title, objective,
                   owner_employee_id, owner_slug, owner_lane, selected_skills,
-                  required_evidence, acceptance_criteria, input_snapshot, wait_for, handoff
+                  required_evidence, acceptance_criteria, input_snapshot, wait_for, handoff,
+                  agent_instance_id, workflow_instance_id, runtime_mode, processing_version
                 ) VALUES (
                   $1::uuid, $2::uuid, $3::uuid, $4, NULLIF($5, ''), $6::jsonb, $7, $8, $9,
                   NULLIF($10, '')::uuid, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb,
-                  $17::jsonb, $18::jsonb
+                  $17::jsonb, $18::jsonb, NULLIF($19, ''), NULLIF($20, ''), $21, $22
                 )
                 ON CONFLICT (turn_id, order_key) DO UPDATE
                   SET updated_at = now()
@@ -864,11 +869,41 @@ async def create_hyper_work_order(
                 json.dumps(acceptance_criteria or [], ensure_ascii=False),
                 json.dumps(input_snapshot or {}, ensure_ascii=False),
                 json.dumps(wait_for or {}, ensure_ascii=False),
-                json.dumps(handoff or {}, ensure_ascii=False),
+                json.dumps(handoff or {}, ensure_ascii=False), agent_instance_id[:180],
+                workflow_instance_id[:180], runtime_mode[:32], max(1, int(processing_version or 1)),
             )
         return {"id": str(row["id"]), "status": row["status"], "attempt": int(row["attempt"] or 0)} if row else None
     except Exception as exc:  # migration may not have landed yet; never sink a Room turn
         log.info("create_hyper_work_order unavailable (non-fatal): %s", exc)
+        return None
+
+
+async def upsert_hyper_agent_runtime(
+    *, org_id: str, employee_id: str, agent_instance_id: str,
+    capability_manifest: Dict[str, Any], processing_version: int = 1,
+) -> Optional[Dict[str, Any]]:
+    """Idempotently provision one stable runtime identity for a hired employee."""
+    try:
+        pool = await init_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO hivemind.hyper_agent_runtimes
+                  (org_id, employee_id, agent_instance_id, processing_version, capability_manifest)
+                VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb)
+                ON CONFLICT (employee_id) DO UPDATE SET
+                  capability_manifest = EXCLUDED.capability_manifest,
+                  processing_version = EXCLUDED.processing_version,
+                  updated_at = now()
+                WHERE hivemind.hyper_agent_runtimes.org_id = EXCLUDED.org_id
+                RETURNING agent_instance_id, status, processing_version
+                """,
+                org_id, employee_id, agent_instance_id, max(1, int(processing_version or 1)),
+                json.dumps(capability_manifest or {}, ensure_ascii=False),
+            )
+        return dict(row) if row else None
+    except Exception as exc:
+        log.info("upsert_hyper_agent_runtime unavailable: %s", exc)
         return None
 
 

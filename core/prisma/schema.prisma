@@ -3172,6 +3172,7 @@ model DigitalEmployee {
   creator               User           @relation("UserCreatedEmployees", fields: [createdBy], references: [id])
   events                SlackEvent[]
   intents               ActionIntent[]
+  hyperRuntime          HyperAgentRuntime?
 
   @@unique([orgId, slug])
   @@index([orgId])
@@ -3261,6 +3262,10 @@ model HyperWorkOrder {
   ownerEmployeeId     String?  @map("owner_employee_id") @db.Uuid
   ownerSlug           String?  @map("owner_slug") @db.VarChar(120)
   ownerLane           String?  @map("owner_lane") @db.VarChar(40)
+  agentInstanceId     String?  @map("agent_instance_id") @db.VarChar(180)
+  workflowInstanceId  String?  @map("workflow_instance_id") @db.VarChar(180)
+  runtimeMode         String   @default("off") @map("runtime_mode") @db.VarChar(32)
+  processingVersion   Int      @default(1) @map("processing_version")
   selectedSkills      Json     @default("[]") @map("selected_skills") @db.JsonB
   requiredEvidence    Json     @default("[]") @map("required_evidence") @db.JsonB
   acceptanceCriteria  Json     @default("[]") @map("acceptance_criteria") @db.JsonB
@@ -3287,6 +3292,7 @@ model HyperWorkOrder {
   @@index([hqCycleId, status])
   @@index([orgId, runtimeEpoch, status])
   @@index([status, leaseExpiresAt], map: "hyper_work_orders_status_lease_idx")
+  @@index([agentInstanceId, status], map: "hyper_work_orders_agent_status_idx")
   @@map("hyper_work_orders")
 }
 
@@ -3360,6 +3366,10 @@ model HyperTurn {
   verificationVerdict Json @default("{}") @map("verification_verdict") @db.JsonB
   lastProgressAt DateTime @default(now()) @map("last_progress_at") @db.Timestamptz(6)
   terminalReason String? @map("terminal_reason") @db.Text
+  grokRuntimeMode String @default("off") @map("grok_runtime_mode") @db.VarChar(32)
+  grokRuntimeVersion Int @default(1) @map("grok_runtime_version")
+  grokWorkflowInstanceId String? @map("grok_workflow_instance_id") @db.VarChar(180)
+  activeAgents Json @default("[]") @map("active_agents") @db.JsonB
   room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
   evals          AgentEval[]
   runtimePlaybookRun RuntimePlaybookRun? @relation(fields: [runtimePlaybookRunId], references: [id], onDelete: SetNull)
@@ -3372,6 +3382,29 @@ model HyperTurn {
   @@index([runtimePlaybookRunId, runtimeCheckpointSequence])
   @@index([runtimePlaybookRunId, runtimeStageId, runtimeAttempt])
   @@map("hyper_turns")
+}
+
+/// Stable Cloudflare-backed identity for one organization-scoped employee.
+/// Task context remains Room/Turn scoped; this row contains only capability,
+/// availability and durable runtime projection metadata.
+model HyperAgentRuntime {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId               String   @map("org_id") @db.Uuid
+  employeeId          String   @unique @map("employee_id") @db.Uuid
+  agentInstanceId     String   @unique @map("agent_instance_id") @db.VarChar(180)
+  processingVersion   Int      @default(1) @map("processing_version")
+  status              String   @default("idle") @db.VarChar(24)
+  capabilityManifest  Json     @default("{}") @map("capability_manifest") @db.JsonB
+  preferences         Json     @default("{}") @db.JsonB
+  currentAssignments  Json     @default("[]") @map("current_assignments") @db.JsonB
+  lastHeartbeatAt     DateTime? @map("last_heartbeat_at") @db.Timestamptz(6)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  employee            DigitalEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, employeeId])
+  @@index([orgId, status])
+  @@map("hyper_agent_runtimes")
 }
 
 /// HyperClaim — a durable, queryable claim/hypothesis/synthesis artifact emitted

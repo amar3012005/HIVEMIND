@@ -100,6 +100,7 @@ from .db import (
     mark_hyper_turn_outbox_delivered,
     get_work_room_execution_profile,
     persist_work_room_execution_profile,
+    upsert_hyper_agent_runtime,
 )
 from .hivemind_client import (
     connector_exec_emulated,
@@ -112,6 +113,9 @@ from .hivemind_client import (
 from .hyper.engine import (Director, _openrouter_chat, run_director, evo_reflect_and_merge, run_mention_reply,
                            make_journal_entry, _persona_fields, _evo_recall, _needs_reasoning_disabled,
                            _fallback_model_for)
+from .hyper.grok_runtime import (
+    build_roster_manifest, mode_at_least, normalize_runtime_mode,
+)
 
 log = logging.getLogger(__name__)
 
@@ -2063,6 +2067,11 @@ class RoomTurnRequest(BaseModel):
     # Immutable identity for human Work Room turns. Historical callers remain
     # readable; every new control-plane dispatch supplies this contract.
     execution_identity: Optional[Dict[str, Any]] = None
+    # Cumulative Grok-style runtime mode, latched by the control plane at
+    # admission. Unknown/legacy callers remain on the byte-compatible path.
+    grok_runtime_mode: Optional[str] = None
+    grok_runtime_version: Optional[int] = Field(default=1, ge=1, le=1000)
+    grok_workflow_instance_id: Optional[str] = Field(default=None, max_length=180)
 
 
 class RoomTurnResponse(BaseModel):
@@ -3813,6 +3822,46 @@ async def _orchestrate_single_agent(
     async def _emit(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return await _emit_event(req.callback_url, req.turn_id, ev)
 
+    async def _work_order_via_real_agent(
+        owner: Dict[str, Any], order: Dict[str, Any], bounded_context: str,
+    ) -> Dict[str, Any]:
+        """Execute a planned WorkOrder with the selected participant's own agent.
+
+        This is intentionally fail-closed in real_tools+ modes: an unavailable
+        agent is a repairable assignment failure, never permission to simulate
+        that teammate with the legacy single-call worker.
+        """
+        instance_id = str(owner.get("_agent_instance_id") or "")
+        await _emit({
+            "t": "agent_assignment_started",
+            "agent": owner.get("slug"),
+            "agent_instance_id": instance_id,
+            "work_order_key": order.get("id") or order.get("title"),
+        })
+        agent = await _build_agent_for_room(
+            req.room_id, owner, user_id=req.user_id, org_id=req.org_id,
+            project_id=req.project_id, allow_web_tools=True,
+        )
+        instruction = (
+            "You are a persistent hired agent working one durable Room assignment. "
+            "Use your real tools when the assignment requires evidence or an external system. "
+            "Do not pretend another agent acted. Do not claim an external write without its tool receipt. "
+            "Return the actual bounded work product plus unresolved gaps.\n\n"
+            + bounded_context[:12000]
+        )
+        reply = await agent(Msg(name="user", content=instruction, role="user"))
+        text = _msg_to_text(reply).strip()
+        if not text:
+            raise RuntimeError(f"agent {owner.get('slug')} returned no durable result")
+        await _emit({
+            "t": "agent_assignment_completed",
+            "agent": owner.get("slug"),
+            "agent_instance_id": instance_id,
+            "work_order_key": order.get("id") or order.get("title"),
+            "status": "submitted",
+        })
+        return {"text": text, "evidence": [], "artifacts": [], "usage": {}}
+
     # Quality mode → model combo. 'best' = all gpt-oss-120b (max rigor). 'auto' =
     # cheap gather + debate, strong 120b SYNTHESIS (the synth anchors quality; the
     # gather model barely affects the deliverable — proven by the combo A/B). req.
@@ -4010,6 +4059,9 @@ async def _orchestrate_single_agent(
                 else None
             ),
             "agentic_task_hook": _agentic_task_via_agent if HYPER_AGENTIC_ENGINE else None,
+            "work_agent_hook": _work_order_via_real_agent,
+            "grok_runtime_mode": normalize_runtime_mode(req.grok_runtime_mode),
+            "grok_runtime_version": max(1, int(req.grok_runtime_version or 1)),
         }
         if _room_kind == "campaign":
             result = await _build_campaign_director(director_kwargs, req.campaign_brief).run()
@@ -4669,6 +4721,34 @@ async def _orchestrate(req: RoomTurnRequest) -> RoomTurnResponse:
             {"t": "seal", "cost_tokens": 0, "status": "failed"},
         )
         return RoomTurnResponse(ok=False, cost_tokens=0, status="failed")
+
+    grok_mode = normalize_runtime_mode(req.grok_runtime_mode)
+    grok_version = max(1, int(req.grok_runtime_version or 1))
+    if mode_at_least(grok_mode, "shadow_roster"):
+        roster_manifest = build_roster_manifest(participants, req.org_id, grok_version)
+        provisioned = []
+        for employee, manifest in zip(participants, roster_manifest):
+            receipt = None
+            if mode_at_least(grok_mode, "persistent_agents"):
+                receipt = await upsert_hyper_agent_runtime(
+                    org_id=req.org_id,
+                    employee_id=str(employee.get("id") or ""),
+                    agent_instance_id=str(manifest["agent_instance_id"]),
+                    capability_manifest=manifest,
+                    processing_version=grok_version,
+                )
+                if not receipt:
+                    raise RuntimeError(
+                        f"persistent agent runtime unavailable for {employee.get('slug') or employee.get('id')}"
+                    )
+            provisioned.append({**manifest, "persistent": bool(receipt)})
+            employee["_agent_instance_id"] = manifest["agent_instance_id"]
+        await _emit_event(req.callback_url, req.turn_id, {
+            "t": "roster_evaluated",
+            "runtime_mode": grok_mode,
+            "processing_version": grok_version,
+            "agents": provisioned,
+        })
 
     from .hyper.skills import resolve_turn_room_kind
     _room_kind = resolve_turn_room_kind(req.room_mode or "", req.task_tag or "", req.room_goal or "", req.user_message or "")

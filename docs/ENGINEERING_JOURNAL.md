@@ -1315,3 +1315,32 @@ slides that find no unique anchor get a page instead of `null`.
   co-mention into a verified relationship.
 - Verification: `node --test tests/unit/kb-upload-integrity.test.js` reported
   `tests 13; pass 13; fail 0`.
+
+### Preview frontend accepted release
+
+- Source: parent/local commit `0b2417f95027eff093a7b79c2f7a7a0c8650d288`
+  with pushed frontend commit `bab779a29e95d10fee48340103c5c75f86440c91`.
+- Target: isolated Worker `hivemind-web-preview`; production Worker and routes
+  were not modified. Preview API and site host values were explicitly baked
+  into the artifact.
+- The first uploaded version lacked the static-assets binding. Its live 1101
+  canary failed, so it was immediately rolled back to the prior version. A
+  corrected version was uploaded only after the dry run showed `env.ASSETS`.
+- Accepted Worker version:
+  `9e20f246-c3ba-47cb-ba7c-e42f72319deb` at 100% preview traffic.
+- Live verification:
+
+  ```text
+  next.preview.singulancelabs.com/hivemind/login = 200
+  live asset = /static/js/main.a9739072.js
+  preview API URL present = true
+  preview site host present = true
+  removed top-bar health label present = false
+  preview-api.singulancelabs.com/health = 200
+  localhost:3001/health = 200
+  localhost:3000/health = 200
+  ```
+
+- Unauthenticated proxy probes return 401 rather than the former 503, which is
+  the expected authorization boundary. Authenticated UI requests use the same
+  repaired local control-plane/Core credentials.

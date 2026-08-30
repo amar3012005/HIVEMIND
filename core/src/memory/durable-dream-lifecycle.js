@@ -166,6 +166,26 @@ export class DurableDreamLifecycle {
     }
   }
 
+  async failRun(input) {
+    const runId = String(input?.run_id || '');
+    if (!UUID.test(runId)) throw Object.assign(new Error('invalid_run_id'), { retryable: false });
+    const run = await this.prisma.cognitionRun.findUnique({ where: { id: runId } });
+    if (!run) throw Object.assign(new Error('run_not_found'), { retryable: false });
+    if (TERMINAL.has(run.status)) return this._receipt(run);
+    const failedStage = String(input?.failed_stage || run.currentStage || 'unknown').slice(0, 48);
+    const failureCode = String(input?.failure_code || 'workflow_retry_exhausted').replace(/[^a-z0-9_-]/gi, '_').slice(0, 160);
+    const finishedAt = new Date();
+    const updated = await this.prisma.cognitionRun.update({
+      where: { id: run.id },
+      data: {
+        status: 'error', currentStage: failedStage, recoveryStatus: 'retry_exhausted',
+        terminalReason: failureCode, heartbeatAt: finishedAt, finishedAt,
+        runMs: Math.max(0, finishedAt.getTime() - run.startedAt.getTime()),
+      },
+    });
+    return this._receipt(updated);
+  }
+
   async _admit(run) { return this._receipt(run); }
 
   async _select_subjects(run) {

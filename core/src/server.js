@@ -6313,6 +6313,7 @@ exit \$RC
       }
       if (pathname === '/internal/dream/admit') return jsonResponse(res, await lifecycle.admit(dreamBody), 202);
       if (pathname === '/internal/dream/stage') return jsonResponse(res, await lifecycle.executeStage(dreamBody));
+      if (pathname === '/internal/dream/fail') return jsonResponse(res, await lifecycle.failRun(dreamBody));
       if (pathname === '/internal/dream/cancel') {
         const run = await prisma.cognitionRun.findUnique({ where: { id: dreamBody?.run_id } });
         if (!run || run.orgId !== dreamBody?.org_id) return jsonResponse(res, { error: 'run_not_found', retryable: false }, 404);

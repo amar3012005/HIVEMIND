@@ -1352,6 +1352,18 @@ slides that find no unique anchor get a page instead of `null`.
 - Accepted release: pending local branch integration and preview Worker canary;
   production remains unchanged.
 
+### Acceptance completion
+
+- Parent/backend commit `a6b6a8396556f6ac9db545e38a0820179ffaa718`
+  was pushed to `origin/codex/knowledge-ingest-workflow-v1`.
+- Preview Worker version `3cb75299-5e9d-4457-a1bb-079a3f45450b` was deployed
+  at 100% to isolated Worker `hivemind-web-preview`. Browser DOM verification
+  showed the approved-email textbox and `Email one-time sign-in link` button,
+  with no Google sign-in control. The live asset was
+  `/static/js/main.882089b5.js`.
+- Live checks returned 200 for the preview login page, preview API health, local
+  control-plane health, and local Core health. Production remained unchanged.
+
 ### Prompt-contract regression lock
 
 - Added source-level regression checks that preserve exact-quote grounding,

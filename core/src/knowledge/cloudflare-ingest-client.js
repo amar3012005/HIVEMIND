@@ -2,6 +2,10 @@ import { safeUploadFilename } from './upload-contract.js';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function enabledByEnvironment() {
   return process.env.HIVEMIND_LOCAL_MODE === 'true'
     && process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED === 'true';
@@ -63,22 +67,38 @@ export class CloudflareKnowledgeIngestClient {
   async persistFile({ orgId, checksum, filename, fileBuffer }) {
     const safeName = safeUploadFilename(filename);
     const objectKey = `org/${orgId}/sha256/${checksum}/${encodeURIComponent(safeName)}`;
-    const response = await this._request(`/objects/${objectKey}`, {
-      method: 'PUT',
-      headers: {
-        'content-type': 'application/octet-stream',
-        'x-hivemind-sha256': checksum,
-        'x-hivemind-filename': encodeURIComponent(safeName),
-      },
-      body: fileBuffer,
-    }, 120_000);
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || !body?.key) {
-      throw Object.assign(new Error(body?.error || `R2 source upload failed with HTTP ${response.status}`), {
-        code: 'SOURCE_OBJECT_STORE_FAILED', retryable: response.status >= 500,
-      });
+    const attempts = Math.max(1, Number(process.env.KNOWLEDGE_INGEST_SOURCE_UPLOAD_ATTEMPTS || 3));
+    const timeoutMs = Math.max(30_000, Number(process.env.KNOWLEDGE_INGEST_SOURCE_UPLOAD_TIMEOUT_MS || 300_000));
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const response = await this._request(`/objects/${objectKey}`, {
+          method: 'PUT',
+          headers: {
+            'content-type': 'application/octet-stream',
+            'x-hivemind-sha256': checksum,
+            'x-hivemind-filename': encodeURIComponent(safeName),
+          },
+          body: fileBuffer,
+        }, timeoutMs);
+        const body = await response.json().catch(() => ({}));
+        if (response.ok && body?.key) return { objectKey: body.key, etag: body.etag || null };
+        lastError = Object.assign(new Error(body?.error || `R2 source upload failed with HTTP ${response.status}`), {
+          code: 'SOURCE_OBJECT_STORE_FAILED', retryable: response.status >= 500,
+        });
+        if (!lastError.retryable) throw lastError;
+      } catch (error) {
+        lastError = Object.assign(error instanceof Error ? error : new Error(String(error)), {
+          code: 'SOURCE_OBJECT_STORE_FAILED',
+          retryable: error?.retryable !== false,
+        });
+        if (!lastError.retryable) throw lastError;
+      }
+      if (attempt < attempts) await sleep(Math.min(5000, 500 * (2 ** (attempt - 1))));
     }
-    return { objectKey: body.key, etag: body.etag || null };
+    throw lastError || Object.assign(new Error('R2 source upload failed'), {
+      code: 'SOURCE_OBJECT_STORE_FAILED', retryable: true,
+    });
   }
 
   async enqueue({ orgId, trackerJobId, processingVersion }) {

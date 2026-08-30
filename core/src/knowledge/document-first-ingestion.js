@@ -11,6 +11,11 @@
  */
 
 import crypto from 'crypto';
+import { buildDocumentParseProvenance } from './document-parse-provenance.js';
+import {
+  captureDocumentProjection,
+  reconcileDocumentProjection,
+} from './document-projection-replacement.js';
 import { runWithOrg, currentOrg } from '../db/prisma.js';
 import { memoryChatFetch, memoryLLMRoute } from '../llm/groq-fallback.js';
 import { chatCompletion, chatCompletionWithFallback } from './enterprise/litellm-client.js';
@@ -3458,11 +3463,15 @@ Every item must include a non-empty content field and one or more valid support_
           // memory citations expose the same classification after re-upload.
           documentType,
           ingestMode,
+          ...buildDocumentParseProvenance({
+            parseResult,
+            documentType,
+            documentTypeConfidence: documentClassification.confidence,
+          }),
           // Backfill canonical identity on legacy rows (idempotent).
           canonicalIngestKey: _canonicalIngestKey,
           sourceExternalId: _scopedSourceId,
           contentHash: checksum,
-          parseMetadata: { ...(parseResult.metadata || {}), document_type: documentType, document_type_confidence: documentClassification.confidence },
           tags: _docTags,
         }
       });
@@ -3741,6 +3750,12 @@ Every item must include a non-empty content field and one or more valid support_
       };
     }
 
+    // Capture the old projection before a forced replacement. It remains live
+    // until the new projection, citations, entities, and claims are durable.
+    const previousProjectionMemoryIds = forceReprocess && !orgIsRemote(orgId)
+      ? await captureDocumentProjection(this.db, knowledgeDoc.id)
+      : [];
+
     // Step 6: Promote candidate memories
     emit('promoting', 80, { segments: segments.length });
     const _tPromote = Date.now();
@@ -3796,6 +3811,19 @@ Every item must include a non-empty content field and one or more valid support_
       this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
       this._structureClaimsAsync({ memories: promoted.memories, orgId }),
     ]);
+    if (previousProjectionMemoryIds.length && !promoted.coverage?.promotion_failed) {
+      const currentProjectionMemoryIds = promoted.memories.map((memory) => memory?.id).filter(Boolean);
+      if (currentProjectionMemoryIds.length) {
+        const replacement = await reconcileDocumentProjection({
+          db: this.db,
+          vectorStore: this.memoryGraphEngine?.vectorStore,
+          documentId: knowledgeDoc.id,
+          previousMemoryIds: previousProjectionMemoryIds,
+          currentMemoryIds: currentProjectionMemoryIds,
+        });
+        promoted.coverage = { ...(promoted.coverage || {}), projection_replacement: replacement };
+      }
+    }
     const _msPromote = Date.now() - _tPromote;
     ingestDiagnostic.info(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
     // Per-stage drop counter (#3 observability): how many segments survived to

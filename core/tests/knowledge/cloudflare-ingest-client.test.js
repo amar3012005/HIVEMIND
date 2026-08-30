@@ -9,6 +9,7 @@ async function withWorkflowEnv(fn) {
   const names = [
     'HIVEMIND_LOCAL_MODE', 'KNOWLEDGE_INGEST_WORKFLOW_ENABLED',
     'KNOWLEDGE_INGEST_WORKFLOW_URL', 'KNOWLEDGE_INGEST_WORKFLOW_SECRET',
+    'KNOWLEDGE_INGEST_SOURCE_UPLOAD_ATTEMPTS', 'KNOWLEDGE_INGEST_SOURCE_UPLOAD_TIMEOUT_MS',
   ];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   Object.assign(process.env, {
@@ -84,5 +85,25 @@ test('R2 reads reject an object whose ETag changed after admission', async () =>
       () => client.getObject('org/object', { expectedEtag: 'admitted-etag' }),
       (error) => error.code === 'SOURCE_OBJECT_INTEGRITY_FAILED' && error.retryable === false,
     );
+  });
+});
+
+test('R2 source admission retries an idempotent object key after a transient timeout', async () => {
+  await withWorkflowEnv(async () => {
+    process.env.KNOWLEDGE_INGEST_SOURCE_UPLOAD_ATTEMPTS = '2';
+    process.env.KNOWLEDGE_INGEST_SOURCE_UPLOAD_TIMEOUT_MS = '30000';
+    let attempts = 0;
+    const client = new CloudflareKnowledgeIngestClient({
+      fetchImpl: async () => {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('timed out'), { code: 23 });
+        return Response.json({ key: 'org/recovered', etag: 'etag-recovered' });
+      },
+    });
+    const persisted = await client.persistFile({
+      orgId: ORG_ID, checksum: 'b'.repeat(64), filename: 'large.pdf', fileBuffer: Buffer.from('%PDF'),
+    });
+    assert.equal(attempts, 2);
+    assert.deepEqual(persisted, { objectKey: 'org/recovered', etag: 'etag-recovered' });
   });
 });

@@ -201,7 +201,8 @@ export class KnowledgeUploadJobStore {
         ...(processingVersion == null ? {} : { processingVersion: Number(processingVersion) }),
       }, data: {
       status: 'failed', stage: 'failed', progress: 100,
-      errorCode: error?.code || 'INGEST_FAILED', errorMessage: String(error?.message || error || 'Ingestion failed').slice(0, 2000),
+      errorCode: String(error?.code || 'INGEST_FAILED').slice(0, 80),
+      errorMessage: String(error?.message || error || 'Ingestion failed').slice(0, 2000),
       completedAt: new Date(),
     } });
     // A delayed failure from workflow version N must not release version N+1's

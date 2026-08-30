@@ -1145,3 +1145,16 @@ slides that find no unique anchor get a page instead of `null`.
   file was copied from the permanent integration worktree into the existing
   local container and that container restarted healthy. This is runtime test
   evidence, not an immutable-image acceptance receipt.
+
+## 2026-08-30 UTC — Dreaming Workflow exhaustion closes PostgreSQL run
+
+- State: patch `e924850a`, local merge `f582bb5d`, and isolated Worker version
+  `b6c01ba1-0420-44e4-b36d-26b04cb416e5`; production remains untouched.
+- The Workflow now writes a durable terminal-failure receipt after stage retries
+  are exhausted. The authenticated backend transition is idempotent and never
+  overwrites completed, cancelled, or already failed runs.
+- Verification: lifecycle unit tests passed 7/7, Worker TypeScript passed, and
+  Wrangler local dry-run resolved only local bindings. Provider-outage run
+  `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` transitioned from running to error at
+  `generate-candidates` with `recovery_status=retry_exhausted`, a safe terminal
+  reason, and `finished_at` populated. No candidate was published.

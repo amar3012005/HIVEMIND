@@ -748,3 +748,22 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Rollback: disable `knowledge_ingest_workflow_v1` to stop new Workflow
   admissions. Core rollback image `sha-81239791` remains the immediate code
   rollback without changing Control Plane, Employees, frontend, or tenant data.
+
+## a4b0448c — canonical entity guarantee and Workers AI BGE-M3 (Core only)
+
+- Canonical SHA: `a4b0448cc42b7ea7c98d656efaa9a640798a34f0`; frontend
+  remained `93b15206d276c798993d57a63fd5694ff9609685`; migrations: none.
+- Manifest: `/root/releases/manifests/a4b0448c/20260830T180454Z/RELEASE_MANIFEST.json`.
+  Running Core image: `hivemind/core-api:sha-a4b0448c`, digest
+  `sha256:cbee2ccca811c70e196f04a7258521967430ea8836879206ed701befb71f735e`.
+- Scope: Core only. Exact source-supported entity names are now mandatory at
+  the canonical promotion boundary and survive every downstream projection.
+  Cloudflare Workers AI `@cf/baai/bge-m3` is primary through AI Gateway;
+  OpenRouter `baai/bge-m3` is secondary.
+- Acceptance: 20/20 contract tests plus 3/3 focused entity/provider tests;
+  live Workers AI and post-release factory probes returned finite 1024-dim
+  vectors; live entity canary retained typed person/product names; public API
+  health and login passed; fresh critical-log count was zero.
+- Rollback: governor-preserved Core image
+  `sha256:900a1f55eb1884d5bbb65773d972dc5c4d05ed12c9629c42ff85e07c9eb2b3c1`
+  and env backup `/root/hivemind/.env.before-cf-bge-20260830T180445Z`.

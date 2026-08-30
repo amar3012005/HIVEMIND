@@ -1002,3 +1002,34 @@ slides that find no unique anchor get a page instead of `null`.
 - Audited Day 1 without mutation: `day1_first_move_v1` is enabled with
   `default_variation=on` and zero targeting rules; production backend master
   gate is true. No deployment was required for either check.
+
+## 2026-08-30 UTC — exact canonical entities and Workers AI BGE-M3 accepted
+
+- Committed and deployed Core SHA `a4b0448cc42b7ea7c98d656efaa9a640798a34f0`.
+  The canonical promotion schema now requires a subject and entity array, and
+  the materializer deterministically merges source-supported generated
+  entities, the claim subject, and relationship endpoints before tags,
+  metadata, vectors, evidence metadata, and canonical projection are written.
+- Root cause: this was a schema/materialization gap, not merely model quality.
+  The prompt requested names, but optional output fields and disconnected
+  projection paths allowed a valid model response to lose a query-worthy name.
+- Embeddings: production now uses Cloudflare Workers AI
+  `@cf/baai/bge-m3` through AI Gateway `hivemind-prod`, with OpenRouter
+  `baai/bge-m3` as the same-model secondary. Provider-local timeouts now fail
+  over; caller cancellation remains fail-fast.
+- Verification commands: `node --test tests/unit/embedding-fallback-contract.test.js
+  tests/claim-structuring-rows.test.js tests/unit/kb-upload-integrity.test.js`
+  reported `tests 20; pass 20; fail 0`; focused materialization tests reported
+  `tests 3; pass 3; fail 0`; all changed files passed `node --check` and
+  `git diff --check`.
+- Production proof: pre-release Workers AI probe returned HTTP 200 and a
+  1024-dimensional vector. Post-release factory acceptance logged
+  `cloudflare -> openrouter`, returned a finite 1024-dimensional vector, and
+  materialized exactly `Apple Vision Pro/product` and `Amira Patel/person`
+  while rejecting an unsupported invented entity. Public login and API health
+  passed; fresh critical-log count was zero.
+- Release: governor session `codex-cf-bge-entity`, Core-only manifest
+  `/root/releases/manifests/a4b0448c/20260830T180454Z/RELEASE_MANIFEST.json`.
+  No frontend, Control Plane, Employees, database, Flagship, Worker, or local
+  deployment setting changed. Environment rollback backup:
+  `/root/hivemind/.env.before-cf-bge-20260830T180445Z`.

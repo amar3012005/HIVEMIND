@@ -138,3 +138,21 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Day 1 audit: production `day1_first_move_v1` is enabled, default-on, and has
   no targeting rules. The production `HIVEMIND_D1_WORKFLOW_ENABLED` backend
   gate is also true, so Day 1 is enabled for every eligible user.
+
+## feature-20260830T181000Z — Exact canonical entities and Cloudflare BGE-M3
+
+- Production Core release `a4b0448cc42b7ea7c98d656efaa9a640798a34f0`
+  makes supported exact subject/entity names a default invariant of canonical
+  knowledge-memory promotion; no feature flag is required for correctness.
+- The generator schema requires `subject` and `entities`. The canonical
+  materializer merges supported declared entities, subject, and relationship
+  endpoints before memory tags, metadata, evidence metadata, vector payloads,
+  and central/embedded/hybrid/BYOD entity projection.
+- Production embedding order is Cloudflare Workers AI
+  `@cf/baai/bge-m3` through `hivemind-prod`, then OpenRouter
+  `baai/bge-m3`. Both emit 1024-dimensional BGE-M3 vectors; timeout failover is
+  enabled without weakening caller cancellation.
+- Verified with 23 focused tests, a live Workers AI preflight, a post-release
+  finite-vector canary, typed exact-name materialization, public checks, and a
+  clean critical-log scan. No frontend, Flagship targeting, Cloudflare
+  Workflow resource, database, or local deployment configuration changed.

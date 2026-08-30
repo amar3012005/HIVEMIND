@@ -971,7 +971,6 @@ slides that find no unique anchor get a page instead of `null`.
 - Safety decision: public pages remain discoverable while training/fine-tuning
   is disallowed by content signals and private hosts are `noindex`. A Cloudflare
   crawler guard remains deferred until production Worker verification.
-
 ## 2026-08-29 UTC — enterprise canonical ingestion lifecycle started
 
 - State: Started
@@ -1034,3 +1033,54 @@ slides that find no unique anchor get a page instead of `null`.
   gates are green.
 - Rollback: disable Flagship `knowledge_ingest_workflow_v1` or set
   `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. No production deployment ran.
+## 2026-08-30 UTC — public AI discovery policy accepted in production
+
+- State: committed and accepted. Parent `fe71aa3c173359659e0a3144df9aef3c0fde6eda`;
+  Da-vinci `main` `93b15206d276c798993d57a63fd5694ff9609685`; Worker
+  `hivemind-web` version `acc99047-4b86-41ca-b1b4-d00c55d6c75e`.
+- Verification: public robots/llms/source-guide paths returned 200; private
+  discovery paths returned 403; private login HTML returned `noindex`; API
+  health returned 200.
+- Cloudflare WAF ruleset `06fb27e2007640bea0a590a353797322` blocks only four
+  discovery paths on private Worker hostnames. Public marketing traffic remains
+  available. The governed canonical service release `40e3b3d1` completed with
+  Core, Control Plane, and Employees healthy; no migrations occurred.
+
+## 2026-08-30 UTC — durable Dreaming v2 session candidate
+
+- State: implemented and statically verified on `codex/dream-lifecycle-v2` in
+  `P:\HIVEMIND-worktrees\dream-lifecycle-v2`; local integration and runtime
+  acceptance remain pending. Production was not touched.
+- Added an isolated Cloudflare Cron/Queue/DLQ/Workflow/R2 package, fail-closed
+  Flagship evaluation, authenticated internal stage callbacks, PostgreSQL
+  checkpoints/candidates/profiles/revisions, conservative visibility inheritance,
+  deterministic replay healing, review APIs, notifications, and additive UI state.
+- Verification completed before commit: Prisma validate/generate passed; Node
+  syntax checks passed; focused cognition tests passed 16/16; Worker TypeScript
+  passed; Wrangler local dry-run resolved only `-local` resources; the Da-vinci
+  optimized production build compiled successfully.
+- Agent Memory and code-review-graph MCP capabilities were not exposed to this
+  session. Git, current code, tests, and repository documents were used as the
+  authority; no unverified completion or secret was recorded externally.
+- Three broader Windows-only test entrypoints (`dream-retention`,
+  `entity-overdream-guard`, and `recall-dreams-first`) could not load because
+  `singulance-amr` has no `win32-x64` prebuilt binary. The remaining focused
+  suite passed; these three require the Linux local-container acceptance run.
+
+## 2026-08-30 UTC — durable Dreaming v2 integrated into local truth
+
+- State: pushed to `singulance-local` at merge `2b2510a3`; frontend source is
+  `4f0f24bcf02c06fd509e6148f7e76b32170fc167`. Production remains unchanged.
+- Merged-state checks: focused cognition tests passed 16/16 after Prisma client
+  generation; schema validation, Worker TypeScript, Wrangler local dry-run, and
+  the optimized Da-vinci build passed.
+- Cloudflare local resources created: `hivemind-dream-trigger-local`,
+  `hivemind-dream-trigger-dlq-local`, `hivemind-dream-artifacts-local`, and
+  `hivemind-dream-workflow-local`. Worker version
+  `f01a3baa-b481-4ba0-bdaf-ecb36563198f` is deployed. All eight local Flagship
+  flags default off and target only the documented test organization.
+- Runtime blocker: the shared `hivemind-api` container currently runs the
+  parallel ingestion session's unmerged `knowledge-workflow-local` image.
+  Rebuilding it here would overwrite another session's test runtime, so database
+  migration, shared-secret wiring, browser E2E, restart injection, and local
+  container acceptance are intentionally deferred until that session integrates.

@@ -292,6 +292,10 @@ export class ResidentAgentScheduler {
           this.logger?.log?.(`[gov-scheduler] early dream org=${o.id.slice(0,8)} — ${hot.length} hot cluster(s)`);
         }
         try {
+          if (process.env.DREAM_WORKFLOW_V2_ENABLED === 'true') {
+            await this._enqueueDurableDream(o.id, 'dirty', `dirty-${Math.floor(now / this.earlyCooldownMs)}`);
+            continue;
+          }
           await this.runManager.runFullCycle({
             orgId: o.id,
             scope: 'organization',
@@ -308,6 +312,20 @@ export class ResidentAgentScheduler {
     } finally {
       this.earlyInFlight = false;
     }
+  }
+
+  async _enqueueDurableDream(orgId, trigger, triggerId) {
+    const endpoint = String(process.env.HIVEMIND_DREAM_WORKER_URL || '').replace(/\/$/, '');
+    const secret = process.env.HIVEMIND_DREAM_WORKFLOW_SECRET;
+    if (!endpoint || !secret) throw new Error('durable_dream_worker_not_configured');
+    const response = await fetch(`${endpoint}/start`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ org_id: orgId, trigger, trigger_id: triggerId, requested_at: new Date().toISOString(), pipeline_version: 2 }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`durable_dream_enqueue_${response.status}`);
+    return response.json();
   }
 
   /**

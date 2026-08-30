@@ -77,3 +77,29 @@ verification, and its independent rollback control.
   today because it mixes Vitest with Node's runner, references retired absolute
   paths/modules, and requires a Linux-only AMR binary. The focused ingestion
   suite and local Linux container runtime are green.
+## feature-20260830T004500Z — Public AI discovery policy
+
+- Production status: deployed and verified. Public `singulancelabs.com` serves
+  `robots.txt`, `llms.txt`, `llms-full.txt`, and sitemap guidance for indexing,
+  citation, retrieval, and direct AI-user visits; training/fine-tuning is
+  declined.
+- Privacy boundary: `next.singulancelabs.com`,
+  `admin.hivemind.singulancelabs.com`, and `icarus.singulancelabs.com` deny
+  discovery-file paths through Cloudflare WAF ruleset
+  `06fb27e2007640bea0a590a353797322`; application HTML remains `noindex`.
+- Release: parent `fe71aa3c173359659e0a3144df9aef3c0fde6eda`; frontend
+  `93b15206d276c798993d57a63fd5694ff9609685`; Worker `hivemind-web` version
+  `acc99047-4b86-41ca-b1b4-d00c55d6c75e`.
+- Rollback: roll back the Worker and disable/delete only that WAF ruleset; no
+  database or customer data changed.
+
+## feature-20260830T150000Z — Durable Dreaming and Subject Profiles v2
+
+- Local status: integrated into `singulance-local` at `2b2510a3`; shared backend
+  runtime acceptance remains pending because the parallel ingestion session owns
+  the current `knowledge-workflow-local` API container.
+- Gate: `DREAM_WORKFLOW_V2_ENABLED` plus fail-closed `dream_workflow_v2`.
+- Cloudflare: isolated Workflow, Queue/DLQ, Cron, R2, Flagship, and existing AI Gateway.
+- Data: additive checkpoints, candidates, typed derivation receipts, and immutable generic subject-profile revisions.
+- Compatibility: existing cognition/profile payloads are unchanged; v2 fields and routes are additive.
+- Promotion: shared-runtime local acceptance is required before production governance.

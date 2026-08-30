@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import {
   canonicalKnowledgeMode, materializeCanonicalKnowledge, normalizePredicate,
   prepareCanonicalProjection, verifyCanonicalProjectionSignature,
@@ -52,6 +53,14 @@ test('Uwe canary resolves bounded title pronoun and local tomorrow', () => {
   assert.equal(result.claims[0].object.name, 'Deep Learning');
   assert.equal(result.claims[0].validFrom, '2026-08-31');
   assert.equal(result.claims[0].assertionStatus, 'user_asserted');
+});
+
+test('claim reads are reserved for read/full modes in the server contract', () => {
+  const server = fs.readFileSync(new URL('../../src/server.js', import.meta.url), 'utf8');
+  const route = server.slice(server.indexOf('const claimsMatch = pathname.match'), server.indexOf('const relsMatch = pathname.match'));
+  assert.match(route, /canonicalProjectionClient\.modeFor/);
+  assert.match(route, /claimsMode !== 'read' && claimsMode !== 'full'/);
+  assert.match(route, /Not found/);
 });
 
 test('Uwe repair upgrades a generic taught object hint to technology', () => {

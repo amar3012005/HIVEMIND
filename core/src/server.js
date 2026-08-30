@@ -10434,6 +10434,12 @@ exit \$RC
       const claimsMatch = pathname.match(/^\/api\/memories\/([^/]+)\/claims$/);
       if (claimsMatch && req.method === 'GET') {
         if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/claims')) return;
+        const claimsMode = await canonicalProjectionClient.modeFor({ orgId, userId });
+        if (claimsMode !== 'read' && claimsMode !== 'full') {
+          // Flag-off/write-only callers retain the pre-Phase-0 surface: the
+          // additive claims endpoint is intentionally undiscoverable.
+          return jsonResponse(res, { error: 'Not found' }, 404);
+        }
         const memoryId = claimsMatch[1];
         try {
           const claimsAccess = await buildAccessContext(userId, orgId).catch(() => null);

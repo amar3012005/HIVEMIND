@@ -136,3 +136,11 @@ verification, and its independent rollback control.
 - Runtime proof: run `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` is terminal error
   with `recovery_status=retry_exhausted`; lifecycle tests passed 7/7 and Worker
   TypeScript validation passed. Production was not modified.
+
+## feature-20260830T042000Z — Immutable terminal Dreaming state
+
+- Local status: patch `718b0117`, merged to `singulance-local` at `c314c713`;
+  isolated Worker version `7c21bf84-11b3-4b66-8126-6e679da944a1`.
+- Behavior: delayed Cloudflare retries cannot convert failed or cancelled runs
+  into completed runs, including through finalize. Tests passed 8/8 and the
+  local provider-outage canary remains terminal error with zero publication.

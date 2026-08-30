@@ -1,0 +1,68 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-canonical-projection-local-root",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": {
+    "ENVIRONMENT": "local",
+    "HIVEMIND_CORE_URL": "http://127.0.0.1:3000",
+    "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
+    "CANONICAL_KNOWLEDGE_ENABLED": "false"
+  },
+  "flagship": [{
+    "binding": "FLAGS",
+    "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
+    "remote": true
+  }],
+  "queues": {
+    "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-local" }],
+    "consumers": [{
+      "queue": "hivemind-canonical-projection-local",
+      "max_batch_size": 10,
+      "max_batch_timeout": 5,
+      "max_retries": 5,
+      "dead_letter_queue": "hivemind-canonical-projection-dlq-local",
+      "max_concurrency": 5,
+      "retry_delay": 30
+    }]
+  },
+  "workflows": [{
+    "name": "hivemind-canonical-projection-workflow-local",
+    "binding": "PROJECTION_WORKFLOW",
+    "class_name": "CanonicalProjectionWorkflow"
+  }],
+  "env": {
+    "local": {
+      "name": "hivemind-canonical-projection-local",
+      "vars": {
+        "ENVIRONMENT": "local",
+        "HIVEMIND_CORE_URL": "https://preview-api.singulancelabs.com",
+        "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
+        "CANONICAL_KNOWLEDGE_ENABLED": "false"
+      },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "queues": {
+        "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-local" }],
+        "consumers": [{ "queue": "hivemind-canonical-projection-local", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-canonical-projection-dlq-local", "max_concurrency": 5, "retry_delay": 30 }]
+      },
+      "workflows": [{ "name": "hivemind-canonical-projection-workflow-local", "binding": "PROJECTION_WORKFLOW", "class_name": "CanonicalProjectionWorkflow" }]
+    },
+    "production": {
+      "name": "hivemind-canonical-projection-production",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "HIVEMIND_CORE_URL": "https://api.singulancelabs.com",
+        "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
+        "CANONICAL_KNOWLEDGE_ENABLED": "false"
+      },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "queues": {
+        "producers": [{ "binding": "PROJECTION_QUEUE", "queue": "hivemind-canonical-projection-production" }],
+        "consumers": [{ "queue": "hivemind-canonical-projection-production", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "hivemind-canonical-projection-dlq-production", "max_concurrency": 5, "retry_delay": 30 }]
+      },
+      "workflows": [{ "name": "hivemind-canonical-projection-workflow-production", "binding": "PROJECTION_WORKFLOW", "class_name": "CanonicalProjectionWorkflow" }]
+    }
+  }
+}

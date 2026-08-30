@@ -1080,6 +1080,35 @@ slides that find no unique anchor get a page instead of `null`.
   governor image rollback. Env backup:
   `/root/hivemind/.env.pre-phase0-20260830T1933Z`.
 
+## 2026-08-30 UTC — Durable Cloudflare ingestion enabled globally
+
+- Production mutation: Flagship app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`, flag
+  `knowledge_ingest_workflow_v1`, changed from default `off` to default `on` at
+  `2026-08-30T20:52:22.525Z`. Existing targeting rules were preserved. No code,
+  Worker, container, database, frontend, Queue, Workflow, R2, or local setting
+  changed.
+- Preflight command: `wrangler flagship flags evaluate ... --context
+  environment=production --context org_id=rollout-preflight-org --context
+  user_id=rollout-preflight-user --json` returned
+  `value=false, variant=off, reason=DEFAULT` before promotion.
+- Acceptance command with valid unrelated UUID context returned
+  `value=true, variant=on, reason=DEFAULT`; the authenticated production Worker
+  `/enabled` probe returned HTTP 200 and `enabled=true` for the same unrelated
+  valid context. Existing canary evaluation remained `on/TARGETING_MATCH`.
+- Embedding acceptance: the running Core environment reports
+  `EMBEDDING_PROVIDER=cloudflare`, `CLOUDFLARE_EMBED_MODEL=@cf/baai/bge-m3`,
+  `CLOUDFLARE_AI_GATEWAY_ID=hivemind-prod`, and
+  `EMBEDDING_FALLBACK_PROVIDER=openrouter`. A fresh in-container factory probe
+  logged `[embed] chain: cloudflare -> openrouter (dim=1024)` and returned
+  `dimension=1024`, `finite=true`, with both links healthy and no fallback log.
+- Runtime remained healthy: Core `sha-7dcc5f15`, Control Plane `sha-346586be`,
+  and Employees `sha-b3616eb4` were not rebuilt or replaced.
+- Rollback: set the Flagship default variation to `off` for immediate admission
+  rollback, or set `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false` as the backend
+  master stop. Existing in-flight Workflow instances retain deterministic,
+  checkpointed state.
+
 ## 2026-08-30 UTC — Knowledge Base canonical projection parity accepted
 
 - Committed and deployed Core-only commits `85926c08cc8cb4d369d6263f69ae97a9cb4b7803`,

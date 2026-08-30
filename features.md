@@ -196,3 +196,25 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   feature-flagged canonical projector. A production Cloudflare Workflow upload
   produced `Professor Uwe Egly (person) -> teaches -> Neuro-Symbolic AI course
   (technology)` with exact document/segment evidence and typed endpoint roles.
+
+## feature-20260830T205222Z — Durable Cloudflare ingestion enabled globally
+
+- Flagship `knowledge_ingest_workflow_v1` in app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` now serves variation `on` by default.
+  Existing exact canary rules remain for audit continuity, but every valid
+  production organization/user context now selects the durable Cloudflare
+  Workflow, Queue, DLQ, and R2 ingestion lifecycle.
+- The production backend master gate remains
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true`; setting it to `false` or changing
+  the Flagship default to `off` immediately returns new admissions to the
+  stable BullMQ path without deleting in-flight Workflow state.
+- Runtime verification used an unrelated valid UUID organization/user pair:
+  Wrangler returned `on/DEFAULT`, and the authenticated live production Worker
+  `/enabled` endpoint returned HTTP 200 with `enabled=true`.
+- Embeddings were already configured correctly and were not redeployed:
+  Cloudflare Workers AI `@cf/baai/bge-m3` through AI Gateway `hivemind-prod` is
+  primary; OpenRouter `baai/bge-m3` is the same-model secondary. A fresh live
+  factory probe reported `cloudflare -> openrouter` and returned a finite
+  1024-dimensional vector with neither provider cooling down.
+- No Worker, container, database, frontend, local deployment setting, Queue,
+  Workflow, R2 bucket, or secret was replaced by this rollout.

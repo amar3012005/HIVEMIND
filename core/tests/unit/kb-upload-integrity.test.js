@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { chunkText } from '../../src/knowledge/document-chunker.js';
 import {
   completeChunkMarkdown,
@@ -142,6 +143,34 @@ test('canonical atomicity operates on the schema f field', () => {
   const split = atomizeUnifiedFacts([{ f: `${one} ${two} ${three}`, source_quote: `${one} ${two} ${three}` }]);
   assert.deepEqual(split.map((fact) => fact.f), [one, two, three]);
   assert.ok(split.every((fact) => fact._atomized));
+});
+
+test('canonical generation prompt stays source-grounded and metadata-aware', () => {
+  const source = readFileSync(new URL('../../src/knowledge/document-first-ingestion.js', import.meta.url), 'utf8');
+  for (const contract of [
+    'Every source_quote must be one exact contiguous substring from SECTION',
+    'Preserve exact names, dates, quantities, units, categorical nouns, negation and uncertainty',
+    'Relationships are structured claim metadata only and must be explicitly supported by the same source_quote',
+    'do not invent causal or organizational links',
+    'Never emit source filenames, document titles, file extensions',
+  ]) {
+    assert.ok(source.includes(contract), `canonical prompt lost contract: ${contract}`);
+  }
+});
+
+test('entity and relationship prompt keeps graph-memory semantic contracts', () => {
+  const source = readFileSync(new URL('../../src/memory/graph-engine.js', import.meta.url), 'utf8');
+  for (const contract of [
+    'extract ALL materially useful, source-supported entities',
+    'Do not stop after the first or most obvious entity',
+    'Updates the earlier preference',
+    'Extends (additive, no',
+    'Derives from both',
+    'two memories mentioning the same person but unrelated facts → Mentions only',
+    'never infer the mechanism from co-occurrence alone',
+  ]) {
+    assert.ok(source.includes(contract), `graph prompt lost contract: ${contract}`);
+  }
 });
 
 test('partial hybrid chunks cannot replace complete parser text', () => {

@@ -104,6 +104,7 @@ services:
       DREAM_WORKFLOW_V2_ENABLED: "true"
       HIVEMIND_DREAM_WORKER_URL: https://hivemind-dream-lifecycle-local.amarsai2005.workers.dev
       HIVEMIND_DREAM_WORKFLOW_SECRET: ${HIVEMIND_DREAM_WORKFLOW_SECRET:-}
+      SESSION_SECRET: ${SESSION_SECRET:-local-session-secret-change-me}
       # hm-extract: OFF by default (KB_EXTRACT_URL unset in ./core/.env means this
       # whole tier is skipped, zero behavior change). Set KB_EXTRACT_URL in
       # core/.env to http://hm-extract:8088 to enable, narrow format allowlist

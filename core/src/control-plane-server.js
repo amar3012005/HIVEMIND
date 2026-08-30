@@ -2988,6 +2988,38 @@ async function proxyKnowledgeWorkflowToCore(req, res, pathname) {
   }
 }
 
+async function proxyCanonicalProjectionToCore(req, res, pathname) {
+  if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed' }, 405);
+  const allowedHeaders = [
+    'content-type', 'x-hivemind-timestamp', 'x-hivemind-nonce',
+    'x-hivemind-content-sha256', 'x-hivemind-signature',
+  ];
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 4096) return jsonResponse(res, { error: 'payload_too_large' }, 413);
+    chunks.push(chunk);
+  }
+  const rawBody = Buffer.concat(chunks);
+  const headers = Object.fromEntries(allowedHeaders
+    .filter((name) => req.headers[name])
+    .map((name) => [name, req.headers[name]]));
+  try {
+    const coreResp = await fetch(new URL(pathname, CONFIG.coreApiBaseUrl), {
+      method: 'POST', headers, body: rawBody, signal: AbortSignal.timeout(90_000),
+    });
+    const responseBody = await coreResp.text();
+    res.writeHead(coreResp.status, { 'Content-Type': coreResp.headers.get('content-type') || 'application/json' });
+    return res.end(responseBody);
+  } catch {
+    return jsonResponse(res, {
+      error: 'core_temporarily_unavailable',
+      message: 'The canonical projection core is temporarily unavailable.',
+    }, 503);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   applyCorsHeaders(req, res);
 
@@ -14324,6 +14356,13 @@ Write the persona now.`;
   // paths into Core.
   if (/^\/internal\/knowledge-ingest\/v1\/jobs\/[0-9a-f-]{36}\/(?:stages\/(?:acquire|materialize|reconcile)|fail)$/.test(pathname)) {
     return proxyKnowledgeWorkflowToCore(req, res, pathname);
+  }
+
+  // Cloudflare canonical-projection requests are authenticated and replay
+  // fenced by Core. Preserve their exact bytes and signature headers; never
+  // expose an arbitrary internal-path proxy or translate them into a session.
+  if (/^\/internal\/canonical-projection\/v1\/memories\/[0-9a-f-]{36}\/stages\/(?:load|reconstruct|resolve|normalize|persist|reconcile|complete|failed)$/.test(pathname)) {
+    return proxyCanonicalProjectionToCore(req, res, pathname);
   }
 
   if (pathname.startsWith('/v1/proxy/')) {

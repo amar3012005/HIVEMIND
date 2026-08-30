@@ -4,6 +4,7 @@ import { CloudflareKnowledgeIngestClient } from '../../src/knowledge/cloudflare-
 
 const ORG_ID = '22222222-2222-4222-8222-222222222222';
 const JOB_ID = '33333333-3333-4333-8333-333333333333';
+const USER_ID = '44444444-4444-4444-8444-444444444444';
 
 async function withWorkflowEnv(fn) {
   const names = [
@@ -38,14 +39,15 @@ test('local Flagship decision gates durable source storage and identifier-only a
       },
     });
 
-    assert.equal(await client.isEnabled(ORG_ID), true);
+    assert.equal(await client.isEnabled(ORG_ID, USER_ID), true);
+    assert.match(calls.at(-1).url, new RegExp(`user_id=${USER_ID}`));
     assert.deepEqual(await client.persistFile({
       orgId: ORG_ID, checksum: 'a'.repeat(64), filename: '../résumé.pdf', fileBuffer: Buffer.from('%PDF'),
     }), { objectKey: 'org/object', etag: 'etag-1' });
-    await client.enqueue({ orgId: ORG_ID, trackerJobId: JOB_ID, processingVersion: 7 });
+    await client.enqueue({ userId: USER_ID, orgId: ORG_ID, trackerJobId: JOB_ID, processingVersion: 7 });
 
     const admission = JSON.parse(calls.at(-1).init.body);
-    assert.deepEqual(admission, { job_id: JOB_ID, org_id: ORG_ID, processing_version: 7 });
+    assert.deepEqual(admission, { job_id: JOB_ID, org_id: ORG_ID, user_id: USER_ID, processing_version: 7 });
     assert.equal(Object.hasOwn(admission, 'file'), false);
     assert.equal(Object.hasOwn(admission, 'metadata'), false);
     assert.equal(calls.every((call) => call.init.headers.authorization === 'Bearer local-test-secret'), true);
@@ -58,7 +60,19 @@ test('Flagship errors fail closed and never select the Workflow path', async () 
       fetchImpl: async () => { throw new Error('flag service unavailable'); },
       logger: { warn() {} },
     });
+    assert.equal(await client.isEnabled(ORG_ID, USER_ID), false);
+  });
+});
+
+test('Flagship selection fails closed when either tenant identity is missing', async () => {
+  await withWorkflowEnv(async () => {
+    let calls = 0;
+    const client = new CloudflareKnowledgeIngestClient({
+      fetchImpl: async () => { calls += 1; return Response.json({ enabled: true }); },
+    });
     assert.equal(await client.isEnabled(ORG_ID), false);
+    assert.equal(await client.isEnabled(null, USER_ID), false);
+    assert.equal(calls, 0);
   });
 });
 
@@ -67,7 +81,7 @@ test('the client remains disabled unless both explicit local gates are true', as
     const client = new CloudflareKnowledgeIngestClient({ fetchImpl: async () => Response.json({ enabled: true }) });
     delete process.env.HIVEMIND_LOCAL_MODE;
     assert.equal(client.configured(), false);
-    assert.equal(await client.isEnabled(ORG_ID), false);
+    assert.equal(await client.isEnabled(ORG_ID, USER_ID), false);
     process.env.HIVEMIND_LOCAL_MODE = 'true';
     process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED = 'false';
     assert.equal(client.configured(), false);
@@ -86,7 +100,7 @@ test('production mode requires the explicit environment and irreversible-looking
     assert.equal(client.configured(), false);
     process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK = 'enable-cloudflare-workflow-v1';
     assert.equal(client.configured(), true);
-    assert.equal(await client.isEnabled(ORG_ID), true);
+    assert.equal(await client.isEnabled(ORG_ID, USER_ID), true);
     process.env.HIVEMIND_LOCAL_MODE = 'true';
     assert.equal(client.configured(), false);
   });

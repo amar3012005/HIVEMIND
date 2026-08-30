@@ -24,6 +24,7 @@ const MAX_GRAPH_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_M
 const MAX_INVENTORY_INFLIGHT_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_INVENTORY_INFLIGHT_PER_ORG || 1));
 const INVENTORY_TIMEOUT_MS = Math.max(TIMEOUT_MS, Number(process.env.MNEME_REMOTE_INVENTORY_TIMEOUT_MS || 15000));
 const INVENTORY_CACHE_MS = Math.max(0, Number(process.env.MNEME_REMOTE_INVENTORY_CACHE_MS || 5000));
+const QUEUE_TIMEOUT_MS = Math.max(100, Number(process.env.MNEME_REMOTE_QUEUE_TIMEOUT_MS || 5000));
 const MAX_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_QUEUED_PER_ORG || 32));
 const MAX_GRAPH_QUEUED_PER_ORG = Math.max(1, Number(process.env.MNEME_REMOTE_MAX_GRAPH_QUEUED_PER_ORG || 128));
 const _failureCircuitUntil = new Map();
@@ -100,6 +101,16 @@ function _releaseSlot(circuitKey) {
   if (!queue?.length) _waitersByCircuit.delete(circuitKey);
 }
 
+function _rejectQueued(circuitKey, error) {
+  const queue = _waitersByCircuit.get(circuitKey);
+  if (!queue?.length) return;
+  _waitersByCircuit.delete(circuitKey);
+  for (const waiter of queue) {
+    waiter.cleanup();
+    waiter.reject(error);
+  }
+}
+
 async function _acquireSlot(orgId, path, signal, options = {}) {
   const circuitKey = _circuitKey(orgId, path, options);
   const maxInflight = _transportClass(options) === 'maintenance'
@@ -123,13 +134,26 @@ async function _acquireSlot(orgId, path, signal, options = {}) {
   }
   await new Promise((resolve, reject) => {
     const waiter = { resolve, reject, signal, cleanup: () => {} };
-    const abort = () => {
+    const remove = () => {
       const index = queue.indexOf(waiter);
       if (index >= 0) queue.splice(index, 1);
+      if (!queue.length) _waitersByCircuit.delete(circuitKey);
+    };
+    const abort = () => {
+      remove();
       waiter.cleanup();
       reject(signal.reason || new Error(`agent ${path} request cancelled while queued`));
     };
-    waiter.cleanup = () => signal?.removeEventListener('abort', abort);
+    const timer = setTimeout(() => {
+      remove();
+      waiter.cleanup();
+      reject(new RemoteMemoryUnavailableError(orgId, path, new Error('tenant transport queue wait timeout')));
+    }, Math.max(100, Number(options.queueTimeoutMs || QUEUE_TIMEOUT_MS)));
+    timer.unref?.();
+    waiter.cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    };
     if (signal?.aborted) return abort();
     signal?.addEventListener('abort', abort, { once: true });
     queue.push(waiter);
@@ -288,6 +312,11 @@ async function _call(orgId, path, body, options = {}) {
   }
   const parentSignal = options.signal === false ? null : (options.signal || currentStageSignal());
   await _acquireSlot(orgId, path, parentSignal, options);
+  const unavailableAfterQueue = _failureCircuitUntil.get(circuitKey) || 0;
+  if (unavailableAfterQueue > Date.now()) {
+    _releaseSlot(circuitKey);
+    throw new RemoteMemoryUnavailableError(orgId, path, new Error('transport circuit open'));
+  }
   const tokens = [a.token, ...(a.fallbackTokens || [])].filter(Boolean);
   let lastStatus = null;
   try {
@@ -339,6 +368,9 @@ async function _call(orgId, path, body, options = {}) {
           || error?.name === 'AbortError'
           || /fetch failed|socket|network|aborted|ECONN|ENOTFOUND|EAI_AGAIN/i.test(String(error?.message || '')))) {
         _failureCircuitUntil.set(circuitKey, Date.now() + FAILURE_COOLDOWN_MS);
+        const unavailable = new RemoteMemoryUnavailableError(orgId, path, error);
+        _rejectQueued(circuitKey, unavailable);
+        throw unavailable;
       }
       throw error;
     } finally {
@@ -558,7 +590,9 @@ export async function remoteList(orgId, filter, cursor, limit, offset = 0, optio
     // Throw, so the route answers an error and the UI can say so. A caller that genuinely wants a
     // best-effort empty list must opt into that by catching this itself.
     _logRemoteOnce('error', 'list', orgId, e, ' — surfacing as an error, not an empty list');
-    throw new Error(`memory list unavailable for this workspace: ${e.message}`);
+    throw isRemoteMemoryUnavailableError(e)
+      ? e
+      : new RemoteMemoryUnavailableError(orgId, '/v1/list', e);
   }
 }
 

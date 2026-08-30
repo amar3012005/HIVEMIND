@@ -40,17 +40,18 @@ async function authorized(request: Request, env: RuntimeEnv): Promise<boolean> {
   return equalSecret(actual, env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || '');
 }
 
-async function flagEnabled(env: RuntimeEnv, orgId: string): Promise<boolean> {
+async function flagEnabled(env: RuntimeEnv, orgId: string, userId: string): Promise<boolean> {
   const environment = env.ENVIRONMENT === 'production' ? 'production' : env.ENVIRONMENT === 'local' ? 'local' : null;
-  if (!environment || !validOrgId(orgId) || !env.FLAGS) return false;
+  if (!environment || !validOrgId(orgId) || !validOrgId(userId) || !env.FLAGS) return false;
   const details = await env.FLAGS.getBooleanDetails(
     env.KNOWLEDGE_INGEST_FLAG || 'knowledge_ingest_workflow_v1',
     false,
-    { targetingKey: orgId, org_id: orgId, environment },
+    { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment },
   );
   console.log(JSON.stringify({
     event: 'knowledge_ingest_flag_evaluation',
     org_id: orgId,
+    user_id: userId,
     value: details.value,
     variant: details.variant,
     reason: details.reason,
@@ -75,6 +76,7 @@ async function core<T>(
       },
       body: JSON.stringify({
         org_id: params.org_id,
+        user_id: params.user_id,
         processing_version: params.processing_version,
         ...extra,
       }),
@@ -95,7 +97,7 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
   async run(event: WorkflowEvent<IngestParams>, step: WorkflowStep) {
     if (!validParams(event.payload)) throw new NonRetryableError('invalid_ingest_payload');
     const params = event.payload;
-    if (!await flagEnabled(this.env, params.org_id)) throw new NonRetryableError('knowledge_ingest_feature_disabled');
+    if (!await flagEnabled(this.env, params.org_id, params.user_id)) throw new NonRetryableError('knowledge_ingest_feature_disabled');
     try {
       await step.do(
         'acquire authorized ingest job',
@@ -179,7 +181,8 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/enabled' && request.method === 'GET') {
       const orgId = url.searchParams.get('org_id') || '';
-      return Response.json({ enabled: await flagEnabled(env, orgId), org_id: orgId });
+      const userId = url.searchParams.get('user_id') || '';
+      return Response.json({ enabled: await flagEnabled(env, orgId, userId), org_id: orgId, user_id: userId });
     }
     if (url.pathname.startsWith('/objects/')) {
       return objectResponse(request, env, decodeURIComponent(url.pathname.slice('/objects/'.length)));
@@ -187,7 +190,7 @@ export default {
     if (url.pathname === '/start' && request.method === 'POST') {
       const params = await request.json<unknown>().catch(() => null);
       if (!validParams(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
-      if (!await flagEnabled(env, params.org_id)) return Response.json({ error: 'feature_disabled' }, { status: 403 });
+      if (!await flagEnabled(env, params.org_id, params.user_id)) return Response.json({ error: 'feature_disabled' }, { status: 403 });
       const instanceId = workflowInstanceId(params);
       await env.INGEST_QUEUE.send(params, { contentType: 'json' });
       return Response.json({ ok: true, queued: true, instance_id: instanceId }, { status: 202 });
@@ -203,7 +206,7 @@ export default {
 
   async queue(batch: MessageBatch<IngestParams>, env: RuntimeEnv): Promise<void> {
     for (const message of batch.messages) {
-      if (!validParams(message.body) || !await flagEnabled(env, message.body.org_id)) {
+      if (!validParams(message.body) || !await flagEnabled(env, message.body.org_id, message.body.user_id)) {
         message.ack();
         continue;
       }

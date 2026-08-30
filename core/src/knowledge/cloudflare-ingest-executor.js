@@ -53,12 +53,15 @@ export class CloudflareKnowledgeIngestExecutor {
     this.steps = stepStore || new KnowledgeIngestStepStore({ prisma, logger });
   }
 
-  async _job({ jobId, orgId, processingVersion }) {
-    if (!UUID.test(jobId) || !UUID.test(orgId)) {
-      throw Object.assign(new Error('job_id and org_id must be UUIDs'), { code: 'INVALID_WORKFLOW_PAYLOAD', retryable: false });
+  async _job({ jobId, orgId, userId, processingVersion }) {
+    if (!UUID.test(jobId) || !UUID.test(orgId) || !UUID.test(userId)) {
+      throw Object.assign(new Error('job_id, org_id, and user_id must be UUIDs'), { code: 'INVALID_WORKFLOW_PAYLOAD', retryable: false });
     }
     const job = await this.jobStore.findOwned(jobId, { orgId });
     if (!job) throw Object.assign(new Error('Knowledge ingest job was not found.'), { code: 'JOB_NOT_FOUND', retryable: false });
+    if (job.userId !== userId) {
+      throw Object.assign(new Error('Workflow user does not own this ingest job.'), { code: 'WORKFLOW_USER_MISMATCH', retryable: false });
+    }
     if (job.orchestrationMode !== 'cloudflare_workflow') {
       throw Object.assign(new Error('Job is not owned by the Cloudflare orchestrator.'), { code: 'ORCHESTRATOR_MISMATCH', retryable: false });
     }
@@ -71,11 +74,11 @@ export class CloudflareKnowledgeIngestExecutor {
     return job;
   }
 
-  async execute({ jobId, orgId, processingVersion, stage }) {
+  async execute({ jobId, orgId, userId, processingVersion, stage }) {
     if (!STAGES.has(stage)) {
       throw Object.assign(new Error('stage must be acquire, materialize, or reconcile'), { code: 'INVALID_STAGE', retryable: false });
     }
-    const job = await this._job({ jobId, orgId, processingVersion });
+    const job = await this._job({ jobId, orgId, userId, processingVersion });
     if (stage === 'acquire') return this._acquire(job);
     if (stage === 'materialize') return this._materialize(job);
     return this._reconcile(job);
@@ -267,8 +270,8 @@ export class CloudflareKnowledgeIngestExecutor {
     return { ok: true, stage: 'reconcile', reused: run.reused, receipt_id: run.receipt.id, terminal: true };
   }
 
-  async fail({ jobId, orgId, processingVersion, errorCode, message, retryable }) {
-    const job = await this._job({ jobId, orgId, processingVersion });
+  async fail({ jobId, orgId, userId, processingVersion, errorCode, message, retryable }) {
+    const job = await this._job({ jobId, orgId, userId, processingVersion });
     if (retryable === true) return { ok: true, deferred: true };
     const error = Object.assign(new Error(String(message || 'Cloudflare workflow failed')), {
       code: String(errorCode || 'WORKFLOW_FAILED').slice(0, 80),

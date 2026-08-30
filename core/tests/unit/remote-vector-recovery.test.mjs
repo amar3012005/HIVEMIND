@@ -87,6 +87,47 @@ test('the per-tenant read bulkhead queues bounded excess work instead of self-re
   assert.equal(requests, 3);
 });
 
+test('an inventory timeout flushes queued callers and recovers after the circuit cooldown', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'hm-remote-inventory-recovery-'));
+  const registry = join(directory, 'agents.json');
+  let requests = 0;
+  const server = http.createServer((_req, res) => {
+    requests += 1;
+    const delay = requests === 1 ? 180 : 5;
+    setTimeout(() => {
+      if (!res.headersSent) res.writeHead(200, { 'content-type': 'application/json' });
+      if (!res.writableEnded) res.end(JSON.stringify({ memories: [{ id: 'recovered' }], total: 1 }));
+    }, delay);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  Object.assign(process.env, {
+    MNEME_AGENT_REGISTRY_FILE: registry,
+    MNEME_REMOTE_TIMEOUT_MS: '40',
+    MNEME_REMOTE_INVENTORY_TIMEOUT_MS: '40',
+    MNEME_REMOTE_FAILURE_COOLDOWN_MS: '60',
+    MNEME_REMOTE_MAX_INVENTORY_INFLIGHT_PER_ORG: '1',
+    MNEME_REMOTE_QUEUE_TIMEOUT_MS: '500',
+  });
+  await writeFile(registry, JSON.stringify({ org: { url: `http://127.0.0.1:${server.address().port}`, token: 'token' } }));
+  const { remoteList } = await import(`../../src/vector/mneme/remote-backend.js?inventory-recovery=${Date.now()}`);
+
+  const startedAt = Date.now();
+  const attempts = [1, 2, 3].map((limit) => remoteList('org', { is_latest: true }, null, limit, 0));
+  const failures = await Promise.allSettled(attempts);
+  assert.equal(failures.every((result) => result.status === 'rejected' && result.reason?.code === 'REMOTE_MEMORY_UNAVAILABLE'), true);
+  assert.ok(Date.now() - startedAt < 140, 'queued inventory calls must be flushed when the owner opens the circuit');
+  assert.equal(requests, 1, 'queued calls must not replay one-by-one into a known outage');
+
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  const recovered = await remoteList('org', { is_latest: true }, null, 1, 0);
+  assert.deepEqual(recovered, { memories: [{ id: 'recovered' }], cursor: null, total: 1 });
+  assert.equal(requests, 2);
+});
+
 test('identical interactive recall requests share one bounded Memory Box operation', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'hm-remote-coalesce-'));
   const registry = join(directory, 'agents.json');

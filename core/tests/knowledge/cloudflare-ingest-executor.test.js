@@ -80,7 +80,7 @@ function fixture({ remote = false } = {}) {
 
 test('the Workflow executor verifies bytes, evidence coverage, persistence and terminal settlement', async () => {
   const { executor, events } = fixture();
-  const input = { jobId: ids.job, orgId: ids.org, processingVersion: 3 };
+  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'acquire' });
   await executor.execute({ ...input, stage: 'materialize' });
   await executor.execute({ ...input, stage: 'reconcile' });
@@ -94,7 +94,7 @@ test('the Workflow executor verifies bytes, evidence coverage, persistence and t
 
 test('materialization records every canonical lifecycle milestone as a durable receipt', async () => {
   const { executor, steps } = fixture();
-  const input = { jobId: ids.job, orgId: ids.org, processingVersion: 3 };
+  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   assert.deepEqual(
     [...steps.rows.keys()].map((key) => key.split(':').at(-2)).sort(),
@@ -107,7 +107,7 @@ test('materialization records every canonical lifecycle milestone as a durable r
 
 test('duplicate Workflow stage delivery reuses its durable receipt and settles only once', async () => {
   const { executor, events } = fixture();
-  const input = { jobId: ids.job, orgId: ids.org, processingVersion: 3 };
+  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   const replay = await executor.execute({ ...input, stage: 'materialize' });
   await executor.execute({ ...input, stage: 'reconcile' });
@@ -121,7 +121,7 @@ test('duplicate Workflow stage delivery reuses its durable receipt and settles o
 test('remote storage reconciliation does not require a central document row', async () => {
   const { executor } = fixture({ remote: true });
   executor.prisma.knowledgeDocument.findFirst = async () => { throw new Error('central lookup must not run'); };
-  const input = { jobId: ids.job, orgId: ids.org, processingVersion: 3 };
+  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   await assert.doesNotReject(() => executor.execute({ ...input, stage: 'reconcile' }));
 });
@@ -161,10 +161,14 @@ test('internal Workflow authorization requires an explicit environment gate and 
 
 test('cancelled, stale, and cross-tenant deliveries cannot execute work', async () => {
   const { executor, events, job } = fixture();
-  const base = { jobId: ids.job, orgId: ids.org, processingVersion: 3, stage: 'acquire' };
+  const base = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'acquire' };
   job.status = 'cancelled';
   await assert.rejects(executor.execute(base), (error) => error.code === 'UPLOAD_CANCELLED');
   job.status = 'processing';
+  await assert.rejects(
+    executor.execute({ ...base, userId: '66666666-6666-4666-8666-666666666666' }),
+    (error) => error.code === 'WORKFLOW_USER_MISMATCH',
+  );
   await assert.rejects(
     executor.execute({ ...base, processingVersion: 2 }),
     (error) => error.code === 'STALE_WORKFLOW',
@@ -184,7 +188,7 @@ test('partial evidence coverage cannot reach settlement', async () => {
     segmentCount: 8, candidateCount: 0, promotedCount: 0,
     coverage: { evidence_embed: { total: 8, embedded: 7, failed: 1, healed: 0 } },
   });
-  const base = { jobId: ids.job, orgId: ids.org, processingVersion: 3 };
+  const base = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
   await assert.rejects(
     executor.execute({ ...base, stage: 'materialize' }),
     (error) => error.code === 'PARTIAL_EMBEDDING' && error.retryable === true,

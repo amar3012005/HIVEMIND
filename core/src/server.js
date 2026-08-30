@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
 import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
-import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
+import { remoteList, remoteHydrate, isRemoteMemoryUnavailableError } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { exactMemoryListTotal } from './memory/memory-list-contract.js';
 import { createRequire } from 'module';
@@ -4268,6 +4268,7 @@ const server = http.createServer(async (req, res) => {
     const common = {
       jobId: (knowledgeWorkflowStage || knowledgeWorkflowFail)[1],
       orgId: String(workflowBody.org_id || ''),
+      userId: String(workflowBody.user_id || ''),
       processingVersion: Number(workflowBody.processing_version) || 1,
     };
     try {
@@ -4284,7 +4285,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, result);
     } catch (error) {
       const retryable = error?.retryable !== false
-        && !['INVALID_WORKFLOW_PAYLOAD', 'JOB_NOT_FOUND', 'ORCHESTRATOR_MISMATCH', 'STALE_WORKFLOW', 'UPLOAD_CANCELLED'].includes(error?.code);
+        && !['INVALID_WORKFLOW_PAYLOAD', 'JOB_NOT_FOUND', 'WORKFLOW_USER_MISMATCH', 'ORCHESTRATOR_MISMATCH', 'STALE_WORKFLOW', 'UPLOAD_CANCELLED'].includes(error?.code);
       return jsonResponse(res, {
         error: error?.code || 'KNOWLEDGE_WORKFLOW_STAGE_FAILED',
         message: String(error?.message || 'Knowledge ingestion stage failed').slice(0, 500),
@@ -25346,6 +25347,14 @@ ${injectionText}`;
           res.end(JSON.stringify({ error: 'Not found' }));
       }
     } catch (error) {
+      if (isRemoteMemoryUnavailableError(error)) {
+        console.warn(`[memory-box] temporarily unavailable org=${error.orgId || 'unknown'} operation=${error.operation || 'unknown'}`);
+        return jsonResponse(res, {
+          error: 'memory_storage_unavailable',
+          message: 'The external Memory Box is temporarily unavailable. Please retry shortly.',
+          retry_after_seconds: 5,
+        }, 503, { 'Retry-After': '5' });
+      }
       console.error('API Error:', error);
       res.writeHead(500);
       res.end(JSON.stringify({ error: error.message }));
@@ -25391,8 +25400,9 @@ async function writeAuditLog(prisma, {
   });
 }
 
-function jsonResponse(res, data, status = 200) {
+function jsonResponse(res, data, status = 200, headers = undefined) {
   res.setHeader('Content-Type', 'application/json');
+  for (const [name, value] of Object.entries(headers || {})) res.setHeader(name, value);
   res.writeHead(status);
   // Prisma can return BigInt columns (for example SourceArtifact.sizeBytes).
   // Convert only at the HTTP boundary so document/evidence payloads remain readable.

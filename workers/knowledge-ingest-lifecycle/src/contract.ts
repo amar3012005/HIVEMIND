@@ -1,6 +1,7 @@
 export type IngestParams = {
   job_id: string;
   org_id: string;
+  user_id: string;
   processing_version: number;
 };
 
@@ -11,6 +12,7 @@ export function validParams(value: unknown): value is IngestParams {
   const input = value as Record<string, unknown>;
   return UUID.test(String(input.job_id || ''))
     && UUID.test(String(input.org_id || ''))
+    && UUID.test(String(input.user_id || ''))
     && Number.isInteger(Number(input.processing_version))
     && Number(input.processing_version) > 0;
 }

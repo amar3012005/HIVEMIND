@@ -4,7 +4,8 @@
 #   release-canonical.sh --sha <merged-singulance-main-sha> \
 #                        --services core,tara-grok,tara-deepgram,control-plane,employees \
 #                        [--canary-url https://next.singulancelabs.com/hivemind/app] \
-#                        [--skip-canary] [--skip-migrations] [--dry-run] [--allow-divergence]
+#                        [--skip-canary] [--skip-migrations] [--dry-run]
+#                        [--service-scoped] [--allow-divergence]
 #
 # Enforces the canonical parallel workflow:
 #   * one deploy = one canonical SHA = one release manifest
@@ -19,7 +20,7 @@
 #   * manifest artifact written for traceability
 set -euo pipefail
 
-SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; ALLOW_DIVERGENCE=0
+SHA=""; SERVICES=""; CANARY_URL=""; SKIP_CANARY=0; SKIP_MIGRATIONS=0; DRY=0; SERVICE_SCOPED=0; ALLOW_DIVERGENCE=0
 while [ $# -gt 0 ]; do case "$1" in
   --sha) SHA="$2"; shift 2;;
   --services) SERVICES="$2"; shift 2;;
@@ -27,6 +28,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --skip-canary) SKIP_CANARY=1; shift;;
   --skip-migrations) SKIP_MIGRATIONS=1; shift;;
   --dry-run) DRY=1; shift;;
+  --service-scoped) SERVICE_SCOPED=1; shift;;
   --allow-divergence) ALLOW_DIVERGENCE=1; shift;;
   *) echo "unknown arg: $1"; exit 2;;
 esac; done
@@ -98,7 +100,9 @@ declare -A REQUESTED=()
 for s in "${SVCS[@]}"; do REQUESTED[$s]=1; done
 coupled_requested=0
 for s in "${COUPLED[@]}"; do [ -n "${REQUESTED[$s]:-}" ] && coupled_requested=1; done
-if [ "$coupled_requested" = 1 ] && [ "$ALLOW_DIVERGENCE" != 1 ]; then
+if [ "$coupled_requested" = 1 ] && [ "$SERVICE_SCOPED" = 1 ]; then
+  echo "[gate] explicit service-scoped release: only $SERVICES will be built and replaced"
+elif [ "$coupled_requested" = 1 ] && [ "$ALLOW_DIVERGENCE" != 1 ]; then
   for s in "${COUPLED[@]}"; do
     [ -n "${REQUESTED[$s]:-}" ] && continue
     c="${CONTAINER[$s]}"

@@ -217,6 +217,41 @@ test('explicit recall modes use the bounded context service and return a RecallP
   assert.equal(forwardedOptions.limit, 15);
 });
 
+test('same user receives byte-compatible off mode and latched reliability-on diagnostics', async () => {
+  const run = async (enabled) => {
+    let forwarded = null;
+    const result = await handleRecallRoute({
+      req: {}, res: {}, body: { query_context: 'latest decision', mode: 'fact' },
+      userId: 'user-1', orgId: 'org-1', prisma: {}, jsonResponse,
+      ensurePersistedMemoryOrFail: () => true, rateLimitAllowOrgRequest: () => true,
+      planEnforcer: null, cognitiveOperator: null, detectQueryIntent: () => 'fact_lookup',
+      computeDynamicWeights: () => ({}), expandTemporalQuery: () => ({}),
+      rewriteQuery: (q) => ({ expanded: q }), effectiveContainerTag: null,
+      buildAccessContext: async () => ({ projectIds: [], teamIds: [] }), isUuidLike: () => false,
+      recallPersistedMemories: async () => ({ memories: [] }), persistentMemoryStore: {},
+      ClusterIndex: class {}, crossClusterEntityBoost: async (m) => m, deduplicateResults: (m) => m,
+      profileStore: null, evidenceRetrieval: null, amrBumpRecall: () => {}, qdrantClient: null,
+      getMemoryTypeBoost: () => 1, recallReliabilityClient: { enabledFor: async () => enabled },
+      recallRuntime: {
+        resolvePlan: () => ({ mode: 'fact', legacy: false, max_graph_hops: 0, latency_budget_ms: 3000,
+          source: {}, time: {}, memory_types: [], relationships: {} }),
+        recall: async (_query, options) => { forwarded = options; return {
+          memories: [{ id: 'm1' }], evidence: [], live: [], ranked_candidates: [],
+          trace: enabled ? { reliability: { status: 'degraded', lanes: { memory_lexical: { status: 'complete' }, memory_vector: { status: 'failed' } } } } : {},
+        }; },
+        loadGraph: async () => ({ items: [] }), buildPacket: () => ({ citations: [] }),
+      },
+    });
+    return { result, forwarded };
+  };
+  const off = await run(false); const on = await run(true);
+  assert.equal(off.forwarded.reliability_v1, false);
+  assert.equal(on.forwarded.reliability_v1, true);
+  assert.equal(off.result.body.retrieval_trace.status, 'legacy');
+  assert.equal(on.result.body.retrieval_trace.status, 'degraded');
+  assert.equal(on.result.body.memories[0].id, 'm1');
+});
+
 test('recall route forwards typed source and time blocks unchanged', async () => {
   let forwarded = null;
   const source = { document_id: 'doc-1', title: 'Brochure.pdf' };
@@ -290,6 +325,36 @@ test('a sovereign Memory Box outage returns 503 and never masquerades as zero re
 
   assert.equal(result.statusCode, 503);
   assert.equal(result.body.error, 'memory_unavailable');
+  assert.equal(result.body.retryable, true);
+  assert.match(result.body.message, /No absence conclusion/);
+});
+
+test('all reliability retrieval lanes unavailable returns 503 without an absence claim', async () => {
+  const unavailable = Object.assign(new Error('all retrieval lanes unavailable'), {
+    code: 'MEMORY_RETRIEVAL_UNAVAILABLE',
+  });
+  const result = await handleRecallRoute({
+    req: {}, res: {}, body: { query_context: 'company details', mode: 'fact' },
+    userId: 'user-1', orgId: 'org-1', prisma: {}, jsonResponse,
+    ensurePersistedMemoryOrFail: () => true, rateLimitAllowOrgRequest: () => true,
+    planEnforcer: null, cognitiveOperator: null, detectQueryIntent: () => 'fact_lookup',
+    computeDynamicWeights: () => ({}), expandTemporalQuery: () => ({}),
+    rewriteQuery: (q) => ({ expanded: q, entities: [], stripped: q }),
+    effectiveContainerTag: null, buildAccessContext: async () => ({ projectIds: [], teamIds: [] }),
+    isUuidLike: () => false, recallPersistedMemories: async () => ({ memories: [] }),
+    persistentMemoryStore: {}, ClusterIndex: class {}, crossClusterEntityBoost: async (m) => m,
+    deduplicateResults: (m) => m, profileStore: null, evidenceRetrieval: null,
+    amrBumpRecall: () => {}, qdrantClient: null, getMemoryTypeBoost: () => 1,
+    recallRuntime: {
+      resolvePlan: () => ({ mode: 'fact', legacy: false, max_graph_hops: 0, latency_budget_ms: 3000 }),
+      recall: async () => { throw unavailable; },
+      loadGraph: async () => ({ items: [] }),
+      buildPacket: () => ({ citations: [] }),
+    },
+  });
+
+  assert.equal(result.statusCode, 503);
+  assert.equal(result.body.error, 'memory_retrieval_unavailable');
   assert.equal(result.body.retryable, true);
   assert.match(result.body.message, /No absence conclusion/);
 });

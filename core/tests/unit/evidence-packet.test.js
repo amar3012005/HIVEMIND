@@ -152,6 +152,31 @@ test('source-focused evidence admits only the resolved document id', async () =>
   assert.deepEqual(result.docIds, ['document-active']);
 });
 
+test('reliability mode forwards the latched flag and preserves independent evidence lane states', async () => {
+  const calls = [];
+  const rows = [{ segmentId: 'segment-1', documentId: 'document-1' }];
+  Object.defineProperty(rows, 'lane_states', {
+    value: {
+      evidence_lexical: { status: 'complete' },
+      evidence_vector: { status: 'failed', reason: 'timeout' },
+    },
+    enumerable: false,
+  });
+  const result = await hop2Evidence({
+    evidenceService: { async retrieveEvidence(options) { calls.push(options); return rows; } },
+    query: 'What is the latest update?',
+    ctx: { userId: 'user-1', orgId: 'org-1' },
+    inspection: { docIds: [], filenames: [], sparse: false },
+    prisma: null,
+    filters: { reliability_v1: true },
+  });
+
+  assert.equal(calls[0].reliabilityV1, true);
+  assert.equal(result.items.length, 1);
+  assert.equal(result.lane_states.evidence_lexical.status, 'complete');
+  assert.equal(result.lane_states.evidence_vector.status, 'failed');
+});
+
 test('project evidence intersects shared-tier memory anchors with project documents', async () => {
   const calls = [];
   const result = await hop2Evidence({
@@ -279,11 +304,13 @@ test('central evidence returns tenant-scoped lexical results when vector search 
     const results = await service.retrieveEvidence({
       query: 'Welche Kapazitat hat LumenCore?',
       userId: 'user-1', orgId: 'org-1', documentIds: ['document-allowed'],
-      depth: 5, deliver: 5,
+      depth: 5, deliver: 5, reliabilityV1: true,
     });
     assert.ok(Date.now() - started < 250);
     assert.equal(results[0].segmentId, 'segment-lexical');
     assert.equal(results[0]._lexical, true);
+    assert.equal(results.lane_states.evidence_lexical.status, 'complete');
+    assert.equal(results.lane_states.evidence_vector.status, 'failed');
     assert.ok(calls.some(({ where }) => where.orgId === 'org-1'
       && where.documentId?.in?.includes('document-allowed')));
   } finally {

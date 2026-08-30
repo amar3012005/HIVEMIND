@@ -1211,6 +1211,9 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
 
   const recallExtras = {
     _structured_intent: true,
+    // Latched once by the authenticated chat route. The recall tool receives
+    // the same fail-closed rollout decision as the public recall endpoint.
+    reliability_v1: ctx.recallReliabilityV1 === true,
     // A planner-classified activity window gets a bounded date-indexed lane in
     // RecallRouter. This is distinct from snapshot time travel and keeps broad
     // questions independent of wording or language.

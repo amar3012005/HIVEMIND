@@ -54,6 +54,7 @@ import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { getEntityLinkQueue } from './memory/entity-link-queue.js';
 import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonicalKnowledge, prepareCanonicalProjection, verifyCanonicalProjectionSignature } from './memory/canonical-knowledge.js';
 import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
+import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
@@ -126,6 +127,7 @@ const REPO_ROOT = path.join(PROJECT_ROOT, '..');
 const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
 const canonicalProjectionClient = new CloudflareCanonicalProjectionClient();
+const recallReliabilityClient = new CloudflareRecallReliabilityClient();
 const canonicalProjectionNonceFallback = new Map();
 
 async function consumeCanonicalProjectionNonce(nonce) {
@@ -21858,6 +21860,7 @@ exit \$RC
               amrBumpRecall,
               qdrantClient,
               getMemoryTypeBoost,
+              recallReliabilityClient,
             });
           }
           break;
@@ -24362,6 +24365,11 @@ exit \$RC
             const agentEnabled = true;
             if (agentEnabled) {
               try {
+                // Evaluate once per authenticated turn and latch the result into
+                // every recall issued by this chat. Flagship failure is off.
+                const recallReliabilityV1 = await recallReliabilityClient
+                  .enabledFor({ orgId, userId })
+                  .catch(() => false);
                 // Still honour the onboarding state machine — it cannot be
                 // LLM-picked because it needs to gate the very first turn
                 // before the LLM ever runs.
@@ -24436,6 +24444,7 @@ exit \$RC
                       allowGeneralKnowledge: body?.allow_general_knowledge === true,
                       ctx: {
                         userId, orgId,
+                        recallReliabilityV1,
                         threadId: body?.thread_id || body?.conversation_id || null,
                         projectId: requestProjectId,
                         scopeFilter: requestScopeFilter,
@@ -24501,6 +24510,7 @@ exit \$RC
                   allowGeneralKnowledge: body?.allow_general_knowledge === true,
                   ctx: {
                     userId, orgId,
+                    recallReliabilityV1,
                     threadId: body?.thread_id || body?.conversation_id || null,
                     projectId: requestProjectId,
                     scopeFilter: requestScopeFilter,

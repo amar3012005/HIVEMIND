@@ -488,7 +488,18 @@ export class EvidenceRetrievalService {
     relationshipRequired = false,
     entityFilterMode = 'must',
     temporalInventory = false,
+    reliabilityV1 = false,
   }) {
+    const laneStates = reliabilityV1 ? {
+      evidence_lexical: { status: 'complete' },
+      evidence_vector: { status: 'complete' },
+    } : null;
+    const withLaneStates = (rows) => {
+      if (laneStates && Array.isArray(rows)) {
+        Object.defineProperty(rows, 'lane_states', { value: laneStates, enumerable: false });
+      }
+      return rows;
+    };
     // Per-tenant: evidence lives in the org container (layer=evidence). Legacy:
     // a dedicated hivemind_evidence collection. Must mirror _embedSegments.
     const collectionName = PER_TENANT
@@ -515,7 +526,7 @@ export class EvidenceRetrievalService {
       });
       const allowed = new Set(authorized.map((document) => document.id));
       docIdSet = docIdSet.filter((id) => allowed.has(id));
-      if (!docIdSet.length) return [];
+      if (!docIdSet.length) return withLaneStates([]);
     }
 
     // When a doc is selected, lower threshold so we actually return its
@@ -580,6 +591,10 @@ export class EvidenceRetrievalService {
             + `unavailable — this answer is built from the remaining lane only, so recall is `
             + `degraded, NOT empty. Check the .amr agent build (is it in sync with byod/?).`);
         }
+        if (laneStates) {
+          laneStates.evidence_vector = { status: vectorHits === null ? 'failed' : 'complete' };
+          laneStates.evidence_lexical = { status: lexicalHits === null ? 'failed' : 'complete' };
+        }
         const hits = fuseRemoteEvidenceHits(vectorHits || [], lexicalHits || []);
         const hydrated = hits.length
           ? await amrKbHydrate(orgId, hits.map((h) => h.segment_id), access)
@@ -633,12 +648,12 @@ export class EvidenceRetrievalService {
           const id = row.segmentId || row.segment_id || row.id;
           if (id && !remoteById.has(id)) remoteById.set(id, { ...row, _temporal_inventory: true });
         }
-        return this._orderAndSlice(filterEvidenceByMetadata([...remoteById.values()], {
+        return withLaneStates(this._orderAndSlice(filterEvidenceByMetadata([...remoteById.values()], {
           sourceKind, temporalSelector, time, memoryTypes, entities, citationId, sourceTitle,
           relationshipMemoryIds,
           relationshipRequired, entityFilterMode,
           projectIds: projectId ? [projectId] : [],
-        }), _deliver);
+        }), _deliver));
       }
 
       // Source and temporal constraints are candidate-generation predicates,
@@ -659,7 +674,7 @@ export class EvidenceRetrievalService {
           { sourceKind, sourceTitle },
         );
         docIdSet = selected.map((row) => row.documentId);
-        if (!docIdSet.length) return [];
+        if (!docIdSet.length) return withLaneStates([]);
       }
 
       // Step 1: Vector search in evidence collection.
@@ -730,7 +745,7 @@ export class EvidenceRetrievalService {
           [...precise, ...broad].map((segment) => [segment.id, segment]),
         ).values()]).catch((error) => {
           console.warn('[EvidenceRetrieval] lexical lane failed:', error.message);
-          return [];
+          return reliabilityV1 ? null : [];
         })
         : Promise.resolve([]);
       // Entity mentions are a third candidate-generation lane over canonical
@@ -829,6 +844,10 @@ export class EvidenceRetrievalService {
       }
       if (lexicalSegments === null) {
         console.warn(`[EvidenceRetrieval] CENTRAL LEXICAL LANE TIMEOUT org=${orgId}; delivering bounded semantic evidence`);
+      }
+      if (laneStates) {
+        laneStates.evidence_vector = { status: boundedVectorResults === null ? 'failed' : 'complete' };
+        laneStates.evidence_lexical = { status: lexicalSegments === null ? 'failed' : 'complete' };
       }
       const vectorResults = boundedVectorResults || [];
 
@@ -977,16 +996,20 @@ export class EvidenceRetrievalService {
         }
       }
 
-      return this._orderAndSlice(filterEvidenceByMetadata(results, {
+      return withLaneStates(this._orderAndSlice(filterEvidenceByMetadata(results, {
         sourceKind, temporalSelector, time, memoryTypes, entities, citationId, sourceTitle,
         relationshipMemoryIds,
         relationshipRequired, entityFilterMode,
         projectIds: projectId ? [projectId] : [],
-      }), _deliver);
+      }), _deliver));
     } catch (error) {
       if (['REMOTE_MEMORY_UNAVAILABLE', 'TEMPORAL_INVENTORY_UNAVAILABLE'].includes(error?.code)) throw error;
       console.error('[EvidenceRetrieval] Retrieval failed:', error);
-      return [];
+      if (laneStates) {
+        laneStates.evidence_lexical = { status: 'failed', reason: error?.code || error?.message || 'retrieval_error' };
+        laneStates.evidence_vector = { status: 'failed', reason: error?.code || error?.message || 'retrieval_error' };
+      }
+      return withLaneStates([]);
     }
   }
 

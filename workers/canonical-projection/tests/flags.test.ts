@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { evaluateProjectionMode } from '../src/flags';
+import { evaluateProjectionMode, evaluateRecallReliability } from '../src/flags';
 
 const org = '22222222-2222-4222-8222-222222222222';
 const user = '33333333-3333-4333-8333-333333333333';
@@ -21,5 +21,18 @@ describe('multivariate canonical knowledge gate', () => {
     expect(await evaluateProjectionMode(environment(new Error('flag unavailable')), org, user)).toBe('off');
     expect(await evaluateProjectionMode(environment('unexpected'), org, user)).toBe('off');
     expect(await evaluateProjectionMode(environment('full'), org, 'invalid')).toBe('off');
+  });
+});
+
+describe('recall reliability gate', () => {
+  it('serves the boolean flag and fails closed', async () => {
+    const enabled = {
+      ENVIRONMENT: 'production', RECALL_PARALLEL_RELIABILITY_ENABLED: 'true',
+      RECALL_RELIABILITY_FLAG: 'recall_parallel_reliability_v1',
+      FLAGS: { getBooleanDetails: vi.fn(async () => ({ value: true, variant: 'on', reason: 'TARGETING_MATCH' })) },
+    } as unknown as Parameters<typeof evaluateRecallReliability>[0];
+    expect(await evaluateRecallReliability(enabled, org, user)).toBe(true);
+    expect(await evaluateRecallReliability({ ...enabled, RECALL_PARALLEL_RELIABILITY_ENABLED: 'false' }, org, user)).toBe(false);
+    expect(await evaluateRecallReliability(enabled, org, 'invalid')).toBe(false);
   });
 });

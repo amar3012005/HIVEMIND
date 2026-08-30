@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { evaluateProjectionMode } from './flags';
+import { evaluateProjectionMode, evaluateRecallReliability } from './flags';
 import { signCoreRequest } from './security';
 import {
   type ProjectionParams,
@@ -127,6 +127,11 @@ export default {
       const orgId = url.searchParams.get('org_id') || '';
       const userId = url.searchParams.get('user_id') || '';
       return Response.json({ mode: await evaluateProjectionMode(env, orgId, userId), org_id: orgId, user_id: userId });
+    }
+    if (url.pathname === '/recall-enabled' && request.method === 'GET') {
+      const orgId = url.searchParams.get('org_id') || '';
+      const userId = url.searchParams.get('user_id') || '';
+      return Response.json({ enabled: await evaluateRecallReliability(env, orgId, userId), org_id: orgId, user_id: userId });
     }
     if (url.pathname === '/start' && request.method === 'POST') {
       let input: unknown;

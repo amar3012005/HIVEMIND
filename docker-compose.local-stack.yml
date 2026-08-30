@@ -99,6 +99,11 @@ services:
       USE_QDRANT_STORAGE: ${USE_QDRANT_STORAGE:-true}
       USE_AST_CHUNKING: ${USE_AST_CHUNKING:-true}
       USE_STATEFUL_MANAGER: ${USE_STATEFUL_MANAGER:-true}
+      # Durable Dreaming v2 local canary. The production branch and production
+      # Worker remain untouched; the shared credential is supplied by the host.
+      DREAM_WORKFLOW_V2_ENABLED: "true"
+      HIVEMIND_DREAM_WORKER_URL: https://hivemind-dream-lifecycle-local.amarsai2005.workers.dev
+      HIVEMIND_DREAM_WORKFLOW_SECRET: ${HIVEMIND_DREAM_WORKFLOW_SECRET:-}
       # hm-extract: OFF by default (KB_EXTRACT_URL unset in ./core/.env means this
       # whole tier is skipped, zero behavior change). Set KB_EXTRACT_URL in
       # core/.env to http://hm-extract:8088 to enable, narrow format allowlist

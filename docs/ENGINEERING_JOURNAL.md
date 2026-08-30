@@ -1106,3 +1106,20 @@ slides that find no unique anchor get a page instead of `null`.
   healthy with revision label `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`.
   Public API health passed and fresh critical-log count was zero. No migration,
   frontend, Control, Employees, parser, database, Redis, or Qdrant replacement.
+
+## 2026-08-30 UTC — Canonical Knowledge Foundation enabled globally
+
+- Operator decision: the current small user base makes a global core-feature
+  rollout preferable to a prolonged percentage rollout. Changed only Flagship
+  `canonical_knowledge_foundation_v1` in app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` from default `off` to default `full`.
+- The flag remains enabled with all five variations and the original exact
+  canary rule preserved. No Worker, Core, frontend, container, database, Queue,
+  Workflow, R2 resource, or secret was changed.
+- Wrangler 4.127.1 API evaluation returned `full/DEFAULT` for an unrelated
+  production user and a different organization, and `full/TARGETING_MATCH` for
+  the original canary. The live production Worker `/enabled` endpoint returned
+  HTTP 200 with `mode=full` for both unrelated and canary identities.
+- Rollback remains immediate: set the Flagship default to `off` or activate
+  `CANONICAL_KNOWLEDGE_KILL_SWITCH=true`. Existing stable-path code remains in
+  the runtime; changing the flag does not require a container deployment.

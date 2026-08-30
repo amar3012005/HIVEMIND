@@ -811,3 +811,19 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Rollback: Flagship `canonical_knowledge_foundation_v1=off`, backend canonical
   kill switch, or `/root/quick-deploy.sh --rollback core`. Previous preserved
   Core image was `hivemind/core-api:sha-0bd3215e`.
+
+## Flagship promotion — Canonical Knowledge Foundation global default
+
+- At `2026-08-30T20:43:35.762Z`, Flagship app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` flag
+  `canonical_knowledge_foundation_v1` changed from default `off` to `full`.
+- Runtime code remains Core `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`,
+  image `hivemind/core-api:sha-7dcc5f15`, digest
+  `sha256:63f8785a4d7216bcb7c70e6f6f84bfd258c3176602f55dc36f6221633ac23929`.
+  No code or infrastructure deployment was required.
+- Acceptance: two unrelated production contexts evaluated `full/DEFAULT`; the
+  original canary evaluated `full/TARGETING_MATCH`; authenticated live Worker
+  checks returned HTTP 200 and `mode=full` for unrelated and canary identities.
+- Rollback: `wrangler flagship flags set 6568ec71-67c6-4b2c-b2f3-98aebe9e81c8
+  canonical_knowledge_foundation_v1 --variation off`, or the backend canonical
+  kill switch for an environment-wide stop.

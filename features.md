@@ -171,9 +171,11 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 
 ## feature-20260830T200500Z — Canonical Knowledge Foundation Phase 0 canary
 
-- Production accepted for exact user `e35811aa-4bcd-44bb-b829-a437895a42eb`
-  and organization `bfbdd2bc-e214-44e5-80d4-e3284256d0c0`; Flagship default
-  remains `off`.
+- Production was first accepted for exact user
+  `e35811aa-4bcd-44bb-b829-a437895a42eb` and organization
+  `bfbdd2bc-e214-44e5-80d4-e3284256d0c0`. After Knowledge Base canonical
+  projection acceptance, Flagship was promoted globally to default `full` on
+  2026-08-30; the backend environment kill switch remains available.
 - Canonical source: `singulance-main`
   `bccbf73fdc1fdb40b1699d1251e7df12e6a15ce0`; frontend
   `59f3779b8291d5136a72a18867b5b4076ed46172`.
@@ -184,8 +186,8 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   `user_asserted`, exact source evidence, and zero lineage. Replay stayed 1/2/0.
 - Cloudflare canonical Worker `c8461f69-d815-4ea5-bba3-82fc644a3f3c` and
   frontend Worker `0ff3c24a-f722-4510-808c-dc50af597602` are live. The
-  multivariate flag serves `full` only to the exact canary; non-canaries are
-  `off`. The UI separates Claims from Memory lineage.
+  multivariate flag now serves `full` by default to every valid tenant/user
+  context. The UI separates Claims from Memory lineage.
 - Rollback: set the canary to `off`, set
   `CANONICAL_KNOWLEDGE_KILL_SWITCH=true`, or use governor rollback images.
 - Knowledge Base promotion parity was accepted at Core

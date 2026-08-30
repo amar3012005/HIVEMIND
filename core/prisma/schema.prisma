@@ -1156,6 +1156,8 @@ model Memory {
   derivation                                                  MemoryDerivation?
   evidenceLinks                                               MemoryEvidenceLink[]
   entityMentions                                              EntityMention[]
+  claimEvidenceLinks                                          ClaimEvidenceLink[]
+  projectionState                                             MemoryProjectionState?
 
   // Phase 1 Cognition Loop: synthesis quality metadata
   // synthesisConfidence: LLM-scored confidence (0.0–1.0) for canonical-fact / synthesis-bridge outputs
@@ -4020,6 +4022,8 @@ model CanonicalEntity {
   updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   memoryLinks MemoryEntityLink[]
+  subjectClaims CanonicalClaim[] @relation("CanonicalClaimSubject")
+  objectClaims  CanonicalClaim[] @relation("CanonicalClaimObject")
 
   @@index([organizationId, entityKind])
   @@unique([organizationId, identityKey], map: "canonical_entities_org_identity_key")
@@ -4042,6 +4046,112 @@ model MemoryEntityLink {
   @@id([memoryId, entityId, role])
   @@index([entityId])
   @@map("memory_entity_links")
+}
+
+/// Versioned registry for the bounded predicates accepted by the canonical graph.
+model CanonicalPredicate {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                String   @db.VarChar(80)
+  version             Int      @default(1)
+  aliases             String[] @default([])
+  inverseName         String?  @map("inverse_name") @db.VarChar(80)
+  subjectKinds        String[] @default([]) @map("subject_kinds")
+  objectKinds         String[] @default([]) @map("object_kinds")
+  riskClass           String   @default("low") @map("risk_class") @db.VarChar(20)
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  claims              CanonicalClaim[]
+
+  @@unique([name, version])
+  @@index([aliases], type: Gin)
+  @@map("canonical_predicates")
+}
+
+/// A factual edge between canonical entities (or an entity and a literal).
+/// It is intentionally separate from `relationships`, which stores memory lineage only.
+model CanonicalClaim {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId      String   @map("organization_id") @db.Uuid
+  claimKey            String   @map("claim_key") @db.VarChar(128)
+  kind                String   @default("entity_relation") @db.VarChar(40)
+  subjectEntityId     String   @map("subject_entity_id") @db.Uuid
+  predicateId         String   @map("predicate_id") @db.Uuid
+  objectEntityId      String?  @map("object_entity_id") @db.Uuid
+  objectLiteral       Json?    @map("object_literal")
+  qualifiers          Json     @default("{}")
+  confidence          Decimal  @default(1.00) @db.Decimal(4, 3)
+  assertionStatus     String   @default("user_asserted") @map("assertion_status") @db.VarChar(32)
+  lifecycleStatus     String   @default("active") @map("lifecycle_status") @db.VarChar(24)
+  validFrom           DateTime? @map("valid_from") @db.Timestamptz(6)
+  validTo             DateTime? @map("valid_to") @db.Timestamptz(6)
+  knownAt             DateTime @default(now()) @map("known_at") @db.Timestamptz(6)
+  processingVersion   Int      @default(1) @map("processing_version")
+  sourceDigest        String   @map("source_digest") @db.VarChar(64)
+  supersedesClaimId   String?  @map("supersedes_claim_id") @db.Uuid
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  subject             CanonicalEntity @relation("CanonicalClaimSubject", fields: [subjectEntityId], references: [id], onDelete: Restrict)
+  objectEntity        CanonicalEntity? @relation("CanonicalClaimObject", fields: [objectEntityId], references: [id], onDelete: Restrict)
+  predicate           CanonicalPredicate @relation(fields: [predicateId], references: [id], onDelete: Restrict)
+  supersedes          CanonicalClaim? @relation("ClaimSupersession", fields: [supersedesClaimId], references: [id], onDelete: SetNull)
+  supersededBy        CanonicalClaim[] @relation("ClaimSupersession")
+  evidence            ClaimEvidenceLink[]
+
+  @@unique([organizationId, claimKey])
+  @@index([organizationId, subjectEntityId, predicateId])
+  @@index([organizationId, objectEntityId])
+  @@index([organizationId, validFrom, validTo])
+  @@map("canonical_claims")
+}
+
+model ClaimEvidenceLink {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  claimId     String   @map("claim_id") @db.Uuid
+  memoryId    String   @map("memory_id") @db.Uuid
+  documentId  String?  @map("document_id") @db.Uuid
+  segmentId   String?  @map("segment_id") @db.Uuid
+  exactQuote  String?  @map("exact_quote")
+  startOffset Int?     @map("start_offset")
+  endOffset   Int?     @map("end_offset")
+  sourceDigest String  @map("source_digest") @db.VarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  claim       CanonicalClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  memory      Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@unique([claimId, memoryId, sourceDigest])
+  @@index([memoryId])
+  @@map("claim_evidence_links")
+}
+
+model MemoryProjectionState {
+  memoryId          String   @id @map("memory_id") @db.Uuid
+  organizationId    String   @map("organization_id") @db.Uuid
+  admittedMode      String   @default("off") @map("admitted_mode") @db.VarChar(16)
+  processingVersion Int      @default(1) @map("processing_version")
+  memoryStatus      String   @default("complete") @map("memory_status") @db.VarChar(20)
+  entitiesStatus    String   @default("pending") @map("entities_status") @db.VarChar(20)
+  claimsStatus      String   @default("pending") @map("claims_status") @db.VarChar(20)
+  lineageStatus     String   @default("complete") @map("lineage_status") @db.VarChar(20)
+  vectorStatus      String   @default("pending") @map("vector_status") @db.VarChar(20)
+  remoteStatus      String?  @map("remote_status") @db.VarChar(20)
+  receipt           Json?
+  lastError         String?  @map("last_error")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  memory            Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, claimsStatus])
+  @@map("memory_projection_states")
+}
+
+model CanonicalProjectionNonce {
+  nonce      String   @id @db.VarChar(200)
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([expiresAt])
+  @@map("canonical_projection_nonces")
 }
 
 // Entity review queue — fuzzy match candidates 0.70-0.95 surface here.

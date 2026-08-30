@@ -838,6 +838,22 @@ export async function remoteMemRelationships(orgId, memoryId) {
   }
 }
 
+export async function remoteMemoryClaims(orgId, memoryId, filters = {}) {
+  try { return await _call(orgId, '/v1/canonical-claims', { memoryId, filters }); }
+  catch (e) { _logRemoteOnce('warn', 'canonical-claims', orgId, e, ` id=${memoryId}`); return null; }
+}
+
+export async function remoteCanonicalProjection(orgId, projection) {
+  try {
+    const out = await _call(orgId, '/v1/canonical-project', { projection });
+    if (!out?.ok || !out?.receipt) throw new Error(out?.error || 'canonical projection was not acknowledged');
+    return out;
+  } catch (e) {
+    _logRemoteOnce('warn', 'canonical-project', orgId, e);
+    return null;
+  }
+}
+
 // Fetch relationship neighbourhoods for one bounded frontier in one transport
 // request.  A recall graph walk previously made one remote request per memory;
 // a dense or concurrent tenant could therefore fill its own transport queue.

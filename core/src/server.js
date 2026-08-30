@@ -13,7 +13,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrMemoryClaims, amrCanonicalProjection, amrDelete, amrPurge } from './vector/mneme/driver.js';
 import { remoteList, remoteHydrate, isRemoteMemoryUnavailableError } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { exactMemoryListTotal } from './memory/memory-list-contract.js';
@@ -52,6 +52,8 @@ import { isOrganizationAdmin } from './workspace/access-policy.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { getEntityLinkQueue } from './memory/entity-link-queue.js';
+import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonicalKnowledge, prepareCanonicalProjection, verifyCanonicalProjectionSignature } from './memory/canonical-knowledge.js';
+import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
@@ -123,6 +125,74 @@ const PROJECT_ROOT = path.join(__dirname, '..');
 const REPO_ROOT = path.join(PROJECT_ROOT, '..');
 const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
+const canonicalProjectionClient = new CloudflareCanonicalProjectionClient();
+const canonicalProjectionNonceFallback = new Map();
+
+async function consumeCanonicalProjectionNonce(nonce) {
+  const expiresAt = new Date(Date.now() + 10 * 60_000);
+  if (prisma?.canonicalProjectionNonce) {
+    try {
+      await prisma.canonicalProjectionNonce.create({ data: { nonce, expiresAt } });
+      prisma.canonicalProjectionNonce.deleteMany({ where: { expiresAt: { lt: new Date() } } }).catch(() => {});
+      return true;
+    } catch (error) { if (error?.code === 'P2002') return false; throw error; }
+  }
+  const now = Date.now();
+  for (const [key, expiry] of canonicalProjectionNonceFallback) if (expiry < now) canonicalProjectionNonceFallback.delete(key);
+  if (canonicalProjectionNonceFallback.has(nonce)) return false;
+  canonicalProjectionNonceFallback.set(nonce, expiresAt.getTime()); return true;
+}
+
+function canonicalProjectionInput({ memoryId, orgId, payload, requestBody, knownAt = new Date() }) {
+  const explicit = Array.isArray(requestBody?.entities) ? requestBody.entities : [];
+  const tagged = (payload?.tags || []).filter((tag) => String(tag).startsWith('entity:')).map((tag) => ({
+    name: String(tag).slice(7).replace(/[-_]+/g, ' '), kind: 'concept', role: 'mentioned',
+  }));
+  return {
+    memoryId, organizationId: orgId, title: payload?.title, content: payload?.content,
+    entities: explicit.length ? explicit : tagged, claims: Array.isArray(requestBody?.claims) ? requestBody.claims : [],
+    exactQuote: payload?.content, knownAt, timeZone: requestBody?.timezone || 'Europe/Berlin',
+    documentId: requestBody?.document_id || null, segmentId: requestBody?.segment_id || null,
+  };
+}
+
+async function projectCanonicalKnowledge({ prisma, mode, input }) {
+  if (orgIsRemote(input.organizationId)) {
+    const receipt = await amrCanonicalProjection(input.organizationId, { mode, input, prepared: prepareCanonicalProjection(input), processingVersion: 1 });
+    if (!receipt) throw new Error('remote canonical projection unavailable');
+    return { mode, status: 'complete', receipt: receipt.receipt };
+  }
+  return materializeCanonicalKnowledge({ prisma, mode, input });
+}
+
+async function handleCanonicalProjectionStageCallback({ req, res, pathname }) {
+  const match = pathname.match(/^\/internal\/canonical-projection\/v1\/memories\/([^/]+)\/stages\/(load|reconstruct|resolve|normalize|persist|reconcile|complete|failed)$/);
+  if (!match || req.method !== 'POST') return false;
+  let rawBody;
+  try { rawBody = (await readBoundedBuffer(req, 1024 * 1024)).toString('utf8'); } catch { jsonResponse(res, { error: 'invalid body' }, 400); return true; }
+  const verified = verifyCanonicalProjectionSignature({ headers: req.headers, pathname, rawBody, secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET });
+  if (!verified.ok) { jsonResponse(res, { error: 'invalid projection signature', reason: verified.reason }, 401); return true; }
+  if (!(await consumeCanonicalProjectionNonce(verified.nonce))) { jsonResponse(res, { error: 'replayed projection nonce' }, 409); return true; }
+  let body; try { body = JSON.parse(rawBody || '{}'); } catch { jsonResponse(res, { error: 'invalid_json_body' }, 400); return true; }
+  const memoryId = match[1]; const stage = match[2]; const orgId = body.org_id; const requiredProjection = body.required_projection;
+  if (!orgId || !['shadow', 'write', 'read', 'full'].includes(requiredProjection)) { jsonResponse(res, { error: 'org_id and valid required_projection required' }, 400); return true; }
+  try {
+    const memory = await persistentMemoryStore.getMemory(memoryId);
+    if (!memory || (memory.org_id || memory.orgId) !== orgId) { jsonResponse(res, { error: 'Not found' }, 404); return true; }
+    const existing = await prisma.memoryProjectionState.findUnique({ where: { memoryId } });
+    const receipts = (existing?.receipt && typeof existing.receipt === 'object') ? { ...existing.receipt } : {};
+    if (receipts.stages?.[stage]) { jsonResponse(res, { ok: true, idempotent: true, receipt: receipts.stages[stage] }); return true; }
+    let receipt = { memory_id: memoryId, stage, processing_version: body.processing_version || 1, required_projection: requiredProjection };
+    if (stage === 'persist') receipt.projection = await projectCanonicalKnowledge({ prisma, mode: requiredProjection, input: canonicalProjectionInput({ memoryId, orgId, payload: memory, requestBody: body }) });
+    const status = stage === 'failed' ? 'failed' : (stage === 'complete' || stage === 'persist' ? 'complete' : 'repairing');
+    const nextReceipt = { ...receipts, stages: { ...(receipts.stages || {}), [stage]: receipt } };
+    await prisma.memoryProjectionState.upsert({
+      where: { memoryId }, update: { admittedMode: requiredProjection, claimsStatus: status, entitiesStatus: status, receipt: nextReceipt, lastError: stage === 'failed' ? (body.error || 'workflow failed') : null },
+      create: { memoryId, organizationId: orgId, admittedMode: requiredProjection, processingVersion: body.processing_version || 1, claimsStatus: status, entitiesStatus: status, receipt: nextReceipt, lastError: stage === 'failed' ? (body.error || 'workflow failed') : null },
+    });
+    jsonResponse(res, { ok: true, receipt }); return true;
+  } catch (error) { jsonResponse(res, { ok: false, error: error.message }, 503); return true; }
+}
 
 // Cognition is an organization-administration surface. Keep its route gates on
 // the same active-membership and canonical-role interpretation as Workspace
@@ -6322,6 +6392,12 @@ exit \$RC
     }
   }
 
+  // HMAC-authenticated Cloudflare workflow callbacks live outside user API auth.
+  if (pathname.startsWith('/internal/canonical-projection/')) {
+    if (await handleCanonicalProjectionStageCallback({ req, res, pathname })) return;
+    return jsonResponse(res, { error: 'not_found' }, 404);
+  }
+
   // API Routes
   // /v2/chat is an isolated native-orchestrator acceptance route. It enters
   // the exact same auth/body/tenant/quota/streaming lifecycle as /api/chat;
@@ -10262,6 +10338,65 @@ exit \$RC
         }
       }
 
+      const projectionStageMatch = pathname.match(/^\/internal\/canonical-projection\/v1\/memories\/([^/]+)\/stages\/(load|reconstruct|resolve|normalize|persist|reconcile|complete|failed)$/);
+      if (projectionStageMatch && req.method === 'POST') {
+        const rawCanonicalBody = JSON.stringify(body || {});
+        const verified = verifyCanonicalProjectionSignature({ headers: req.headers, pathname, rawBody: rawCanonicalBody, secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET });
+        if (!verified.ok) return jsonResponse(res, { error: 'invalid projection signature', reason: verified.reason }, 401);
+        if (!(await consumeCanonicalProjectionNonce(verified.nonce))) return jsonResponse(res, { error: 'replayed projection nonce' }, 409);
+        const memoryId = projectionStageMatch[1]; const stage = projectionStageMatch[2];
+        const requestedOrg = body?.org_id; const requiredProjection = body?.required_projection;
+        if (!requestedOrg || !requiredProjection) return jsonResponse(res, { error: 'org_id and required_projection required' }, 400);
+        try {
+          const memory = await persistentMemoryStore.getMemory(memoryId);
+          if (!memory || (memory.org_id || memory.orgId) !== requestedOrg) return jsonResponse(res, { error: 'Not found' }, 404);
+          const existing = await prisma?.memoryProjectionState?.findUnique({ where: { memoryId } });
+          const receipts = (existing?.receipt && typeof existing.receipt === 'object') ? { ...existing.receipt } : {};
+          if (receipts.stages?.[stage]) return jsonResponse(res, { ok: true, idempotent: true, receipt: receipts.stages[stage] });
+          let result = { memory_id: memoryId, stage, processing_version: body.processing_version || 1, required_projection: requiredProjection };
+          if (stage === 'persist') {
+            const admittedMode = requiredProjection;
+            const projection = await projectCanonicalKnowledge({ prisma, mode: admittedMode, input: canonicalProjectionInput({
+              memoryId, orgId: requestedOrg, payload: memory,
+              requestBody: { entities: body.entities || [], claims: body.claims || [], timezone: body.timezone },
+            }) });
+            result = { ...result, projection };
+          }
+          const status = stage === 'failed' ? 'failed' : (stage === 'complete' ? 'complete' : (stage === 'persist' ? 'complete' : 'repairing'));
+          const nextReceipt = { ...receipts, stages: { ...(receipts.stages || {}), [stage]: result } };
+          await prisma.memoryProjectionState.upsert({
+            where: { memoryId },
+            update: { claimsStatus: status, entitiesStatus: status, receipt: nextReceipt, lastError: stage === 'failed' ? (body.error || 'workflow failed') : null },
+            create: { memoryId, organizationId: requestedOrg, admittedMode: requiredProjection, processingVersion: body.processing_version || 1, claimsStatus: status, entitiesStatus: status, receipt: nextReceipt, lastError: stage === 'failed' ? (body.error || 'workflow failed') : null },
+          });
+          return jsonResponse(res, { ok: true, receipt: result });
+        } catch (error) { return jsonResponse(res, { ok: false, error: error.message }, 503); }
+      }
+
+      // Cloudflare Workflow repair callback. Queue messages carry identifiers only;
+      // Core reloads the authorized memory and reconstructs the projection here.
+      if (pathname === '/internal/canonical-projection/repair' && req.method === 'POST') {
+        const rawCanonicalBody = JSON.stringify(body || {});
+        const verified = verifyCanonicalProjectionSignature({
+          headers: req.headers, pathname, rawBody: rawCanonicalBody,
+          secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET,
+        });
+        if (!verified.ok) return jsonResponse(res, { error: 'invalid projection signature', reason: verified.reason }, 401);
+        if (!body?.memory_id || !body?.org_id) return jsonResponse(res, { error: 'memory_id and org_id required' }, 400);
+        try {
+          const memory = await persistentMemoryStore.getMemory(body.memory_id);
+          if (!memory || (memory.org_id || memory.orgId) !== body.org_id) return jsonResponse(res, { error: 'Not found' }, 404);
+          const mode = canonicalKnowledgeMode({ evaluatedMode: body.mode || 'write' });
+          const projection = await projectCanonicalKnowledge({ prisma, mode, input: canonicalProjectionInput({
+            memoryId: body.memory_id, orgId: body.org_id, payload: memory,
+            requestBody: { entities: body.entities || [], claims: body.claims || [], timezone: body.timezone },
+          }) });
+          return jsonResponse(res, { ok: true, workflow_id: `claim-${body.memory_id}-v${body.processing_version || 1}`, projection });
+        } catch (error) {
+          return jsonResponse(res, { ok: false, error: error.message }, 503);
+        }
+      }
+
       // GET /api/memories/:id/relationships
       // Returns every edge touching this memory, grouped by direction +
       // type, with target/source memory titles inlined so the FE drawer
@@ -10274,6 +10409,39 @@ exit \$RC
       //     in:  [{ id, type, confidence, source_id, source_title, ... }],
       //     by_type: { Updates: [...], Extends: [...], Mentions: [...], ... },
       //   }
+      const claimsMatch = pathname.match(/^\/api\/memories\/([^/]+)\/claims$/);
+      if (claimsMatch && req.method === 'GET') {
+        if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/claims')) return;
+        const memoryId = claimsMatch[1];
+        try {
+          const memory = await persistentMemoryStore.getMemory(memoryId);
+          const isAdmin = principal.scopes?.includes('admin') || principal.master;
+          const sameOrg = !(memory?.org_id || memory?.orgId) || (memory.org_id || memory.orgId) === orgId;
+          if (!memory || memory.deleted_at || ((!sameOrg || memory.user_id !== userId) && !isAdmin)) {
+            return jsonResponse(res, { error: 'Not found' }, 404);
+          }
+          if (orgIsRemote(orgId)) {
+            const remoteClaims = await amrMemoryClaims(orgId, memoryId, {
+              subject: url.searchParams.get('subject'), predicate: url.searchParams.get('predicate'),
+              object: url.searchParams.get('object'), validAt: url.searchParams.get('valid_at'),
+            });
+            return jsonResponse(res, remoteClaims || { memory_id: memoryId, claims: [], projection: { status: 'degraded' } });
+          }
+          const claims = await getCanonicalClaimsForMemory({
+            prisma, organizationId: orgId, memoryId,
+            filters: {
+              subject: url.searchParams.get('subject'), predicate: url.searchParams.get('predicate'),
+              object: url.searchParams.get('object'), validAt: url.searchParams.get('valid_at'),
+            },
+          });
+          const projection = await prisma.memoryProjectionState.findUnique({ where: { memoryId } });
+          return jsonResponse(res, { memory_id: memoryId, claims, projection });
+        } catch (error) {
+          console.error('[memory-claims]', error);
+          return jsonResponse(res, { error: error.message }, 500);
+        }
+      }
+
       const relsMatch = pathname.match(/^\/api\/memories\/([^/]+)\/relationships$/);
       if (relsMatch && req.method === 'GET') {
         if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/relationships')) return;
@@ -20111,6 +20279,10 @@ exit \$RC
                 }
               };
 
+              // Tenant+user Flagship admission is evaluated once and latched for
+              // every memory produced by this request. Any evaluation failure is off.
+              const admittedCanonicalMode = await canonicalProjectionClient.modeFor({ orgId, userId });
+
               // Determine sync vs async mode
               const syncMode = url.searchParams.get('sync') === 'true' || body.sync === true;
               const wantSmartRouting = body.smartIngest !== false && !body.skipProcessing;
@@ -20205,6 +20377,18 @@ exit \$RC
                       }
 
                       results.push(result);
+
+                      const canonicalMode = admittedCanonicalMode;
+                      if (canonicalMode !== 'off' && result.memoryId) {
+                        try {
+                          await projectCanonicalKnowledge({ prisma, mode: canonicalMode, input: canonicalProjectionInput({
+                            memoryId: result.memoryId, orgId, payload: p, requestBody: body,
+                          }) });
+                          await canonicalProjectionClient.start({ memoryId: result.memoryId, orgId, userId, requiredProjection: canonicalMode }).catch(() => null);
+                        } catch (projectionError) {
+                          console.warn('[canonical-knowledge] async projection degraded:', projectionError.message);
+                        }
+                      }
 
                       ingestTracker.updateJob(jobId, { status: 'embedding', progress: 60, memoryId: result.memoryId });
 
@@ -20445,11 +20629,26 @@ exit \$RC
 
               const firstMemory = await persistentMemoryStore.getMemory(firstSuccessResult.memoryId);
 
+              const canonicalMode = admittedCanonicalMode;
+              let projection;
+              if (canonicalMode !== 'off') {
+                try {
+                  projection = await projectCanonicalKnowledge({ prisma, mode: canonicalMode, input: canonicalProjectionInput({
+                    memoryId: firstSuccessResult.memoryId, orgId, payload: ingestPayload, requestBody: body,
+                  }) });
+                  await canonicalProjectionClient.start({ memoryId: firstSuccessResult.memoryId, orgId, userId, requiredProjection: canonicalMode }).catch(() => null);
+                } catch (projectionError) {
+                  console.warn('[canonical-knowledge] sync projection degraded:', projectionError.message);
+                  projection = { mode: canonicalMode, status: 'degraded', error: projectionError.message };
+                }
+              }
+
               return jsonResponse(res, {
                 success: true,
                 memory: firstMemory,
                 relationships: firstSuccessResult.edgesCreated,
                 chunk_count: syncResults.filter(r => !r.skipped).length,
+                ...(projection ? { projection } : {}),
                 mutation: {
                   operation: firstSuccessResult.operation,
                   deprecated_ids: firstSuccessResult.deprecatedIds,

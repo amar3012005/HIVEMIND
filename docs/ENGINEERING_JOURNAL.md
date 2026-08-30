@@ -1270,3 +1270,38 @@ slides that find no unique anchor get a page instead of `null`.
     turn store: passed.
 - Local Worker version `308c14b7-ca86-4539-8abd-15831474515a`; production was not
   touched. Rollback remains the environment kill switch or Flagship `off`.
+
+## 2026-08-31 UTC — Durable Chat V2 exact production canary accepted
+
+- Accepted release `a73cdbc82dc5ea637244d38bda7fb8ea7a96a0f3` through the
+  canonical Core-only governor. The release applied two additive idempotent
+  migrations and replaced only `hm-core`; Control, Employees, frontend, data
+  services, BYOD agents, ingestion workers, and TARA were not restarted.
+- Pre-release PostgreSQL backup and checksum:
+  `/root/releases/backups/pre-durable-chat-a73cdbc8-20260830T233248Z.sql.gz`,
+  `88461757b872cc2d38cec13342697544819a58574a21d34d22d4d731c44c281c`.
+- Core image `hivemind/core-api:sha-a73cdbc8`, digest
+  `sha256:8d826de5f0c7ff669bc198da15e1453c915890cee8a6fa491a80554cff83e5f6`;
+  manifest `/root/releases/manifests/a73cdbc8/20260830T233409Z/RELEASE_MANIFEST.json`
+  reports `ok` and the exact revision.
+- Production Worker active version
+  `c413ed26-533f-4198-8d6f-be03841e1ae3`. The first secret probe failed closed
+  because the secret was initially uploaded under a non-source binding name;
+  no durable row was created. The source-defined `DURABLE_CHAT_AGENT_SECRET`
+  binding was installed, the unused secret was removed, and authenticated mode
+  checks then returned exact-canary `full` and unrelated identity `off`.
+- E2E: stable flag-off arithmetic returned HTTP 200, original V2 keys, and zero
+  durable rows. Exact canary arithmetic returned turn
+  `21fbe4c5-2d54-4d3b-be72-781494b440c9`; duplicate
+  `X-Idempotency-Key` returned the same turn with `replayed=true`. Its Durable
+  Object held only phase/status/sequence/hashed trace metadata; Workflow output
+  held only turn/status/phase/sequence/time and completed successfully. Grounded
+  recall turn `074d6d72-afff-4006-ae4b-b432a72e7c47` returned three sources,
+  two citations, no gaps, and `full/completed`.
+- Checks: focused Core 82/82, Worker 15/15, Prisma valid, TypeScript and Wrangler
+  production dry-run passed. Four durable tables and 14 indexes exist, both
+  migration ledger rows are finished, public homepage/login/API/Core are 200,
+  Core/Control/Employees are healthy, and fresh critical-log count is zero.
+- Flag default remains `off`; only the existing operator canary is `full`.
+  Rollback is exact rule off, followed if needed by the backed-up Core environment
+  kill switch and canonical service-scoped recreation. No global rollout occurred.

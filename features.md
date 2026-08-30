@@ -286,3 +286,13 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Local Worker version `308c14b7-ca86-4539-8abd-15831474515a`; Workflow resource
   `hivemind-chat-turn-workflow-local`. Production remains disabled and was not
   deployed or modified.
+
+### Exact production canary
+
+- Accepted on canonical SHA `a73cdbc82dc5ea637244d38bda7fb8ea7a96a0f3`.
+  Production Worker version `c413ed26-533f-4198-8d6f-be03841e1ae3` and Workflow
+  `hivemind-chat-turn-workflow-production` are live. Flagship remains default
+  `off`; only the existing production operator identity is targeted `full`.
+- Stable non-canary V2, durable completion, exactly-once replay, grounded recall,
+  metadata-only edge state, public health, and clean logs were verified. This is
+  a canary release, not a global enablement.

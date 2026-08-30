@@ -1,5 +1,45 @@
 # Current SINGULANCE Production Release
 
+## a73cdbc8 — durable Chat V2 production canary
+
+- Canonical parent SHA `a73cdbc82dc5ea637244d38bda7fb8ea7a96a0f3` on
+  `singulance-main`; frontend unchanged at
+  `59f3779b8291d5136a72a18867b5b4076ed46172`.
+- Core-only canonical release. Image `hivemind/core-api:sha-a73cdbc8`, digest
+  `sha256:8d826de5f0c7ff669bc198da15e1453c915890cee8a6fa491a80554cff83e5f6`;
+  revision label matches the full parent SHA and Core is healthy. Control Plane
+  and Employees were not rebuilt or recreated.
+- Additive replay-safe migrations
+  `20260831143000_durable_chat_agent_v1` and
+  `20260831150000_durable_chat_continuations` applied successfully. Backup
+  `/root/releases/backups/pre-durable-chat-a73cdbc8-20260830T233248Z.sql.gz`,
+  SHA-256 `88461757b872cc2d38cec13342697544819a58574a21d34d22d4d731c44c281c`.
+- Manifest `/root/releases/manifests/a73cdbc8/20260830T233409Z/RELEASE_MANIFEST.json`
+  reports `ok` for the exact SHA.
+- Cloudflare Worker `hivemind-durable-chat-agent-production`, active version
+  `c413ed26-533f-4198-8d6f-be03841e1ae3`; Workflow
+  `hivemind-chat-turn-workflow-production`; Flagship
+  `durable_chat_agent_v1` remains default `off` with one exact production
+  `full` rule for the existing operator canary. Unrelated production context
+  evaluates `off`.
+- Production acceptance: 82/82 focused Core tests, 15/15 Worker tests, Prisma
+  validation, TypeScript, Wrangler types and production dry-run passed. Stable
+  flag-off Chat V2 returned HTTP 200 with its original shape and zero durable
+  rows. Canary first execution returned `full/completed`; the same
+  `X-Idempotency-Key` replayed the identical turn with `replayed=true`.
+  Grounded recall returned three sources and two citations. Durable Object and
+  Workflow inspection contained lifecycle metadata only and Workflow reached
+  `complete`. Public homepage, login, API and Core health returned 200; fresh
+  Core critical-log count was zero.
+- Environment backup
+  `/root/hivemind/.env.pre-durable-chat-20260830T233350Z`. Immediate behavioral
+  rollback is to remove/set the exact Flagship rule to `off`; then set
+  `DURABLE_CHAT_AGENT_ENABLED=false` and recreate Core through the canonical
+  service-scoped release path. The schema is additive and remains inert. This
+  is the first production Worker release, so leave it deployed and inert rather
+  than deleting Durable Object or Workflow resources during rollback. Exact
+  prior Core is `319620270b84392d13d3a2c8970c10cb299372ea`.
+
 ## sha-a2e8db25 — provenance-only Derives and precise Memory Box edge repair
 
 - Parent SHA: `a2e8db25d55968d9ddd771db9c98738ea4ec027b` on `singulance-main` (PRs #521 and #522). Frontend unchanged and still hosted independently on Cloudflare.

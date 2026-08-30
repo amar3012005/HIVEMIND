@@ -188,3 +188,9 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   `off`. The UI separates Claims from Memory lineage.
 - Rollback: set the canary to `off`, set
   `CANONICAL_KNOWLEDGE_KILL_SWITCH=true`, or use governor rollback images.
+- Knowledge Base promotion parity was accepted at Core
+  `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`: standard, enterprise,
+  connector, and evidence-upgrade promotion boundaries now await the same
+  feature-flagged canonical projector. A production Cloudflare Workflow upload
+  produced `Professor Uwe Egly (person) -> teaches -> Neuro-Symbolic AI course
+  (technology)` with exact document/segment evidence and typed endpoint roles.

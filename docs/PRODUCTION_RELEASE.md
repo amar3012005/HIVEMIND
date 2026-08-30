@@ -792,3 +792,22 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Rollback: Flagship off or backend kill switch; governor rollback images and
   `/root/hivemind/.env.pre-phase0-20260830T1933Z` retained. Additive tables are
   inert on the stable path while disabled.
+
+## 7dcc5f15 — Knowledge Base canonical projection parity
+
+- Parent `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`; frontend unchanged at
+  `59f3779b8291d5136a72a18867b5b4076ed46172`; migrations: none.
+- Core `hivemind/core-api:sha-7dcc5f15`, digest
+  `sha256:63f8785a4d7216bcb7c70e6f6f84bfd258c3176602f55dc36f6221633ac23929`;
+  manifest `/root/releases/manifests/7dcc5f15/20260830T203237Z/RELEASE_MANIFEST.json`.
+- Scope: Core only. The document promotion boundary now invokes the same
+  tenant/user-flagged canonical materializer used by direct memory saves, with
+  one latched rollout mode per document and repairable per-memory degradation.
+- Acceptance: 17/17 focused tests; authenticated Cloudflare Workflow upload
+  completed ready; all promoted memories received full/complete projection;
+  exact typed teaches claim, entity roles, and document/segment evidence were
+  persisted; multiple recall and chat queries passed after synthetic cleanup.
+  Public health passed and fresh critical-log count was zero.
+- Rollback: Flagship `canonical_knowledge_foundation_v1=off`, backend canonical
+  kill switch, or `/root/quick-deploy.sh --rollback core`. Previous preserved
+  Core image was `hivemind/core-api:sha-0bd3215e`.

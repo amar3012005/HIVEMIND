@@ -1079,3 +1079,30 @@ slides that find no unique anchor get a page instead of `null`.
   `full`; non-canary `off`. Rollback is Flagship off, backend kill switch, or
   governor image rollback. Env backup:
   `/root/hivemind/.env.pre-phase0-20260830T1933Z`.
+
+## 2026-08-30 UTC — Knowledge Base canonical projection parity accepted
+
+- Committed and deployed Core-only commits `85926c08cc8cb4d369d6263f69ae97a9cb4b7803`,
+  `0bd3215e333ee9541b129ffec7fee7acb08d981e`, and final
+  `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f` from `singulance-main`.
+- Focused verification command:
+  `node --test tests/unit/document-canonical-projection.test.js tests/memory/canonical-knowledge.test.js`.
+  Final result: 17 tests, 17 passed, 0 failed. Syntax checks and
+  `git diff --check` also passed.
+- Production E2E: authenticated canary upload job
+  `671712ae-a118-4ba6-ae5c-444ec5da0f84` completed `ready` through
+  `cloudflare_workflow` with one document, one segment, three candidates, and
+  four memories. All four projection states were `full/complete` with no error.
+- Semantic proof: memory `895b16bc-1dbd-4efc-bfa1-ac7b39617d88` produced one
+  exact-evidence claim `Professor Uwe Egly (person) -> teaches ->
+  Neuro-Symbolic AI course (technology)` plus subject/actor and
+  object/technology roles. No factual predicate was written to memory lineage.
+- Recall canaries passed for instructor, subject, start date, Quantum Computing,
+  and Deep Learning queries. Clean-data chat answered both Quantum Computing
+  and Deep Learning with citations. All synthetic canary documents/memories and
+  all disposable API keys were deleted/revoked after verification.
+- Runtime: `hivemind/core-api:sha-7dcc5f15`, digest
+  `sha256:63f8785a4d7216bcb7c70e6f6f84bfd258c3176602f55dc36f6221633ac23929`,
+  healthy with revision label `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`.
+  Public API health passed and fresh critical-log count was zero. No migration,
+  frontend, Control, Employees, parser, database, Redis, or Qdrant replacement.

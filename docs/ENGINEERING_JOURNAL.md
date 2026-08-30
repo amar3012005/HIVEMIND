@@ -1052,3 +1052,30 @@ slides that find no unique anchor get a page instead of `null`.
   `suppressServiceError` marker; public login returned 200.
 - Scope: frontend only. No Core, Control Plane, Employees, database, Workflow,
   Flagship, or local-preview resource was rebuilt or changed.
+
+## 2026-08-30 UTC — Phase 0 Canonical Knowledge Foundation accepted
+
+- Committed: parent `singulance-main`
+  `bccbf73fdc1fdb40b1699d1251e7df12e6a15ce0`; frontend `main`
+  `59f3779b8291d5136a72a18867b5b4076ed46172`.
+- Tests: canonical/proxy suites 12/12; Cloudflare Worker 11/11; frontend claim
+  normalizer 2/2; optimized frontend production build compiled successfully.
+- Migration `20260830190000_canonical_knowledge_foundation` applied. Verified
+  backup `/root/backups/hivemind-pre-phase0-20260830T192734Z.dump`, SHA-256
+  `d76a7e0d13425f2beedc3c4f5d2e340f29ba5961e617e633f2a5d6d3241a3ffd`.
+- Accepted runtime: Core `sha-bccbf73f` digest
+  `sha256:8f4c6b3632e637e80ca109d4ae1f2b01cef99cc8cf16b16ab63705a37db62269`;
+  Control `sha-346586be` digest
+  `sha256:285a4fdf44ee625ed0ad3f64807c6931b7623258cec4aa6d2d0b1abcc4061fbe`.
+- Cloudflare: canonical Worker `c8461f69-d815-4ea5-bba3-82fc644a3f3c`,
+  frontend Worker `0ff3c24a-f722-4510-808c-dc50af597602`, Workflow
+  `claim-74fb72fc-08da-41cc-8c56-598eae67bfee-v3` complete.
+- Production proof: one teaches claim, two entities, correct endpoint roles,
+  exact quote, 2026-08-31 validity, `user_asserted`, zero lineage, replay 1/2/0,
+  authenticated claims HTTP 200, public health 200, live UI markers, and zero
+  fresh critical logs. User recall joined Deep Learning and Quantum Computing
+  through Uwe without a false lineage edge.
+- Rollout: `canonical_knowledge_foundation_v1` default `off`; exact canary
+  `full`; non-canary `off`. Rollback is Flagship off, backend kill switch, or
+  governor image rollback. Env backup:
+  `/root/hivemind/.env.pre-phase0-20260830T1933Z`.

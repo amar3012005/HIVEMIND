@@ -168,3 +168,23 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Accepted as Cloudflare Worker version
   `288561fd-e001-4132-a82c-7e8f0711d9e3` after focused tests, production build,
   dry-run, served-bundle inspection, and public login verification.
+
+## feature-20260830T200500Z — Canonical Knowledge Foundation Phase 0 canary
+
+- Production accepted for exact user `e35811aa-4bcd-44bb-b829-a437895a42eb`
+  and organization `bfbdd2bc-e214-44e5-80d4-e3284256d0c0`; Flagship default
+  remains `off`.
+- Canonical source: `singulance-main`
+  `bccbf73fdc1fdb40b1699d1251e7df12e6a15ce0`; frontend
+  `59f3779b8291d5136a72a18867b5b4076ed46172`.
+- `CanonicalClaim` stores factual predicates separately from memory lineage.
+  `/relationships` remains Updates, Extends, Derives, Contradicts, and PartOf.
+- Canary proof: one `Uwe Egly -> teaches -> deep learning` claim, two entities,
+  subject/actor and object/technology roles, valid from 2026-08-31,
+  `user_asserted`, exact source evidence, and zero lineage. Replay stayed 1/2/0.
+- Cloudflare canonical Worker `c8461f69-d815-4ea5-bba3-82fc644a3f3c` and
+  frontend Worker `0ff3c24a-f722-4510-808c-dc50af597602` are live. The
+  multivariate flag serves `full` only to the exact canary; non-canaries are
+  `off`. The UI separates Claims from Memory lineage.
+- Rollback: set the canary to `off`, set
+  `CANONICAL_KNOWLEDGE_KILL_SWITCH=true`, or use governor rollback images.

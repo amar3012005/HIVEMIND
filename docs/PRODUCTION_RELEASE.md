@@ -767,3 +767,28 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Rollback: governor-preserved Core image
   `sha256:900a1f55eb1884d5bbb65773d972dc5c4d05ed12c9629c42ff85e07c9eb2b3c1`
   and env backup `/root/hivemind/.env.before-cf-bge-20260830T180445Z`.
+
+## bccbf73f — Phase 0 Canonical Knowledge Foundation canary
+
+- Parent `bccbf73fdc1fdb40b1699d1251e7df12e6a15ce0`; frontend
+  `59f3779b8291d5136a72a18867b5b4076ed46172`.
+- Core `hivemind/core-api:sha-bccbf73f`, digest
+  `sha256:8f4c6b3632e637e80ca109d4ae1f2b01cef99cc8cf16b16ab63705a37db62269`;
+  Control `hivemind/control-plane:sha-346586be`, digest
+  `sha256:285a4fdf44ee625ed0ad3f64807c6931b7623258cec4aa6d2d0b1abcc4061fbe`.
+  Employees and data/infrastructure containers were not replaced.
+- Migration `20260830190000_canonical_knowledge_foundation`; backup
+  `/root/backups/hivemind-pre-phase0-20260830T192734Z.dump`, SHA-256
+  `d76a7e0d13425f2beedc3c4f5d2e340f29ba5961e617e633f2a5d6d3241a3ffd`.
+- Cloudflare canonical Worker `c8461f69-d815-4ea5-bba3-82fc644a3f3c`, frontend
+  Worker `0ff3c24a-f722-4510-808c-dc50af597602`, Workflow
+  `claim-74fb72fc-08da-41cc-8c56-598eae67bfee-v3` complete.
+- Flagship `canonical_knowledge_foundation_v1`: default `off`, exact canary
+  `full`, non-canary `off`.
+- Acceptance: authenticated claims 200; exactly one Uwe/teaches/Deep Learning
+  claim, two entities, typed roles, exact evidence, valid-from 2026-08-31,
+  user-asserted, zero lineage, stable replay; public health 200, live frontend
+  markers verified, fresh critical logs zero.
+- Rollback: Flagship off or backend kill switch; governor rollback images and
+  `/root/hivemind/.env.pre-phase0-20260830T1933Z` retained. Additive tables are
+  inert on the stable path while disabled.

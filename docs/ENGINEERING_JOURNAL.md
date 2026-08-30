@@ -1307,6 +1307,51 @@ slides that find no unique anchor get a page instead of `null`.
 - Accepted release: local `singulance-local` only after the post-commit checks;
   production remains unchanged.
 
+## 2026-08-30 — Production gate and preview one-time-email correction
+
+### Verified
+
+- Preview authentication now renders the existing approved one-time-email flow
+  rather than Google. An unapproved synthetic address returned the expected
+  non-enumerating `202` and did not trigger delivery.
+- Frontend command:
+
+  ```text
+  npm test -- --runInBand src/components/hivemind/app/auth/__tests__/local-preview-login-contract.test.js src/components/hivemind/app/auth/__tests__/existing-user-routing-contract.test.js
+  Test Suites: 2 passed, 2 total
+  Tests: 2 passed, 2 total
+  ```
+
+- Backend command:
+
+  ```text
+  node --test tests/knowledge/*.test.js tests/unit/kb-upload-integrity.test.js tests/unit/local-workflow-proxy-contract.test.js
+  tests 120; pass 120; fail 0
+  ```
+
+- Worker commands `npm run types`, `npm run check`, and
+  `npx wrangler deploy --env production --dry-run` passed. The dry run resolved
+  only the declared production Workflow, Queue/DLQ, R2, Flagship, and production
+  API bindings; it did not create or deploy resources.
+
+### Decision
+
+- Production capability uses an explicit environment plus acknowledgement gate,
+  in addition to the existing feature flag. This is the safest reversible
+  default: local remains a test environment, production cannot activate from a
+  copied local environment, and a Flagship outage cannot select the new path.
+- Current production was audited read-only and does not yet contain the required
+  Workflow enablement, environment, URL, or shared-secret settings. Therefore
+  production is not described as accepted or live.
+
+### Committed
+
+- Frontend commit `17a964dd2d26ec90ebc9053fb42be8f25e756213` was pushed to
+  `origin/codex/preview-health-poll-cleanup` before updating the parent gitlink.
+- Backend/parent commit: pending this journal entry.
+- Accepted release: pending local branch integration and preview Worker canary;
+  production remains unchanged.
+
 ### Prompt-contract regression lock
 
 - Added source-level regression checks that preserve exact-quote grounding,

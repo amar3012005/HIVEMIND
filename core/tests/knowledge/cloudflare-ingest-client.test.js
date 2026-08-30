@@ -8,6 +8,7 @@ const JOB_ID = '33333333-3333-4333-8333-333333333333';
 async function withWorkflowEnv(fn) {
   const names = [
     'HIVEMIND_LOCAL_MODE', 'KNOWLEDGE_INGEST_WORKFLOW_ENABLED',
+    'KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT', 'KNOWLEDGE_INGEST_PRODUCTION_ACK', 'NODE_ENV',
     'KNOWLEDGE_INGEST_WORKFLOW_URL', 'KNOWLEDGE_INGEST_WORKFLOW_SECRET',
     'KNOWLEDGE_INGEST_SOURCE_UPLOAD_ATTEMPTS', 'KNOWLEDGE_INGEST_SOURCE_UPLOAD_TIMEOUT_MS',
   ];
@@ -69,6 +70,24 @@ test('the client remains disabled unless both explicit local gates are true', as
     assert.equal(await client.isEnabled(ORG_ID), false);
     process.env.HIVEMIND_LOCAL_MODE = 'true';
     process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED = 'false';
+    assert.equal(client.configured(), false);
+  });
+});
+
+test('production mode requires the explicit environment and irreversible-looking acknowledgement', async () => {
+  await withWorkflowEnv(async () => {
+    const client = new CloudflareKnowledgeIngestClient({ fetchImpl: async () => Response.json({ enabled: true }) });
+    Object.assign(process.env, {
+      HIVEMIND_LOCAL_MODE: 'false', NODE_ENV: 'production',
+      KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT: 'production',
+      KNOWLEDGE_INGEST_WORKFLOW_ENABLED: 'true',
+    });
+    delete process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK;
+    assert.equal(client.configured(), false);
+    process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK = 'enable-cloudflare-workflow-v1';
+    assert.equal(client.configured(), true);
+    assert.equal(await client.isEnabled(ORG_ID), true);
+    process.env.HIVEMIND_LOCAL_MODE = 'true';
     assert.equal(client.configured(), false);
   });
 });

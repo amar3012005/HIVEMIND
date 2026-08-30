@@ -38,11 +38,12 @@ async function authorized(request: Request, env: Env): Promise<boolean> {
 }
 
 async function flagEnabled(env: Env, orgId: string): Promise<boolean> {
-  if (env.ENVIRONMENT !== 'local' || !validOrgId(orgId) || !env.FLAGS) return false;
+  const environment = env.ENVIRONMENT === 'production' ? 'production' : env.ENVIRONMENT === 'local' ? 'local' : null;
+  if (!environment || !validOrgId(orgId) || !env.FLAGS) return false;
   const details = await env.FLAGS.getBooleanDetails(
     env.KNOWLEDGE_INGEST_FLAG || 'knowledge_ingest_workflow_v1',
     false,
-    { targetingKey: orgId, org_id: orgId, environment: 'local' },
+    { targetingKey: orgId, org_id: orgId, environment },
   );
   console.log(JSON.stringify({
     event: 'knowledge_ingest_flag_evaluation',

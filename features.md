@@ -220,3 +220,30 @@ verification, and its independent rollback control.
   and local proxy read canaries passed. Local Core source is read-only mounted so
   JS-only changes require restart rather than image rebuild; manifest/native/
   Prisma changes still require a build.
+
+## feature-20260830T120000Z — Production-gated durable ingestion and preview email login
+
+- Local status: tested on `codex/knowledge-ingest-workflow-v1`; production and
+  `singulance-main` remain unchanged until a separately governed canary release.
+- Authentication: `next.preview.singulancelabs.com` uses the existing approved
+  one-time-email link flow. Google is not rendered or invoked in preview. The
+  production login path is not changed by this local-only UI branch.
+- Production safety gate: the hosted ingestion client activates in production
+  only when `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true`,
+  `KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT=production`, `NODE_ENV=production`,
+  local mode is false, and
+  `KNOWLEDGE_INGEST_PRODUCTION_ACK=enable-cloudflare-workflow-v1`. Flagship must
+  independently enable `knowledge_ingest_workflow_v1` for the tenant; failures
+  remain fail-closed.
+- Production resource contract: Worker
+  `hivemind-knowledge-ingest-production`, Workflow
+  `hivemind-knowledge-ingest-workflow-production`, Queue/DLQ
+  `hivemind-knowledge-ingest[-dlq]-production`, and R2
+  `hivemind-ingest-artifacts-production`. These names are isolated from local
+  resources and are declared but not provisioned or deployed by this entry.
+- Verification: focused ingestion suite `120/120`; frontend preview-login
+  contract `2/2`; Worker types/check and production Wrangler dry-run passed.
+  The dry run used the production API hostname and production bindings without
+  creating resources or changing traffic.
+- Rollback: disable the tenant Flagship decision or set
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; new admissions remain on BullMQ.

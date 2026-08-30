@@ -99,6 +99,53 @@
           "class_name": "KnowledgeIngestWorkflow"
         }
       ]
+    },
+    "production": {
+      "name": "hivemind-knowledge-ingest-production",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "HIVEMIND_CORE_URL": "https://api.singulancelabs.com",
+        "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
+      },
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
+          "remote": true
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "ARTIFACTS",
+          "bucket_name": "hivemind-ingest-artifacts-production"
+        }
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "INGEST_QUEUE",
+            "queue": "hivemind-knowledge-ingest-production"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "hivemind-knowledge-ingest-production",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 5,
+            "dead_letter_queue": "hivemind-knowledge-ingest-dlq-production",
+            "max_concurrency": 5,
+            "retry_delay": 30
+          }
+        ]
+      },
+      "workflows": [
+        {
+          "name": "hivemind-knowledge-ingest-workflow-production",
+          "binding": "INGEST_WORKFLOW",
+          "class_name": "KnowledgeIngestWorkflow"
+        }
+      ]
     }
   }
 }

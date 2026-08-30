@@ -1219,6 +1219,20 @@ slides that find no unique anchor get a page instead of `null`.
   dry-run passed, and the local canary was restored to terminal error with zero
   published candidates. The shared API restarted healthy.
 
+## 2026-08-30 UTC — immutable merged local API image accepted
+
+- State: deterministic-build patch `5bab2ada`, integrated into
+  `singulance-local` at `963dd056`; production remains untouched.
+- Root cause: optional Lightpanda and Puppeteer postinstall browser downloads
+  blocked BuildKit indefinitely. The local API Dockerfile now skips only those
+  optional downloads, retains dependency lifecycle scripts and explicit Prisma
+  generation, and disables npm audit/funding network work during the image build.
+- Verification: the complete image build succeeded and produced
+  `sha256:cf62435628596297a247387c7dd2ccca46323e215ae49056690fcd70f5918d22`.
+  The shared API was recreated from the permanent integration worktree and is
+  healthy. Inspection inside the immutable image confirmed both the Dreaming
+  terminal-state guard and the integrated ingestion provenance module.
+
 ## 2026-08-30 UTC — OCR quality gate, Gateway vision, and preview proxy recovery
 
 - State: local-only on `codex/knowledge-ingest-workflow-v1`; production was not

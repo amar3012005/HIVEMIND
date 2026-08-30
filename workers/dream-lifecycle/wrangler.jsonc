@@ -17,7 +17,7 @@
   "env": {
     "local": {
       "name": "hivemind-dream-lifecycle-local",
-      "vars": { "HIVEMIND_DREAM_API_URL": "https://preview-api.singulancelabs.com", "HIVEMIND_DREAM_INSTANCE_PREFIX": "dream-local" },
+      "vars": { "HIVEMIND_DREAM_API_URL": "https://preview.singulancelabs.com", "HIVEMIND_DREAM_INSTANCE_PREFIX": "dream-local" },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {
         "producers": [{ "binding": "DREAM_TRIGGER_QUEUE", "queue": "hivemind-dream-trigger-local" }],

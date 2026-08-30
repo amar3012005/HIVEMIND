@@ -1051,6 +1051,16 @@ slides that find no unique anchor get a page instead of `null`.
   BuildKit builder produced the feature image; a final merged image build was
   started from the merged checkout so the shared local runtime can include both
   durable ingestion and durable Dreaming without overwriting either feature.
+- Final local runtime: image
+  `sha256:daab197a497e5a33d2d1924bd3ccc6d78e07411e02bd4ca8fe8a0c673770cc8d`
+  is running healthy with PostgreSQL and Qdrant ready, Cloudflare Workflow and
+  AI Gateway gates enabled, and both merged lifecycle modules present. The
+  existing Paolo canary retains all ten successful checkpoint receipts.
+- Startup hardening: the merged server correctly failed closed when the local
+  Compose service omitted its OAuth session-signing secret. The Compose contract
+  now forwards `HIVEMIND_OAUTH_SESSION_SECRET` from process or local env; a new
+  random local-only value was injected at runtime, never printed, persisted, or
+  committed. API and control-plane health passed after recreation.
 ## 2026-08-30 UTC — public AI discovery policy accepted in production
 
 - State: committed and accepted. Parent `fe71aa3c173359659e0a3144df9aef3c0fde6eda`;

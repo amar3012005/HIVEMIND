@@ -82,6 +82,9 @@ services:
       CLAIM_STRUCTURING_MODEL: ${CLAIM_STRUCTURING_MODEL:-}
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
       HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:-local-admin-secret-change-me}
+      # Local runtime-only signing key. Set this in the launching process or
+      # core/.env; never reuse or commit a production session secret.
+      HIVEMIND_OAUTH_SESSION_SECRET: ${HIVEMIND_OAUTH_SESSION_SECRET:-}
       # Durable Knowledge Base ingestion is opt-in and local-only. The core
       # still requires a positive Flagship decision for the organization.
       HIVEMIND_LOCAL_MODE: "true"

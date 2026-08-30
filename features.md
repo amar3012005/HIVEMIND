@@ -247,3 +247,22 @@ verification, and its independent rollback control.
   creating resources or changing traffic.
 - Rollback: disable the tenant Flagship decision or set
   `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; new admissions remain on BullMQ.
+
+## feature-20260831T013000Z — Grok-style persistent HyperAgent runtime foundation
+
+- Session status: implemented and verified on `codex/grok-hyperagents-v1` at
+  pushed commit `e4cee2b4`; not yet merged into `singulance-local`, enabled in
+  Flagship, deployed, or released to production.
+- Flag: cumulative multivariate `hyperagents_grok_agents_v1`, fail-closed to
+  `off`, with the admission decision latched immutably on each HyperTurn.
+- Runtime: roster-first capability manifests, stable organization-scoped
+  Cloudflare Agent identities, deterministic Room Workflows, PostgreSQL turn
+  and WorkOrder leases, and fail-closed real participant execution in
+  `real_tools+`. Shadow mode remains diagnostic-only.
+- Recovery: Workflow messages contain identifiers only; duplicate starts reuse
+  `room-{turn_id}-v{processing_version}` and WorkOrders retain their existing
+  `(turn_id, order_key)` idempotency boundary.
+- Verification: Prisma schema validation/generation, 15 Employees tests under
+  Python 3.12, 25 affected Core route/recovery tests, 2 Core runtime tests,
+  Worker typecheck, 4 Worker contract tests, and a Wrangler local dry run all
+  passed. Shared local containers and production were not changed.

@@ -1401,3 +1401,38 @@ slides that find no unique anchor get a page instead of `null`.
 - Unauthenticated proxy probes return 401 rather than the former 503, which is
   the expected authorization boundary. Authenticated UI requests use the same
   repaired local control-plane/Core credentials.
+
+## 2026-08-31 — Grok-style HyperAgents session implementation
+
+### Committed
+
+- Pushed `e4cee2b4` to `origin/codex/grok-hyperagents-v1` from isolated worktree
+  `P:\\HIVEMIND-worktrees\\grok-hyperagents-v1`.
+- Added the additive HyperAgent runtime schema, cumulative feature decision,
+  Cloudflare Agent/Workflow package, roster-first selector, persistent agent
+  provisioning, durable turn dispatch, real-participant WorkOrder execution,
+  event projection, and local-only environment wiring.
+- Production was not deployed. The dirty primary checkout was not changed.
+
+### Verification
+
+```text
+Prisma schema validate: valid
+Prisma Client generate: passed
+Employees Python 3.12 focused suite: 15 passed
+Core Grok runtime unit tests: 2 passed
+Core HyperRoom route/event/recovery suite: 25 passed
+Worker TypeScript check: passed
+Worker Vitest contract suite: 4 passed
+Wrangler deploy --dry-run --env local: passed
+```
+
+### Integration boundary
+
+- The attempted session-branch merge of current `origin/singulance-main` into
+  `origin/singulance-local` exposed broad pre-existing ingestion/recall
+  conflicts and was aborted without modifying either shared branch.
+- Per `docs/LOCAL_INTEGRATION_PROTOCOL.md`, that production-to-local
+  reconciliation and the session merge must be serialized in the permanent
+  `HIVEMIND-local-main` worktree before any shared-stack rebuild or local flag
+  canary. No accepted local or production release is claimed here.

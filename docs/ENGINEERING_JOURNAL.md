@@ -1112,3 +1112,36 @@ slides that find no unique anchor get a page instead of `null`.
   Rebuilding it here would overwrite another session's test runtime, so database
   migration, shared-secret wiring, browser E2E, restart injection, and local
   container acceptance are intentionally deferred until that session integrates.
+
+## 2026-08-30 UTC — durable Dreaming v2 local runtime recovery acceptance
+
+- State: the parallel canonical-ingestion branch is fully integrated and the
+  shared API is now owned by the permanent `HIVEMIND-local-main` worktree.
+  Dreaming runtime wiring and the provider-outage guard are committed as
+  `276d2203` and integrated locally by merge `76a134fe`. Production was not
+  modified.
+- Cloudflare evidence: isolated local Worker version
+  `249788ca-2a2f-400c-80d9-d68f1c237860` admitted manual, recovery, and
+  duplicate trigger messages. Trigger `duplicate-acceptance-1` produced one
+  run and one attempt for every completed stage despite duplicate delivery.
+- Runtime evidence: manual run `a4b43088-d7f7-458f-a583-556c52769c14`
+  completed all twelve stages; subject selection found 19 profiles and nine
+  eligible graph bundles. This zero-candidate run exposed that total provider
+  failure was incorrectly treated as successful completion.
+- Recovery patch verification: focused lifecycle tests passed 6/6. Recovery
+  run `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` now remains at
+  `generate-candidates`; PostgreSQL records the retryable structured error
+  `candidate_generation_provider_unavailable` and attempt 2 instead of a false
+  terminal success. Cloudflare Workflow instance
+  `dream-local-47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f-provider-outage-retry-1788058404-v2`
+  is running its bounded exponential retry policy.
+- External blocker: the production-parity LiteLLM credential expired on
+  2026-08-24 and the current OpenRouter credential is rejected. No credential
+  value was logged or committed. Candidate grounding, derivations, profiles,
+  vectors, notifications, UI publication, and success-path restart acceptance
+  remain unverified until those provider credentials are rotated.
+- Build note: the canonical Docker rebuild was cancelled after dependency
+  installation stalled. For the recovery canary only, the committed lifecycle
+  file was copied from the permanent integration worktree into the existing
+  local container and that container restarted healthy. This is runtime test
+  evidence, not an immutable-image acceptance receipt.

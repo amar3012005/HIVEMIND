@@ -72,3 +72,31 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   today because it mixes Vitest with Node's runner, references retired absolute
   paths/modules, and requires a Linux-only AMR binary. The focused ingestion
   suite and local Linux container runtime are green.
+
+## feature-20260830T150300Z — Durable canonical ingestion Workflow production canary
+
+- Production status: deployed and accepted on canonical parent
+  `5a979b736c2e02214cae8e95785446e66748dff7`. The public upload, polling,
+  duplicate, scope, billing, memory, and citation payloads remain unchanged.
+- Cloudflare resources: Worker `hivemind-knowledge-ingest-production`, Workflow
+  `hivemind-knowledge-ingest-workflow-production`, Queue/DLQ
+  `hivemind-knowledge-ingest[-dlq]-production`, and R2
+  `hivemind-ingest-artifacts-production`. Active Worker secret-change version:
+  `cb297a0d-7025-4440-bd4c-a4f6e9c1ce5f`.
+- Flagship `knowledge_ingest_workflow_v1` remains default-off. It has separate
+  environment-qualified local and production canary rules, so neither tenant ID
+  can accidentally enable the other environment.
+- Production canary job `60828bf4-4578-48c4-948e-a9affebdde0a` completed through
+  `cloudflare_workflow`: one document, one evidence segment/vector, four
+  candidates, five memories, five citations, canonical entity links, four
+  relationships, ten successful receipts, and three exactly-once settlements.
+  Two duplicate starts reused the completed deterministic Workflow instance;
+  counts remained stable. Persisted-hybrid recall returned the synthetic Paolo
+  canary memory.
+- Tests: 141/141 focused Core tests, Worker 2/2 tests, TypeScript, production
+  Wrangler dry-run, Prisma generation/validation, public health, tenant-scoped
+  ingestion/recall, duplicate replay, persisted-count checks, and fresh critical
+  log scan passed.
+- Rollback: disable the Flagship rule or set
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; canonical rollback images are the
+  prior `sha-40e3b3d1` Core, Control Plane, and Employees images.

@@ -696,3 +696,39 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Production E2E: one operator-owned verification email containing Strategist, Builder, Skeptic, Researcher, and Communicator avatars was reported `delivered` by Cloudflare. The same send created exactly one unread `email.sent` notification with palette version `2`. Each live public SVG contains its exact direct lane fill and zero `fill=var(--hm-...)` occurrences.
 - Runtime: `hm-core`, `hm-control`, and `hm-employees` healthy on immutable `sha-d843a668`; public API health green; fresh critical/error-projection scan empty. Existing Day 1 deterministic turn remained exactly one and sealed.
 - Isolation and rollback: no frontend, local Docker, preview, or `singulance-local` configuration changed. Canonical per-service rollback images were preserved by the governor.
+
+## 5a979b73 — durable canonical ingestion Workflow production canary
+
+- Canonical SHA: `5a979b736c2e02214cae8e95785446e66748dff7` on
+  `singulance-main`. Frontend gitlink remained the accepted production SHA
+  `93b15206d276c798993d57a63fd5694ff9609685`; no frontend deployment occurred.
+- Manifest: `/root/releases/manifests/5a979b73/20260830T143237Z/RELEASE_MANIFEST.json`
+  (SHA-256 `93484423247cb1874e2d7124198e399ff000ca1332f03c6080564ed199a144d6`).
+- Migrations: `20260829224500_knowledge_ingest_workflow`,
+  `20260830002000_canonical_entity_identity_key`, and
+  `20260830010000_knowledge_ingest_step_lease_fence`; all additive and applied by
+  the guarded Prisma deploy.
+- Runtime images: Core
+  `sha256:a09d59b845ac0f6aba67bd448dd1c0a2b98a7433c180e44e380adb5343f3a487`,
+  Control Plane
+  `sha256:5999853de9a8f17a5d79659492a7b5686ab001b1f0e9531018c8471d8e6ec53d`,
+  Employees
+  `sha256:35706b2ba03f23222a2968e09cb9af8923daa416dc2b1dab559ecb62378b5397`;
+  all healthy with exact revision labels.
+- Cloudflare Worker: `hivemind-knowledge-ingest-production`, active version
+  `cb297a0d-7025-4440-bd4c-a4f6e9c1ce5f`; dedicated production Workflow,
+  Queue/DLQ, and R2 bindings. Flagship is enabled with default variation `off`
+  and one environment-qualified operator canary rule.
+- Tests and canary: 141/141 focused Core tests, Worker 2/2, TypeScript, Wrangler
+  dry-run, Prisma validation, public checks, and clean fresh critical logs.
+  Production job `60828bf4-4578-48c4-948e-a9affebdde0a` completed with 10/10
+  receipts, 1/1 vector, five memories/citations, canonical entities, four graph
+  relationships, and three exactly-once settlements. Duplicate starts reused
+  the completed deterministic instance; persisted-hybrid recall succeeded.
+- Backup: verified post-migration schema/data backup
+  `/root/releases/backups/post-knowledge-ingest-5a979b73-20260830T150239Z.sql.gz`,
+  SHA-256 `4f517652dc07696ba43576c51e139f61265a98a6ba539a905149a872754828af`.
+- Rollback: remove the production canary rule or set
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; environment backup is
+  `/root/hivemind/.env.pre-knowledge-ingest-20260830T143208Z`; prior canonical
+  images are `hivemind/{core-api,control-plane,employees}:sha-40e3b3d1`.

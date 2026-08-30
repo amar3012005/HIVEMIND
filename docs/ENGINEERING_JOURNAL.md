@@ -924,3 +924,46 @@ slides that find no unique anchor get a page instead of `null`.
   gates are green.
 - Rollback: disable Flagship `knowledge_ingest_workflow_v1` or set
   `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. No production deployment ran.
+
+## 2026-08-30 UTC — durable canonical ingestion accepted in production
+
+- State: accepted release. Candidate branch `codex/knowledge-ingest-production`
+  was built from the latest `origin/singulance-main` and fast-forwarded only the
+  ingestion commits; unrelated `singulance-local`, preview, Dreaming, and
+  frontend commits were excluded. Canonical SHA:
+  `5a979b736c2e02214cae8e95785446e66748dff7`.
+- Static verification: focused Core command reported `tests 141; pass 141;
+  fail 0`; Worker tests reported 2/2; Worker TypeScript and production Wrangler
+  dry-run passed; Prisma generate/validate and `git diff --check` passed. The
+  first Windows `npm ci` attempt hit the repository's Lightpanda `|| true`
+  portability defect; `npm install --ignore-scripts` plus explicit Prisma
+  generation provided the complete dependency tree used by the passing tests.
+- Release: the mandatory governor claimed session
+  `knowledge-ingest-prod-20260830`, built immutable Core, Control Plane, and
+  Employees images, applied all three additive migrations, recreated only those
+  services, and verified exact revision labels plus health. Manifest:
+  `/root/releases/manifests/5a979b73/20260830T143237Z/RELEASE_MANIFEST.json`.
+- Cloudflare: production-only R2, Queue, DLQ, Workflow, and Worker were created.
+  Worker version `cb297a0d-7025-4440-bd4c-a4f6e9c1ce5f` contains the shared
+  secret binding. Unauthorized `/enabled` returned 401. Flagship remains
+  default-off with environment-qualified local and production canary rules.
+- E2E evidence: job `60828bf4-4578-48c4-948e-a9affebdde0a`, document
+  `ddcf42c9-44a3-4326-818f-4c2c67c72f11`, and deterministic Workflow instance
+  `kb-60828bf4-4578-48c4-948e-a9affebdde0a-v1` reached `ready`. Persisted
+  verification found 10/10 successful receipts, 1/1 evidence vector, five
+  memories, five citation links, canonical Paolo Meridian and Singulance
+  Operations entity links, four related graph edges, and exactly three usage
+  settlements. Two duplicate starts returned the same completed Workflow and
+  left all counts unchanged. Persisted-hybrid recall returned the canary memory.
+- Runtime proof: public API health and login returned 200. Fresh Core, Control
+  Plane, and Employees critical-log scans were empty. Running image labels equal
+  the canonical SHA.
+- Backup: `/root/releases/backups/post-knowledge-ingest-5a979b73-20260830T150239Z.sql.gz`,
+  199 MB compressed / 321,010,151 bytes uncompressed, SHA-256
+  `4f517652dc07696ba43576c51e139f61265a98a6ba539a905149a872754828af`.
+  An initial 20-byte failed pipeline artifact was removed before this verified
+  backup was created.
+- Rollback: Flagship canary removal is immediate. Backend kill switch is
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. Environment backup:
+  `/root/hivemind/.env.pre-knowledge-ingest-20260830T143208Z`; canonical prior
+  images are `sha-40e3b3d1`.

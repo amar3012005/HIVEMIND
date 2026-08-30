@@ -2489,7 +2489,11 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
           // boundary and may update the durable row. Re-read it so canonical
           // projection consumes those committed fields rather than the stale
           // promotion object returned by the graph engine.
-          const persistedMemory = await persistentMemoryStore.getMemory(memory.id) || memory;
+          const persistedMemory = orgIsRemote(orgId)
+            ? (await persistentMemoryStore.getMemory(memory.id) || memory)
+            : (await prisma.memory.findFirst({
+              where: { id: memory.id, orgId },
+            }) || memory);
           const projection = await projectCanonicalKnowledge({
             prisma,
             mode,

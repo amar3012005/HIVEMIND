@@ -108,3 +108,20 @@ verification, and its independent rollback control.
 - Data: additive checkpoints, candidates, typed derivation receipts, and immutable generic subject-profile revisions.
 - Compatibility: existing cognition/profile payloads are unchanged; v2 fields and routes are additive.
 - Promotion: shared-runtime local acceptance is required before production governance.
+
+## feature-20260830T025500Z — Dreaming provider-outage recovery guard
+
+- Local status: committed as `276d2203` and integrated into the permanent
+  `singulance-local` worktree by merge `76a134fe`; production remains unchanged.
+- Behavior: if every eligible subject fails during candidate generation, the
+  stage raises retryable `candidate_generation_provider_unavailable`. The run
+  cannot reconcile, publish, notify, or finalize as a successful zero-candidate
+  dream during a total AI-provider outage.
+- Verification: the focused lifecycle suite passed 6/6. Local recovery run
+  `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` remained checkpointed at
+  `generate-candidates` with attempt 2 while its isolated Cloudflare Workflow
+  continued bounded retries.
+- Remaining gate: rotate the expired production-parity LiteLLM/OpenRouter
+  credentials, rebuild an immutable local API image, then finish successful
+  grounding, derivation, profile, vector, notification, UI, restart, and DLQ
+  acceptance before any governed production promotion.

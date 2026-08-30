@@ -25,14 +25,15 @@ WORKDIR /app
 
 FROM base AS deps
 
-# Copy package files
-COPY core/package.json ./
-COPY core/prisma ./prisma
+# Dependency installation is keyed only by the manifests. Prisma schema edits
+# are frequent and must not invalidate the expensive npm layer on every local
+# feature branch. The BuildKit cache also survives clean image rebuilds.
+COPY core/package.json core/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
 
-# Install dependencies, generate Prisma client, then prune dev deps
-RUN npm install && \
-    npx prisma generate && \
-    npm prune --omit=dev
+# Generate only after the schema arrives, then prune the already-cached tree.
+COPY core/prisma ./prisma
+RUN npx prisma generate && npm prune --omit=dev
 
 # ==========================================
 # Development Stage

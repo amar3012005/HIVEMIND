@@ -1112,3 +1112,52 @@ slides that find no unique anchor get a page instead of `null`.
   Rebuilding it here would overwrite another session's test runtime, so database
   migration, shared-secret wiring, browser E2E, restart injection, and local
   container acceptance are intentionally deferred until that session integrates.
+
+## 2026-08-30 UTC — heavy-document Workflow production-parity acceptance
+
+- State: committed local candidate; production unchanged. Branch
+  `codex/knowledge-ingest-workflow-v1`, worktree
+  `P:\HIVEMIND-worktrees\knowledge-ingest-workflow-v1`, commit
+  `1ae13c022db72927aebef43ecdaa6230c5fd24a7`.
+- Affected files: Cloudflare ingestion client, document-first ingestion,
+  projection replacement, parser provenance, upload job failure recording,
+  local Compose parity, the heavy-file canary runner, and focused tests.
+- Production-parity boundary: inference/model names, embedding policy, parser
+  configuration, and Cloudflare AI Gateway were read from production without
+  printing or committing secrets. All stateful services and Cloudflare
+  ingestion resources remained the isolated local variants.
+- Runtime command: `node scripts/run-local-heavy-ingest-canary.mjs <eight OCR
+  PDFs>` with the local API/user/org variables and `HIVEMIND_CANARY_FORCE=true`.
+  Final database verification output:
+
+  ```text
+  jobs=8 ready=8 pages=691 segments=1722 memories=113 vectors=1722
+  citation_links=113 receipt_memories=113 min_successful_receipts=10
+  max_settlements_per_job=3
+  ```
+
+- Incident and repair: six first-pass R2 writes admitted while two concurrent
+  writes exceeded the former fixed 120-second timeout. The two durable jobs
+  were terminally recorded, then replayed from the same job identities after
+  adding bounded idempotent upload retries. Both completed; no substitute job
+  rows were created. The run also proved forced projection replacement and
+  healed parser provenance (`parsed`, `pdf-parse`, structure extracted) for all
+  eight documents.
+- Focused test command: PowerShell expanded
+  `Get-ChildItem tests/knowledge/*.test.js` into `node --test`. Output:
+  `tests 105`, `pass 105`, `fail 0`.
+- Static verification: Node syntax checks passed for every changed module and
+  runner; PowerShell parser returned `powershell_parse=ok`; Compose returned
+  `compose_config=ok`; `git diff --check` returned no errors.
+- Runtime verification: API health reported DB and Qdrant ready with
+  document-first ingestion and evidence retrieval enabled. A cross-tenant job
+  status request returned 404. Filename recall returned `count=8`,
+  `search_method=persisted-hybrid`, one exact filename match, and eight cited
+  results.
+- Baseline note: unfiltered `npm test` remains red for existing unrelated
+  collection/runtime failures including Node collecting Vitest files, missing
+  retired modules and absolute paths, and no Windows AMR native binary. The
+  feature-scoped suite and Linux container runtime are green.
+- Rollback: disable the Flagship flag or local master gate. No production
+  release, production database mutation, or production Cloudflare resource
+  mutation occurred.

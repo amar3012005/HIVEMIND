@@ -361,3 +361,47 @@ Full findings in the audit report (23 confirmed: 4 critical/P0, 7 high/P1,
 - `is_latest` cascade repair: `core/scripts/reingest-memories-canonical.mjs --commit`
 - Eval gate before prod release: `core/scripts/eval-harness.mjs` (14 golden cases)
 - Per-tenant Qdrant migration: `core/scripts/qdrant-per-tenant-backfill.mjs`
+
+---
+
+## 11. Local Cloudflare Workflow Acceptance Runbook
+
+Heavy Knowledge Base uploads use the Cloudflare path only when all three gates
+are true: `HIVEMIND_LOCAL_MODE`, `KNOWLEDGE_INGEST_WORKFLOW_ENABLED`, and the
+organization-targeted Flagship flag `knowledge_ingest_workflow_v1`. The job
+latches `cloudflare_workflow` at admission; a later flag change cannot move an
+in-flight job to BullMQ.
+
+Use `scripts/start-production-parity-local-ingestion.ps1` to import only the
+production inference, embedding, parser, and AI Gateway policy into the local
+Core container. It deliberately preserves local PostgreSQL, Redis, Qdrant,
+auth, Queue, Workflow, R2, Flagship, API hosts, and secrets. Never copy an
+entire production environment file into local Compose.
+
+Run concurrent files with `scripts/run-local-heavy-ingest-canary.mjs`. A valid
+terminal receipt requires all of the following:
+
+- every job is `ready` with ten successful receipts for its current processing
+  version;
+- persisted segment count equals vector-stored segment count;
+- receipt memory count equals the distinct live document citation count;
+- forced replay leaves one current projection, while a memory supported by a
+  different document remains active;
+- each usage metric settles once despite retries;
+- a different organization cannot read the job or source;
+- filename/content recall returns persisted results with source citations.
+
+R2 source PUTs are deterministic by organization, checksum, and safe filename.
+Transient uploads retry a bounded number of times using
+`KNOWLEDGE_INGEST_SOURCE_UPLOAD_ATTEMPTS` and
+`KNOWLEDGE_INGEST_SOURCE_UPLOAD_TIMEOUT_MS`; bytes never enter Queue messages or
+Workflow step results. If admission exhausts retries, record the exact durable
+job as failed and replay that identity after the source is retained. Do not
+create a replacement job.
+
+Forced projection replacement is commit-after-success: the previous projection
+stays live until the successor's memories, citations, entities, and claims are
+durable. Reconciliation then detaches obsolete links, preserves memories with
+other document support, retires true document orphans, and removes their
+semantic points. A vector-cleanup failure blocks terminal success and is
+Workflow-retryable.

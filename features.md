@@ -108,3 +108,33 @@ verification, and its independent rollback control.
 - Data: additive checkpoints, candidates, typed derivation receipts, and immutable generic subject-profile revisions.
 - Compatibility: existing cognition/profile payloads are unchanged; v2 fields and routes are additive.
 - Promotion: shared-runtime local acceptance is required before production governance.
+
+## feature-20260830T081500Z — Heavy-document ingestion replay hardening
+
+- Local status: accepted on `codex/knowledge-ingest-workflow-v1`; production and
+  `singulance-main` remain unchanged.
+- Source commit: `1ae13c022db72927aebef43ecdaa6230c5fd24a7`.
+- Capability: forced reprocessing keeps the existing document projection live
+  until its replacement memories, citations, entities, and claims are durable;
+  it then retires only memories without support from another document and
+  removes obsolete semantic vectors and citation links.
+- Admission durability: identifier-stable R2 writes retry bounded transient
+  failures with a configurable five-minute attempt window. Platform timeout
+  codes are normalized before durable job failure recording.
+- Production parity: local inference used the production Cloudflare AI Gateway,
+  LLM policy, embedding model and 1024-dimensional embedding contract. Database,
+  Redis, Qdrant, auth, Workflow, Queue, R2, and Flagship resources stayed local.
+- Runtime acceptance: eight OCR PDFs were admitted together through
+  `knowledge_ingest_workflow_v1`. All eight reached `ready`: 691 pages, 1,722
+  segments, 1,722/1,722 evidence vectors, 113 memories, and 113 live citation
+  projections. Every current processing version has ten successful checkpoint
+  receipts and each job retains exactly three idempotent usage settlements.
+- Isolation and recall: a foreign-organization status request returned 404.
+  Filename recall returned eight persisted-hybrid results, one exact filename
+  match, and citations on all eight returned memories.
+- Tests: all 105 `core/tests/knowledge/*.test.js` tests passed; syntax,
+  PowerShell parsing, Compose validation, and `git diff --check` passed. The
+  repository-wide Node test command remains red on its documented unrelated
+  Windows/Vitest/AMR/retired-module baseline.
+- Rollback: disable `knowledge_ingest_workflow_v1` or set
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; new admissions return to BullMQ.

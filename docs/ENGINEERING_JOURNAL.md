@@ -1161,3 +1161,60 @@ slides that find no unique anchor get a page instead of `null`.
 - Rollback: disable the Flagship flag or local master gate. No production
   release, production database mutation, or production Cloudflare resource
   mutation occurred.
+## 2026-08-30 UTC — durable Dreaming v2 local runtime recovery acceptance
+
+- State: the parallel canonical-ingestion branch is fully integrated and the
+  shared API is now owned by the permanent `HIVEMIND-local-main` worktree.
+  Dreaming runtime wiring and the provider-outage guard are committed as
+  `276d2203` and integrated locally by merge `76a134fe`. Production was not
+  modified.
+- Cloudflare evidence: isolated local Worker version
+  `249788ca-2a2f-400c-80d9-d68f1c237860` admitted manual, recovery, and
+  duplicate trigger messages. Trigger `duplicate-acceptance-1` produced one
+  run and one attempt for every completed stage despite duplicate delivery.
+- Runtime evidence: manual run `a4b43088-d7f7-458f-a583-556c52769c14`
+  completed all twelve stages; subject selection found 19 profiles and nine
+  eligible graph bundles. This zero-candidate run exposed that total provider
+  failure was incorrectly treated as successful completion.
+- Recovery patch verification: focused lifecycle tests passed 6/6. Recovery
+  run `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` now remains at
+  `generate-candidates`; PostgreSQL records the retryable structured error
+  `candidate_generation_provider_unavailable` and attempt 2 instead of a false
+  terminal success. Cloudflare Workflow instance
+  `dream-local-47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f-provider-outage-retry-1788058404-v2`
+  is running its bounded exponential retry policy.
+- External blocker: the production-parity LiteLLM credential expired on
+  2026-08-24 and the current OpenRouter credential is rejected. No credential
+  value was logged or committed. Candidate grounding, derivations, profiles,
+  vectors, notifications, UI publication, and success-path restart acceptance
+  remain unverified until those provider credentials are rotated.
+- Build note: the canonical Docker rebuild was cancelled after dependency
+  installation stalled. For the recovery canary only, the committed lifecycle
+  file was copied from the permanent integration worktree into the existing
+  local container and that container restarted healthy. This is runtime test
+  evidence, not an immutable-image acceptance receipt.
+
+## 2026-08-30 UTC — Dreaming Workflow exhaustion closes PostgreSQL run
+
+- State: patch `e924850a`, local merge `f582bb5d`, and isolated Worker version
+  `b6c01ba1-0420-44e4-b36d-26b04cb416e5`; production remains untouched.
+- The Workflow now writes a durable terminal-failure receipt after stage retries
+  are exhausted. The authenticated backend transition is idempotent and never
+  overwrites completed, cancelled, or already failed runs.
+- Verification: lifecycle unit tests passed 7/7, Worker TypeScript passed, and
+  Wrangler local dry-run resolved only local bindings. Provider-outage run
+  `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` transitioned from running to error at
+  `generate-candidates` with `recovery_status=retry_exhausted`, a safe terminal
+  reason, and `finished_at` populated. No candidate was published.
+
+## 2026-08-30 UTC — terminal Dreaming runs are immutable
+
+- State: patch `718b0117`, local merge `c314c713`, isolated Worker version
+  `7c21bf84-11b3-4b66-8126-6e679da944a1`; production remains untouched.
+- A delayed retry from an older Workflow version exposed that `finalize` could
+  overwrite an already failed run as completed. Stage execution now returns
+  every terminal receipt unchanged, including finalize, and the Worker aborts
+  when it observes error or cancelled state.
+- Verification: lifecycle tests passed 8/8, Worker TypeScript and local Wrangler
+  dry-run passed, and the local canary was restored to terminal error with zero
+  published candidates. The shared API restarted healthy.

@@ -138,3 +138,38 @@ verification, and its independent rollback control.
   Windows/Vitest/AMR/retired-module baseline.
 - Rollback: disable `knowledge_ingest_workflow_v1` or set
   `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; new admissions return to BullMQ.
+## feature-20260830T025500Z — Dreaming provider-outage recovery guard
+
+- Local status: committed as `276d2203` and integrated into the permanent
+  `singulance-local` worktree by merge `76a134fe`; production remains unchanged.
+- Behavior: if every eligible subject fails during candidate generation, the
+  stage raises retryable `candidate_generation_provider_unavailable`. The run
+  cannot reconcile, publish, notify, or finalize as a successful zero-candidate
+  dream during a total AI-provider outage.
+- Verification: the focused lifecycle suite passed 6/6. Local recovery run
+  `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` remained checkpointed at
+  `generate-candidates` with attempt 2 while its isolated Cloudflare Workflow
+  continued bounded retries.
+- Remaining gate: rotate the expired production-parity LiteLLM/OpenRouter
+  credentials, rebuild an immutable local API image, then finish successful
+  grounding, derivation, profile, vector, notification, UI, restart, and DLQ
+  acceptance before any governed production promotion.
+
+## feature-20260830T033000Z — Dreaming terminal failure receipts
+
+- Local status: patch `e924850a`, merged to `singulance-local` at `f582bb5d`;
+  isolated Worker version `b6c01ba1-0420-44e4-b36d-26b04cb416e5`.
+- Behavior: exhausted Cloudflare stage retries durably close the authoritative
+  PostgreSQL run as recoverable error. A provider outage cannot leave an active
+  run stuck indefinitely or publish partial cognition.
+- Runtime proof: run `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` is terminal error
+  with `recovery_status=retry_exhausted`; lifecycle tests passed 7/7 and Worker
+  TypeScript validation passed. Production was not modified.
+
+## feature-20260830T042000Z — Immutable terminal Dreaming state
+
+- Local status: patch `718b0117`, merged to `singulance-local` at `c314c713`;
+  isolated Worker version `7c21bf84-11b3-4b66-8126-6e679da944a1`.
+- Behavior: delayed Cloudflare retries cannot convert failed or cancelled runs
+  into completed runs, including through finalize. Tests passed 8/8 and the
+  local provider-outage canary remains terminal error with zero publication.

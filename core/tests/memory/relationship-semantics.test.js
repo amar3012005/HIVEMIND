@@ -175,6 +175,41 @@ test('validated dispatcher atomically versions structured claims and certifies t
   assert.equal(applied.edgesCreated[0].metadata.relationship_validation_status, 'validated');
 });
 
+test('explicit relationship rejection happens before memory persistence in every storage adapter', async () => {
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
+  const tenant = { user_id: '00000000-0000-4000-8000-000000009601', org_id: '00000000-0000-4000-8000-000000009602' };
+  const oldMemory = await engine.ingestMemory({ ...tenant, content: 'Atlas retention is 12 months.',
+    claim_subject: 'atlas', claim_predicate: 'retention', claim_qualifiers: { object: '12 months' },
+    skipProcessing: true, defer_entity_linking: true, smartIngest: false });
+
+  await assert.rejects(() => engine.ingestMemory({ ...tenant, content: 'Atlas retention is 12 months.',
+    claim_subject: 'atlas', claim_predicate: 'retention', claim_qualifiers: { object: '12 months' },
+    relationship: { type: 'Updates', target_id: oldMemory.memoryId, confidence: 0.95 },
+    skipProcessing: true, defer_entity_linking: true, smartIngest: false }), /relationship_policy_rejected:Updates/);
+
+  assert.equal(store.memories.size, 1, 'rejected relationship must not leave an orphan memory');
+  assert.equal(store.relationships.length, 0);
+});
+
+test('explicit supported update saved through ingest creates one certified edge', async () => {
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
+  const tenant = { user_id: '00000000-0000-4000-8000-000000009611', org_id: '00000000-0000-4000-8000-000000009612' };
+  const oldMemory = await engine.ingestMemory({ ...tenant, content: 'Atlas retention is 12 months.',
+    claim_subject: 'atlas', claim_predicate: 'retention', claim_qualifiers: { object: '12 months' },
+    skipProcessing: true, defer_entity_linking: true, smartIngest: false });
+  const updated = await engine.ingestMemory({ ...tenant, content: 'Atlas retention is now 13 months.',
+    claim_subject: 'atlas', claim_predicate: 'retention', claim_qualifiers: { object: '13 months' },
+    relationship: { type: 'Updates', target_id: oldMemory.memoryId, confidence: 0.95 },
+    skipProcessing: true, defer_entity_linking: true, smartIngest: false });
+
+  assert.equal(updated.operation, 'updated');
+  assert.equal(store.memories.size, 2);
+  assert.equal(store.relationships.length, 1);
+  assert.equal(store.relationships[0].metadata.relationship_validation_status, 'validated');
+});
+
 test('malformed entity-link output retains structured entities and explicit type', async () => {
   const previousAttempts = process.env.ENTITY_LINK_MAX_ATTEMPTS;
   process.env.ENTITY_LINK_MAX_ATTEMPTS = '1';

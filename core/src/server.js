@@ -3035,20 +3035,15 @@ async function ingestRoutedPayload(routedPayload, engine) {
 // ingestSource) so the highest-traffic write path gains provenance tags, canonical
 // entity persistence, async claim structuring and the coverage ledger, while the
 // engine-internal smart routing (same flags) keeps behavior identical. Trees keep
-// the engine path (ingestSource has no tree mode). Fallback to the engine path is
-// LOUD (warn log) — kept during migration for enterprise robustness; the legacy
-// path is deleted in the Phase 11 sweep once telemetry shows zero fallbacks.
+// the engine path (ingestSource has no tree mode). Canonical failures are surfaced:
+// retrying through the legacy writer after a remote Memory Box has acknowledged a
+// partial operation can create duplicate memories and split graph semantics.
 async function ingestRoutedPayloadCanonical(routedPayload, engine) {
   const v5 = (process.env.V5_MEMORIES_CANONICAL || 'true').toLowerCase() !== 'false';
   if (!v5 || routedPayload?.__ingest_tree) return ingestRoutedPayload(routedPayload, engine);
-  try {
-    const r = await ingestCanonicalPayload(routedPayload, { sourceType: 'api', mode: 'atomic' });
-    if (r?.skipped) return { skipped: true, operation: 'skipped_redundant', reason: r.reason || 'redundant', memoryId: r.memoryId || null };
-    return { ...r, operation: r.operation || 'created' };
-  } catch (e) {
-    console.warn('[v5-memories-canonical] envelope path failed, using engine path:', e.message);
-    return ingestRoutedPayload(routedPayload, engine);
-  }
+  const r = await ingestCanonicalPayload(routedPayload, { sourceType: 'api', mode: 'atomic' });
+  if (r?.skipped) return { skipped: true, operation: 'skipped_redundant', reason: r.reason || 'redundant', memoryId: r.memoryId || null };
+  return { ...r, operation: r.operation || 'created' };
 }
 
 // V5 Phase 5C — Tara voice saves via the canonical envelope (evidence mode:

@@ -53,3 +53,17 @@ test('candidate generation retries when every eligible subject hits a provider f
   );
   assert.equal(runUpdated, false);
 });
+
+test('workflow retry exhaustion closes the authoritative run without publishing', async () => {
+  const run = { id: '11111111-1111-4111-8111-111111111111', status: 'running', currentStage: 'generate-candidates', startedAt: new Date(Date.now() - 1000) };
+  let update;
+  const lifecycle = new DurableDreamLifecycle({ prisma: { cognitionRun: {
+    findUnique: async () => run,
+    update: async ({ data }) => { update = data; return { ...run, ...data }; },
+  } } });
+  await lifecycle.failRun({ run_id: run.id, failed_stage: 'generate-candidates', failure_code: 'candidate_generation_provider_unavailable' });
+  assert.equal(update.status, 'error');
+  assert.equal(update.recoveryStatus, 'retry_exhausted');
+  assert.equal(update.terminalReason, 'candidate_generation_provider_unavailable');
+  assert.equal(update.currentStage, 'generate-candidates');
+});

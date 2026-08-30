@@ -2,3 +2,4 @@ node_modules/
 .wrangler/
 .wrangler-dry-run/
 .dev.vars
+worker-configuration.d.ts

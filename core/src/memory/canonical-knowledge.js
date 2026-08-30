@@ -132,7 +132,11 @@ async function upsertEntity(tx, organizationId, raw) {
   // PostgreSQL cannot target that index through Prisma's compound upsert, so
   // resolve first and recover the concurrent-create race explicitly.
   const existing = await tx.canonicalEntity.findFirst({
-    where: { organizationId, OR: [{ identityKey }, { normalizedName: slug, entityKind: kind }] },
+    where: { organizationId, OR: [
+      { identityKey },
+      { normalizedName: slug, entityKind: kind },
+      { canonicalName: { equals: plain(raw.name), mode: 'insensitive' }, entityKind: kind },
+    ] },
     orderBy: { createdAt: 'asc' },
   });
   if (existing) return existing;
@@ -266,12 +270,18 @@ export async function materializeCanonicalKnowledge({ prisma, mode, input, proce
     // this memory before canonical roles existed. Keep the typed endpoints and
     // remove only redundant links on this one memory; entity rows and links on
     // every other memory remain untouched.
-    if (tx.memoryEntityLink.deleteMany && projectedNames.size && projectedEntityIds.size) {
-      await tx.memoryEntityLink.deleteMany({ where: {
-        memoryId: input.memoryId,
-        entityId: { notIn: [...projectedEntityIds] },
-        entity: { organizationId: input.organizationId, normalizedName: { in: [...projectedNames] } },
-      } });
+    if (tx.memoryEntityLink.findMany && tx.memoryEntityLink.deleteMany && projectedNames.size && projectedEntityIds.size) {
+      const attached = await tx.memoryEntityLink.findMany({
+        where: { memoryId: input.memoryId }, include: { entity: true },
+      });
+      const redundant = attached.filter((link) => !projectedEntityIds.has(link.entityId)
+        && link.entity?.organizationId === input.organizationId
+        && projectedNames.has(normalizeEntity(link.entity.canonicalName)));
+      if (redundant.length) {
+        await tx.memoryEntityLink.deleteMany({ where: { OR: redundant.map((link) => ({
+          memoryId: link.memoryId, entityId: link.entityId, role: link.role,
+        })) } });
+      }
     }
     await tx.memoryProjectionState.update({
       where: { memoryId: input.memoryId }, data: { entitiesStatus: 'complete', claimsStatus: 'complete', receipt: { claim_count: persisted.length } },

@@ -104,7 +104,7 @@ test('materializer is deterministic, persists roles/evidence, and never writes r
   const tx = {
     memoryProjectionState: { upsert: async (x) => calls.push(['state.upsert', x]), update: async (x) => calls.push(['state.update', x]) },
     canonicalEntity: { findFirst: async () => null, create: async (x) => ({ id: `e${++entitySeq}`, ...x.data }) },
-    memoryEntityLink: { upsert: async (x) => calls.push(['link', x]) },
+    memoryEntityLink: { upsert: async (x) => calls.push(['link', x]), findMany: async () => [], deleteMany: async (x) => calls.push(['link.deleteMany', x]) },
     canonicalPredicate: { upsert: async (x) => ({ id: 'p1', name: x.create.name }) },
     canonicalClaim: { upsert: async (x) => { calls.push(['claim', x]); return { id: 'c1', ...x.create }; } },
     claimEvidenceLink: { upsert: async (x) => calls.push(['evidence', x]) },
@@ -126,6 +126,37 @@ test('materializer is deterministic, persists roles/evidence, and never writes r
     assert.ok(calls.some(([type]) => type === 'evidence'));
     assert.equal('relationship' in tx, false);
   } finally { process.env.CANONICAL_KNOWLEDGE_ENABLED = prior; }
+});
+
+test('materializer removes only redundant same-name links from the projected memory', async () => {
+  const deleted = []; let entitySeq = 0;
+  const tx = {
+    memoryProjectionState: { upsert: async () => {}, update: async () => {} },
+    canonicalEntity: { findFirst: async () => null, create: async (x) => ({ id: `typed-${++entitySeq}`, ...x.data }) },
+    memoryEntityLink: {
+      upsert: async () => {},
+      findMany: async () => [{ memoryId: 'm1', entityId: 'legacy', role: 'mentioned', entity: {
+        organizationId: 'o1', canonicalName: 'Deep Learning',
+      } }, { memoryId: 'm1', entityId: 'other', role: 'mentioned', entity: {
+        organizationId: 'o1', canonicalName: 'Unrelated Entity',
+      } }],
+      deleteMany: async (x) => deleted.push(x),
+    },
+    canonicalPredicate: { upsert: async () => ({ id: 'p1' }) },
+    canonicalClaim: { upsert: async (x) => ({ id: 'c1', ...x.create }) },
+    claimEvidenceLink: { upsert: async () => {} },
+  };
+  const oldEnabled = process.env.CANONICAL_KNOWLEDGE_ENABLED; process.env.CANONICAL_KNOWLEDGE_ENABLED = 'true';
+  try {
+    await materializeCanonicalKnowledge({ prisma: { $transaction: (fn) => fn(tx) }, mode: 'write', input: {
+      memoryId: 'm1', organizationId: 'o1', title: 'Uwe Egly teaching deep learning',
+      content: 'He started teaching deep learning from tomorrow.',
+      entities: [{ name: 'Uwe Egly', kind: 'person' }, { name: 'deep learning', kind: 'concept' }],
+    } });
+    assert.equal(deleted.length, 1);
+    assert.equal(deleted[0].where.OR.length, 1);
+    assert.equal(deleted[0].where.OR[0].entityId, 'legacy');
+  } finally { process.env.CANONICAL_KNOWLEDGE_ENABLED = oldEnabled; }
 });
 
 test('repair callback signature validates canonical HMAC and rejects body changes', () => {

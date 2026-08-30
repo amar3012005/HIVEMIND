@@ -93,7 +93,7 @@ test('materializer is deterministic, persists roles/evidence, and never writes r
   const calls = []; let entitySeq = 0;
   const tx = {
     memoryProjectionState: { upsert: async (x) => calls.push(['state.upsert', x]), update: async (x) => calls.push(['state.update', x]) },
-    canonicalEntity: { upsert: async (x) => ({ id: `e${++entitySeq}`, ...x.create }) },
+    canonicalEntity: { findFirst: async () => null, create: async (x) => ({ id: `e${++entitySeq}`, ...x.data }) },
     memoryEntityLink: { upsert: async (x) => calls.push(['link', x]) },
     canonicalPredicate: { upsert: async (x) => ({ id: 'p1', name: x.create.name }) },
     canonicalClaim: { upsert: async (x) => { calls.push(['claim', x]); return { id: 'c1', ...x.create }; } },
@@ -132,9 +132,9 @@ test('explicit replacement supersedes claim history and creates only an Updates 
   const entityIds = new Map();
   const tx = {
     memoryProjectionState: { upsert: async () => {}, update: async () => {} },
-    canonicalEntity: { upsert: async (x) => {
-      const key = x.create.identityKey; if (!entityIds.has(key)) entityIds.set(key, `e${entityIds.size + 1}`);
-      return { id: entityIds.get(key), ...x.create };
+    canonicalEntity: { findFirst: async () => null, create: async (x) => {
+      const key = x.data.identityKey; if (!entityIds.has(key)) entityIds.set(key, `e${entityIds.size + 1}`);
+      return { id: entityIds.get(key), ...x.data };
     } },
     memoryEntityLink: { upsert: async () => {} },
     canonicalPredicate: { upsert: async () => ({ id: 'p-teaches' }) },

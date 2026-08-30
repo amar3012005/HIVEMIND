@@ -1174,6 +1174,13 @@ CREATE INDEX relationships_type_idx ON public.relationships USING btree (type);
 --
 
 -- Phase 0 canonical knowledge foundation (additive; relationships remain memory lineage only).
+CREATE TABLE IF NOT EXISTS hivemind.canonical_entities (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(), organization_id uuid NOT NULL,
+  canonical_name text NOT NULL, normalized_name text NOT NULL, identity_key varchar(500),
+  entity_kind varchar(40) NOT NULL, aliases text[] DEFAULT '{}', metadata jsonb NOT NULL DEFAULT '{}',
+  confidence numeric(3,2) NOT NULL DEFAULT 1, created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(organization_id, identity_key)
+);
 CREATE TABLE IF NOT EXISTS hivemind.canonical_predicates (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(80) NOT NULL, version integer NOT NULL DEFAULT 1,
   aliases text[] NOT NULL DEFAULT '{}', inverse_name varchar(80), active boolean NOT NULL DEFAULT true,
@@ -1186,12 +1193,13 @@ CREATE TABLE IF NOT EXISTS hivemind.canonical_claims (
   assertion_status varchar(32) NOT NULL DEFAULT 'user_asserted', lifecycle_status varchar(24) NOT NULL DEFAULT 'active',
   valid_from timestamptz, valid_to timestamptz, known_at timestamptz NOT NULL DEFAULT now(),
   processing_version integer NOT NULL DEFAULT 1, source_digest varchar(64) NOT NULL,
+  supersedes_claim_id uuid,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(organization_id, claim_key), CHECK ((object_entity_id IS NOT NULL) <> (object_literal IS NOT NULL))
 );
 CREATE TABLE IF NOT EXISTS hivemind.claim_evidence_links (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(), claim_id uuid NOT NULL, memory_id uuid NOT NULL,
-  exact_quote text, start_offset integer, end_offset integer, source_digest varchar(64) NOT NULL,
+  document_id uuid, segment_id uuid, exact_quote text, start_offset integer, end_offset integer, source_digest varchar(64) NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(claim_id, memory_id, source_digest)
 );
 CREATE TABLE IF NOT EXISTS hivemind.memory_projection_states (

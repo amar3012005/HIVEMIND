@@ -839,7 +839,7 @@ export async function remoteMemRelationships(orgId, memoryId) {
 }
 
 export async function remoteMemoryClaims(orgId, memoryId, filters = {}) {
-  try { return await _call(orgId, '/v1/canonical-claims', { memoryId, filters }); }
+  try { return await _call(orgId, '/v1/canonical-claims', { memoryId, ...filters }); }
   catch (e) { _logRemoteOnce('warn', 'canonical-claims', orgId, e, ` id=${memoryId}`); return null; }
 }
 

@@ -36,6 +36,7 @@ const AGENT_CAPABILITIES = Object.freeze([
   'memory.recall', 'memory.lexical', 'memory.hydrate', 'memory.inventory', 'memory.inventory.total',
   'evidence.recall', 'evidence.lexical', 'evidence.hydrate', 'evidence.inventory',
   'graph.read', 'relationship.read', 'provenance.read', 'document.ingest-mode',
+  'canonical-claims.write', 'canonical-claims.read', 'canonical-projection.status',
   'vector.status', 'vector.pending', 'vector.repair',
 ]);
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
@@ -1944,8 +1945,16 @@ const routes = {
         const kind = String(raw?.kind || 'concept').toLowerCase();
         const slug = String(raw?.name || '').normalize('NFKC').toLowerCase().trim().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
         const key = `${kind}:${slug}`; if (entities.has(key)) return entities.get(key);
-        const { rows } = await client.query(`INSERT INTO canonical_entities (organization_id,canonical_name,normalized_name,identity_key,entity_kind)
-          VALUES ($1,$2,$3,$4,$5) ON CONFLICT (organization_id,identity_key) DO UPDATE SET updated_at=now() RETURNING id`, [ORG, raw.name, slug, key, kind]);
+        let rows = (await client.query('SELECT id FROM canonical_entities WHERE organization_id=$1 AND identity_key=$2 LIMIT 1', [ORG,key])).rows;
+        if (!rows.length) {
+          try {
+            rows = (await client.query(`INSERT INTO canonical_entities (organization_id,canonical_name,normalized_name,identity_key,entity_kind)
+              VALUES ($1,$2,$3,$4,$5) RETURNING id`, [ORG, raw.name, slug, key, kind])).rows;
+          } catch (error) {
+            if (error?.code !== '23505') throw error;
+            rows = (await client.query('SELECT id FROM canonical_entities WHERE organization_id=$1 AND identity_key=$2 LIMIT 1', [ORG,key])).rows;
+          }
+        }
         entities.set(key, rows[0].id); return rows[0].id;
       };
       for (const e of prepared.entities || []) {
@@ -1976,7 +1985,13 @@ const routes = {
     const { rows } = await pg.query(`SELECT c.id,c.claim_key,s.canonical_name AS subject,p.name AS predicate,o.canonical_name AS object,c.object_literal,c.qualifiers,c.confidence,c.assertion_status,c.lifecycle_status,c.valid_from,c.valid_to,e.exact_quote,e.start_offset,e.end_offset
       FROM claim_evidence_links e JOIN canonical_claims c ON c.id=e.claim_id JOIN canonical_entities s ON s.id=c.subject_entity_id LEFT JOIN canonical_entities o ON o.id=c.object_entity_id JOIN canonical_predicates p ON p.id=c.predicate_id WHERE e.memory_id=$1 AND c.organization_id=$2 ORDER BY c.created_at`, [b.memoryId,ORG]);
     const state = await pg.query('SELECT * FROM memory_projection_states WHERE memory_id=$1',[b.memoryId]);
-    return { memory_id: b.memoryId, claims: rows, projection: state.rows[0] || null };
+    const token = (value) => String(value || '').normalize('NFKC').toLowerCase().trim();
+    const validAt = b.validAt ? new Date(b.validAt) : null;
+    const claims = rows.filter((row) => (!b.subject || token(row.subject) === token(b.subject))
+      && (!b.predicate || token(row.predicate) === token(b.predicate))
+      && (!b.object || token(row.object || row.object_literal?.value) === token(b.object))
+      && (!validAt || ((!row.valid_from || new Date(row.valid_from) <= validAt) && (!row.valid_to || new Date(row.valid_to) > validAt))));
+    return { memory_id: b.memoryId, claims, projection: state.rows[0] || null };
   },
 
   // ── Per-memory relationships (self-host READ) ─────────────────────────────

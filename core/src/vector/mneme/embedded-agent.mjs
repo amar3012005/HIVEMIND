@@ -41,6 +41,7 @@ const AGENT_CAPABILITIES = Object.freeze([
   'memory.recall', 'memory.lexical', 'memory.hydrate', 'memory.inventory', 'memory.inventory.total',
   'evidence.recall', 'evidence.lexical', 'evidence.hydrate', 'evidence.inventory',
   'graph.read', 'relationship.read', 'provenance.read', 'document.ingest-mode',
+  'canonical-claims.write', 'canonical-claims.read', 'canonical-projection.status',
   'vector.status', 'vector.pending', 'vector.repair',
 ]);
 
@@ -243,6 +244,44 @@ async function ensureSchema() {
        AND (a.created_at, a.id) > (b.created_at, b.id);
     CREATE UNIQUE INDEX IF NOT EXISTS rel_edge_uniq
       ON relationships(org_id, from_id, to_id, type);
+    CREATE TABLE IF NOT EXISTS canonical_entities (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid NOT NULL,
+      canonical_name text NOT NULL, normalized_name text NOT NULL, identity_key varchar(500),
+      entity_kind varchar(40) NOT NULL, aliases text[] DEFAULT '{}', metadata jsonb NOT NULL DEFAULT '{}',
+      confidence numeric(3,2) NOT NULL DEFAULT 1, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS canonical_entities_org_identity_key ON canonical_entities(org_id, identity_key) WHERE identity_key IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS memory_entity_links (
+      memory_id uuid NOT NULL, entity_id uuid NOT NULL, role varchar(40) NOT NULL DEFAULT 'mentioned',
+      confidence numeric(3,2) NOT NULL DEFAULT 1, created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY(memory_id, entity_id, role)
+    );
+    CREATE TABLE IF NOT EXISTS canonical_predicates (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(80) NOT NULL, version integer NOT NULL DEFAULT 1,
+      aliases text[] NOT NULL DEFAULT '{}', inverse_name varchar(80), active boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(name, version)
+    );
+    CREATE TABLE IF NOT EXISTS canonical_claims (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), org_id uuid NOT NULL, claim_key varchar(128) NOT NULL,
+      subject_entity_id uuid NOT NULL, predicate_id uuid NOT NULL, object_entity_id uuid, object_literal jsonb,
+      qualifiers jsonb NOT NULL DEFAULT '{}', confidence numeric(4,3) NOT NULL DEFAULT 1,
+      assertion_status varchar(32) NOT NULL DEFAULT 'user_asserted', lifecycle_status varchar(24) NOT NULL DEFAULT 'active',
+      valid_from timestamptz, valid_to timestamptz, known_at timestamptz NOT NULL DEFAULT now(),
+      processing_version integer NOT NULL DEFAULT 1, source_digest varchar(64) NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE(org_id, claim_key), CHECK ((object_entity_id IS NOT NULL) <> (object_literal IS NOT NULL))
+    );
+    CREATE TABLE IF NOT EXISTS claim_evidence_links (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), claim_id uuid NOT NULL, memory_id uuid NOT NULL,
+      exact_quote text, start_offset integer, end_offset integer, source_digest varchar(64) NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(claim_id, memory_id, source_digest)
+    );
+    CREATE TABLE IF NOT EXISTS memory_projection_states (
+      memory_id uuid PRIMARY KEY, org_id uuid NOT NULL, admitted_mode varchar(16) NOT NULL DEFAULT 'off',
+      processing_version integer NOT NULL DEFAULT 1, entities_status varchar(20) NOT NULL DEFAULT 'pending',
+      claims_status varchar(20) NOT NULL DEFAULT 'pending', remote_status varchar(20), receipt jsonb,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE IF NOT EXISTS knowledge_documents (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
@@ -1499,6 +1538,64 @@ function routesFor(ctx) {
         };
       }
       return { relationships };
+    },
+    '/v1/canonical-project': async (b) => {
+      const p = b.projection || {}; const input = p.input || {}; const prepared = p.prepared || {};
+      if (!input.memoryId || p.mode === 'off') return { ok: false, error: 'memoryId and enabled mode required' };
+      const client = await db().connect();
+      try {
+        await client.query('BEGIN'); const entities = new Map();
+        const resolve = async (raw) => {
+          const kind = String(raw?.kind || 'concept').toLowerCase();
+          const slug = String(raw?.name || '').normalize('NFKC').toLowerCase().trim().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+          const key = `${kind}:${slug}`; if (entities.has(key)) return entities.get(key);
+          let rows = (await client.query('SELECT id FROM canonical_entities WHERE org_id=$1 AND identity_key=$2 LIMIT 1', [org,key])).rows;
+          if (!rows.length) {
+            try {
+              rows = (await client.query(`INSERT INTO canonical_entities(org_id,canonical_name,normalized_name,identity_key,entity_kind)
+                VALUES($1,$2,$3,$4,$5) RETURNING id`, [org,raw.name,slug,key,kind])).rows;
+            } catch (error) {
+              if (error?.code !== '23505') throw error;
+              rows = (await client.query('SELECT id FROM canonical_entities WHERE org_id=$1 AND identity_key=$2 LIMIT 1', [org,key])).rows;
+            }
+          }
+          entities.set(key, rows[0].id); return rows[0].id;
+        };
+        for (const entity of prepared.entities || []) {
+          const id = await resolve(entity);
+          await client.query('INSERT INTO memory_entity_links(memory_id,entity_id,role,confidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [input.memoryId,id,entity.role || 'mentioned',entity.confidence || 1]);
+        }
+        let count = 0;
+        for (const claim of prepared.claims || []) {
+          const subjectId = await resolve(claim.subject); const objectId = claim.object?.name ? await resolve(claim.object) : null;
+          const predicate = await client.query('INSERT INTO canonical_predicates(name) VALUES($1) ON CONFLICT(name,version) DO UPDATE SET name=EXCLUDED.name RETURNING id', [claim.predicate]);
+          const digest = prepared.sourceDigest;
+          const claimKey = createHash('sha256').update([org,subjectId,claim.predicate,objectId || JSON.stringify(claim.object?.literal),digest,p.processingVersion || 1].join('|')).digest('hex');
+          const row = await client.query(`INSERT INTO canonical_claims(org_id,claim_key,subject_entity_id,predicate_id,object_entity_id,object_literal,qualifiers,confidence,assertion_status,valid_from,valid_to,processing_version,source_digest)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(org_id,claim_key) DO UPDATE SET updated_at=now() RETURNING id`,
+          [org,claimKey,subjectId,predicate.rows[0].id,objectId,objectId ? null : claim.object?.literal || null,claim.qualifiers || {},claim.confidence || 1,claim.assertionStatus || 'user_asserted',claim.validFrom || null,claim.validTo || null,p.processingVersion || 1,digest]);
+          await client.query('INSERT INTO claim_evidence_links(claim_id,memory_id,exact_quote,start_offset,end_offset,source_digest) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING', [row.rows[0].id,input.memoryId,input.exactQuote || input.content || null,input.startOffset || null,input.endOffset || null,digest]);
+          for (const [id,role] of [[subjectId,'subject'],[subjectId,'actor'],[objectId,'object']]) if (id) await client.query('INSERT INTO memory_entity_links(memory_id,entity_id,role) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[input.memoryId,id,role]);
+          count += 1;
+        }
+        const receipt = { memory_id: input.memoryId, processing_version: p.processingVersion || 1, claim_count: count };
+        await client.query(`INSERT INTO memory_projection_states(memory_id,org_id,admitted_mode,processing_version,entities_status,claims_status,remote_status,receipt)
+          VALUES($1,$2,$3,$4,'complete','complete','complete',$5) ON CONFLICT(memory_id) DO UPDATE SET claims_status='complete',entities_status='complete',remote_status='complete',receipt=$5,updated_at=now()`, [input.memoryId,org,p.mode,p.processingVersion || 1,receipt]);
+        await client.query('COMMIT'); return { ok: true, receipt };
+      } catch (error) { await client.query('ROLLBACK'); return { ok: false, error: error.message }; } finally { client.release(); }
+    },
+    '/v1/canonical-claims': async (b) => {
+      if (!b.memoryId) return { error: 'memoryId required' };
+      const { rows } = await db().query(`SELECT c.id,c.claim_key,s.canonical_name AS subject,p.name AS predicate,o.canonical_name AS object,c.object_literal,c.qualifiers,c.confidence,c.assertion_status,c.lifecycle_status,c.valid_from,c.valid_to,e.exact_quote,e.start_offset,e.end_offset
+        FROM claim_evidence_links e JOIN canonical_claims c ON c.id=e.claim_id JOIN canonical_entities s ON s.id=c.subject_entity_id LEFT JOIN canonical_entities o ON o.id=c.object_entity_id JOIN canonical_predicates p ON p.id=c.predicate_id WHERE e.memory_id=$1 AND c.org_id=$2 ORDER BY c.created_at`, [b.memoryId,org]);
+      const state = await db().query('SELECT * FROM memory_projection_states WHERE memory_id=$1',[b.memoryId]);
+      const token = (value) => String(value || '').normalize('NFKC').toLowerCase().trim();
+      const validAt = b.validAt ? new Date(b.validAt) : null;
+      const claims = rows.filter((row) => (!b.subject || token(row.subject) === token(b.subject))
+        && (!b.predicate || token(row.predicate) === token(b.predicate))
+        && (!b.object || token(row.object || row.object_literal?.value) === token(b.object))
+        && (!validAt || ((!row.valid_from || new Date(row.valid_from) <= validAt) && (!row.valid_to || new Date(row.valid_to) > validAt))));
+      return { memory_id: b.memoryId, claims, projection: state.rows[0] || null };
     },
     '/v1/mem-relationships': async (b) => {
       if (!b.memoryId) return { error: 'memoryId required' };

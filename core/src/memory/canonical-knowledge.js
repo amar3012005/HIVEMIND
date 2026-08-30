@@ -126,11 +126,21 @@ async function upsertEntity(tx, organizationId, raw) {
   const slug = normalizeEntity(raw.name);
   if (!slug) throw new Error(`invalid canonical entity: ${raw.name}`);
   const identityKey = `${kind}:${slug}`;
-  return tx.canonicalEntity.upsert({
-    where: { organizationId_identityKey: { organizationId, identityKey } },
-    update: { updatedAt: new Date() },
-    create: { organizationId, canonicalName: plain(raw.name), normalizedName: slug, identityKey, entityKind: kind },
-  });
+  // Production uses a partial unique index (`WHERE identity_key IS NOT NULL`).
+  // PostgreSQL cannot target that index through Prisma's compound upsert, so
+  // resolve first and recover the concurrent-create race explicitly.
+  const existing = await tx.canonicalEntity.findFirst({ where: { organizationId, identityKey } });
+  if (existing) return existing;
+  try {
+    return await tx.canonicalEntity.create({
+      data: { organizationId, canonicalName: plain(raw.name), normalizedName: slug, identityKey, entityKind: kind },
+    });
+  } catch (error) {
+    if (error?.code !== 'P2002') throw error;
+    const raced = await tx.canonicalEntity.findFirst({ where: { organizationId, identityKey } });
+    if (!raced) throw error;
+    return raced;
+  }
 }
 
 export async function materializeCanonicalKnowledge({ prisma, mode, input, processingVersion = 1 } = {}) {

@@ -13,7 +13,10 @@ CANON_REMOTE="${SINGULANCE_CANON_REMOTE:-https://github.com/amar3012005/HIVEMIND
 SHA=$(git ls-remote "$CANON_REMOTE" "refs/heads/$BRANCH" | awk '{print $1}')
 [ -n "$SHA" ] || { echo "FATAL: $BRANCH does not exist on $CANON_REMOTE"; exit 1; }
 
-git -C /root/hivemind-main fetch "$CANON_REMOTE" "$BRANCH" --quiet
+git -C /root/hivemind-main \
+  -c submodule.recurse=false \
+  -c fetch.recurseSubmodules=false \
+  fetch "$CANON_REMOTE" "$BRANCH" --quiet
 git -C /root/hivemind-main cat-file -e "$SHA^{commit}" 2>/dev/null \
   || { echo "FATAL: fetched canonical commit $SHA is unavailable"; exit 1; }
 

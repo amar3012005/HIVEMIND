@@ -31,6 +31,7 @@ const TRUSTED_INTERNAL_ARGUMENTS = new Set([
   '_original_content',
   'semantic_recovery',
   'allow_semantic_source_recovery',
+  'reliability_v1',
 ]);
 
 export class Toolkit {

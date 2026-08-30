@@ -1970,7 +1970,7 @@ const routes = {
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(organization_id,claim_key) DO UPDATE SET updated_at=now() RETURNING id`,
           [ORG,key,sid,pred.rows[0].id,oid,oid ? null : c.object?.literal || null,c.qualifiers || {},c.confidence || 1,c.assertionStatus || 'user_asserted',c.validFrom || null,c.validTo || null,p.processingVersion || 1,digest]);
         await client.query(`INSERT INTO claim_evidence_links(claim_id,memory_id,exact_quote,start_offset,end_offset,source_digest) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, [claim.rows[0].id,input.memoryId,input.exactQuote || input.content || null,input.startOffset || null,input.endOffset || null,digest]);
-        for (const [id,role] of [[sid,'subject'],[sid,'actor'],[oid,'object']]) if (id) await client.query('INSERT INTO memory_entity_links(memory_id,entity_id,role) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[input.memoryId,id,role]);
+        for (const [id,role] of [[sid,'subject'],[sid,'actor'],[oid,'object'],[oid,c.object?.kind]]) if (id && role) await client.query('INSERT INTO memory_entity_links(memory_id,entity_id,role) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[input.memoryId,id,role]);
         count++;
       }
       const receipt = { memory_id: input.memoryId, processing_version: p.processingVersion || 1, claim_count: count };

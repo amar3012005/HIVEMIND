@@ -174,7 +174,10 @@ export async function materializeCanonicalKnowledge({ prisma, mode, input, proce
     };
     for (const entity of prepared.entities) {
       const row = await resolve(entity);
-      const role = CANONICAL_ENTITY_ROLES.has(entity.role) ? entity.role : 'mentioned';
+      const kindRole = normalizeEntityKind(entity.kind);
+      const role = CANONICAL_ENTITY_ROLES.has(entity.role)
+        ? entity.role
+        : (CANONICAL_ENTITY_ROLES.has(kindRole) ? kindRole : 'mentioned');
       await tx.memoryEntityLink.upsert({
         where: { memoryId_entityId_role: { memoryId: input.memoryId, entityId: row.id, role } },
         update: { confidence: entity.confidence ?? 1 },
@@ -194,6 +197,13 @@ export async function materializeCanonicalKnowledge({ prisma, mode, input, proce
         await tx.memoryEntityLink.upsert({
           where: { memoryId_entityId_role: { memoryId: input.memoryId, entityId: entity.id, role } },
           update: {}, create: { memoryId: input.memoryId, entityId: entity.id, role },
+        });
+      }
+      const objectKindRole = normalizeEntityKind(claim.object?.kind);
+      if (objectEntity && CANONICAL_ENTITY_ROLES.has(objectKindRole) && objectKindRole !== 'object') {
+        await tx.memoryEntityLink.upsert({
+          where: { memoryId_entityId_role: { memoryId: input.memoryId, entityId: objectEntity.id, role: objectKindRole } },
+          update: {}, create: { memoryId: input.memoryId, entityId: objectEntity.id, role: objectKindRole },
         });
       }
       const objectToken = objectEntity?.id || JSON.stringify(claim.object?.literal);

@@ -59,6 +59,10 @@ try {
     assert.equal(claims[0].evidence.length, 1);
     assert.equal(lineage, 0);
     assert.deepEqual(new Set(links.map((link) => link.entity.entityKind)), new Set(['person', 'technology']));
+    const uwe = links.filter((link) => link.entity.entityKind === 'person').map((link) => link.role);
+    const deepLearning = links.filter((link) => link.entity.entityKind === 'technology').map((link) => link.role);
+    assert.ok(uwe.includes('subject') && uwe.includes('actor'));
+    assert.ok(deepLearning.includes('object') && deepLearning.includes('technology'));
     receipt = { claim_count: claims.length, entity_count: new Set(links.map((link) => link.entityId)).size, evidence_count: claims[0].evidence.length, lineage_count: lineage };
     throw rollback;
   });

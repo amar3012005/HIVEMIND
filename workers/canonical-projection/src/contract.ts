@@ -1,6 +1,11 @@
 export const PROJECTION_MODES = ['shadow', 'write', 'read', 'full'] as const;
 export type ProjectionMode = typeof PROJECTION_MODES[number];
 
+export const CORE_STAGE_NAMES = [
+  'load', 'reconstruct', 'resolve', 'normalize', 'persist', 'reconcile', 'complete', 'failed',
+] as const;
+export type CoreStageName = typeof CORE_STAGE_NAMES[number];
+
 export type ProjectionParams = {
   memory_id: string;
   org_id: string;
@@ -31,4 +36,9 @@ export function validParams(value: unknown): value is ProjectionParams {
 
 export function workflowInstanceId(params: ProjectionParams): string {
   return `claim-${params.memory_id}-v${params.processing_version}`;
+}
+
+export function coreStagePath(memoryId: string, stage: CoreStageName): string {
+  if (!validUuid(memoryId)) throw new Error('invalid_memory_id');
+  return `/internal/canonical-projection/v1/memories/${memoryId}/stages/${stage}`;
 }

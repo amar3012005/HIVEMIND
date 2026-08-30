@@ -4,6 +4,8 @@ import { evaluateProjectionMode } from './flags';
 import { signCoreRequest } from './security';
 import {
   type ProjectionParams,
+  type CoreStageName,
+  coreStagePath,
   validParams,
   validUuid,
   workflowInstanceId,
@@ -11,7 +13,7 @@ import {
 
 export { evaluateProjectionMode } from './flags';
 export { signCoreRequest } from './security';
-export { type ProjectionParams, validParams, workflowInstanceId } from './contract';
+export { type ProjectionParams, coreStagePath, validParams, workflowInstanceId } from './contract';
 
 type RuntimeEnv = Env & {
   CANONICAL_PROJECTION_ADMISSION_SECRET: string;
@@ -72,8 +74,8 @@ async function boundedJson(request: Request): Promise<unknown> {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-async function core(env: RuntimeEnv, params: ProjectionParams, stage: string): Promise<CoreResult> {
-  const pathname = `/internal/canonical-projection/v1/memories/${params.memory_id}/stages/${stage}`;
+async function core(env: RuntimeEnv, params: ProjectionParams, stage: CoreStageName): Promise<CoreResult> {
+  const pathname = coreStagePath(params.memory_id, stage);
   const signed = await signCoreRequest(env.CANONICAL_PROJECTION_HMAC_SECRET, pathname, params);
   const response = await fetch(`${env.HIVEMIND_CORE_URL.replace(/\/$/, '')}${pathname}`, {
     method: 'POST', headers: signed.headers, body: signed.body,

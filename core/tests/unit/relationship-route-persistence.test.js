@@ -32,7 +32,7 @@ test('BYOD relationship writes route before every central relationship query', (
   const start = storeSource.indexOf('async createRelationship(edge)');
   const end = storeSource.indexOf('async createMemoryVersion', start);
   const method = storeSource.slice(start, end);
-  const remoteBranch = method.indexOf('if (orgIsRemote(_remoteOrg))');
+  const remoteBranch = method.indexOf('if (remoteLatched || orgIsRemote(_remoteOrg))');
   const centralLookup = method.indexOf('this.client.relationship.findUnique');
   assert.ok(remoteBranch > -1 && centralLookup > -1 && remoteBranch < centralLookup);
   assert.match(method.slice(remoteBranch, centralLookup), /await amrAddEdge/);
@@ -47,4 +47,10 @@ test('semantic edge constructors carry explicit tenant scope into storage adapte
     const method = graphSource.slice(start, end > start ? end : undefined);
     assert.match(method, /createRelationship\(\{[\s\S]*?org_id,/);
   }
+});
+
+test('remote memory hydration latches the agent backend through relationship persistence', () => {
+  assert.match(storeSource, /function mapAgentRow[\s\S]*?_storage_backend:\s*'agent'/);
+  assert.match(storeSource, /const remoteLatched = edge\.storage_backend === 'agent'/);
+  assert.match(storeSource, /if \(remoteLatched \|\| orgIsRemote\(_remoteOrg\)\)/);
 });

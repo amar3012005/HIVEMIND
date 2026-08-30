@@ -99,6 +99,7 @@ function findJsonbCulprit(obj) {
 function mapAgentRow(r) {
   if (!r) return null;
   return {
+    _storage_backend: 'agent',
     id: r.id,
     user_id: r.user_id || null,
     owner: r.user_id ? { id: r.user_id, name: null } : null,
@@ -1638,7 +1639,8 @@ export class PrismaGraphStore {
     if (!hasCanonicalRelationshipCertification({ ...edge, type })) {
       throw new Error(`relationship_policy_uncertified:${type}`);
     }
-    if (orgIsRemote(_remoteOrg)) {
+    const remoteLatched = edge.storage_backend === 'agent';
+    if (remoteLatched || orgIsRemote(_remoteOrg)) {
       // Remote tenants have no central memory/relationship rows. Route before
       // the central duplicate/budget lookup (which is tenant-scoped and would
       // correctly reject a BYOD id). The agent owns uniqueness and returns a

@@ -220,6 +220,21 @@ test('explicit supported update saved through ingest creates one certified edge'
   assert.equal(store.relationships[0].metadata.relationship_validation_status, 'validated');
 });
 
+test('typed entity hints participate in pre-write relationship admission', async () => {
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
+  const tenant = { user_id: '00000000-0000-4000-8000-000000009631', org_id: '00000000-0000-4000-8000-000000009632' };
+  const metadata = { extracted_entities: [{ name: 'Atlas Memory Box', kind: 'product' }, { name: 'Heidelberg', kind: 'place' }] };
+  const oldMemory = await engine.ingestMemory({ ...tenant, content: 'Atlas Memory Box retention in Heidelberg is 12 months.', metadata,
+    skipProcessing: true, defer_entity_linking: true, smartIngest: false, skip_relationship_classification: true });
+  const updated = await engine.ingestMemory({ ...tenant, content: 'Atlas Memory Box retention in Heidelberg is now 13 months.', metadata,
+    relationship: { type: 'Updates', target_id: oldMemory.memoryId, confidence: 0.97 },
+    skipProcessing: true, defer_entity_linking: true, smartIngest: false });
+  assert.equal(updated.operation, 'updated');
+  assert.ok((await store.getMemory(updated.memoryId)).tags.includes('entity:heidelberg'));
+  assert.equal(store.relationships.length, 1);
+});
+
 test('invalid inferred relationship downgrades before persistence instead of orphaning a remote write', async () => {
   const store = new InMemoryGraphStore();
   const engine = new MemoryGraphEngine({ store, predictCalibrate: false });

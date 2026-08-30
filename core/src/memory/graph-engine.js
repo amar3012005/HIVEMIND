@@ -722,6 +722,21 @@ export class MemoryGraphEngine {
         sourceMetadata: baseMemory.source_metadata,
       }),
     };
+    // Structured callers and canonical extraction may already know the exact
+    // typed entities. Materialize their deterministic tags before graph
+    // admission so remote and central stores validate the same subject set;
+    // the async linker later enriches rather than being required for safety.
+    const declaredEntities = extractedEntityCandidates(baseMemory);
+    if (declaredEntities.length) {
+      baseMemory.tags = normalizeTagsArray([
+        ...(baseMemory.tags || []),
+        ...declaredEntities.map((entity) => {
+          const name = typeof entity === 'string' ? entity : entity?.name;
+          const slug = normalizeEntity(name || '');
+          return slug ? `entity:${slug}` : null;
+        }).filter(Boolean),
+      ]);
+    }
 
     // Bulk-KB fast path (#6): the per-user advisory lock exists to serialize a
     // user's writes so concurrent supersede/dedup can't race. When the caller

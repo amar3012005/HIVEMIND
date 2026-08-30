@@ -1279,3 +1279,16 @@ slides that find no unique anchor get a page instead of `null`.
   image additionally declares the Poppler/ImageMagick/Ghostscript runtime used
   by the production image; a manifest/native/Prisma release still requires the
   immutable build to complete before production promotion.
+
+### Committed
+
+- Backend/parent commit `8b072cd7a3d1d3ff4dee24dd9e5f1fc8b9c49ac6`
+  was pushed to `origin/codex/knowledge-ingest-workflow-v1`.
+- Frontend commit `bab779a29e95d10fee48340103c5c75f86440c91` was
+  pushed to `origin/codex/preview-health-poll-cleanup` before the parent gitlink.
+- Affected paths: `core/Dockerfile.dev`, canonical fact generation, PDF quality
+  and semantic chunking, Gateway vision parsing, upload routing, focused tests,
+  local Compose/startup, the frontend top bar/hooks, `features.md`, and this
+  journal.
+- Accepted release: local `singulance-local` only after the post-commit checks;
+  production remains unchanged.

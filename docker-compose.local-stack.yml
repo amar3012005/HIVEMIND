@@ -106,6 +106,8 @@ services:
       KB_UNIFIED_WINDOW_CHARS: ${KB_UNIFIED_WINDOW_CHARS:-}
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
       HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:-local-admin-secret-change-me}
+      HIVEMIND_OAUTH_SESSION_SECRET: ${HIVEMIND_OAUTH_SESSION_SECRET:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
       # Durable Knowledge Base ingestion is opt-in and local-only. The core
       # still requires a positive Flagship decision for the organization.
       HIVEMIND_LOCAL_MODE: "true"
@@ -142,7 +144,7 @@ services:
       # native dependencies, Prisma generation, or the Dockerfile changes.
       - ./core/src:/app/src:ro
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 5

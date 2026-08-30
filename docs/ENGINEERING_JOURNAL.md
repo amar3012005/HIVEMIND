@@ -1292,3 +1292,12 @@ slides that find no unique anchor get a page instead of `null`.
   journal.
 - Accepted release: local `singulance-local` only after the post-commit checks;
   production remains unchanged.
+
+### Prompt-contract regression lock
+
+- Added source-level regression checks that preserve exact-quote grounding,
+  qualifiers and negation, metadata-aware entity coverage, typed
+  Updates/Extends/Derives semantics, and the prohibition on promoting ordinary
+  co-mention into a verified relationship.
+- Verification: `node --test tests/unit/kb-upload-integrity.test.js` reported
+  `tests 13; pass 13; fail 0`.

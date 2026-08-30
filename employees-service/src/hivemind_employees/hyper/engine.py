@@ -1381,6 +1381,9 @@ class Director:
         execution_profile: Optional[Dict[str, Any]] = None,
         direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
         agentic_task_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
+        work_agent_hook: Optional[Callable[[Dict[str, Any], Dict[str, Any], str], Awaitable[Dict[str, Any]]]] = None,
+        grok_runtime_mode: str = "off",
+        grok_runtime_version: int = 1,
     ) -> None:
         # Run-wide output language from the FE navbar toggle (locale code/name →
         # language NAME, '' for English). Drives a strict "write in X only" directive.
@@ -1408,6 +1411,10 @@ class Director:
         # Callable(user_message, board_context) -> the agent's final answer,
         # or None to fall through to the normal pipeline.
         self.agentic_task_hook = agentic_task_hook
+        self.work_agent_hook = work_agent_hook
+        from .grok_runtime import normalize_runtime_mode
+        self.grok_runtime_mode = normalize_runtime_mode(grok_runtime_mode)
+        self.grok_runtime_version = max(1, int(grok_runtime_version or 1))
         self.participants = participants
         self.roster = {(p.get("slug") or p.get("id")): p for p in participants}
         self.room_template = room_template or "debate"
@@ -4135,6 +4142,21 @@ class Director:
         orders = plan_steps or [row for row in (plan.get("work_orders") or []) if isinstance(row, dict)]
         if not orders or not self.participants:
             return []
+        from .grok_runtime import mode_at_least, select_active_agents
+        if mode_at_least(self.grok_runtime_mode, "shadow_roster"):
+            active = select_active_agents(
+                self.participants, orders,
+                maximum=max(1, int(os.environ.get("HYPER_GROK_MAX_ACTIVE_AGENTS", "3") or "3")),
+            )
+            for employee in active:
+                await self.emit({
+                    "t": "agent_activated",
+                    "agent": employee.get("slug"),
+                    "name": employee.get("name"),
+                    "lane": employee.get("_lane") or employee.get("role_archetype"),
+                    "agent_instance_id": employee.get("_agent_instance_id"),
+                    "runtime_mode": self.grok_runtime_mode,
+                })
         completed_by_step: Dict[str, Dict[str, Any]] = {}
 
         async def execute(index: int, order: Dict[str, Any]) -> Dict[str, Any]:
@@ -4163,6 +4185,14 @@ class Director:
                     depends_on=dependencies,
                     wait_for=wait_for,
                     handoff=handoff,
+                    agent_instance_id=str(owner.get("_agent_instance_id") or ""),
+                    workflow_instance_id=(
+                        f"agent-{self.turn_id}-{step_id}-v{self.grok_runtime_version}"
+                        if self.grok_runtime_mode not in {"off", "shadow_roster", "persistent_agents"}
+                        else ""
+                    ),
+                    runtime_mode=self.grok_runtime_mode,
+                    processing_version=self.grok_runtime_version,
                 )
             work_id = existing_work_id or str((persisted or {}).get("id") or "")
             if wait_for:
@@ -4218,15 +4248,23 @@ class Director:
                 "'no verified contact found in gathered evidence' — do not manufacture one, even hedged."
             )
             try:
-                response = await self._groq([
-                    {"role": "system", "content": (
-                        _now_block() + f"You are {persona_name}, a {lane}. {persona}\n"
-                        "You are completing one bounded work order for your Room. Work from the supplied evidence "
-                        "and selected methods only — never invent a fact, contact, or source not present in that "
-                        "evidence. Be concise, concrete, and produce the actual work product.")},
-                    {"role": "user", "content": f"{prompt}\n\nEVIDENCE BOARD:\n{context}"},
-                ], model=self.persona_model, temp=0.35, bucket="worker", max_tokens=220)
-                text = _strip_cot((response or {}).get("content") or "").strip()
+                from .grok_runtime import mode_at_least
+                agent_result: Dict[str, Any] = {}
+                if mode_at_least(self.grok_runtime_mode, "real_tools"):
+                    if self.work_agent_hook is None:
+                        raise RuntimeError("real agent runtime selected without a work-agent executor")
+                    agent_result = await self.work_agent_hook(owner, order, f"{prompt}\n\nEVIDENCE BOARD:\n{context}")
+                    text = _strip_cot(str(agent_result.get("text") or "")).strip()
+                else:
+                    response = await self._groq([
+                        {"role": "system", "content": (
+                            _now_block() + f"You are {persona_name}, a {lane}. {persona}\n"
+                            "You are completing one bounded work order for your Room. Work from the supplied evidence "
+                            "and selected methods only — never invent a fact, contact, or source not present in that "
+                            "evidence. Be concise, concrete, and produce the actual work product.")},
+                        {"role": "user", "content": f"{prompt}\n\nEVIDENCE BOARD:\n{context}"},
+                    ], model=self.persona_model, temp=0.35, bucket="worker", max_tokens=220)
+                    text = _strip_cot((response or {}).get("content") or "").strip()
                 if not text:
                     raise RuntimeError("worker returned no usable result")
                 activity = _work_order_activity(order.get("title"), text)
@@ -4244,8 +4282,11 @@ class Director:
                 if work_id:
                     await complete_hyper_work_order(
                         work_order_id=work_id, org_id=self.org_id, status="completed", summary=text[:1000],
-                        output={"text": text, "title": order.get("title")}, evidence=evidence, artifacts=[],
-                        usage={"tokens": int(self._last_tok or 0)},
+                        output={"text": text, "title": order.get("title"),
+                                "agent_instance_id": owner.get("_agent_instance_id")},
+                        evidence=list(agent_result.get("evidence") or evidence),
+                        artifacts=list(agent_result.get("artifacts") or []),
+                        usage=agent_result.get("usage") or {"tokens": int(self._last_tok or 0)},
                     )
                 return result
             except Exception as exc:  # a worker failure is a visible, bounded result, never a dead Room
@@ -5853,6 +5894,7 @@ class Director:
             "and EVIDENCE BOARD below. Correct only the stated unmet criteria. Do not add facts, claims, URLs, recipients, "
             "channels, actions, performance, or provider state."
         )
+        evidence_board = "\n".join(self.blackboard)[:5000]
         repair_user = (
             f"UNMET CRITERIA:\n{json.dumps(errors, ensure_ascii=False)}\n\n"
             f"ACTIONS TO REPAIR:\n{json.dumps(invalid_actions, ensure_ascii=False)}\n\n"
@@ -5861,7 +5903,7 @@ class Director:
             f"ACCEPTED PLAN CONTEXT (read only):\n"
             f"{json.dumps({k: v for k, v in semantic.items() if k not in {'actions', *relevant_fields}}, ensure_ascii=False)[:6000]}\n\n"
             f"VERIFIED COMPANY CONTEXT:\n{self.company_brief[:2500]}\n\n"
-            f"EVIDENCE BOARD:\n{'\n'.join(self.blackboard)[:5000]}"
+            f"EVIDENCE BOARD:\n{evidence_board}"
         )
         repaired_message = await self._groq(
             [{"role": "system", "content": repair_prompt}, {"role": "user", "content": repair_user}],

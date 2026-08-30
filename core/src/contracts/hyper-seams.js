@@ -35,6 +35,7 @@ export const ROOM_TURN_FIELDS = [
   'task_tag', 'campaign_id', 'campaign_brief', 'display_message', 'execution_context',
   'sim_mode', 'sim_agents', 'evo_mode', 'write_policy', 'agentic_model', 'language',
   'execution_identity',
+  'grok_runtime_mode', 'grok_runtime_version', 'grok_workflow_instance_id',
   'schema_version',
 ];
 

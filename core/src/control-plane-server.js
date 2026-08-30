@@ -12891,6 +12891,17 @@ Write the persona now.`;
         return jsonResponse(res, planLimitBody(runLimit, 'hyperAgentRuns'), runLimit.status || 429);
       }
 
+      // Fail-closed, cumulative Flagship decision. The value is latched on the
+      // turn before any execution begins; a later flag change cannot move an
+      // in-flight turn between the legacy and durable runtimes.
+      const { evaluateGrokRuntime, grokModeAtLeast, grokWorkflowId } = await import('./hyperagents/grok-runtime-client.js');
+      const grokDecision = await evaluateGrokRuntime({
+        orgId: current.session.orgId, userId: current.session.userId,
+      });
+      const grokWorkflowInstanceId = grokModeAtLeast(grokDecision.mode, 'durable_assignments')
+        ? grokWorkflowId(meteredTurnId, grokDecision.version)
+        : null;
+
       // Sequence is monotonic per room. Atomic via SELECT max + insert
       // wrapped in serializable transaction.
       try {
@@ -12921,6 +12932,9 @@ Write the persona now.`;
               status: 'live',
               idempotencyKey: key,
               lines: [],
+              grokRuntimeMode: grokDecision.mode,
+              grokRuntimeVersion: grokDecision.version,
+              grokWorkflowInstanceId,
             },
           });
           await tx.hyperRoom.update({
@@ -13040,6 +13054,9 @@ Write the persona now.`;
             room_goal: room.goal || '',
             room_mode: roomExecutionMode(room),
             task_tag: isHq ? 'HQ' : roomExecutionTag(room),
+            grok_runtime_mode: grokDecision.mode,
+            grok_runtime_version: grokDecision.version,
+            grok_workflow_instance_id: grokWorkflowInstanceId,
             ...(executionContext ? { execution_context: executionContext } : {}),
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -13048,9 +13065,50 @@ Write the persona now.`;
             console.warn('[hyper-rooms] sidecar dispatch threw:', err.message);
           }
         };
-        setImmediate(() => dispatchSidecar().catch(err => console.warn('[hyper-rooms] async sidecar dispatch failed:', err.message)));
+        if (grokModeAtLeast(grokDecision.mode, 'durable_assignments')) {
+          const { startGrokRoomWorkflow } = await import('./hyperagents/grok-runtime-client.js');
+          try {
+            await startGrokRoomWorkflow({
+              turnId: turn.id, roomId, orgId: current.session.orgId, userId: current.session.userId,
+              mode: grokDecision.mode, version: grokDecision.version,
+            });
+          } catch (error) {
+            const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
+            await appendTurnEvent(prisma, turn.id, {
+              t: 'error', code: 'grok_workflow_admission_failed', message: error.message,
+            });
+            await sealTurn(prisma, turn.id, { status: 'failed', event: {
+              t: 'seal', status: 'failed', error: error.message, cost_tokens: 0,
+            } });
+            return jsonResponse(res, { turn_id: turn.id, status: 'failed', error: error.message }, 503);
+          }
+        } else {
+          if (grokModeAtLeast(grokDecision.mode, 'persistent_agents')) {
+            const { provisionGrokRoster } = await import('./hyperagents/grok-runtime-client.js');
+            try {
+              await provisionGrokRoster({
+                turnId: turn.id, roomId, orgId: current.session.orgId, userId: current.session.userId,
+                mode: grokDecision.mode, version: grokDecision.version,
+              });
+            } catch (error) {
+              const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
+              await appendTurnEvent(prisma, turn.id, {
+                t: 'error', code: 'grok_agent_provision_failed', message: error.message,
+              });
+              await sealTurn(prisma, turn.id, { status: 'failed', event: {
+                t: 'seal', status: 'failed', error: error.message, cost_tokens: 0,
+              } });
+              return jsonResponse(res, { turn_id: turn.id, status: 'failed', error: error.message }, 503);
+            }
+          }
+          setImmediate(() => dispatchSidecar().catch(err => console.warn('[hyper-rooms] async sidecar dispatch failed:', err.message)));
+        }
 
-        return jsonResponse(res, { turn_id: turn.id, status: turn.status }, 202);
+        return jsonResponse(res, {
+          turn_id: turn.id, status: turn.status,
+          runtime_mode: grokDecision.mode,
+          workflow_instance_id: grokWorkflowInstanceId,
+        }, 202);
       } catch (err) {
         if (!hyperCredit.duplicate) await controlCreditService.release({ orgId: current.session.orgId, idempotencyKey: hyperCreditKey }).catch(() => {});
         console.warn('[hyper-rooms] turn create failed:', err.message);
@@ -13099,6 +13157,111 @@ Write the persona now.`;
     // ─── Internal hook: sidecar writes turn events back here ───
     // Sidecar POSTs each JSONL event during execution; we append it to
     // the row and let any open SSE subscriber pick it up on next poll.
+    const grokWorkflowMatch = pathname.match(/^\/internal\/hyper-grok\/v1\/turns\/([0-9a-f-]{36})\/(prepare|execute|reconcile)$/i);
+    if (grokWorkflowMatch && req.method === 'POST') {
+      const { verifyGrokWorkflowSecret, normalizeGrokRuntimeMode } = await import('./hyperagents/grok-runtime-client.js');
+      if (!verifyGrokWorkflowSecret(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+      const body = await parseBody(req).catch(() => ({}));
+      const turnId = grokWorkflowMatch[1];
+      const action = grokWorkflowMatch[2];
+      const turn = await prisma.hyperTurn.findUnique({ where: { id: turnId }, include: { room: true } });
+      if (!turn || turn.room.orgId !== body.org_id) return jsonResponse(res, { error: 'Not found' }, 404);
+      if (turn.grokRuntimeMode !== normalizeGrokRuntimeMode(body.mode)
+          || Number(turn.grokRuntimeVersion) !== Number(body.processing_version)) {
+        return jsonResponse(res, { error: 'latched_runtime_mismatch', retryable: false }, 409);
+      }
+      if (action === 'prepare') {
+        const participants = turn.room.participantIds?.length
+          ? await prisma.digitalEmployee.findMany({
+              where: { id: { in: turn.room.participantIds }, orgId: turn.room.orgId, archivedAt: null, status: { not: 'paused' } },
+              select: {
+                id: true, slug: true, name: true, roleArchetype: true,
+                tools: true, enabledConnectors: true, status: true,
+              },
+            })
+          : [];
+        const manifests = [];
+        for (const employee of participants) {
+          const digest = crypto.createHash('sha256')
+            .update(`${turn.room.orgId}:${employee.id}:v${turn.grokRuntimeVersion}`).digest('hex').slice(0, 32);
+          const manifest = {
+            employee_id: employee.id,
+            agent_instance_id: `ha-${digest}-v${turn.grokRuntimeVersion}`,
+            slug: employee.slug, name: employee.name,
+            lane: deriveCsiLane(employee), tools: employee.tools || [],
+            connectors: employee.enabledConnectors || [], status: employee.status,
+            processing_version: turn.grokRuntimeVersion,
+          };
+          await prisma.hyperAgentRuntime.upsert({
+            where: { employeeId: employee.id },
+            create: {
+              orgId: turn.room.orgId, employeeId: employee.id,
+              agentInstanceId: manifest.agent_instance_id,
+              processingVersion: turn.grokRuntimeVersion, capabilityManifest: manifest,
+            },
+            update: {
+              processingVersion: turn.grokRuntimeVersion, capabilityManifest: manifest,
+            },
+          });
+          manifests.push(manifest);
+        }
+        const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+        await appendTurnEvent(prisma, turn.id, {
+          t: 'roster_evaluated', runtime_mode: turn.grokRuntimeMode,
+          processing_version: turn.grokRuntimeVersion, agents: manifests,
+        });
+        return jsonResponse(res, { ok: true, agents: manifests });
+      }
+      if (action === 'reconcile') {
+        if (!['complete', 'failed', 'cost_capped'].includes(turn.status)) {
+          return jsonResponse(res, { error: 'turn_not_terminal', retryable: true, status: turn.status }, 409);
+        }
+        const failed = turn.status !== 'complete';
+        return jsonResponse(res, {
+          ok: !failed, terminal: true, status: turn.status,
+          verification: turn.verificationVerdict || {}, active_agents: turn.activeAgents || [],
+          ...(failed ? { error: turn.terminalReason || 'turn_failed', retryable: false } : {}),
+        }, failed ? 422 : 200);
+      }
+
+      if (['complete', 'failed', 'cost_capped'].includes(turn.status)) {
+        return jsonResponse(res, { ok: turn.status === 'complete', terminal: true, reused: true, status: turn.status });
+      }
+      const claim = await prisma.$executeRawUnsafe(
+        `UPDATE "hivemind"."hyper_turns"
+            SET execution_phase='GROK_RUNNING', last_progress_at=now()
+          WHERE id=$1::uuid AND (
+            execution_phase IN ('ACCEPTED','GROK_QUEUED')
+            OR (execution_phase='GROK_RUNNING' AND last_progress_at < now() - interval '10 minutes')
+          )`,
+        turn.id,
+      );
+      if (!claim) return jsonResponse(res, { error: 'turn_execution_already_claimed', retryable: true }, 409);
+      const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+      await appendTurnEvent(prisma, turn.id, {
+        t: 'workflow_started', workflow_instance_id: turn.grokWorkflowInstanceId,
+        runtime_mode: turn.grokRuntimeMode, processing_version: turn.grokRuntimeVersion,
+      });
+      try {
+        const response = await dispatchHyperRoomTurn({
+          room_id: turn.roomId, turn_id: turn.id, user_id: turn.room.userId, org_id: turn.room.orgId,
+          user_message: turn.userMessage, participant_ids: turn.room.participantIds || [],
+          project_id: turn.room.projectId || null, room_goal: turn.room.goal || '',
+          room_mode: roomExecutionMode(turn.room), task_tag: roomExecutionTag(turn.room),
+          grok_runtime_mode: turn.grokRuntimeMode,
+          grok_runtime_version: turn.grokRuntimeVersion,
+          grok_workflow_instance_id: turn.grokWorkflowInstanceId,
+          callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
+        });
+        return jsonResponse(res, { ok: true, dispatched: true, response: response || null });
+      } catch (error) {
+        await prisma.hyperTurn.update({
+          where: { id: turn.id }, data: { executionPhase: 'GROK_QUEUED', terminalReason: String(error.message || error) },
+        }).catch(() => {});
+        return jsonResponse(res, { error: error.message, retryable: true }, 503);
+      }
+    }
+
     if (pathname === '/internal/hyper/turn-event' && req.method === 'POST') {
       const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
       const routeResult = await handleInternalHyperTurnEventRoute({

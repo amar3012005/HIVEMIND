@@ -141,9 +141,28 @@ export async function appendTurnEvent(prisma, turnId, event) {
     const now = Date.now();
     const stamped = { ts: now, received_ts: now, ...event };
     lines.push(stamped);
+    let activeAgents;
+    if (event?.t === 'agent_activated' || event?.t === 'agent_assignment_started'
+        || event?.t === 'agent_assignment_completed' || event?.t === 'agent_waiting') {
+      const current = await tx.hyperTurn.findUnique({ where: { id: turnId }, select: { activeAgents: true } }).catch(() => null);
+      const agents = Array.isArray(current?.activeAgents) ? [...current.activeAgents] : [];
+      const key = String(event.agent_instance_id || event.agent || '');
+      const index = agents.findIndex((agent) => String(agent.agent_instance_id || agent.agent || '') === key);
+      const projection = {
+        ...(index >= 0 ? agents[index] : {}),
+        employee_slug: event.agent || null,
+        agent_instance_id: event.agent_instance_id || null,
+        status: event.t === 'agent_assignment_completed' ? 'complete'
+          : event.t === 'agent_waiting' ? 'waiting'
+            : event.t === 'agent_assignment_started' ? 'working' : 'active',
+        updated_at: now,
+      };
+      if (index >= 0) agents[index] = projection; else agents.push(projection);
+      activeAgents = agents;
+    }
     await tx.hyperTurn.update({
       where: { id: turnId },
-      data: { lines },
+      data: { lines, ...(activeAgents ? { activeAgents } : {}) },
     });
     return { stamped, appended: true };
   });

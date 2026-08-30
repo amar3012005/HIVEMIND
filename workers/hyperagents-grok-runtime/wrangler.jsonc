@@ -1,0 +1,43 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-hyperagents-grok-local-root",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "vars": {
+    "ENVIRONMENT": "local",
+    "HIVEMIND_CORE_URL": "http://127.0.0.1:3000",
+    "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
+  },
+  "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+  "durable_objects": {
+    "bindings": [{ "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HiredHyperAgent"] }],
+  "workflows": [{ "name": "hivemind-hyper-room-run-local", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" }],
+  "env": {
+    "local": {
+      "name": "hivemind-hyperagents-grok-local",
+      "vars": {
+        "ENVIRONMENT": "local",
+        "HIVEMIND_CORE_URL": "https://preview-api.singulancelabs.com",
+        "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
+      },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "durable_objects": { "bindings": [{ "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" }] },
+      "workflows": [{ "name": "hivemind-hyper-room-run-local", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" }]
+    },
+    "production": {
+      "name": "hivemind-hyperagents-grok-production",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "HIVEMIND_CORE_URL": "https://api.singulancelabs.com",
+        "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
+      },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "durable_objects": { "bindings": [{ "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" }] },
+      "workflows": [{ "name": "hivemind-hyper-room-run-production", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" }]
+    }
+  }
+}

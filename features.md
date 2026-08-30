@@ -126,3 +126,15 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   `sha-b3616eb4`, and the post-canary three-minute critical-log scan was empty.
 - Rollback: disable the Flagship rule for new Workflow admissions; for the Core
   graph fix use the governor-preserved `sha-81239791` rollback image.
+
+## feature-20260830T180000Z — Second production ingestion canary tenant
+
+- Flagship-only rollout; no Worker, container, database, frontend, or local
+  deployment changed.
+- `knowledge_ingest_workflow_v1` now also evaluates true only for production
+  org `bfbdd2bc-e214-44e5-80d4-e3284256d0c0` plus user
+  `e35811aa-4bcd-44bb-b829-a437895a42eb`. A different user in the same org
+  evaluates false; the global default remains off.
+- Day 1 audit: production `day1_first_move_v1` is enabled, default-on, and has
+  no targeting rules. The production `HIVEMIND_D1_WORKFLOW_ENABLED` backend
+  gate is also true, so Day 1 is enabled for every eligible user.

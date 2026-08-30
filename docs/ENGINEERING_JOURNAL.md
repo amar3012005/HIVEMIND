@@ -990,3 +990,15 @@ slides that find no unique anchor get a page instead of `null`.
   the non-latest predecessor); a final critical-log scan was empty.
 - DECISION: preserve Flagship default-off and exact two-dimensional targeting.
   This is reversible and prevents an untested tenant-wide rollout.
+
+## 2026-08-30 UTC — ingestion canary targeting expanded
+
+- Added one production-only, exact org-and-user rule to
+  `knowledge_ingest_workflow_v1`: org
+  `bfbdd2bc-e214-44e5-80d4-e3284256d0c0`, user
+  `e35811aa-4bcd-44bb-b829-a437895a42eb`.
+- Runtime verification through the production Worker `/enabled` endpoint:
+  requested pair `true`; same org with a different user `false`.
+- Audited Day 1 without mutation: `day1_first_move_v1` is enabled with
+  `default_variation=on` and zero targeting rules; production backend master
+  gate is true. No deployment was required for either check.

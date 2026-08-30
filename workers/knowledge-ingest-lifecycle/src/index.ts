@@ -17,6 +17,9 @@ type StageResult = {
   reused?: boolean;
   terminal?: boolean;
 };
+type RuntimeEnv = Env & {
+  KNOWLEDGE_INGEST_WORKFLOW_SECRET: string;
+};
 
 async function equalSecret(actual: string, expected: string): Promise<boolean> {
   if (!actual || !expected) return false;
@@ -32,12 +35,12 @@ async function equalSecret(actual: string, expected: string): Promise<boolean> {
   return difference === 0;
 }
 
-async function authorized(request: Request, env: Env): Promise<boolean> {
+async function authorized(request: Request, env: RuntimeEnv): Promise<boolean> {
   const actual = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
   return equalSecret(actual, env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || '');
 }
 
-async function flagEnabled(env: Env, orgId: string): Promise<boolean> {
+async function flagEnabled(env: RuntimeEnv, orgId: string): Promise<boolean> {
   const environment = env.ENVIRONMENT === 'production' ? 'production' : env.ENVIRONMENT === 'local' ? 'local' : null;
   if (!environment || !validOrgId(orgId) || !env.FLAGS) return false;
   const details = await env.FLAGS.getBooleanDetails(
@@ -57,7 +60,7 @@ async function flagEnabled(env: Env, orgId: string): Promise<boolean> {
 }
 
 async function core<T>(
-  env: Env,
+  env: RuntimeEnv,
   params: IngestParams,
   suffix: string,
   extra: Record<string, unknown> = {},
@@ -88,7 +91,7 @@ async function core<T>(
   return body as T;
 }
 
-export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<Env, IngestParams> {
+export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, IngestParams> {
   async run(event: WorkflowEvent<IngestParams>, step: WorkflowStep) {
     if (!validParams(event.payload)) throw new NonRetryableError('invalid_ingest_payload');
     const params = event.payload;
@@ -171,7 +174,7 @@ async function objectResponse(request: Request, env: Env, objectKey: string): Pr
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: RuntimeEnv): Promise<Response> {
     if (!await authorized(request, env)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
     const url = new URL(request.url);
     if (url.pathname === '/enabled' && request.method === 'GET') {
@@ -198,7 +201,7 @@ export default {
     return Response.json({ error: 'Not found' }, { status: 404 });
   },
 
-  async queue(batch: MessageBatch<IngestParams>, env: Env): Promise<void> {
+  async queue(batch: MessageBatch<IngestParams>, env: RuntimeEnv): Promise<void> {
     for (const message of batch.messages) {
       if (!validParams(message.body) || !await flagEnabled(env, message.body.org_id)) {
         message.ack();
@@ -219,4 +222,4 @@ export default {
       message.ack();
     }
   },
-} satisfies ExportedHandler<Env, IngestParams>;
+} satisfies ExportedHandler<RuntimeEnv, IngestParams>;

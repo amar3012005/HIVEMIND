@@ -6,7 +6,8 @@ const source = fs.readFileSync(new URL('../../src/control-plane-server.js', impo
 
 test('the hosted Workflow bridge is environment-gated, secret-authenticated, and path-bounded', () => {
   const start = source.indexOf('async function proxyKnowledgeWorkflowToCore');
-  const end = source.indexOf('\n}\n', start);
+  const relativeEnd = source.slice(start).search(/\r?\n}\r?\n/);
+  const end = relativeEnd < 0 ? -1 : start + relativeEnd;
   assert.ok(start > 0 && end > start);
   const helper = source.slice(start, end);
   assert.match(helper, /knowledgeWorkflowEnabled/);

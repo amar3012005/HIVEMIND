@@ -47,6 +47,7 @@ verification, and its independent rollback control.
 - Release rule: deploy only from a clean, current `singulance-main` promotion;
   verify public crawler access and private-host `noindex` behavior before
   enabling any narrow crawler guard.
+
 ## feature-20260830T004500Z — Public AI discovery policy
 
 - Production status: deployed and verified. Public `singulancelabs.com` serves
@@ -62,3 +63,13 @@ verification, and its independent rollback control.
   `acc99047-4b86-41ca-b1b4-d00c55d6c75e`.
 - Rollback: roll back the Worker and disable/delete only that WAF ruleset; no
   database or customer data changed.
+
+## feature-20260830T150000Z — Durable Dreaming and Subject Profiles v2
+
+- Local candidate: implemented on `codex/dream-lifecycle-v2`; integration and
+  shared-runtime acceptance remain pending.
+- Gate: `DREAM_WORKFLOW_V2_ENABLED` plus fail-closed `dream_workflow_v2`.
+- Cloudflare: isolated Workflow, Queue/DLQ, Cron, R2, Flagship, and existing AI Gateway.
+- Data: additive checkpoints, candidates, typed derivation receipts, and immutable generic subject-profile revisions.
+- Compatibility: existing cognition/profile payloads are unchanged; v2 fields and routes are additive.
+- Promotion: local acceptance and `singulance-local` integration are required before production governance.

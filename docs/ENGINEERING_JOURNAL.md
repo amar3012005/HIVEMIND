@@ -983,3 +983,24 @@ slides that find no unique anchor get a page instead of `null`.
   discovery paths on private Worker hostnames. Public marketing traffic remains
   available. The governed canonical service release `40e3b3d1` completed with
   Core, Control Plane, and Employees healthy; no migrations occurred.
+
+## 2026-08-30 UTC — durable Dreaming v2 session candidate
+
+- State: implemented and statically verified on `codex/dream-lifecycle-v2` in
+  `P:\HIVEMIND-worktrees\dream-lifecycle-v2`; local integration and runtime
+  acceptance remain pending. Production was not touched.
+- Added an isolated Cloudflare Cron/Queue/DLQ/Workflow/R2 package, fail-closed
+  Flagship evaluation, authenticated internal stage callbacks, PostgreSQL
+  checkpoints/candidates/profiles/revisions, conservative visibility inheritance,
+  deterministic replay healing, review APIs, notifications, and additive UI state.
+- Verification completed before commit: Prisma validate/generate passed; Node
+  syntax checks passed; focused cognition tests passed 16/16; Worker TypeScript
+  passed; Wrangler local dry-run resolved only `-local` resources; the Da-vinci
+  optimized production build compiled successfully.
+- Agent Memory and code-review-graph MCP capabilities were not exposed to this
+  session. Git, current code, tests, and repository documents were used as the
+  authority; no unverified completion or secret was recorded externally.
+- Three broader Windows-only test entrypoints (`dream-retention`,
+  `entity-overdream-guard`, and `recall-dreams-first`) could not load because
+  `singulance-amr` has no `win32-x64` prebuilt binary. The remaining focused
+  suite passed; these three require the Linux local-container acceptance run.

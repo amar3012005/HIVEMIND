@@ -3057,6 +3057,9 @@ enum RelationshipType {
   Contradicts
   PartOf
   Mentions
+  GroundedIn
+  DependsOn
+  Implies
 }
 
 enum VisibilityScope {
@@ -4269,9 +4272,179 @@ model CognitionRun {
   triggeredBy       String?   @map("triggered_by") @db.Uuid
   startedAt         DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
   finishedAt        DateTime? @map("finished_at") @db.Timestamptz(6)
+  workflowInstanceId String?   @unique @map("workflow_instance_id") @db.VarChar(100)
+  pipelineVersion    Int       @default(1) @map("pipeline_version")
+  triggerKey         String?   @map("trigger_key") @db.VarChar(160)
+  latchedFlags       Json      @default("{}") @map("latched_flags")
+  scopeSnapshot      Json      @default("{}") @map("scope_snapshot")
+  currentStage       String?   @map("current_stage") @db.VarChar(48)
+  progress           Int       @default(0)
+  candidateCount     Int       @default(0) @map("candidate_count")
+  acceptedCount      Int       @default(0) @map("accepted_count")
+  rejectedCount      Int       @default(0) @map("rejected_count")
+  quarantinedCount   Int       @default(0) @map("quarantined_count")
+  publishedCount     Int       @default(0) @map("published_count")
+  profileUpdateCount Int       @default(0) @map("profile_update_count")
+  relationshipCount  Int       @default(0) @map("relationship_count")
+  vectorCount        Int       @default(0) @map("vector_count")
+  modelRoute          String?   @map("model_route") @db.VarChar(160)
+  embeddingModel      String?   @map("embedding_model") @db.VarChar(160)
+  tokenCount          Int       @default(0) @map("token_count")
+  costMicros          BigInt    @default(0) @map("cost_micros")
+  heartbeatAt         DateTime? @map("heartbeat_at") @db.Timestamptz(6)
+  cancelledAt         DateTime? @map("cancelled_at") @db.Timestamptz(6)
+  recoveryStatus      String?   @map("recovery_status") @db.VarChar(32)
+  terminalReason      String?   @map("terminal_reason")
+  steps               CognitionStep[]
+  candidates          DreamCandidate[]
+  profileRevisions    SubjectProfileRevision[]
 
   @@index([orgId, startedAt(sort: Desc)])
+  @@index([orgId, pipelineVersion, status])
+  @@unique([orgId, triggerKey, pipelineVersion])
   @@map("cognition_run")
+}
+
+model CognitionStep {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId           String    @map("run_id") @db.Uuid
+  pipelineVersion Int       @map("pipeline_version")
+  stageKey        String    @map("stage_key") @db.VarChar(48)
+  shardKey        String    @default("root") @map("shard_key") @db.VarChar(160)
+  status          String    @default("pending") @db.VarChar(24)
+  attempt         Int       @default(0)
+  inputDigest     String    @map("input_digest") @db.VarChar(64)
+  outputReceipt   Json      @default("{}") @map("output_receipt")
+  counters        Json      @default("{}")
+  leaseExpiresAt  DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  error           Json?
+  startedAt       DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  run             CognitionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, pipelineVersion, stageKey, shardKey])
+  @@index([status, leaseExpiresAt])
+  @@map("cognition_steps")
+}
+
+model SubjectProfile {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  subjectType       String    @map("subject_type") @db.VarChar(32)
+  subjectKey        String    @map("subject_key") @db.VarChar(180)
+  displayName       String    @map("display_name") @db.VarChar(240)
+  aliases           String[]  @default([])
+  importance        Float     @default(0)
+  pinned            Boolean   @default(false)
+  active            Boolean   @default(true)
+  stableProjection  Json      @default("[]") @map("stable_projection")
+  dynamicProjection Json      @default("[]") @map("dynamic_projection")
+  projectionVersion Int       @default(0) @map("projection_version")
+  lastActivityAt    DateTime? @map("last_activity_at") @db.Timestamptz(6)
+  lastReconciledAt  DateTime? @map("last_reconciled_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  facts             SubjectProfileFact[]
+  revisions         SubjectProfileRevision[]
+  candidates        DreamCandidate[]
+
+  @@unique([orgId, subjectType, subjectKey])
+  @@index([orgId, active, importance(sort: Desc)])
+  @@index([orgId, lastActivityAt(sort: Desc)])
+  @@map("subject_profiles")
+}
+
+model SubjectProfileFact {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  profileId         String    @map("profile_id") @db.Uuid
+  factKey           String    @map("fact_key") @db.VarChar(180)
+  value             String
+  category          String    @db.VarChar(48)
+  temporalClass     String    @map("temporal_class") @db.VarChar(32)
+  confidence        Float
+  status            String    @default("active") @db.VarChar(24)
+  revision          Int       @default(1)
+  evidenceMemoryIds String[]  @default([]) @map("evidence_memory_ids") @db.Uuid
+  derivationIds     String[]  @default([]) @map("derivation_ids") @db.Uuid
+  supersedesId      String?   @map("supersedes_id") @db.Uuid
+  validFrom         DateTime? @map("valid_from") @db.Timestamptz(6)
+  validTo           DateTime? @map("valid_to") @db.Timestamptz(6)
+  lastConfirmedAt   DateTime? @map("last_confirmed_at") @db.Timestamptz(6)
+  expiresAt         DateTime? @map("expires_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  profile           SubjectProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, factKey, revision])
+  @@index([profileId, status, temporalClass])
+  @@index([expiresAt])
+  @@map("subject_profile_facts")
+}
+
+model SubjectProfileRevision {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  profileId      String    @map("profile_id") @db.Uuid
+  runId          String    @map("run_id") @db.Uuid
+  version        Int
+  changedFactIds String[]  @default([]) @map("changed_fact_ids") @db.Uuid
+  verification   Json      @default("{}")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  profile        SubjectProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  run            CognitionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([profileId, version])
+  @@index([runId])
+  @@map("subject_profile_revisions")
+}
+
+model DreamCandidate {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  runId             String    @map("run_id") @db.Uuid
+  orgId             String    @map("org_id") @db.Uuid
+  subjectProfileId  String?   @map("subject_profile_id") @db.Uuid
+  deterministicHash String    @map("deterministic_hash") @db.VarChar(64)
+  type              String    @db.VarChar(40)
+  claim             String
+  sourceMemoryIds   String[]  @default([]) @map("source_memory_ids") @db.Uuid
+  confidence        Float     @default(0)
+  risk              String    @default("low") @db.VarChar(24)
+  verdict           String    @default("pending") @db.VarChar(24)
+  publicationStatus String    @default("pending") @map("publication_status") @db.VarChar(24)
+  rejectionReasons  String[]  @default([]) @map("rejection_reasons")
+  scopeSnapshot     Json      @default("{}") @map("scope_snapshot")
+  verifierReceipt   Json      @default("{}") @map("verifier_receipt")
+  publishedMemoryId String?   @map("published_memory_id") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  run               CognitionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  subjectProfile    SubjectProfile? @relation(fields: [subjectProfileId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, deterministicHash])
+  @@index([runId, verdict, publicationStatus])
+  @@index([subjectProfileId, createdAt(sort: Desc)])
+  @@map("dream_candidates")
+}
+
+model DerivationReceipt {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String    @map("org_id") @db.Uuid
+  candidateId        String?   @map("candidate_id") @db.Uuid
+  fromMemoryId       String    @map("from_memory_id") @db.Uuid
+  toMemoryId         String    @map("to_memory_id") @db.Uuid
+  relationshipType   RelationshipType @map("relationship_type")
+  status             String    @default("queued") @db.VarChar(24)
+  attempts           Int       @default(0)
+  verifierModel      String?   @map("verifier_model") @db.VarChar(160)
+  verifierPromptHash String?   @map("verifier_prompt_hash") @db.VarChar(64)
+  receipt            Json      @default("{}")
+  error              Json?
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  processedAt        DateTime? @map("processed_at") @db.Timestamptz(6)
+
+  @@unique([orgId, fromMemoryId, toMemoryId, relationshipType])
+  @@index([status, createdAt])
+  @@map("derivation_receipts")
 }
 
 // ─────────────────────────────────────────────────────────────

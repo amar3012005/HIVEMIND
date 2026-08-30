@@ -67,3 +67,16 @@ test('workflow retry exhaustion closes the authoritative run without publishing'
   assert.equal(update.terminalReason, 'candidate_generation_provider_unavailable');
   assert.equal(update.currentStage, 'generate-candidates');
 });
+
+test('a delayed finalize retry cannot overwrite a terminal failed run', async () => {
+  const run = { id: '11111111-1111-4111-8111-111111111111', status: 'error', currentStage: 'generate-candidates', pipelineVersion: 2, cancelledAt: null };
+  let stepLookup = false;
+  const lifecycle = new DurableDreamLifecycle({ prisma: {
+    cognitionRun: { findUnique: async () => run },
+    cognitionStep: { findUnique: async () => { stepLookup = true; } },
+  } });
+  const receipt = await lifecycle.executeStage({ run_id: run.id, stage: 'finalize' });
+  assert.equal(receipt.status, 'error');
+  assert.equal(receipt.stage, 'generate-candidates');
+  assert.equal(stepLookup, false);
+});

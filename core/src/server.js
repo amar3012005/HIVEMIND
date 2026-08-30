@@ -160,10 +160,20 @@ function canonicalProjectionInput({ memoryId, orgId, payload, requestBody, known
       object = String(payload?.title || '').match(/^(.+?)\s+(?:is\s+)?(?:teaching|teaches|teach)\b/i)?.[1]?.trim();
     }
     if (object) {
+      const hintedObjectKind = String(legacyQualifiers.object_type || legacyQualifiers.objectType || '').toLowerCase();
+      const inferEndpointKind = (value, hint = '') => {
+        if (/person|people|professor|teacher|instructor|individual/.test(hint)) return 'person';
+        if (/place|location|city|country|region/.test(hint)) return 'location';
+        if (/organization|company|institution|university/.test(hint)) return 'organization';
+        if (/product/.test(hint)) return 'product';
+        if (/technology|course|subject|field/.test(hint)
+          || /(?:artificial intelligence|machine learning|deep learning|neuro[-‑ ]symbolic|\bAI\b|computing)/i.test(String(value))) return 'technology';
+        return 'concept';
+      };
       reconstructedClaims = [{
-        subject: { name: String(legacySubject), kind: /(?:deep learning|machine learning|technology)/i.test(String(legacySubject)) ? 'technology' : 'concept' },
+        subject: { name: String(legacySubject), kind: inferEndpointKind(legacySubject) },
         predicate: String(legacyPredicate),
-        object: { name: String(object), kind: /is[_\s-]*taught[_\s-]*by/i.test(String(legacyPredicate)) ? 'person' : 'concept' },
+        object: { name: String(object), kind: inferEndpointKind(object, hintedObjectKind) },
         qualifiers: legacyQualifiers,
         valid_from: legacyQualifiers.valid_from || legacyQualifiers.validFrom || null,
         assertion_status: 'user_asserted',

@@ -137,6 +137,26 @@ test('materializer is deterministic, persists roles/evidence, and never writes r
   } finally { process.env.CANONICAL_KNOWLEDGE_ENABLED = prior; }
 });
 
+test('ingestion instructor aliases normalize to the canonical teaches direction', () => {
+  const prepared = prepareCanonicalProjection({
+    organizationId: '47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f',
+    memoryId: '74fb72fc-08da-41cc-8c56-598eae67bfee',
+    title: 'Neuro-Symbolic AI Course Instructor',
+    content: 'Professor Uwe Egly is the instructor of the Neuro-Symbolic AI course.',
+    claims: [{
+      subject: { name: 'Neuro-Symbolic AI course', kind: 'technology' },
+      predicate: 'instructor is',
+      object: { name: 'Professor Uwe Egly', kind: 'person' },
+    }],
+  });
+  assert.equal(prepared.claims.length, 1);
+  assert.equal(prepared.claims[0].predicate, 'teaches');
+  assert.equal(prepared.claims[0].subject.name, 'Professor Uwe Egly');
+  assert.equal(prepared.claims[0].subject.kind, 'person');
+  assert.equal(prepared.claims[0].object.name, 'Neuro-Symbolic AI course');
+  assert.equal(prepared.claims[0].object.kind, 'technology');
+});
+
 test('materializer removes only redundant same-name links from the projected memory', async () => {
   const deleted = []; let entitySeq = 0;
   const tx = {

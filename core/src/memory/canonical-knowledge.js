@@ -11,7 +11,10 @@ export const CANONICAL_ENTITY_ROLES = new Set([
 ]);
 
 const PREDICATES = new Map([
-  ['teach', ['teaches', false]], ['teaches', ['teaches', false]], ['is_taught_by', ['teaches', true]],
+  ['teach', ['teaches', false]], ['teaches', ['teaches', false]], ['instructs', ['teaches', false]],
+  ['is_instructor_of', ['teaches', false]], ['instructor_of', ['teaches', false]],
+  ['is_taught_by', ['teaches', true]], ['taught_by', ['teaches', true]],
+  ['instructor_is', ['teaches', true]], ['has_instructor', ['teaches', true]],
   ['works_for', ['works_for', false]], ['employed_by', ['works_for', false]],
   ['manages', ['manages', false]], ['reports_to', ['reports_to', false]], ['owns', ['owns', false]],
   ['uses', ['uses', false]], ['develops', ['develops', false]], ['manufactures', ['manufactures', false]],

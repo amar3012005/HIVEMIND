@@ -732,3 +732,19 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; environment backup is
   `/root/hivemind/.env.pre-knowledge-ingest-20260830T143208Z`; prior canonical
   images are `hivemind/{core-api,control-plane,employees}:sha-40e3b3d1`.
+
+## 048fba06 — BYOD canonical graph routing (Core only)
+
+- Canonical SHA: `048fba06cb0437c77ff2c26ddd132509883c57d0` on
+  `singulance-main`; migration: none; frontend: unchanged.
+- Manifest: `/root/releases/manifests/048fba06/20260830T173838Z/RELEASE_MANIFEST.json`.
+- Scope: governed explicit service-scoped deployment rebuilt and replaced only
+  Core. Running images after acceptance: Core `sha-048fba06`, Control Plane and
+  Employees `sha-b3616eb4`; all healthy.
+- Verification: 20/20 focused tests; exact-user Flagship evaluation true and
+  same-org/different-user evaluation false; BYOD create/update/relationship/list
+  canary passed; canary data cleanup completed; public health green and fresh
+  critical logs empty.
+- Rollback: disable `knowledge_ingest_workflow_v1` to stop new Workflow
+  admissions. Core rollback image `sha-81239791` remains the immediate code
+  rollback without changing Control Plane, Employees, frontend, or tenant data.

@@ -100,3 +100,29 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Rollback: disable the Flagship rule or set
   `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; canonical rollback images are the
   prior `sha-40e3b3d1` Core, Control Plane, and Employees images.
+
+## feature-20260830T174500Z — BYOD canonical graph parity for flagged ingestion
+
+- Production status: accepted on Core SHA
+  `048fba06cb0437c77ff2c26ddd132509883c57d0`. Control Plane, Employees,
+  frontend, local Docker settings, databases, and Cloudflare resource bindings
+  were not rebuilt or replaced.
+- Fix: the storage backend selected for a BYOD memory is latched onto hydrated
+  rows and every canonical graph projection. Updates, Extends, Derives,
+  Contradicts, entity projection, and citation/relationship writes can no
+  longer fall through to central PostgreSQL when an async boundary loses
+  request-local routing context.
+- Production canary: two tenant-scoped BYOD writes returned 201; the second
+  returned `mutation.operation=updated`; the agent returned one certified
+  Updates edge; the prior memory became non-latest; and deterministic tags for
+  Paolo Meridian, Heidelberg, and Atlas Memory Box were present. Exact canary
+  memories were removed after verification.
+- Flagship: `knowledge_ingest_workflow_v1` evaluates true only for production
+  org `0a1d5b33-a33c-49a6-8185-6d16370670a2` plus user
+  `727af46d-6bdf-4a77-ac7f-1c8c59bde96d`; a different user in the same org
+  evaluated false. Default remains off.
+- Verification: focused graph/deployment tests 20/20, public health green,
+  Core `sha-048fba06` healthy, Control Plane and Employees unchanged on
+  `sha-b3616eb4`, and the post-canary three-minute critical-log scan was empty.
+- Rollback: disable the Flagship rule for new Workflow admissions; for the Core
+  graph fix use the governor-preserved `sha-81239791` rollback image.

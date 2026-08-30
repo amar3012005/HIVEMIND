@@ -967,3 +967,26 @@ slides that find no unique anchor get a page instead of `null`.
   `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. Environment backup:
   `/root/hivemind/.env.pre-knowledge-ingest-20260830T143208Z`; canonical prior
   images are `sha-40e3b3d1`.
+
+## 2026-08-30 UTC — BYOD graph routing completed for ingestion canary tenant
+
+- Committed: `812397915495bf551d0ddb94b5d3596a6db22d73` latched agent
+  routing on remote hydration; `048fba06cb0437c77ff2c26ddd132509883c57d0`
+  carried the authoritative scoped-org decision through every graph projection.
+- Test command: `node --test tests/unit/relationship-route-persistence.test.js
+  tests/memory/relationship-semantics.test.js
+  tests/unit/quick-deploy-service-scope.test.js` → `tests 20; pass 20; fail 0`.
+- Accepted release: governor session `byod-graph-final`, Core-only manifest
+  `/root/releases/manifests/048fba06/20260830T173838Z/RELEASE_MANIFEST.json`.
+  `hm-core` is healthy on `sha-048fba06`; `hm-control` and `hm-employees`
+  remained healthy on `sha-b3616eb4`.
+- Runtime proof: tenant-scoped BYOD create and explicit Updates requests both
+  returned 201. Relationship hydration returned the Updates edge and a
+  canonical-entity Mentions edge; the old memory was non-latest; entity tags
+  included `paolo-meridian`, `heidelberg`, and `atlas-memory-box`.
+- Flag proof: the production Worker `/enabled` returned true for the designated
+  org/user pair and false for a different user in the same org. All exact
+  production canary memories were deleted afterward (8 tag-selected rows plus
+  the non-latest predecessor); a final critical-log scan was empty.
+- DECISION: preserve Flagship default-off and exact two-dimensional targeting.
+  This is reversible and prevents an untested tenant-wide rollout.

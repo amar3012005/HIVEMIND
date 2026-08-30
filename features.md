@@ -125,3 +125,14 @@ verification, and its independent rollback control.
   credentials, rebuild an immutable local API image, then finish successful
   grounding, derivation, profile, vector, notification, UI, restart, and DLQ
   acceptance before any governed production promotion.
+
+## feature-20260830T033000Z — Dreaming terminal failure receipts
+
+- Local status: patch `e924850a`, merged to `singulance-local` at `f582bb5d`;
+  isolated Worker version `b6c01ba1-0420-44e4-b36d-26b04cb416e5`.
+- Behavior: exhausted Cloudflare stage retries durably close the authoritative
+  PostgreSQL run as recoverable error. A provider outage cannot leave an active
+  run stuck indefinitely or publish partial cognition.
+- Runtime proof: run `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` is terminal error
+  with `recovery_status=retry_exhausted`; lifecycle tests passed 7/7 and Worker
+  TypeScript validation passed. Production was not modified.

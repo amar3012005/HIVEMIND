@@ -1290,7 +1290,7 @@ export class MemoryGraphEngine {
             : [];
         const deriveSourceRefs = Array.isArray(input._derives_from) ? input._derives_from.filter(Boolean) : [];
 
-        const semanticRelationship = (classification.relationship || deriveSources.length > 0)
+        let semanticRelationship = (classification.relationship || deriveSources.length > 0)
           ? normalizeRelationshipDescriptor({
             ...(classification.relationship || { type: 'Derives' }),
             sourceIds: classification.relationship?.sourceIds?.length ? classification.relationship.sourceIds : deriveSources,
@@ -1299,14 +1299,14 @@ export class MemoryGraphEngine {
             confidence: classification.relationship?.confidence ?? deriveSourceRefs[0]?.score ?? deriveSourceRefs[0]?.confidence,
           })
           : null;
-        const effectiveRelationshipType = semanticRelationship?.type || classification.relationship?.type || null;
+        let effectiveRelationshipType = semanticRelationship?.type || classification.relationship?.type || null;
 
         // Remote/BYOD transactions cannot roll back an already acknowledged
         // Memory Box write. Validate every caller-declared semantic edge before
         // createMemory so a rejected edge can never leave an orphan memory or
         // trigger a second persistence path. The same admission policy runs for
         // managed, hybrid, BYOD and .amr storage modes.
-        if (callerAuthorizedRelationship && semanticRelationship) {
+        if (semanticRelationship) {
           const confidence = classification.relationship?.confidence ?? semanticRelationship.confidence ?? 1;
           let verdict;
           if (effectiveRelationshipType === 'Derives') {
@@ -1334,7 +1334,13 @@ export class MemoryGraphEngine {
             });
           }
           if (!verdict?.ok) {
-            throw new Error(`relationship_policy_rejected:${effectiveRelationshipType}:${verdict?.reason || 'invalid-relationship'}`);
+            if (callerAuthorizedRelationship) {
+              throw new Error(`relationship_policy_rejected:${effectiveRelationshipType}:${verdict?.reason || 'invalid-relationship'}`);
+            }
+            console.log(`[graph-engine] inferred ${effectiveRelationshipType} rejected before persistence: ${verdict?.reason || 'invalid-relationship'}`);
+            classification = { operation: 'created', relationship: null };
+            semanticRelationship = null;
+            effectiveRelationshipType = null;
           }
         }
 

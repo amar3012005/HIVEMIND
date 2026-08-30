@@ -220,6 +220,22 @@ test('explicit supported update saved through ingest creates one certified edge'
   assert.equal(store.relationships[0].metadata.relationship_validation_status, 'validated');
 });
 
+test('invalid inferred relationship downgrades before persistence instead of orphaning a remote write', async () => {
+  const store = new InMemoryGraphStore();
+  const engine = new MemoryGraphEngine({ store, predictCalibrate: false });
+  engine.relationshipClassifier = { classifyRelationship: () => ({
+    operation: 'extended', relationship: { type: 'Extends', targetId: 'missing-target', confidence: 0.9 },
+  }) };
+  const saved = await engine.ingestMemory({
+    user_id: '00000000-0000-4000-8000-000000009621', org_id: '00000000-0000-4000-8000-000000009622',
+    content: 'Atlas has a new bounded queue policy.', skipProcessing: true, defer_entity_linking: true,
+    skipSmartRouting: true,
+  });
+  assert.equal(saved.operation, 'created');
+  assert.equal(store.memories.size, 1);
+  assert.equal(store.relationships.length, 0);
+});
+
 test('malformed entity-link output retains structured entities and explicit type', async () => {
   const previousAttempts = process.env.ENTITY_LINK_MAX_ATTEMPTS;
   process.env.ENTITY_LINK_MAX_ATTEMPTS = '1';

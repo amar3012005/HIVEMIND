@@ -1238,3 +1238,35 @@ slides that find no unique anchor get a page instead of `null`.
   `24cab74d-0e4a-466e-8a12-0b8b0a99aca3`. Production remained untouched and off.
 - Rollback: disable `DURABLE_CHAT_AGENT_ENABLED` or serve Flagship `off`; existing
   Chat V2 remains the stable path.
+
+## 2026-08-31 UTC — Durable chat continuation and Workflow accepted locally
+
+- State: verified locally; not a production release. Branch remains
+  `codex/durable-chat-agent-v1`; committed as `2d4619d4` and production
+  master/Flagship gates remain off.
+- Added an additive continuation table and lease-fenced store. Direct E2E proved
+  an invalid choice returns HTTP 400 while releasing the token, a later valid
+  retry completes it once, duplicate idempotency replays the response, and the
+  plaintext continuation token is never persisted.
+- Added `hivemind-chat-turn-workflow-local`. Deterministic instances wait for an
+  opaque `chat-terminal` event for up to seven days. Live completed and failed
+  canaries both reached Workflow `complete`; output was restricted to turn ID,
+  status, phase, sequence, and timestamp.
+- Stable-path proof used a temporary API container from the same image with
+  `DURABLE_CHAT_AGENT_ENABLED=false`: HTTP 200, no additive response field, and
+  zero durable-turn rows. The temporary container was removed.
+- Query matrix: bounded fact, exact-source/stem, detailed, comprehensive,
+  timeline, snapshot, diff, aggregate, relationship, and project operations ran.
+  Timeline and ordinary facts grounded successfully. Snapshot/diff correctly
+  failed closed where the tenant had no qualified temporal material; project
+  listing correctly reported zero authorized projects. Standard used a top-five
+  ceiling and detailed/comprehensive a top-fifteen ceiling.
+- Commands and results:
+  - `node --test tests/unit/durable-chat-agent.test.js tests/unit/durable-chat-continuation-store.test.js tests/unit/native-chat-v2.test.js tests/unit/compound-orchestrator.test.js tests/unit/chat-depth-contract.test.js`: 72/73 passed. The sole unrelated existing connector fixture expects no `instruction` field while runtime now includes it.
+  - `npm test` in `workers/durable-chat-agent`: 15/15 passed.
+  - `npx tsc --noEmit` and `npx wrangler types`: passed.
+  - `docker exec -w /app hivemind-api npx prisma validate`: schema valid.
+  - `node --check` for server, chat executor, continuation store, and durable
+    turn store: passed.
+- Local Worker version `308c14b7-ca86-4539-8abd-15831474515a`; production was not
+  touched. Rollback remains the environment kill switch or Flagship `off`.

@@ -271,3 +271,18 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   detailed/comprehensive retain the existing unified top 15 contract.
 - Rollback is immediate: set `DURABLE_CHAT_AGENT_ENABLED=false` or serve `off`.
   No production Worker, container, database, frontend, or flag was changed.
+
+### Durable continuation and Workflow completion
+
+- Implemented in local feature commit `2d4619d4` on
+  `codex/durable-chat-agent-v1`; production was not changed.
+- PostgreSQL now owns lease-fenced compound-turn continuations. Only token
+  digests are persisted; invalid input is retryable, successful tokens are
+  consumed exactly once, and duplicate idempotency keys replay the stored final
+  response.
+- `workflow` and `full` start a deterministic Cloudflare Workflow per turn and
+  wait durably for opaque terminal metadata. The live local success and failure
+  canaries both completed, and Workflow output contained no customer content.
+- Local Worker version `308c14b7-ca86-4539-8abd-15831474515a`; Workflow resource
+  `hivemind-chat-turn-workflow-local`. Production remains disabled and was not
+  deployed or modified.

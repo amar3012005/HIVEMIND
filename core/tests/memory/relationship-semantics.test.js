@@ -7,6 +7,16 @@ import {
   hasCanonicalRelationshipCertification,
   validateRelationshipProposal,
 } from '../../src/memory/relationship-semantics.js';
+import { assessClaimRelation } from '../../src/memory/claim-signature.js';
+
+test('claim comparison ignores ingest stamps and recognizes changed month values', () => {
+  const tenantTags = ['entity:atlas-memory-box'];
+  const relation = assessClaimRelation(
+    { content: 'Atlas retention is now 13 months. (2026-08-30T16:53Z)', tags: tenantTags },
+    { content: 'Atlas retention is 12 months. (2026-08-30T16:53Z)', tags: tenantTags },
+  );
+  assert.equal(relation.relation, 'update');
+});
 
 test('canonical relationship policy rejects memory co-mentions and weak derivations', () => {
   const tenant = { org_id: 'org-a', user_id: 'user-a' };

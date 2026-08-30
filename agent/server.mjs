@@ -13,7 +13,7 @@
 //   AGENT_PORT    listen port (default 8787)
 //   MNEME_DIM     embedding dim (default 1024)
 import http from 'node:http';
-import { timingSafeEqual, randomUUID } from 'node:crypto';
+import { timingSafeEqual, randomUUID, createHash } from 'node:crypto';
 
 const ORG = process.env.ORG_ID || die('ORG_ID required');
 const TOKEN = process.env.AGENT_TOKEN || die('AGENT_TOKEN required');
@@ -36,6 +36,7 @@ const AGENT_CAPABILITIES = Object.freeze([
   'memory.recall', 'memory.lexical', 'memory.hydrate', 'memory.inventory', 'memory.inventory.total',
   'evidence.recall', 'evidence.lexical', 'evidence.hydrate', 'evidence.inventory',
   'graph.read', 'relationship.read', 'provenance.read', 'document.ingest-mode',
+  'canonical-claims.write', 'canonical-claims.read', 'canonical-projection.status',
   'vector.status', 'vector.pending', 'vector.repair',
 ]);
 const QDRANT_URL = (process.env.QDRANT_URL || '').replace(/\/+$/, '');
@@ -1932,6 +1933,65 @@ const routes = {
     for (const r of outRows) if (result[r.id]) result[r.id].out = r.c;
     for (const r of inRows) if (result[r.id]) result[r.id].in = r.c;
     return result;
+  },
+
+  '/v1/canonical-project': async (b) => {
+    const p = sanitizeJson(b.projection || {}); const input = p.input || {}; const prepared = p.prepared || {};
+    if (!input.memoryId || p.mode === 'off') return { ok: false, error: 'memoryId and enabled mode required' };
+    const client = await pg.connect();
+    try {
+      await client.query('BEGIN'); const entities = new Map();
+      const resolve = async (raw) => {
+        const kind = String(raw?.kind || 'concept').toLowerCase();
+        const slug = String(raw?.name || '').normalize('NFKC').toLowerCase().trim().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+        const key = `${kind}:${slug}`; if (entities.has(key)) return entities.get(key);
+        let rows = (await client.query('SELECT id FROM canonical_entities WHERE organization_id=$1 AND identity_key=$2 LIMIT 1', [ORG,key])).rows;
+        if (!rows.length) {
+          try {
+            rows = (await client.query(`INSERT INTO canonical_entities (organization_id,canonical_name,normalized_name,identity_key,entity_kind)
+              VALUES ($1,$2,$3,$4,$5) RETURNING id`, [ORG, raw.name, slug, key, kind])).rows;
+          } catch (error) {
+            if (error?.code !== '23505') throw error;
+            rows = (await client.query('SELECT id FROM canonical_entities WHERE organization_id=$1 AND identity_key=$2 LIMIT 1', [ORG,key])).rows;
+          }
+        }
+        entities.set(key, rows[0].id); return rows[0].id;
+      };
+      for (const e of prepared.entities || []) {
+        const id = await resolve(e); const role = String(e.role || 'mentioned');
+        await client.query('INSERT INTO memory_entity_links(memory_id,entity_id,role,confidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [input.memoryId,id,role,e.confidence || 1]);
+      }
+      let count = 0;
+      for (const c of prepared.claims || []) {
+        const sid = await resolve(c.subject); const oid = c.object?.name ? await resolve(c.object) : null;
+        const pred = await client.query(`INSERT INTO canonical_predicates(name) VALUES($1) ON CONFLICT(name,version) DO UPDATE SET name=EXCLUDED.name RETURNING id`, [c.predicate]);
+        const digest = prepared.sourceDigest; const key = createHash('sha256').update([ORG,sid,c.predicate,oid || JSON.stringify(c.object?.literal),digest,p.processingVersion || 1].join('|')).digest('hex');
+        const claim = await client.query(`INSERT INTO canonical_claims(organization_id,claim_key,subject_entity_id,predicate_id,object_entity_id,object_literal,qualifiers,confidence,assertion_status,valid_from,valid_to,processing_version,source_digest)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT(organization_id,claim_key) DO UPDATE SET updated_at=now() RETURNING id`,
+          [ORG,key,sid,pred.rows[0].id,oid,oid ? null : c.object?.literal || null,c.qualifiers || {},c.confidence || 1,c.assertionStatus || 'user_asserted',c.validFrom || null,c.validTo || null,p.processingVersion || 1,digest]);
+        await client.query(`INSERT INTO claim_evidence_links(claim_id,memory_id,exact_quote,start_offset,end_offset,source_digest) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, [claim.rows[0].id,input.memoryId,input.exactQuote || input.content || null,input.startOffset || null,input.endOffset || null,digest]);
+        for (const [id,role] of [[sid,'subject'],[sid,'actor'],[oid,'object'],[oid,c.object?.kind]]) if (id && role) await client.query('INSERT INTO memory_entity_links(memory_id,entity_id,role) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[input.memoryId,id,role]);
+        count++;
+      }
+      const receipt = { memory_id: input.memoryId, processing_version: p.processingVersion || 1, claim_count: count };
+      await client.query(`INSERT INTO memory_projection_states(memory_id,organization_id,admitted_mode,processing_version,entities_status,claims_status,remote_status,receipt)
+        VALUES($1,$2,$3,$4,'complete','complete','complete',$5) ON CONFLICT(memory_id) DO UPDATE SET claims_status='complete',entities_status='complete',remote_status='complete',receipt=$5,updated_at=now()`, [input.memoryId,ORG,p.mode,p.processingVersion || 1,receipt]);
+      await client.query('COMMIT'); return { ok: true, receipt };
+    } catch (e) { await client.query('ROLLBACK'); return { ok: false, error: e.message }; } finally { client.release(); }
+  },
+
+  '/v1/canonical-claims': async (b) => {
+    if (!b.memoryId) return { error: 'memoryId required' };
+    const { rows } = await pg.query(`SELECT c.id,c.claim_key,s.canonical_name AS subject,p.name AS predicate,o.canonical_name AS object,c.object_literal,c.qualifiers,c.confidence,c.assertion_status,c.lifecycle_status,c.valid_from,c.valid_to,e.exact_quote,e.start_offset,e.end_offset
+      FROM claim_evidence_links e JOIN canonical_claims c ON c.id=e.claim_id JOIN canonical_entities s ON s.id=c.subject_entity_id LEFT JOIN canonical_entities o ON o.id=c.object_entity_id JOIN canonical_predicates p ON p.id=c.predicate_id WHERE e.memory_id=$1 AND c.organization_id=$2 ORDER BY c.created_at`, [b.memoryId,ORG]);
+    const state = await pg.query('SELECT * FROM memory_projection_states WHERE memory_id=$1',[b.memoryId]);
+    const token = (value) => String(value || '').normalize('NFKC').toLowerCase().trim();
+    const validAt = b.validAt ? new Date(b.validAt) : null;
+    const claims = rows.filter((row) => (!b.subject || token(row.subject) === token(b.subject))
+      && (!b.predicate || token(row.predicate) === token(b.predicate))
+      && (!b.object || token(row.object || row.object_literal?.value) === token(b.object))
+      && (!validAt || ((!row.valid_from || new Date(row.valid_from) <= validAt) && (!row.valid_to || new Date(row.valid_to) > validAt))));
+    return { memory_id: b.memoryId, claims, projection: state.rows[0] || null };
   },
 
   // ── Per-memory relationships (self-host READ) ─────────────────────────────

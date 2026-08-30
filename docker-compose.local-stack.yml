@@ -26,6 +26,12 @@ services:
       REDIS_PORT: 6379
       GROQ_API_KEY: ${GROQ_API_KEY}
       GROQ_INFERENCE_MODEL: ${GROQ_INFERENCE_MODEL:-llama-3.3-70b-versatile}
+      GROQ_API_TIMEOUT: ${GROQ_API_TIMEOUT:-}
+      GROQ_BASE_PROMPT: ${GROQ_BASE_PROMPT:-}
+      GROQ_LANGUAGE: ${GROQ_LANGUAGE:-}
+      GROQ_MAX_RETRIES: ${GROQ_MAX_RETRIES:-}
+      GROQ_VISION_MODEL: ${GROQ_VISION_MODEL:-}
+      GROQ_WHISPER_MODEL: ${GROQ_WHISPER_MODEL:-}
       MISTRAL_API_KEY: ${MISTRAL_API_KEY}
       MISTRAL_EMBEDDING_MODEL: ${MISTRAL_EMBEDDING_MODEL:-mistral-embed}
       # Production-parity AI transport. Values are injected into the local
@@ -70,9 +76,14 @@ services:
       # explicit route a shared LITELLM_BASE_URL can point chat traffic at the
       # custom BGE embeddings provider and return opaque Gateway 530s.
       LLM_PRIMARY: ${LLM_PRIMARY:-openrouter}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       LITELLM_API_KEY: ${LITELLM_API_KEY:-}
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
       LITELLM_EMBED_MODEL: ${LITELLM_EMBED_MODEL:-}
+      EMBEDDINGS_SERVICE_URL: ${EMBEDDINGS_SERVICE_URL:-}
+      DOCLING_URL: ${DOCLING_URL:-http://docling:5001}
       KB_UNIFIED_EXTRACT: ${KB_UNIFIED_EXTRACT:-true}
       KB_UNIFIED_MODEL: ${KB_UNIFIED_MODEL:-}
       KB_UNIFIED_FALLBACK_MODELS: ${KB_UNIFIED_FALLBACK_MODELS:-}
@@ -80,6 +91,19 @@ services:
       MEMORY_PROCESSOR_MODEL: ${MEMORY_PROCESSOR_MODEL:-}
       ENTITY_EXTRACTION_MODEL: ${ENTITY_EXTRACTION_MODEL:-}
       CLAIM_STRUCTURING_MODEL: ${CLAIM_STRUCTURING_MODEL:-}
+      KB_ALLOW_PER_FACT_LLM_LINKING: ${KB_ALLOW_PER_FACT_LLM_LINKING:-}
+      KB_CONSOLIDATE: ${KB_CONSOLIDATE:-}
+      KB_CURATED_MEMORY_CAP: ${KB_CURATED_MEMORY_CAP:-}
+      KB_DISTILL_WINDOW_CHARS: ${KB_DISTILL_WINDOW_CHARS:-}
+      KB_ENABLE_ALGO_VERSION_EDGES: ${KB_ENABLE_ALGO_VERSION_EDGES:-}
+      KB_ENRICH_ENABLED: ${KB_ENRICH_ENABLED:-}
+      KB_ENTITY_LINK_MODE: ${KB_ENTITY_LINK_MODE:-}
+      KB_FACTS_PER_1K_CHARS: ${KB_FACTS_PER_1K_CHARS:-}
+      KB_INGEST_VERBOSE: ${KB_INGEST_VERBOSE:-}
+      KB_MIN_FACTS_PER_WINDOW: ${KB_MIN_FACTS_PER_WINDOW:-}
+      KB_SEGMENT_WRITE_ATTEMPTS: ${KB_SEGMENT_WRITE_ATTEMPTS:-}
+      KB_UNIFIED_EMPTY_RETRIES: ${KB_UNIFIED_EMPTY_RETRIES:-}
+      KB_UNIFIED_WINDOW_CHARS: ${KB_UNIFIED_WINDOW_CHARS:-}
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
       HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:-local-admin-secret-change-me}
       # Durable Knowledge Base ingestion is opt-in and local-only. The core
@@ -124,6 +148,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      docling:
+        condition: service_healthy
 
   # ==========================================
   # hm-extract — standalone document extraction (anydoc-based)
@@ -147,6 +173,29 @@ services:
     # (node -e "fetch(...)") is correct. A wget-based override here made a
     # genuinely healthy container report unhealthy in production, because
     # node:22-slim has no wget — caught on the real first deploy.
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+
+  # Production-parity PDF/document parser, pinned to the exact digest running
+  # on the Singulance server. Source bytes and parser traffic remain local.
+  docling:
+    image: ghcr.io/docling-project/docling-serve@sha256:69f7c33dab7067be28d88bfe61b7be08e53c4f87d5571378001f853d9b95c34e
+    container_name: hivemind-docling
+    environment:
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: 3
+      OMP_NUM_THREADS: 2
+      DOCLING_SERVE_MAX_SYNC_WAIT: 180
+    mem_limit: 9g
+    cpus: 3
+    volumes:
+      - docling_models:/opt/app-root/src/.cache/docling/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5001/health', timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+      start_period: 120s
     restart: unless-stopped
     networks:
       - hivemind-network
@@ -264,6 +313,8 @@ volumes:
     name: hivemind-embedding-cache
   pgadmin_data:
     name: hivemind-pgadmin-data
+  docling_models:
+    name: hivemind-docling-models
 
 networks:
   hivemind-network:

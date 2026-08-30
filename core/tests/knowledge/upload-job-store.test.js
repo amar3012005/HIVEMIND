@@ -106,6 +106,16 @@ test('a winning Workflow failure releases only its own versioned reservation', a
   assert.deepEqual(released, [{ orgId: 'org', idempotencyKey: 'knowledge-credit:job:5' }]);
 });
 
+test('failure recording normalizes numeric platform error codes to the string contract', async () => {
+  let written;
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    findFirst: async () => ({ id: 'job', processingVersion: 1 }),
+    updateMany: async ({ data }) => { written = data; return { count: 1 }; },
+  } } });
+  await store.fail('job', 'org', Object.assign(new Error('timed out'), { code: 23 }));
+  assert.equal(written.errorCode, '23');
+});
+
 test('ready responses always expose an authoritative terminal lifecycle', () => {
   const response = KnowledgeUploadJobStore.response({
     id: 'job', status: 'ready', stage: 'promoted', progress: 95,

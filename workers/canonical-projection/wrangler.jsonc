@@ -55,7 +55,7 @@
         "ENVIRONMENT": "production",
         "HIVEMIND_CORE_URL": "https://api.singulancelabs.com",
         "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
-        "CANONICAL_KNOWLEDGE_ENABLED": "false"
+        "CANONICAL_KNOWLEDGE_ENABLED": "true"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {

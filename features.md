@@ -77,6 +77,11 @@ verification, and its independent rollback control.
   today because it mixes Vitest with Node's runner, references retired absolute
   paths/modules, and requires a Linux-only AMR binary. The focused ingestion
   suite and local Linux container runtime are green.
+- Integration receipt: feature commit `58ec7ff8` and merged-state candidate
+  `42d2bcc0` are pushed on `codex/knowledge-ingest-workflow-v1`; merged checks
+  passed 138/138 backend tests, 3/3 frontend discovery tests, the optimized
+  frontend build, Prisma validation, and local control-plane health. This entry
+  remains local-only and does not authorize a production rollout.
 ## feature-20260830T004500Z — Public AI discovery policy
 
 - Production status: deployed and verified. Public `singulancelabs.com` serves

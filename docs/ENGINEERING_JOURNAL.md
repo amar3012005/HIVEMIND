@@ -1033,6 +1033,24 @@ slides that find no unique anchor get a page instead of `null`.
   gates are green.
 - Rollback: disable Flagship `knowledge_ingest_workflow_v1` or set
   `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. No production deployment ran.
+
+## 2026-08-30 UTC — canonical ingestion merged-state acceptance
+
+- State: feature commit `58ec7ff8` and merge candidate `42d2bcc0` were pushed
+  on `codex/knowledge-ingest-workflow-v1` from
+  `P:\HIVEMIND-worktrees\knowledge-ingest-workflow-v1`. The candidate contains
+  the latest `origin/singulance-local` (`5e602f95`) and leaves production
+  unchanged.
+- Merged verification: the backend ingestion/Gateway/Dreaming suite passed
+  138/138; Da-vinci AI-discovery tests passed 3/3 and its optimized build
+  compiled; Prisma schema validation passed; local PostgreSQL exposes both
+  `cognition_steps` and `knowledge_ingest_steps`, including the fenced
+  `lease_token` column.
+- Runtime verification: the local control plane was restarted after the merge
+  and reported healthy with scheduler and playbooks ready. The isolated
+  BuildKit builder produced the feature image; a final merged image build was
+  started from the merged checkout so the shared local runtime can include both
+  durable ingestion and durable Dreaming without overwriting either feature.
 ## 2026-08-30 UTC — public AI discovery policy accepted in production
 
 - State: committed and accepted. Parent `fe71aa3c173359659e0a3144df9aef3c0fde6eda`;

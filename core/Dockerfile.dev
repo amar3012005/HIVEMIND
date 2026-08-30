@@ -34,7 +34,15 @@ FROM base AS deps
 # are frequent and must not invalidate the expensive npm layer on every local
 # feature branch. The BuildKit cache also survives clean image rebuilds.
 COPY core/package.json core/package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+# Lightpanda is an optional browser accelerator and its package already ignores
+# postinstall download failures. The nightly GitHub binary download can hang
+# deterministic container builds, so point only the install step at a harmless
+# existing executable and keep every other dependency lifecycle script enabled.
+RUN --mount=type=cache,target=/root/.npm \
+    LIGHTPANDA_EXECUTABLE_PATH=/bin/false \
+    PUPPETEER_SKIP_DOWNLOAD=true \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    npm ci --no-audit --no-fund --foreground-scripts
 
 # Generate only after the schema arrives, then prune the already-cached tree.
 COPY core/prisma ./prisma

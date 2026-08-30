@@ -250,7 +250,8 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 
 ## feature-20260830T230000Z — Durable Chat Agent local acceptance
 
-- Local-only branch `codex/durable-chat-agent-v1` adds the multivariate
+- Local-only branch `codex/durable-chat-agent-v1`, pushed implementation
+  `7347cfc3f502fc564b75ae6efee5a6086cf6cc0f`, adds the multivariate
   `durable_chat_agent_v1` envelope around the unchanged Native Chat V2.
   Production remains disabled at both Flagship and environment gates.
 - PostgreSQL is authoritative for turn admission, request scope, ordered events,

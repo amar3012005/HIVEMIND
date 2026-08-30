@@ -1201,8 +1201,9 @@ slides that find no unique anchor get a page instead of `null`.
 
 ## 2026-08-31 UTC — Durable chat session orchestration accepted locally
 
-- State: Committed implementation pending branch commit; not an accepted
-  production release.
+- State: Committed and pushed as
+  `7347cfc3f502fc564b75ae6efee5a6086cf6cc0f`; not an accepted production
+  release.
 - Branch/base: `codex/durable-chat-agent-v1` from
   `bb359330c3dfd336672433847af2559f2670b1b0`.
 - Implemented additive Prisma turn/checkpoint/event state, authenticated cursor

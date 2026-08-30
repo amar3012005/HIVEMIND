@@ -124,7 +124,10 @@ export class DurableDreamLifecycle {
     const run = await this.prisma.cognitionRun.findUnique({ where: { id: runId } });
     if (!run) throw Object.assign(new Error('run_not_found'), { retryable: false });
     if (run.cancelledAt || run.status === 'cancelled') throw Object.assign(new Error('run_cancelled'), { retryable: false });
-    if (TERMINAL.has(run.status) && stage !== 'finalize') return this._receipt(run);
+    // A terminal authoritative run is immutable. In particular, a delayed
+    // Workflow retry must never reach finalize and convert an error/cancelled
+    // run back to completed.
+    if (TERMINAL.has(run.status)) return this._receipt(run);
 
     const inputDigest = digest({ run_id: runId, stage, shard_key: shardKey, input, pipeline_version: run.pipelineVersion });
     const existing = await this.prisma.cognitionStep.findUnique({

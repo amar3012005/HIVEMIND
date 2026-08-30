@@ -1090,7 +1090,7 @@ function safePathSegment(name) {
 }
 
 export class DocumentFirstIngestionService {
-  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
+  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, canonicalProjector = null, logger = console }) {
     this.db = db;
     this.smartIngestRouter = smartIngestRouter;
     this.memoryGraphEngine = memoryGraphEngine;
@@ -1098,6 +1098,11 @@ export class DocumentFirstIngestionService {
     this.embeddingService = embeddingService;
     this.entityExtractor = entityExtractor;
     this.topicStateWriter = topicStateWriter;
+    // Server-owned adapter into the feature-flagged canonical claim layer. The
+    // ingestion service deliberately does not evaluate Flagship or know how a
+    // tenant stores its Memory Box; it only provides the durable promotion
+    // boundary shared by BullMQ and Workflow execution.
+    this.canonicalProjector = canonicalProjector;
     this.logger = createIngestDiagnosticLogger(logger);
     // Collapse simultaneous first uploads of the same bytes into one pipeline.
     // Database constraints protect rows across processes; this prevents callers
@@ -1166,6 +1171,30 @@ export class DocumentFirstIngestionService {
         content: memory.content,
       }));
     return this._extractEntitiesAsync({ segments, userId, orgId, documentId, force: true });
+  }
+
+  async _projectPromotedCanonicalKnowledge({ memories, userId, orgId, documentId }) {
+    if (typeof this.canonicalProjector !== 'function') return [];
+    const targets = (Array.isArray(memories) ? memories : []).filter((memory) => memory?.id);
+    if (!targets.length) return [];
+    const receipts = [];
+    let admittedMode = null;
+    // Projection is intentionally awaited at the ingestion reconciliation
+    // boundary. Each target remains isolated: a provider/remote-agent outage
+    // degrades that memory's projection without discarding committed evidence
+    // or the other successfully projected memories.
+    for (const memory of targets) {
+      try {
+        const receipt = await this.canonicalProjector({ memory, userId, orgId, documentId, admittedMode });
+        admittedMode ||= receipt?.mode || null;
+        receipts.push(receipt);
+      } catch (error) {
+        admittedMode ||= error?.canonicalMode || null;
+        this.logger.warn?.(`[canonical-knowledge] promoted memory ${String(memory.id).slice(0, 8)} degraded: ${error.message}`);
+        receipts.push({ memoryId: memory.id, status: 'degraded', error: error.message });
+      }
+    }
+    return receipts;
   }
   /**
    * V5 Phase 3 — claim structuring for committed memories. Callers decide
@@ -3840,6 +3869,9 @@ Every item must include a non-empty content field and one or more valid support_
       this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
       this._structureClaimsAsync({ memories: promoted.memories, orgId }),
     ]);
+    await this._projectPromotedCanonicalKnowledge({
+      memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id,
+    });
     if (previousProjectionMemoryIds.length && !promoted.coverage?.promotion_failed) {
       const currentProjectionMemoryIds = promoted.memories.map((memory) => memory?.id).filter(Boolean);
       if (currentProjectionMemoryIds.length) {
@@ -4001,6 +4033,9 @@ Every item must include a non-empty content field and one or more valid support_
       this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: parentDoc.id }),
       this._structureClaimsAsync({ memories: promoted.memories, orgId }),
     ]);
+    await this._projectPromotedCanonicalKnowledge({
+      memories: promoted.memories, userId, orgId, documentId: parentDoc.id,
+    });
 
     return {
       documentId: parentDoc.id,
@@ -4184,6 +4219,9 @@ Every item must include a non-empty content field and one or more valid support_
       this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
       this._structureClaimsAsync({ memories: promoted.memories, orgId }),
     ]);
+    await this._projectPromotedCanonicalKnowledge({
+      memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id,
+    });
 
     return {
       documentId: knowledgeDoc.id,
@@ -5329,6 +5367,9 @@ Every item must include a non-empty content field and one or more valid support_
       }),
       this._structureClaimsAsync({ memories, orgId }),
     ]);
+    await this._projectPromotedCanonicalKnowledge({
+      memories, userId: document.userId || userId, orgId, documentId: document.id,
+    });
     onProgress?.({ stage: 'reconciling', progress: 96, memories: memories.length });
     return {
       documentId: document.id,

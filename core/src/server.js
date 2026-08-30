@@ -2469,6 +2469,47 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
       smartIngestRouter,
       memoryGraphEngine: persistentMemoryEngine,
       doclingAdapter, // Pass Docling adapter if DOCLING_URL is set, null otherwise
+      canonicalProjector: async ({ memory, userId, orgId, documentId, admittedMode }) => {
+        // One flag evaluation is latched for the complete document promotion;
+        // an in-flight upload cannot switch implementations between memories.
+        const mode = admittedMode || await canonicalProjectionClient.modeFor({ orgId, userId });
+        if (mode === 'off') return { memoryId: memory.id, mode, status: 'off' };
+        try {
+          // Claim structuring and entity linking run immediately before this
+          // boundary and may update the durable row. Re-read it so canonical
+          // projection consumes those committed fields rather than the stale
+          // promotion object returned by the graph engine.
+          const persistedMemory = await persistentMemoryStore.getMemory(memory.id) || memory;
+          const projection = await projectCanonicalKnowledge({
+            prisma,
+            mode,
+            input: canonicalProjectionInput({
+              memoryId: memory.id,
+              orgId,
+              payload: persistedMemory,
+              requestBody: {
+                document_id: documentId,
+                segment_id: memory.support_segment_ids?.[0] || memory.supportSegmentIds?.[0] || null,
+              },
+            }),
+          });
+          const workflow = await canonicalProjectionClient.start({
+            memoryId: memory.id, orgId, userId, requiredProjection: mode,
+          }).catch((error) => ({ status: 'degraded', error: error.message }));
+          return { memoryId: memory.id, mode, status: projection?.status || 'complete', projection, workflow };
+        } catch (error) {
+          await prisma.memoryProjectionState.upsert({
+            where: { memoryId: memory.id },
+            update: { admittedMode: mode, claimsStatus: 'degraded', entitiesStatus: 'degraded', lastError: error.message },
+            create: {
+              memoryId: memory.id, organizationId: orgId, admittedMode: mode,
+              claimsStatus: 'degraded', entitiesStatus: 'degraded', lastError: error.message,
+            },
+          }).catch(() => null);
+          error.canonicalMode = mode;
+          throw error;
+        }
+      },
       embeddingService: {
         embed: async (input, options = {}) => {
           // Use the existing Qdrant client's embedding pipeline

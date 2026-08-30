@@ -2011,7 +2011,8 @@ export async function answerStep({ message, history, evidence, plan, language, a
   }
   if (plan.operation === 'relation_between'
       && evidence.relation?.verified_relation_found !== true
-      && evidence.relation?.grounded_relation_claim_found !== true) {
+      && evidence.relation?.grounded_relation_claim_found !== true
+      && !(['session', 'workflow', 'full'].includes(ctx?.durableChatMode) && hasGroundingEvidence(evidence))) {
     return {
       response: noVerifiedRelationResponse({ evidence, language }),
       claims: [],
@@ -3776,6 +3777,10 @@ export async function runReactAgentV2({
         const stored = await createChatContinuation({
           userId: ctx.userId, orgId: ctx.orgId, message, language,
           resumeState: compound.resumeState,
+        }, {
+          prisma: ctx.prisma,
+          durable: ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
+          parentTurnId: ctx.durableChatTurnId || null,
         });
         continuation = {
           schema_version: 1,
@@ -4246,6 +4251,51 @@ export async function runReactAgentV2({
     });
     _pt('gather_evidence_ms', _ps);
     steps.push(...evidence.steps);
+    const durableRecoveryEnabled = ['session', 'workflow', 'full'].includes(ctx?.durableChatMode);
+    // A relationship graph is deliberately conservative and may not yet have
+    // projected a freshly saved, explicit assertion. In durable mode, a zero
+    // graph result gets one source-backed recall pass. This does not manufacture
+    // an edge: synthesis must still ground the answer in the recovered memory.
+    if (_dedicatedLane
+        && durableRecoveryEnabled
+        && plan.operation === 'relation_between'
+        && evidence?.coverage?.evidence_found === false
+        && Array.isArray(plan.named_entities)
+        && plan.named_entities.length >= 2) {
+      const saved = {
+        operation: plan.operation,
+        relation: plan.relation,
+        canonical: plan.query_canonical_en,
+        subQueries: plan.sub_queries,
+        entities: plan.named_entities,
+        answerType: plan.answer_type,
+        recallMode: plan.recall_mode,
+      };
+      const relationshipQuery = `source for relationship between ${plan.named_entities.slice(0, 2).join(' and ')}`;
+      plan.operation = 'recall';
+      plan.relation = null;
+      plan.query_canonical_en = relationshipQuery;
+      plan.sub_queries = [relationshipQuery];
+      plan.named_entities = [];
+      plan.answer_type = 'fact';
+      plan.recall_mode = 'fact';
+      onEvent?.({ type: 'query_optimized', queries: plan.sub_queries, reason: 'durable_relationship_evidence_recovery' });
+      const recovered = await gatherEvidence({
+        plan, ctx, onEvent, deadlineAt: Date.now() + RETRIEVAL_BUDGET_MS,
+      });
+      retrievalPasses += 1;
+      steps.push(...recovered.steps);
+      Object.assign(plan, {
+        operation: saved.operation,
+        relation: saved.relation,
+        query_canonical_en: saved.canonical,
+        sub_queries: saved.subQueries,
+        named_entities: saved.entities,
+        answer_type: saved.answerType,
+        recall_mode: saved.recallMode,
+      });
+      if (recovered?.coverage?.evidence_found === true) evidence = recovered;
+    }
     if (!_dedicatedLane && shouldRetryAfterZeroCoverage({
       router: intentDecision._router,
       canonicalQuery: plan.query_canonical_en,
@@ -4271,6 +4321,54 @@ export async function runReactAgentV2({
         retrievalPasses += 1;
         steps.push(...retried.steps);
         evidence = retried;
+      }
+    }
+    // Native V2 planning can produce a precise but embedding-hostile rewrite
+    // (for example "<entity> approval and effective dates") even though the
+    // entity's canonical memory is present. In durable modes, make one bounded,
+    // deterministic entity-anchor recovery pass. This is intentionally behind
+    // durable_chat_agent_v1 so flag-off Chat V2 remains byte-compatible.
+    const durableEntityRecoveryEnabled = durableRecoveryEnabled;
+    const entityAnchor = Array.isArray(plan.named_entities)
+      ? plan.named_entities.find((value) => typeof value === 'string' && value.trim())
+      : null;
+    if (!_dedicatedLane
+        && durableEntityRecoveryEnabled
+        && evidence?.coverage?.evidence_found === false
+        && entityAnchor
+        && String(plan.query_canonical_en || '').trim().toLocaleLowerCase() !== entityAnchor.trim().toLocaleLowerCase()) {
+      const originalCanonicalQuery = plan.query_canonical_en;
+      const originalSubQueries = plan.sub_queries;
+      const originalNamedEntities = plan.named_entities;
+      const originalAnswerType = plan.answer_type;
+      // Ask for the source-backed record rather than repeating the failed
+      // attribute phrase. This broadens semantic retrieval while remaining
+      // tenant-scoped and evidence-only; synthesis still answers the original
+      // user question and must cite the recovered record.
+      const recoveryQuery = `source for claims about ${entityAnchor.trim()}`;
+      plan.query_canonical_en = recoveryQuery;
+      plan.sub_queries = [recoveryQuery];
+      plan.answer_type = 'fact';
+      // Planner entities are relevance hints, not proof that entity projection
+      // has already completed. Clear the hard entity filter for this recovery
+      // pass so a freshly saved, source-grounded memory remains retrievable.
+      plan.named_entities = [];
+      onEvent?.({
+        type: 'query_optimized',
+        queries: plan.sub_queries,
+        reason: 'durable_entity_anchor_recovery',
+      });
+      const recovered = await gatherEvidence({
+        plan, ctx, onEvent, deadlineAt: Date.now() + RETRIEVAL_BUDGET_MS,
+      });
+      plan.query_canonical_en = originalCanonicalQuery;
+      plan.sub_queries = originalSubQueries;
+      plan.named_entities = originalNamedEntities;
+      plan.answer_type = originalAnswerType;
+      retrievalPasses += 1;
+      steps.push(...recovered.steps);
+      if (recovered?.coverage?.evidence_found === true) {
+        evidence = recovered;
       }
     }
     trace.recall = {

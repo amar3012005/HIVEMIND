@@ -247,3 +247,42 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   false, roll the Worker back to version
   `c8461f69-d815-4ea5-bba3-82fc644a3f3c`, or release exact prior Core SHA
   `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f` through the canonical runner.
+
+## feature-20260830T230000Z — Durable Chat Agent local acceptance
+
+- Local-only branch `codex/durable-chat-agent-v1`, pushed implementation
+  `7347cfc3f502fc564b75ae6efee5a6086cf6cc0f`, adds the multivariate
+  `durable_chat_agent_v1` envelope around the unchanged Native Chat V2.
+  Production remains disabled at both Flagship and environment gates.
+- PostgreSQL is authoritative for turn admission, request scope, ordered events,
+  checkpoints, final responses, errors, replay, and tenant authorization.
+  Cloudflare Agent version `24cab74d-0e4a-466e-8a12-0b8b0a99aca3` stores only
+  opaque lifecycle metadata; its contract rejects message, prompt, answer,
+  memory, evidence, citation, tool payload, source, and artifact fields.
+- Modes are `off`, `shadow`, `session`, `workflow`, and `full`. Evaluation is
+  latched once per turn and fails closed to the byte-compatible V2 path.
+- Durable modes add one bounded recovery for a zero-result entity-attribute
+  rewrite, and graph-first/source-second recovery for an explicit relationship
+  claim. Existing synthesis still requires source grounding and forbids deriving
+  relationships from co-mention.
+- Local E2E proved fact, ownership, temporal, source, detailed overview,
+  exhaustive synthesis, relationship, idempotent replay, cursor resume,
+  unauthenticated denial, and metadata-only edge mirroring. Standard uses top 5;
+  detailed/comprehensive retain the existing unified top 15 contract.
+- Rollback is immediate: set `DURABLE_CHAT_AGENT_ENABLED=false` or serve `off`.
+  No production Worker, container, database, frontend, or flag was changed.
+
+### Durable continuation and Workflow completion
+
+- Implemented in local feature commit `2d4619d4` on
+  `codex/durable-chat-agent-v1`; production was not changed.
+- PostgreSQL now owns lease-fenced compound-turn continuations. Only token
+  digests are persisted; invalid input is retryable, successful tokens are
+  consumed exactly once, and duplicate idempotency keys replay the stored final
+  response.
+- `workflow` and `full` start a deterministic Cloudflare Workflow per turn and
+  wait durably for opaque terminal metadata. The live local success and failure
+  canaries both completed, and Workflow output contained no customer content.
+- Local Worker version `308c14b7-ca86-4539-8abd-15831474515a`; Workflow resource
+  `hivemind-chat-turn-workflow-local`. Production remains disabled and was not
+  deployed or modified.

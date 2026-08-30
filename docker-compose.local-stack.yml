@@ -121,6 +121,14 @@ services:
       CANONICAL_PROJECTION_WORKFLOW_URL: ${CANONICAL_PROJECTION_WORKFLOW_URL:-http://host.docker.internal:8787}
       CANONICAL_PROJECTION_WORKFLOW_SECRET: ${CANONICAL_PROJECTION_WORKFLOW_SECRET:-}
       CANONICAL_PROJECTION_HMAC_SECRET: ${CANONICAL_PROJECTION_HMAC_SECRET:-}
+      RECALL_PARALLEL_RELIABILITY_ENABLED: ${RECALL_PARALLEL_RELIABILITY_ENABLED:-false}
+      # Chat V2 remains authoritative. This additive envelope is enabled only
+      # when both the local master switch and Flagship mode are positive.
+      # Cloudflare receives lifecycle metadata only; Core PostgreSQL retains
+      # messages, recall packets, tool results, citations, and responses.
+      DURABLE_CHAT_AGENT_ENABLED: ${DURABLE_CHAT_AGENT_ENABLED:-false}
+      CLOUDFLARE_CHAT_AGENT_URL: ${CLOUDFLARE_CHAT_AGENT_URL:-}
+      CLOUDFLARE_CHAT_AGENT_SECRET: ${CLOUDFLARE_CHAT_AGENT_SECRET:-}
       ENABLE_DOCUMENT_FIRST_INGEST: ${ENABLE_DOCUMENT_FIRST_INGEST:-true}
       ENABLE_EVIDENCE_RECALL: ${ENABLE_EVIDENCE_RECALL:-true}
       ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}

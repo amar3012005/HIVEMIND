@@ -156,3 +156,15 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   finite-vector canary, typed exact-name materialization, public checks, and a
   clean critical-log scan. No frontend, Flagship targeting, Cloudflare
   Workflow resource, database, or local deployment configuration changed.
+
+## feature-20260830T184000Z — Quiet durable-ingestion connectivity handling
+
+- Production frontend `3fb492ac6e69008f19bc71bbe9fc81878e806b2f`
+  no longer shows a global connection outage for an individual Knowledge Base
+  status-poll miss. Durable polling continues normally.
+- The global health badge requires three consecutive failures before showing
+  Offline and returns Online after the first successful probe. User-action and
+  confirmed service failures remain visible.
+- Accepted as Cloudflare Worker version
+  `288561fd-e001-4132-a82c-7e8f0711d9e3` after focused tests, production build,
+  dry-run, served-bundle inspection, and public login verification.

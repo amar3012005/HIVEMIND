@@ -1033,3 +1033,22 @@ slides that find no unique anchor get a page instead of `null`.
   No frontend, Control Plane, Employees, database, Flagship, Worker, or local
   deployment setting changed. Environment rollback backup:
   `/root/hivemind/.env.before-cf-bge-20260830T180445Z`.
+
+## 2026-08-30 UTC — transient Knowledge Base connectivity noise fixed
+
+- Root cause: the durable status loop correctly retried a missed poll, but the
+  shared Axios interceptor first converted that same expected miss into a
+  global `Connection problem` toast. Independently, TopBar declared `Offline`
+  after one failed background health probe.
+- Frontend commit `3fb492ac6e69008f19bc71bbe9fc81878e806b2f` suppresses
+  global outage notifications only for retrying status polls and background
+  health probes. User-initiated upload failures and real 5xx responses remain
+  visible. TopBar now requires three consecutive failed probes and recovers on
+  the first success.
+- Verification: focused Jest suite `2 passed`; optimized production build
+  compiled successfully; Wrangler dry-run passed. Cloudflare Worker
+  `hivemind-web` version `288561fd-e001-4132-a82c-7e8f0711d9e3` was deployed.
+  The served lazy application chunk contains both the status route and
+  `suppressServiceError` marker; public login returned 200.
+- Scope: frontend only. No Core, Control Plane, Employees, database, Workflow,
+  Flagship, or local-preview resource was rebuilt or changed.

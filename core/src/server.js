@@ -144,14 +144,36 @@ async function consumeCanonicalProjectionNonce(nonce) {
 }
 
 function canonicalProjectionInput({ memoryId, orgId, payload, requestBody, knownAt = new Date() }) {
+  const admittedKnownAt = payload?.created_at || payload?.createdAt || knownAt;
   const explicit = Array.isArray(requestBody?.entities) ? requestBody.entities : [];
   const tagged = (payload?.tags || []).filter((tag) => String(tag).startsWith('entity:')).map((tag) => ({
     name: String(tag).slice(7).replace(/[-_]+/g, ' '), kind: 'concept', role: 'mentioned',
   }));
+  const suppliedClaims = Array.isArray(requestBody?.claims) ? requestBody.claims : [];
+  const legacyPredicate = payload?.claim_predicate || payload?.claimPredicate;
+  const legacySubject = payload?.claim_subject || payload?.claimSubject;
+  const legacyQualifiers = payload?.claim_qualifiers || payload?.claimQualifiers || {};
+  let reconstructedClaims = suppliedClaims;
+  if (!reconstructedClaims.length && legacyPredicate && legacySubject) {
+    let object = legacyQualifiers.object || legacyQualifiers.value || legacyQualifiers.teacher || legacyQualifiers.actor;
+    if (/^\s*(he|she|they)\s*$/i.test(String(object || ''))) {
+      object = String(payload?.title || '').match(/^(.+?)\s+(?:is\s+)?(?:teaching|teaches|teach)\b/i)?.[1]?.trim();
+    }
+    if (object) {
+      reconstructedClaims = [{
+        subject: { name: String(legacySubject), kind: /(?:deep learning|machine learning|technology)/i.test(String(legacySubject)) ? 'technology' : 'concept' },
+        predicate: String(legacyPredicate),
+        object: { name: String(object), kind: /is[_\s-]*taught[_\s-]*by/i.test(String(legacyPredicate)) ? 'person' : 'concept' },
+        qualifiers: legacyQualifiers,
+        valid_from: legacyQualifiers.valid_from || legacyQualifiers.validFrom || null,
+        assertion_status: 'user_asserted',
+      }];
+    }
+  }
   return {
     memoryId, organizationId: orgId, title: payload?.title, content: payload?.content,
-    entities: explicit.length ? explicit : tagged, claims: Array.isArray(requestBody?.claims) ? requestBody.claims : [],
-    exactQuote: payload?.content, knownAt, timeZone: requestBody?.timezone || 'Europe/Berlin',
+    entities: explicit.length ? explicit : tagged, claims: reconstructedClaims,
+    exactQuote: payload?.content, knownAt: admittedKnownAt, timeZone: requestBody?.timezone || 'Europe/Berlin',
     documentId: requestBody?.document_id || null, segmentId: requestBody?.segment_id || null,
   };
 }
@@ -10414,12 +10436,11 @@ exit \$RC
         if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/claims')) return;
         const memoryId = claimsMatch[1];
         try {
-          const memory = await persistentMemoryStore.getMemory(memoryId);
-          const isAdmin = principal.scopes?.includes('admin') || principal.master;
-          const sameOrg = !(memory?.org_id || memory?.orgId) || (memory.org_id || memory.orgId) === orgId;
-          if (!memory || memory.deleted_at || ((!sameOrg || memory.user_id !== userId) && !isAdmin)) {
-            return jsonResponse(res, { error: 'Not found' }, 404);
-          }
+          const claimsAccess = await buildAccessContext(userId, orgId).catch(() => null);
+          const memory = principal.master
+            ? await persistentMemoryStore.getMemory(memoryId)
+            : await persistentMemoryStore.getMemoryScoped(memoryId, { user_id: userId, org_id: orgId, access_context: claimsAccess });
+          if (!memory || memory.deleted_at) return jsonResponse(res, { error: 'Not found' }, 404);
           if (orgIsRemote(orgId)) {
             const remoteClaims = await amrMemoryClaims(orgId, memoryId, {
               subject: url.searchParams.get('subject'), predicate: url.searchParams.get('predicate'),

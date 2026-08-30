@@ -24,8 +24,11 @@ export class CloudflareCanonicalProjectionClient {
   async start({ memoryId, orgId, userId, processingVersion = 1, requiredProjection = 'write' }) {
     const c = config(); if (!c) return null;
     const response = await this.fetchImpl(`${c.baseUrl}/start`, {
-      method: 'POST', headers: { authorization: `Bearer ${c.secret}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ memory_id: memoryId, org_id: orgId, user_id: userId, processing_version: processingVersion, required_projection: requiredProjection }),
+      method: 'POST', headers: {
+        authorization: `Bearer ${c.secret}`, 'content-type': 'application/json',
+        'x-hivemind-user-id': userId,
+      },
+      body: JSON.stringify({ memory_id: memoryId, org_id: orgId, processing_version: processingVersion, required_projection: requiredProjection }),
       signal: AbortSignal.timeout(10000),
     });
     const body = await response.json().catch(() => ({}));

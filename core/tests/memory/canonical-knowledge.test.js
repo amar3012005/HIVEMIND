@@ -5,11 +5,39 @@ import {
   canonicalKnowledgeMode, materializeCanonicalKnowledge, normalizePredicate,
   prepareCanonicalProjection, verifyCanonicalProjectionSignature,
 } from '../../src/memory/canonical-knowledge.js';
+import { CloudflareCanonicalProjectionClient } from '../../src/memory/cloudflare-canonical-projection-client.js';
 
 test('feature mode fails closed and kill switch wins', () => {
   assert.equal(canonicalKnowledgeMode({ evaluatedMode: 'full', env: {} }), 'off');
   assert.equal(canonicalKnowledgeMode({ evaluatedMode: 'write', env: { CANONICAL_KNOWLEDGE_ENABLED: 'true' } }), 'write');
   assert.equal(canonicalKnowledgeMode({ evaluatedMode: 'full', env: { CANONICAL_KNOWLEDGE_ENABLED: 'true', CANONICAL_KNOWLEDGE_KILL_SWITCH: 'true' } }), 'off');
+});
+
+test('Cloudflare admission is tenant/user scoped and Queue payload remains identifier-only', async () => {
+  const prior = {
+    enabled: process.env.CANONICAL_KNOWLEDGE_ENABLED,
+    url: process.env.CANONICAL_PROJECTION_WORKFLOW_URL,
+    secret: process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET,
+  };
+  process.env.CANONICAL_KNOWLEDGE_ENABLED = 'true';
+  process.env.CANONICAL_PROJECTION_WORKFLOW_URL = 'https://projection.test';
+  process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = 'secret';
+  const calls = [];
+  const client = new CloudflareCanonicalProjectionClient({ fetchImpl: async (url, init = {}) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify(url.includes('/enabled') ? { mode: 'write' } : { ok: true }), { status: 200 });
+  } });
+  try {
+    assert.equal(await client.modeFor({ orgId: 'org-1', userId: 'user-1' }), 'write');
+    await client.start({ memoryId: 'memory-1', orgId: 'org-1', userId: 'user-1', requiredProjection: 'write' });
+    const admission = calls[1];
+    assert.equal(admission.init.headers['x-hivemind-user-id'], 'user-1');
+    assert.deepEqual(Object.keys(JSON.parse(admission.init.body)).sort(), ['memory_id', 'org_id', 'processing_version', 'required_projection']);
+  } finally {
+    if (prior.enabled === undefined) delete process.env.CANONICAL_KNOWLEDGE_ENABLED; else process.env.CANONICAL_KNOWLEDGE_ENABLED = prior.enabled;
+    if (prior.url === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_URL; else process.env.CANONICAL_PROJECTION_WORKFLOW_URL = prior.url;
+    if (prior.secret === undefined) delete process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET; else process.env.CANONICAL_PROJECTION_WORKFLOW_SECRET = prior.secret;
+  }
 });
 
 test('Uwe canary resolves bounded title pronoun and local tomorrow', () => {
@@ -24,6 +52,22 @@ test('Uwe canary resolves bounded title pronoun and local tomorrow', () => {
   assert.equal(result.claims[0].object.name, 'Deep Learning');
   assert.equal(result.claims[0].validFrom, '2026-08-31');
   assert.equal(result.claims[0].assertionStatus, 'user_asserted');
+});
+
+test('repair reconstruction collapses generic tag hints onto typed claim endpoints', () => {
+  const result = prepareCanonicalProjection({
+    title: 'Uwe Egly teaching deep learning',
+    content: 'He started teaching deep learning from tomorrow.',
+    entities: [{ name: 'uwe egly', kind: 'concept' }, { name: 'deep learning', kind: 'concept' }],
+    claims: [{
+      subject: { name: 'deep learning', kind: 'technology' }, predicate: 'is_taught_by',
+      object: { name: 'Uwe Egly', kind: 'person' }, valid_from: '2026-08-31',
+    }],
+  });
+  assert.equal(result.entities.length, 2);
+  assert.deepEqual(result.entities.map((entity) => entity.kind).sort(), ['person', 'technology']);
+  assert.equal(result.claims[0].subject.name, 'Uwe Egly');
+  assert.equal(result.claims[0].object.name, 'deep learning');
 });
 
 test('ambiguous pronoun does not publish a trusted claim', () => {

@@ -95,12 +95,30 @@ export function prepareCanonicalProjection(input = {}) {
     claims.push({
       subject, object, predicate: normalized.name,
       confidence: Number.isFinite(candidate.confidence) ? candidate.confidence : 1,
-      qualifiers: candidate.qualifiers || {}, validFrom: candidate.valid_from || candidate.validFrom || null,
+      qualifiers: candidate.qualifiers || {},
+      validFrom: resolveTomorrow(source, knownAt, timeZone) || candidate.valid_from || candidate.validFrom || null,
       validTo: candidate.valid_to || candidate.validTo || null,
       assertionStatus: candidate.assertion_status || 'user_asserted',
     });
   }
-  return { entities, claims, sourceDigest, knownAt, timeZone, unresolvedSubject: Boolean(fallback?.unresolved_subject) };
+  // Identifier-only Workflow repair often reconstructs entity hints from tags,
+  // where the original type is unavailable.  Claim endpoints are stronger than
+  // those generic hints: collapse same-name hints onto the typed claim entity so
+  // replay cannot create both `concept:uwe-egly` and `person:uwe-egly`.
+  const preferred = new Map();
+  for (const claim of claims) {
+    for (const endpoint of [claim.subject, claim.object]) {
+      if (endpoint?.name) preferred.set(normalizeEntity(endpoint.name), endpoint);
+    }
+  }
+  const canonicalEntities = new Map();
+  for (const entity of entities) {
+    const key = normalizeEntity(entity.name);
+    const stronger = preferred.get(key);
+    canonicalEntities.set(key, stronger ? { ...entity, ...stronger } : entity);
+  }
+  for (const [key, entity] of preferred) canonicalEntities.set(key, entity);
+  return { entities: [...canonicalEntities.values()], claims, sourceDigest, knownAt, timeZone, unresolvedSubject: Boolean(fallback?.unresolved_subject) };
 }
 
 async function upsertEntity(tx, organizationId, raw) {

@@ -178,13 +178,13 @@ function canonicalProjectionInput({ memoryId, orgId, payload, requestBody, known
   };
 }
 
-async function projectCanonicalKnowledge({ prisma, mode, input }) {
+async function projectCanonicalKnowledge({ prisma, mode, input, processingVersion = 1 }) {
   if (orgIsRemote(input.organizationId)) {
-    const receipt = await amrCanonicalProjection(input.organizationId, { mode, input, prepared: prepareCanonicalProjection(input), processingVersion: 1 });
+    const receipt = await amrCanonicalProjection(input.organizationId, { mode, input, prepared: prepareCanonicalProjection(input), processingVersion });
     if (!receipt) throw new Error('remote canonical projection unavailable');
     return { mode, status: 'complete', receipt: receipt.receipt };
   }
-  return materializeCanonicalKnowledge({ prisma, mode, input });
+  return materializeCanonicalKnowledge({ prisma, mode, input, processingVersion });
 }
 
 async function handleCanonicalProjectionStageCallback({ req, res, pathname }) {
@@ -205,7 +205,7 @@ async function handleCanonicalProjectionStageCallback({ req, res, pathname }) {
     const receipts = (existing?.receipt && typeof existing.receipt === 'object') ? { ...existing.receipt } : {};
     if (receipts.stages?.[stage]) { jsonResponse(res, { ok: true, idempotent: true, receipt: receipts.stages[stage] }); return true; }
     let receipt = { memory_id: memoryId, stage, processing_version: body.processing_version || 1, required_projection: requiredProjection };
-    if (stage === 'persist') receipt.projection = await projectCanonicalKnowledge({ prisma, mode: requiredProjection, input: canonicalProjectionInput({ memoryId, orgId, payload: memory, requestBody: body }) });
+    if (stage === 'persist') receipt.projection = await projectCanonicalKnowledge({ prisma, mode: requiredProjection, processingVersion: body.processing_version || 1, input: canonicalProjectionInput({ memoryId, orgId, payload: memory, requestBody: body }) });
     const status = stage === 'failed' ? 'failed' : (stage === 'complete' || stage === 'persist' ? 'complete' : 'repairing');
     const nextReceipt = { ...receipts, stages: { ...(receipts.stages || {}), [stage]: receipt } };
     await prisma.memoryProjectionState.upsert({

@@ -64,8 +64,10 @@ function deriveBoundedClaim({ title, content, entities, knownAt, timeZone }) {
     : typed.find((e) => text.toLowerCase().includes(plain(e.name).toLowerCase())) || null;
   if (!subject) return { unresolved_subject: true };
   const objectName = teach[1].replace(/\s+too$/i, '').trim();
-  const object = typed.find((e) => normalizeEntity(e.name) === normalizeEntity(objectName))
-    || { name: objectName, kind: 'technology' };
+  const matchedObject = typed.find((e) => normalizeEntity(e.name) === normalizeEntity(objectName));
+  const object = matchedObject
+    ? { ...matchedObject, kind: normalizeEntityKind(matchedObject.kind) === 'concept' ? 'technology' : matchedObject.kind }
+    : { name: objectName, kind: 'technology' };
   return {
     subject, predicate: 'teaches', object, confidence: 1,
     qualifiers: {}, valid_from: resolveTomorrow(text, knownAt, timeZone),
@@ -129,7 +131,10 @@ async function upsertEntity(tx, organizationId, raw) {
   // Production uses a partial unique index (`WHERE identity_key IS NOT NULL`).
   // PostgreSQL cannot target that index through Prisma's compound upsert, so
   // resolve first and recover the concurrent-create race explicitly.
-  const existing = await tx.canonicalEntity.findFirst({ where: { organizationId, identityKey } });
+  const existing = await tx.canonicalEntity.findFirst({
+    where: { organizationId, OR: [{ identityKey }, { normalizedName: slug, entityKind: kind }] },
+    orderBy: { createdAt: 'asc' },
+  });
   if (existing) return existing;
   try {
     return await tx.canonicalEntity.create({
@@ -167,10 +172,15 @@ export async function materializeCanonicalKnowledge({ prisma, mode, input, proce
       create: { memoryId: input.memoryId, organizationId: input.organizationId, admittedMode, processingVersion },
     });
     const entityByKey = new Map();
+    const projectedEntityIds = new Set();
+    const projectedNames = new Set();
     const resolve = async (raw) => {
       const key = `${normalizeEntityKind(raw.kind || 'concept')}:${normalizeEntity(raw.name)}`;
       if (!entityByKey.has(key)) entityByKey.set(key, await upsertEntity(tx, input.organizationId, raw));
-      return entityByKey.get(key);
+      const entity = entityByKey.get(key);
+      projectedEntityIds.add(entity.id);
+      projectedNames.add(normalizeEntity(raw.name));
+      return entity;
     };
     for (const entity of prepared.entities) {
       const row = await resolve(entity);
@@ -251,6 +261,17 @@ export async function materializeCanonicalKnowledge({ prisma, mode, input, proce
         }
       }
       persisted.push(row);
+    }
+    // Historical extraction may have attached generic same-name entities to
+    // this memory before canonical roles existed. Keep the typed endpoints and
+    // remove only redundant links on this one memory; entity rows and links on
+    // every other memory remain untouched.
+    if (tx.memoryEntityLink.deleteMany && projectedNames.size && projectedEntityIds.size) {
+      await tx.memoryEntityLink.deleteMany({ where: {
+        memoryId: input.memoryId,
+        entityId: { notIn: [...projectedEntityIds] },
+        entity: { organizationId: input.organizationId, normalizedName: { in: [...projectedNames] } },
+      } });
     }
     await tx.memoryProjectionState.update({
       where: { memoryId: input.memoryId }, data: { entitiesStatus: 'complete', claimsStatus: 'complete', receipt: { claim_count: persisted.length } },

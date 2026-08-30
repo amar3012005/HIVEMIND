@@ -54,6 +54,16 @@ test('Uwe canary resolves bounded title pronoun and local tomorrow', () => {
   assert.equal(result.claims[0].assertionStatus, 'user_asserted');
 });
 
+test('Uwe repair upgrades a generic taught object hint to technology', () => {
+  const result = prepareCanonicalProjection({
+    title: 'Uwe Egly teaching deep learning', content: 'He started teaching deep learning from tomorrow.',
+    entities: [{ name: 'uwe egly', kind: 'concept' }, { name: 'deep learning', kind: 'concept' }],
+    knownAt: '2026-08-30T18:23:00Z', timeZone: 'Europe/Berlin',
+  });
+  assert.equal(result.claims[0].object.kind, 'technology');
+  assert.deepEqual(result.entities.map((entity) => entity.kind).sort(), ['person', 'technology']);
+});
+
 test('repair reconstruction collapses generic tag hints onto typed claim endpoints', () => {
   const result = prepareCanonicalProjection({
     title: 'Uwe Egly teaching deep learning',
@@ -112,6 +122,7 @@ test('materializer is deterministic, persists roles/evidence, and never writes r
     assert.ok(calls.some(([type, x]) => type === 'link' && x.create?.role === 'subject'));
     assert.ok(calls.some(([type, x]) => type === 'link' && x.create?.role === 'actor'));
     assert.ok(calls.some(([type, x]) => type === 'link' && x.create?.role === 'object'));
+    assert.ok(calls.some(([type, x]) => type === 'link' && x.create?.role === 'technology'));
     assert.ok(calls.some(([type]) => type === 'evidence'));
     assert.equal('relationship' in tx, false);
   } finally { process.env.CANONICAL_KNOWLEDGE_ENABLED = prior; }

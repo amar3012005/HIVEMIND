@@ -3454,6 +3454,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
         id: uuidv4(),
+        org_id,
         from_id: sourceId,
         to_id: targetId,
         type: 'Updates',
@@ -3538,6 +3539,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
         id: uuidv4(),
+        org_id,
         from_id: sourceId,
         to_id: targetId,
         type: 'Extends',
@@ -3618,6 +3620,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       for (const sourceIdValue of uniqueSourceIds) {
         const edge = await store.createRelationship({
           id: uuidv4(),
+          org_id,
           from_id: sourceIdValue,
           to_id: targetId,
           type: 'Derives',

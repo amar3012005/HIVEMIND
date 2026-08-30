@@ -38,3 +38,13 @@ test('BYOD relationship writes route before every central relationship query', (
   assert.match(method.slice(remoteBranch, centralLookup), /await amrAddEdge/);
   assert.match(method.slice(remoteBranch, centralLookup), /remote relationship write was not acknowledged/);
 });
+
+test('semantic edge constructors carry explicit tenant scope into storage adapters', () => {
+  const graphSource = fs.readFileSync(new URL('../../src/memory/graph-engine.js', import.meta.url), 'utf8');
+  for (const marker of ['async applyUpdate(', 'async applyExtends(', 'async applyDerivesFromSources(']) {
+    const start = graphSource.indexOf(marker);
+    const end = graphSource.indexOf('\n  async ', start + marker.length);
+    const method = graphSource.slice(start, end > start ? end : undefined);
+    assert.match(method, /createRelationship\(\{[\s\S]*?org_id,/);
+  }
+});

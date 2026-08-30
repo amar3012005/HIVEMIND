@@ -13,6 +13,8 @@ const EVENT_PHASES = Object.freeze({
   coverage_assessed: 'recall_verified',
   tool_start: 'tools_running',
   tool_result: 'tools_running',
+  orchestration_resumed: 'tools_running',
+  orchestration_input_required: 'waiting_input',
   synthesis_start: 'synthesizing',
   answer_start: 'synthesizing',
   validation_complete: 'validating',
@@ -146,6 +148,11 @@ export class DurableChatTurnStore {
       where: { id: turnId },
       data: { status: 'completed', currentPhase: 'completed', responsePayload: json(responsePayload), completedAt: new Date(), updatedAt: new Date() },
     });
+    Promise.resolve(this.notifier?.event?.(cloudflareEventMetadata({
+      turnId,
+      event: { type: 'turn_completed', sequence: Number(sequence) || 0 },
+      phase: 'completed', status: 'completed',
+    }))).catch((error) => this.logger?.warn?.(`[durable-chat] completion mirror degraded turn=${turnId}: ${error.message}`));
   }
 
   async fail(turnId, error, sequence) {
@@ -155,6 +162,11 @@ export class DurableChatTurnStore {
       where: { id: turnId },
       data: { status: 'failed', currentPhase: 'failed', error: safeError, completedAt: new Date(), updatedAt: new Date() },
     });
+    Promise.resolve(this.notifier?.event?.(cloudflareEventMetadata({
+      turnId,
+      event: { type: 'turn_failed', sequence: Number(sequence) || 0 },
+      phase: 'failed', status: 'failed',
+    }))).catch((mirrorError) => this.logger?.warn?.(`[durable-chat] failure mirror degraded turn=${turnId}: ${mirrorError.message}`));
   }
 
   async readAuthorized({ turnId, orgId, userId, after = 0, limit = 200 }) {

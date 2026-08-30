@@ -3777,6 +3777,10 @@ export async function runReactAgentV2({
         const stored = await createChatContinuation({
           userId: ctx.userId, orgId: ctx.orgId, message, language,
           resumeState: compound.resumeState,
+        }, {
+          prisma: ctx.prisma,
+          durable: ['session', 'workflow', 'full'].includes(ctx.durableChatMode),
+          parentTurnId: ctx.durableChatTurnId || null,
         });
         continuation = {
           schema_version: 1,

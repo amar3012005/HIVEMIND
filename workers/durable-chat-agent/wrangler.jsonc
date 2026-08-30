@@ -14,6 +14,11 @@
     "bindings": [{ "name": "CHAT_SESSION", "class_name": "HivemindChatSession" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HivemindChatSession"] }],
+  "workflows": [{
+    "name": "hivemind-chat-turn-workflow-development",
+    "binding": "CHAT_TURN_WORKFLOW",
+    "class_name": "ChatTurnWorkflow"
+  }],
   "env": {
     "local": {
       "name": "hivemind-durable-chat-agent-local",
@@ -25,7 +30,12 @@
         "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
         "DURABLE_CHAT_AGENT_ENABLED": "true"
       },
-      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }]
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "workflows": [{
+        "name": "hivemind-chat-turn-workflow-local",
+        "binding": "CHAT_TURN_WORKFLOW",
+        "class_name": "ChatTurnWorkflow"
+      }]
     },
     "production": {
       "name": "hivemind-durable-chat-agent-production",
@@ -37,7 +47,12 @@
         "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
         "DURABLE_CHAT_AGENT_ENABLED": "false"
       },
-      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }]
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "workflows": [{
+        "name": "hivemind-chat-turn-workflow-production",
+        "binding": "CHAT_TURN_WORKFLOW",
+        "class_name": "ChatTurnWorkflow"
+      }]
     }
   }
 }

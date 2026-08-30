@@ -12,6 +12,8 @@ export type SessionMetadata = {
   occurred_at: string;
 };
 
+export type ChatTurnWorkflowParams = { turn_id: string; mode: ChatMode };
+
 const ALLOWED_KEYS = new Set([
   'turn_id', 'mode', 'sequence', 'event_type', 'phase', 'status', 'trace_id', 'occurred_at',
 ]);
@@ -33,4 +35,19 @@ export function validateMetadata(input: unknown): SessionMetadata {
   if (record.event_type != null && String(record.event_type).length > 80) throw new Error('invalid_event_type');
   if (record.trace_id != null && String(record.trace_id).length > 64) throw new Error('invalid_trace_id');
   return record as SessionMetadata;
+}
+
+export function validateWorkflowParams(input: unknown): ChatTurnWorkflowParams {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('workflow_params_required');
+  const record = input as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !['turn_id', 'mode'].includes(key) || FORBIDDEN_KEYS.test(key))) {
+    throw new Error('workflow_params_forbidden');
+  }
+  if (!UUID.test(String(record.turn_id || ''))) throw new Error('invalid_turn_id');
+  if (!CHAT_MODES.includes(record.mode as ChatMode)) throw new Error('invalid_mode');
+  return record as ChatTurnWorkflowParams;
+}
+
+export function isTerminalMetadata(input: SessionMetadata): boolean {
+  return ['completed', 'failed', 'cancelled'].includes(input.status);
 }

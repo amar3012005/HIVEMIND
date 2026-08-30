@@ -1,5 +1,6 @@
 import { Agent, getAgentByName } from 'agents';
-import { CHAT_MODES, type ChatMode, type SessionMetadata, validateMetadata } from './contract';
+import { CHAT_MODES, isTerminalMetadata, type ChatMode, type SessionMetadata, validateMetadata } from './contract';
+export { ChatTurnWorkflow } from './workflow';
 
 export interface Env extends Cloudflare.Env {
   CHAT_SESSION: DurableObjectNamespace<HivemindChatSession>;
@@ -8,6 +9,7 @@ export interface Env extends Cloudflare.Env {
   DURABLE_CHAT_FLAG: 'durable_chat_agent_v1';
   DURABLE_CHAT_AGENT_ENABLED: 'true' | 'false';
   DURABLE_CHAT_AGENT_SECRET: string;
+  CHAT_TURN_WORKFLOW: Workflow;
 }
 
 type MetadataRow = {
@@ -90,7 +92,24 @@ export default {
       try {
         const metadata = validateMetadata(await request.json());
         const session = await getAgentByName<Env, HivemindChatSession>(env.CHAT_SESSION, metadata.turn_id);
-        return Response.json(url.pathname.endsWith('/open') ? await session.open(metadata) : await session.record(metadata));
+        if (url.pathname.endsWith('/open')) {
+          const opened = await session.open(metadata);
+          let workflow_instance_id: string | null = null;
+          if (metadata.mode === 'workflow' || metadata.mode === 'full') {
+            workflow_instance_id = `chat-${metadata.turn_id}`;
+            await env.CHAT_TURN_WORKFLOW.create({
+              id: workflow_instance_id,
+              params: { turn_id: metadata.turn_id, mode: metadata.mode },
+            }).catch(() => null);
+          }
+          return Response.json({ ...opened, workflow_instance_id });
+        }
+        const recorded = await session.record(metadata);
+        if (isTerminalMetadata(metadata)) {
+          const workflow = await env.CHAT_TURN_WORKFLOW.get(`chat-${metadata.turn_id}`);
+          await workflow.sendEvent({ type: 'chat-terminal', payload: metadata }).catch(() => null);
+        }
+        return Response.json(recorded);
       } catch (error) {
         return Response.json({ error: error instanceof Error ? error.message : 'invalid_metadata' }, { status: 400 });
       }
@@ -100,6 +119,13 @@ export default {
       try {
         validateMetadata({ turn_id: turnId, phase: 'read', status: 'read', occurred_at: new Date().toISOString() });
         return Response.json(await (await getAgentByName<Env, HivemindChatSession>(env.CHAT_SESSION, turnId)).status());
+      } catch { return Response.json({ error: 'invalid_turn_id' }, { status: 400 }); }
+    }
+    if (url.pathname === '/workflows/status' && request.method === 'GET') {
+      const turnId = url.searchParams.get('turn_id') || '';
+      try {
+        validateMetadata({ turn_id: turnId, phase: 'read', status: 'read', occurred_at: new Date().toISOString() });
+        return Response.json(await (await env.CHAT_TURN_WORKFLOW.get(`chat-${turnId}`)).status());
       } catch { return Response.json({ error: 'invalid_turn_id' }, { status: 400 }); }
     }
     return Response.json({ error: 'not_found' }, { status: 404 });

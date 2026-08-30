@@ -1991,7 +1991,7 @@ if (process.env.DOCLING_URL) {
         let _pdfProbe = null;
         if (ext === 'pdf') {
           try {
-            const { fastPdfExtract, splitFastPdfPageBlocks } = await import('./knowledge/enterprise/fast-pdf-parser.js');
+            const { fastPdfExtract, splitFastPdfPageBlocks, chunkTextAtSemanticBoundaries } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fast = await fastPdfExtract(tempPath);
             _pdfProbe = fast;
             // ── Tier 3 (priority): Groq vision OCR for image-heavy PDFs ──
@@ -2003,14 +2003,20 @@ if (process.env.DOCLING_URL) {
             // cannot see at any setting, and it is fast and already proven here
             // (3-10s on real branding PDFs). KB_FIGURE_RICH_TO_VISION=false reverts.
             const _visionWanted = fast.isImageHeavy
+              || fast.isTextLayerCorrupt
               || (fast.isFigureRich
                   && String(process.env.KB_FIGURE_RICH_TO_VISION ?? 'true').toLowerCase() !== 'false');
-            if (_visionWanted && (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY)) {
-              if (fast.isFigureRich && !fast.isImageHeavy) {
+            if (_visionWanted) {
+              if (fast.isTextLayerCorrupt) {
+                console.log(`[docling-adapter] corrupt PDF text layer ${filename} `
+                  + `(short=${Math.round(fast.textQuality.shortRatio * 100)}% `
+                  + `single=${Math.round(fast.textQuality.singleRatio * 100)}%) → vision OCR`);
+              } else if (fast.isFigureRich && !fast.isImageHeavy) {
                 console.log(`[docling-adapter] figure-rich ${filename} (${Math.round(fast.avgPerPage)} chars/page over `
                   + `${fast.pages}p) → vision for figure content`);
               }
-              const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
+              const { parsePdfWithGroqVision, visionProviderAvailable } = await import('./knowledge/enterprise/groq-vision-parser.js');
+              if (!visionProviderAvailable()) throw new Error('No direct vision key or Cloudflare AI Gateway BYOK alias is configured');
               const vision = await parsePdfWithGroqVision(tempPath);
               if (!vision.error && vision.text.length > 200) {
                 if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=groq-vision file=${filename} smart=${smart} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
@@ -2040,7 +2046,8 @@ if (process.env.DOCLING_URL) {
             // ZIP+XML natively and vision physically cannot read the format.
             // Reversible: KB_PDF_TEXTLAYER_FIRST=false restores docling-for-smart.
             const _textLayerFirst = String(process.env.KB_PDF_TEXTLAYER_FIRST ?? 'true').toLowerCase() !== 'false';
-            if ((!smart || _textLayerFirst) && !fast.error && !fast.isImageHeavy && fast.text.length > 200) {
+            if ((!smart || _textLayerFirst) && !fast.error && !fast.isImageHeavy
+              && !fast.isTextLayerCorrupt && fast.text.length > 200) {
               if (smart && _textLayerFirst) {
                 console.log(`[docling-adapter] ${filename}: text layer present `
                   + `(${fast.text.length} chars / ${fast.pages}p) → fast-pdf, SKIPPING docling `
@@ -2071,14 +2078,8 @@ if (process.env.DOCLING_URL) {
                   if (block.text.length <= CHUNK_TARGET) {
                     hybridChunks.push({ text: block.text, headings: [heading], page: block.page });
                   } else {
-                    for (let i = 0; i < block.text.length; i += (CHUNK_TARGET - CHUNK_OVERLAP)) {
-                      const piece = block.text.slice(i, i + CHUNK_TARGET).trim();
-                      if (piece.length < 50) continue;
-                      hybridChunks.push({
-                        text: piece,
-                        headings: [heading],
-                        page: block.page,
-                      });
+                    for (const piece of chunkTextAtSemanticBoundaries(block.text, CHUNK_TARGET, CHUNK_OVERLAP)) {
+                      hybridChunks.push({ text: piece, headings: [heading], page: block.page });
                     }
                   }
                 }
@@ -2186,7 +2187,8 @@ if (process.env.DOCLING_URL) {
         // Text-bearing and not image-heavy → neither OCR nor picture description is
         // needed. Only a scan (no extractable text) or an image-heavy doc requires them.
         const _hasTextLayer = ext === 'pdf' && !!(_pdfProbe && !_pdfProbe.error && _pdfProbe.text && _pdfProbe.text.length > 200);
-        const _doclingHeavyOk = ext !== 'pdf' ? true : (!_hasTextLayer || !!_pdfProbe?.isImageHeavy);
+        const _doclingHeavyOk = ext !== 'pdf' ? true
+          : (!_hasTextLayer || !!_pdfProbe?.isImageHeavy || !!_pdfProbe?.isTextLayerCorrupt);
         if (ext === 'pdf' && !_doclingHeavyOk) {
           console.log(`[docling-adapter] ${filename}: text layer present (${_pdfProbe.text.length} chars / ${_pdfProbe.pages}p) → docling WITHOUT ocr/picture-description`);
         }

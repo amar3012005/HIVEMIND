@@ -62,14 +62,46 @@ foreach ($line in $localApi) {
   $split = $line.IndexOf('=')
   if ($split -lt 1) { continue }
   $name = $line.Substring(0, $split)
-  if ($name -in @('HIVEMIND_MASTER_API_KEY','HIVEMIND_ADMIN_SECRET','HIVEMIND_OAUTH_SESSION_SECRET')) {
+  if ($name -in @('HIVEMIND_MASTER_API_KEY','HIVEMIND_ADMIN_SECRET','HIVEMIND_OAUTH_SESSION_SECRET','SESSION_SECRET')) {
     [Environment]::SetEnvironmentVariable($name, $line.Substring($split + 1), 'Process')
   }
 }
-if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('HIVEMIND_OAUTH_SESSION_SECRET', 'Process'))) {
+
+# The control plane runs with NODE_ENV=production even in the isolated preview
+# stack, so the well-known development master key is deliberately rejected by
+# internal-auth. Generate an ephemeral local-only key when an old stack still
+# carries that placeholder, and recreate both Core and the control plane with
+# the same value. The key is never printed or imported from production.
+$localMasterKey = [Environment]::GetEnvironmentVariable('HIVEMIND_MASTER_API_KEY', 'Process')
+if ([string]::IsNullOrWhiteSpace($localMasterKey) -or $localMasterKey -eq 'hm_master_key_99228811') {
+  $masterBytes = New-Object byte[] 48
+  [Security.Cryptography.RandomNumberGenerator]::Fill($masterBytes)
+  $localMasterKey = [Convert]::ToBase64String($masterBytes)
+  [Environment]::SetEnvironmentVariable('HIVEMIND_MASTER_API_KEY', $localMasterKey, 'Process')
+}
+[Environment]::SetEnvironmentVariable('API_MASTER_KEY', $localMasterKey, 'Process')
+
+function New-LocalSecret {
+  $bytes = New-Object byte[] 48
+  [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  return [Convert]::ToBase64String($bytes)
+}
+
+$adminSecret = [Environment]::GetEnvironmentVariable('HIVEMIND_ADMIN_SECRET', 'Process')
+if ([string]::IsNullOrWhiteSpace($adminSecret) -or $adminSecret -eq 'local-admin-secret-change-me') {
+  [Environment]::SetEnvironmentVariable('HIVEMIND_ADMIN_SECRET', (New-LocalSecret), 'Process')
+}
+
+$oauthSecret = [Environment]::GetEnvironmentVariable('HIVEMIND_OAUTH_SESSION_SECRET', 'Process')
+if ([string]::IsNullOrWhiteSpace($oauthSecret) -or $oauthSecret -eq 'change-me') {
   $sessionBytes = New-Object byte[] 48
   [Security.Cryptography.RandomNumberGenerator]::Fill($sessionBytes)
   [Environment]::SetEnvironmentVariable('HIVEMIND_OAUTH_SESSION_SECRET', [Convert]::ToBase64String($sessionBytes), 'Process')
+}
+
+$controlSessionSecret = [Environment]::GetEnvironmentVariable('SESSION_SECRET', 'Process')
+if ([string]::IsNullOrWhiteSpace($controlSessionSecret) -or $controlSessionSecret -eq 'local-session-secret-change-me') {
+  [Environment]::SetEnvironmentVariable('SESSION_SECRET', (New-LocalSecret), 'Process')
 }
 
 $controlEnv = (& docker inspect hivemind-control-plane-local | ConvertFrom-Json | ForEach-Object { $_[0].Config.Env })
@@ -112,10 +144,32 @@ for ($attempt = 0; $attempt -lt 36; $attempt += 1) {
 }
 if (-not $healthy) { throw 'The production-parity local API did not become healthy with Docling enabled.' }
 
+# Recreate the proxy after Core is healthy so authenticated browser reads use
+# the same non-placeholder internal key and do not collapse into misleading
+# 503 responses while both containers themselves appear healthy.
+Push-Location $repo
+try {
+  & docker compose @compose up -d --no-build --no-deps --force-recreate control-plane
+  if ($LASTEXITCODE -ne 0) { throw 'Unable to recreate the local control plane.' }
+} finally {
+  Pop-Location
+}
+
+$controlHealthy = $false
+for ($attempt = 0; $attempt -lt 24; $attempt += 1) {
+  Start-Sleep -Seconds 2
+  try {
+    $controlHealth = Invoke-RestMethod -Uri 'http://127.0.0.1:3001/health' -TimeoutSec 5
+    if ($controlHealth.ok) { $controlHealthy = $true; break }
+  } catch {}
+}
+if (-not $controlHealthy) { throw 'The local control plane did not become healthy.' }
+
 [pscustomobject]@{
   ok = $true
   flagship_enabled = $true
   api_healthy = $true
+  control_plane_healthy = $true
   docling_adapter = [bool]$health.phase1.docling_adapter
   embeddings_configured = [bool]$health.amr_engine.embeddingsConfigured
   production_inference_policy = $true

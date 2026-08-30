@@ -1218,3 +1218,64 @@ slides that find no unique anchor get a page instead of `null`.
 - Verification: lifecycle tests passed 8/8, Worker TypeScript and local Wrangler
   dry-run passed, and the local canary was restored to terminal error with zero
   published candidates. The shared API restarted healthy.
+
+## 2026-08-30 UTC — OCR quality gate, Gateway vision, and preview proxy recovery
+
+- State: local-only on `codex/knowledge-ingest-workflow-v1`; production was not
+  modified. Frontend commit `bab779a` is pushed on
+  `codex/preview-health-poll-cleanup`. Parent/backend commit is recorded by the
+  following journal entry after commit and push.
+- Browser incident: `documents`, `billing/usage`, and `health` all returned 503
+  because the preview control plane ran in production mode with the deliberately
+  rejected public development master key. Core and control plane were recreated
+  with the same generated local-only secret; direct service canary output was:
+
+  ```text
+  /health 200
+  /api/documents?limit=1 200
+  /api/billing/usage 200
+  ```
+
+- UI decision: document and billing reads are required and remain. The top-bar
+  health request was presentation-only and fired every 30 seconds on every page,
+  so its poll and status pill were removed. Browser extension SES/storage and
+  brightness messages are external to the app.
+- Measured extraction defect: all eight source PDFs had a large text layer but
+  74.2-86.4% single-letter Latin tokens; the old size-based probe called them
+  text-native. The new quality gate classified all eight `corrupt=true` in one
+  concurrent run. Existing rows were not mutated or reprocessed.
+- Runtime proof: one real PDF page was rendered locally and sent from Core using
+  the production Cloudflare AI Gateway ID, account, token, and OpenRouter BYOK
+  alias with no direct provider key. Output:
+
+  ```text
+  {"available":true,"ok":true,"chars":906,"markdown":true,"error":null}
+  ```
+
+- Persisted-quality audit before reprocessing: 1,722/1,722 segments vectorized,
+  1,596 page-addressable, 1,722 carrying heading metadata, 113 cited memories,
+  136 entity links, and 131 relationships (105 PartOf, 11 Derives, 9 Extends,
+  5 Contradicts, 1 Updates). A grounded eight-query recall matrix found the
+  expected answer within the returned set for seven queries; the Revlon query
+  missed and two desired facts were not top-ranked, consistent with corrupted
+  evidence already persisted by the former parser route.
+- Focused backend command:
+
+  ```text
+  node --test tests/knowledge/*.test.js tests/unit/kb-upload-integrity.test.js
+  tests 116; pass 116; fail 0
+  ```
+
+- Frontend verification:
+
+  ```text
+  memories-visible-scope-contract: tests 4; pass 4; fail 0
+  npm run build: Compiled successfully
+  ```
+
+- Build note: two clean local image attempts remained silent in `npm ci` after
+  deprecation notices and were cancelled after bounded waits. Local Compose now
+  read-only mounts `core/src`, so JS-only iteration is restart-fast. The dev
+  image additionally declares the Poppler/ImageMagick/Ghostscript runtime used
+  by the production image; a manifest/native/Prisma release still requires the
+  immutable build to complete before production promotion.

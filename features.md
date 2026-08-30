@@ -173,3 +173,40 @@ verification, and its independent rollback control.
 - Behavior: delayed Cloudflare retries cannot convert failed or cancelled runs
   into completed runs, including through finalize. Tests passed 8/8 and the
   local provider-outage canary remains terminal error with zero publication.
+
+## feature-20260830T090000Z — Meta-aware PDF quality and preview-read recovery
+
+- Local status: accepted on `codex/knowledge-ingest-workflow-v1`; production and
+  `singulance-main` remain unchanged. The frontend companion commit is
+  `bab779a` on `codex/preview-health-poll-cleanup`.
+- PDF quality: a deterministic text-layer gate measures short-token,
+  single-token, and average-token-length corruption. Text-rich but fragmented
+  OCR now routes to vision OCR instead of being treated as clean fast-PDF text.
+- Chunking: clean fast-PDF pages split at paragraph, sentence, newline, or word
+  boundaries with bounded overlap; document title, heading path, and page remain
+  contextual embedding and citation metadata, never synthetic evidence text.
+- AI parity: vision OCR now supports the production Cloudflare AI Gateway BYOK
+  transport without direct provider keys. A real rendered page returned 906
+  characters of Markdown through the Gateway. The local image declares Poppler,
+  ImageMagick, and Ghostscript, matching the production renderer contract.
+- Canonical memory quality: the extraction prompt now unambiguously separates
+  standalone claim `f` from verbatim `source_quote`; the atomicity guard reads
+  the canonical `f` field and splits only claims containing at least three
+  independent sentences. Entity context, exact quote validation, typed claim
+  structure, Updates/Extends/Derives graph semantics, citations, and tenant
+  scoping remain intact.
+- Eight-file evidence: all supplied OCR PDFs were classified concurrently; all
+  eight correctly failed the clean-text gate (61-90 pages, 74-86% single-letter
+  tokens in their raw text layers). Existing durable data remains unchanged.
+  Recall canaries found the expected fact in seven of eight query sets; the one
+  miss and off-target top ranks are attributable to the already-ingested damaged
+  OCR and are the reason future/reprocessed versions use the new OCR route.
+- Preview recovery: the control plane and Core now share a generated local-only
+  non-placeholder internal key, so documents, billing usage, and health proxy
+  checks return 200. The redundant top-bar 30-second health poll and status pill
+  were removed; required Memories/Knowledge and billing reads remain.
+- Verification: 116/116 focused backend tests, 18/18 quality/context tests,
+  Memories scope 4/4, frontend optimized build, real AI Gateway page canary,
+  and local proxy read canaries passed. Local Core source is read-only mounted so
+  JS-only changes require restart rather than image rebuild; manifest/native/
+  Prisma changes still require a build.

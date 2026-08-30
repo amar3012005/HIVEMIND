@@ -1158,3 +1158,15 @@ slides that find no unique anchor get a page instead of `null`.
   `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` transitioned from running to error at
   `generate-candidates` with `recovery_status=retry_exhausted`, a safe terminal
   reason, and `finished_at` populated. No candidate was published.
+
+## 2026-08-30 UTC — terminal Dreaming runs are immutable
+
+- State: patch `718b0117`, local merge `c314c713`, isolated Worker version
+  `7c21bf84-11b3-4b66-8126-6e679da944a1`; production remains untouched.
+- A delayed retry from an older Workflow version exposed that `finalize` could
+  overwrite an already failed run as completed. Stage execution now returns
+  every terminal receipt unchanged, including finalize, and the Worker aborts
+  when it observes error or cancelled state.
+- Verification: lifecycle tests passed 8/8, Worker TypeScript and local Wrangler
+  dry-run passed, and the local canary was restored to terminal error with zero
+  published candidates. The shared API restarted healthy.

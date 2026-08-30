@@ -2957,6 +2957,37 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
   }
 }
 
+async function proxyLocalKnowledgeWorkflowToCore(req, res, pathname) {
+  const enabled = process.env.HIVEMIND_LOCAL_MODE === 'true'
+    && process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED === 'true';
+  const expected = process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || '';
+  const actual = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!enabled || !secretsMatch(actual, expected)) {
+    return jsonResponse(res, { error: 'Unauthorized' }, 401);
+  }
+  if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed' }, 405);
+  const body = await parseBody(req);
+  try {
+    const coreResp = await fetch(new URL(pathname, CONFIG.coreApiBaseUrl), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${expected}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(90_000),
+    });
+    const responseBody = await coreResp.text();
+    res.writeHead(coreResp.status, { 'Content-Type': coreResp.headers.get('content-type') || 'application/json' });
+    return res.end(responseBody);
+  } catch (error) {
+    return jsonResponse(res, {
+      error: 'core_temporarily_unavailable',
+      message: 'The local ingestion core is temporarily unavailable.',
+    }, 503);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   applyCorsHeaders(req, res);
 
@@ -14286,6 +14317,15 @@ Write the persona now.`;
   }
 
   // ─── Proxy Routes (session-cookie → core API with master key) ─────
+  // Hosted local Cloudflare Workflows cannot call a loopback-only Core URL.
+  // This narrow service-to-service bridge is disabled outside explicit local
+  // mode and authenticates with the same dedicated Workflow secret at both
+  // boundaries. It never creates a browser session and never maps arbitrary
+  // paths into Core.
+  if (/^\/internal\/knowledge-ingest\/v1\/jobs\/[0-9a-f-]{36}\/(?:stages\/(?:acquire|materialize|reconcile)|fail)$/.test(pathname)) {
+    return proxyLocalKnowledgeWorkflowToCore(req, res, pathname);
+  }
+
   if (pathname.startsWith('/v1/proxy/')) {
     const current = await requireSession(req, res);
     if (!current) return;

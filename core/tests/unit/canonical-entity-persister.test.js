@@ -16,6 +16,7 @@ function makePrisma({ existing = [], reviewMatch = null } = {}) {
     canonicalEntity: {
       findFirst: async ({ where }) => entities.find((e) => {
         if (e.organizationId !== where.organizationId) return false;
+        if (where.identityKey) return e.identityKey === where.identityKey;
         if (where.normalizedName?.in) return where.normalizedName.in.includes(e.normalizedName);
         return false;
       }) || null,
@@ -139,5 +140,52 @@ test('remote resolution can create a canonical entity without a central memory F
   });
   assert.equal(results[0].action, 'created');
   assert.equal(prisma.entities.length, 1);
+  assert.equal(prisma.entities[0].identityKey, 'canonical:paolo rossi');
   assert.equal(prisma.links.length, 0, 'remote memory must not create a central FK link');
+});
+
+test('a concurrent canonical insert reuses the database-unique winner', async () => {
+  const prisma = makePrisma();
+  prisma.canonicalEntity.create = async ({ data }) => {
+    prisma.entities.push({ id: 'ce-winner', ...data });
+    throw Object.assign(new Error('unique identity race'), { code: 'P2002' });
+  };
+  const resolver = new EntityResolver({ prisma });
+
+  const results = await resolver.resolveAndLink({
+    memoryId: 'm-race',
+    organizationId: ORG,
+    candidates: [{ name: 'Paolo Rinaldi', kind: 'person' }],
+  });
+
+  assert.equal(results[0].entityId, 'ce-winner');
+  assert.equal(results[0].action, 'linked');
+  assert.equal(results[0].reason, 'identity_key_race_reuse');
+  assert.equal(prisma.links[0].entityId, 'ce-winner');
+});
+
+test('entity merge uses valid idempotent link upserts inside one transaction', async () => {
+  const calls = [];
+  const rows = {
+    src: { id: 'src', aliases: ['old'], emailDomains: [], externalRefs: {}, mergedFrom: [] },
+    dst: { id: 'dst', aliases: [], emailDomains: [], externalRefs: {}, mergedFrom: [] },
+  };
+  const tx = {
+    memoryEntityLink: {
+      findMany: async () => [{ memoryId: 'm1', entityId: 'src', role: 'mentioned', confidence: 0.8 }],
+      upsert: async (args) => calls.push(['upsert', args]),
+      delete: async (args) => calls.push(['delete-link', args]),
+    },
+    canonicalEntity: {
+      findUnique: async ({ where }) => rows[where.id],
+      update: async (args) => calls.push(['update-entity', args]),
+      delete: async (args) => calls.push(['delete-entity', args]),
+    },
+  };
+  const prisma = { $transaction: async (fn) => fn(tx) };
+
+  await new EntityResolver({ prisma }).mergeEntities({ srcId: 'src', dstId: 'dst' });
+
+  assert.deepEqual(calls.map(([kind]) => kind), ['upsert', 'delete-link', 'update-entity', 'delete-entity']);
+  assert.equal(calls[0][1].where.memoryId_entityId_role.entityId, 'dst');
 });

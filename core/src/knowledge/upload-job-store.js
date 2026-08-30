@@ -94,6 +94,7 @@ export class KnowledgeUploadJobStore {
       // broken" — and functionally it was.
       const orphanClauses = bootedAt
         ? [{ status: { in: ['queued', 'processing'] }, documentId: null,
+             orchestrationMode: { not: 'cloudflare_workflow' },
              createdAt: { lt: new Date(Math.min(bootedAt.getTime(), Date.now() - bootOrphanMin * 60_000)) } }]
         : [];
       const { count } = await this._model().updateMany({
@@ -156,11 +157,14 @@ export class KnowledgeUploadJobStore {
     return this._model().updateMany({ where: { id: jobId, orgId }, data });
   }
 
-  async progress(jobId, orgId, stage, progress, extra = {}) {
+  async progress(jobId, orgId, stage, progress, extra = {}, { processingVersion = null } = {}) {
     const existing = await this.findOwned(jobId, { orgId });
     const detail = Object.fromEntries(Object.entries(extra || {}).filter(([, value]) => value !== undefined));
     await this._model().updateMany({
-      where: { id: jobId, orgId, status: { notIn: [...TERMINAL] } },
+      where: {
+        id: jobId, orgId, status: { notIn: [...TERMINAL] },
+        ...(processingVersion == null ? {} : { processingVersion: Number(processingVersion) }),
+      },
       data: {
         // A job that is REPORTING A STAGE is being worked on, so `status` must say
         // so. This wrote stage+progress but never touched status, which therefore
@@ -189,31 +193,55 @@ export class KnowledgeUploadJobStore {
     });
   }
 
-  async fail(jobId, orgId, error) {
+  async fail(jobId, orgId, error, { processingVersion = null } = {}) {
     const before = await this.findOwned(jobId, { orgId });
-    await this._model().updateMany({
-      where: { id: jobId, orgId, status: { notIn: [...TERMINAL] } }, data: {
+    const updated = await this._model().updateMany({
+      where: {
+        id: jobId, orgId, status: { notIn: [...TERMINAL] },
+        ...(processingVersion == null ? {} : { processingVersion: Number(processingVersion) }),
+      }, data: {
       status: 'failed', stage: 'failed', progress: 100,
       errorCode: error?.code || 'INGEST_FAILED', errorMessage: String(error?.message || error || 'Ingestion failed').slice(0, 2000),
       completedAt: new Date(),
     } });
-    if (this.creditService) await this.creditService.release({ orgId, idempotencyKey: `knowledge-credit:${jobId}:${before?.processingVersion || 1}` }).catch(() => {});
+    // A delayed failure from workflow version N must not release version N+1's
+    // reservation after an operator retry. Only the attempt that actually won
+    // the version-fenced terminal write owns its reservation.
+    if (updated.count && this.creditService) {
+      const creditVersion = processingVersion == null
+        ? (before?.processingVersion || 1)
+        : Number(processingVersion);
+      await this.creditService.release({
+        orgId,
+        idempotencyKey: `knowledge-credit:${jobId}:${creditVersion}`,
+      }).catch(() => {});
+    }
+    return updated.count > 0;
   }
 
-  async complete(jobId, orgId, userId, result) {
+  async complete(jobId, orgId, userId, result, { processingVersion = null } = {}) {
     const jobBefore = await this.findOwned(jobId, { orgId, userId });
+    if (processingVersion != null && Number(jobBefore?.processingVersion) !== Number(processingVersion)) {
+      throw Object.assign(new Error('Workflow processing version is stale.'), { code: 'STALE_WORKFLOW', retryable: false });
+    }
     if (jobBefore?.status === 'ready' && jobBefore.usageSettledAt) return false;
     if (this.creditService) {
       const pages = Math.max(1, Number(result.pages) || 1);
       const service = jobBefore?.ingestMode === 'evidence' ? 'knowledge_page_evidence' : 'knowledge_page_both';
-      const creditKey = `knowledge-credit:${jobId}:${jobBefore?.processingVersion || 1}`;
+      const creditVersion = processingVersion == null
+        ? (jobBefore?.processingVersion || 1)
+        : Number(processingVersion);
+      const creditKey = `knowledge-credit:${jobId}:${creditVersion}`;
       const adjusted = await this.creditService.adjustReservation({ orgId, idempotencyKey: creditKey, service, units: pages });
       if (!adjusted.admitted && adjusted.admitted !== undefined) {
         throw Object.assign(new Error('Monthly credits exhausted before upload settlement.'), { code: 'CREDITS_EXHAUSTED' });
       }
     }
     const updated = await this._model().updateMany({
-      where: { id: jobId, orgId, userId, status: { notIn: [...TERMINAL] } },
+      where: {
+        id: jobId, orgId, userId, status: { notIn: [...TERMINAL] },
+        ...(processingVersion == null ? {} : { processingVersion: Number(processingVersion) }),
+      },
       data: {
         status: 'ready', stage: 'ready', progress: 100, documentId: result.documentId || null,
         memoryIds: result.promotedMemoryIds || [], pageCount: Math.max(1, Number(result.pages) || 1),
@@ -224,14 +252,37 @@ export class KnowledgeUploadJobStore {
       },
     });
     if (!updated.count) {
+      // The only mutation above was scoped to this attempt's reservation key.
+      // Release it when the database transition lost a race to retry/cancel so
+      // the stale attempt cannot leave reserved credit behind.
+      if (this.creditService) {
+        const creditVersion = processingVersion == null
+          ? (jobBefore?.processingVersion || 1)
+          : Number(processingVersion);
+        await this.creditService.release({
+          orgId,
+          idempotencyKey: `knowledge-credit:${jobId}:${creditVersion}`,
+        }).catch(() => {});
+      }
       const existing = await this.findOwned(jobId, { orgId, userId });
       if (existing?.status !== 'ready' || existing.usageSettledAt) return false;
     }
     await this.settle(jobId, orgId, userId, 'uploads', 1);
     await this.settle(jobId, orgId, userId, 'kbPages', Math.max(1, Number(result.pages) || 1));
     await this.settle(jobId, orgId, userId, 'memories', Math.max(0, Number(result.promotedCount) || 0));
-    if (this.creditService) await this.creditService.settle({ orgId, idempotencyKey: `knowledge-credit:${jobId}:${jobBefore?.processingVersion || 1}` });
-    await this.updateOwned(jobId, orgId, { usageSettledAt: new Date() });
+    if (this.creditService) {
+      const creditVersion = processingVersion == null
+        ? (jobBefore?.processingVersion || 1)
+        : Number(processingVersion);
+      await this.creditService.settle({ orgId, idempotencyKey: `knowledge-credit:${jobId}:${creditVersion}` });
+    }
+    await this._model().updateMany({
+      where: {
+        id: jobId, orgId,
+        ...(processingVersion == null ? {} : { processingVersion: Number(processingVersion) }),
+      },
+      data: { usageSettledAt: new Date() },
+    });
     return true;
   }
 

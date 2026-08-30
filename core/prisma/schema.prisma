@@ -1917,6 +1917,11 @@ model KnowledgeIngestJob {
   stage             String    @default("accepted") @db.VarChar(48)
   progress          Int       @default(0)
   processingVersion Int       @default(1) @map("processing_version")
+  orchestrationMode String    @default("bullmq") @map("orchestration_mode") @db.VarChar(32)
+  workflowInstanceId String?  @map("workflow_instance_id") @db.VarChar(160)
+  pipelineVersion   Int       @default(1) @map("pipeline_version")
+  sourceObjectKey   String?   @map("source_object_key") @db.VarChar(700)
+  sourceObjectEtag  String?   @map("source_object_etag") @db.VarChar(160)
   attempt           Int       @default(0)
   queueJobId        String?   @map("queue_job_id") @db.VarChar(160)
   documentId        String?   @map("document_id") @db.Uuid
@@ -1932,13 +1937,45 @@ model KnowledgeIngestJob {
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  steps             KnowledgeIngestStep[]
 
   @@index([orgId, userId, createdAt(sort: Desc)])
   @@index([orgId, status, updatedAt])
   @@index([orgId, scopeKey, checksum])
   @@index([orgId, ingestMode, status])
   @@index([queueJobId])
+  @@index([workflowInstanceId])
   @@map("knowledge_ingest_jobs")
+}
+
+/// Idempotent, lease-backed receipts for an external durable orchestrator.
+/// Large artifacts stay in object storage; this table records only hashes,
+/// references, coverage and terminal verification evidence.
+model KnowledgeIngestStep {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobId             String    @map("job_id") @db.Uuid
+  processingVersion Int       @map("processing_version")
+  stageKey          String    @map("stage_key") @db.VarChar(64)
+  shardKey          String    @default("root") @map("shard_key") @db.VarChar(160)
+  status            String    @default("pending") @db.VarChar(24)
+  attempt           Int       @default(0)
+  inputDigest       String?   @map("input_digest") @db.VarChar(128)
+  outputRefs        Json      @default("{}") @map("output_refs")
+  coverage          Json      @default("{}")
+  leaseUntil        DateTime? @map("lease_until") @db.Timestamptz(6)
+  leaseToken        String?   @map("lease_token") @db.Uuid
+  errorCode         String?   @map("error_code") @db.VarChar(80)
+  errorMessage      String?   @map("error_message")
+  startedAt         DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt       DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  job               KnowledgeIngestJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, processingVersion, stageKey, shardKey])
+  @@index([jobId, processingVersion, status])
+  @@index([status, leaseUntil])
+  @@map("knowledge_ingest_steps")
 }
 
 /// Exactly-once settlement markers for billable Knowledge Base metrics.
@@ -3985,6 +4022,7 @@ model CanonicalEntity {
   memoryLinks MemoryEntityLink[]
 
   @@index([organizationId, entityKind])
+  @@unique([organizationId, identityKey], map: "canonical_entities_org_identity_key")
   @@index([organizationId, entityKind, normalizedName], map: "canonical_entities_org_kind_normalized_idx")
   @@index([aliases], type: Gin)
   @@index([emailDomains], type: Gin)

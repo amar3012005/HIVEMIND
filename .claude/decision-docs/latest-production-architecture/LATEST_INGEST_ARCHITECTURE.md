@@ -113,3 +113,58 @@ For a disposable tenant or explicitly authorized test tenant:
 5. Verify no Prisma UUID/transaction errors, shard-lock errors, false-ready state, proxy 5xx, or noisy per-segment production logs.
 6. Clean the synthetic document, vectors, entities, relationships, jobs, and temporary key.
 
+## Local durable Workflow implementation (2026-08-30)
+
+The feature-flagged implementation on `codex/knowledge-ingest-workflow-v1` is
+for integration into `singulance-local`; it does not replace production. The
+existing multipart request, `202`, polling, terminal, duplicate, scope, and
+billing contracts remain unchanged.
+
+Activation requires all three gates:
+
+```text
+HIVEMIND_LOCAL_MODE=true
+KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true
+Flagship knowledge_ingest_workflow_v1=true for the organization
+```
+
+The orchestrator and processing version are latched on the job. Cloudflare
+messages carry only `job_id`, `org_id`, and `processing_version`. Source bytes
+live in the isolated R2 bucket and are verified by ETag and SHA-256.
+
+PostgreSQL records ten successful receipts for a `both` attempt: `acquire`,
+`materialize`, `extract`, `persist_evidence`, `embed_evidence`, `evidence_gate`,
+`generate_memories`, `project_entities_claims`,
+`persist_relationships_citations`, and `reconcile`. The canonical engine remains
+the executor. A crash replays its idempotent materialization boundary and heals
+missing vectors; finer receipts are persisted verification evidence. Lease
+tokens fence late expired workers, and successful receipts reject changed input
+within the same processing version.
+
+Local runtime uses production model parity: Gemini 2.5 Flash Lite, the configured
+DeepSeek/Groq fallback chain, and BGE-M3 1024-dimensional embeddings through AI
+Gateway `hivemind-prod`. Credentials remain environment-only. Chat extraction is
+explicitly routed to OpenRouter; BGE embedding/reranking routes are rejected for
+chat before network I/O.
+
+Cloudflare-hosted validation uses only Worker
+`hivemind-knowledge-ingest-local`, Workflow
+`hivemind-knowledge-ingest-workflow-local`, Queue/DLQ
+`hivemind-knowledge-ingest[-dlq]-local`, and R2
+`hivemind-ingest-artifacts-local`. Its preview bridge is path-bounded,
+local-gated, and dedicated-secret authenticated at both hops.
+
+Accepted canaries:
+
+- Evidence-only job `7ae4c69c-8c2c-40a7-b764-e88b156d5c8b`: one document,
+  10/10 embedded segments, zero memories, grounded citation.
+- Paolo job `cca99f31-fcfd-4707-b0ba-2d84de3f9d9c`: one document, 2/2 embedded
+  segments, 10 candidates, 8 memories, 9 citations, ten receipts, and one
+  canonical Paolo entity.
+- Starting the same hosted deterministic instance twice completed once with
+  stable counts. Authenticated recall returned Paolo memories and exact evidence.
+
+Rollback: disable the Flagship flag or set
+`KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. No production resource or
+`singulance-main` release is part of this implementation.
+

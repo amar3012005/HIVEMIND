@@ -30,6 +30,25 @@ test('canonical upload returns a normalized durable 202', async () => {
   assert.equal(result.statusCode, 202);
   assert.equal(result.body.job_id, '33333333-3333-4333-8333-333333333333');
   assert.equal(result.body.storage_mode, 'hybrid');
+  assert.deepEqual(Object.keys(result.body), [
+    'job_id', 'status', 'stage', 'progress', 'document_id', 'memory_ids',
+    'storage_mode', 'ingest_mode', 'evidence_only', 'evidence_only_reason',
+    'memory_generation_failed', 'counts', 'progress_detail', 'error',
+    'created_at', 'updated_at', 'completed_at', 'existing',
+  ]);
+  assert.deepEqual(Object.keys(result.body.counts), ['pages', 'segments', 'candidates', 'memories']);
+  assert.equal(result.body.existing, false);
+  assert.equal(context().res.headers['X-Job-Id'], undefined);
+});
+
+test('canonical upload preserves the X-Job-Id header and existing latch', async () => {
+  const ctx = context({ knowledgeUploadService: { admit: async () => ({ ok: true, existing: true, job: {
+    id: '33333333-3333-4333-8333-333333333333', status: 'queued', stage: 'queued', progress: 0,
+    storageMode: 'hybrid', memoryIds: [], createdAt: new Date(), updatedAt: new Date(),
+  } }) } });
+  const result = await handleKnowledgeUploadRoute(ctx);
+  assert.equal(ctx.res.headers['X-Job-Id'], '33333333-3333-4333-8333-333333333333');
+  assert.equal(result.body.existing, true);
 });
 
 test('canonical upload fails closed when durable service is unavailable', async () => {

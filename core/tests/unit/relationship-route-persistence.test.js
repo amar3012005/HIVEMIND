@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const source = fs.readFileSync(new URL('../../src/server.js', import.meta.url), 'utf8');
 const storeSource = fs.readFileSync(new URL('../../src/memory/prisma-graph-store.js', import.meta.url), 'utf8');
+const engineSource = fs.readFileSync(new URL('../../src/memory/graph-engine.js', import.meta.url), 'utf8');
 
 test('public relationship writes use the canonical validated dispatcher', () => {
   const routeStart = source.indexOf("case '/api/relationships':");
@@ -53,4 +54,5 @@ test('remote memory hydration latches the agent backend through relationship per
   assert.match(storeSource, /function mapAgentRow[\s\S]*?_storage_backend:\s*'agent'/);
   assert.match(storeSource, /const remoteLatched = edge\.storage_backend === 'agent'/);
   assert.match(storeSource, /if \(remoteLatched \|\| orgIsRemote\(_remoteOrg\)\)/);
+  assert.match(engineSource, /storage_backend:[^\n]+orgIsRemote\(org_id\) \? 'agent'/);
 });

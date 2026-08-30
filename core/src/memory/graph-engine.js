@@ -3455,7 +3455,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       const edge = await store.createRelationship({
         id: uuidv4(),
         org_id,
-        storage_backend: source._storage_backend || target._storage_backend || undefined,
+        storage_backend: source._storage_backend || target._storage_backend || (orgIsRemote(org_id) ? 'agent' : undefined),
         from_id: sourceId,
         to_id: targetId,
         type: 'Updates',
@@ -3541,7 +3541,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       const edge = await store.createRelationship({
         id: uuidv4(),
         org_id,
-        storage_backend: source._storage_backend || target._storage_backend || undefined,
+        storage_backend: source._storage_backend || target._storage_backend || (orgIsRemote(org_id) ? 'agent' : undefined),
         from_id: sourceId,
         to_id: targetId,
         type: 'Extends',
@@ -3623,7 +3623,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         const edge = await store.createRelationship({
           id: uuidv4(),
           org_id,
-          storage_backend: sources.find((memory) => memory?.id === sourceIdValue)?._storage_backend || target._storage_backend || undefined,
+          storage_backend: sources.find((memory) => memory?.id === sourceIdValue)?._storage_backend || target._storage_backend || (orgIsRemote(org_id) ? 'agent' : undefined),
           from_id: sourceIdValue,
           to_id: targetId,
           type: 'Derives',
@@ -3727,7 +3727,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         to_id: targetId,
         type,
         org_id,
-        storage_backend: sources.find((memory) => memory?._storage_backend)?._storage_backend || target?._storage_backend || edge.storage_backend,
+        storage_backend: sources.find((memory) => memory?._storage_backend)?._storage_backend || target?._storage_backend || edge.storage_backend || (orgIsRemote(org_id) ? 'agent' : undefined),
         confidence: edge.confidence ?? 1,
         created_at: edge.created_at || nowIso(),
         created_by: edge.created_by || 'canonical-relationship-dispatcher',

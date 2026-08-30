@@ -2,16 +2,16 @@ param(
   [string]$ProductionSshHost = 'singulance',
   [string]$ProductionCoreContainer = 'hm-core',
   [string]$TestOrgId = '47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f',
-  [string]$WorkflowUrl = 'https://hivemind-knowledge-ingest-local.amarsai2005.workers.dev'
+  [string]$WorkflowUrl = 'https://hivemind-knowledge-ingest-local.amarsai2005.workers.dev',
+  [string]$DurableChatUrl = '',
+  [string]$DurableChatSecret = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$compose = @(
-  '-p', 'hivemind',
-  '-f', (Join-Path $repo 'docker-compose.local-stack.yml'),
-  '-f', (Join-Path $repo 'docker-compose.local-services.yml')
-)
+$compose = @('-p', 'hivemind', '-f', (Join-Path $repo 'docker-compose.local-stack.yml'))
+$localServices = Join-Path $repo 'docker-compose.local-services.yml'
+if (Test-Path -LiteralPath $localServices) { $compose += @('-f', $localServices) }
 
 # These are inference/parser policy variables only. Database, Redis, Qdrant,
 # public URLs, auth/session identity, and Cloudflare lifecycle resources remain
@@ -116,6 +116,11 @@ if ([string]::IsNullOrWhiteSpace($workflowSecret)) { throw 'The local Workflow s
 [Environment]::SetEnvironmentVariable('KNOWLEDGE_INGEST_WORKFLOW_SECRET', $workflowSecret, 'Process')
 [Environment]::SetEnvironmentVariable('DOCLING_URL', 'http://docling:5001', 'Process')
 [Environment]::SetEnvironmentVariable('KB_EXTRACT_URL', 'http://hm-extract:8088', 'Process')
+if (-not [string]::IsNullOrWhiteSpace($DurableChatUrl) -and -not [string]::IsNullOrWhiteSpace($DurableChatSecret)) {
+  [Environment]::SetEnvironmentVariable('DURABLE_CHAT_AGENT_ENABLED', 'true', 'Process')
+  [Environment]::SetEnvironmentVariable('CLOUDFLARE_CHAT_AGENT_URL', $DurableChatUrl, 'Process')
+  [Environment]::SetEnvironmentVariable('CLOUDFLARE_CHAT_AGENT_SECRET', $DurableChatSecret, 'Process')
+}
 
 $decision = Invoke-RestMethod -Uri "$WorkflowUrl/enabled?org_id=$([Uri]::EscapeDataString($TestOrgId))" `
   -Headers @{ Authorization = "Bearer $workflowSecret" } -TimeoutSec 20
@@ -149,8 +154,11 @@ if (-not $healthy) { throw 'The production-parity local API did not become healt
 # 503 responses while both containers themselves appear healthy.
 Push-Location $repo
 try {
-  & docker compose @compose up -d --no-build --no-deps --force-recreate control-plane
-  if ($LASTEXITCODE -ne 0) { throw 'Unable to recreate the local control plane.' }
+  $services = @(& docker compose @compose config --services)
+  if ($services -contains 'control-plane') {
+    & docker compose @compose up -d --no-build --no-deps --force-recreate control-plane
+    if ($LASTEXITCODE -ne 0) { throw 'Unable to recreate the local control plane.' }
+  }
 } finally {
   Pop-Location
 }
@@ -174,4 +182,5 @@ if (-not $controlHealthy) { throw 'The local control plane did not become health
   embeddings_configured = [bool]$health.amr_engine.embeddingsConfigured
   production_inference_policy = $true
   local_data_plane = $true
+  durable_chat_enabled = -not [string]::IsNullOrWhiteSpace($DurableChatUrl)
 } | ConvertTo-Json -Compress

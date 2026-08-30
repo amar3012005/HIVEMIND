@@ -1181,3 +1181,59 @@ slides that find no unique anchor get a page instead of `null`.
   projection sibling check remained `full`.
 - Flag default remains off and exact canary remains on. Environment backup:
   `/root/hivemind/.env.pre-recall-reliability-20260830T213044Z`.
+
+## 2026-08-31 UTC — Durable chat session orchestration started
+
+- State: Started; implementation and local verification in progress.
+- Owner: Codex.
+- Branch: `codex/durable-chat-agent-v1`.
+- Base: `bb359330c3dfd336672433847af2559f2670b1b0` (`origin/singulance-main`).
+- Scope: additive, fail-closed `durable_chat_agent_v1` turn/checkpoint/event
+  ledger; metadata-only Cloudflare Agent session coordination; resumable Core
+  event reads; preservation of the existing Native Chat V2 planner, top-5/
+  top-15 recall windows, tool execution, grounding, and synthesis behavior.
+- Data boundary: customer messages, recall packets, tool results, citations,
+  and final answers remain in HIVEMIND PostgreSQL/Memory Box storage. The
+  Cloudflare session receives opaque identifiers and execution metadata only.
+- Production: not deployed; global default must remain `off` until a separate
+  governed rollout is accepted.
+- Verification: pending.
+
+## 2026-08-31 UTC — Durable chat session orchestration accepted locally
+
+- State: Committed implementation pending branch commit; not an accepted
+  production release.
+- Branch/base: `codex/durable-chat-agent-v1` from
+  `bb359330c3dfd336672433847af2559f2670b1b0`.
+- Implemented additive Prisma turn/checkpoint/event state, authenticated cursor
+  replay, idempotent admission/final replay, metadata-only Cloudflare Agent
+  mirroring, fail-closed multivariate evaluation, and V2-compatible top-5/top-15
+  depth behavior. Cloudflare notification is explicitly non-blocking after the
+  local transaction.
+- The local grounded canary exposed two existing two-stage gaps: an embedding-
+  hostile attribute rewrite could miss the correct memory, and a conservative
+  graph lookup could return empty while an explicit source claim was present.
+  Durable mode now performs one bounded source-record recovery. Relationship
+  synthesis remains citation-gated and the prompt still forbids co-mention edges.
+- Commands and results:
+  - `node --test ...durable-chat*.test.js ...chat*.test.js ...native-chat-v2.test.js`:
+    70 passed; three Windows-only loaders failed before tests because
+    `singulance-amr` has no `win32-x64` binary. Re-running those tests in the
+    Linux image reached 18/21; the three failures reproduce pre-existing contract
+    drift/missing isolated embedding configuration and do not touch changed code.
+  - Focused durable suite: 9/9 passed, including a permanently stalled edge
+    notifier proving Core admission and event persistence remain non-blocking.
+  - `npm test --prefix workers/durable-chat-agent`: 12/12 passed.
+  - `npm run check --prefix workers/durable-chat-agent`: Wrangler type generation
+    and `tsc --noEmit` passed.
+  - `prisma validate --schema core/prisma/schema.prisma`: valid.
+  - Live local public API: save HTTP 201; fact, source, temporal, detailed,
+    comprehensive, and relation turns HTTP 200 in `full`; temporal returned both
+    exact dates with two sources; relationship returned the explicit ownership
+    claim as grounded. Temporary scoped key was deleted and canary was tombstoned.
+  - Replay route: unauthenticated HTTP 401; authorized cursor HTTP 200 with a
+    completed turn and ordered next sequence. Cloudflare status endpoint HTTP 200.
+- Local Cloudflare Agent version:
+  `24cab74d-0e4a-466e-8a12-0b8b0a99aca3`. Production remained untouched and off.
+- Rollback: disable `DURABLE_CHAT_AGENT_ENABLED` or serve Flagship `off`; existing
+  Chat V2 remains the stable path.

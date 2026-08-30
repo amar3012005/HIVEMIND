@@ -1,0 +1,43 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-durable-chat-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ENVIRONMENT": "development",
+    "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
+    "DURABLE_CHAT_AGENT_ENABLED": "false"
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "durable_objects": {
+    "bindings": [{ "name": "CHAT_SESSION", "class_name": "HivemindChatSession" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HivemindChatSession"] }],
+  "env": {
+    "local": {
+      "name": "hivemind-durable-chat-agent-local",
+      "durable_objects": {
+        "bindings": [{ "name": "CHAT_SESSION", "class_name": "HivemindChatSession" }]
+      },
+      "vars": {
+        "ENVIRONMENT": "local",
+        "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
+        "DURABLE_CHAT_AGENT_ENABLED": "true"
+      },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }]
+    },
+    "production": {
+      "name": "hivemind-durable-chat-agent-production",
+      "durable_objects": {
+        "bindings": [{ "name": "CHAT_SESSION", "class_name": "HivemindChatSession" }]
+      },
+      "vars": {
+        "ENVIRONMENT": "production",
+        "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
+        "DURABLE_CHAT_AGENT_ENABLED": "false"
+      },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }]
+    }
+  }
+}

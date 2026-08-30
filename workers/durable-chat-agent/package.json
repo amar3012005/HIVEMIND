@@ -1,0 +1,23 @@
+{
+  "name": "hivemind-durable-chat-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "wrangler types && tsc --noEmit",
+    "test": "vitest run",
+    "dev": "wrangler dev --env local",
+    "deploy:local": "wrangler deploy --env local",
+    "deploy:production": "wrangler deploy --env production",
+    "dry-run": "wrangler deploy --dry-run --env local"
+  },
+  "dependencies": {
+    "agents": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest",
+    "vitest": "latest",
+    "wrangler": "latest"
+  }
+}

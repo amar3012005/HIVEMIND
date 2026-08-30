@@ -55,6 +55,8 @@ import { getEntityLinkQueue } from './memory/entity-link-queue.js';
 import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonicalKnowledge, prepareCanonicalProjection, verifyCanonicalProjectionSignature } from './memory/canonical-knowledge.js';
 import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
 import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
+import { CloudflareChatSessionClient } from './agent/v2/cloudflare-chat-session-client.js';
+import { DurableChatTurnStore, createDurableEventSink } from './agent/v2/durable-turn-store.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
@@ -128,6 +130,7 @@ const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
 const canonicalProjectionClient = new CloudflareCanonicalProjectionClient();
 const recallReliabilityClient = new CloudflareRecallReliabilityClient();
+const cloudflareChatSessionClient = new CloudflareChatSessionClient();
 const canonicalProjectionNonceFallback = new Map();
 
 async function consumeCanonicalProjectionNonce(nonce) {
@@ -24126,6 +24129,26 @@ exit \$RC
         // ==========================================
         // CHAT — Talk to HIVE (memory-augmented LLM)
         // ==========================================
+        case '/api/chat/turn-events':
+          if (req.method === 'GET') {
+            const turnId = url.searchParams.get('turn_id');
+            if (!turnId) return jsonResponse(res, { error: 'turn_id_required' }, 400);
+            try {
+              const store = new DurableChatTurnStore({ prisma, notifier: cloudflareChatSessionClient });
+              const replay = await store.readAuthorized({
+                turnId, orgId, userId,
+                after: url.searchParams.get('after') || 0,
+                limit: url.searchParams.get('limit') || 200,
+              });
+              if (!replay) return jsonResponse(res, { error: 'turn_not_found' }, 404);
+              return jsonResponse(res, replay);
+            } catch (error) {
+              console.warn(`[durable-chat] replay unavailable: ${error.message}`);
+              return jsonResponse(res, { error: 'durable_chat_unavailable' }, 503);
+            }
+          }
+          break;
+
         case '/api/chat':
         case '/v2/chat':
           if (req.method === 'POST') {
@@ -24364,12 +24387,79 @@ exit \$RC
             // recall-then-LLM flow on HIVEMIND_AGENT_MODE=off or on error.
             const agentEnabled = true;
             if (agentEnabled) {
+              let failedDurableChatStore = null;
+              let failedDurableChatTurn = null;
               try {
                 // Evaluate once per authenticated turn and latch the result into
                 // every recall issued by this chat. Flagship failure is off.
                 const recallReliabilityV1 = await recallReliabilityClient
                   .enabledFor({ orgId, userId })
                   .catch(() => false);
+                // Additive durable execution envelope. The selected mode is
+                // evaluated once and latched on the turn. Flag/Worker/schema
+                // failures fail closed to the unchanged Chat V2 path.
+                let durableChatMode = await cloudflareChatSessionClient
+                  .modeFor({ orgId, userId })
+                  .catch(() => 'off');
+                let durableChatStore = null;
+                let durableChatTurn = null;
+                if (durableChatMode !== 'off') {
+                  try {
+                    durableChatStore = new DurableChatTurnStore({ prisma, notifier: cloudflareChatSessionClient });
+                    const admitted = await durableChatStore.createOrReuse({
+                      orgId, userId,
+                      threadId: body?.thread_id || body?.conversation_id || null,
+                      idempotencyKey: chatCreditKey,
+                      mode: durableChatMode,
+                      requestPayload: {
+                        message, history, language, model, use_tools: useTools,
+                        recall_mode: body?.recall_mode || null,
+                        source: body?.source || null,
+                        time: body?.time || null,
+                      },
+                      scopeSnapshot: {
+                        project_id: requestProjectId,
+                        scope_filter: requestScopeFilter,
+                        authorized_project_ids: agentAccessCtx.projectIds || [],
+                      },
+                    });
+                    durableChatTurn = admitted.turn;
+                    failedDurableChatStore = durableChatStore;
+                    failedDurableChatTurn = durableChatTurn;
+                    if (!admitted.created && durableChatTurn.status === 'completed' && durableChatTurn.responsePayload) {
+                      const replayed = {
+                        ...durableChatTurn.responsePayload,
+                        durable_turn: {
+                          id: durableChatTurn.id, mode: durableChatTurn.orchestrationMode,
+                          status: 'completed', replayed: true,
+                          events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
+                        },
+                      };
+                      await settleChatCredit();
+                      if (wantStream) {
+                        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+                        res.write(`data: ${JSON.stringify({ type: 'done', ...replayed })}\n\n`);
+                        res.end();
+                        return;
+                      }
+                      return jsonResponse(res, replayed);
+                    }
+                    if (!admitted.created && !['failed', 'cancelled'].includes(durableChatTurn.status)) {
+                      await releaseChatCredit();
+                      return jsonResponse(res, {
+                        error: 'chat_turn_in_progress',
+                        durable_turn: {
+                          id: durableChatTurn.id, mode: durableChatTurn.orchestrationMode,
+                          status: durableChatTurn.status, phase: durableChatTurn.currentPhase,
+                          events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
+                        },
+                      }, 409);
+                    }
+                  } catch (error) {
+                    console.warn(`[durable-chat] admission degraded to Chat V2: ${error.message}`);
+                    durableChatMode = 'off'; durableChatStore = null; durableChatTurn = null;
+                  }
+                }
                 // Still honour the onboarding state machine — it cannot be
                 // LLM-picked because it needs to gate the very first turn
                 // before the LLM ever runs.
@@ -24420,9 +24510,13 @@ exit \$RC
                     Connection: 'keep-alive',
                     'X-Accel-Buffering': 'no',
                   });
-                  const emit = (evt) => {
+                  const rawEmit = (evt) => {
                     try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {}
                   };
+                  const durableSink = durableChatTurn
+                    ? createDurableEventSink({ store: durableChatStore, turnId: durableChatTurn.id, emit: rawEmit })
+                    : null;
+                  const emit = (evt) => durableSink ? durableSink.push(evt) : rawEmit(evt);
                   try {
                     const result = await runReactAgent({
                       message, history, model, apiKey: groqKey,
@@ -24445,6 +24539,7 @@ exit \$RC
                       ctx: {
                         userId, orgId,
                         recallReliabilityV1,
+                        durableChatMode,
                         threadId: body?.thread_id || body?.conversation_id || null,
                         projectId: requestProjectId,
                         scopeFilter: requestScopeFilter,
@@ -24468,6 +24563,12 @@ exit \$RC
                     if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
                       result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
                     }
+                    if (durableChatTurn && durableChatMode !== 'shadow') {
+                      result.durable_turn = {
+                        id: durableChatTurn.id, mode: durableChatMode, status: 'completed', replayed: false,
+                        events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
+                      };
+                    }
                     try {
                       planEnforcer?.recordUsage(orgId, 'searches', 1, { source: 'chat', feature: 'brain_chat', metadata: { use_tools: useTools } });
                       const tot = Number(result?.usage?.total_tokens) || 0;
@@ -24481,15 +24582,26 @@ exit \$RC
                       });
                     }
                     emit({ type: 'done', ...result });
+                    if (durableSink) {
+                      await durableSink.flush();
+                      await durableChatStore.complete(durableChatTurn.id, result, durableSink.sequence);
+                    }
                     await settleChatCredit();
                   } catch (agentErr) {
                     await releaseChatCredit();
                     emit({ type: 'error', error: agentErr.message });
+                    if (durableSink) {
+                      await durableSink.flush();
+                      await durableChatStore.fail(durableChatTurn.id, agentErr, durableSink.sequence);
+                    }
                   }
                   try { res.end(); } catch {}
                   return;
                 }
 
+                const durableSink = durableChatTurn
+                  ? createDurableEventSink({ store: durableChatStore, turnId: durableChatTurn.id })
+                  : null;
                 const result = await runReactAgent({
                   message, history, model, apiKey: groqKey,
                   assistantName: agentAssistantName, orgName: agentOrgName,
@@ -24511,6 +24623,7 @@ exit \$RC
                   ctx: {
                     userId, orgId,
                     recallReliabilityV1,
+                    durableChatMode,
                     threadId: body?.thread_id || body?.conversation_id || null,
                     projectId: requestProjectId,
                     scopeFilter: requestScopeFilter,
@@ -24528,6 +24641,7 @@ exit \$RC
                     runWebCrawlJob,
                     runWebSearchJob,
                   },
+                  onEvent: durableSink ? (event) => durableSink.push(event) : null,
                 });
 
                 // Usage metering: one chat = one search query; tokens from the
@@ -24553,6 +24667,12 @@ exit \$RC
                 if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
                   result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
                 }
+                if (durableChatTurn && durableChatMode !== 'shadow') {
+                  result.durable_turn = {
+                    id: durableChatTurn.id, mode: durableChatMode, status: 'completed', replayed: false,
+                    events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
+                  };
+                }
                 if (!useTools && (body?.thread_id || body?.conversation_id)) {
                   const { recordCompactAssistantTurn } = await import('./agent/v2/compact-context.js');
                   await recordCompactAssistantTurn({
@@ -24560,10 +24680,18 @@ exit \$RC
                     response: result?.response, sources: result?.sources || [],
                   });
                 }
+                if (durableSink) {
+                  durableSink.push({ type: 'done', result_digest: crypto.createHash('sha256').update(JSON.stringify(result)).digest('hex') });
+                  await durableSink.flush();
+                  await durableChatStore.complete(durableChatTurn.id, result, durableSink.sequence);
+                }
                 await settleChatCredit();
                 return jsonResponse(res, result);
               } catch (agentErr) {
                 await releaseChatCredit();
+                if (failedDurableChatStore && failedDurableChatTurn) {
+                  await failedDurableChatStore.fail(failedDurableChatTurn.id, agentErr).catch(() => {});
+                }
                 console.error('[chat:orchestrator] failed:', agentErr.message);
                 return jsonResponse(res, { error: 'chat_orchestration_failed', traceable: true }, 502);
               }

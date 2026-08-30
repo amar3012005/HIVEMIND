@@ -4867,6 +4867,66 @@ model HyperTurnEventOutbox {
   @@map("hyper_turn_event_outbox")
 }
 
+model DurableChatTurn {
+  id                String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId             String                  @map("org_id") @db.Uuid
+  userId            String                  @map("user_id") @db.Uuid
+  threadDigest      String?                 @map("thread_digest") @db.Char(64)
+  idempotencyKey    String                  @map("idempotency_key") @db.VarChar(180)
+  orchestrationMode String                  @default("off") @map("orchestration_mode") @db.VarChar(24)
+  status            String                  @default("accepted") @db.VarChar(32)
+  currentPhase      String                  @default("accepted") @map("current_phase") @db.VarChar(40)
+  requestPayload    Json                    @map("request_payload") @db.JsonB
+  scopeSnapshot     Json                    @default("{}") @map("scope_snapshot") @db.JsonB
+  responsePayload   Json?                   @map("response_payload") @db.JsonB
+  error             Json?                   @db.JsonB
+  createdAt         DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime                @default(now()) @map("updated_at") @db.Timestamptz(6)
+  completedAt       DateTime?               @map("completed_at") @db.Timestamptz(6)
+  checkpoints       DurableChatCheckpoint[]
+  events            DurableChatEvent[]
+
+  @@unique([orgId, idempotencyKey], map: "durable_chat_turns_org_idempotency_key")
+  @@index([orgId, userId, updatedAt(sort: Desc)], map: "durable_chat_turns_tenant_updated_idx")
+  @@index([threadDigest, updatedAt(sort: Desc)], map: "durable_chat_turns_thread_updated_idx")
+  @@map("durable_chat_turns")
+}
+
+model DurableChatCheckpoint {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  turnId         String          @map("turn_id") @db.Uuid
+  phase          String          @db.VarChar(40)
+  status         String          @default("pending") @db.VarChar(24)
+  attempt        Int             @default(1)
+  inputDigest    String?         @map("input_digest") @db.Char(64)
+  receipt        Json            @default("{}") @db.JsonB
+  error          Json?           @db.JsonB
+  leaseToken     String?         @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?       @map("lease_expires_at") @db.Timestamptz(6)
+  startedAt      DateTime        @default(now()) @map("started_at") @db.Timestamptz(6)
+  completedAt    DateTime?       @map("completed_at") @db.Timestamptz(6)
+  updatedAt      DateTime        @default(now()) @map("updated_at") @db.Timestamptz(6)
+  turn           DurableChatTurn @relation(fields: [turnId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([turnId, phase], map: "durable_chat_checkpoints_turn_phase_key")
+  @@index([status, leaseExpiresAt], map: "durable_chat_checkpoints_recovery_idx")
+  @@map("durable_chat_checkpoints")
+}
+
+model DurableChatEvent {
+  id        BigInt          @id @default(autoincrement())
+  turnId    String          @map("turn_id") @db.Uuid
+  sequence  Int
+  eventType String          @map("event_type") @db.VarChar(80)
+  event     Json            @db.JsonB
+  createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  turn      DurableChatTurn @relation(fields: [turnId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([turnId, sequence], map: "durable_chat_events_turn_sequence_key")
+  @@index([turnId, createdAt], map: "durable_chat_events_turn_created_idx")
+  @@map("durable_chat_events")
+}
+
 model PromotionCode {
   id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   codeHash        String    @unique @map("code_hash") @db.Char(64)

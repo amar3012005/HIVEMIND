@@ -8,7 +8,7 @@
  */
 
 import fetch from 'node-fetch';
-import { cloudflareGatewayEnabled, gatewayFirstFetch } from '../../llm/cloudflare-gateway.js';
+import { cloudflareGatewayEnabled, gatewayFirstFetch, gatewayProviderForUrl } from '../../llm/cloudflare-gateway.js';
 import { meterTokens } from '../../billing/usage-tracker.js';
 import { currentOrg, currentApiKey } from '../../db/prisma.js';
 import { recordAiUsage, resolveAiModelPolicy } from '../../llm/ai-governance.js';
@@ -188,6 +188,18 @@ function pickRoute(model) {
   }
   return { base: LITELLM_BASE_URL, key: LITELLM_API_KEY, provider: 'litellm' };
 }
+
+export function assertChatRoute(route) {
+  if (!route?.base) throw new Error('[enterprise-extract] chat route has no base URL');
+  const gatewayProvider = gatewayProviderForUrl(`${String(route.base).replace(/\/+$/, '')}/chat/completions`);
+  if (route.provider === 'litellm' && /^custom-bge-(?:embeddings|reranker)$/i.test(gatewayProvider || '')) {
+    throw new Error(
+      `[enterprise-extract] invalid chat route: ${gatewayProvider} is an embedding/reranking provider; `
+      + 'set LLM_PRIMARY=openrouter (or configure a dedicated chat-completions base URL)',
+    );
+  }
+  return route;
+}
 const TIMEOUT_MS = 60_000;
 // Learned provider capability, scoped to this process. If a provider says a
 // model requires reasoning, do not pay for the same guaranteed 400 on every
@@ -232,7 +244,7 @@ export async function chatCompletion({ messages, model, temperature = 0.1, max_t
     max_tokens,
   };
 
-  const route = pickRoute(model);
+  const route = assertChatRoute(pickRoute(model));
   if (route.wireModel) body.model = route.wireModel;
   // On OpenRouter, remap Groq model ids to their OpenRouter equivalents.
   if (route.provider === 'openrouter') {

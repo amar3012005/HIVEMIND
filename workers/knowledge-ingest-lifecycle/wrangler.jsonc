@@ -1,0 +1,104 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-knowledge-ingest-local-root",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "ENVIRONMENT": "local",
+    "HIVEMIND_CORE_URL": "http://127.0.0.1:3000",
+    "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
+  },
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
+      "remote": true
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ARTIFACTS",
+      "bucket_name": "hivemind-ingest-artifacts-local"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "INGEST_QUEUE",
+        "queue": "hivemind-knowledge-ingest-local"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "hivemind-knowledge-ingest-local",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "hivemind-knowledge-ingest-dlq-local",
+        "max_concurrency": 5,
+        "retry_delay": 30
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "hivemind-knowledge-ingest-workflow-local",
+      "binding": "INGEST_WORKFLOW",
+      "class_name": "KnowledgeIngestWorkflow"
+    }
+  ],
+  "env": {
+    "local": {
+      "name": "hivemind-knowledge-ingest-local",
+      "vars": {
+        "ENVIRONMENT": "local",
+        "HIVEMIND_CORE_URL": "https://preview-api.singulancelabs.com",
+        "KNOWLEDGE_INGEST_FLAG": "knowledge_ingest_workflow_v1"
+      },
+      "flagship": [
+        {
+          "binding": "FLAGS",
+          "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8",
+          "remote": true
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "ARTIFACTS",
+          "bucket_name": "hivemind-ingest-artifacts-local"
+        }
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "INGEST_QUEUE",
+            "queue": "hivemind-knowledge-ingest-local"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "hivemind-knowledge-ingest-local",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 5,
+            "dead_letter_queue": "hivemind-knowledge-ingest-dlq-local",
+            "max_concurrency": 5,
+            "retry_delay": 30
+          }
+        ]
+      },
+      "workflows": [
+        {
+          "name": "hivemind-knowledge-ingest-workflow-local",
+          "binding": "INGEST_WORKFLOW",
+          "class_name": "KnowledgeIngestWorkflow"
+        }
+      ]
+    }
+  }
+}

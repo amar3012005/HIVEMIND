@@ -47,3 +47,33 @@ verification, and its independent rollback control.
 - Release rule: deploy only from a clean, current `singulance-main` promotion;
   verify public crawler access and private-host `noindex` behavior before
   enabling any narrow crawler guard.
+
+## feature-20260830T012000Z — Enterprise canonical ingestion Workflow v1
+
+- Local status: implemented and accepted for `singulance-local`; production and
+  `singulance-main` remain unchanged.
+- Capability: Cloudflare Queue + Workflow orchestration, R2 source durability,
+  PostgreSQL lease/checkpoint receipts, replay-safe canonical evidence, memory,
+  entity, and citation materialization, with unchanged browser/API contracts.
+- Controls: `HIVEMIND_LOCAL_MODE=true`,
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true`, and Flagship
+  `knowledge_ingest_workflow_v1=true` for the test organization. Either feature
+  control rolls new admissions back to BullMQ.
+- Cloudflare local resources: Worker `hivemind-knowledge-ingest-local`, Workflow
+  `hivemind-knowledge-ingest-workflow-local`, Queue/DLQ
+  `hivemind-knowledge-ingest[-dlq]-local`, and R2
+  `hivemind-ingest-artifacts-local`. Hosted Worker version:
+  `ad64498c-2489-459c-a664-7de235a7bd38`.
+- AI parity: production Gemini/DeepSeek/Groq policy and BGE-M3 1024-dimensional
+  embeddings use AI Gateway `hivemind-prod`; credentials are not stored in Git.
+- Verification: 133/133 focused backend tests; Worker 2/2 tests, TypeScript
+  check, and Wrangler dry-run; frontend AI-discovery 3/3 and full CRA build;
+  Prisma validation; local and hosted replay canaries.
+- Runtime canary: job `cca99f31-fcfd-4707-b0ba-2d84de3f9d9c` produced one
+  document, two evidence segments with 2/2 vectors, ten candidates, eight
+  memories, nine citations, ten successful receipts, and one canonical Paolo
+  entity. Duplicate hosted starts completed once with unchanged counts.
+- Baseline note: unfiltered root `npm test` is not a valid Windows release gate
+  today because it mixes Vitest with Node's runner, references retired absolute
+  paths/modules, and requires a Linux-only AMR binary. The focused ingestion
+  suite and local Linux container runtime are green.

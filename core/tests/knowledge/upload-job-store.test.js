@@ -52,6 +52,60 @@ test('duplicate lookup gives a live source owner priority over newer terminal du
   });
 });
 
+test('boot orphan reaping excludes Cloudflare Workflow jobs that survive an API restart', async () => {
+  let where;
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    updateMany: async (query) => { where = query.where; return { count: 0 }; },
+  } } });
+  await store.reapStale({ bootedAt: new Date(), bootOrphanMin: 5 });
+  const bootOrphan = where.OR.at(-1);
+  assert.deepEqual(bootOrphan.orchestrationMode, { not: 'cloudflare_workflow' });
+});
+
+test('Workflow progress and failure writes are fenced by processing version', async () => {
+  const writes = [];
+  const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {
+    findFirst: async () => ({ id: 'job', attempt: 0, metadata: {}, processingVersion: 4 }),
+    updateMany: async (query) => { writes.push(query); return { count: 1 }; },
+  } } });
+  await store.progress('job', 'org', 'embedding', 50, {}, { processingVersion: 4 });
+  await store.fail('job', 'org', new Error('failed'), { processingVersion: 4 });
+  assert.equal(writes[0].where.processingVersion, 4);
+  assert.equal(writes[1].where.processingVersion, 4);
+});
+
+test('a stale Workflow failure cannot release the current retry reservation', async () => {
+  const released = [];
+  const store = new KnowledgeUploadJobStore({
+    prisma: { knowledgeIngestJob: {
+      findFirst: async () => ({ id: 'job', processingVersion: 5 }),
+      updateMany: async () => ({ count: 0 }),
+    } },
+    creditService: { release: async (input) => released.push(input) },
+  });
+
+  const changed = await store.fail('job', 'org', new Error('late v4 failure'), { processingVersion: 4 });
+
+  assert.equal(changed, false);
+  assert.deepEqual(released, []);
+});
+
+test('a winning Workflow failure releases only its own versioned reservation', async () => {
+  const released = [];
+  const store = new KnowledgeUploadJobStore({
+    prisma: { knowledgeIngestJob: {
+      findFirst: async () => ({ id: 'job', processingVersion: 5 }),
+      updateMany: async () => ({ count: 1 }),
+    } },
+    creditService: { release: async (input) => released.push(input) },
+  });
+
+  const changed = await store.fail('job', 'org', new Error('v5 failure'), { processingVersion: 5 });
+
+  assert.equal(changed, true);
+  assert.deepEqual(released, [{ orgId: 'org', idempotencyKey: 'knowledge-credit:job:5' }]);
+});
+
 test('ready responses always expose an authoritative terminal lifecycle', () => {
   const response = KnowledgeUploadJobStore.response({
     id: 'job', status: 'ready', stage: 'promoted', progress: 95,

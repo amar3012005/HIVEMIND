@@ -154,6 +154,48 @@ test('accepted upload persists one durable job before enqueue', async () => {
   assert.equal(deps.created[0].ingestMode, 'both');
 });
 
+test('enabled local Workflow latches orchestration and never sends file bytes in its queue message', async () => {
+  const deps = dependencies();
+  let legacyUsed = false;
+  deps.queue.persistFile = async () => { legacyUsed = true; return '/tmp/legacy'; };
+  deps.queue.enqueue = async () => { legacyUsed = true; return {}; };
+  const calls = [];
+  deps.cloudflareQueue = {
+    isEnabled: async (orgId) => orgId === ids.org,
+    isAvailable: async () => true,
+    persistFile: async (input) => {
+      calls.push(['persist', input]);
+      return { objectKey: 'org/source', etag: 'etag-1' };
+    },
+    enqueue: async (input) => {
+      calls.push(['enqueue', input]);
+      return { queue_job_id: 'workflow-1', workflow_instance_id: 'workflow-1' };
+    },
+  };
+
+  const result = await new KnowledgeUploadService(deps).admit(request());
+  assert.equal(result.ok, true);
+  assert.equal(legacyUsed, false);
+  assert.equal(deps.created[0].orchestrationMode, 'cloudflare_workflow');
+  const queueInput = calls.find(([kind]) => kind === 'enqueue')[1];
+  assert.equal(queueInput.filePath, null);
+  assert.equal(Object.hasOwn(queueInput, 'fileBuffer'), false);
+  const finalUpdate = deps.updates.at(-1)[2];
+  assert.equal(finalUpdate.workflowInstanceId, 'workflow-1');
+  assert.equal(finalUpdate.sourceObjectKey, 'org/source');
+});
+
+test('disabled or failed-closed Workflow flag preserves the legacy BullMQ path', async () => {
+  const deps = dependencies();
+  let legacyUsed = false;
+  deps.queue.persistFile = async () => { legacyUsed = true; return '/tmp/legacy'; };
+  deps.cloudflareQueue = { isEnabled: async () => false };
+  const result = await new KnowledgeUploadService(deps).admit(request());
+  assert.equal(result.ok, true);
+  assert.equal(legacyUsed, true);
+  assert.equal(deps.created[0].orchestrationMode, 'bullmq');
+});
+
 test('evidence mode persists through the durable job and queue metadata', async () => {
   const deps = dependencies();
   let queued;

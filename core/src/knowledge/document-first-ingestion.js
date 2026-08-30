@@ -1067,8 +1067,9 @@ export class DocumentFirstIngestionService {
     this.cancelledEntityDocuments = new Set();
   }
 
-  /** Fire-and-forget entity extraction over segments (P1 #9).
-   *  Parallel workers — bound by ENTITY_EXTRACT_CONCURRENCY (default 6). */
+  /** Entity extraction over segments (P1 #9).
+   *  Callers may await the returned flight at a durable completion boundary.
+   *  Parallel workers are bound by ENTITY_EXTRACT_CONCURRENCY (default 6). */
   _extractEntitiesAsync({ segments, userId, orgId, documentId, force = false }) {
     if (!this.entityExtractor || process.env.ENABLE_ENTITY_EXTRACTION !== 'true') return null;
     // Skip entity extraction on tiny docs (single short segment) — no real value.
@@ -1124,20 +1125,20 @@ export class DocumentFirstIngestionService {
         id: memory.support_segment_ids[0],
         content: memory.content,
       }));
-    this._extractEntitiesAsync({ segments, userId, orgId, documentId, force: true });
+    return this._extractEntitiesAsync({ segments, userId, orgId, documentId, force: true });
   }
   /**
-   * V5 Phase 3 — async claim structuring (OFF the save hot path → zero added
-   * latency). For committed memories, extract normalized {subject, predicate,
+   * V5 Phase 3 — claim structuring for committed memories. Callers decide
+   * whether to await its returned promise. Extract normalized {subject, predicate,
    * qualifiers} with a multilingual LLM and backfill the claim_* columns so
    * dreaming / clustering / graph intelligence have structured claim identity.
    * Language-agnostic (the model reads any language; we store canonical English
-   * subject/predicate for cross-language clustering). Robust: fire-and-forget,
-   * bounded concurrency, per-memory failure isolation, never blocks or fails a
-   * save. Flag V5_CLAIM_STRUCTURING (default on). NOT wired to destructive dedup
+   * subject/predicate for cross-language clustering). Robust: bounded
+   * concurrency and per-memory failure isolation. Flag V5_CLAIM_STRUCTURING
+   * (default on). NOT wired to destructive dedup
    * (safe — enrichment only).
    */
-  _structureClaimsAsync({ memories, orgId }) {
+  async _structureClaimsAsync({ memories, orgId }) {
     if ((process.env.V5_CLAIM_STRUCTURING || 'true').toLowerCase() === 'false') return;
     const store = this.memoryGraphEngine?.store;
     if (!store?.updateMemory) return;
@@ -1156,7 +1157,7 @@ export class DocumentFirstIngestionService {
     // requests here — the flood of 500-1000-token calls visible in every ingest log, and the ones that
     // truncated at 86% after the model swap. The output per memory is a tiny
     // {subject, predicate, qualifiers}; 24 of them fit comfortably in one response.
-    // Kept post-commit and fire-and-forget, exactly as V5 designed it: this runs on the FINAL memory
+    // Kept post-commit: this runs on the FINAL memory
     // text, after atomic splitting, curation, dedup and prefix stamping, so it cannot be folded into
     // the extraction call — at that point these memories do not exist yet, and one extracted fact can
     // become several memories.
@@ -1166,7 +1167,7 @@ subject+predicate identify the claim across paraphrases and languages. Keep valu
     const system = `Extract the core CLAIM structure for EACH numbered memory below, in ANY language.
 Return ONLY JSON: {"claims":[{"i":<the memory's number>,"subject":"<canonical English noun phrase of what the claim is ABOUT>","predicate":"<canonical English relation/attribute, lowercased, e.g. has_launch_date, rated_power, is_partner_of>","qualifiers":{"<key>":"<value>"}}, ...]}.
 Emit one entry per input memory, using its exact number in "i". subject+predicate identify the claim across paraphrases and languages (normalize to English + lowercase). qualifiers holds scope/conditions/owner/time as key-value. Keep values short. For a memory with nothing durable, return empty strings for subject and predicate.`;
-    (async () => {
+    return (async () => {
       // Sub-batch so the profile budget (600 + n*420, capped 8000) is always reachable:
       // 17 x 420 = 7740 < 8000. One 24-claim batch would need >10k completion with the
       // verbose model — a guaranteed finish=length truncation, i.e. a guaranteed
@@ -3790,8 +3791,11 @@ Every item must include a non-empty content field and one or more valid support_
         coverage: { promotion_failed: true, promotion_error: String(err.message).slice(0, 300) },
       };
     }
-    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
-    this._structureClaimsAsync({ memories: promoted.memories, orgId });
+    emit('projecting_entities', 96, { memories: promoted.memories.length });
+    await Promise.all([
+      this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
+      this._structureClaimsAsync({ memories: promoted.memories, orgId }),
+    ]);
     const _msPromote = Date.now() - _tPromote;
     ingestDiagnostic.info(`[phase1-timing] parse=${_msParse}ms seg=${_msSeg}ms embed=${_msEmbed}ms promote=${_msPromote}ms segs=${segments.length} memories=${promoted.memories.length}`);
     // Per-stage drop counter (#3 observability): how many segments survived to
@@ -3936,7 +3940,10 @@ Every item must include a non-empty content field and one or more valid support_
       },
       promotionStrategy: 'enterprise_selective'
     });
-    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: parentDoc.id });
+    await Promise.all([
+      this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: parentDoc.id }),
+      this._structureClaimsAsync({ memories: promoted.memories, orgId }),
+    ]);
 
     return {
       documentId: parentDoc.id,
@@ -4116,8 +4123,10 @@ Every item must include a non-empty content field and one or more valid support_
       },
       promotionStrategy: `connector_${providerKey}`,
     });
-    this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id });
-    this._structureClaimsAsync({ memories: promoted.memories, orgId });
+    await Promise.all([
+      this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
+      this._structureClaimsAsync({ memories: promoted.memories, orgId }),
+    ]);
 
     return {
       documentId: knowledgeDoc.id,
@@ -4260,7 +4269,7 @@ Every item must include a non-empty content field and one or more valid support_
       const evId = evRes?.memoryId || evRes?.id || null;
       // V5: evidence rows also get async claim structuring so meeting/transcript
       // sources carry the same subject/predicate/qualifiers identity for clustering.
-      if (evId) this._structureClaimsAsync({ memories: [{ id: evId, content: envelope.content }], orgId });
+      if (evId) await this._structureClaimsAsync({ memories: [{ id: evId, content: envelope.content }], orgId });
       return { ok: true, mode, source: sourceType, memoryIds: evId ? [evId] : [], promotedCount: evId ? 1 : 0, memoryId: evId };
     }
 
@@ -4364,7 +4373,7 @@ Every item must include a non-empty content field and one or more valid support_
       if (orgIsRemote(orgId)) throw e;
     }
     // V5 Phase 3: async claim structuring for the committed atomic memory (off hot path).
-    if (memoryIds.length) this._structureClaimsAsync({ memories: [{ id: memoryIds[0], content: atomicContent }], orgId });
+    if (memoryIds.length) await this._structureClaimsAsync({ memories: [{ id: memoryIds[0], content: atomicContent }], orgId });
     return {
       ok: true, mode, source: sourceType, memoryIds,
       promotedCount: memoryIds.length, memoryId: memoryIds[0] || null,
@@ -5257,6 +5266,13 @@ Every item must include a non-empty content field and one or more valid support_
     }
     const memories = (promoted?.memories || []).filter((memory) => memory?.id);
     onProgress?.({ stage: 'linking_provenance', progress: 92 });
+    await Promise.all([
+      this._extractPromotedEntitiesAsync({
+        memories, userId: document.userId || userId, orgId, documentId: document.id,
+      }),
+      this._structureClaimsAsync({ memories, orgId }),
+    ]);
+    onProgress?.({ stage: 'reconciling', progress: 96, memories: memories.length });
     return {
       documentId: document.id,
       segmentCount: segments.length,

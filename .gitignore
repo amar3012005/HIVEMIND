@@ -97,6 +97,7 @@ infra/secrets/
 .dev.vars
 .dev.vars.*
 .wrangler/
+workers/*/worker-configuration.d.ts
 output/
 tmp/
 backups/

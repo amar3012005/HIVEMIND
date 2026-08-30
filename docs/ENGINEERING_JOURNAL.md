@@ -971,3 +971,66 @@ slides that find no unique anchor get a page instead of `null`.
 - Safety decision: public pages remain discoverable while training/fine-tuning
   is disallowed by content signals and private hosts are `noindex`. A Cloudflare
   crawler guard remains deferred until production Worker verification.
+
+## 2026-08-29 UTC — enterprise canonical ingestion lifecycle started
+
+- State: Started
+- Owner: Codex
+- Branch: `codex/knowledge-ingest-workflow-v1`
+- Base / commit: `8b4af294bd24ad738d70cebb3ac715e737895f00` plus
+  `origin/singulance-main` merge `c83de650c896c4f2f8eeacaa0e54361cb8df48cb` -> pending
+- Scope: local-only durable Knowledge Base orchestration using Cloudflare
+  Workflow, Queue, R2, Flagship, PostgreSQL checkpoints, and the existing
+  canonical memory/evidence/entity funnel; public upload payloads remain
+  unchanged.
+- Verification: baseline and implementation tests pending.
+- Production: not deployed; production resources and `singulance-main` are
+  explicitly out of scope.
+- Rollback: disable `knowledge_ingest_workflow_v1` or
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED` to retain the existing BullMQ path.
+- Next: freeze the existing upload/status contract in tests before adding the
+  additive checkpoint schema and local Worker.
+
+## 2026-08-30 UTC — enterprise canonical ingestion lifecycle accepted locally
+
+- State: local implementation and Cloudflare acceptance complete; production
+  unchanged. Branch `codex/knowledge-ingest-workflow-v1`, worktree
+  `P:\HIVEMIND-worktrees\knowledge-ingest-workflow-v1`.
+- Compatibility: upload/precheck/status routes, multipart fields, response
+  keys, `X-Job-Id`, 50 MB limit, duplicate behavior, scope enforcement, and
+  BullMQ fallback remain unchanged.
+- Durability: jobs latch orchestrator/source references; ten canonical receipts
+  are processing-version, digest, lease, and lease-token fenced. Queue messages
+  contain identifiers only; R2 reads verify ETag plus SHA-256.
+- Canonical convergence: entity and claim projection are awaited. Covered
+  connector/chat adapters cannot persist memories or entities outside the
+  canonical service. Concurrent canonical entity creates converge through a
+  database-unique identity key.
+- AI parity: local Core used the production model policy and Cloudflare AI
+  Gateway. Chat extraction rejects BGE embedding/reranker routes. The BGE-M3
+  canary returned 1024 finite dimensions.
+- Cloudflare: created only the `-local` Queue, DLQ, R2, Workflow, and Worker;
+  deployed Worker version `ad64498c-2489-459c-a664-7de235a7bd38`. Flagship is
+  true only for organization `47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f`.
+- Runtime: evidence-only job `7ae4c69c-8c2c-40a7-b764-e88b156d5c8b`
+  completed with 10/10 vectors and zero memories. Paolo job
+  `cca99f31-fcfd-4707-b0ba-2d84de3f9d9c` completed with one document, two
+  segments, ten candidates, eight memories, nine citations, ten receipts, and
+  one canonical Paolo entity. Duplicate hosted starts completed once with
+  stable counts; recall returned two memories and one exact evidence result.
+- Verification:
+  - Focused backend command covering `tests/knowledge/*.test.js`, the knowledge
+    route, canonical entity/routing, LiteLLM/Gateway, and local proxy contracts:
+    133 passed, 0 failed.
+  - Worker `npm test`: 2 passed; `npm run check`: passed; `npm run dry-run`:
+    passed with only `-local` bindings.
+  - Frontend `npm run test:ai-discovery`: 3 passed; `npm run build`: compiled
+    successfully.
+  - `npx prisma generate`, `npx prisma validate`, and three additive local SQL
+    migrations: passed/applied.
+- Repository baseline: unfiltered `npm test` remains red for unrelated existing
+  runner/environment defects (Vitest collected by Node, retired paths/modules,
+  Windows without native AMR, and legacy unrelated assertions). Feature-scoped
+  gates are green.
+- Rollback: disable Flagship `knowledge_ingest_workflow_v1` or set
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. No production deployment ran.

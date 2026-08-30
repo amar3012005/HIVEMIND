@@ -834,6 +834,9 @@ let documentFirstIngestion = null;
 let kbIngestQueue = null;
 let knowledgeUploadJobStore = null;
 let knowledgeUploadService = null;
+let cloudflareKnowledgeIngestClient = null;
+let knowledgeWorkflowExecutor = null;
+let isAuthorizedKnowledgeWorkflowRequest = null;
 
 // Hoisted Nango token resolver — used by syncScheduler + webhookProcessor
 const nangoTokenResolver = async ({ userId, orgId, providerKey }) => {
@@ -2456,53 +2459,75 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
     try {
       const { KbIngestQueue } = await import('./knowledge/kb-ingest-queue.js');
       knowledgeUploadJobStore = new KnowledgeUploadJobStore({ prisma, planEnforcer, creditService, logger: console });
+      const validateKnowledgeIngestJob = async ({ trackerJobId, userId, orgId, metadata }) => {
+        const durable = await knowledgeUploadJobStore.findOwned(trackerJobId, { orgId, userId });
+        if (!durable || durable.status === 'cancelled') throw Object.assign(new Error('Upload authorization is no longer valid.'), { code: 'UPLOAD_NOT_AUTHORIZED' });
+        const scope = await authorizeKnowledgeScope({
+          prisma, userId, orgId, targetScope: durable.scopeType,
+          projectIds: durable.scopeType === 'project' ? [durable.scopeId] : [],
+          primaryTeamId: durable.scopeType === 'team' ? durable.scopeId : null,
+        });
+        if (!scope.ok) throw Object.assign(new Error('Upload scope is no longer accessible.'), { code: 'UPLOAD_SCOPE_REVOKED' });
+        const org = await prisma.organization.findFirst({ where: { id: orgId }, select: { memoryStorageMode: true } });
+        if (!org || org.memoryStorageMode !== durable.storageMode || !isMemoryStorageReady(orgId, durable.storageMode)) {
+          throw Object.assign(new Error('The configured memory storage is unavailable.'), { code: 'STORAGE_UNAVAILABLE' });
+        }
+      };
+      const processKnowledgeUpload = async ({ userId, orgId, filename, contentType, fileBuffer, metadata, onProgress }) => {
+        if (metadata.media_kind !== 'image') {
+          return documentFirstIngestion.ingestSource({
+            userId, orgId, source: { type: 'kb', filename },
+            file: { buffer: fileBuffer, contentType, filename }, metadata,
+            ingestMode: metadata?.ingest_mode || 'both', onProgress,
+          });
+        }
+        onProgress({ stage: 'extracting', progress: 25 });
+        const { buildImageMemoryPayload } = await import('./services/image-ingest.js');
+        const { payload } = await buildImageMemoryPayload({
+          imageBuffer: fileBuffer, mimeType: contentType, hint: metadata.hint,
+          userId, orgId, projectId: metadata.project_ids?.[0] || null, filename,
+        });
+        const saved = await ingestCanonicalPayload(payload, { sourceType: 'api', platform: 'knowledge_upload', mode: 'atomic' });
+        const ids = saved?.memoryIds?.length ? saved.memoryIds : [saved?.memoryId].filter(Boolean);
+        return {
+          documentId: saved?.documentId || ids[0] || null, promotedMemoryIds: ids,
+          promotedCount: Math.max(1, ids.length), segmentCount: saved?.segmentCount || 0,
+          candidateCount: Math.max(1, ids.length), pages: 1,
+        };
+      };
       kbIngestQueue = new KbIngestQueue({
         documentFirstIngestion,
         ingestTracker,
         jobStore: knowledgeUploadJobStore,
-        validateJob: async ({ trackerJobId, userId, orgId, metadata }) => {
-          const durable = await knowledgeUploadJobStore.findOwned(trackerJobId, { orgId, userId });
-          if (!durable || durable.status === 'cancelled') throw Object.assign(new Error('Upload authorization is no longer valid.'), { code: 'UPLOAD_NOT_AUTHORIZED' });
-          const scope = await authorizeKnowledgeScope({
-            prisma, userId, orgId, targetScope: durable.scopeType,
-            projectIds: durable.scopeType === 'project' ? [durable.scopeId] : [],
-            primaryTeamId: durable.scopeType === 'team' ? durable.scopeId : null,
-          });
-          if (!scope.ok) throw Object.assign(new Error('Upload scope is no longer accessible.'), { code: 'UPLOAD_SCOPE_REVOKED' });
-          const org = await prisma.organization.findFirst({ where: { id: orgId }, select: { memoryStorageMode: true } });
-          if (!org || org.memoryStorageMode !== durable.storageMode || !isMemoryStorageReady(orgId, durable.storageMode)) {
-            throw Object.assign(new Error('The configured memory storage is unavailable.'), { code: 'STORAGE_UNAVAILABLE' });
-          }
-        },
-        processUpload: async ({ userId, orgId, filename, contentType, fileBuffer, metadata, onProgress }) => {
-          if (metadata.media_kind !== 'image') {
-            return documentFirstIngestion.ingestSource({
-              userId, orgId, source: { type: 'kb', filename },
-              file: { buffer: fileBuffer, contentType, filename }, metadata,
-              ingestMode: metadata?.ingest_mode || 'both', onProgress,
-            });
-          }
-          onProgress({ stage: 'extracting', progress: 25 });
-          const { buildImageMemoryPayload } = await import('./services/image-ingest.js');
-          const { payload } = await buildImageMemoryPayload({
-            imageBuffer: fileBuffer, mimeType: contentType, hint: metadata.hint,
-            userId, orgId, projectId: metadata.project_ids?.[0] || null, filename,
-          });
-          const saved = await ingestCanonicalPayload(payload, { sourceType: 'api', platform: 'knowledge_upload', mode: 'atomic' });
-          const ids = saved?.memoryIds?.length ? saved.memoryIds : [saved?.memoryId].filter(Boolean);
-          return {
-            documentId: saved?.documentId || ids[0] || null, promotedMemoryIds: ids,
-            promotedCount: Math.max(1, ids.length), segmentCount: saved?.segmentCount || 0,
-            candidateCount: Math.max(1, ids.length), pages: 1,
-          };
-        },
+        validateJob: validateKnowledgeIngestJob,
+        processUpload: processKnowledgeUpload,
+        logger: console,
+      });
+      const [{ CloudflareKnowledgeIngestClient }, workflowModule] = await Promise.all([
+        import('./knowledge/cloudflare-ingest-client.js'),
+        import('./knowledge/cloudflare-ingest-executor.js'),
+      ]);
+      cloudflareKnowledgeIngestClient = new CloudflareKnowledgeIngestClient({ logger: console });
+      isAuthorizedKnowledgeWorkflowRequest = workflowModule.isAuthorizedKnowledgeWorkflowRequest;
+      knowledgeWorkflowExecutor = new workflowModule.CloudflareKnowledgeIngestExecutor({
+        prisma,
+        jobStore: knowledgeUploadJobStore,
+        objectClient: cloudflareKnowledgeIngestClient,
+        documentFirstIngestion,
+        validateJob: validateKnowledgeIngestJob,
+        processUpload: processKnowledgeUpload,
+        isRemoteOrg: orgIsRemote,
         logger: console,
       });
       knowledgeUploadService = new KnowledgeUploadService({
-        prisma, queue: kbIngestQueue, jobStore: knowledgeUploadJobStore,
+        prisma, queue: kbIngestQueue, cloudflareQueue: cloudflareKnowledgeIngestClient,
+        jobStore: knowledgeUploadJobStore,
         planEnforcer, creditService, storageReady: isMemoryStorageReady,
       });
-      process.once('SIGTERM', () => { kbIngestQueue?.close().catch(() => {}); });
+      process.once('SIGTERM', () => {
+        kbIngestQueue?.close().catch(() => {});
+        cloudflareKnowledgeIngestClient?.close().catch(() => {});
+      });
     } catch (err) {
       console.warn('[kb-queue] init failed (inline path unaffected):', err.message);
     }
@@ -4221,6 +4246,50 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
+
+  // Local-only Cloudflare Workflow control surface. The Worker carries no
+  // tenant data or database credentials: it presents the dedicated service
+  // secret and asks Core to execute one idempotent PostgreSQL-checkpointed
+  // stage. Browser sessions and ordinary API keys can never access this path.
+  const knowledgeWorkflowStage = pathname.match(
+    /^\/internal\/knowledge-ingest\/v1\/jobs\/([0-9a-f-]{36})\/stages\/(acquire|materialize|reconcile)$/,
+  );
+  const knowledgeWorkflowFail = pathname.match(
+    /^\/internal\/knowledge-ingest\/v1\/jobs\/([0-9a-f-]{36})\/fail$/,
+  );
+  if (knowledgeWorkflowStage || knowledgeWorkflowFail) {
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
+    if (!knowledgeWorkflowExecutor || !isAuthorizedKnowledgeWorkflowRequest?.(req)) {
+      return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    }
+    const workflowBody = await parseBody(req).catch(() => ({}));
+    const common = {
+      jobId: (knowledgeWorkflowStage || knowledgeWorkflowFail)[1],
+      orgId: String(workflowBody.org_id || ''),
+      processingVersion: Number(workflowBody.processing_version) || 1,
+    };
+    try {
+      const result = await runWithOrg(common.orgId, () => (
+        knowledgeWorkflowStage
+          ? knowledgeWorkflowExecutor.execute({ ...common, stage: knowledgeWorkflowStage[2] })
+          : knowledgeWorkflowExecutor.fail({
+            ...common,
+            errorCode: workflowBody.error_code,
+            message: workflowBody.message,
+            retryable: workflowBody.retryable === true,
+          })
+      ));
+      return jsonResponse(res, result);
+    } catch (error) {
+      const retryable = error?.retryable !== false
+        && !['INVALID_WORKFLOW_PAYLOAD', 'JOB_NOT_FOUND', 'ORCHESTRATOR_MISMATCH', 'STALE_WORKFLOW', 'UPLOAD_CANCELLED'].includes(error?.code);
+      return jsonResponse(res, {
+        error: error?.code || 'KNOWLEDGE_WORKFLOW_STAGE_FAILED',
+        message: String(error?.message || 'Knowledge ingestion stage failed').slice(0, 500),
+        retryable,
+      }, retryable ? 409 : 422);
+    }
+  }
 
   // ─── Connector Runtime V1 — capability endpoint + stateless MCP gateway ───
   // Flag-gated (CONNECTOR_RUNTIME_ENABLED). Default OFF → this block is skipped
@@ -12612,13 +12681,17 @@ exit \$RC
                   id: true, filename: true, status: true, stage: true, progress: true,
                   checksum: true, documentId: true, errorCode: true, errorMessage: true,
                   createdAt: true, updatedAt: true, processingVersion: true,
+                  orchestrationMode: true, sourceObjectKey: true,
                 },
               });
               // Say up front whether each one can actually be replayed. Without this
               // the UI would offer Retry on jobs whose bytes are gone.
               const jobs = rows.map((j) => ({
                 ...j,
-                replayable: !!kbIngestQueue?.rawFilePath({ orgId, checksum: j.checksum, filename: j.filename }),
+                replayable: !!(
+                  (j.orchestrationMode === 'cloudflare_workflow' && j.sourceObjectKey)
+                  || kbIngestQueue?.rawFilePath({ orgId, checksum: j.checksum, filename: j.filename })
+                ),
               }));
               return jsonResponse(res, { jobs, count: jobs.length, statuses: wanted });
             } catch (e) {
@@ -12653,8 +12726,25 @@ exit \$RC
                   message: `Only failed, dead or cancelled jobs can be replayed (this one is "${job.status}").`,
                 }, 409);
               }
-              const filePath = kbIngestQueue.rawFilePath({ orgId, checksum: job.checksum, filename: job.filename });
-              if (!filePath) {
+              const workflowReplay = job.orchestrationMode === 'cloudflare_workflow'
+                && !!job.sourceObjectKey && !!cloudflareKnowledgeIngestClient;
+              if (workflowReplay && job.workflowInstanceId) {
+                const workflowStatus = await cloudflareKnowledgeIngestClient
+                  .getWorkflowStatus(job.workflowInstanceId).catch(() => null);
+                if (['queued', 'running', 'waiting', 'paused'].includes(workflowStatus?.status)) {
+                  return jsonResponse(res, {
+                    error: 'workflow_still_active', job_id: job.id,
+                    workflow_instance_id: job.workflowInstanceId,
+                    status: workflowStatus.status,
+                    message: 'The durable Workflow is still active; wait for it instead of starting a competing processing version.',
+                  }, 409);
+                }
+              }
+              const selectedQueue = workflowReplay ? cloudflareKnowledgeIngestClient : kbIngestQueue;
+              const filePath = workflowReplay
+                ? null
+                : kbIngestQueue.rawFilePath({ orgId, checksum: job.checksum, filename: job.filename });
+              if (!workflowReplay && !filePath) {
                 return jsonResponse(res, {
                   error: 'raw_file_unavailable', job_id: job.id, filename: job.filename,
                   message: 'The original bytes are no longer on disk (the job failed before raw-file '
@@ -12665,8 +12755,9 @@ exit \$RC
               await knowledgeUploadJobStore.updateOwned(job.id, orgId, {
                 status: 'queued', stage: 'queued', progress: 0, processingVersion,
                 attempt: 0, errorCode: null, errorMessage: null, completedAt: null,
+                workflowInstanceId: null, queueJobId: null,
               });
-              const queued = await kbIngestQueue.enqueue({
+              const queued = await selectedQueue.enqueue({
                 userId: job.userId || userId, orgId,
                 filename: job.filename, contentType: job.contentType, checksum: job.checksum,
                 filePath, trackerJobId: job.id, processingVersion,
@@ -12677,7 +12768,11 @@ exit \$RC
                   Object.assign(new Error('Ingestion queue is saturated.'), { code: 'QUEUE_SATURATED' }));
                 return jsonResponse(res, { error: 'queue_saturated', retry_after: 30 }, 429);
               }
-              await knowledgeUploadJobStore.updateOwned(job.id, orgId, { queueJobId: queued?.queue_job_id });
+              await knowledgeUploadJobStore.updateOwned(job.id, orgId, {
+                queueJobId: queued?.queue_job_id,
+                workflowInstanceId: queued?.workflow_instance_id || null,
+                orchestrationMode: workflowReplay ? 'cloudflare_workflow' : 'bullmq',
+              });
               console.log(`[knowledge/jobs/retry] replaying ${job.filename} job=${job.id} org=${String(orgId).slice(0, 8)} v${processingVersion}`);
               return jsonResponse(res, {
                 success: true, job_id: job.id, status: 'queued',

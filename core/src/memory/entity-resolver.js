@@ -229,21 +229,45 @@ export class EntityResolver {
           continue;
         }
       }
-      const created = await this.prisma.canonicalEntity.create({
-        data: {
-          organizationId,
-          canonicalName: _canonName,
-          // normalized_name is NOT NULL in the DB; without it every create threw
-          // P2011 and canonical_entities could never populate. Stable identity key.
-          normalizedName: normalizeName(_canonName) || String(_canonName).toLowerCase(),
-          entityKind: kind,
-          aliases: cand.name ? [cand.name] : [],
-          primaryEmail: cand.email ? String(cand.email).toLowerCase() : null,
-          emailDomains: domain ? [domain] : [],
-          externalRefs,
-          metadata: cand.metadata || {},
-        },
-      });
+      const normalizedName = _normKey || String(_canonName).toLowerCase();
+      // The read-before-create guard above cannot prevent two API replicas (or
+      // two concurrent promotion windows) from observing absence together.
+      // A deterministic, database-unique identity key is the authoritative
+      // race fence. Historical rows may keep identity_key=NULL; every newly
+      // resolved entity participates in the constraint.
+      const identityKey = `canonical:${normalizedName}`;
+      let created;
+      try {
+        created = await this.prisma.canonicalEntity.create({
+          data: {
+            organizationId,
+            canonicalName: _canonName,
+            // normalized_name is NOT NULL in the DB; without it every create threw
+            // P2011 and canonical_entities could never populate.
+            normalizedName,
+            identityKey,
+            entityKind: kind,
+            aliases: cand.name ? [cand.name] : [],
+            primaryEmail: cand.email ? String(cand.email).toLowerCase() : null,
+            emailDomains: domain ? [domain] : [],
+            externalRefs,
+            metadata: cand.metadata || {},
+          },
+        });
+      } catch (error) {
+        if (error?.code !== 'P2002') throw error;
+        // Another worker won the unique insert. Reuse its committed row and
+        // continue linking; duplicate delivery is a successful no-op here.
+        const winner = await this.prisma.canonicalEntity.findFirst({
+          where: { organizationId, identityKey },
+          orderBy: { createdAt: 'asc' },
+        });
+        if (!winner) throw error;
+        if (linkMemory) await this._link({ memoryId, entityId: winner.id, role, confidence: 1.00 });
+        await this._enrichEntity(winner.id, { name: cand.name, email: cand.email, domain, externalRefs });
+        results.push({ entityId: winner.id, role, confidence: 1.00, action: 'linked', reason: 'identity_key_race_reuse' });
+        continue;
+      }
       if (linkMemory) await this._link({ memoryId, entityId: created.id, role, confidence: 1.00 });
       results.push({ entityId: created.id, role, confidence: 1.00, action: 'created' });
     }
@@ -324,26 +348,21 @@ export class EntityResolver {
     if (srcId === dstId) return { ok: true, noop: true };
     await this.prisma.$transaction(async (tx) => {
       // Re-link memories from src to dst.
-      await tx.$executeRawUnsafe(
-        `UPDATE memory_entity_links SET entity_id = $1::uuid WHERE entity_id = $2::uuid
-         ON CONFLICT (memory_id, entity_id, role) DO NOTHING`,
-        dstId, srcId
-      ).catch(async () => {
-        // Postgres ON CONFLICT requires INSERT; do plain UPDATE + ignore unique violations.
-        const links = await tx.memoryEntityLink.findMany({ where: { entityId: srcId } });
-        for (const l of links) {
-          try {
-            await tx.memoryEntityLink.upsert({
-              where: { memoryId_entityId_role: { memoryId: l.memoryId, entityId: dstId, role: l.role } },
-              update: { confidence: Math.max(l.confidence, 1) },
-              create: { memoryId: l.memoryId, entityId: dstId, role: l.role, confidence: l.confidence },
-            });
-          } catch {}
-          await tx.memoryEntityLink.delete({
-            where: { memoryId_entityId_role: { memoryId: l.memoryId, entityId: srcId, role: l.role } },
-          }).catch(() => {});
-        }
-      });
+      // The former UPDATE ... ON CONFLICT statement is invalid PostgreSQL.
+      // Catching it inside an interactive transaction cannot recover because
+      // PostgreSQL marks the whole transaction aborted (25P02). Use valid,
+      // idempotent Prisma upserts from the outset so links are never lost.
+      const links = await tx.memoryEntityLink.findMany({ where: { entityId: srcId } });
+      for (const l of links) {
+        await tx.memoryEntityLink.upsert({
+          where: { memoryId_entityId_role: { memoryId: l.memoryId, entityId: dstId, role: l.role } },
+          update: { confidence: Math.max(Number(l.confidence || 0), 1) },
+          create: { memoryId: l.memoryId, entityId: dstId, role: l.role, confidence: l.confidence },
+        });
+        await tx.memoryEntityLink.delete({
+          where: { memoryId_entityId_role: { memoryId: l.memoryId, entityId: srcId, role: l.role } },
+        });
+      }
       const src = await tx.canonicalEntity.findUnique({ where: { id: srcId } });
       const dst = await tx.canonicalEntity.findUnique({ where: { id: dstId } });
       if (src && dst) {

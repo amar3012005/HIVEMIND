@@ -34,9 +34,10 @@ function ingestModeMismatchBody({ job, requestedMode }) {
 }
 
 export class KnowledgeUploadService {
-  constructor({ prisma, queue, jobStore, planEnforcer, creditService = null, storageReady, isRemoteOrg = orgIsRemote }) {
+  constructor({ prisma, queue, cloudflareQueue = null, jobStore, planEnforcer, creditService = null, storageReady, isRemoteOrg = orgIsRemote }) {
     this.prisma = prisma;
     this.queue = queue;
+    this.cloudflareQueue = cloudflareQueue;
     this.jobStore = jobStore;
     this.planEnforcer = planEnforcer;
     this.creditService = creditService;
@@ -82,7 +83,10 @@ export class KnowledgeUploadService {
         error: 'storage_unavailable', message: 'The selected memory storage is unavailable. No central fallback was used.',
       } };
     }
-    if (!await this.queue?.isAvailable()) {
+    const useCloudflare = await this.cloudflareQueue?.isEnabled?.(orgId);
+    const selectedQueue = useCloudflare ? this.cloudflareQueue : this.queue;
+    const orchestrationMode = useCloudflare ? 'cloudflare_workflow' : 'bullmq';
+    if (!await selectedQueue?.isAvailable({ orgId })) {
       return { ok: false, status: 503, body: { error: 'queue_unavailable', message: 'Durable ingestion is temporarily unavailable.' } };
     }
 
@@ -213,7 +217,7 @@ export class KnowledgeUploadService {
       await this.jobStore.updateOwned(job.id, orgId, {
         status: 'queued', stage: 'queued', progress: 0, processingVersion,
         attempt: 0, errorCode: null, errorMessage: null, completedAt: null,
-        ingestMode,
+        ingestMode, orchestrationMode, workflowInstanceId: null,
         metadata: sanitizeKnowledgeJson(reprocessMetadata),
       });
       job = await this.jobStore.findOwned(job.id, { orgId, userId });
@@ -223,6 +227,7 @@ export class KnowledgeUploadService {
         scopeKey: scope.scopeKey, storageMode, filename,
         contentType: file.contentType || 'application/octet-stream', mediaKind: validation.kind,
         checksum, ingestMode, status: 'queued', stage: 'queued', progress: 0, processingVersion,
+        orchestrationMode,
         metadata: sanitizeKnowledgeJson({ ...safeMetadata, project_ids: projectIds, primary_team_id: primaryTeamId }),
       });
       job = admitted.job;
@@ -257,8 +262,16 @@ export class KnowledgeUploadService {
 
     try {
       const promotionOnly = promoteExistingEvidence && !!job.documentId;
-      const filePath = promotionOnly ? null : this.queue.persistFile({ orgId, checksum, filename, fileBuffer: file.data });
-      const queued = await this.queue.enqueue({
+      const persisted = promotionOnly ? null : await selectedQueue.persistFile({
+        orgId, checksum, filename, fileBuffer: file.data,
+      });
+      const filePath = typeof persisted === 'string' ? persisted : null;
+      const sourceObjectKey = persisted && typeof persisted === 'object' ? persisted.objectKey : null;
+      const sourceObjectEtag = persisted && typeof persisted === 'object' ? persisted.etag : null;
+      if (sourceObjectKey) {
+        await this.jobStore.updateOwned(job.id, orgId, { sourceObjectKey, sourceObjectEtag });
+      }
+      const queued = await selectedQueue.enqueue({
         userId, orgId, filename, contentType: file.contentType, checksum, filePath,
         trackerJobId: job.id, processingVersion,
         metadata: sanitizeKnowledgeJson({
@@ -277,7 +290,13 @@ export class KnowledgeUploadService {
         await this.jobStore.fail(job.id, orgId, Object.assign(new Error('Ingestion queue is saturated.'), { code: 'QUEUE_SATURATED' }));
         return { ok: false, status: 429, body: { error: 'queue_saturated', retry_after: 30 } };
       }
-      await this.jobStore.updateOwned(job.id, orgId, { queueJobId: queued.queue_job_id });
+      await this.jobStore.updateOwned(job.id, orgId, {
+        queueJobId: queued.queue_job_id,
+        workflowInstanceId: queued.workflow_instance_id || null,
+        orchestrationMode,
+        sourceObjectKey,
+        sourceObjectEtag,
+      });
       return { ok: true, job: await this.jobStore.findOwned(job.id, { orgId, userId }) };
     } catch (error) {
       await this.jobStore.fail(job.id, orgId, error).catch(() => {});

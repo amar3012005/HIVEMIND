@@ -1,0 +1,17 @@
+{
+  "name": "hivemind-knowledge-ingest-lifecycle",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "types": "wrangler types",
+    "dry-run": "wrangler deploy --env local --dry-run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.1",
+    "wrangler": "^4.32.0"
+  }
+}

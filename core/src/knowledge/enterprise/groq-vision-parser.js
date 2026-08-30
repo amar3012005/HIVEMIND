@@ -8,7 +8,8 @@
  *
  * Outputs markdown stitched in page order.
  *
- * Requires: GROQ_API_KEY env, `convert` (ImageMagick) on PATH.
+ * Requires: a direct provider key or Cloudflare AI Gateway BYOK alias, plus
+ * `pdftoppm` (preferred) or `convert` (ImageMagick) on PATH.
  */
 
 import fs from 'fs';
@@ -17,6 +18,11 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import crypto from 'crypto';
+import {
+  cloudflareGatewayEnabled,
+  gatewayByokAlias,
+  gatewayFirstFetch,
+} from '../../llm/cloudflare-gateway.js';
 
 const GROQ_KEY = process.env.GROQ_API_KEY || '';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
@@ -57,6 +63,12 @@ const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for the ra
 const execFileAsync = promisify(execFile);
 const OCR_MAX_TOKENS = Number(process.env.HIVEMIND_VISION_OCR_MAX_TOKENS || 2600);
 const RENDER_TIMEOUT_MS = Number(process.env.GROQ_VISION_RENDER_TIMEOUT_MS || 300_000);
+
+export function visionProviderAvailable() {
+  return Boolean(GROQ_KEY || OPENROUTER_KEY
+    || (cloudflareGatewayEnabled()
+      && (gatewayByokAlias('groq') || gatewayByokAlias('openrouter'))));
+}
 
 // PDF rasterisation is CPU, RAM and temporary-disk heavy. Ingestion admits
 // multiple tenant jobs concurrently, so allowing every vision document to run
@@ -134,7 +146,7 @@ TRANSCRIBE, DO NOT AUTHOR. You are converting an image to text, not answering ab
  * @returns {Promise<{text: string, pages: number, markdown: string, error: string|null}>}
  */
 export async function parsePdfWithGroqVision(pdfPath) {
-  if (!GROQ_KEY && !OPENROUTER_KEY) return { text: '', pages: 0, markdown: '', error: 'No vision provider API key set' };
+  if (!visionProviderAvailable()) return { text: '', pages: 0, markdown: '', error: 'No vision provider or AI Gateway BYOK alias set' };
   const workDir = path.join(os.tmpdir(), `vision-${crypto.randomUUID()}`);
   fs.mkdirSync(workDir, { recursive: true });
   try {
@@ -214,7 +226,7 @@ export async function parsePdfWithGroqVision(pdfPath) {
  * @returns {Promise<{text:string, markdown:string, error:string|null}>}
  */
 export async function ocrSingleImage(imagePath) {
-  if (!GROQ_KEY && !OPENROUTER_KEY) return { text: '', markdown: '', error: 'No vision provider API key set' };
+  if (!visionProviderAvailable()) return { text: '', markdown: '', error: 'No vision provider or AI Gateway BYOK alias set' };
   try {
     const text = await visionOcrPage(imagePath, 1);
     return { text, markdown: text, error: null };
@@ -243,13 +255,16 @@ async function visionOcrPage(imagePath, pageNum) {
     ],
   };
 
-  const orKey = OPENROUTER_KEY;
+  const gatewayGroq = cloudflareGatewayEnabled() && gatewayByokAlias('groq');
+  const gatewayOpenRouter = cloudflareGatewayEnabled() && gatewayByokAlias('openrouter');
+  const groqAvailable = Boolean(GROQ_KEY || gatewayGroq);
+  const openRouterAvailable = Boolean(OPENROUTER_KEY || gatewayOpenRouter);
   // Provider order. When Groq is billing-blocked/delinquent org-wide (every call
   // 400s "restricted because of overdue payment"), preferring OpenRouter skips the
   // always-failing Groq attempt + its noisy error + 60s timeout risk. Flag-gated
   // (VISION_OPENROUTER_PRIMARY or the global HYPER_OPENROUTER_PRIMARY); default
   // Groq-first for healthy accounts, OR as fallback either way.
-  const orFirst = orKey && (
+  const orFirst = openRouterAvailable && (
     String(process.env.VISION_OPENROUTER_PRIMARY ?? '').toLowerCase() === 'true'
     || String(process.env.HYPER_OPENROUTER_PRIMARY ?? '').toLowerCase() === 'true');
 
@@ -257,7 +272,8 @@ async function visionOcrPage(imagePath, pageNum) {
   const tryGroq = async () => {
     let err = null;
     for (let attempt = 0; attempt <= 3; attempt++) {
-      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      if (!groqAvailable) throw new Error('Groq vision provider not configured');
+      const res = await gatewayFirstFetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -274,11 +290,11 @@ async function visionOcrPage(imagePath, pageNum) {
     throw err || new Error('Groq vision failed');
   };
   const tryOR = async () => {
-    if (!orKey) throw new Error('OPENROUTER_API_KEY not set');
+    if (!openRouterAvailable) throw new Error('OpenRouter vision provider not configured');
     const orModel = OPENROUTER_VISION_MODEL;
-    const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    const orRes = await gatewayFirstFetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${orKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://hivemind.davinciai.eu', 'X-Title': 'HIVEMIND' },
+      headers: { Authorization: `Bearer ${OPENROUTER_KEY}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://hivemind.davinciai.eu', 'X-Title': 'HIVEMIND' },
       body: JSON.stringify({ ...body, model: orModel }),
       signal: AbortSignal.timeout(60_000),
     });
@@ -303,9 +319,10 @@ async function visionOcrPage(imagePath, pageNum) {
     if (!String(out || '').trim()) throw new Error(`${label} vision returned empty content`);
     return out;
   };
-  const order = orFirst
-    ? [() => nonEmpty(tryOR, 'OpenRouter'), () => nonEmpty(tryGroq, 'Groq')]
-    : [() => nonEmpty(tryGroq, 'Groq'), () => nonEmpty(tryOR, 'OpenRouter')];
+  const order = (orFirst
+    ? [[openRouterAvailable, () => nonEmpty(tryOR, 'OpenRouter')], [groqAvailable, () => nonEmpty(tryGroq, 'Groq')]]
+    : [[groqAvailable, () => nonEmpty(tryGroq, 'Groq')], [openRouterAvailable, () => nonEmpty(tryOR, 'OpenRouter')]])
+    .filter(([available]) => available).map(([, fn]) => fn);
   let lastErr = null;
   for (const fn of order) {
     try { return await fn(); } catch (e) { lastErr = e; }

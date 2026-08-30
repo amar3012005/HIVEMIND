@@ -4,10 +4,16 @@ import { chunkText } from '../../src/knowledge/document-chunker.js';
 import {
   completeChunkMarkdown,
   estimateFactBearingSentences,
+  atomizeUnifiedFacts,
   LLM_PROFILES,
   llmProfile,
 } from '../../src/knowledge/document-first-ingestion.js';
-import { splitFastPdfPageBlocks } from '../../src/knowledge/enterprise/fast-pdf-parser.js';
+import {
+  assessTextLayerQuality,
+  chunkTextAtSemanticBoundaries,
+  splitFastPdfPageBlocks,
+} from '../../src/knowledge/enterprise/fast-pdf-parser.js';
+import { visionProviderAvailable } from '../../src/knowledge/enterprise/groq-vision-parser.js';
 
 // A 3-section markdown doc with facts spread across sections (shape of the
 // 2026-08-05 live repro: segment 1 began "val from Martina Berger").
@@ -77,6 +83,65 @@ test('fast-pdf page splitting retains page one when the first marker is page two
   assert.equal(blocks[1].page, 2);
   assert.match(blocks[0].text, /Module A instructor/);
   assert.match(blocks[1].text, /Advanced Photonics/);
+});
+
+test('PDF quality gate rejects the measured fragmented OCR text shape', () => {
+  const damaged = 'Ar t D ir e c t or Willia m S q u a r e Wr it e r Carol Conn '.repeat(80);
+  const clean = 'The annual report identifies William Square as art director and Carol Conn as writer. '.repeat(80);
+  const bad = assessTextLayerQuality(damaged);
+  const good = assessTextLayerQuality(clean);
+  assert.equal(bad.corrupt, true, JSON.stringify(bad));
+  assert.equal(good.corrupt, false, JSON.stringify(good));
+  assert.ok(bad.singleRatio > good.singleRatio);
+});
+
+test('vision OCR accepts the production-style Cloudflare AI Gateway BYOK transport', () => {
+  const names = ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_AI_GATEWAY_ID',
+    'CLOUDFLARE_AI_GATEWAY_TOKEN', 'CLOUDFLARE_AI_GATEWAY_ENABLED',
+    'CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS'];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  Object.assign(process.env, {
+    CLOUDFLARE_ACCOUNT_ID: 'test-account',
+    CLOUDFLARE_AI_GATEWAY_ID: 'test-gateway',
+    CLOUDFLARE_AI_GATEWAY_TOKEN: 'test-token',
+    CLOUDFLARE_AI_GATEWAY_ENABLED: 'true',
+    CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: 'test-openrouter-alias',
+  });
+  try { assert.equal(visionProviderAvailable(), true); }
+  finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
+test('fast PDF page chunks use semantic boundaries and never bisect words', () => {
+  const source = [
+    'Executive summary explains the complete operating model and its constraints.',
+    'The annual report names the accountable owners and preserves every measured value.',
+    'A final paragraph records the decision, date, scope, rationale, and expected outcome.',
+  ].join(' ').concat(' ').repeat(35).trim();
+  const chunks = chunkTextAtSemanticBoundaries(source, 600, 90);
+  assert.ok(chunks.length > 3);
+  for (const chunk of chunks) {
+    assert.match(chunk, /^[A-Za-z]/);
+    assert.match(chunk, /[A-Za-z.]$/);
+  }
+  for (const probe of ['Executive summary', 'accountable owners', 'expected outcome']) {
+    assert.ok(chunks.some((chunk) => chunk.includes(probe)), `lost ${probe}`);
+  }
+});
+
+test('canonical atomicity operates on the schema f field', () => {
+  const [one, two, three] = [
+    'Northwind approved the plan.',
+    'The budget is 40,000 EUR.',
+    'Delivery begins in October.',
+  ];
+  const split = atomizeUnifiedFacts([{ f: `${one} ${two} ${three}`, source_quote: `${one} ${two} ${three}` }]);
+  assert.deepEqual(split.map((fact) => fact.f), [one, two, three]);
+  assert.ok(split.every((fact) => fact._atomized));
 });
 
 test('partial hybrid chunks cannot replace complete parser text', () => {

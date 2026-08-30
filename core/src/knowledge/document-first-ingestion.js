@@ -773,6 +773,23 @@ export function normalizeUnifiedClaims(rawFacts, content, maxFacts, minImportanc
   return out;
 }
 
+/** Keep related one/two-sentence claims intact, but split a model response that
+ * packed three or more independent sentences into one memory. The canonical
+ * schema names the claim field `f`; accepting legacy `content`/`text` is only
+ * for replay compatibility. */
+export function atomizeUnifiedFacts(rawFacts) {
+  const split = [];
+  for (const fact of (Array.isArray(rawFacts) ? rawFacts : [])) {
+    const text = String(fact?.f || fact?.content || fact?.text || '').trim();
+    const parts = text.split(/(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9])/).map((part) => part.trim())
+      .filter((part) => part.length >= 12 && /\p{L}{3}/u.test(part));
+    if (parts.length >= 3) {
+      for (const part of parts) split.push({ ...fact, f: part, _atomized: true });
+    } else split.push(fact);
+  }
+  return split;
+}
+
 /** Split a provider-truncated extraction window at a real structural boundary. */
 export function splitDenseExtractionContent(value, minPartChars = 320) {
   const content = String(value || '').trim();
@@ -1845,7 +1862,7 @@ Emit a separate fact only when a claim stands on a DIFFERENT subject or decision
 
 Promote only decisions, commitments, requirements, metrics, named parties, dates, concrete specifications, products and their exact categories or variants, roles, responsibilities, status changes, risks, constraints, dependencies, policies and durable organization or customer facts. Skip slogans, generic marketing, headers, footers, contacts, disclaimers, repeated descriptions and OCR noise. Every source_quote must be one exact contiguous substring from SECTION that supports the entire claim; use 40-900 characters when needed for contextual support. memory_type is only fact or event; preserve the narrower enterprise meaning in claim_kind. Preserve exact names, dates, quantities, units, categorical nouns, negation and uncertainty. Never broaden or guess a category. The subject, predicate and object must express the same complete claim as "f"; prefer one complete claim over fragments. Relationships are structured claim metadata only and must be explicitly supported by the same source_quote; do not invent causal or organizational links. Entities are named people, organizations, products, places, technologies, or standards only — a real proper noun a person would recognize. CAPITALISATION IS NOT EVIDENCE: a generic kind is not an entity. Give each entity a "k" from the listed kinds; if none fits, omit it. Never emit source filenames, document titles, file extensions, part numbers, fonts, colours, format sizes, URLs or asset identifiers as entities.
 FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, whatever that language is. These rules are written in English for your benefit only — they are instructions, NOT a language sample. Never translate the section's content into the language of these instructions.
-"t" and "f" MUST be in the same language as each other: "f" is a verbatim substring of the SECTION, so if "t" is in a different language from its own "f" you have translated, and that is wrong. Keep the SECTION's own names and number formats as written (not 1.240 -> 1,240, not Hannover -> Hanover).`;
+"t" and "f" MUST be in the same language as each other. "source_quote" is the verbatim SECTION substring; "f" is the standalone claim it supports and may resolve context without translating or inventing. If "t" or "f" uses a different language from "source_quote", you have translated, and that is wrong. Keep the SECTION's own names and number formats as written (not 1.240 -> 1,240, not Hannover -> Hanover).`;
 // REVERTED, DO NOT REINTRODUCE: an earlier version of this paragraph also said every "t" must be
 // "readable as a sentence lifted from the SECTION itself". Deployed, that produced 0 facts from 4
 // windows on a document holding 30-46 fact-bearing sentences each ("EXTRACTION SHORTFALL: kept 0
@@ -1931,19 +1948,9 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     // Split on sentence boundaries and keep the parts that still carry a verb, preserving
     // each part's grounding quote. Cheap, deterministic, no extra LLM call.
     if (String(process.env.KB_ATOMIC_FACTS ?? 'true').toLowerCase() !== 'false') {
-      const split = [];
-      for (const f of rawFacts) {
-        const text = String(f?.content || f?.text || '').trim();
-        const parts = text.split(/(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9])/).map((t) => t.trim())
-          .filter((t) => t.length >= 12 && /\p{L}{3}/u.test(t));
-        // Owner directive: memories may carry 2-4 sentences of RELATED detail — only
-        // split when a claim packs 3+ sentences (those are almost always unrelated facts).
-        if (parts.length >= 3) {
-          for (const part of parts) split.push({ ...f, content: part, _atomized: true });
-        } else {
-          split.push(f);
-        }
-      }
+      // Owner directive: memories may carry 2-4 sentences of RELATED detail — only
+      // split when a claim packs 3+ sentences (those are almost always unrelated facts).
+      const split = atomizeUnifiedFacts(rawFacts);
       if (split.length !== rawFacts.length) {
         ingestDiagnostic.info(`[kb-atomic] ${rawFacts.length} claim(s) -> ${split.length} atomic fact(s)`);
       }

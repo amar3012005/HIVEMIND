@@ -22,6 +22,72 @@ async function loadPdfParse() {
 }
 
 /**
+ * Detect a PDF text layer that exists in quantity but is not usable prose.
+ *
+ * OCR-backed archive PDFs often expose each glyph as a separate positioned
+ * token ("Ar t D ir e c t or"). Character count and words such as "Director"
+ * elsewhere make the old image-heavy test pass, but lexical retrieval,
+ * headings, entities and embeddings are then built from corrupted text. Keep
+ * this language-neutral over Latin-script tokens and report the measurements so
+ * routing decisions are observable and testable.
+ */
+export function assessTextLayerQuality(text) {
+  const source = String(text || '');
+  const tokens = source.match(/\p{L}+/gu) || [];
+  const latin = tokens.filter((token) => /[A-Za-z]/.test(token));
+  const count = latin.length;
+  const shortRatio = count ? latin.filter((token) => token.length <= 2).length / count : 0;
+  const singleRatio = count ? latin.filter((token) => token.length === 1).length / count : 0;
+  const averageTokenLength = count
+    ? latin.reduce((sum, token) => sum + token.length, 0) / count
+    : 0;
+  const corrupt = count >= 200
+    && shortRatio >= Number(process.env.KB_PDF_CORRUPT_SHORT_TOKEN_RATIO || 0.55)
+    && singleRatio >= Number(process.env.KB_PDF_CORRUPT_SINGLE_TOKEN_RATIO || 0.32)
+    && averageTokenLength <= Number(process.env.KB_PDF_CORRUPT_AVG_TOKEN_LENGTH || 3.6);
+  return { corrupt, tokenCount: count, shortRatio, singleRatio, averageTokenLength };
+}
+
+/**
+ * Split one page near paragraph/sentence/word boundaries with bounded overlap.
+ * Stored offsets remain deterministic, while neither the chunk end nor the next
+ * chunk start can bisect a word. Page and heading metadata are added by the
+ * caller because this helper deliberately owns text boundaries only.
+ */
+export function chunkTextAtSemanticBoundaries(text, target = 1500, overlap = 200) {
+  const source = String(text || '').trim();
+  if (!source) return [];
+  const size = Math.max(200, Number(target) || 1500);
+  const shared = Math.max(0, Math.min(size - 50, Number(overlap) || 0));
+  if (source.length <= size) return [source];
+  const chunks = [];
+  let start = 0;
+  while (start < source.length) {
+    let end = Math.min(source.length, start + size);
+    if (end < source.length) {
+      const floor = start + Math.floor(size * 0.65);
+      const window = source.slice(floor, end);
+      const candidates = [
+        [...window.matchAll(/\n\s*\n/gu)].at(-1),
+        [...window.matchAll(/(?<=[.!?。！？])\s+/gu)].at(-1),
+        [...window.matchAll(/\n/gu)].at(-1),
+        [...window.matchAll(/\s+/gu)].at(-1),
+      ];
+      const boundary = candidates.find(Boolean);
+      if (boundary) end = floor + boundary.index + boundary[0].length;
+    }
+    const piece = source.slice(start, end).trim();
+    if (piece.length >= 50) chunks.push(piece);
+    if (end >= source.length) break;
+    let next = Math.max(start + 1, end - shared);
+    while (next < end && next > 0 && /\p{L}|\p{N}/u.test(source[next - 1])
+      && /\p{L}|\p{N}/u.test(source[next])) next += 1;
+    start = Math.min(end, next);
+  }
+  return chunks;
+}
+
+/**
  * @param {string} filePath
  * @returns {Promise<{text: string, pages: number, isImageHeavy: boolean, error: string|null}>}
  */
@@ -65,6 +131,7 @@ export async function fastPdfExtract(filePath) {
     //     long-single-page-text-PDF exception while still flagging short
     //     image-heavy docs).
     const longAlnumWord = /\b[A-Za-z0-9]{5,}\b/.test(text);
+    const textQuality = assessTextLayerQuality(text);
     const isImageHeavy = !longAlnumWord
       || avgPerPage < 300
       || (text.length < 2000 && avgPerPage < 500);
@@ -87,7 +154,10 @@ export async function fastPdfExtract(filePath) {
       && longAlnumWord
       && pages >= Number(process.env.KB_FIGURE_RICH_MIN_PAGES || 4)
       && avgPerPage < Number(process.env.KB_FIGURE_RICH_CHARS_PER_PAGE || 900);
-    return { text, pages, isImageHeavy, isFigureRich, avgPerPage, error: null };
+    return {
+      text, pages, isImageHeavy, isFigureRich, isTextLayerCorrupt: textQuality.corrupt,
+      textQuality, avgPerPage, error: null,
+    };
   } catch (err) {
     return { text: '', pages: 0, isImageHeavy: true, error: err.message };
   }

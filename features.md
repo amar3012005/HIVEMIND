@@ -218,3 +218,32 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   1024-dimensional vector with neither provider cooling down.
 - No Worker, container, database, frontend, local deployment setting, Queue,
   Workflow, R2 bucket, or secret was replaced by this rollout.
+
+## feature-20260830T214700Z — Parallel recall reliability production canary
+
+- Canonical Core SHA `319620270b84392d13d3a2c8970c10cb299372ea` adds
+  independently recoverable memory lexical/vector and evidence lexical/vector
+  lanes to both public recall and chat.
+- Flagship `recall_parallel_reliability_v1` defaults `off`. It serves `on` only
+  for production org `bfbdd2bc-e214-44e5-80d4-e3284256d0c0` plus user
+  `e35811aa-4bcd-44bb-b829-a437895a42eb`; all other users retain the stable
+  prior behavior. The Core environment master gate is enabled and fail-closed.
+- Healthy lanes remain usable when another lane fails. Only failure of all four
+  retrieval lanes produces retryable HTTP 503, explicitly without claiming the
+  requested knowledge is absent. Strict temporal inventory failures also remain
+  fail-closed.
+- `latest` and `earliest` final top-K are ordered from the fully filtered mixed
+  memory/evidence pool using the requested known-time or event-time axis, with
+  stable deterministic tie-breaking. Timeline delivery remains chronological.
+- Same-user rollback proof changed only the canary rule `on -> off -> on`:
+  all three runs returned the same ordered IDs, timestamps, and two evidence
+  rows; off reported `legacy`, while on reported all four lanes `complete`.
+- Live chat returned two memories plus one evidence row, three citations, and a
+  grounded answer after the internal-tool allowlist regression was fixed.
+- Cloudflare Worker version `d99c1304-61ff-40c8-a4b5-b0b5c148ce80`; Core image
+  `hivemind/core-api:sha-31962027`, digest
+  `sha256:715f48540ef97dc7d51263e22c34476f35fe68542cac964c02e3afd507f36ad4`.
+- Rollback: serve `off` for the exact canary (fastest), set the Core master gate
+  false, roll the Worker back to version
+  `c8461f69-d815-4ea5-bba3-82fc644a3f3c`, or release exact prior Core SHA
+  `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f` through the canonical runner.

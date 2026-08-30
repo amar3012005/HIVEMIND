@@ -1152,3 +1152,32 @@ slides that find no unique anchor get a page instead of `null`.
 - Rollback remains immediate: set the Flagship default to `off` or activate
   `CANONICAL_KNOWLEDGE_KILL_SWITCH=true`. Existing stable-path code remains in
   the runtime; changing the flag does not require a container deployment.
+
+## 2026-08-30 UTC — Parallel recall reliability canary accepted
+
+- Committed and accepted: `7f07fc39cd84d4826f2b73fae3aa38ce0a57d69d`
+  plus chat integration fix `319620270b84392d13d3a2c8970c10cb299372ea` on
+  `singulance-main`. No frontend commit, migration, or data-service change.
+- Focused Core route/client/evidence checks passed 18/18 on Windows. The clean
+  Linux Node container passed the 79-test recall/temporal/evidence set and the
+  two targeted chat-toolkit flag tests. Worker tests passed 12/12; TypeScript,
+  Wrangler production dry-run, syntax checks, and `git diff --check` passed.
+- Production Worker `d99c1304-61ff-40c8-a4b5-b0b5c148ce80` exposes the
+  authenticated fail-closed flag evaluation route. Unauthenticated access was
+  401; exact canary was true; another user in the same org was false.
+- Same-user production comparison temporarily served the exact rule off, then
+  restored it on after propagation. Both modes returned HTTP 200 with identical
+  ordered memory IDs `74fb72fc`, `0d633927`, `932e4b8b`, descending known times,
+  and two evidence rows. On exposed four complete lanes; off exposed legacy
+  behavior with no lane diagnostics.
+- Live chat acceptance returned `2 memories + 1 evidence`, three citations, and
+  a grounded Uwe Egly answer. The first chat canary caught an omitted trusted
+  internal argument; regression coverage was added before the final release.
+- Accepted Core `hivemind/core-api:sha-31962027`, revision
+  `319620270b84392d13d3a2c8970c10cb299372ea`, digest
+  `sha256:715f48540ef97dc7d51263e22c34476f35fe68542cac964c02e3afd507f36ad4`.
+  Control and Employees retained their prior images. Public API, Core, login,
+  and homepage returned 200; fresh Core critical-log count was zero. Canonical
+  projection sibling check remained `full`.
+- Flag default remains off and exact canary remains on. Environment backup:
+  `/root/hivemind/.env.pre-recall-reliability-20260830T213044Z`.

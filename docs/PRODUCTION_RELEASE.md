@@ -827,3 +827,24 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Rollback: `wrangler flagship flags set 6568ec71-67c6-4b2c-b2f3-98aebe9e81c8
   canonical_knowledge_foundation_v1 --variation off`, or the backend canonical
   kill switch for an environment-wide stop.
+
+## 31962027 — Parallel recall reliability canary
+
+- Parent `319620270b84392d13d3a2c8970c10cb299372ea`; frontend unchanged at
+  `59f3779b8291d5136a72a18867b5b4076ed46172`; migrations: none.
+- Core `hivemind/core-api:sha-31962027`, digest
+  `sha256:715f48540ef97dc7d51263e22c34476f35fe68542cac964c02e3afd507f36ad4`;
+  manifest `/root/releases/manifests/31962027/20260830T214532Z/RELEASE_MANIFEST.json`.
+- Cloudflare canonical-projection Worker version
+  `d99c1304-61ff-40c8-a4b5-b0b5c148ce80`. Flag
+  `recall_parallel_reliability_v1` default remains `off`; exact canary rule is
+  `on`. Core master gate is true.
+- Acceptance: Worker 12/12 plus typecheck/dry-run; focused Core 18/18; Linux
+  recall/evidence 79/79; chat-toolkit 2/2. Same-user on/off/on returned stable
+  ordered results, final latest top-K followed descending requested known time,
+  four lane receipts were complete, and chat returned grounded cited evidence.
+  Public API/Core/login/home checks were 200 and fresh critical logs were zero.
+- Rollback: exact canary flag off; Worker immutable version
+  `c8461f69-d815-4ea5-bba3-82fc644a3f3c`; exact prior Core SHA
+  `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f` via the canonical service-scoped
+  release runner. Do not use the retired quick-deploy rollback shortcut.

@@ -45,7 +45,7 @@
       "vars": {
         "ENVIRONMENT": "production",
         "DURABLE_CHAT_FLAG": "durable_chat_agent_v1",
-        "DURABLE_CHAT_AGENT_ENABLED": "false"
+        "DURABLE_CHAT_AGENT_ENABLED": "true"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "workflows": [{

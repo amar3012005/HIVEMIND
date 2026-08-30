@@ -36,8 +36,10 @@ implementation persists message and stream content in Durable Object SQLite.
   synthesis loop and no hidden message history in Cloudflare.
 
 Local resources use the `-local` Worker name and local Flagship targeting.
-Production configuration has `DURABLE_CHAT_AGENT_ENABLED=false`; promotion is a
-separate governed release after schema deployment and production canary approval.
+Production has an enabled infrastructure gate but remains fail-closed through
+Flagship: the default variation is `off`, and only explicitly targeted canaries
+enter a durable mode. The Core environment gate is a second independent kill
+switch.
 
 ## Answer coverage contract
 

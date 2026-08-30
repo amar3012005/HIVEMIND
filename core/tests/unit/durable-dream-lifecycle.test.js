@@ -32,3 +32,24 @@ test('admission coalesces a second trigger onto the active tenant run', async ()
   assert.equal(receipt.run_id, active.id);
   assert.equal(creates, 0);
 });
+
+test('candidate generation retries when every eligible subject hits a provider failure', async () => {
+  let runUpdated = false;
+  const lifecycle = new DurableDreamLifecycle({
+    prisma: {
+      subjectProfile: { findMany: async () => [{ id: 'profile-1', displayName: 'Paolo', aliases: [], subjectType: 'person' }] },
+      cognitionStep: { findUnique: async () => ({ outputReceipt: { bundles: [{ subject_profile_id: 'profile-1', memory_ids: ['memory-1', 'memory-2'] }] } }) },
+      memory: { findMany: async () => [{ id: 'memory-1' }, { id: 'memory-2' }] },
+      dreamCandidate: { upsert: async () => { throw new Error('candidate must not be persisted'); } },
+      cognitionRun: { update: async () => { runUpdated = true; } },
+    },
+    cognitionLoop: { _llmCanonicalFact: async () => { throw new Error('provider unavailable'); } },
+    logger: { warn: () => {} },
+  });
+
+  await assert.rejects(
+    lifecycle._generate_candidates({ id: 'run-1', orgId: '47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f', pipelineVersion: 2 }),
+    (error) => error.message === 'candidate_generation_provider_unavailable' && error.retryable === true,
+  );
+  assert.equal(runUpdated, false);
+});

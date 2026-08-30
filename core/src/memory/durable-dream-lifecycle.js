@@ -232,6 +232,8 @@ export class DurableDreamLifecycle {
     const walk = await this.prisma.cognitionStep.findUnique({ where: { runId_pipelineVersion_stageKey_shardKey: { runId: run.id, pipelineVersion: run.pipelineVersion, stageKey: 'walk-graph', shardKey: 'root' } } });
     const bundleMap = new Map((walk?.outputReceipt?.bundles || []).map((b) => [b.subject_profile_id, b.memory_ids]));
     let created = 0;
+    let generationAttempts = 0;
+    let providerFailures = 0;
     for (const profile of profiles) {
       const keys = [profile.displayName, ...(profile.aliases || [])].map(slug).filter(Boolean);
       const tags = keys.flatMap((k) => [`entity:${k}`, `person:${k}`, `organization:${k}`, `project:${k}`, `topic:${k}`]);
@@ -247,7 +249,12 @@ export class DurableDreamLifecycle {
       }
       const members = await this.prisma.memory.findMany({ where, orderBy: [{ importanceScore: 'desc' }, { createdAt: 'desc' }], take: 12 });
       if (members.length < 2) continue;
-      const generated = await this.cognitionLoop._llmCanonicalFact(profile.displayName, members).catch((error) => { this.logger.warn(`[dream-v2] candidate generation failed profile=${profile.id}: ${error.message}`); return null; });
+      generationAttempts += 1;
+      const generated = await this.cognitionLoop._llmCanonicalFact(profile.displayName, members).catch((error) => {
+        providerFailures += 1;
+        this.logger.warn(`[dream-v2] candidate generation failed profile=${profile.id}: ${error.message}`);
+        return null;
+      });
       if (!generated?.canonical_fact) continue;
       const sourceIds = [...new Set((generated.supporting_memory_ids || []).filter((id) => members.some((m) => m.id === id)))];
       if (sourceIds.length < 2) continue;
@@ -259,6 +266,11 @@ export class DurableDreamLifecycle {
         update: {},
       });
       if (result.runId === run.id) created += 1;
+    }
+    if (generationAttempts > 0 && providerFailures === generationAttempts) {
+      const error = new Error('candidate_generation_provider_unavailable');
+      error.retryable = true;
+      throw error;
     }
     await this.prisma.cognitionRun.update({ where: { id: run.id }, data: { candidateCount: created } });
     return { run_id: run.id, candidate_count: created, counts: { candidates: created } };

@@ -1638,6 +1638,18 @@ export class PrismaGraphStore {
     if (!hasCanonicalRelationshipCertification({ ...edge, type })) {
       throw new Error(`relationship_policy_uncertified:${type}`);
     }
+    if (orgIsRemote(_remoteOrg)) {
+      // Remote tenants have no central memory/relationship rows. Route before
+      // the central duplicate/budget lookup (which is tenant-scoped and would
+      // correctly reject a BYOD id). The agent owns uniqueness and returns a
+      // durable acknowledgement for its own edge store.
+      const _edgeId = edge.id || crypto.randomUUID();
+      const acknowledged = await amrAddEdge({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type,
+        confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {},
+        createdBy: edge.created_by || 'system', orgId: _remoteOrg });
+      if (!acknowledged) throw new Error('remote relationship write was not acknowledged');
+      return mapRelationshipRecord({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });
+    }
     if (['Updates', 'Extends', 'Derives', 'Contradicts'].includes(type)) {
       const uniqueWhere = { fromId_toId_type: { fromId: edge.from_id, toId: edge.to_id, type } };
       const existing = await this.client.relationship.findUnique({ where: uniqueWhere, select: { id: true } });
@@ -1647,17 +1659,6 @@ export class PrismaGraphStore {
         });
         if (semanticOut >= 10) throw new Error('relationship_policy_rejected:semantic-edge-budget-exhausted');
       }
-    }
-    if (orgIsRemote(_remoteOrg)) {
-      // Central path generates `id` via Prisma's @default(uuid()) at the upsert below; this branch
-      // skips that upsert entirely, so callers that don't pass an id (the common case) were sending
-      // `id: undefined` straight to the agent's NOT-NULL, no-default `id` column — a guaranteed
-      // "null value in column id violates not-null constraint" on every remote-org edge write.
-      const _edgeId = edge.id || crypto.randomUUID();
-      await amrAddEdge({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type,
-        confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {},
-        createdBy: edge.created_by || 'system', orgId: _remoteOrg });
-      return mapRelationshipRecord({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });
     }
     const created = await this.client.relationship.upsert({
       where: {

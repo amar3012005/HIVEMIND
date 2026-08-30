@@ -27,3 +27,14 @@ test('dual storage relationship writes await durable AMR admission', () => {
   assert.doesNotMatch(dualBranch, /Promise\.resolve\(amrAddEdge/);
   assert.doesNotMatch(dualBranch, /\.catch\(\(\) => \{\}\)/);
 });
+
+test('BYOD relationship writes route before every central relationship query', () => {
+  const start = storeSource.indexOf('async createRelationship(edge)');
+  const end = storeSource.indexOf('async createMemoryVersion', start);
+  const method = storeSource.slice(start, end);
+  const remoteBranch = method.indexOf('if (orgIsRemote(_remoteOrg))');
+  const centralLookup = method.indexOf('this.client.relationship.findUnique');
+  assert.ok(remoteBranch > -1 && centralLookup > -1 && remoteBranch < centralLookup);
+  assert.match(method.slice(remoteBranch, centralLookup), /await amrAddEdge/);
+  assert.match(method.slice(remoteBranch, centralLookup), /remote relationship write was not acknowledged/);
+});

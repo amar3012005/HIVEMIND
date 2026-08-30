@@ -1,4 +1,4 @@
-CREATE TABLE "durable_chat_turns" (
+CREATE TABLE IF NOT EXISTS "durable_chat_turns" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
   "org_id" UUID NOT NULL,
   "user_id" UUID NOT NULL,
@@ -17,11 +17,11 @@ CREATE TABLE "durable_chat_turns" (
   CONSTRAINT "durable_chat_turns_pkey" PRIMARY KEY ("id")
 );
 
-CREATE UNIQUE INDEX "durable_chat_turns_org_idempotency_key" ON "durable_chat_turns"("org_id", "idempotency_key");
-CREATE INDEX "durable_chat_turns_tenant_updated_idx" ON "durable_chat_turns"("org_id", "user_id", "updated_at" DESC);
-CREATE INDEX "durable_chat_turns_thread_updated_idx" ON "durable_chat_turns"("thread_digest", "updated_at" DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS "durable_chat_turns_org_idempotency_key" ON "durable_chat_turns"("org_id", "idempotency_key");
+CREATE INDEX IF NOT EXISTS "durable_chat_turns_tenant_updated_idx" ON "durable_chat_turns"("org_id", "user_id", "updated_at" DESC);
+CREATE INDEX IF NOT EXISTS "durable_chat_turns_thread_updated_idx" ON "durable_chat_turns"("thread_digest", "updated_at" DESC);
 
-CREATE TABLE "durable_chat_checkpoints" (
+CREATE TABLE IF NOT EXISTS "durable_chat_checkpoints" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
   "turn_id" UUID NOT NULL,
   "phase" VARCHAR(40) NOT NULL,
@@ -39,10 +39,10 @@ CREATE TABLE "durable_chat_checkpoints" (
   CONSTRAINT "durable_chat_checkpoints_turn_fkey" FOREIGN KEY ("turn_id") REFERENCES "durable_chat_turns"("id") ON DELETE CASCADE ON UPDATE NO ACTION
 );
 
-CREATE UNIQUE INDEX "durable_chat_checkpoints_turn_phase_key" ON "durable_chat_checkpoints"("turn_id", "phase");
-CREATE INDEX "durable_chat_checkpoints_recovery_idx" ON "durable_chat_checkpoints"("status", "lease_expires_at");
+CREATE UNIQUE INDEX IF NOT EXISTS "durable_chat_checkpoints_turn_phase_key" ON "durable_chat_checkpoints"("turn_id", "phase");
+CREATE INDEX IF NOT EXISTS "durable_chat_checkpoints_recovery_idx" ON "durable_chat_checkpoints"("status", "lease_expires_at");
 
-CREATE TABLE "durable_chat_events" (
+CREATE TABLE IF NOT EXISTS "durable_chat_events" (
   "id" BIGSERIAL NOT NULL,
   "turn_id" UUID NOT NULL,
   "sequence" INTEGER NOT NULL,
@@ -53,5 +53,5 @@ CREATE TABLE "durable_chat_events" (
   CONSTRAINT "durable_chat_events_turn_fkey" FOREIGN KEY ("turn_id") REFERENCES "durable_chat_turns"("id") ON DELETE CASCADE ON UPDATE NO ACTION
 );
 
-CREATE UNIQUE INDEX "durable_chat_events_turn_sequence_key" ON "durable_chat_events"("turn_id", "sequence");
-CREATE INDEX "durable_chat_events_turn_created_idx" ON "durable_chat_events"("turn_id", "created_at");
+CREATE UNIQUE INDEX IF NOT EXISTS "durable_chat_events_turn_sequence_key" ON "durable_chat_events"("turn_id", "sequence");
+CREATE INDEX IF NOT EXISTS "durable_chat_events_turn_created_idx" ON "durable_chat_events"("turn_id", "created_at");

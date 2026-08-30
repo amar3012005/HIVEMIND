@@ -417,6 +417,7 @@ test('compound orchestrator: composio read step executes and reports completed',
   assert.deepEqual(res.readResults, [{
     index: 0,
     operation: 'search',
+    instruction: 'search emails',
     tool: 'composio_gmail_search',
     data: { results: ['m1'] },
   }]);

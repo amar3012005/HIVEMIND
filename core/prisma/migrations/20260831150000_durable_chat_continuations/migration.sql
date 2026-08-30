@@ -1,4 +1,4 @@
-CREATE TABLE "durable_chat_continuations" (
+CREATE TABLE IF NOT EXISTS "durable_chat_continuations" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
   "token_hash" CHAR(64) NOT NULL,
   "parent_turn_id" UUID,
@@ -15,6 +15,6 @@ CREATE TABLE "durable_chat_continuations" (
   CONSTRAINT "durable_chat_continuations_pkey" PRIMARY KEY ("id")
 );
 
-CREATE UNIQUE INDEX "durable_chat_continuations_token_hash_key" ON "durable_chat_continuations"("token_hash");
-CREATE INDEX "durable_chat_continuations_tenant_status_idx" ON "durable_chat_continuations"("org_id", "user_id", "status", "expires_at");
-CREATE INDEX "durable_chat_continuations_recovery_idx" ON "durable_chat_continuations"("status", "lease_expires_at");
+CREATE UNIQUE INDEX IF NOT EXISTS "durable_chat_continuations_token_hash_key" ON "durable_chat_continuations"("token_hash");
+CREATE INDEX IF NOT EXISTS "durable_chat_continuations_tenant_status_idx" ON "durable_chat_continuations"("org_id", "user_id", "status", "expires_at");
+CREATE INDEX IF NOT EXISTS "durable_chat_continuations_recovery_idx" ON "durable_chat_continuations"("status", "lease_expires_at");

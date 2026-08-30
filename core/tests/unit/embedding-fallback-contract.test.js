@@ -2,6 +2,32 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildEmbeddingChain, FallbackEmbedService } from '../../src/embeddings/factory.js';
+import { CloudflareWorkersAIEmbedService } from '../../src/embeddings/cloudflare-workers-ai.js';
+
+test('Cloudflare BGE-M3 uses the account REST API through the configured AI Gateway', async () => {
+  let request;
+  const service = new CloudflareWorkersAIEmbedService({
+    accountId: 'account', apiToken: 'secret', gatewayId: 'hivemind-prod',
+    fetchImpl: async (url, init) => {
+      request = { url, init };
+      return { ok: true, json: async () => ({ result: { data: [Array(1024).fill(0.1)] } }) };
+    },
+  });
+  const [vector] = await service.embed(['query'], { tenantId: 'tenant-a' });
+  assert.equal(vector.length, 1024);
+  assert.match(request.url, /ai\/run\/@cf\/baai\/bge-m3$/);
+  assert.equal(request.init.headers['cf-aig-gateway-id'], 'hivemind-prod');
+  assert.equal(JSON.parse(request.init.body).text[0], 'query');
+});
+
+test('a primary provider timeout falls through to same-model secondary', async () => {
+  const timeout = Object.assign(new Error('primary timeout'), { code: 'EMBEDDING_TIMEOUT' });
+  const service = new FallbackEmbedService([
+    { name: 'cloudflare', service: { embed: async () => { throw timeout; } } },
+    { name: 'openrouter', service: { embed: async () => [[1, 2, 3]] } },
+  ]);
+  assert.deepEqual(await service.embed(['query']), [[1, 2, 3]]);
+});
 
 test('production embedding chain uses one bge-m3 vector space across three failure domains', () => {
   const keys = [

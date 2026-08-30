@@ -25,6 +25,7 @@
  */
 
 import { getLiteLLMEmbedService, LiteLLMEmbedService } from './litellm.js';
+import { CloudflareWorkersAIEmbedService } from './cloudflare-workers-ai.js';
 
 // How long a link that just failed is DEPRIORITISED for. It is never removed — see embed().
 const LINK_COOLDOWN_MS = Number(process.env.EMBEDDING_LINK_COOLDOWN_MS || 60000);
@@ -83,7 +84,9 @@ export class FallbackEmbedService {
         if (errors.length) console.warn(`[embed] served by fallback '${link.name}' after ${errors.length} failure(s)`);
         return out;
       } catch (err) {
-        if (err?.code === 'EMBEDDING_TIMEOUT' || err?.code === 'EMBEDDING_CANCELLED') throw err;
+        // Caller cancellation is authoritative. A provider-local timeout is exactly
+        // what this same-model fallback chain exists to survive.
+        if (err?.code === 'EMBEDDING_CANCELLED') throw err;
         // Log the FIRST failure of each link, not every one — a hot loop with a dead primary
         // would otherwise bury the log. The cooldown entry doubles as the "already reported" mark.
         if (!this._downUntil.has(link.name)) {
@@ -151,6 +154,10 @@ function makeOpenRouterService() {
   );
 }
 
+function makeCloudflareService() {
+  return new CloudflareWorkersAIEmbedService();
+}
+
 function makeSingulanceService() {
   return new LiteLLMEmbedService(
     process.env.SINGULANCE_EMBED_MODEL || 'bge-m3',
@@ -176,6 +183,7 @@ function makeBlaiqService() {
  *   object, or "failover" would retry the same dead endpoint.
  */
 function buildService(provider, fresh = false) {
+  if (provider === 'cloudflare') return makeCloudflareService();
   if (provider === 'singulance') return makeSingulanceService();
   if (provider === 'blaiq') return makeBlaiqService();
   // Compatibility alias for older deployments. It remains OpenAI-compatible

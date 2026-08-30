@@ -1302,6 +1302,9 @@ slides that find no unique anchor get a page instead of `null`.
   production dry-run passed. Four durable tables and 14 indexes exist, both
   migration ledger rows are finished, public homepage/login/API/Core are 200,
   Core/Control/Employees are healthy, and fresh critical-log count is zero.
+- Event replay authorization passed: the owning tenant received HTTP 200 with
+  six ordered events, a different tenant received HTTP 404 with no events, and
+  the unauthenticated public route returned HTTP 401.
 - Flag default remains `off`; only the existing operator canary is `full`.
   Rollback is exact rule off, followed if needed by the backed-up Core environment
   kill switch and canonical service-scoped recreation. No global rollout occurred.

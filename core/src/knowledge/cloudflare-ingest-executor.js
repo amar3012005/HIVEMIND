@@ -5,6 +5,7 @@ import {
   requireCompleteEvidenceEmbedding,
 } from './kb-ingest-queue.js';
 import { sanitizeKnowledgeJson } from './upload-contract.js';
+import { knowledgeWorkflowEnabled } from './cloudflare-ingest-client.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STAGES = new Set(['acquire', 'materialize', 'reconcile']);
@@ -13,11 +14,6 @@ function safeEqual(left, right) {
   const a = Buffer.from(String(left || ''));
   const b = Buffer.from(String(right || ''));
   return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
-}
-
-export function knowledgeWorkflowEnabled() {
-  return process.env.HIVEMIND_LOCAL_MODE === 'true'
-    && process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED === 'true';
 }
 
 export function isAuthorizedKnowledgeWorkflowRequest(req) {

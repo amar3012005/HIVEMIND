@@ -168,3 +168,33 @@ Rollback: disable the Flagship flag or set
 `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. No production resource or
 `singulance-main` release is part of this implementation.
 
+## Production promotion contract (2026-08-30)
+
+The same code path is production-capable, but configuration is deliberately
+fail-closed. Production execution requires all of the following:
+
+```text
+KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true
+KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT=production
+KNOWLEDGE_INGEST_PRODUCTION_ACK=enable-cloudflare-workflow-v1
+NODE_ENV=production
+HIVEMIND_LOCAL_MODE is absent or false
+Flagship knowledge_ingest_workflow_v1=true for the admitted organization
+```
+
+The production Worker uses dedicated `-production` Workflow, Queue, DLQ, and R2
+resources. It calls the existing production Core endpoint through the same
+secret-authenticated, path-bounded bridge. Model selection, AI Gateway routing,
+embedding dimensions, public upload/status payloads, canonical materialization,
+tenant authorization, durable checkpoints, and settlement semantics do not
+fork between local and production.
+
+Declaring the environment is not production acceptance. A governed promotion
+must first create the named resources and secret, deploy an immutable Core image
+with the parser/OCR native dependencies, deploy the Worker, and leave Flagship
+off by default. It must then enable one disposable tenant and pass authenticated
+evidence-only, evidence-to-both, restart/replay, cross-tenant denial, exact-count,
+citation, entity, relationship, and recall canaries. Only that evidence permits
+a gradual tenant rollout. Existing production resources and settings are not
+silently inferred, copied, or overwritten.
+

@@ -87,6 +87,7 @@ import { handleHermesRoutes } from './hermes/control-routes.js';
 import { attachSsoContext, resolveSsoConfig } from './auth/sso-resolver.js';
 import { handleScimRequest } from './scim/scim-router.js';
 import { configureSystemEmailNotificationSink, renderTemplate, sendRenderedSystemEmail, sendSystemEmail, sendSystemEmailBatch, sendTeamInvitationEmails, queueEmailDelivery } from './email/email-service.js';
+import { knowledgeWorkflowEnabled } from './knowledge/cloudflare-ingest-client.js';
 import { renderDayZeroOnboardingEmail, renderDayZeroOnboardingReportHtml } from './email/templates/day0-company-onboarding.js';
 import { renderDayZeroOnboardingPdf } from './email/day0-company-report-pdf.js';
 import { renderHumationAvatarSvg } from './email/humation-avatar.js';
@@ -2957,9 +2958,8 @@ async function proxyToCore(req, res, { session, method, path, body, query, rawBo
   }
 }
 
-async function proxyLocalKnowledgeWorkflowToCore(req, res, pathname) {
-  const enabled = process.env.HIVEMIND_LOCAL_MODE === 'true'
-    && process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED === 'true';
+async function proxyKnowledgeWorkflowToCore(req, res, pathname) {
+  const enabled = knowledgeWorkflowEnabled();
   const expected = process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET || '';
   const actual = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!enabled || !secretsMatch(actual, expected)) {
@@ -2983,7 +2983,7 @@ async function proxyLocalKnowledgeWorkflowToCore(req, res, pathname) {
   } catch (error) {
     return jsonResponse(res, {
       error: 'core_temporarily_unavailable',
-      message: 'The local ingestion core is temporarily unavailable.',
+      message: 'The ingestion core is temporarily unavailable.',
     }, 503);
   }
 }
@@ -14323,7 +14323,7 @@ Write the persona now.`;
   // boundaries. It never creates a browser session and never maps arbitrary
   // paths into Core.
   if (/^\/internal\/knowledge-ingest\/v1\/jobs\/[0-9a-f-]{36}\/(?:stages\/(?:acquire|materialize|reconcile)|fail)$/.test(pathname)) {
-    return proxyLocalKnowledgeWorkflowToCore(req, res, pathname);
+    return proxyKnowledgeWorkflowToCore(req, res, pathname);
   }
 
   if (pathname.startsWith('/v1/proxy/')) {

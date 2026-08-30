@@ -126,11 +126,14 @@ test('remote storage reconciliation does not require a central document row', as
   await assert.doesNotReject(() => executor.execute({ ...input, stage: 'reconcile' }));
 });
 
-test('internal Workflow authorization requires local mode, feature gate and exact secret', () => {
+test('internal Workflow authorization requires an explicit environment gate and exact secret', () => {
   const previous = {
     local: process.env.HIVEMIND_LOCAL_MODE,
     enabled: process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED,
     secret: process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET,
+    environment: process.env.KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT,
+    acknowledgement: process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK,
+    nodeEnv: process.env.NODE_ENV,
   };
   try {
     Object.assign(process.env, {
@@ -141,10 +144,18 @@ test('internal Workflow authorization requires local mode, feature gate and exac
     assert.equal(isAuthorizedKnowledgeWorkflowRequest({ headers: { authorization: 'Bearer wrong' } }), false);
     process.env.HIVEMIND_LOCAL_MODE = 'false';
     assert.equal(isAuthorizedKnowledgeWorkflowRequest({ headers: { authorization: 'Bearer expected-secret' } }), false);
+    Object.assign(process.env, {
+      NODE_ENV: 'production', KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT: 'production',
+      KNOWLEDGE_INGEST_PRODUCTION_ACK: 'enable-cloudflare-workflow-v1',
+    });
+    assert.equal(isAuthorizedKnowledgeWorkflowRequest({ headers: { authorization: 'Bearer expected-secret' } }), true);
   } finally {
     if (previous.local === undefined) delete process.env.HIVEMIND_LOCAL_MODE; else process.env.HIVEMIND_LOCAL_MODE = previous.local;
     if (previous.enabled === undefined) delete process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED; else process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED = previous.enabled;
     if (previous.secret === undefined) delete process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET; else process.env.KNOWLEDGE_INGEST_WORKFLOW_SECRET = previous.secret;
+    if (previous.environment === undefined) delete process.env.KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT; else process.env.KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT = previous.environment;
+    if (previous.acknowledgement === undefined) delete process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK; else process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK = previous.acknowledgement;
+    if (previous.nodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previous.nodeEnv;
   }
 });
 

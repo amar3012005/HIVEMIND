@@ -6,9 +6,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function enabledByEnvironment() {
-  return process.env.HIVEMIND_LOCAL_MODE === 'true'
-    && process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED === 'true';
+export function knowledgeWorkflowEnvironment() {
+  if (process.env.KNOWLEDGE_INGEST_WORKFLOW_ENABLED !== 'true') return null;
+  const requested = String(process.env.KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT || '').trim().toLowerCase();
+  const localMode = process.env.HIVEMIND_LOCAL_MODE === 'true';
+  if ((requested === '' || requested === 'local') && localMode) return 'local';
+  if (requested === 'production'
+    && !localMode
+    && process.env.NODE_ENV === 'production'
+    && process.env.KNOWLEDGE_INGEST_PRODUCTION_ACK === 'enable-cloudflare-workflow-v1') {
+    return 'production';
+  }
+  return null;
+}
+
+export function knowledgeWorkflowEnabled() {
+  return knowledgeWorkflowEnvironment() !== null;
 }
 
 function requireConfig() {
@@ -26,13 +39,13 @@ export class CloudflareKnowledgeIngestClient {
   }
 
   configured() {
-    return enabledByEnvironment() && !!requireConfig();
+    return knowledgeWorkflowEnabled() && !!requireConfig();
   }
 
   async _request(pathname, init = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
     const config = requireConfig();
-    if (!enabledByEnvironment() || !config) {
-      throw Object.assign(new Error('Cloudflare knowledge ingestion is not configured for local mode.'), {
+    if (!knowledgeWorkflowEnabled() || !config) {
+      throw Object.assign(new Error('Cloudflare knowledge ingestion is not configured for this environment.'), {
         code: 'CLOUDFLARE_INGEST_DISABLED', retryable: false,
       });
     }
@@ -161,7 +174,8 @@ export class CloudflareKnowledgeIngestClient {
     return {
       enabled: this.configured(),
       mode: this.mode,
-      local_only: true,
+      environment: knowledgeWorkflowEnvironment(),
+      local_only: knowledgeWorkflowEnvironment() === 'local',
       degraded: false,
     };
   }

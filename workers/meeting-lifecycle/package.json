@@ -1,0 +1,7 @@
+{
+  "name": "hivemind-meeting-lifecycle",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "wrangler dev --port 8791 --persist-to P:\\HIVEMIND\\wrangler\\meeting-lifecycle", "check": "wrangler types && tsc --noEmit", "test": "vitest run", "types": "wrangler types", "dry-run": "wrangler deploy --env local --dry-run" },
+  "devDependencies": { "@types/node": "^26.4.0", "typescript": "^5.9.2", "vitest": "^4.1.1", "wrangler": "^4.32.0" }
+}

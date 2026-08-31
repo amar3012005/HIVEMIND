@@ -2158,3 +2158,56 @@ git diff --check: passed (line-ending warnings only)
   `0caffe3c-ff87-43c8-992a-51a05deea123`.
 - Live browser navigation retained the preview hostname for both login and app
   routes after JavaScript execution. Production frontend was not changed.
+
+## 2026-08-31 UTC — Durable GDPR-ready Meeting Notes v2 local candidate committed
+
+- Backend/session branch `codex/meeting-lifecycle-v2` pushed commit
+  `ced23852`; Da-vinci branch `codex/meeting-lifecycle-v2-ui` pushed commit
+  `b3b63e12369cbb52aa4642eceb2c10da9f5a4ee2`. Worktree:
+  `C:\Users\AMAR\Documents\ChatGPT\HIVEMIND-meeting-v2`.
+- Added an inert-by-default multivariate meeting lifecycle, versioned privacy
+  policies/notices, participant authorization receipts, encrypted invitation
+  delivery secrets, transactional notification outbox, PostgreSQL checkpoints,
+  EU R2 audio receipts, Cloudflare audio/email Queues and finalization Workflow,
+  mandatory AI Gateway controls, canonical publication gating, and participant
+  and privacy-admin UI.
+- Verification commands and outputs:
+  - `npx prisma validate` -> `The schema at prisma\schema.prisma is valid`.
+  - `node --test tests/unit/meeting*.test.js` -> `tests 38`, `pass 38`,
+    `fail 0`.
+  - `npm run check` in `workers/meeting-lifecycle` -> Wrangler binding types
+    generated and TypeScript exited 0.
+  - `npm test` in the Worker -> `Test Files 1 passed`, `Tests 6 passed`.
+  - `npm run dry-run` -> local Workflow, two Queues, EU R2 and Flagship
+    bindings resolved; `--dry-run: exiting now`.
+  - `npm run build` in Da-vinci -> `Compiled successfully`.
+- This is committed implementation work, not an accepted local release. BYOD
+  v2 deliberately fails closed pending tenant-agent functional parity; the
+  rights route currently creates an immediate restriction and pending request
+  but still needs the full durable cross-storage deletion executor. The clean
+  permanent integration worktree was not available for a shared-stack rebuild.
+- No migration, Cloudflare resource mutation, Flagship change, shared-container
+  rebuild, `singulance-local` merge, or production action occurred.
+
+## 2026-08-31 UTC — Meeting Notes v2 enabled for every local identity
+
+- Created Flagship string flag `meeting_lifecycle_v2` with variations
+  `off|shadow|consent|workflow|full`, safe default `off`, and exactly one rule:
+  `environment equals local -> full`. Arbitrary local evaluation returned
+  `full / TARGETING_MATCH`; arbitrary production evaluation returned
+  `off / DEFAULT`.
+- Provisioned only isolated local resources:
+  `hivemind-meeting-lifecycle-local`,
+  `hivemind-meeting-finalization-local`, audio/email Queues and DLQs, and
+  `hivemind-meeting-audio-local-eu` with EU jurisdiction. Latest Worker version
+  after secret installation: `6a4eecf6-00b6-44bb-b13b-28dbd3000eee`.
+- Installed generated Worker service and invitation-encryption secrets without
+  printing or committing them. Authenticated live `/mode` returned
+  `local_worker_mode=full`.
+- Updated the session branch's local Compose defaults to enable admission and
+  publication. `docker inspect hivemind-api` returned no Meeting v2 environment
+  gates, proving the already-running shared Core has not loaded them.
+- Did not merge or recreate the shared stack because the permanent integration
+  worktree contained unrelated edits in `core/data/mcp-connectors.json` and a
+  dirty `docker-compose.local-stack.yml` entry. Those files were not cleaned,
+  stashed, overwritten or committed. Production remained unchanged.

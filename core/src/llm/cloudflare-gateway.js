@@ -107,6 +107,9 @@ export function gatewayHeaders(provider) {
     // Chat, recall, transcription and embeddings carry tenant data; no cache until
     // a separately reviewed cache-key/isolation policy exists.
     'cf-aig-skip-cache': 'true',
+    // Retain provider/model/latency/token metadata without persisting customer
+    // prompts, transcripts, completions or embedding inputs in Gateway logs.
+    'cf-aig-collect-log-payload': 'false',
     ...(alias ? { 'cf-aig-byok-alias': alias } : {}),
   };
 }

@@ -49,11 +49,13 @@ export function resolveEmailIdentityMode() {
   return MODES.has(mode) ? mode : 'off';
 }
 
-export function safeReturnTo(candidate, fallback) {
+export function safeReturnTo(candidate, fallback, allowedOrigins = null) {
   try {
     const target = new URL(String(candidate || ''));
-    const approved = String(process.env.EMAIL_AUTH_ALLOWED_ORIGINS || '')
-      .split(',').map((entry) => entry.trim()).filter(Boolean);
+    const approved = Array.isArray(allowedOrigins)
+      ? allowedOrigins
+      : String(process.env.EMAIL_AUTH_ALLOWED_ORIGINS || '')
+        .split(',').map((entry) => entry.trim()).filter(Boolean);
     if (!approved.includes(target.origin)) return fallback;
     if (!target.pathname.startsWith('/hivemind/')) return fallback;
     return target.toString();

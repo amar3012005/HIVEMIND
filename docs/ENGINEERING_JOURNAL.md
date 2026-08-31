@@ -1637,3 +1637,21 @@ git diff --check: passed (line-ending warnings only)
 - Production configuration and targeting were not changed. Rollback is setting
   `VISUAL_PATH_IN_HYPERROOMS=false` in the local environment and recreating only
   Employees.
+
+## 2026-08-31 — Local governed model configuration restored
+
+- The next branding retry passed artifact admission but returned no answer because
+  the Employees-only recreation had discarded previously process-injected AI
+  Gateway variables. Logs showed `no governed model provider configured`, followed
+  by a verifier `NoneType.get` error.
+- Restored the same governed Cloudflare AI Gateway configuration used by production
+  into the local Employees process without printing or persisting secret values.
+  A direct model probe returned a valid choices object; the renderer gate remained
+  enabled and Employees health returned HTTP 200.
+- Added `scripts/recreate-local-employees-production-parity.ps1` so future
+  Employees-only recreations securely load only the approved provider variables
+  through `ssh singulance`, recreate only Employees, verify health, and erase the
+  variables from the calling process afterward.
+- The verifier now turns an absent provider response into the explicit error
+  `governed verifier model returned no response` rather than leaking an internal
+  `NoneType.get` exception into the Room result.

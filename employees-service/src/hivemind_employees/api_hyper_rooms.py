@@ -2566,6 +2566,8 @@ async def _verify_turn(
         if _needs_reasoning_disabled(verifier_model):
             body["reasoning"] = {"enabled": False}
         data = await _openrouter_chat(body, timeout=httpx.Timeout(25.0, connect=5.0))
+        if not isinstance(data, dict):
+            raise RuntimeError("governed verifier model returned no response")
         reply = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
     except Exception as exc:  # noqa: BLE001 — preserve the report, but never silently pass quality
         log.warning("[verify] pass failed: %s", exc)

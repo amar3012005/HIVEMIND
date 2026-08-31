@@ -368,3 +368,29 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   not deploy or enable the Grok-style HyperAgents runtime.
 - Rollback is immediate by serving `off` to the exact canary; the additive
   database latch can remain in place.
+
+## feature-20260831T191032Z — Durable knowledge ingestion v2
+
+- Accepted production implementation: canonical SHA
+  `f4107cc82490a1ddf57a7b215955be6184d4038b`; Core digest
+  `sha256:77083aab6997bfbda1a9ddbf2d0294396197528ccd399c90b4ccbcef7713c217`;
+  Cloudflare Worker version `d8547ac3-6609-4b47-bf87-32cd9d9c185a`.
+- Adds one-time admission latching, fail-closed Workflow selection, a fenced
+  processing lease, independently retryable evidence and memory checkpoints,
+  parser-error contamination rejection, and direct Cloudflare Gemini vision.
+  Stable BullMQ remains selected while the production flag is off.
+- A disposable valid PDF completed the seven-step Workflow; every durable
+  receipt succeeded exactly once, the lease cleared, hybrid recall cited the
+  exact document, and identical replay was rejected without reparsing. All
+  disposable document and R2 data were removed afterward.
+- Two earlier canaries were rejected and rolled back: one caught a PostgreSQL
+  schema qualification error; the next caught an invalid zero-yield reconcile
+  reason. Both fixes are in the accepted revision and retained in the journal.
+- Rollout state: `knowledge_ingest_workflow_v1` remains globally **off** in
+  production after acceptance. The capability is dormant for normal production
+  uploads until a separately governed flag promotion; local-only targeting is
+  preserved.
+- Rollback: keep Flagship off; Worker
+  `d917d0a1-38fe-4933-a4eb-34bcb891c625`; Core
+  `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`; exact backups and manifest are
+  recorded in `docs/PRODUCTION_RELEASE.md`.

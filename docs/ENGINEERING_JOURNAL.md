@@ -1598,3 +1598,31 @@ slides that find no unique anchor get a page instead of `null`.
   The fix maps zero-yield promotion to the already documented and permitted
   `extraction_yield_zero` value, preserving the existing API/status contract
   instead of widening it with another public enum.
+
+### Accepted final canary and governed release
+
+- Final canonical SHA `f4107cc82490a1ddf57a7b215955be6184d4038b`
+  deployed Core-only through the governor. Core digest is
+  `sha256:77083aab6997bfbda1a9ddbf2d0294396197528ccd399c90b4ccbcef7713c217`;
+  Worker version `d8547ac3-6609-4b47-bf87-32cd9d9c185a` is active at 100%.
+  Control and Employees retained their prior images and start times.
+- A valid disposable PDF completed Workflow
+  `kb-577defcf-94d4-48e5-ad46-866dba0ed358-v1`: all five durable receipts
+  succeeded once at attempt 1, reconciliation reached ready, and its lease was
+  removed. Hybrid recall returned the unique fact with filename and exact
+  document citation. Identical replay returned 409 for the same job/checksum
+  without a second parse or dispatch.
+- The canary produced evidence but zero promoted memories, reported through the
+  existing `extraction_yield_zero` reason. The real promotion checkpoint
+  succeeded and source-backed recall was proven; this is not represented as a
+  positive memory-yield test.
+- The accepted document, failed-canary orphan, and all associated R2 objects
+  were deleted and verified absent. Flagship was restored globally off after
+  the latched job completed; operator and unrelated contexts evaluate off.
+- Direct Cloudflare Gemini multimodal REST verification returned 200. Public
+  health and fresh critical-log scans passed. No customer artifact, email, or
+  other external side effect was produced.
+- Rollback: keep the flag off; Core
+  `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`; Worker
+  `d917d0a1-38fe-4933-a4eb-34bcb891c625`; verified database backups are in the
+  production release ledger.

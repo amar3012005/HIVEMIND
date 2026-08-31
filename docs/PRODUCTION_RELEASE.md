@@ -1069,3 +1069,40 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   images `hivemind/core-api:sha-afd97867`,
   `hivemind/control-plane:sha-afd97867`, and
   `hivemind/employees:sha-afd97867` if code rollback is required.
+
+## f4107cc8 — Knowledge ingestion v2 accepted; production flag remains off
+
+- Canonical SHA `f4107cc82490a1ddf57a7b215955be6184d4038b`; Core image
+  `hivemind/core-api:sha-f4107cc8`, digest
+  `sha256:77083aab6997bfbda1a9ddbf2d0294396197528ccd399c90b4ccbcef7713c217`.
+  Manifest `/root/releases/f4107cc8/RELEASE_MANIFEST.20260831T190559Z.json`,
+  SHA-256 `5feb6e6895ada6ac26891915fd9b22dc0d346563b61d1f147d3041f2297006cd`.
+- Worker `hivemind-knowledge-ingest-production` version
+  `d8547ac3-6609-4b47-bf87-32cd9d9c185a` is active at 100%. Flagship
+  `knowledge_ingest_workflow_v1` remains globally production-off; default and
+  both production rules serve `off`, while local-only behavior is preserved.
+  Operator and unrelated contexts both evaluated off after acceptance.
+- Applied schema-qualified `20260831235900_knowledge_ingest_processing_lease`
+  and corrective `20260901000500_fix_knowledge_ingest_lease_schema`. Verified
+  backups: `/root/backups/hivemind-pre-ff80d612-20260831T184059Z.dump`
+  (`80bd47e0911b034d86e0dfe0e23f5bd858a359d87a98bbe451dfa0098c195ce8`)
+  and `/root/backups/hivemind-pre-87c49282-20260831T185253Z.dump`
+  (`2ff50f02d0ec10ab63042705ea22946618f6d074184a62708f817ba3f5c7a101`).
+- Two rejected canaries were rolled back before acceptance: `ff80d612` exposed
+  the wrong-schema migration and created no document/evidence; `87c49282`
+  reached real materialization/promotion but reconciliation rejected a new
+  zero-yield reason. Final `f4107cc8` maps it to existing allowed
+  `extraction_yield_zero`. No customer evidence changed.
+- Accepted disposable PDF job `577defcf-94d4-48e5-ad46-866dba0ed358` completed
+  Workflow `kb-577defcf-94d4-48e5-ad46-866dba0ed358-v1` in seven steps.
+  Acquire, `materialize_evidence`, `promote_memories`, materialize, and reconcile
+  each succeeded once at attempt 1; the lease cleared. Recall returned the exact
+  marker, filename, and document citation. Identical replay returned
+  `duplicate_document` for the same job/checksum without redispatch. All
+  disposable database and R2 artifacts were deleted and verified absent.
+- Direct Cloudflare Gemini multimodal REST verification returned 200. API/home
+  health passed and fresh critical logs were clean. Control and Employees were
+  neither rebuilt nor restarted.
+- Rollback: keep the flag off; Core
+  `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`; Worker
+  `d917d0a1-38fe-4933-a4eb-34bcb891c625`; database backups above.

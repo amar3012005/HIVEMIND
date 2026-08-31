@@ -314,3 +314,21 @@ test('the fenced scheduler admits four globally, caps each organization at two, 
   assert.equal((await executor._claimProcessingLease(jobs[2])).acquired, true);
   assert.equal(leases.length, 4);
 });
+
+test('stage-slot claims use the advisory mutex without Serializable transaction conflicts', async () => {
+  const { executor, job } = fixture();
+  let transactionOptions = 'not-called';
+  executor.prisma.knowledgeIngestLease = {
+    findMany: async () => [],
+    create: async ({ data }) => data,
+    update: async ({ data }) => data,
+  };
+  executor.prisma.$executeRawUnsafe = async () => 1;
+  executor.prisma.$transaction = async (work, options) => {
+    transactionOptions = options;
+    return work(executor.prisma);
+  };
+
+  assert.equal((await executor._claimProcessingLease(job, 'extract')).acquired, true);
+  assert.equal(transactionOptions, undefined);
+});

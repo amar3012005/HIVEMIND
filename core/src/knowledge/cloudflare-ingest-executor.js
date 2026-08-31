@@ -177,7 +177,11 @@ export class CloudflareKnowledgeIngestExecutor {
     const capacity = STAGE_CAPACITY[stage] || STAGE_CAPACITY.extract;
     const prefix = `${PROCESSING_LEASE_PREFIX}:${stage}`;
     const transact = this.prisma.$transaction
-      ? (work) => this.prisma.$transaction(work, { isolationLevel: 'Serializable' })
+      // The transaction-scoped PostgreSQL advisory lock below is the single
+      // scheduler mutex. Adding Serializable isolation caused harmless slot
+      // claims to abort under burst admission, delaying the next stage by the
+      // retry timer even though no capacity conflict existed.
+      ? (work) => this.prisma.$transaction(work)
       : (work) => work(this.prisma);
     try {
       return await transact(async (tx) => {

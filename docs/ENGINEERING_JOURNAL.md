@@ -1438,3 +1438,28 @@ slides that find no unique anchor get a page instead of `null`.
   `4f9ebe65-c99b-4b30-9736-fb28eac7bc7f` was hard-deleted through the API.
 - Final Core/API/homepage health is 200; fresh fatal/panic/unhandled/transport
   queue/citation-failure log scan returned no lines. Release presence is clear.
+
+## 2026-08-31 UTC — Durable chat Flagship default promoted globally
+
+- Production governor updated Cloudflare Flagship app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`, flag
+  `durable_chat_agent_v1`, through GET, precondition verification, and a complete
+  PUT. Changelog timestamp `2026-08-31T08:28:06.413Z`; the only diff is
+  `default_variation: off -> full`. Cloudflare reported the API operator as
+  `updated_by: unknown`.
+- Preserved exactly: string variations `off`, `shadow`, `session`, `workflow`,
+  and `full`; two targeting rules; description; `enabled:true`. Rollback payload
+  is the identical full definition with only `default_variation: off`.
+- Production binding verification: existing operator resolved `full` through
+  its preserved targeting rule. Two unrelated synthetic production contexts
+  matched neither rule and resolved `full` with reason `DEFAULT`, proving the
+  global rollout rather than accidental rule matching.
+- Authenticated read-only canaries returned HTTP 200: direct response nonempty;
+  profile grounded with one source; exact source grounded with one source and
+  no gaps; relationship grounded with five sources and no gaps. No unrelated
+  real identity had safe profile, parsed-source, and relationship coverage
+  together, so no customer data was fabricated for acceptance.
+- Core/API/homepage returned 200; critical logs were empty. Core, Control, and
+  Employees retained exact images and start times. No build, migration, restart,
+  or deployment occurred for this flag-only rollout. Release presence closed
+  cleanly.

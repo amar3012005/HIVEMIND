@@ -5,6 +5,31 @@ This append-only registry is the global record of features accepted on
 runtime verification have completed. Use the same feature identifier in
 Cloudflare Agent Memory and in the `singulance-local` registry.
 
+## feature-20260831T082806Z — Durable chat orchestration globally enabled
+
+- Production status: deployed, globally enabled, and verified for all users.
+- Capability: durable chat sessions and turn lifecycle around the existing
+  grounded native planner, progressive profile discovery, hybrid memory plus
+  evidence recall, citation validation, graph relationships, and canonical
+  memory saves.
+- Runtime: Core `9091c1e01d63270a14d668cf60c6634d27469e95`, image
+  `hivemind/core-api:sha-9091c1e0`, digest
+  `sha256:258e140bc90f0bd2478371d7d12caf247e88648aa4f8e6eb5e318e8d5a6bb261`.
+- Cloudflare: Flagship app `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`, string flag
+  `durable_chat_agent_v1`, enabled with global default variation `full`.
+  Variations `{off, shadow, session, workflow, full}`, both existing targeting
+  rules, and description were preserved exactly. Two unrelated contexts
+  evaluated `full` with reason `DEFAULT`; the original operator evaluated
+  `full` through its preserved targeting rule.
+- Acceptance: direct, profile, exact-source, relationship, broad recall,
+  project-list, temporal no-coverage, aggregate no-coverage, and canonical
+  declarative save paths returned the expected production behavior. Core/API/
+  homepage are healthy; critical logs are clean; no service was rebuilt or
+  restarted for the flag change.
+- Rollback: full-replace the same preserved Flagship definition with only
+  `default_variation` changed back to `off`. The captured definition retains
+  every variation and rule; no code, schema, or container rollback is required.
+
 ## feature-20260829T203749Z — Day 1 lifecycle default-on
 
 - Production status: deployed, globally enabled, and verified.

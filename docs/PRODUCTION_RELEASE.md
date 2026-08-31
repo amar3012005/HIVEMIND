@@ -32,6 +32,14 @@
   and start times.
 - Rollback is Core `hivemind/core-api:sha-62553bc2`, digest
   `sha256:9f7240205861dc4d3073743b7ccefe398319c573d57e1bbf781e02be6a3d6256`.
+- Global rollout accepted at `2026-08-31T08:28:06.413Z`: Cloudflare Flagship
+  app `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`, flag
+  `durable_chat_agent_v1`, changed only `default_variation: off -> full`.
+  Variations, both targeting rules, description, and `enabled:true` were
+  preserved. Two unrelated contexts evaluated `full` by `DEFAULT`; the operator
+  remained `full` by `TARGETING_MATCH`. No container was rebuilt or restarted.
+  Immediate behavior rollback is the captured full flag definition with only
+  `default_variation` restored to `off`.
 
 ## 4371984d / 953f3a71 — durable ingestion and grounded-chat hardening
 

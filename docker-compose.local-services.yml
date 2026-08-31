@@ -64,22 +64,6 @@ services:
       CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_AI_GATEWAY_TOKEN:-}
       CLOUDFLARE_AI_GATEWAY_BASE_URL: ${CLOUDFLARE_AI_GATEWAY_BASE_URL:-https://gateway.ai.cloudflare.com}
       CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-}
-      # Keep local HyperAgent cognition on the same provider/model policy as
-      # production while all semantic and lifecycle data remains local.  These
-      # are pass-throughs only; values are supplied from the operator's local
-      # environment and are never committed to Compose.
-      HYPER_MODEL_BEST: ${HYPER_MODEL_BEST:-}
-      HYPER_MODEL_RECON: ${HYPER_MODEL_RECON:-}
-      HYPER_ROOM_MODEL: ${HYPER_ROOM_MODEL:-}
-      HYPER_SYNTH_MODEL: ${HYPER_SYNTH_MODEL:-}
-      HIVEMIND_AGENT_FINAL_MODEL: ${HIVEMIND_AGENT_FINAL_MODEL:-}
-      HIVEMIND_LLM_MODEL: ${HIVEMIND_LLM_MODEL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
-      LLM_PRIMARY: ${LLM_PRIMARY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-}
-      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
-      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
       SLACK_CLIENT_ID: ""
       SLACK_CLIENT_SECRET: ""
     ports:
@@ -127,6 +111,21 @@ services:
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
       HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-}
       HYPER_GROK_WORKFLOW_SECRET: ${HYPER_GROK_WORKFLOW_SECRET:-}
+      # Keep local HyperAgent cognition on the same provider/model policy as
+      # production while all semantic and lifecycle data remains local. These
+      # are pass-throughs only; values are never committed to Compose.
+      HYPER_MODEL_BEST: ${HYPER_MODEL_BEST:-}
+      HYPER_MODEL_RECON: ${HYPER_MODEL_RECON:-}
+      HYPER_ROOM_MODEL: ${HYPER_ROOM_MODEL:-}
+      HYPER_SYNTH_MODEL: ${HYPER_SYNTH_MODEL:-}
+      HIVEMIND_AGENT_FINAL_MODEL: ${HIVEMIND_AGENT_FINAL_MODEL:-}
+      HIVEMIND_LLM_MODEL: ${HIVEMIND_LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_PRIMARY: ${LLM_PRIMARY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-}
       # Artifact-only Room profiles (branding, marketing, fundraising, product)
       # must be able to enter the governed renderer in the shared local preview.
       VISUAL_PATH_IN_HYPERROOMS: ${VISUAL_PATH_IN_HYPERROOMS:-true}

@@ -1347,3 +1347,51 @@ slides that find no unique anchor get a page instead of `null`.
 - Production code and containers were not changed by this test. The global flag
   default remains `off`; exact operator targeting was restored to `full` after
   the comparison.
+
+## 2026-08-31 UTC — Durable chat defects fixed and fresh heavy OCR E2E accepted
+
+- Committed and pushed `d4a45da449301377ed8de465b21f900772ed023d`
+  (chat planning/retrieval), `953f3a719aab66aed5b1f479ed6e45f232613761`
+  (narrow async materialization proxy), and
+  `4371984dccca1ee2666555fcbfee0606618ba3ad` (Cloudflare embedding batch bounds
+  and retry-credit settlement healing) to the session branch and
+  `singulance-main`.
+- Accepted releases through the deployment governor only. Core manifest:
+  `/root/releases/manifests/4371984d/20260831T005717Z/RELEASE_MANIFEST.json`;
+  Control manifest:
+  `/root/releases/manifests/953f3a71/20260831T004847Z/RELEASE_MANIFEST.json`.
+  Exact running images are Core `sha-4371984d` / digest
+  `2e954b4e4149b9cb7658327ab3231aea57eb5edadf526844dac2fe8649cf7fb0`,
+  Control `sha-953f3a71` / digest
+  `83ea81bfcb59de74e3955416cb10ddd6a0bafcb7211be582f62a1cab5b0de2a9`,
+  and unchanged Employees `sha-b3616eb4`.
+- Verification commands and outputs:
+  - Focused Core batching/fallback/job-store tests: `22 passed, 0 failed`.
+  - Control materialization proxy contract: `2 passed, 0 failed`.
+  - Candidate/baseline chat suite: `72 passed, 3 failed` on both revisions;
+    every changed/new test passed and the same three unrelated stale assertions
+    remained.
+  - `wrangler workflows instances describe ...v2`: `Status: Completed`,
+    `Duration: 11 minutes`, `Last Successful Step: reconcile coverage and
+    settle-1`.
+  - Live Cloudflare embedding probe: `{"batches":[45,5],"rows":50,
+    "dimension":1024,"finite":true}`.
+  - Public checks: `singulancelabs.com 200`, production login `200`, API health
+    `200`; fresh Core fatal/panic/unhandled/transport-queue/citation-failure scan
+    returned no lines.
+- Fresh OCR acceptance: job `85bf1f37-ff77-4865-819a-a4c3bebbf141`, workflow
+  `kb-85bf1f37-ff77-4865-819a-a4c3bebbf141-v2`, document
+  `483831cf-c694-41bf-b5f5-e51937224801`; terminal `ready`, 90 pages, 221
+  segments, 221/221 embeddings, 17 candidates, 15 memories, zero vector
+  failures, and settlement timestamp `2026-08-31T01:00:49.027Z`. Temporary host
+  and container upload copies were removed after verified terminal settlement.
+- Post-ingest chat acceptance:
+  - Exact filename + Issue 361 returned Will Hopkins, Ira Friedlander, Robin
+    McDonald, David Schaff, Barnaby Conrad III, Gray D. Boone, and Horizon;
+    grounded with 2 sources / 2 citations.
+  - Unconstrained CITY CYCLES returned David Barry and the correct subject;
+    grounded with 2 sources / 2 citations.
+- Production A/B retained the safety boundary: exact operator mode was restored
+  to `full`; global default remains `off`; flag-off users continue on stable V2
+  and do not create durable turns. Rollback images and digests are recorded in
+  `docs/PRODUCTION_RELEASE.md`.

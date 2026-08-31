@@ -31,7 +31,7 @@ from agentscope.formatter import (
 from agentscope.memory import InMemoryMemory
 from agentscope.model import AnthropicChatModel, ChatModelBase, OpenAIChatModel
 
-from ..ai_gateway import sdk_target
+from ..ai_gateway import sdk_target, workers_ai_sdk_target
 from ..hyper.model_policy import HYPER_FAST_MODEL, canonical_hyper_model, requires_openrouter
 
 from .agentscope_tools import build_hivemind_toolkit, register_experience_tool
@@ -270,7 +270,26 @@ def _uses_groq_fallback(provider: str) -> bool:
 def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> ChatModelBase:
     """Map employee.llm_provider + employee.model → AgentScope chat model."""
     provider = (employee_row.get("llm_provider") or "anthropic").lower()
-    model = canonical_hyper_model(employee_row.get("model") or "claude-haiku-4-5")
+    model = canonical_hyper_model(employee_row.get("model") or "@cf/zai-org/glm-5.3-flash")
+    if model.startswith("@cf/") or model.startswith("workers-ai/@cf/"):
+        routed_model, api_key, base_url, gateway_default_headers = workers_ai_sdk_target(model)
+        return OpenAIChatModel(
+            model_name=routed_model,
+            api_key=api_key,
+            stream=False,
+            generate_kwargs={
+                "max_tokens": max(256, min(
+                    8192,
+                    int(os.environ.get("HYPER_AGENT_MAX_OUTPUT_TOKENS", "4096") or "4096"),
+                )),
+            },
+            client_kwargs={
+                "base_url": base_url,
+                "default_headers": gateway_default_headers,
+                "max_retries": 3,
+                "timeout": 60.0,
+            },
+        )
     # Existing employee records may still name Groq. Treat that as a legacy
     # configuration and move the call onto the governed 20B OpenRouter route;
     # no HyperAgent participant may bypass the room-level provider policy.

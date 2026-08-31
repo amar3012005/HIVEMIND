@@ -99,3 +99,32 @@ def sdk_target(url: str, api_key: str) -> tuple[str, str, dict[str, str]]:
         headers["Authorization"] = ""
         headers["cf-aig-byok-alias"] = alias
     return base, api_key, headers
+
+
+def workers_ai_sdk_target(model: str) -> tuple[str, str, str, dict[str, str]]:
+    """Return the authenticated AI Gateway target for a Workers AI model.
+
+    The compatibility endpoint keeps existing OpenAI SDK callers unchanged,
+    while ``workers-ai/@cf/...`` selects Workers AI rather than a third-party
+    provider.  Fail closed when Gateway configuration is incomplete: callers
+    must not silently fall back to OpenRouter for a model selected to avoid it.
+    """
+    if not enabled():
+        raise RuntimeError("Cloudflare AI Gateway is required for Workers AI models")
+    normalized = str(model or "").strip()
+    if normalized.startswith("workers-ai/"):
+        routed_model = normalized
+    elif normalized.startswith("@cf/"):
+        routed_model = f"workers-ai/{normalized}"
+    else:
+        raise ValueError(f"Not a Workers AI model: {normalized}")
+    base = os.getenv("CLOUDFLARE_AI_GATEWAY_BASE_URL", "https://gateway.ai.cloudflare.com").rstrip("/")
+    base_url = (
+        f"{base}/v1/{os.environ['CLOUDFLARE_ACCOUNT_ID']}/"
+        f"{os.environ['CLOUDFLARE_AI_GATEWAY_ID']}/compat"
+    )
+    token = os.environ["CLOUDFLARE_AI_GATEWAY_TOKEN"].strip()
+    return routed_model, token, base_url, {
+        "cf-aig-authorization": f"Bearer {token}",
+        "cf-aig-skip-cache": "true",
+    }

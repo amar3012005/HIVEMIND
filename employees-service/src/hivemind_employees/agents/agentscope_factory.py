@@ -327,6 +327,17 @@ def _resolve_model(employee_row: dict, llm_api_key: Optional[str] = None) -> Cha
         model_name=routed_model,
         api_key=api_key,
         stream=False,
+        # AgentScope otherwise advertises a 64k completion budget on every
+        # ReAct call. Besides being wildly disproportionate to a bounded work
+        # note, OpenRouter rejects that reservation when the key cannot afford
+        # the theoretical maximum. Keep real output bounded at the model
+        # boundary; the Director has separate iteration/tool budgets.
+        generate_kwargs={
+            "max_tokens": max(256, min(
+                8192,
+                int(os.environ.get("HYPER_AGENT_MAX_OUTPUT_TOKENS", "4096") or "4096"),
+            )),
+        },
         client_kwargs={"base_url": base_url, "default_headers": gateway_default_headers,
                        "max_retries": 3, "timeout": 60.0},
     )

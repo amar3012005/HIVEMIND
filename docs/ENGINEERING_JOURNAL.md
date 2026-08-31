@@ -1617,3 +1617,23 @@ git diff --check: passed (line-ending warnings only)
 - Rollback remains deleting priority rule 1 or changing its served variation to
   `off`. This was a Flagship targeting change only; no service was rebuilt and
   no production deployment occurred.
+
+## 2026-08-31 — Local branding artifact admission restored
+
+- A local branding Room failed before agent work with
+  `visual_artifact_path_disabled`: execution profile `branding.artifact.v1`
+  required `branding_artifact`, while the Employees container lacked the
+  independent visual-path environment switch.
+- Commit `83f57630e6fa400b2d8ac547e42d3715772a65c3` defaults
+  `VISUAL_PATH_IN_HYPERROOMS=true` only in the shared local Compose overlay.
+- Recreated only `hivemind-employees-local`; no image rebuild or other service
+  recreation was performed. Runtime inspection returned
+  `visual_path_enabled=true`, `_visual_artifacts_enabled()=True`, and Employees
+  health HTTP 200.
+- The application image does not include pytest, and the host Python lacks the
+  service dependency set, so those two attempted focused-test commands were
+  environment-invalid rather than test failures. Existing artifact-path tests
+  remain unchanged; the deployed runtime gate itself was directly verified.
+- Production configuration and targeting were not changed. Rollback is setting
+  `VISUAL_PATH_IN_HYPERROOMS=false` in the local environment and recreating only
+  Employees.

@@ -404,3 +404,7 @@ verification, and its independent rollback control.
   the accepted full-mode canary. Evaluation with arbitrary local org/user values
   returned `full` via `TARGETING_MATCH`; the same arbitrary identity with
   `environment=production` returned the default `off`.
+- Local artifact-only profiles are enabled through
+  `VISUAL_PATH_IN_HYPERROOMS=true` as of commit `83f57630`. Branding, marketing,
+  fundraising, and product tasks can therefore enter the governed renderer
+  instead of terminating before agent execution.

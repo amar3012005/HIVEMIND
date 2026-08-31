@@ -1574,10 +1574,20 @@ class Director:
         """Expose only factual sources and method guidance to final synthesis.
 
         Worker prose remains in the visible discussion and durable board, but
-        it is not an evidence transport. The final model re-derives its answer
-        from the same authoritative inputs instead of copying worker claims.
+        it is not an evidence transport. Persisted provider receipts produced
+        by those workers *are* evidence and must be restored explicitly after
+        WORK_RESULT prose is excluded. The final model therefore re-derives
+        its answer from authoritative inputs without losing real browser work.
         """
-        sources = "\n".join(self._source_evidence_snapshot())[:source_limit]
+        receipt_evidence = self._verified_work_evidence()
+        receipt_block = "\n".join(
+            "VERIFIED PROVIDER RECEIPT: " + json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+            for row in receipt_evidence
+        )
+        sources = "\n".join(filter(None, [
+            receipt_block,
+            "\n".join(self._source_evidence_snapshot()),
+        ]))[:source_limit]
         methods = "\n".join(
             str(item) for item in self.blackboard if str(item).startswith("SKILL[")
         )[:4000]

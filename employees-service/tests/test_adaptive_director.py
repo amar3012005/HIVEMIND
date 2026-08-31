@@ -726,6 +726,33 @@ def test_work_orders_execute_as_independent_agent_results(monkeypatch):
     assert "complete bounded contribution" in worker_react["content"]
 
 
+def test_synthesis_context_keeps_verified_receipts_but_excludes_worker_prose():
+    director, _events = _director(message="Compare current public prices")
+    director.blackboard = [
+        "WORK_RESULT[Lena | Research]: unsupported candidate prose",
+        "WEB: older search context",
+    ]
+    director.work_results = [{
+        "status": "completed",
+        "text": "agent interpretation must not become evidence",
+        "evidence": [{
+            "adapter": "cloudflare_browser",
+            "provider_id": "browser-receipt-1",
+            "url": "https://example.com/pricing",
+            "title": "Current pricing",
+            "excerpt": "Model A — $999",
+        }],
+    }]
+
+    context = director._synthesis_context(8000)
+
+    assert "VERIFIED PROVIDER RECEIPT" in context
+    assert "browser-receipt-1" in context
+    assert "Model A — $999" in context
+    assert "unsupported candidate prose" not in context
+    assert "agent interpretation must not become evidence" not in context
+
+
 def test_work_room_turn_plan_runs_dependencies_before_dependent_steps(monkeypatch):
     director, _events = _director(message="Assess our product direction")
     director.room_mode = "work"

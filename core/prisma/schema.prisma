@@ -4823,11 +4823,84 @@ model MeetingSession {
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   finalizedAt       DateTime? @map("finalized_at") @db.Timestamptz(6)
+  orchestrationMode String    @default("legacy") @map("orchestration_mode") @db.VarChar(24)
+  pipelineVersion   Int       @default(1) @map("pipeline_version")
+  workflowInstanceId String?  @map("workflow_instance_id")
+  latchedFlags      Json      @default("{}") @map("latched_flags")
+  recordingPolicyId String?   @map("recording_policy_id") @db.Uuid
+  recordingPolicyVersion Int? @map("recording_policy_version")
+  authorizationStatus String  @default("legacy_attested") @map("authorization_status") @db.VarChar(32)
+  authorizationSnapshotId String? @map("authorization_snapshot_id") @db.Uuid
+  purposes          Json      @default("[]")
+  storagePlacement  String?   @map("storage_placement") @db.VarChar(32)
+  gatewayRoute      String?   @map("gateway_route")
+  sttModel          String?   @map("stt_model")
+  insightsModel     String?   @map("insights_model")
+  embeddingModel    String?   @map("embedding_model")
+  currentStage      String?   @map("current_stage") @db.VarChar(64)
+  progress          Int       @default(0)
+  recoveryStatus    String?   @map("recovery_status") @db.VarChar(32)
+  publicationAllowed Boolean  @default(false) @map("publication_allowed")
+  processingRestricted Boolean @default(false) @map("processing_restricted")
+  audioRetentionDeadline DateTime? @map("audio_retention_deadline") @db.Timestamptz(6)
 
   @@index([orgId, userId, status, updatedAt(sort: Desc)], map: "meeting_sessions_org_user_status_idx")
   @@index([status, finalizationNextAttemptAt, updatedAt], map: "meeting_sessions_finalization_retry_idx")
   @@index([finalizedMeetingId], map: "meeting_sessions_finalized_meeting_idx")
   @@map("meeting_sessions")
+}
+
+model MeetingRecordingPolicy {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId String @map("org_id") @db.Uuid
+  version Int
+  status String @default("draft") @db.VarChar(24)
+  controllerName String @map("controller_name")
+  privacyContact String @map("privacy_contact")
+  countryCode String @map("country_code") @db.VarChar(2)
+  recordingJurisdiction String @map("recording_jurisdiction")
+  lawfulBasis Json @default("{}") @map("lawful_basis")
+  purposes Json @default("[]")
+  specialCategoryCondition String? @map("special_category_condition")
+  nationalRecordingRule String @map("national_recording_rule")
+  internalConsentMode String @default("participant_authorization") @map("internal_consent_mode") @db.VarChar(32)
+  externalConsentMode String @default("strict_participant_authorization") @map("external_consent_mode") @db.VarChar(32)
+  processors Json @default("[]")
+  retention Json @default("{}")
+  dpiaStatus String @default("required") @map("dpia_status") @db.VarChar(24)
+  dpiaReference String? @map("dpia_reference")
+  dpiaApprovedBy String? @map("dpia_approved_by") @db.Uuid
+  dpiaApprovedAt DateTime? @map("dpia_approved_at") @db.Timestamptz(6)
+  approvedBy String? @map("approved_by") @db.Uuid
+  approvedAt DateTime? @map("approved_at") @db.Timestamptz(6)
+  effectiveAt DateTime? @map("effective_at") @db.Timestamptz(6)
+  supersededAt DateTime? @map("superseded_at") @db.Timestamptz(6)
+  createdBy String @map("created_by") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  @@unique([orgId, version])
+  @@map("meeting_recording_policies")
+}
+
+model MeetingPipelineStep {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId String @map("session_id") @db.Uuid
+  orgId String @map("org_id") @db.Uuid
+  pipelineVersion Int @map("pipeline_version")
+  stageKey String @map("stage_key") @db.VarChar(64)
+  shardKey String @default("0") @map("shard_key") @db.VarChar(128)
+  status String @default("pending") @db.VarChar(24)
+  attempt Int @default(0)
+  leaseExpiresAt DateTime? @map("lease_expires_at") @db.Timestamptz(6)
+  inputDigest String? @map("input_digest") @db.VarChar(64)
+  outputReceipt Json? @map("output_receipt")
+  coverageCounters Json @default("{}") @map("coverage_counters")
+  structuredError Json? @map("structured_error")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  @@unique([sessionId, pipelineVersion, stageKey, shardKey])
+  @@map("meeting_pipeline_steps")
 }
 
 /// P1 — progressive durable transcript. Each 10-min recording segment is persisted

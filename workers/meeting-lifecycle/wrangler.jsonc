@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hivemind-meeting-lifecycle-local-root",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-31",
+  "compatibility_flags": ["nodejs_compat"],
+  "dev": { "port": 8791 },
+  "vars": { "ENVIRONMENT": "local", "HIVEMIND_CORE_URL": "http://127.0.0.1:3000", "MEETING_LIFECYCLE_FLAG": "meeting_lifecycle_v2" },
+  "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+  "r2_buckets": [{ "binding": "AUDIO", "bucket_name": "hivemind-meeting-audio-local-eu", "jurisdiction": "eu" }],
+  "queues": {
+    "producers": [{ "binding": "AUDIO_QUEUE", "queue": "hivemind-meeting-audio-local" }, { "binding": "EMAIL_QUEUE", "queue": "hivemind-meeting-email-local" }],
+    "consumers": [{ "queue": "hivemind-meeting-audio-local", "max_batch_size": 10, "max_retries": 5, "dead_letter_queue": "hivemind-meeting-audio-dlq-local", "max_concurrency": 5, "retry_delay": 30 }, { "queue": "hivemind-meeting-email-local", "max_batch_size": 10, "max_retries": 5, "dead_letter_queue": "hivemind-meeting-email-dlq-local", "max_concurrency": 5, "retry_delay": 30 }]
+  },
+  "workflows": [{ "name": "hivemind-meeting-finalization-local", "binding": "MEETING_WORKFLOW", "class_name": "MeetingFinalizationWorkflow" }],
+  "env": {
+    "local": {
+      "name": "hivemind-meeting-lifecycle-local",
+      "vars": { "ENVIRONMENT": "local", "HIVEMIND_CORE_URL": "https://preview-api.singulancelabs.com", "MEETING_LIFECYCLE_FLAG": "meeting_lifecycle_v2" },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "r2_buckets": [{ "binding": "AUDIO", "bucket_name": "hivemind-meeting-audio-local-eu", "jurisdiction": "eu" }],
+      "queues": { "producers": [{ "binding": "AUDIO_QUEUE", "queue": "hivemind-meeting-audio-local" }, { "binding": "EMAIL_QUEUE", "queue": "hivemind-meeting-email-local" }], "consumers": [{ "queue": "hivemind-meeting-audio-local", "max_batch_size": 10, "max_retries": 5, "dead_letter_queue": "hivemind-meeting-audio-dlq-local", "max_concurrency": 5, "retry_delay": 30 }, { "queue": "hivemind-meeting-email-local", "max_batch_size": 10, "max_retries": 5, "dead_letter_queue": "hivemind-meeting-email-dlq-local", "max_concurrency": 5, "retry_delay": 30 }] },
+      "workflows": [{ "name": "hivemind-meeting-finalization-local", "binding": "MEETING_WORKFLOW", "class_name": "MeetingFinalizationWorkflow" }]
+    },
+    "production": {
+      "name": "hivemind-meeting-lifecycle-production",
+      "vars": { "ENVIRONMENT": "production", "HIVEMIND_CORE_URL": "https://api.singulancelabs.com", "MEETING_LIFECYCLE_FLAG": "meeting_lifecycle_v2" },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "r2_buckets": [{ "binding": "AUDIO", "bucket_name": "hivemind-meeting-audio-production-eu", "jurisdiction": "eu" }],
+      "queues": { "producers": [{ "binding": "AUDIO_QUEUE", "queue": "hivemind-meeting-audio-production" }, { "binding": "EMAIL_QUEUE", "queue": "hivemind-meeting-email-production" }], "consumers": [{ "queue": "hivemind-meeting-audio-production", "max_batch_size": 10, "max_retries": 5, "dead_letter_queue": "hivemind-meeting-audio-dlq-production", "max_concurrency": 5, "retry_delay": 30 }, { "queue": "hivemind-meeting-email-production", "max_batch_size": 10, "max_retries": 5, "dead_letter_queue": "hivemind-meeting-email-dlq-production", "max_concurrency": 5, "retry_delay": 30 }] },
+      "workflows": [{ "name": "hivemind-meeting-finalization-production", "binding": "MEETING_WORKFLOW", "class_name": "MeetingFinalizationWorkflow" }]
+    }
+  }
+}

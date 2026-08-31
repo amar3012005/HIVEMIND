@@ -32,7 +32,9 @@ export function meetingAudioStorageKey({ orgId, sessionId, idx, checksum, conten
   for (const value of [orgId, sessionId]) if (!/^[0-9a-f-]{36}$/i.test(String(value))) throw new Error('invalid meeting storage owner');
   if (!Number.isInteger(Number(idx)) || Number(idx) < 0) throw new Error('invalid meeting segment index');
   if (!/^[a-f0-9]{64}$/i.test(String(checksum))) throw new Error('invalid meeting audio checksum');
-  return path.join(String(orgId), String(sessionId), `${Number(idx)}-${checksum}.${audioExtension(contentType)}`);
+  // Persisted object keys are platform-neutral identifiers, not host paths.
+  // POSIX separators keep receipts stable across Windows local and Linux prod.
+  return path.posix.join(String(orgId), String(sessionId), `${Number(idx)}-${checksum}.${audioExtension(contentType)}`);
 }
 
 function resolveKey(storageKey) {

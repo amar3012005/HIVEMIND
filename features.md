@@ -471,3 +471,22 @@ verification, and its independent rollback control.
 - Evidence-required assignments cannot complete on prose alone. Cloudflare
   Browser sessions now write bounded receipts containing session identity, URL,
   title, rendered-text evidence, and Live View reference into the WorkResult.
+
+## feature-20260831T123500Z — Durable GDPR-ready Meeting Notes v2 (local candidate)
+
+- Multivariate Flagship flag `meeting_lifecycle_v2` implements latched
+  `off`, `shadow`, `consent`, `workflow`, and `full` modes and remains default
+  `off` in every environment.
+- Local candidate adds versioned privacy policy/notice data, participant-level
+  authorization and purpose receipts, durable PostgreSQL checkpoints/outbox,
+  identifier-only Cloudflare Queues and Workflow, explicit EU-jurisdiction R2,
+  Gateway-only AI processing, immediate successful-audio deletion receipts,
+  canonical publication gating, and responsive organizer/participant UI.
+- Existing meeting APIs remain available on the flag-off path. Active v2 for a
+  remote/BYOD tenant deliberately fails closed until the matching agent
+  capability is implemented; it never writes tenant content centrally.
+- Verified in the isolated session worktree with Prisma validation, 38 focused
+  Core meeting tests, 6 Worker tests, Worker typecheck, Wrangler local dry-run,
+  and an optimized frontend build. This is not yet locally accepted because
+  tenant-agent v2 parity, the full rights/deletion executor, and shared-stack
+  runtime failure injection remain outstanding. Production was untouched.

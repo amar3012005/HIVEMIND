@@ -56,6 +56,27 @@ import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonic
 import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
 import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
 import { CloudflareChatSessionClient } from './agent/v2/cloudflare-chat-session-client.js';
+import {
+  CloudflareMeetingLifecycleClient,
+  assertMeetingGatewayReady,
+  createV2MeetingSession,
+  decideMeetingInvitation,
+  exchangeMeetingInvitation,
+  finalizeV2MeetingSession,
+  getMeetingPolicy,
+  listV2Authorizations,
+  addV2MeetingParticipants,
+  controlV2MeetingSession,
+  dispatchMeetingOutbox,
+  enqueuePendingMeetingOutbox,
+  claimMeetingPipelineStep,
+  settleMeetingPipelineStep,
+  putMeetingPolicy,
+  refreshAuthorizationSnapshot,
+  startV2MeetingSession,
+  verifyMeetingInvitation,
+  withdrawMeetingAuthorization,
+} from './knowledge/meeting-lifecycle-v2.js';
 import { DurableChatTurnStore, createDurableEventSink } from './agent/v2/durable-turn-store.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
@@ -131,6 +152,7 @@ const require = createRequire(import.meta.url);
 const canonicalProjectionClient = new CloudflareCanonicalProjectionClient();
 const recallReliabilityClient = new CloudflareRecallReliabilityClient();
 const cloudflareChatSessionClient = new CloudflareChatSessionClient();
+const cloudflareMeetingLifecycleClient = new CloudflareMeetingLifecycleClient();
 const canonicalProjectionNonceFallback = new Map();
 
 async function consumeCanonicalProjectionNonce(nonce) {
@@ -6422,6 +6444,183 @@ exit \$RC
     });
   }
 
+  // Meeting authorization is intentionally outside the authenticated app API.
+  // The high-entropy invitation secret arrives in a POST body after the browser
+  // reads it from the URL fragment, so it never appears in request URLs/referrers.
+  if (pathname.startsWith('/v1/public/meeting-authorization/')) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    if (req.method !== 'POST') return jsonResponse(res, { error: 'method_not_allowed' }, 405);
+    let publicBody;
+    try { publicBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json_body' }, 400); }
+    if (!prisma || process.env.MEETING_LIFECYCLE_V2_ENABLED !== 'true') return jsonResponse(res, { error: 'not_found' }, 404);
+    let result;
+    if (pathname === '/v1/public/meeting-authorization/exchange') result = await exchangeMeetingInvitation(prisma, publicBody?.token);
+    else if (pathname === '/v1/public/meeting-authorization/verify') result = await verifyMeetingInvitation(prisma, publicBody?.exchange_id, publicBody?.otp);
+    else if (pathname === '/v1/public/meeting-authorization/decision') result = await decideMeetingInvitation(prisma, {
+      exchangeId: publicBody?.exchange_id, decisionToken: publicBody?.decision_token,
+      decision: publicBody?.decision, purposes: publicBody?.purposes, subjectAttestation: publicBody?.subject_attestation,
+    });
+    else if (pathname === '/v1/public/meeting-authorization/withdraw') result = await withdrawMeetingAuthorization(prisma, {
+      exchangeId: publicBody?.exchange_id, decisionToken: publicBody?.decision_token,
+    });
+    else return jsonResponse(res, { error: 'not_found' }, 404);
+    return jsonResponse(res, result.body, result.status);
+  }
+
+  // Identifier-only Cloudflare Workflow/Queue callback surface. It is never
+  // browser authenticated and accepts only the dedicated meeting service key.
+  if (pathname.startsWith('/internal/meeting-lifecycle/v2/')) {
+    const expected = String(process.env.MEETING_LIFECYCLE_SECRET || '');
+    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const a = Buffer.from(expected); const b = Buffer.from(supplied);
+    if (!expected || a.length !== b.length || !crypto.timingSafeEqual(a, b)) return jsonResponse(res, { error: 'unauthorized', retryable: false }, 401);
+    if (!prisma || process.env.MEETING_LIFECYCLE_V2_ENABLED !== 'true') return jsonResponse(res, { error: 'meeting_v2_disabled', retryable: false }, 403);
+    if (pathname === '/internal/meeting-lifecycle/v2/email' && req.method === 'POST') {
+      let emailBody; try { emailBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json', retryable: false }, 400); }
+      if (!/^[0-9a-fA-F-]{36}$/.test(String(emailBody?.outbox_id || '')) || !/^[0-9a-fA-F-]{36}$/.test(String(emailBody?.org_id || ''))) return jsonResponse(res, { error: 'invalid_email_identity', retryable: false }, 400);
+      const result = await dispatchMeetingOutbox(prisma, { outboxId: emailBody.outbox_id, orgId: emailBody.org_id, limit: 1 });
+      if (!result.results?.[0]?.ok) return jsonResponse(res, { error: 'email_delivery_pending', retryable: true }, 503);
+      return jsonResponse(res, { ok: true, outbox_id: emailBody.outbox_id });
+    }
+    const audioMatch = pathname.match(/^\/internal\/meeting-lifecycle\/v2\/audio\/([0-9a-fA-F-]{36})\/(\d+)$/);
+    if (audioMatch && req.method === 'POST') {
+      const sessionId = audioMatch[1]; const index = Number(audioMatch[2]);
+      const orgId = String(req.headers['x-hivemind-org-id'] || '');
+      try {
+        assertMeetingGatewayReady();
+        const objectKey = String(req.headers['x-hivemind-object-key'] || '');
+        const existing = await prisma.$queryRawUnsafe(
+          `SELECT a.status,a.storage_key FROM hivemind.meeting_audio_segments a WHERE a.session_id=$1::uuid AND a.org_id=$2::uuid AND a.idx=$3`, sessionId, orgId, index,
+        ).catch(() => []);
+        if (existing?.[0]?.status === 'transcribed') return jsonResponse(res, { ok: true, reused: true, segment_index: index });
+        const rows = await prisma.$queryRawUnsafe(
+          `UPDATE hivemind.meeting_audio_segments a SET status='processing',attempts=attempts+1,lease_expires_at=now()+interval '10 minutes',last_error=NULL,updated_at=now()
+             FROM hivemind.meeting_sessions s
+            WHERE s.id=a.session_id AND s.org_id=a.org_id AND s.user_id=a.user_id
+              AND s.id=$1::uuid AND s.org_id=$2::uuid AND a.idx=$3
+              AND (a.status IN ('queued','error') OR (a.status='processing' AND a.lease_expires_at<now()))
+            RETURNING s.user_id,s.authorization_status,s.processing_restricted,a.checksum,a.content_type,a.storage_key,a.status`, sessionId, orgId, index,
+        ).catch(() => []);
+        const row = rows?.[0];
+        if (!row && existing?.[0]) return jsonResponse(res, { error: 'audio_stage_already_processing', retryable: true }, 409);
+        if (!row || row.storage_key !== objectKey) throw Object.assign(new Error('audio_receipt_not_found'), { retryable: true });
+        if (row.authorization_status !== 'ready_to_record' || row.processing_restricted) throw Object.assign(new Error('processing_restricted'), { retryable: false });
+        const maxBytes = (Number(process.env.MEETING_STT_MAX_MB || 24) * 1024 * 1024); const chunks = []; let total = 0;
+        for await (const chunk of req) { total += chunk.length; if (total > maxBytes) throw Object.assign(new Error('audio_too_large'), { retryable: false }); chunks.push(chunk); }
+        const audio = Buffer.concat(chunks); const checksum = crypto.createHash('sha256').update(audio).digest('hex');
+        if (!audio.length || checksum !== row.checksum) throw Object.assign(new Error('audio_integrity_failed'), { retryable: false });
+        const transcribed = await transcribeAudio({ audio, contentType: row.content_type, filename: `meeting-${index}.webm`, model: process.env.MEETING_STT_MODEL, temperature: 0, response_format: 'verbose_json', timeoutMs: 300_000 });
+        if (!transcribed.ok) throw Object.assign(new Error('transcription_failed'), { retryable: [0, 408, 425, 429, 500, 502, 503, 504].includes(transcribed.status) });
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO hivemind.meeting_segments(session_id,org_id,user_id,idx,text,start_ms,end_ms,status)
+             SELECT $1::uuid,$2::uuid,$3::uuid,$4,$5,a.start_ms,a.end_ms,'transcribed' FROM hivemind.meeting_audio_segments a
+              WHERE a.session_id=$1::uuid AND a.org_id=$2::uuid AND a.idx=$4
+             ON CONFLICT(session_id,idx) DO UPDATE SET text=EXCLUDED.text,status='transcribed'`, sessionId, orgId, row.user_id, index, String(transcribed.text || ''),
+          );
+          await tx.$executeRawUnsafe(`UPDATE hivemind.meeting_audio_segments SET status='transcribed',updated_at=now(),last_error=NULL WHERE session_id=$1::uuid AND org_id=$2::uuid AND idx=$3`, sessionId, orgId, index);
+          await tx.$executeRawUnsafe(`UPDATE hivemind.meeting_artifact_receipts SET status='transcribed' WHERE session_id=$1::uuid AND org_id=$2::uuid AND artifact_kind='audio' AND shard_key=$3`, sessionId, orgId, String(index));
+        });
+        return jsonResponse(res, { ok: true, segment_index: index, chars: String(transcribed.text || '').length });
+      } catch (error) {
+        await prisma.$executeRawUnsafe(
+          `UPDATE hivemind.meeting_audio_segments SET status='error',lease_expires_at=NULL,next_attempt_at=now()+interval '30 seconds',last_error=$1,updated_at=now()
+            WHERE session_id=$2::uuid AND org_id=$3::uuid AND idx=$4 AND status='processing'`, String(error?.message || error).slice(0, 500), sessionId, orgId, index,
+        ).catch(() => {});
+        return jsonResponse(res, { error: error?.code || error?.message || 'transcription_stage_failed', retryable: error?.retryable !== false && error?.code !== 'MEETING_GATEWAY_REQUIRED' }, (error?.retryable === false || error?.code === 'MEETING_GATEWAY_REQUIRED') ? 422 : 500);
+      }
+    }
+    if (pathname === '/internal/meeting-lifecycle/v2/stage' && req.method === 'POST') {
+      let stageBody; try { stageBody = await parseBody(req); } catch { return jsonResponse(res, { error: 'invalid_json', retryable: false }, 400); }
+      const sessionId = String(stageBody?.session_id || ''); const orgId = String(stageBody?.org_id || '');
+      if (!/^[0-9a-fA-F-]{36}$/.test(sessionId) || !/^[0-9a-fA-F-]{36}$/.test(orgId) || Number(stageBody?.pipeline_version) !== 2) return jsonResponse(res, { error: 'invalid_stage_identity', retryable: false }, 400);
+      const sessions = await prisma.$queryRawUnsafe(`SELECT * FROM hivemind.meeting_sessions WHERE id=$1::uuid AND org_id=$2::uuid AND pipeline_version=2`, sessionId, orgId).catch(() => []);
+      const session = sessions?.[0]; if (!session) return jsonResponse(res, { error: 'not_found', retryable: false }, 404);
+      const stageKey = String(stageBody?.stage || '').slice(0, 64);
+      const checkpoint = await claimMeetingPipelineStep(prisma, { sessionId, orgId, pipelineVersion: 2, stageKey });
+      if (!checkpoint.claimed) {
+        if (checkpoint.status === 'completed') return jsonResponse(res, { ...(checkpoint.output_receipt || {}), reused: true });
+        return jsonResponse(res, { error: 'stage_already_processing', retryable: true }, 409);
+      }
+      const stageSuccess = async (payload) => {
+        await settleMeetingPipelineStep(prisma, { id: checkpoint.id, status: 'completed', receipt: payload });
+        return jsonResponse(res, payload);
+      };
+      try {
+        if (stageBody.stage === 'verify') {
+          assertMeetingGatewayReady();
+          const authz = await refreshAuthorizationSnapshot(prisma, orgId, sessionId);
+          if (authz?.authorization_status !== 'ready_to_record' || session.processing_restricted) throw Object.assign(new Error('processing_restricted'), { retryable: false });
+          const coverage = await prisma.$queryRawUnsafe(
+            `SELECT COUNT(*)::int total,COUNT(*) FILTER(WHERE status='transcribed')::int transcribed FROM hivemind.meeting_audio_segments WHERE session_id=$1::uuid AND org_id=$2::uuid`, sessionId, orgId,
+          );
+          const c = coverage[0]; if (!c.total || c.total !== c.transcribed) throw Object.assign(new Error('segments_not_ready'), { retryable: true, coverage: c });
+          return stageSuccess({ ok: true, stage: 'verify', coverage: c });
+        }
+        if (stageBody.stage === 'finalize') {
+          const result = await processMeetingFinalization(prisma, { sessionId, orgId, userId: session.user_id }, { creditService });
+          if (!result?.ok) throw Object.assign(new Error(result?.error || result?.waiting || 'finalization_pending'), { retryable: !result?.terminal });
+          await prisma.$executeRawUnsafe(`UPDATE hivemind.meeting_sessions SET current_stage='finalized',progress=75 WHERE id=$1::uuid AND org_id=$2::uuid`, sessionId, orgId);
+          return stageSuccess({ ok: true, meeting_id: result.meetingId, reused: result.existing });
+        }
+        if (stageBody.stage === 'publish') {
+          if (process.env.MEETING_V2_PUBLICATION_ENABLED === 'false' || !session.publication_allowed) return stageSuccess({ ok: true, skipped: 'publication_not_authorized' });
+          const meetings = await prisma.$queryRawUnsafe(`SELECT * FROM hivemind.meetings WHERE id=$1::uuid AND org_id=$2::uuid AND deleted_at IS NULL`, session.finalized_meeting_id, orgId);
+          const meeting = meetings?.[0]; if (!meeting) throw Object.assign(new Error('meeting_not_finalized'), { retryable: true });
+          const baseTags = ['meeting', 'ai-meeting-notes', `meeting:${meeting.id}`, `policy-version:${session.recording_policy_version}`];
+          const evidence = await ingestCanonicalPayload({
+            user_id: session.user_id, org_id: orgId, project_id: meeting.project_id, title: `${meeting.title} — transcript evidence`,
+            content: meeting.transcript, memory_type: 'conversation', tags: [...baseTags, 'transcript', 'evidence'], scope: meeting.scope || 'organization',
+            metadata: { meeting_id: meeting.id, session_id: sessionId, policy_version: session.recording_policy_version, authorization_snapshot_id: session.authorization_snapshot_id },
+          }, { sourceType: 'meeting', mode: 'evidence' });
+          const facts = [
+            ...(Array.isArray(meeting.decisions) ? meeting.decisions.map((content) => ({ type: 'decision', content })) : []),
+            ...(Array.isArray(meeting.action_items) ? meeting.action_items.map((item) => ({ type: 'goal', content: typeof item === 'string' ? item : `${item.task}${item.owner ? ` — owner: ${item.owner}` : ''}${item.due ? ` — due: ${item.due}` : ''}` })) : []),
+            ...(Array.isArray(meeting.key_points) ? meeting.key_points.map((content) => ({ type: 'fact', content })) : []),
+          ].filter((fact) => String(fact.content || '').trim()).slice(0, 50);
+          const memoryIds = [];
+          for (let index = 0; index < facts.length; index += 1) {
+            const fact = facts[index];
+            const saved = await ingestCanonicalPayload({ user_id: session.user_id, org_id: orgId, project_id: meeting.project_id,
+              title: `${meeting.title} — ${fact.type} ${index + 1}`, content: String(fact.content), memory_type: fact.type,
+              tags: [...baseTags, fact.type], scope: meeting.scope || 'organization',
+              metadata: { meeting_id: meeting.id, session_id: sessionId, evidence_document_id: evidence?.documentId || null, source_index: index, authorization_snapshot_id: session.authorization_snapshot_id },
+            }, { sourceType: 'meeting', mode: 'atomic' });
+            if (saved?.memoryId || saved?.id) memoryIds.push(saved.memoryId || saved.id);
+          }
+          if (memoryIds[0]) await prisma.$executeRawUnsafe(`UPDATE hivemind.meetings SET source_memory_id=$1::uuid,updated_at=now() WHERE id=$2::uuid AND org_id=$3::uuid`, memoryIds[0], meeting.id, orgId);
+          await prisma.$executeRawUnsafe(`UPDATE hivemind.meeting_sessions SET current_stage='published',progress=90 WHERE id=$1::uuid AND org_id=$2::uuid`, sessionId, orgId);
+          return stageSuccess({ ok: true, evidence_document_id: evidence?.documentId || null, memory_ids: memoryIds });
+        }
+        if (stageBody.stage === 'reconcile_delete') {
+          const latest = await prisma.$queryRawUnsafe(`SELECT status,finalized_meeting_id,processing_restricted FROM hivemind.meeting_sessions WHERE id=$1::uuid AND org_id=$2::uuid`, sessionId, orgId);
+          if (latest?.[0]?.status !== 'ready' || latest[0].processing_restricted) throw Object.assign(new Error('terminal_verification_failed'), { retryable: true });
+          const artifacts = await prisma.$queryRawUnsafe(`SELECT object_key FROM hivemind.meeting_artifact_receipts WHERE session_id=$1::uuid AND org_id=$2::uuid AND artifact_kind='audio' AND deleted_at IS NULL`, sessionId, orgId);
+          return stageSuccess({ ok: true, delete_keys: artifacts.map((item) => item.object_key).filter(Boolean) });
+        }
+        if (stageBody.stage === 'confirm_delete') {
+          const keys = Array.isArray(stageBody.deleted_keys) ? stageBody.deleted_keys.map(String).slice(0, 500) : [];
+          for (const key of keys) {
+            const ref = crypto.createHash('sha256').update(key).digest('hex');
+            await prisma.$transaction(async (tx) => {
+              await tx.$executeRawUnsafe(`UPDATE hivemind.meeting_artifact_receipts SET status='deleted',deleted_at=now(),deletion_receipt=$1::jsonb WHERE session_id=$2::uuid AND org_id=$3::uuid AND object_key=$4`, JSON.stringify({ verified: true }), sessionId, orgId, key);
+              await tx.$executeRawUnsafe(`INSERT INTO hivemind.meeting_deletion_receipts(org_id,session_id,artifact_kind,artifact_ref_hash,outcome,provider_receipt) VALUES($1::uuid,$2::uuid,'audio',$3,'deleted',$4::jsonb) ON CONFLICT DO NOTHING`, orgId, sessionId, ref, JSON.stringify({ verified: true }));
+            });
+          }
+          await prisma.$executeRawUnsafe(`UPDATE hivemind.meeting_sessions SET current_stage='complete',progress=100,recovery_status='complete' WHERE id=$1::uuid AND org_id=$2::uuid`, sessionId, orgId);
+          return stageSuccess({ ok: true, deleted: keys.length });
+        }
+        throw Object.assign(new Error('unknown_stage'), { retryable: false });
+      } catch (error) {
+        await settleMeetingPipelineStep(prisma, { id: checkpoint.id, status: 'error', error: { code: error?.code || 'meeting_stage_failed', message: String(error?.message || error).slice(0, 500) } }).catch(() => {});
+        return jsonResponse(res, { error: error?.code || error?.message || 'meeting_stage_failed', retryable: error?.retryable !== false }, error?.retryable === false ? 422 : 500);
+      }
+    }
+    return jsonResponse(res, { error: 'not_found' }, 404);
+  }
+
   // ── Grok voice adapter internal callbacks (service-token authed) ─────────
   // MUST sit OUTSIDE the `/api/` block below. These paths start with /internal/,
   // so while this dispatch was nested inside `if (pathname.startsWith('/api/'))`
@@ -6692,18 +6891,30 @@ exit \$RC
       // `/api/` block — it was unreachable while nested here.)
 
       let _mAuth = null;
-      if (/^\/api\/(meetings|tara|autofill)(\/|$)/.test(pathname)) {
+      if (/^\/api\/(meetings|meeting-policies|tara|autofill)(\/|$)/.test(pathname)) {
         _mAuth = await authenticateApiKey(req).catch(() => null);
         if (!_mAuth?.ok) return jsonResponse(res, { error: 'unauthorized' }, 401);
       }
       const _mUserId = _mAuth?.principal?.userId || null;
       const _mOrgId  = _mAuth?.principal?.orgId  || null;
-      if (pathname.startsWith('/api/meetings')) {
+      if (pathname.startsWith('/api/meetings') || pathname.startsWith('/api/meeting-policies')) {
         const meetingMembership = await prisma?.userOrganization.findUnique({
           where: { userId_orgId: { userId: _mUserId, orgId: _mOrgId } },
-          select: { isActive: true },
+          select: { isActive: true, role: true },
         }).catch(() => null);
         if (!meetingMembership?.isActive) return jsonResponse(res, { error: 'not_found' }, 404);
+        if (pathname === '/api/meeting-policies/current') {
+          if (req.method === 'GET') {
+            const policy = await getMeetingPolicy(prisma, _mOrgId);
+            return jsonResponse(res, { policy });
+          }
+          if (req.method === 'PUT') {
+            if (!['owner', 'admin'].includes(meetingMembership.role)) return jsonResponse(res, { error: 'forbidden' }, 403);
+            const result = await putMeetingPolicy(prisma, { orgId: _mOrgId, userId: _mUserId, body });
+            return jsonResponse(res, result.body, result.status);
+          }
+          return jsonResponse(res, { error: 'method_not_allowed' }, 405);
+        }
       }
       let _mProjectIds = null;
       const meetingProjectIds = async () => {
@@ -6849,6 +7060,23 @@ exit \$RC
             plan: usage.plan, reason: 'Meeting notes monthly allowance reached.',
           }, 'meetingMinutes'), 402);
         }
+        if (orgIsRemote(_mOrgId)) {
+          const remoteV2Mode = await cloudflareMeetingLifecycleClient.modeFor({ orgId: _mOrgId, userId: _mUserId });
+          if (!['off', 'shadow'].includes(remoteV2Mode)) {
+            return jsonResponse(res, { error: 'remote_meeting_v2_agent_upgrade_required', mode: remoteV2Mode, recoverable: true }, 503);
+          }
+        }
+        if (!orgIsRemote(_mOrgId) && prisma) {
+          try {
+            const v2 = await createV2MeetingSession(prisma, cloudflareMeetingLifecycleClient, {
+              orgId: _mOrgId, userId: _mUserId, body,
+            });
+            if (v2.handled) return jsonResponse(res, { ...v2.body, remaining_seconds: remainingSeconds }, v2.status);
+          } catch (error) {
+            const status = ['MEETING_GATEWAY_REQUIRED', 'MEETING_INVITATION_KEY_REQUIRED'].includes(error?.code) ? 503 : 500;
+            return jsonResponse(res, { error: error?.code || 'meeting_v2_admission_failed', message: process.env.NODE_ENV === 'production' ? undefined : error.message }, status);
+          }
+        }
         const requestedSessionId = typeof body?.session_id === 'string' && /^[0-9a-fA-F-]{36}$/.test(body.session_id)
           ? body.session_id
           : null;
@@ -6893,6 +7121,37 @@ exit \$RC
         }
       }
 
+      // Additive v2 organizer lifecycle. Legacy sessions never match these
+      // transitions because they retain orchestration_mode='legacy'.
+      {
+        const authzMatch = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})\/authorizations$/);
+        if (authzMatch && req.method === 'GET') {
+          if (orgIsRemote(_mOrgId)) return jsonResponse(res, { error: 'remote_meeting_v2_not_configured' }, 503);
+          const result = await listV2Authorizations(prisma, { orgId: _mOrgId, userId: _mUserId, sessionId: authzMatch[1] });
+          return jsonResponse(res, result.body, result.status);
+        }
+        const startMatch = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})\/start$/);
+        if (startMatch && req.method === 'POST') {
+          if (orgIsRemote(_mOrgId)) return jsonResponse(res, { error: 'remote_meeting_v2_not_configured' }, 503);
+          const result = await startV2MeetingSession(prisma, cloudflareMeetingLifecycleClient, { orgId: _mOrgId, userId: _mUserId, sessionId: startMatch[1] });
+          return jsonResponse(res, result.body, result.status);
+        }
+        const participantsMatch = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})\/(participants|invitations)$/);
+        if (participantsMatch && req.method === 'POST') {
+          if (orgIsRemote(_mOrgId)) return jsonResponse(res, { error: 'remote_meeting_v2_not_configured' }, 503);
+          const result = await addV2MeetingParticipants(prisma, cloudflareMeetingLifecycleClient, {
+            orgId: _mOrgId, userId: _mUserId, sessionId: participantsMatch[1], body,
+          });
+          return jsonResponse(res, result.body, result.status);
+        }
+        const controlMatch = pathname.match(/^\/api\/meetings\/sessions\/([0-9a-fA-F-]{36})\/(pause|cancel|restrict|erase)$/);
+        if (controlMatch && req.method === 'POST') {
+          if (orgIsRemote(_mOrgId)) return jsonResponse(res, { error: 'remote_meeting_v2_not_configured' }, 503);
+          const result = await controlV2MeetingSession(prisma, { orgId: _mOrgId, userId: _mUserId, sessionId: controlMatch[1], action: controlMatch[2], body });
+          return jsonResponse(res, result.body, result.status);
+        }
+      }
+
       // POST /api/meetings/sessions/:sid/audio/:idx — the recorder's durable
       // boundary. Bytes are atomically committed to the configured persistent
       // meeting-audio volume before the browser may delete its IndexedDB copy;
@@ -6925,9 +7184,33 @@ exit \$RC
               return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, status: stored.status || 'queued', durability: 'amr_persisted' }, 202);
             }
             const session = await prisma.$queryRawUnsafe(
-              `SELECT id FROM hivemind.meeting_sessions WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid`, sid, mOrg, mUser,
+              `SELECT id,status,orchestration_mode,authorization_status,processing_restricted FROM hivemind.meeting_sessions WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid`, sid, mOrg, mUser,
             );
             if (!session?.[0]) return jsonResponse(res, { error: 'not_found' }, 404);
+            const v2Mode = String(session[0].orchestration_mode || '').split(':')[1];
+            if (v2Mode === 'workflow' || v2Mode === 'full') {
+              if (session[0].status !== 'recording' || session[0].authorization_status !== 'ready_to_record' || session[0].processing_restricted) {
+                return jsonResponse(res, { error: 'recording_not_authorized', authorization_status: session[0].authorization_status }, 409);
+              }
+              const stored = await cloudflareMeetingLifecycleClient.putAudio({ sessionId: sid, orgId: mOrg, index: idx, checksum, contentType: _ct, bytes: audio });
+              await prisma.$transaction(async (tx) => {
+                await tx.$executeRawUnsafe(
+                  `INSERT INTO hivemind.meeting_audio_segments(session_id,org_id,user_id,idx,storage_key,checksum,content_type,byte_size,start_ms,end_ms,status)
+                   VALUES($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,'queued')
+                   ON CONFLICT(session_id,idx) DO UPDATE SET updated_at=now() WHERE hivemind.meeting_audio_segments.checksum=EXCLUDED.checksum`,
+                  sid, mOrg, mUser, idx, stored.object_key, checksum, _ct.slice(0, 160), audio.length,
+                  Number.isFinite(startMs) ? startMs : null, Number.isFinite(endMs) ? endMs : null,
+                );
+                await tx.$executeRawUnsafe(
+                  `INSERT INTO hivemind.meeting_artifact_receipts(session_id,org_id,artifact_kind,shard_key,storage_placement,object_key,etag,sha256,byte_count,content_type,start_ms,end_ms)
+                   VALUES($1::uuid,$2::uuid,'audio',$3,'managed_eu_r2',$4,$5,$6,$7,$8,$9,$10)
+                   ON CONFLICT(session_id,artifact_kind,shard_key) DO UPDATE SET etag=EXCLUDED.etag,status='persisted'`,
+                  sid, mOrg, String(idx), stored.object_key, stored.etag || null, checksum, audio.length, _ct.slice(0, 160),
+                  Number.isFinite(startMs) ? startMs : null, Number.isFinite(endMs) ? endMs : null,
+                );
+              });
+              return jsonResponse(res, { ok: true, session_id: sid, segment_index: idx, status: 'queued', durability: 'cloudflare_r2_eu', object_receipt: stored.receipt_id || null }, 202);
+            }
             const existing = await prisma.$queryRawUnsafe(
               `SELECT checksum, status FROM hivemind.meeting_audio_segments WHERE session_id=$1::uuid AND idx=$2 AND org_id=$3::uuid AND user_id=$4::uuid`,
               sid, idx, mOrg, mUser,
@@ -7419,6 +7702,13 @@ exit \$RC
         if (finalizeSession && req.method === 'POST') {
           const sid = finalizeSession[1]; const mOrg = _mOrgId; const mUser = _mUserId;
           if (!orgIsRemote(mOrg) && !prisma) return jsonResponse(res, { error: 'db_unavailable' }, 503);
+          if (!orgIsRemote(mOrg)) {
+            const modeRows = await prisma.$queryRawUnsafe(`SELECT orchestration_mode FROM hivemind.meeting_sessions WHERE id=$1::uuid AND org_id=$2::uuid AND user_id=$3::uuid`, sid, mOrg, mUser).catch(() => []);
+            if (/^workflow_v2:(workflow|full)$/.test(String(modeRows?.[0]?.orchestration_mode || ''))) {
+              const result = await finalizeV2MeetingSession(prisma, cloudflareMeetingLifecycleClient, { orgId: mOrg, userId: mUser, sessionId: sid, body: { ...body, expected_segments: body.expected_segment_count } });
+              return jsonResponse(res, result.body, result.status);
+            }
+          }
           const requestedScope = String(body.scope || '').toLowerCase();
           if (requestedScope === 'project') {
             const access = body.project_id ? await prisma.projectMember.findFirst({
@@ -26321,6 +26611,13 @@ if (shouldStartHttpServer()) {
   }
 
   startGmailWatcherScheduler({ prisma });
+
+  if (process.env.MEETING_LIFECYCLE_V2_ENABLED === 'true' && prisma) {
+    const enqueueOutbox = () => enqueuePendingMeetingOutbox(prisma, cloudflareMeetingLifecycleClient, { limit: 25 })
+      .catch((error) => console.warn('[meeting-v2] outbox Queue tick failed:', error?.message?.slice(0, 160)));
+    setInterval(enqueueOutbox, Math.max(5000, Number(process.env.MEETING_OUTBOX_INTERVAL_MS || 15000))).unref();
+    setTimeout(enqueueOutbox, 5000).unref();
+  }
 
   // Embedding reconciler (drift guard). Every persisted memory MUST land in its
   // org's Qdrant collection, but ~16 save paths write to PG and only some embed

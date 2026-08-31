@@ -2235,3 +2235,18 @@ git diff --check: passed (line-ending warnings only)
   worktree contained unrelated edits in `core/data/mcp-connectors.json` and a
   dirty `docker-compose.local-stack.yml` entry. Those files were not cleaned,
   stashed, overwritten or committed. Production remained unchanged.
+
+## 2026-08-31 UTC — Preview global network popup removed
+
+- Removed the app-wide `ServiceErrorToast` mount from Da-vinci `AppShell` so
+  transient background request failures no longer interrupt every page with a
+  misleading "Connection problem" popup. Request promises and page-specific
+  error handling remain unchanged.
+- Da-vinci session commit: `ec2c860372696293b48b309aa6db65964d410c8a`.
+- Verification:
+  - `npm test -- --watchAll=false --runTestsByPath src/components/hivemind/app/shared/__tests__/connectivity.test.js`
+    -> 1 suite passed, 2 tests passed.
+  - `npm run build:cloudflare` with preview API/host environment ->
+    `Compiled successfully`; Cloudflare artifact pruning completed.
+- This change is frontend-only. No shared Docker container or production
+  service was rebuilt or modified.

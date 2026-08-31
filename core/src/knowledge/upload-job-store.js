@@ -233,7 +233,22 @@ export class KnowledgeUploadJobStore {
         ? (jobBefore?.processingVersion || 1)
         : Number(processingVersion);
       const creditKey = `knowledge-credit:${jobId}:${creditVersion}`;
-      const adjusted = await this.creditService.adjustReservation({ orgId, idempotencyKey: creditKey, service, units: pages });
+      let adjusted;
+      try {
+        adjusted = await this.creditService.adjustReservation({ orgId, idempotencyKey: creditKey, service, units: pages });
+      } catch (error) {
+        // A failed processing version releases its reservation. Operator retry
+        // creates a new version from the retained R2 object, and older retry
+        // callers did not reserve that new version before enqueueing it. Heal
+        // that bounded historical gap idempotently at settlement; this remains
+        // tenant/version fenced and still rejects an exhausted entitlement.
+        if (error?.message !== 'credit reservation not found') throw error;
+        adjusted = await this.creditService.reserve({
+          orgId, userId, service, units: pages, source: 'knowledge_upload_retry',
+          idempotencyKey: creditKey,
+          metadata: { job_id: jobId, ingest_mode: jobBefore?.ingestMode || 'both', retry_recovered: true },
+        });
+      }
       if (!adjusted.admitted && adjusted.admitted !== undefined) {
         throw Object.assign(new Error('Monthly credits exhausted before upload settlement.'), { code: 'CREDITS_EXHAUSTED' });
       }

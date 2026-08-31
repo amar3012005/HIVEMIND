@@ -753,6 +753,31 @@ def test_synthesis_context_keeps_verified_receipts_but_excludes_worker_prose():
     assert "agent interpretation must not become evidence" not in context
 
 
+def test_synthesis_context_prefers_latest_receipt_per_url_and_keeps_all_sources():
+    director, _events = _director(message="Compare three competitor prices")
+    director.work_results = [
+        {"status": "completed", "evidence": [{
+            "adapter": "cloudflare_browser", "provider_id": "old",
+            "url": "https://one.example/pricing", "excerpt": "old blocked page",
+        }]},
+        {"status": "completed", "evidence": [
+            {"adapter": "cloudflare_browser", "provider_id": "new",
+             "url": "https://one.example/pricing", "excerpt": "One — $100"},
+            {"adapter": "cloudflare_browser", "provider_id": "two",
+             "url": "https://two.example/pricing", "excerpt": "Two — $200"},
+            {"adapter": "cloudflare_browser", "provider_id": "three",
+             "url": "https://three.example/pricing", "excerpt": "Three — $300"},
+        ]},
+    ]
+
+    context = director._synthesis_context(100)
+
+    assert "old blocked page" not in context
+    assert "One — $100" in context
+    assert "Two — $200" in context
+    assert "Three — $300" in context
+
+
 def test_work_room_turn_plan_runs_dependencies_before_dependent_steps(monkeypatch):
     director, _events = _director(message="Assess our product direction")
     director.room_mode = "work"

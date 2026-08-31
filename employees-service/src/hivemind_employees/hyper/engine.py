@@ -1580,6 +1580,11 @@ class Director:
         its answer from authoritative inputs without losing real browser work.
         """
         receipt_evidence = self._verified_work_evidence()
+        # A browser receipt is already bounded below.  Never cut the combined
+        # receipt block halfway through the second/third source: that made the
+        # writer see one competitor and hallucinate the rest from room history.
+        if receipt_evidence:
+            source_limit = max(source_limit, min(20000, 2400 * len(receipt_evidence)))
         receipt_block = "\n".join(
             "VERIFIED PROVIDER RECEIPT: " + json.dumps(row, ensure_ascii=False, separators=(",", ":"))
             for row in receipt_evidence
@@ -4480,7 +4485,9 @@ class Director:
                         "Use the browser and other allowed tools to resolve every exact reviewer gap. "
                         "If a selected public page is blocked or consent-gated, choose a credible accessible "
                         "competitor page instead. Capture current rendered evidence, exact URLs and comparable "
-                        "price facts, then prepare the requested artifact inputs. Reviewer gaps:\n"
+                        "price facts. The company named in Room/Company context is the subject, not one of its "
+                        "own competitors, and cannot count toward the requested competitor total. "
+                        "Then prepare the requested artifact inputs. Reviewer gaps:\n"
                         + str(rejected.get("text") or "")[:3000]
                     ),
                     "required_evidence": ["Persisted browser receipts for every repaired factual claim"],
@@ -4509,7 +4516,8 @@ class Director:
                         "persisted browser receipts. Reject missing prices, missing competitors, inaccessible "
                         "sources, or unsupported comparisons. This is the pre-synthesis evidence gate: pass when "
                         "the persisted evidence and comparison inputs are sufficient for final synthesis; do not "
-                        "reject merely because the final formatted artifact is produced immediately after this gate."
+                        "reject merely because the final formatted artifact is produced immediately after this gate. "
+                        "Never count the subject company from Room/Company context as its own competitor."
                     ),
                     "required_evidence": [],
                     "acceptance_criteria": [
@@ -4534,20 +4542,25 @@ class Director:
         """Return only persisted receipt observations from completed assignments."""
         facts: List[Dict[str, Any]] = []
         seen = set()
-        for result in self.work_results:
+        # Prefer the newest successful observation for a URL. Repair/analysis
+        # assignments often revisit a failed consent/404 page with a working
+        # canonical URL. The earlier receipt remains in PostgreSQL for audit,
+        # but must not displace the newer evidence in final synthesis.
+        for result in reversed(self.work_results):
             if not isinstance(result, dict) or result.get("status") != "completed":
                 continue
-            for receipt in result.get("evidence") or []:
+            for receipt in reversed(result.get("evidence") or []):
                 if not isinstance(receipt, dict):
                     continue
-                key = str(receipt.get("provider_id") or receipt.get("url") or "")
+                url = str(receipt.get("url") or "").strip()
+                key = url.lower().rstrip("/") or str(receipt.get("provider_id") or "")
                 if not key or key in seen:
                     continue
                 seen.add(key)
                 facts.append({
                     "source": str(receipt.get("adapter") or "tool_receipt"),
                     "title": str(receipt.get("title") or "")[:240],
-                    "url": str(receipt.get("url") or "")[:1000],
+                    "url": url[:1000],
                     "content": str(receipt.get("excerpt") or receipt.get("title") or "")[:2400],
                     "provider_receipt": key[:240],
                 })
@@ -5710,7 +5723,8 @@ class Director:
                         "Review the completed assignments against their evidence and acceptance criteria. "
                         "This is the pre-synthesis evidence gate: verify that the persisted inputs are sufficient "
                         "for the requested final artifact, but do not reject solely because final formatting and "
-                        "synthesis happen after this gate."
+                        "synthesis happen after this gate. When the task asks for competitors, the company in "
+                        "Room/Company context is the subject and must not count as one of its own competitors."
                     ),
                     # The reviewer consumes persisted predecessor receipts. It
                     # must not browse the web again merely to prove it reviewed
@@ -6722,7 +6736,7 @@ class Director:
         if self.room_kind == "campaign":
             raise RuntimeError("Campaign Rooms may complete only through campaign__govern_delivery")
         depth = self.response_depth if self.response_depth in {"direct", "focused", "operating"} else "focused"
-        board_limit = {"direct": 3000, "focused": 4500, "operating": 8000}[depth]
+        board_limit = {"direct": 5000, "focused": 10000, "operating": 14000}[depth]
         board = self._synthesis_context(board_limit)
         debate_ctx = (f"\n\nThe room DEBATED this — transcript:\n{transcript_json}\nCite who argued what."
                       + (f"\nMODERATOR NOTE: {self._debate_disagreement_note}" if self._debate_disagreement_note else "")
@@ -6820,6 +6834,10 @@ class Director:
                 "or links that are not in the gathered context. A fabricated specific tagged UNVERIFIED is "
                 "still fabricated — omit it or write [confirm with sales] / [confirm with legal] instead. "
                 "Contact details: use ONLY the company's real sender identity from context."
+                "\nCOMPETITOR COUNTING: when the request asks for competitors of the company in ROOM/COMPANY "
+                "CONTEXT, the company itself is the subject and MUST NOT count as a competitor. Use exactly the "
+                "requested number of distinct third-party competitors with successful receipts; a consent page, "
+                "404, or unsupported absence claim is not a researched pricing page."
                 + self._room_instr_block + _fmt + self._lang_directive())
         if depth == "direct":
             sysp += (

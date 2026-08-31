@@ -2123,7 +2123,7 @@ if (process.env.DOCLING_URL) {
               const { parsePdfWithGroqVision, visionProviderAvailable } = await import('./knowledge/enterprise/groq-vision-parser.js');
               if (!visionProviderAvailable()) throw new Error('No direct vision key or Cloudflare AI Gateway BYOK alias is configured');
               const vision = await parsePdfWithGroqVision(tempPath);
-              if (vision.text.length > 200) {
+              if (vision.text.trim().length >= 8) {
                 if (vision.failedPages?.length) {
                   console.warn(`[docling-adapter] whole-document vision preserved ${vision.pages} pages; failed_pages=${vision.failedPages.length}`);
                 }
@@ -2137,7 +2137,7 @@ if (process.env.DOCLING_URL) {
               console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
             }
             let visualEnrichment = null;
-            if (fast.isFigureRich && !fast.isImageHeavy && !fast.isTextLayerCorrupt
+            if (fast.hasUsableTextLayer && !fast.isImageHeavy && !fast.isTextLayerCorrupt
               && String(process.env.KB_FIGURE_RICH_TO_VISION ?? 'true').toLowerCase() !== 'false') {
               const { detectVisualPdfPages, parsePdfWithGroqVision, visionProviderAvailable } = await import('./knowledge/enterprise/groq-vision-parser.js');
               if (visionProviderAvailable()) {
@@ -2169,7 +2169,7 @@ if (process.env.DOCLING_URL) {
             // Reversible: KB_PDF_TEXTLAYER_FIRST=false restores docling-for-smart.
             const _textLayerFirst = String(process.env.KB_PDF_TEXTLAYER_FIRST ?? 'true').toLowerCase() !== 'false';
             if ((!smart || _textLayerFirst) && !fast.error && !fast.isImageHeavy
-              && !fast.isTextLayerCorrupt && fast.text.length > 200) {
+              && !fast.isTextLayerCorrupt && fast.hasUsableTextLayer) {
               if (smart && _textLayerFirst) {
                 console.log(`[docling-adapter] ${filename}: text layer present `
                   + `(${fast.text.length} chars / ${fast.pages}p) → fast-pdf, SKIPPING docling `
@@ -2315,7 +2315,7 @@ if (process.env.DOCLING_URL) {
         const useSmart = smart === true;
         // Text-bearing and not image-heavy → neither OCR nor picture description is
         // needed. Only a scan (no extractable text) or an image-heavy doc requires them.
-        const _hasTextLayer = ext === 'pdf' && !!(_pdfProbe && !_pdfProbe.error && _pdfProbe.text && _pdfProbe.text.length > 200);
+        const _hasTextLayer = ext === 'pdf' && !!(_pdfProbe && !_pdfProbe.error && _pdfProbe.hasUsableTextLayer);
         const _doclingHeavyOk = ext !== 'pdf' ? true
           : (!_hasTextLayer || !!_pdfProbe?.isImageHeavy || !!_pdfProbe?.isTextLayerCorrupt);
         if (ext === 'pdf' && !_doclingHeavyOk) {
@@ -2413,11 +2413,12 @@ if (process.env.DOCLING_URL) {
             // clean markdown with headings and pages in 74s. Try vision first; keep
             // fast-pdf as the last resort so a missing vision key still degrades rather
             // than fails.
-            if (process.env.GROQ_API_KEY || process.env.OPENROUTER_API_KEY) {
+            const { visionProviderAvailable } = await import('./knowledge/enterprise/groq-vision-parser.js');
+            if (visionProviderAvailable()) {
               try {
                 const { parsePdfWithGroqVision } = await import('./knowledge/enterprise/groq-vision-parser.js');
                 const vfb = await parsePdfWithGroqVision(tempPath);
-                if (!vfb.error && vfb.text.length > 200) {
+                if (!vfb.error && vfb.text.trim().length >= 8) {
                   console.warn(`[docling-adapter] tier=docling failed/empty → VISION fallback for ${filename} (chars=${vfb.text.length})`);
                   return {
                     text: vfb.text, markdown: vfb.markdown, json: null,
@@ -2432,7 +2433,7 @@ if (process.env.DOCLING_URL) {
             }
             const { fastPdfExtract } = await import('./knowledge/enterprise/fast-pdf-parser.js');
             const fb = await fastPdfExtract(tempPath);
-            if (!fb.error && fb.text.length > 200) {
+            if (!fb.error && fb.hasUsableTextLayer) {
               console.warn(`[docling-adapter] tier=docling failed/empty → falling back to fast-pdf for ${filename}`);
               const _fbt = collapseLetterSpacing(fb.text || '');
               return {

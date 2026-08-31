@@ -495,3 +495,22 @@ verification, and its independent rollback control.
 - Verified provider receipt identity is preserved independently from URL-based
   deduplication, so final synthesis can cite the exact durable receipt while
   still preferring the newest observation for a repeated URL.
+
+### Local governed browser workspace — 2026-08-31
+
+- Backend commit `a1c49174` and frontend commit `2ebaf9f6` add one persistent,
+  WorkOrder-scoped Cloudflare Browser workspace per hired Agent. Tabs are reused
+  during retries; rendered text, JSON-LD, links, timestamps and content hashes
+  are captured generically rather than through pricing-specific extraction.
+- Screenshots are integrity-hashed and stored only in
+  `hivemind-hyperagent-browser-local`. Browser receipts expose an opaque artifact
+  ID, never the internal R2 object key. Public-URL validation rejects local,
+  private, credentialed, IPv6-literal and non-standard-port destinations.
+- The Room UI now shows browser tab state, capture validity and Cloudflare Live
+  View from persisted tool-receipt events. An optional Manifest V3 companion
+  creates a user-visible Chrome group named `HIVEMIND` without cookie or
+  debugger permissions and only after a user action.
+- Live local Worker version `6b00ea24-ac03-4cf2-8432-8cf08e18b1a4` passed the
+  Browser Run canary: persistent Agent provision, assignment, two-tab rendered
+  navigation, evidence validation, SHA-256 receipt, R2 screenshot, Live View and
+  explicit session cleanup. Production remains unchanged.

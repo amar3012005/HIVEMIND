@@ -2081,3 +2081,36 @@ git diff --check: passed (line-ending warnings only)
   unknown-user provisioning is intentionally fail-closed and production stays
   `off` until those protected credentials, real Turnstile widget, WAF policy,
   and registration E2E are completed.
+
+## 2026-08-31 — Governed HyperAgent browser workspace (local)
+
+### Committed
+
+- Backend/Worker commit `a1c49174` on
+  `codex/hyperagent-browser-workspace-v1`.
+- Frontend commit `2ebaf9f6fec1f8c522db58ac4ab411cb700c815b` on
+  `codex/hyperagent-browser-workspace-ui-v1`.
+- Worktree: `P:\HIVEMIND-worktrees\hyperagent-browser-workspace-v1`.
+
+### Verification
+
+- `npm run check && npm test` in `workers/hyperagents-grok-runtime`: TypeScript
+  passed; 6/6 tests passed, including public-browser URL boundaries.
+- Focused Employees tests: 6/6 Grok runtime and 5/5 Director browser receipt,
+  dependency, repair and review tests passed in the existing local image with
+  the session source mounted read-only by convention.
+- `npm run build` in `frontend/Da-vinci`: compiled successfully.
+- `wrangler deploy --env local --dry-run`: all Agent, Workflow, Browser, Flagship,
+  Sandbox and local R2 bindings resolved.
+- Live local Worker canary: provisioned a persistent Agent, assigned a WorkOrder,
+  opened `https://example.com` in a new tab, validated rendered content, produced
+  content and screenshot SHA-256 receipts, returned two tabs plus Live View, and
+  closed the Browser session successfully.
+
+### Accepted release boundary
+
+- Created only `hivemind-hyperagent-browser-local` and deployed only
+  `hivemind-hyperagents-grok-local` version
+  `6b00ea24-ac03-4cf2-8432-8cf08e18b1a4`.
+- This is a local feature acceptance, not a production release. No production
+  flag, bucket, Worker, service, container or frontend deployment changed.

@@ -2650,24 +2650,15 @@ class Director:
 
     def _work_order_owner(self, lane: str) -> Dict[str, Any]:
         """Resolve a planned lane to an actual Room participant, never an invented agent."""
-        wanted = str(lane or "").strip().lower()
-        aliases = {
-            "researcher": "investigator", "investigator": "researcher",
-            "reviewer": "skeptic", "skeptic": "reviewer",
-        }
+        from .grok_runtime import canonical_capabilities
+        wanted = canonical_capabilities(lane)
         for participant in self.participants:
-            capabilities = {
-                str(participant.get(key) or "").strip().lower()
-                for key in ("_lane", "lane", "role_archetype")
-                if str(participant.get(key) or "").strip()
-            }
-            if any(
-                actual == wanted
-                or aliases.get(actual) == wanted
-                or aliases.get(wanted) == actual
-                or wanted in actual.split()
-                for actual in capabilities
-            ):
+            capabilities = canonical_capabilities(
+                participant.get("_lane"), participant.get("lane"),
+                participant.get("role_archetype"), participant.get("capabilities"),
+                participant.get("skills"), participant.get("tools"),
+            )
+            if wanted.intersection(capabilities):
                 return participant
         from .grok_runtime import mode_at_least
         if mode_at_least(getattr(self, "grok_runtime_mode", "off"), "shadow_roster"):

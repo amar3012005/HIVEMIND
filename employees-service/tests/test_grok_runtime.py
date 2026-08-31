@@ -1,10 +1,23 @@
 from hivemind_employees.hyper.grok_runtime import (
+    canonical_capabilities,
     agent_instance_id,
     build_roster_manifest,
     mode_at_least,
     normalize_runtime_mode,
     select_active_agents,
 )
+
+
+def test_compound_research_role_satisfies_investigator_lane():
+    assert "investigator" in canonical_capabilities("Customer & Market Researcher")
+    participants = [{
+        "id": "omar", "name": "Omar", "slug": "omar",
+        "role_archetype": "Customer & Market Researcher",
+    }]
+    selected = select_active_agents(
+        participants, [{"owner_lane": "Investigator"}], lead_id="missing", maximum=3,
+    )
+    assert [row["id"] for row in selected] == ["omar"]
 
 
 def _employee(employee_id: str, slug: str, lane: str):

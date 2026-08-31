@@ -897,6 +897,17 @@ async function execProfile(bus, plan, ctx, { beforeDeadline, remaining, startToo
   }
 }
 
+export function authorizedProjectsCitation(projects = []) {
+  const rows = Array.isArray(projects) ? projects : [];
+  return {
+    id: 'PROJECTS1', source_type: 'authorized_projects', source_label: 'Authorized projects',
+    title: 'Authorized projects',
+    snippet: rows.length
+      ? rows.map((project) => `${project.name} (${project.slug || project.id})`).join('\n').slice(0, 2000)
+      : 'No active projects are authorized for this user in the current organization.',
+  };
+}
+
 async function execProjects(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
   if (!(plan.operation === 'projects' && remaining() > 0)) return;
   const args = { query: plan.project_prompt || plan.query_canonical_en || '' };
@@ -904,12 +915,10 @@ async function execProjects(bus, plan, ctx, { beforeDeadline, remaining, startTo
     startTool('hivemind_list_projects', args);
     const result = await beforeDeadline(() => dispatchTool('hivemind_list_projects', args, ctx));
     const projects = Array.isArray(result?.projects) ? result.projects : [];
-    if (projects.length) {
-      bus.addPacket({ citations: [{
-        id: 'PROJECTS1', source_type: 'authorized_projects', source_label: 'Authorized projects',
-        title: 'Authorized projects', snippet: projects.map((project) => `${project.name} (${project.slug || project.id})`).join('\n').slice(0, 2000),
-      }] });
-    }
+    // An authorized empty result is completion evidence too. Without a
+    // citation packet, synthesis treats "zero projects" as a retrieval outage
+    // and emits an unrelated generic recall failure.
+    bus.addPacket({ citations: [authorizedProjectsCitation(projects)] });
     recordTool('hivemind_list_projects', args, `${projects.length} authorized projects`, result);
     return { projectsResult: result };
   } catch (error) {

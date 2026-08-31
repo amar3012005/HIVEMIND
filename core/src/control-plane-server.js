@@ -13767,6 +13767,21 @@ Write the persona now.`;
             }).catch((error) => console.warn('[grok-hyperagents] realtime publish failed:', error.message));
           }
         }
+        if (['agent_assignment_started', 'agent_assignment_heartbeat', 'agent_tool_started', 'agent_tool_receipt']
+          .includes(body.event?.t) && body.event.work_order_id && body.event.agent_instance_id) {
+          // A model/browser call may legitimately run for minutes. Persist its
+          // lease heartbeat on every live event so recovery and the frontend can
+          // distinguish active work from an abandoned assignment.
+          await prisma.$executeRawUnsafe(
+            `UPDATE "hivemind"."hyper_work_orders"
+                SET last_heartbeat_at=now(), updated_at=now()
+              WHERE id=$1::uuid AND turn_id=$2::uuid
+                AND agent_instance_id=$3
+                AND status IN ('queued','running','blocked')`,
+            String(body.event.work_order_id), body.turn_id,
+            String(body.event.agent_instance_id),
+          );
+        }
         if (body.event?.t === 'agent_tool_receipt' && body.event.work_order_id
             && body.event.agent_instance_id) {
           const scope = await prisma.hyperTurn.findUnique({

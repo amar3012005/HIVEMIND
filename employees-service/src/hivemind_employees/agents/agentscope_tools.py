@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 from agentscope.message._message_block import TextBlock
@@ -1307,6 +1307,7 @@ def register_delegate_to_tool(
 def register_cloudflare_browser_tool(
     tk: Toolkit, org_id: str, user_id: str, runtime_mode: str,
     *, agent_instance_id: str, work_order_id: str,
+    receipt_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
 ) -> None:
     """Expose the feature-gated Cloudflare Browser Run adapter to one Agent.
 
@@ -1355,7 +1356,7 @@ def register_cloudflare_browser_tool(
             tabs = [row for row in (payload.get("tabs") or []) if isinstance(row, dict)][:24]
             receipt_excerpt = str(page.get("text") or "")[:8000]
             valid = bool(page.get("page_valid"))
-            _record_agent_tool_receipt({
+            receipt = {
                 "adapter": "cloudflare_browser",
                 "status": "completed" if valid else "invalid",
                 "provider_id": str(payload.get("session_id") or ""),
@@ -1369,7 +1370,14 @@ def register_cloudflare_browser_tool(
                 "invalid_reason": str(page.get("invalid_reason") or "")[:300] or None,
                 "screenshot": screenshot,
                 "tabs": tabs,
-            })
+            }
+            _record_agent_tool_receipt(receipt)
+            # Persist and stream the receipt as soon as the browser action
+            # succeeds. Waiting for the entire ReAct loop to finish made a
+            # multi-page run look frozen and left no durable evidence if the
+            # later synthesis call timed out.
+            if receipt_callback is not None:
+                await receipt_callback(dict(receipt))
             return _tool_response_text(
                 f"Title: {page.get('title') or ''}\nURL: {page.get('url') or ''}\n\n"
                 f"Evidence status: {'valid' if valid else 'invalid'}"

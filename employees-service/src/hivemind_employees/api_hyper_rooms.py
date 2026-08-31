@@ -3901,6 +3901,35 @@ async def _orchestrate_single_agent(
         that teammate with the legacy single-call worker.
         """
         instance_id = str(owner.get("_agent_instance_id") or "")
+        work_order_id = str(order.get("_work_order_id") or "")
+        emitted_receipt_keys: Set[str] = set()
+
+        def _receipt_action_key(receipt: Dict[str, Any]) -> str:
+            identity = "|".join([
+                work_order_id,
+                str(receipt.get("adapter") or "tool"),
+                str(receipt.get("provider_id") or ""),
+                str(receipt.get("content_hash") or ""),
+                str(receipt.get("url") or ""),
+                str(receipt.get("captured_at") or ""),
+            ])
+            return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+        async def _persist_live_receipt(receipt: Dict[str, Any]) -> None:
+            action_key = _receipt_action_key(receipt)
+            if action_key in emitted_receipt_keys:
+                return
+            emitted_receipt_keys.add(action_key)
+            await _emit({
+                "t": "agent_tool_receipt", "agent": owner.get("slug"),
+                "agent_instance_id": instance_id,
+                "work_order_id": work_order_id or None,
+                "action_key": action_key,
+                "adapter": receipt.get("adapter"), "status": receipt.get("status"),
+                "provider_receipt": receipt,
+                "artifact_refs": [receipt.get("screenshot")]
+                if isinstance(receipt.get("screenshot"), dict) else [],
+            })
         await _emit({
             "t": "agent_assignment_started",
             "agent": owner.get("slug"),
@@ -3929,9 +3958,17 @@ async def _orchestrate_single_agent(
                 agent.toolkit, str(req.org_id or ""), str(req.user_id or ""),
                 str(req.grok_runtime_mode or "off"),
                 agent_instance_id=instance_id,
-                work_order_id=str(order.get("_work_order_id") or ""),
+                work_order_id=work_order_id,
+                receipt_callback=_persist_live_receipt,
             )
-        if mode_at_least(req.grok_runtime_mode, "collaboration"):
+        # The Director's durable dependency graph already owns participant
+        # handoffs and independent review. The old in-process delegate tool
+        # launches an uncheckpointed nested agent, duplicates the reviewer,
+        # hides progress, and can keep the parent WorkOrder running for minutes.
+        # Keep it as an explicit compatibility escape hatch only.
+        if (mode_at_least(req.grok_runtime_mode, "collaboration")
+                and str(os.environ.get("HYPER_GROK_INLINE_DELEGATION_ENABLED", "false")).lower()
+                in {"1", "true", "yes", "on"}):
             async def _build_selected_sub_agent(target_row: Dict[str, Any]) -> ReActAgent:
                 return await _build_agent_for_room(
                     req.room_id, target_row, user_id=req.user_id, org_id=req.org_id,
@@ -3956,8 +3993,32 @@ async def _orchestrate_single_agent(
             + bounded_context[:12000]
             + (f"\n\nUSER STEERING (latest instructions win):\n{steering_context}" if steering_context else "")
         )
+
+        async def _invoke_with_heartbeat(message: Msg) -> Any:
+            interval = max(3.0, min(30.0, float(
+                os.environ.get("HYPER_GROK_HEARTBEAT_SECONDS", "8") or "8"
+            )))
+
+            async def _heartbeat_loop() -> None:
+                while True:
+                    await asyncio.sleep(interval)
+                    await _emit({
+                        "t": "agent_assignment_heartbeat",
+                        "agent": owner.get("slug"),
+                        "agent_instance_id": instance_id,
+                        "work_order_id": work_order_id or None,
+                        "phase": "executing",
+                    })
+
+            heartbeat = asyncio.create_task(_heartbeat_loop())
+            try:
+                return await agent(message)
+            finally:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+
         begin_agent_tool_receipts()
-        reply = await agent(Msg(name="user", content=instruction, role="user"))
+        reply = await _invoke_with_heartbeat(Msg(name="user", content=instruction, role="user"))
         text = _msg_to_text(reply).strip()
         if not text:
             raise RuntimeError(f"agent {owner.get('slug')} returned no durable result")
@@ -3971,7 +4032,7 @@ async def _orchestrate_single_agent(
         ]
         if (mode_at_least(req.grok_runtime_mode, "real_tools")
                 and order.get("required_evidence") and not valid_receipts):
-            repair = await agent(Msg(
+            repair = await _invoke_with_heartbeat(Msg(
                 name="user",
                 role="user",
                 content=(
@@ -3997,15 +4058,8 @@ async def _orchestrate_single_agent(
             raise RuntimeError(
                 f"agent {owner.get('slug')} produced no verified tool receipt for an evidence-required assignment"
             )
-        for index, receipt in enumerate(receipts):
-            await _emit({
-                "t": "agent_tool_receipt", "agent": owner.get("slug"),
-                "agent_instance_id": instance_id,
-                "work_order_id": order.get("_work_order_id") or None,
-                "action_key": f"{order.get('_work_order_id')}:{index}:{receipt.get('provider_id')}",
-                "adapter": receipt.get("adapter"), "status": receipt.get("status"),
-                "provider_receipt": receipt,
-            })
+        for receipt in receipts:
+            await _persist_live_receipt(receipt)
         tool_calls = int(getattr(agent, "tool_call_count", 0) or 0)
         if tool_calls >= max(1, int(max_tool_calls * 0.8)):
             await _emit({

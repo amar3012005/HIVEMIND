@@ -143,6 +143,7 @@ export async function appendTurnEvent(prisma, turnId, event) {
     lines.push(stamped);
     let activeAgents;
     if (event?.t === 'agent_activated' || event?.t === 'agent_assignment_started'
+        || event?.t === 'agent_assignment_heartbeat'
         || event?.t === 'agent_assignment_completed' || event?.t === 'agent_waiting') {
       const current = await tx.hyperTurn.findUnique({ where: { id: turnId }, select: { activeAgents: true } }).catch(() => null);
       const agents = Array.isArray(current?.activeAgents) ? [...current.activeAgents] : [];
@@ -154,7 +155,8 @@ export async function appendTurnEvent(prisma, turnId, event) {
         agent_instance_id: event.agent_instance_id || null,
         status: event.t === 'agent_assignment_completed' ? 'complete'
           : event.t === 'agent_waiting' ? 'waiting'
-            : event.t === 'agent_assignment_started' ? 'working' : 'active',
+            : (event.t === 'agent_assignment_started' || event.t === 'agent_assignment_heartbeat')
+              ? 'working' : 'active',
         updated_at: now,
       };
       if (index >= 0) agents[index] = projection; else agents.push(projection);

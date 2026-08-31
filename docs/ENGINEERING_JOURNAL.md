@@ -1679,6 +1679,35 @@ slides that find no unique anchor get a page instead of `null`.
 - This changes provider routing only. Gemini planner targeting and the
   Grok-style runtime rollout state are unchanged.
 
+## 2026-08-31 UTC — durable ingestion stage pipeline and global rollout
+
+- Runtime evidence showed that Cloudflare Queue admission was capped at one
+  consumer and Core held an extract lease across parsing plus evidence
+  embedding. A burst therefore left later documents at `queued` even while the
+  server had capacity for a different stage.
+- Canonical commit `22f549a3c300cf46c3bcb0ed412ff85cadd61e4e`
+  pipelines independent extract, embed, promote, and project/reconcile capacity.
+  Queue consumer concurrency is 5; Core remains protected by per-stage global
+  and tenant caps. PostgreSQL's transaction-scoped advisory lock is the only
+  slot mutex; redundant Serializable isolation was removed after a live burst
+  reproduced write-conflict retries.
+- Verification passed 48 focused Core tests, Worker typecheck, 5 Worker tests,
+  and a production Wrangler dry-run. Two production three-PDF bursts completed
+  all six jobs. The accepted burst visibly overlapped parsing, embedding, and
+  memory generation; all checkpoints completed on attempt 1, fresh slot
+  conflicts were 0, and fresh fatal errors were 0.
+- Core is healthy at the exact revision above. Worker deployment
+  `9225e2b9e0884df5ba44cbba3d76b3ee`, Workflow version
+  `ab5db32d-d295-43c3-8dc3-47f6ce6c6664`, and Queue consumer
+  `55511ec7533d45f7a9fc4e96458c5250` are active. Flagship
+  `knowledge_ingest_workflow_v1` now serves `on` by default and every retained
+  production rule also serves `on`; the Core environment gate remains the kill
+  switch.
+- Retained image incident jobs `73477d60-f51b-40f0-a3e0-305a977f5ddb` and
+  `96892760-0026-4401-91c0-48e358f15dfa` were replayed from their existing R2
+  sources as processing version 2. Both reached `ready` with exactly one
+  canonical memory and no source re-upload.
+
 ## 2026-08-31 UTC - ingestion throughput final acceptance and incident repair
 
 - Canonical `e9fca76f6e8d66398d195f87d431645a56b1b058` released only the

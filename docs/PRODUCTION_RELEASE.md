@@ -1210,3 +1210,28 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   served by Amazon Bedrock, exact-revision service health, public API health,
   and an empty fresh critical-log scan. No migration was applied.
 - Rollback: governor rollback to the preceding `8d35d3c2` service images.
+
+## 22f549a3 — staged Cloudflare ingestion throughput
+
+- Canonical parent SHA `22f549a3c300cf46c3bcb0ed412ff85cadd61e4e`;
+  frontend unchanged at `c5a4973c468f39f86f573284180f95afa140145a`.
+- Core image digest
+  `sha256:012ee1498ea4d1e55fe623f41a15b29944db66823640d1979d0e5567d85d2eec`;
+  manifest
+  `/root/releases/manifests/22f549a3/20260831T222531Z/RELEASE_MANIFEST.json`.
+  No migration was pending or applied.
+- Knowledge Worker deployment `9225e2b9e0884df5ba44cbba3d76b3ee` and
+  Workflow version `ab5db32d-d295-43c3-8dc3-47f6ce6c6664`; production Queue
+  consumer concurrency changed from 1 to 5 while retaining batch size 10,
+  retries 5, retry delay 30 seconds, and the existing DLQ.
+- Acceptance: six concurrent PDF jobs across two bursts reached `ready`; the
+  final burst had one-attempt acquire, materialize-evidence, promotion, and
+  reconcile receipts, overlapped parser/embed/promotion stages, zero fresh
+  scheduler conflicts, zero fresh fatal errors, public health 200, and exact
+  Core revision health. Two retained JPEG incident jobs also replayed to
+  `ready` from R2 as v2 with one canonical memory each.
+- Global rollout: Flagship default is `on`, all retained production rules serve
+  `on`, and the authenticated bound Worker returned `enabled:true` for an
+  unrelated production context plus both historical canary tenants. Emergency
+  rollback is Flagship default/rules to `off`, or the existing Core master
+  environment gate; Core image rollback uses the governor's saved stable tag.

@@ -445,3 +445,16 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Flag rollback restores default and production priorities 2/3 to `off` while
   preserving local-on behavior and the full flag definition. Runtime rollback
   versions are listed in `docs/PRODUCTION_RELEASE.md`.
+# Production feature — staged durable canonical ingestion (2026-08-31)
+
+- Flag: `knowledge_ingest_workflow_v1` — enabled globally in production.
+- Release: `22f549a3c300cf46c3bcb0ed412ff85cadd61e4e`.
+- Admission uses Cloudflare Queue/Workflow/R2. Core independently bounds
+  extraction, evidence embedding, memory generation, and projection/reconcile,
+  allowing the next document to extract as soon as the prior parser releases
+  its slot.
+- Public upload/status contracts are unchanged; BullMQ remains the flag-off
+  rollback path but is not selected while the global flag and Core gate are on.
+- Cloudflare BGE-M3 remains the primary embedding route with the configured
+  secondary fallback. Image uploads use the same durable admission and
+  canonical single-memory materializer.

@@ -105,6 +105,7 @@ import { activateHqAfterOnboarding, appendHqEvent, FIRST_LIFE_OBJECTIVE, resetHq
 import { startHqScheduler } from './hq-runtime/scheduler.js';
 import { runtimeTransportStats } from './runtime-transport/client.js';
 import { internalFetch } from './internal/internal-fetch.js';
+import { grokModeAtLeast as grokModeAtLeastGlobal } from './hyperagents/grok-runtime-client.js';
 import {
   getRuntimeRole,
   shouldRunRecurringMaintenanceJobs,
@@ -1288,7 +1289,7 @@ function dispatchHyperRoomTurn(body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: payload,
-    timeoutMs: grokModeAtLeast(payload?.grok_runtime_mode, 'durable_assignments')
+    timeoutMs: grokModeAtLeastGlobal(payload?.grok_runtime_mode, 'durable_assignments')
       ? 30 * 60 * 1000
       : 90_000,
   });

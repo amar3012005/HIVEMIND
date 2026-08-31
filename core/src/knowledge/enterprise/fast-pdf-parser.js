@@ -49,6 +49,26 @@ export function assessTextLayerQuality(text) {
 }
 
 /**
+ * Classify whether a PDF has usable native text without confusing brevity with
+ * absence. A one-page invoice, certificate, title sheet, or short note can have
+ * fewer than 300 characters and still possess a perfectly valid text layer.
+ * Raster pages are discovered separately with pdfimages and selectively sent
+ * to vision; document-wide vision is reserved for PDFs with no usable text.
+ */
+export function classifyPdfTextLayer(text, pages = 0) {
+  const source = String(text || '').trim();
+  const meaningfulTokens = source.match(/[\p{L}\p{N}]{3,}/gu) || [];
+  const hasUsableTextLayer = source.length >= 8 && meaningfulTokens.length >= 1;
+  const pageCount = Math.max(1, Number(pages) || 1);
+  const avgPerPage = source.length / pageCount;
+  return {
+    hasUsableTextLayer,
+    isImageHeavy: !hasUsableTextLayer,
+    avgPerPage,
+  };
+}
+
+/**
  * Split one page near paragraph/sentence/word boundaries with bounded overlap.
  * Stored offsets remain deterministic, while neither the chunk end nor the next
  * chunk start can bisect a word. Page and heading metadata are added by the
@@ -93,7 +113,7 @@ export function chunkTextAtSemanticBoundaries(text, target = 1500, overlap = 200
  */
 export async function fastPdfExtract(filePath) {
   const PDFParse = await loadPdfParse();
-  if (!PDFParse) return { text: '', pages: 0, isImageHeavy: true, error: 'pdf-parse not available' };
+  if (!PDFParse) return { text: '', pages: 0, hasUsableTextLayer: false, isImageHeavy: true, error: 'pdf-parse not available' };
   try {
     const buf = fs.readFileSync(filePath);
     let text = '';
@@ -121,20 +141,9 @@ export async function fastPdfExtract(filePath) {
       const pageMatches = text.match(/-- \d+ of (\d+) --/);
       if (pageMatches) pages = Number(pageMatches[1]);
     }
-    const avgPerPage = pages > 0 ? text.length / pages : text.length;
-    // Image-heavy when:
-    //   - avg <300 chars/page (was 150, too strict — header+footer+labels
-    //     could exceed 150 even on a scanned page), OR
-    //   - text extracted has no alphanumeric word longer than 4 chars
-    //     (OCR garbage / glyph-only output), OR
-    //   - total text is very small (<2000 chars) AND avg <500 (catches the
-    //     long-single-page-text-PDF exception while still flagging short
-    //     image-heavy docs).
-    const longAlnumWord = /\b[A-Za-z0-9]{5,}\b/.test(text);
+    const classification = classifyPdfTextLayer(text, pages);
+    const { avgPerPage, hasUsableTextLayer, isImageHeavy } = classification;
     const textQuality = assessTextLayerQuality(text);
-    const isImageHeavy = !longAlnumWord
-      || avgPerPage < 300
-      || (text.length < 2000 && avgPerPage < 500);
     // FIGURE-RICH: carries a real text layer (so NOT image-heavy) but far too
     // little text per page to be prose — the signature of a slide deck or report
     // where charts and diagrams hold much of the meaning.
@@ -151,15 +160,16 @@ export async function fastPdfExtract(filePath) {
     // (branding PDFs, 3-10s each); it was simply unreachable for a deck that
     // happened to carry captions.
     const isFigureRich = !isImageHeavy
-      && longAlnumWord
+      && hasUsableTextLayer
       && pages >= Number(process.env.KB_FIGURE_RICH_MIN_PAGES || 4)
       && avgPerPage < Number(process.env.KB_FIGURE_RICH_CHARS_PER_PAGE || 900);
     return {
       text, pages, isImageHeavy, isFigureRich, isTextLayerCorrupt: textQuality.corrupt,
+      hasUsableTextLayer,
       textQuality, avgPerPage, error: null,
     };
   } catch (err) {
-    return { text: '', pages: 0, isImageHeavy: true, error: err.message };
+    return { text: '', pages: 0, hasUsableTextLayer: false, isImageHeavy: true, error: err.message };
   }
 }
 

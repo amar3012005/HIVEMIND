@@ -11,6 +11,7 @@ import {
 } from '../../src/knowledge/document-first-ingestion.js';
 import {
   assessTextLayerQuality,
+  classifyPdfTextLayer,
   chunkTextAtSemanticBoundaries,
   splitFastPdfPageBlocks,
 } from '../../src/knowledge/enterprise/fast-pdf-parser.js';
@@ -94,6 +95,17 @@ test('PDF quality gate rejects the measured fragmented OCR text shape', () => {
   assert.equal(bad.corrupt, true, JSON.stringify(bad));
   assert.equal(good.corrupt, false, JSON.stringify(good));
   assert.ok(bad.singleRatio > good.singleRatio);
+});
+
+test('short coherent PDF text is native text, not a whole-document vision trigger', () => {
+  const short = classifyPdfTextLayer('Uwe Egly teaches Deep Learning tomorrow.', 1);
+  assert.equal(short.hasUsableTextLayer, true);
+  assert.equal(short.isImageHeavy, false);
+  assert.ok(short.avgPerPage < 300, 'fixture must cover the former density bug');
+
+  const blank = classifyPdfTextLayer('   ', 1);
+  assert.equal(blank.hasUsableTextLayer, false);
+  assert.equal(blank.isImageHeavy, true);
 });
 
 test('vision OCR accepts direct Cloudflare Gemini transport without OpenRouter', () => {

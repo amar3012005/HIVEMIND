@@ -107,7 +107,7 @@ services:
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
       HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:-local-admin-secret-change-me}
       HIVEMIND_OAUTH_SESSION_SECRET: ${HIVEMIND_OAUTH_SESSION_SECRET:-}
-      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_SECRET: ${SESSION_SECRET:-local-session-secret-change-me}
       # Durable Knowledge Base ingestion is opt-in and local-only. The core
       # still requires a positive Flagship decision for the organization.
       HIVEMIND_LOCAL_MODE: "true"
@@ -146,7 +146,6 @@ services:
       DREAM_WORKFLOW_V2_ENABLED: "true"
       HIVEMIND_DREAM_WORKER_URL: https://hivemind-dream-lifecycle-local.amarsai2005.workers.dev
       HIVEMIND_DREAM_WORKFLOW_SECRET: ${HIVEMIND_DREAM_WORKFLOW_SECRET:-}
-      SESSION_SECRET: ${SESSION_SECRET:-local-session-secret-change-me}
       # hm-extract: OFF by default (KB_EXTRACT_URL unset in ./core/.env means this
       # whole tier is skipped, zero behavior change). Set KB_EXTRACT_URL in
       # core/.env to http://hm-extract:8088 to enable, narrow format allowlist

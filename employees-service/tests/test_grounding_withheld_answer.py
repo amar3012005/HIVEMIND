@@ -96,6 +96,14 @@ class RoundDeadlineConfigTests(unittest.TestCase):
     its parsing doesn't silently regress to 0/unset."""
 
     def test_default_deadline_is_a_sane_positive_number_of_minutes(self):
-        from hivemind_employees.api_hyper_rooms import HYPER_ROOM_ROUND_DEADLINE_SECONDS
+        from hivemind_employees.api_hyper_rooms import (
+            HYPER_GROK_ROOM_ROUND_DEADLINE_SECONDS,
+            HYPER_ROOM_ROUND_DEADLINE_SECONDS,
+            _work_room_execution_phase,
+        )
         self.assertGreater(HYPER_ROOM_ROUND_DEADLINE_SECONDS, 60)
         self.assertLess(HYPER_ROOM_ROUND_DEADLINE_SECONDS, 1800)
+        self.assertGreater(HYPER_GROK_ROOM_ROUND_DEADLINE_SECONDS, HYPER_ROOM_ROUND_DEADLINE_SECONDS)
+        self.assertLessEqual(HYPER_GROK_ROOM_ROUND_DEADLINE_SECONDS, 1800)
+        self.assertEqual(_work_room_execution_phase("off"), "ACCEPTED")
+        self.assertEqual(_work_room_execution_phase("full"), "GROK_RUNNING")

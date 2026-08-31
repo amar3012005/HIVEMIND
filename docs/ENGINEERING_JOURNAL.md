@@ -1395,3 +1395,46 @@ slides that find no unique anchor get a page instead of `null`.
   to `full`; global default remains `off`; flag-off users continue on stable V2
   and do not create durable turns. Rollback images and digests are recorded in
   `docs/PRODUCTION_RELEASE.md`.
+
+## 2026-08-31 UTC — Progressive profile discovery deployed and chat matrix accepted
+
+- Committed and pushed `102b551d2d7ca454b3858b8736decdb86e41dbac`
+  (lazy profile discovery), `b284a77ef581e01231f5c8b860e0b105f999a947`
+  (tool-enabled profile read/write boundary),
+  `62553bc2e566d72920d5480553534138f385cdca` (citeable authoritative empty
+  project result), and `9091c1e01d63270a14d668cf60c6634d27469e95`
+  (empty-project gap reconciliation) to the session branch and
+  `singulance-main`.
+- Each production replacement used the deployment governor's Core-only fast
+  path. Final image `hivemind/core-api:sha-9091c1e0`, digest
+  `258e140bc90f0bd2478371d7d12caf247e88648aa4f8e6eb5e318e8d5a6bb261`;
+  manifest `/root/releases/manifests/9091c1e0/20260831T081213Z/RELEASE_MANIFEST.json`.
+  Control `sha-953f3a71` and Employees `sha-b3616eb4` retained exact prior
+  digests and start times throughout.
+- Linux verification: initial lazy-profile release 39/39; final focused matrix
+  83/84 with the parent baseline carrying the identical sole stale
+  exact-source expected-shape assertion (`kind:null`). All new regressions
+  passed; syntax and diff checks passed; no schema diff and no pending
+  migration.
+- Final authenticated production matrix for user `e35811aa-…` / organization
+  `bfbdd2bc-…`:
+  - direct arithmetic: `102`, HTTP 200, operation `direct`, no gaps;
+  - tool-enabled organization profile: `Singulance Labs`, grounded 1/1,
+    operation `profile`, no gaps;
+  - exact Teil3 Issue 361 source: Barnaby Conrad III / Gray D. Boone, grounded
+    2/2, operation `source_read`, no gaps;
+  - Pantene / Procter & Gamble: one grounded relationship sentence, 2/2,
+    operation `relation_between`, no gaps;
+  - authorized projects: explicit grounded empty result, 1/1, operation
+    `projects`, no gaps.
+- Additional acceptance before the final sweep covered unconstrained CITY
+  CYCLES recall, a detailed Teil2 creative-role synthesis, profile read,
+  temporal no-coverage, and exact aggregate no-coverage. Missing complete
+  temporal/registry evidence failed closed rather than fabricating an answer.
+- Declarative auto-save canary selected `save` without a remember verb, used
+  explicit personal scope, preserved three exact entities and
+  `provenance:user-assertion`, and wrote through `ingestCanonicalPayload`.
+  Tenant-scoped memory/entity rows were inspected, then memory
+  `4f9ebe65-c99b-4b30-9736-fb28eac7bc7f` was hard-deleted through the API.
+- Final Core/API/homepage health is 200; fresh fatal/panic/unhandled/transport
+  queue/citation-failure log scan returned no lines. Release presence is clear.

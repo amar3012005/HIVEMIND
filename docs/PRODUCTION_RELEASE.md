@@ -1,5 +1,38 @@
 # Current SINGULANCE Production Release
 
+## 9091c1e0 — lazy profile discovery and complete chat-route acceptance
+
+- Canonical Core SHA `9091c1e01d63270a14d668cf60c6634d27469e95` on
+  `singulance-main`; image `hivemind/core-api:sha-9091c1e0`, digest
+  `sha256:258e140bc90f0bd2478371d7d12caf247e88648aa4f8e6eb5e318e8d5a6bb261`.
+  Manifest `/root/releases/manifests/9091c1e0/20260831T081213Z/RELEASE_MANIFEST.json`
+  reports `ok` for Core only. No migration was required; 174 migrations are
+  applied with none pending.
+- Native V2 no longer receives caller profile values on every planner call.
+  The authenticated, bounded profile packet is loaded lazily only after a
+  direct personalized response, save/auto-save, or profile update is selected.
+  Explicit profile reads use the server-scoped `hivemind_profile` capability,
+  including `use_tools:true`; the model receives no user/org identifier input.
+- Production acceptance passed direct arithmetic, native profile, tool-enabled
+  profile, exact-source document recall, unconstrained recall, graph
+  relationship, broad source synthesis, projects, temporal no-coverage, exact
+  aggregate no-coverage, and a disposable declarative auto-save. Grounded
+  routes returned citations and zero gaps. Empty authorized projects now return
+  a grounded explicit empty result rather than a generic retrieval failure.
+  Temporal and aggregate requests without complete evidence fail closed.
+- The disposable personal-memory assertion selected `save`, preserved exact
+  entities and `user_assertion` provenance, traversed `ingestCanonicalPayload`,
+  and created tenant-scoped entity links. The exact canary memory was hard
+  deleted after verification.
+- Linux release suites progressed from 39/39 on the lazy-profile commit to
+  83/84 on the final candidate. The sole failure is identical on the deployed
+  parent baseline: a stale exact-source test expects no additive `kind:null`.
+  Every changed regression passed. Core/API/homepage return 200 and fresh
+  critical logs are empty. Control and Employees retained their exact images
+  and start times.
+- Rollback is Core `hivemind/core-api:sha-62553bc2`, digest
+  `sha256:9f7240205861dc4d3073743b7ccefe398319c573d57e1bbf781e02be6a3d6256`.
+
 ## 4371984d / 953f3a71 — durable ingestion and grounded-chat hardening
 
 - Canonical runtime commits on `singulance-main`: Core

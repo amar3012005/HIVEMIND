@@ -19,21 +19,25 @@ def test_unrelated_models_are_preserved():
     assert canonical_hyper_model("google/gemini-2.5-flash") == "google/gemini-2.5-flash"
 
 
-def test_legacy_20b_openrouter_mapping_prefers_novita(monkeypatch):
+def test_legacy_20b_openrouter_mapping_prefers_bedrock_with_fast_fallbacks(monkeypatch):
     monkeypatch.delenv("HYPER_OR_IGNORE", raising=False)
     assert _or_model("openai/gpt-oss-20b") == HYPER_FAST_MODEL
     order, ignored = _or_provider_routing(HYPER_FAST_MODEL)
-    assert order == ["Novita"]
-    assert "Novita" not in ignored
-    assert "Groq" in ignored
+    assert order == [
+        "amazon-bedrock",
+        "amazon-bedrock/eu-west-1",
+        "groq",
+        "together",
+    ]
+    assert not {provider.lower() for provider in order} & {provider.lower() for provider in ignored}
 
 
-def test_groq_is_excluded_even_when_custom_ignore_omits_it(monkeypatch):
+def test_groq_is_kept_as_ordered_openrouter_fallback_for_gpt_oss_20b(monkeypatch):
     monkeypatch.setenv("HYPER_OR_IGNORE", "DekaLLM")
     order, ignored = _or_provider_routing(HYPER_FAST_MODEL)
-    assert order == ["Novita"]
-    assert "Groq" not in order
-    assert "Groq" in ignored
+    assert order is not None
+    assert "groq" in order
+    assert "Groq" not in ignored
 
 
 def test_hyperagent_gpt_oss_never_routes_to_direct_groq(monkeypatch):

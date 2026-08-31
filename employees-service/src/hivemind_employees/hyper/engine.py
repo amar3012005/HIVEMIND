@@ -196,8 +196,23 @@ _OR_PROVIDER_PIN = {
     "anthropic/": ["Anthropic"],
     "deepseek/": ["DeepSeek", "Fireworks"],
     "openai/gpt-oss-120b": ["Cerebras", "Together"],
-    "openai/gpt-oss-20b": ["Novita"],
-    HYPER_FAST_MODEL: ["Novita"],
+    # GPT-OSS 20B is the governed fast HyperAgent tier. Keep the OpenRouter
+    # Nitro variant for priority/throughput routing, while explicitly preferring
+    # the Bedrock lanes before the high-throughput Groq and Together fallbacks.
+    # Use OpenRouter endpoint tags (not display names) so the two Bedrock regions
+    # remain independently addressable.
+    "openai/gpt-oss-20b": [
+        "amazon-bedrock",
+        "amazon-bedrock/eu-west-1",
+        "groq",
+        "together",
+    ],
+    HYPER_FAST_MODEL: [
+        "amazon-bedrock",
+        "amazon-bedrock/eu-west-1",
+        "groq",
+        "together",
+    ],
     "openai/gpt-oss": ["Cerebras"],
     "qwen/": ["Alibaba"],
     "moonshotai/": ["Moonshot AI", "Novita"],

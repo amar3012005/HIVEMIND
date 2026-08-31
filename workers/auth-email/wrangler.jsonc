@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-30",
+  "env": {
+    "local": {
+      "name": "singulance-auth-email-local",
+      "vars": { "ENVIRONMENT": "local", "CONTROL_PLANE_URL": "https://preview-api.singulancelabs.com" },
+      "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+      "queues": {
+        "producers": [{ "binding": "AUTH_EMAIL_QUEUE", "queue": "singulance-auth-email-local" }],
+        "consumers": [{ "queue": "singulance-auth-email-local", "dead_letter_queue": "singulance-auth-email-dlq-local", "max_batch_size": 10, "max_retries": 5 }]
+      }
+    },
+    "production": {
+      "name": "singulance-auth-email-production",
+      "vars": { "ENVIRONMENT": "production", "CONTROL_PLANE_URL": "https://api.singulancelabs.com" },
+      "flagship": [{ "binding": "FLAGS", "app_id": "2e89fbd3-7496-459b-a507-f1017d444dd9", "remote": true }],
+      "queues": {
+        "producers": [{ "binding": "AUTH_EMAIL_QUEUE", "queue": "singulance-auth-email-production" }],
+        "consumers": [{ "queue": "singulance-auth-email-production", "dead_letter_queue": "singulance-auth-email-dlq-production", "max_batch_size": 10, "max_retries": 5 }]
+      }
+    }
+  }
+}

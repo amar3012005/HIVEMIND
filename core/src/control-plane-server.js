@@ -21,6 +21,8 @@ import {
 } from './control-plane/signup-admission.js';
 import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
+import { createZitadelEmailIdentity } from './control-plane/zitadel-email-identity.js';
+import { createEmailIdentityService, EMAIL_AUTH_PUBLIC_RESPONSE, normalizeEmail, resolveEmailIdentityMode, safeReturnTo } from './auth/email-identity-service.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
 import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
@@ -249,6 +251,7 @@ const CONFIG = {
 };
 
 const prisma = getPrismaClient();
+const emailIdentity = createEmailIdentityService({ prisma, publicBaseUrl: defaultFrontendBaseUrl });
 configureSystemEmailNotificationSink(createEmailNotificationSink(prisma));
 const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, platformCreditAccountDetail, platformCreditIntelligence, replaceModelPrice, upsertModelPolicy } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
@@ -1636,6 +1639,62 @@ async function workspaceInviteMatchesAuthenticatedEmail(token, email) {
   return Boolean(invite.email) && String(invite.email).toLowerCase() === String(email).toLowerCase();
 }
 
+async function verifyEmailTurnstile(token, req) {
+  if (process.env.HIVEMIND_LOCAL_MODE === 'true' && process.env.EMAIL_AUTH_TURNSTILE_BYPASS === 'true') return true;
+  const secret = String(process.env.TURNSTILE_EMAIL_AUTH_SECRET || '');
+  if (!secret || !token) return false;
+  const form = new FormData();
+  form.set('secret', secret); form.set('response', String(token));
+  const remoteIp = String(req.headers['cf-connecting-ip'] || req.socket?.remoteAddress || '');
+  if (remoteIp) form.set('remoteip', remoteIp);
+  const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST', body: form, signal: AbortSignal.timeout(5000),
+  });
+  const result = await response.json().catch(() => ({}));
+  return Boolean(result.success && (!result.action || result.action === 'email_auth'));
+}
+
+async function dispatchAuthEmailOutbox(outboxId) {
+  const claimed = await emailIdentity.claimOutbox(outboxId).catch(() => null);
+  if (!claimed) return;
+  const { email, otp, fragmentUrl } = claimed.payload;
+  const rendered = {
+    subject: 'Your SINGULANCE sign-in code',
+    text: `Your one-time sign-in code is ${otp}. It expires in 10 minutes.\n\nYou can also continue securely here: ${fragmentUrl}\n\nOpening the link alone does not sign you in.`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#111"><p style="font-size:12px;letter-spacing:.15em;color:#117dff">SINGULANCE · SECURE SIGN IN</p><h1 style="font-size:24px">Your sign-in code</h1><p style="font-size:34px;font-weight:700;letter-spacing:.3em">${otp}</p><p>This code expires in 10 minutes and can be used once.</p><p><a href="${fragmentUrl}" style="display:inline-block;background:#117dff;color:#fff;padding:12px 18px;border-radius:6px;text-decoration:none">Continue securely</a></p><p style="font-size:12px;color:#666">Opening this link does not sign you in automatically. Confirm in the browser to finish.</p></div>`,
+  };
+  const delivery = await sendRenderedSystemEmail({ to: email, rendered, templateId: 'email_identity_sign_in' });
+  await emailIdentity.settleOutbox(outboxId, { ok: delivery.ok, status: delivery.status, messageId: delivery.messageId, code: delivery.error });
+  if (!delivery.ok) throw new Error('Auth email delivery failed');
+}
+
+async function enqueueAuthEmailOutbox(outboxId) {
+  const queueUrl = String(process.env.AUTH_EMAIL_QUEUE_URL || '');
+  const secret = String(process.env.AUTH_EMAIL_QUEUE_SECRET || '');
+  if (!queueUrl || !secret) return dispatchAuthEmailOutbox(outboxId);
+  const response = await fetch(`${queueUrl.replace(/\/$/, '')}/enqueue`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-auth-email-secret': secret },
+    body: JSON.stringify({ outbox_id: outboxId, environment: process.env.HIVEMIND_LOCAL_MODE === 'true' ? 'local' : 'production', processing_version: 1 }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error(`Auth email Queue admission failed (${response.status})`);
+}
+
+async function effectiveEmailIdentityMode() {
+  const flagUrl = String(process.env.AUTH_EMAIL_FLAG_URL || '');
+  const secret = String(process.env.AUTH_EMAIL_QUEUE_SECRET || '');
+  if (!flagUrl) return resolveEmailIdentityMode();
+  if (!secret) return 'off';
+  try {
+    const response = await fetch(`${flagUrl.replace(/\/$/, '')}/mode`, {
+      headers: { 'x-auth-email-secret': secret }, signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) return 'off';
+    const payload = await response.json();
+    return ['off', 'shadow', 'primary', 'email_only'].includes(payload.mode) ? payload.mode : 'off';
+  } catch { return 'off'; }
+}
+
 async function platformUserExists({ sub, email }) {
   if (!prisma) return false;
   const user = await prisma.user.findFirst({
@@ -2261,32 +2320,33 @@ async function upsertUserFromZitadel(userInfo) {
     throw new Error('Database unavailable');
   }
 
-  let existing = await prisma.user.findUnique({
-    where: { zitadelUserId: userInfo.sub }
+  const normalizedEmail = normalizeEmail(userInfo.email);
+  const linkedIdentity = await prisma.userIdentity.findUnique({
+    where: { provider_providerSubject: { provider: 'zitadel', providerSubject: userInfo.sub } },
+    include: { user: true },
   });
+  let existing = linkedIdentity?.user || await prisma.user.findUnique({ where: { zitadelUserId: userInfo.sub } });
 
   // Fallback: find by email (handles re-auth or manual user creation)
-  if (!existing && userInfo.email) {
-    existing = await prisma.user.findUnique({ where: { email: userInfo.email } });
+  if (!existing && normalizedEmail) {
+    existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
   }
 
   if (existing) {
-    // SCIM-binding hook: a User row created via SCIM has a synthetic
-    // zitadelUserId like 'scim:<orgId>:<email>'. When that user later
-    // signs in via SSO, we replace the placeholder with the real Zitadel
-    // sub and audit the crossover so admins can see "this account was
-    // pre-provisioned by SCIM and just bound to a real IdP login."
+    // SCIM and other identities are additive. Never replace the canonical
+    // compatibility subject merely because the verified address is shared.
     const wasScimSeed = typeof existing.zitadelUserId === 'string' && existing.zitadelUserId.startsWith('scim:');
-    const updated = await prisma.user.update({
-      where: { id: existing.id },
-      data: {
-        zitadelUserId: userInfo.sub,
-        email: userInfo.email,
-        displayName: userInfo.name,
-        avatarUrl: userInfo.picture,
-        locale: userInfo.locale || existing.locale,
-        lastActiveAt: new Date()
-      }
+    const updated = await prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({ where: { id: existing.id }, data: {
+        email: normalizedEmail || existing.email, displayName: userInfo.name || existing.displayName,
+        avatarUrl: userInfo.picture || existing.avatarUrl, locale: userInfo.locale || existing.locale, lastActiveAt: new Date(),
+      } });
+      await tx.userIdentity.upsert({
+        where: { provider_providerSubject: { provider: 'zitadel', providerSubject: userInfo.sub } },
+        update: { userId: user.id, normalizedEmail, verifiedAt: userInfo.email_verified === false ? null : new Date() },
+        create: { userId: user.id, provider: 'zitadel', providerSubject: userInfo.sub, normalizedEmail, verifiedAt: userInfo.email_verified === false ? null : new Date(), isPrimary: existing.zitadelUserId === userInfo.sub },
+      });
+      return user;
     });
     if (wasScimSeed) {
       try {
@@ -2298,23 +2358,24 @@ async function upsertUserFromZitadel(userInfo) {
           action: 'update',
           resourceType: 'user',
           oldValue: { zitadelUserId: existing.zitadelUserId },
-          newValue: { zitadelUserId: userInfo.sub },
-          metadata: { source: 'sso_login', via_email_fallback: true },
+          newValue: { linkedProvider: 'zitadel' },
+          metadata: { source: 'sso_login', additive_identity: true },
         }).catch(() => {});
       } catch { /* audit best-effort */ }
     }
     return updated;
   }
 
-  const created = await prisma.user.create({
-    data: {
-      zitadelUserId: userInfo.sub,
-      email: userInfo.email,
-      displayName: userInfo.name,
-      avatarUrl: userInfo.picture,
-      locale: userInfo.locale || 'en',
-      lastActiveAt: new Date()
-    }
+  const created = await prisma.$transaction(async (tx) => {
+    const user = await tx.user.create({ data: {
+      zitadelUserId: userInfo.sub, email: normalizedEmail, displayName: userInfo.name,
+      avatarUrl: userInfo.picture, locale: userInfo.locale || 'en', lastActiveAt: new Date(),
+    } });
+    await tx.userIdentity.create({ data: {
+      userId: user.id, provider: 'zitadel', providerSubject: userInfo.sub,
+      normalizedEmail, verifiedAt: userInfo.email_verified === false ? null : new Date(), isPrimary: true,
+    } });
+    return user;
   });
   // A user identity alone does not have a trustworthy personal/enterprise
   // profile. Deliver the welcome only once its workspace is activated.
@@ -4149,6 +4210,91 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ─── Unified email-first authentication ───────────────────────
+  if (pathname.startsWith('/internal/auth-email/outbox/') && pathname.endsWith('/deliver') && req.method === 'POST') {
+    if (!process.env.AUTH_EMAIL_QUEUE_SECRET || !secretsMatch(req.headers['x-auth-email-secret'], process.env.AUTH_EMAIL_QUEUE_SECRET)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+    const outboxId = pathname.split('/')[4];
+    await dispatchAuthEmailOutbox(outboxId);
+    return jsonResponse(res, { ok: true });
+  }
+  if (pathname === '/auth/email/config' && req.method === 'GET') {
+    const mode = await effectiveEmailIdentityMode();
+    return jsonResponse(res, {
+      mode,
+      enabled: mode === 'primary' || mode === 'email_only',
+      email_only: mode === 'email_only',
+      turnstile_site_key: process.env.TURNSTILE_EMAIL_AUTH_SITE_KEY || null,
+    });
+  }
+
+  if (pathname === '/auth/email/start' && req.method === 'POST') {
+    const mode = await effectiveEmailIdentityMode();
+    if (mode !== 'primary' && mode !== 'email_only') return jsonResponse(res, { error: 'Not found' }, 404);
+    const startedAt = Date.now();
+    try {
+      const body = await parseBody(req);
+      const turnstileOk = await verifyEmailTurnstile(body?.turnstile_token, req);
+      const fallback = CONFIG.postLoginRedirect;
+      const returnTo = safeReturnTo(body?.return_to, fallback);
+      let started = { accepted: false };
+      if (turnstileOk) started = await emailIdentity.start({
+        email: body?.email, intent: body?.intent, returnTo, mode,
+        environment: process.env.HIVEMIND_LOCAL_MODE === 'true' ? 'local' : 'production',
+      });
+      if (started.outboxId) setImmediate(() => enqueueAuthEmailOutbox(started.outboxId).catch((error) => console.error('[email-auth] delivery dispatch failed', { outboxId: started.outboxId, error: error.message })));
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < 180) await new Promise((resolve) => setTimeout(resolve, 180 - elapsed));
+      return jsonResponse(res, { ...EMAIL_AUTH_PUBLIC_RESPONSE, challenge_id: started.challengeId || crypto.randomUUID() }, 202);
+    } catch (error) {
+      console.error('[email-auth] start failed', { error: error.message });
+      return jsonResponse(res, { ...EMAIL_AUTH_PUBLIC_RESPONSE, challenge_id: crypto.randomUUID() }, 202);
+    }
+  }
+
+  if (pathname === '/auth/email/resend' && req.method === 'POST') {
+    const mode = await effectiveEmailIdentityMode();
+    if (mode !== 'primary' && mode !== 'email_only') return jsonResponse(res, { error: 'Not found' }, 404);
+    const body = await parseBody(req).catch(() => ({}));
+    const turnstileOk = await verifyEmailTurnstile(body?.turnstile_token, req).catch(() => false);
+    const result = turnstileOk && isCanonicalUuid(String(body?.challenge_id || ''))
+      ? await emailIdentity.resend(String(body.challenge_id)).catch(() => ({ ok: false })) : { ok: false };
+    if (result.outboxId) setImmediate(() => enqueueAuthEmailOutbox(result.outboxId).catch(() => {}));
+    return jsonResponse(res, { ok: true, resend_after_seconds: 30, message: 'If the challenge is active, a new code is on its way.' }, 202);
+  }
+
+  if (pathname === '/auth/email/verify' && req.method === 'POST') {
+    const mode = await effectiveEmailIdentityMode();
+    if (mode !== 'primary' && mode !== 'email_only') return jsonResponse(res, { error: 'Not found' }, 404);
+    try {
+      const body = await parseBody(req);
+      if (!isCanonicalUuid(String(body?.challenge_id || ''))) throw new Error('invalid');
+      const verified = await emailIdentity.verify({ challengeId: String(body.challenge_id), code: body?.code, linkToken: body?.link_token });
+      if (!verified.ok) return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);
+      let user = await prisma.user.findUnique({ where: { email: verified.email } });
+      if (user?.deletedAt) return jsonResponse(res, { ok: false, error: 'This account is unavailable.' }, 403);
+      if (!user) {
+        const provisioned = await createZitadelEmailIdentity(verified.email);
+        user = await upsertUserFromZitadel({ sub: provisioned.userId, email: verified.email, email_verified: true, name: provisioned.displayName, locale: 'en' });
+      } else {
+        await prisma.userIdentity.upsert({
+          where: { provider_providerSubject: { provider: 'email', providerSubject: verified.email } },
+          update: { userId: user.id, normalizedEmail: verified.email, verifiedAt: new Date() },
+          create: { userId: user.id, provider: 'email', providerSubject: verified.email, normalizedEmail: verified.email, verifiedAt: new Date(), isPrimary: false },
+        });
+        user = await prisma.user.update({ where: { id: user.id }, data: { lastActiveAt: new Date() } });
+      }
+      const membership = await resolveCurrentOrg(user.id);
+      if (!await emailIdentity.consume(String(body.challenge_id), user.id)) return jsonResponse(res, { ok: false, error: 'The code or link has already been used.' }, 401);
+      const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: membership.org?.id || null });
+      return jsonResponse(res, { ok: true, redirect_to: verified.challenge.returnTo, needs_onboarding: !membership.org }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
+    } catch (error) {
+      console.error('[email-auth] verification failed', { error: error.message });
+      return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);
+    }
+  }
+
+  // Deprecated preview-only bypass retained behind its old kill switch for
+  // rollback. New preview and production clients use /auth/email/* above.
   // ─── Local preview email sign-in ──────────────────────────────
   if (pathname === '/auth/local-preview/request' && req.method === 'POST') {
     if (process.env.HIVEMIND_LOCAL_MODE !== 'true' || process.env.HIVEMIND_LOCAL_AUTH_BYPASS !== 'true') {

@@ -1,0 +1,7 @@
+{
+  "name": "@hivemind/auth-email-worker",
+  "private": true,
+  "type": "module",
+  "scripts": { "typecheck": "tsc --noEmit", "test": "vitest run", "deploy:local": "wrangler deploy --env local", "deploy:production": "wrangler deploy --env production" },
+  "devDependencies": { "typescript": "^5.9.2", "vitest": "^3.2.4", "wrangler": "^4.32.0" }
+}

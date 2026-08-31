@@ -42,8 +42,93 @@ model User {
   seoSearchConsoleProperties SeoSearchConsoleProperty[] @relation("UserSeoSearchConsoleProperties")
   billingCheckouts           BillingCheckout[]
   webhookSubscriptions      WebhookSubscription[]
+  identities                UserIdentity[]
+  authIdentityEvents        AuthIdentityEvent[]
 
   @@map("users")
+}
+
+model UserIdentity {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  provider        String    @db.VarChar(32)
+  providerSubject String    @map("provider_subject") @db.VarChar(255)
+  normalizedEmail String?   @map("normalized_email") @db.VarChar(255)
+  verifiedAt      DateTime? @map("verified_at") @db.Timestamptz(6)
+  isPrimary       Boolean   @default(false) @map("is_primary")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerSubject])
+  @@index([userId])
+  @@index([normalizedEmail])
+  @@map("user_identities")
+}
+
+model EmailAuthChallenge {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  emailCiphertext   String    @map("email_ciphertext") @db.Text
+  emailLookupHash   String    @map("email_lookup_hash") @db.VarChar(64)
+  otpHash           String    @map("otp_hash") @db.VarChar(128)
+  linkTokenHash     String    @map("link_token_hash") @db.VarChar(128)
+  intent            String    @default("auto") @db.VarChar(16)
+  returnTo          String    @map("return_to") @db.Text
+  environment       String    @db.VarChar(16)
+  flagMode          String    @map("flag_mode") @db.VarChar(16)
+  attempts          Int       @default(0)
+  resendCount       Int       @default(0) @map("resend_count")
+  expiresAt         DateTime  @map("expires_at") @db.Timestamptz(6)
+  resendAvailableAt DateTime  @map("resend_available_at") @db.Timestamptz(6)
+  verifiedAt        DateTime? @map("verified_at") @db.Timestamptz(6)
+  consumedAt        DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  outbox            AuthEmailOutbox[]
+  events            AuthIdentityEvent[]
+
+  @@index([emailLookupHash, createdAt(sort: Desc)])
+  @@index([expiresAt])
+  @@map("email_auth_challenges")
+}
+
+model AuthEmailOutbox {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  challengeId       String             @map("challenge_id") @db.Uuid
+  environment       String             @db.VarChar(16)
+  processingVersion Int                @default(1) @map("processing_version")
+  payloadCiphertext String             @map("payload_ciphertext") @db.Text
+  status            String             @default("pending") @db.VarChar(24)
+  attempt           Int                @default(0)
+  providerMessageId String?            @map("provider_message_id") @db.VarChar(255)
+  providerStatus    String?            @map("provider_status") @db.VarChar(32)
+  nextAttemptAt     DateTime?          @map("next_attempt_at") @db.Timestamptz(6)
+  sentAt            DateTime?          @map("sent_at") @db.Timestamptz(6)
+  terminalAt        DateTime?          @map("terminal_at") @db.Timestamptz(6)
+  lastError         Json?              @map("last_error") @db.JsonB
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  challenge         EmailAuthChallenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([challengeId])
+  @@map("auth_email_outbox")
+}
+
+model AuthIdentityEvent {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String?             @map("user_id") @db.Uuid
+  challengeId String?             @map("challenge_id") @db.Uuid
+  eventType   String              @map("event_type") @db.VarChar(64)
+  outcome     String              @db.VarChar(24)
+  metadata    Json                @default("{}") @db.JsonB
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  user        User?               @relation(fields: [userId], references: [id], onDelete: SetNull)
+  challenge   EmailAuthChallenge? @relation(fields: [challengeId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([challengeId, createdAt(sort: Desc)])
+  @@map("auth_identity_events")
 }
 
 /// Multi-tenant organizations with EU data residency settings

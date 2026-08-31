@@ -2114,3 +2114,20 @@ git diff --check: passed (line-ending warnings only)
   `6b00ea24-ac03-4cf2-8432-8cf08e18b1a4`.
 - This is a local feature acceptance, not a production release. No production
   flag, bucket, Worker, service, container or frontend deployment changed.
+
+### Shared local integration completion
+
+- Integrated through the permanent `singulance-local` worktree at merge commit
+  `8a966f53`, after first merging current `origin/singulance-main` and preserving
+  the pre-existing connector catalog edit through its own session branch.
+- Frontend integration commit `5fb8b769` preserves production email-auth changes,
+  local realtime Room support, and the browser workspace UI together.
+- Rebuilt only the affected local API dependency, Control Plane, and Employees
+  images; recreated only Control Plane and Employees under the established
+  `hivemind` Compose project. Both containers and HTTP health routes passed.
+- Rotated a local-only Workflow shared secret into ignored `.env` storage and
+  the local Worker secret store. Both services now target
+  `hivemind-hyperagents-grok-local.amarsai2005.workers.dev`; no secret was
+  printed or committed.
+- Post-integration Browser Run canary again returned valid rendered evidence,
+  content and screenshot hashes, Live View, two tabs, and successful cleanup.

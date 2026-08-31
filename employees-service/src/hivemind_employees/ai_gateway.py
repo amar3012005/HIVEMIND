@@ -128,3 +128,36 @@ async def workers_ai_chat(body: Mapping[str, Any], *, timeout: httpx.Timeout) ->
         return value if isinstance(value, dict) else None
     except (httpx.TimeoutException, httpx.TransportError, ValueError):
         return None
+
+
+async def unified_ai_chat(body: Mapping[str, Any], *, timeout: httpx.Timeout) -> dict[str, Any] | None:
+    """Run a third-party model with Cloudflare Unified Billing and Gateway policy."""
+    if not enabled():
+        return None
+    account = os.environ["CLOUDFLARE_ACCOUNT_ID"].strip()
+    token = os.environ["CLOUDFLARE_AI_GATEWAY_TOKEN"].strip()
+    gateway_id = os.environ["CLOUDFLARE_AI_GATEWAY_ID"].strip()
+    payload = dict(body)
+    payload.pop("reasoning", None)
+    payload.pop("reasoning_effort", None)
+    payload.pop("chat_template_kwargs", None)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {token}", "cf-aig-gateway-id": gateway_id},
+                json=payload,
+            )
+        if response.status_code != 200:
+            return None
+        value = response.json()
+        return value if isinstance(value, dict) else None
+    except (httpx.TimeoutException, httpx.TransportError, ValueError):
+        return None
+
+
+async def planner_ai_chat(body: Mapping[str, Any], *, timeout: httpx.Timeout) -> dict[str, Any] | None:
+    """Use Cloudflare billing for the canary planner, never provider-direct transport."""
+    if str(body.get("model") or "").startswith("@cf/"):
+        return await workers_ai_chat(body, timeout=timeout)
+    return await unified_ai_chat(body, timeout=timeout)

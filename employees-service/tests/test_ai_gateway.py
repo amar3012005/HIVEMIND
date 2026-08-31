@@ -75,3 +75,38 @@ def test_workers_ai_chat_uses_gateway_and_disables_thinking(monkeypatch):
     assert captured["json"]["chat_template_kwargs"]["enable_thinking"] is False
     assert "reasoning_effort" not in captured["json"]
     assert "openrouter" not in captured["url"]
+
+
+def test_unified_ai_chat_uses_cloudflare_credits_without_openrouter_byok(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class Client:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return None
+        async def post(self, url, **kwargs):
+            captured.update(url=url, **kwargs)
+            return Response()
+
+    monkeypatch.setattr(ai_gateway.httpx, "AsyncClient", Client)
+    result = asyncio.run(ai_gateway.unified_ai_chat({
+        "model": "google/gemini-2.5-flash-lite",
+        "messages": [{"role": "user", "content": "plan"}],
+        "reasoning_effort": "none",
+    }, timeout=ai_gateway.httpx.Timeout(5.0)))
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert captured["url"].endswith("/ai/v1/chat/completions")
+    assert captured["headers"]["cf-aig-gateway-id"] == "gateway"
+    assert captured["json"]["model"] == "google/gemini-2.5-flash-lite"
+    assert "reasoning_effort" not in captured["json"]
+    assert "openrouter" not in captured["url"]
+    assert "cf-aig-byok-alias" not in captured["headers"]

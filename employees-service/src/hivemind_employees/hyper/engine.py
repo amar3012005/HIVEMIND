@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..ai_gateway import post as gateway_post, workers_ai_chat
+from ..ai_gateway import post as gateway_post, planner_ai_chat
 
 from ..config import get_settings
 from ..db import (
@@ -1821,8 +1821,8 @@ class Director:
             _to = float(os.getenv("HYPER_SYNTH_TIMEOUT_S", "90") or 90)
         else:
             _to = 60.0
-        if str(body.get("model") or "").startswith("@cf/"):
-            result = await workers_ai_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
+        if str(body.get("model") or "") == HYPER_PLANNER_MODEL:
+            result = await planner_ai_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
             if isinstance(result, dict):
                 usage = result.get("usage") or {}
                 self._record_model_usage(body.get("model"), usage, bucket)

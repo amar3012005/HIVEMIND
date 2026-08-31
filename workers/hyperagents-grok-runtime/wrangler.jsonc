@@ -11,11 +11,22 @@
     "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
   },
   "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
+  "browser": { "binding": "BROWSER", "remote": true },
+  "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "max_instances": 5 }],
   "durable_objects": {
-    "bindings": [{ "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" }]
+    "bindings": [
+      { "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" },
+      { "name": "Sandbox", "class_name": "Sandbox" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HiredHyperAgent"] }],
-  "workflows": [{ "name": "hivemind-hyper-room-run-local", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["HiredHyperAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox"] }
+  ],
+  "workflows": [
+    { "name": "hivemind-hyper-room-run-local", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" },
+    { "name": "hivemind-hyper-agent-assignment-local", "binding": "AGENT_ASSIGNMENT_WORKFLOW", "class_name": "HyperAgentAssignmentWorkflow" }
+  ],
   "env": {
     "local": {
       "name": "hivemind-hyperagents-grok-local",
@@ -25,8 +36,16 @@
         "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
-      "durable_objects": { "bindings": [{ "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" }] },
-      "workflows": [{ "name": "hivemind-hyper-room-run-local", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" }]
+      "browser": { "binding": "BROWSER", "remote": true },
+      "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "max_instances": 5 }],
+      "durable_objects": { "bindings": [
+        { "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" },
+        { "name": "Sandbox", "class_name": "Sandbox" }
+      ] },
+      "workflows": [
+        { "name": "hivemind-hyper-room-run-local", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" },
+        { "name": "hivemind-hyper-agent-assignment-local", "binding": "AGENT_ASSIGNMENT_WORKFLOW", "class_name": "HyperAgentAssignmentWorkflow" }
+      ]
     },
     "production": {
       "name": "hivemind-hyperagents-grok-production",
@@ -36,8 +55,16 @@
         "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
-      "durable_objects": { "bindings": [{ "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" }] },
-      "workflows": [{ "name": "hivemind-hyper-room-run-production", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" }]
+      "browser": { "binding": "BROWSER", "remote": true },
+      "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "max_instances": 20 }],
+      "durable_objects": { "bindings": [
+        { "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" },
+        { "name": "Sandbox", "class_name": "Sandbox" }
+      ] },
+      "workflows": [
+        { "name": "hivemind-hyper-room-run-production", "binding": "ROOM_RUN_WORKFLOW", "class_name": "HyperRoomRunWorkflow" },
+        { "name": "hivemind-hyper-agent-assignment-production", "binding": "AGENT_ASSIGNMENT_WORKFLOW", "class_name": "HyperAgentAssignmentWorkflow" }
+      ]
     }
   }
 }

@@ -3372,6 +3372,8 @@ model HyperTurn {
   grokRuntimeVersion Int @default(1) @map("grok_runtime_version")
   grokWorkflowInstanceId String? @map("grok_workflow_instance_id") @db.VarChar(180)
   activeAgents Json @default("[]") @map("active_agents") @db.JsonB
+  controlState Json @default("{\"action\":\"run\",\"revision\":0}") @map("control_state") @db.JsonB
+  steeringMessages Json @default("[]") @map("steering_messages") @db.JsonB
   room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
   evals          AgentEval[]
   runtimePlaybookRun RuntimePlaybookRun? @relation(fields: [runtimePlaybookRunId], references: [id], onDelete: SetNull)
@@ -3403,10 +3405,77 @@ model HyperAgentRuntime {
   createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt           DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
   employee            DigitalEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  routines            HyperAgentRoutine[]
 
   @@unique([orgId, employeeId])
   @@index([orgId, status])
   @@map("hyper_agent_runtimes")
+}
+
+/// Immutable, validated capability material. Runtime code selects these rows;
+/// it never hard-codes department skills into the executor.
+model HyperAgentSkillVersion {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String   @map("org_id") @db.Uuid
+  skillKey           String   @map("skill_key") @db.VarChar(120)
+  version            Int      @default(1)
+  status             String   @default("draft") @db.VarChar(24)
+  manifest           Json     @default("{}") @db.JsonB
+  validationReceipts Json     @default("[]") @map("validation_receipts") @db.JsonB
+  createdBy          String?  @map("created_by") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  activatedAt        DateTime? @map("activated_at") @db.Timestamptz(6)
+
+  @@unique([orgId, skillKey, version])
+  @@index([orgId, status])
+  @@map("hyper_agent_skill_versions")
+}
+
+/// A schedule points at an immutable playbook version. Cloudflare wakes the
+/// agent; PostgreSQL remains authoritative for status and next-run metadata.
+model HyperAgentRoutine {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId              String   @map("org_id") @db.Uuid
+  roomId             String   @map("room_id") @db.Uuid
+  agentRuntimeId     String   @map("agent_runtime_id") @db.Uuid
+  playbookId         String   @map("playbook_id") @db.VarChar(120)
+  playbookVersion    Int      @map("playbook_version")
+  scheduleType       String   @map("schedule_type") @db.VarChar(24)
+  scheduleExpression String   @map("schedule_expression") @db.VarChar(160)
+  status             String   @default("active") @db.VarChar(24)
+  authorityPolicy    Json     @default("{}") @map("authority_policy") @db.JsonB
+  workflowInstanceId String?  @map("workflow_instance_id") @db.VarChar(180)
+  nextRunAt          DateTime? @map("next_run_at") @db.Timestamptz(6)
+  lastRunAt          DateTime? @map("last_run_at") @db.Timestamptz(6)
+  createdBy          String   @map("created_by") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  agentRuntime       HyperAgentRuntime @relation(fields: [agentRuntimeId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, roomId, playbookId, playbookVersion, scheduleExpression])
+  @@index([orgId, status, nextRunAt])
+  @@map("hyper_agent_routines")
+}
+
+/// Provider actions and browser/Sandbox operations require durable receipts.
+/// A successful HTTP response without this row is not completion evidence.
+model HyperToolReceipt {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  roomId         String   @map("room_id") @db.Uuid
+  turnId         String   @map("turn_id") @db.Uuid
+  workOrderId    String   @map("work_order_id") @db.Uuid
+  agentInstanceId String  @map("agent_instance_id") @db.VarChar(180)
+  actionKey      String   @map("action_key") @db.VarChar(160)
+  adapter        String   @db.VarChar(80)
+  status         String   @db.VarChar(24)
+  providerReceipt Json    @default("{}") @map("provider_receipt") @db.JsonB
+  artifactRefs   Json     @default("[]") @map("artifact_refs") @db.JsonB
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([orgId, actionKey])
+  @@index([workOrderId, status])
+  @@map("hyper_tool_receipts")
 }
 
 /// HyperClaim — a durable, queryable claim/hypothesis/synthesis artifact emitted

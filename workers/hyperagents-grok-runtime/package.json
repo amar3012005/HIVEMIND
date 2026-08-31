@@ -8,6 +8,8 @@
     "dry-run": "wrangler deploy --env local --dry-run"
   },
   "dependencies": {
+    "@cloudflare/codemode": "^0.5.1",
+    "@cloudflare/sandbox": "^0.13.0-next.751.1",
     "agents": "^0.22.0"
   },
   "devDependencies": {

@@ -2641,6 +2641,9 @@ class Director:
             actual = str(participant.get("_lane") or participant.get("lane") or "").lower()
             if actual == wanted or aliases.get(actual) == wanted or aliases.get(wanted) == actual:
                 return participant
+        from .grok_runtime import mode_at_least
+        if mode_at_least(getattr(self, "grok_runtime_mode", "off"), "shadow_roster"):
+            return {}
         return (self.participants or [{}])[0]
 
     def _work_order_context(self, required_evidence: List[str]) -> str:
@@ -4169,6 +4172,16 @@ class Director:
             evidence = list(order.get("required_evidence") or [])
             criteria = list(order.get("acceptance_criteria") or [])
             wait_for = _normalize_work_step_wait(order.get("wait"))
+            if not owner.get("id") and mode_at_least(self.grok_runtime_mode, "shadow_roster"):
+                wait_for = {
+                    "kind": "capability", "reason": "Room roster lacks the required capability",
+                    "prompt": f"Add an organization specialist for lane {order.get('owner_lane') or 'unknown'}.",
+                    "resume_key": f"specialist:{step_id}",
+                }
+                await self.emit({
+                    "t": "specialist_requested", "required_lane": order.get("owner_lane"),
+                    "work_order_key": order_key, "reason": wait_for["reason"],
+                })
             handoff = _normalize_work_step_handoff(order.get("handoff"))
             existing_work_id = str(order.get("_work_order_id") or "").strip()
             persisted = None
@@ -4253,7 +4266,10 @@ class Director:
                 if mode_at_least(self.grok_runtime_mode, "real_tools"):
                     if self.work_agent_hook is None:
                         raise RuntimeError("real agent runtime selected without a work-agent executor")
-                    agent_result = await self.work_agent_hook(owner, order, f"{prompt}\n\nEVIDENCE BOARD:\n{context}")
+                    agent_result = await self.work_agent_hook(
+                        owner, {**order, "_work_order_id": work_id},
+                        f"{prompt}\n\nEVIDENCE BOARD:\n{context}",
+                    )
                     text = _strip_cot(str(agent_result.get("text") or "")).strip()
                 else:
                     response = await self._groq([

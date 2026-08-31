@@ -351,3 +351,24 @@ verification, and its independent rollback control.
 - Stable non-canary V2, durable completion, exactly-once replay, grounded recall,
   metadata-only edge state, public health, and clean logs were verified. This is
   a canary release, not a global enablement.
+
+## feature-20260831T020000Z — Complete durable Grok-style HyperAgents (local candidate)
+
+- Cumulative Flagship flag `hyperagents_grok_agents_v1` remains fail-closed and
+  unenabled. Its stages are `off`, `shadow_roster`, `persistent_agents`,
+  `durable_assignments`, `real_tools`, `collaboration`, `browser`, `skills`,
+  `routines`, and `full`; the decision is latched per turn.
+- Persistent organization-scoped Agent identities, roster-first selection,
+  deterministic Room and WorkOrder Workflows, PostgreSQL leases/receipts,
+  duplicate-safe recovery, capability-gap events, real participant execution,
+  collaboration, versioned skills, and Agent-owned routines are implemented.
+- Pause, resume, cancel, and steering persist on the HyperTurn and are honored
+  by Employees. Cloudflare Browser Run is exposed as a structured Agent tool;
+  Sandbox execution is argv-only, allowlisted, isolated, and authority-gated.
+- Integrated Da-vinci candidate `f47d945` adds active-agent/runtime visibility
+  and live turn controls.
+- Verified with Prisma validation/generation, Core runtime/HyperRoom tests,
+  changed-file Python compilation, Worker TypeScript and contract tests,
+  Wrangler local dry-run including Browser/Sandbox, Sandbox image build, and an
+  optimized Da-vinci build. No Cloudflare resource or production service was
+  deployed or enabled.

@@ -2056,3 +2056,28 @@ git diff --check: passed (line-ending warnings only)
   configured through the protected integration environment before browser E2E.
 - This entry is not a local acceptance or production release. Production must
   remain `off` until the separate governed rollout is completed.
+
+### Local integration evidence
+
+- Merged through the permanent integration worktree. The additive SQL created
+  four tables and backfilled three provider identities without changing user
+  IDs. Only `hivemind-control-plane-local` was rebuilt/recreated; all other
+  shared containers remained running.
+- Local Worker version `c0ab9a0c-0935-483e-b0b0-18f4f873e657` is bound only to
+  `singulance-auth-email-local`, its local DLQ, and the local Flagship app.
+  Preview frontend versions `82b8f6b1-cecd-45e8-bf63-3b07a7edc934` and final
+  routing fix `fbac798d-d19e-4dfe-bdf7-d86b629f9363` were deployed only to
+  `hivemind-web-preview` / `next.preview.singulancelabs.com`.
+- Live existing-user E2E passed: challenge/outbox persisted, allowlisted email
+  delivery settled `sent|queued`, OTP verification returned 200 with a rotated
+  session cookie, scanner GET left the challenge unconsumed, confirmation POST
+  consumed it, replay returned 401, and duplicate Queue delivery retained one
+  attempt.
+- Mobile Playwright acceptance at 390x844 showed the email input and no Google
+  button in local `email_only`; submitting an approved email rendered the OTP
+  input and verify action with zero page errors.
+- Remaining hard blocker: no isolated preview ZITADEL service PAT and preview
+  organization ID are configured. Existing-user email login is accepted; new
+  unknown-user provisioning is intentionally fail-closed and production stays
+  `off` until those protected credentials, real Turnstile widget, WAF policy,
+  and registration E2E are completed.

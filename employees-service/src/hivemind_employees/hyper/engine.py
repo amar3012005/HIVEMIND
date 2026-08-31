@@ -4219,6 +4219,14 @@ class Director:
                     "work_order_key": order_key, "reason": wait_for["reason"],
                 })
             handoff = _normalize_work_step_handoff(order.get("handoff"))
+            assignment_budgets = {
+                "max_input_chars": max(4000, min(64000, int(os.environ.get("HYPER_GROK_MAX_INPUT_CHARS", "24000") or "24000"))),
+                "max_output_chars": max(2000, min(64000, int(os.environ.get("HYPER_GROK_MAX_OUTPUT_CHARS", "32000") or "32000"))),
+                "max_tool_calls": max(1, min(32, int(os.environ.get("HYPER_GROK_MAX_TOOL_CALLS", "8") or "8"))),
+                "max_delegations": max(0, min(8, int(os.environ.get("HYPER_AGENTIC_MAX_DELEGATIONS", "4") or "4"))),
+                "max_repairs": max(0, min(2, int(os.environ.get("HYPER_GROK_AGENT_GRAPH_REPAIRS", "1") or "1"))),
+                "wall_timeout_seconds": max(30, min(900, int(os.environ.get("HYPER_GROK_ASSIGNMENT_TIMEOUT_SECONDS", "240") or "240"))),
+            }
             existing_work_id = str(order.get("_work_order_id") or "").strip()
             persisted = None
             if not existing_work_id:
@@ -4229,7 +4237,8 @@ class Director:
                     owner=owner, selected_skills=list(self.skills_used), required_evidence=evidence,
                     acceptance_criteria=criteria,
                     input_snapshot={"room_kind": self.room_kind, "room_mode": self.room_mode,
-                                    "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps)},
+                                    "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps),
+                                    "budgets": assignment_budgets},
                     plan_step_id=step_id,
                     depends_on=dependencies,
                     wait_for=wait_for,
@@ -4278,6 +4287,11 @@ class Director:
             predecessor_notes = [completed_by_step[dependency].get("text", "")
                                  for dependency in dependencies if dependency in completed_by_step]
             if predecessor_notes:
+                await self.emit({
+                    "t": "agent_handoff", "work_order_id": work_id or None,
+                    "work_order_key": order_key, "agent_instance_id": owner.get("_agent_instance_id"),
+                    "from_work_order_keys": dependencies,
+                })
                 context += "\n\nCOMPLETED PREREQUISITES:\n" + "\n".join(predecessor_notes)
             prompt = (
                 f"WORK ORDER: {order.get('title')}\nOBJECTIVE: {order.get('objective')}\n"
@@ -4316,10 +4330,18 @@ class Director:
                                     owner,
                                     {**order, "_work_order_id": work_id},
                                     f"{prompt}\n\nEVIDENCE BOARD:\n{context}",
-                                    max_repairs=max(0, min(2, int(os.environ.get(
-                                        "HYPER_GROK_AGENT_GRAPH_REPAIRS", "1"
-                                    ) or "1"))),
+                                    max_repairs=assignment_budgets["max_repairs"],
+                                    max_input_chars=assignment_budgets["max_input_chars"],
+                                    max_output_chars=assignment_budgets["max_output_chars"],
+                                    max_tool_receipts=assignment_budgets["max_tool_calls"],
+                                    wall_timeout_seconds=assignment_budgets["wall_timeout_seconds"],
                                 )
+                                if provider_attempt:
+                                    await self.emit({
+                                        "t": "agent_recovered", "work_order_id": work_id or None,
+                                        "agent_instance_id": owner.get("_agent_instance_id"),
+                                        "attempt": provider_attempt + 1,
+                                    })
                                 break
                             except Exception as provider_exc:
                                 detail = str(provider_exc).lower()
@@ -4329,6 +4351,12 @@ class Director:
                                 )
                                 if not transient_budget or provider_attempt >= 3:
                                     raise
+                                await self.emit({
+                                    "t": "agent_budget_warning", "work_order_id": work_id or None,
+                                    "agent_instance_id": owner.get("_agent_instance_id"),
+                                    "budget": "provider_in_flight", "attempt": provider_attempt + 1,
+                                    "limit": 4,
+                                })
                                 # OpenRouter rejects concurrent long-running agent
                                 # calls until its in-flight budget settles. This is
                                 # a retryable provider condition, not failed work.
@@ -4598,7 +4626,7 @@ class Director:
                     "title": str(receipt.get("title") or "")[:240],
                     "url": url[:1000],
                     "content": str(receipt.get("excerpt") or receipt.get("title") or "")[:2400],
-                    "provider_receipt": key[:240],
+                    "provider_receipt": str(receipt.get("provider_id") or key)[:240],
                 })
         return facts[:80]
 

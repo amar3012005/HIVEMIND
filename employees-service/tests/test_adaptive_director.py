@@ -832,6 +832,11 @@ def test_reviewer_rejection_runs_bounded_repair_and_fresh_review(monkeypatch):
     director.is_work_room = True
     director.grok_runtime_mode = "full"
     director.grok_runtime_version = "v1"
+    director.participants = [
+        {"id": "00000000-0000-4000-8000-000000000001", "slug": "lead", "name": "Lead", "_lane": "Strategist"},
+        {"id": "00000000-0000-4000-8000-000000000002", "slug": "researcher", "name": "Researcher", "_lane": "Researcher"},
+        {"id": "00000000-0000-4000-8000-000000000003", "slug": "reviewer", "name": "Reviewer", "_lane": "Skeptic"},
+    ]
     calls = []
 
     async def create(**kwargs):

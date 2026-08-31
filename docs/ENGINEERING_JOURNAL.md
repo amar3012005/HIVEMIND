@@ -1811,3 +1811,24 @@ git diff --check: passed (line-ending warnings only)
   worktree contains unrelated modifications to `core/data/mcp-connectors.json`
   and `docker-compose.local-stack.yml`. Per the local integration protocol they
   were not stashed, reset, overwritten, or merged over.
+
+## 2026-08-31 — Grok assignment budgets and complete lifecycle events
+
+- Added explicit bounded assignment execution metadata for input/output size,
+  tool calls, delegations, repairs, parallel assignments, and wall-clock time.
+  LangGraph enforces input, output, receipt and timeout bounds; AgentScope uses
+  the assignment tool-iteration limit.
+- Added durable lifecycle events `agent_tool_started`, `agent_budget_warning`,
+  `agent_handoff`, and `agent_recovered`, closing the event vocabulary required
+  by the Grok HyperAgents architecture.
+- Corrected receipt hydration so URL deduplication no longer replaces the exact
+  provider receipt identifier used for audit and synthesis.
+
+### Verification evidence
+
+- Python 3.12 isolated suite:
+  `pytest tests/test_langgraph_runtime.py tests/test_grok_runtime.py tests/test_adaptive_director.py -q`
+  — `43 passed in 1.55s`.
+- The reviewer-repair test now uses a real Researcher and independent Skeptic
+  roster. A missing capability remains a deliberate `specialist_requested`
+  wait and is not bypassed with an invented persona.

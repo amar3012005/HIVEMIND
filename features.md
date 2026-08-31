@@ -432,3 +432,10 @@ verification, and its independent rollback control.
   explicit grant; Room gateway accepted a valid signed ticket and rejected an
   invalid one. Local Worker version:
   `3d2eac64-94ab-458c-843f-7e2dd6bb5e6c`.
+- Every durable assignment now persists an explicit bounded execution envelope
+  (input/output size, tool-call, delegation, repair, parallelism and wall-time
+  limits). Runtime events now cover tool start, budget warning, handoff and
+  recovery in addition to assignment start/completion and receipts.
+- Verified provider receipt identity is preserved independently from URL-based
+  deduplication, so final synthesis can cite the exact durable receipt while
+  still preferring the newest observation for a repeated URL.

@@ -252,6 +252,8 @@ const CONFIG = {
 
 const prisma = getPrismaClient();
 const emailIdentity = createEmailIdentityService({ prisma, publicBaseUrl: defaultFrontendBaseUrl });
+const emailPostLoginRedirect = `${defaultFrontendBaseUrl.replace(/\/$/, '')}/hivemind/app/overview?auth=callback`;
+const emailAllowedOrigins = [new URL(defaultFrontendBaseUrl).origin];
 configureSystemEmailNotificationSink(createEmailNotificationSink(prisma));
 const { configureAiGovernance, listModelGovernance, listModelPrices, normalizeModelPolicyInput, platformCreditAccountDetail, platformCreditIntelligence, replaceModelPrice, upsertModelPolicy } = await import('./llm/ai-governance.js');
 configureAiGovernance(prisma);
@@ -4224,6 +4226,7 @@ const server = http.createServer(async (req, res) => {
       enabled: mode === 'primary' || mode === 'email_only',
       email_only: mode === 'email_only',
       turnstile_site_key: process.env.TURNSTILE_EMAIL_AUTH_SITE_KEY || null,
+      default_redirect_to: emailPostLoginRedirect,
     });
   }
 
@@ -4234,8 +4237,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await parseBody(req);
       const turnstileOk = await verifyEmailTurnstile(body?.turnstile_token, req);
-      const fallback = CONFIG.postLoginRedirect;
-      const returnTo = safeReturnTo(body?.return_to, fallback);
+      const returnTo = safeReturnTo(body?.return_to, emailPostLoginRedirect, emailAllowedOrigins);
       let started = { accepted: false };
       if (turnstileOk) started = await emailIdentity.start({
         email: body?.email, intent: body?.intent, returnTo, mode,
@@ -4286,7 +4288,8 @@ const server = http.createServer(async (req, res) => {
       const membership = await resolveCurrentOrg(user.id);
       if (!await emailIdentity.consume(String(body.challenge_id), user.id)) return jsonResponse(res, { ok: false, error: 'The code or link has already been used.' }, 401);
       const sessionId = await sessionStore.createSession({ userId: user.id, email: user.email, orgId: membership.org?.id || null });
-      return jsonResponse(res, { ok: true, redirect_to: verified.challenge.returnTo, needs_onboarding: !membership.org }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
+      const redirectTo = safeReturnTo(verified.challenge.returnTo, emailPostLoginRedirect, emailAllowedOrigins);
+      return jsonResponse(res, { ok: true, redirect_to: redirectTo, needs_onboarding: !membership.org }, 200, { 'Set-Cookie': makeSessionCookie(sessionId) });
     } catch (error) {
       console.error('[email-auth] verification failed', { error: error.message });
       return jsonResponse(res, { ok: false, error: 'The code or link is invalid or has expired.' }, 401);

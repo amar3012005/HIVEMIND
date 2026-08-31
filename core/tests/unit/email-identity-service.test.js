@@ -29,5 +29,9 @@ test('return destinations require an exact origin and hivemind path', () => {
   assert.equal(safeReturnTo('https://next.preview.singulancelabs.com/hivemind/app/overview', fallback), 'https://next.preview.singulancelabs.com/hivemind/app/overview');
   assert.equal(safeReturnTo('https://evil.example/hivemind/app', fallback), fallback);
   assert.equal(safeReturnTo('https://next.singulancelabs.com/admin', fallback), fallback);
+  assert.equal(
+    safeReturnTo('https://next.singulancelabs.com/hivemind/app/overview', fallback, ['https://next.preview.singulancelabs.com']),
+    fallback,
+  );
   if (previous === undefined) delete process.env.EMAIL_AUTH_ALLOWED_ORIGINS; else process.env.EMAIL_AUTH_ALLOWED_ORIGINS = previous;
 });

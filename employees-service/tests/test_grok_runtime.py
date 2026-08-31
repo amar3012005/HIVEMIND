@@ -45,3 +45,17 @@ def test_selector_uses_role_capability_when_display_lane_is_generic():
     ]
     selected = select_active_agents(roster, [{"owner_lane": "Researcher"}], maximum=2)
     assert [row["id"] for row in selected] == ["1", "2"]
+
+
+def test_five_person_roster_activates_only_lead_and_required_specialist():
+    roster = [
+        _employee("1", "lead", "Strategist"),
+        _employee("2", "research", "Researcher"),
+        _employee("3", "review", "Skeptic"),
+        _employee("4", "writer", "Communicator"),
+        _employee("5", "builder", "Builder"),
+    ]
+    selected = select_active_agents(
+        roster, [{"owner_lane": "Researcher"}], lead_id="1", maximum=3,
+    )
+    assert [row["id"] for row in selected] == ["1", "2"]

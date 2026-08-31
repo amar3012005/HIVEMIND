@@ -68,3 +68,23 @@ def test_assignment_graph_bounds_input_and_records_effective_limits():
     assert len(prompts[0]) == 4000
     assert result["usage"]["max_input_chars"] == 4000
     assert result["usage"]["cognitive_attempts"] == 1
+
+
+def test_concurrent_assignment_graphs_keep_private_context_isolated():
+    observed = {}
+
+    async def execute(employee, _order, prompt):
+        await asyncio.sleep(0)
+        observed[employee["id"]] = prompt
+        return {"text": employee["id"], "tool_receipts": [], "evidence": [], "artifacts": []}
+
+    async def run_both():
+        return await asyncio.gather(
+            run_bounded_assignment_graph(execute, {"id": "agent-a"}, {"id": "work-a"}, "PRIVATE-A"),
+            run_bounded_assignment_graph(execute, {"id": "agent-b"}, {"id": "work-b"}, "PRIVATE-B"),
+        )
+
+    first, second = asyncio.run(run_both())
+    assert first["text"] == "agent-a"
+    assert second["text"] == "agent-b"
+    assert observed == {"agent-a": "PRIVATE-A", "agent-b": "PRIVATE-B"}

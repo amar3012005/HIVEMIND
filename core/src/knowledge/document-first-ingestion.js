@@ -3221,7 +3221,7 @@ Every item must include a non-empty content field and one or more valid support_
     // Remote (self-host) orgs: KB writes route to the agent — assertKbAllowedForOrg is lifted.
     // All other paths (enterprise, connector) still block via their own assertKbAllowedForOrg calls.
     if (!orgIsRemote(opts?.orgId)) assertKbAllowedForOrg(opts?.orgId);
-    let { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null } = opts;
+    let { userId, orgId, filename, fileBuffer, contentType, metadata = {}, onProgress = null, stageHooks = null } = opts;
     metadata = sanitizeKnowledgeJson(metadata);
     const ingestMode = metadata.ingest_mode === 'evidence' ? 'evidence' : 'both';
     const forceReprocess = metadata.force_reprocess === true;
@@ -3645,6 +3645,10 @@ Every item must include a non-empty content field and one or more valid support_
       ? segments
       : segments.filter((segment) => segment?.vectorStored !== true);
     const _alreadyEmbedded = Math.max(0, segments.length - _segmentsToEmbed.length);
+    await stageHooks?.beforeEvidenceEmbedding?.({
+      documentId: knowledgeDoc.id,
+      segmentCount: _segmentsToEmbed.length,
+    });
     if (_segmentsToEmbed.length) {
       // Step 5: Embed segments.
       // Central path: store vector in Qdrant + update DB row (vectorStored=true).
@@ -4322,6 +4326,7 @@ Every item must include a non-empty content field and one or more valid support_
           // into the job tracker. Not an HTTP-envelope field — undefined for
           // remote callers, which is harmless.
           onProgress: envelope.onProgress || null,
+          stageHooks: envelope.stageHooks || null,
         });
         // Spread the underlying result so existing callers keep reading pages /
         // candidateCount / segmentCount / documentId; add the canonical fields.

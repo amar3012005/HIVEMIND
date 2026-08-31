@@ -18,9 +18,17 @@ const STAGE_CAPACITY = {
     global: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_EXTRACT_CONCURRENCY || 4)),
     org: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_EXTRACT_ORG_CONCURRENCY || 2)),
   },
+  embed: {
+    global: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_EMBED_CONCURRENCY || 3)),
+    org: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_EMBED_ORG_CONCURRENCY || 2)),
+  },
   promote: {
     global: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_PROMOTE_CONCURRENCY || 4)),
     org: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_PROMOTE_ORG_CONCURRENCY || 2)),
+  },
+  project: {
+    global: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_PROJECT_CONCURRENCY || 6)),
+    org: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_PROJECT_ORG_CONCURRENCY || 3)),
   },
 };
 const TERMINAL_MATERIALIZATION_ERRORS = new Set([
@@ -268,6 +276,8 @@ export class CloudflareKnowledgeIngestExecutor {
       };
       let result;
       if (isStoredEvidencePromotion(job.metadata)) {
+        await this._releaseProcessingLease(job, 'extract');
+        await this._waitForProcessingLease(job, 'promote');
         const promoted = await this.steps.run({
           jobId: job.id, processingVersion: job.processingVersion, stageKey: 'promote_memories',
           input: { documentId: job.metadata.promotion_document_id, strategy: 'upgrade_evidence_to_both' },
@@ -279,7 +289,7 @@ export class CloudflareKnowledgeIngestExecutor {
           return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
         });
         result = promoted.receipt.outputRefs;
-        await this._releaseProcessingLease(job, 'extract');
+        await this._releaseProcessingLease(job, 'promote');
       } else {
         const evidenceStage = await this.steps.run({
           jobId: job.id, processingVersion: job.processingVersion,
@@ -304,6 +314,12 @@ export class CloudflareKnowledgeIngestExecutor {
               ? durableMetadata
               : { ...durableMetadata, ingest_mode: 'evidence' },
             onProgress,
+            stageHooks: isImage ? null : {
+              beforeEvidenceEmbedding: async () => {
+                await this._releaseProcessingLease(job, 'extract');
+                await this._waitForProcessingLease(job, 'embed');
+              },
+            },
           });
           requireCompleteEvidenceEmbedding(value);
           return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
@@ -313,6 +329,7 @@ export class CloudflareKnowledgeIngestExecutor {
         // durable evidence exists. The next document starts immediately while
         // this one proceeds through memory generation on an independent pool.
         await this._releaseProcessingLease(job, 'extract');
+        if (!isImage) await this._releaseProcessingLease(job, 'embed');
         result = evidence;
         if (job.ingestMode === 'both' && !isImage) {
           await this._waitForProcessingLease(job, 'promote');
@@ -367,10 +384,13 @@ export class CloudflareKnowledgeIngestExecutor {
       throw Object.assign(new Error('Canonical materialization has not completed.'), { code: 'MATERIALIZATION_INCOMPLETE', retryable: true });
     }
     const result = materialized.outputRefs || {};
-    const run = await this.steps.run({
-      jobId: job.id, processingVersion: job.processingVersion, stageKey: 'reconcile',
-      input: { materializeReceipt: materialized.id, documentId: result.documentId },
-    }, async () => {
+    await this._waitForProcessingLease(job, 'project');
+    let run;
+    try {
+      run = await this.steps.run({
+        jobId: job.id, processingVersion: job.processingVersion, stageKey: 'reconcile',
+        input: { materializeReceipt: materialized.id, documentId: result.documentId },
+      }, async () => {
       if (!result.documentId || (isImage
         ? Number(result.promotedCount || 0) <= 0
         : Number(result.segmentCount || 0) <= 0)) {
@@ -416,7 +436,10 @@ export class CloudflareKnowledgeIngestExecutor {
         },
         coverage: result.coverage || {},
       };
-    });
+      });
+    } finally {
+      await this._releaseProcessingLease(job, 'project');
+    }
     return { ok: true, stage: 'reconcile', reused: run.reused, receipt_id: run.receipt.id, terminal: true };
   }
 

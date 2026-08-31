@@ -128,3 +128,5 @@ references/humanizer/
 references/mempalace/
 references/obsidian-3d-graph/
 references/paperclip/
+# ICARUS Harness runtime state (local, never commit)
+.icarus/runtime/

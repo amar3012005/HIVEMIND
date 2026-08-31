@@ -2649,12 +2649,12 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
           throw Object.assign(new Error('The configured memory storage is unavailable.'), { code: 'STORAGE_UNAVAILABLE' });
         }
       };
-      const processKnowledgeUpload = async ({ userId, orgId, filename, contentType, fileBuffer, metadata, onProgress }) => {
+      const processKnowledgeUpload = async ({ userId, orgId, filename, contentType, fileBuffer, metadata, onProgress, stageHooks }) => {
         if (metadata.media_kind !== 'image') {
           return documentFirstIngestion.ingestSource({
             userId, orgId, source: { type: 'kb', filename },
             file: { buffer: fileBuffer, contentType, filename }, metadata,
-            ingestMode: metadata?.ingest_mode || 'both', onProgress,
+            ingestMode: metadata?.ingest_mode || 'both', onProgress, stageHooks,
           });
         }
         onProgress({ stage: 'extracting', progress: 25 });

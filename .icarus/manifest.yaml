@@ -1,0 +1,9 @@
+# ICARUS Harness repository contract. Commit this file; never commit .icarus/runtime/.
+schema_version: 1
+harness_version: 1
+repo_id: repo-4903f2713dfa5bcd
+repo_root: \\?\P:\HIVEMIND-worktrees\image-ingest-canonical-fix
+git_remote_fingerprint: 4903f2713dfa5bcd
+policy_version: 1
+agents:
+- codex

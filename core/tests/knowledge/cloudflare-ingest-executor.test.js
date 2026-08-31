@@ -77,7 +77,12 @@ function fixture({ remote = false, image = false } = {}) {
       },
     },
     validateJob: async () => { events.push(['validate']); },
-    processUpload: async ({ onProgress, metadata }) => {
+    processUpload: async ({ onProgress, metadata, stageHooks }) => {
+      if (stageHooks?.beforeEvidenceEmbedding) {
+        events.push(['extract-complete']);
+        await stageHooks.beforeEvidenceEmbedding({ documentId: ids.document, segmentCount: 8 });
+        events.push(['embed-start']);
+      }
       onProgress({ stage: 'embedding', progress: 65 });
       if (image) {
         events.push(['image-metadata', metadata]);
@@ -123,6 +128,24 @@ test('materialization records real evidence and promotion checkpoints', async ()
   );
   assert.equal(events.filter(([kind]) => kind === 'get').length, 1);
   assert.equal(events.filter(([kind]) => kind === 'promote').length, 1);
+  assert.ok(events.findIndex(([kind]) => kind === 'extract-complete')
+    < events.findIndex(([kind]) => kind === 'embed-start'));
+});
+
+test('documents hand off extract capacity before embedding and use independent stage pools', async () => {
+  const { executor, events } = fixture();
+  const claims = [];
+  const releases = [];
+  executor._waitForProcessingLease = async (_job, stage) => { claims.push(stage); return { acquired: true }; };
+  executor._releaseProcessingLease = async (_job, stage) => { releases.push(stage || 'all'); };
+
+  await executor.execute({
+    jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'materialize',
+  });
+
+  assert.deepEqual(claims, ['extract', 'embed', 'promote']);
+  assert.equal(releases.indexOf('extract') < releases.indexOf('embed'), true);
+  assert.equal(events.some(([kind]) => kind === 'promote'), true);
 });
 
 test('duplicate Workflow stage delivery reuses its durable receipt and settles only once', async () => {

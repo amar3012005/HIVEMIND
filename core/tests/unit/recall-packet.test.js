@@ -2,6 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildRecallPacket, validateGroundedClaims, NO_GROUNDED_EVIDENCE } from '../../src/memory/recall-packet.js';
 
+test('claim validation removes duplicate semantic sentences and merges citations', () => {
+  const result = validateGroundedClaims({ claims: [
+    { text: 'Pantene is a division of Procter & Gamble.', grounded: true, citation_ids: ['C1'] },
+    { text: '  PANTENE is a division of Procter & Gamble! ', grounded: true, citation_ids: ['C2'] },
+  ] }, { citations: [{ id: 'C1' }, { id: 'C2' }] });
+  assert.equal(result.claims.length, 1);
+  assert.deepEqual(result.claims[0].citation_ids, ['C1', 'C2']);
+  assert.equal(result.answer, 'Pantene is a division of Procter & Gamble.');
+});
+
 test('RecallPacket assigns server-owned stable citation ids', () => {
   const packet = buildRecallPacket({
     facts: [{ id: 'm1' }],

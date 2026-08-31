@@ -265,7 +265,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
   return { parsed: parseJsonObjectContent(raw), usage: data.usage };
 }
 
-async function callValidatedClaimStream({ message, messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, evidence, allowGeneralKnowledge, onEvent, language = 'en' }) {
+async function callValidatedClaimStream({ message, messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, evidence, allowGeneralKnowledge, onEvent, language = 'en', source = null }) {
   const streamInstruction = `STREAMING OUTPUT CONTRACT: Return exactly one JSON object matching the supplied strict response schema and no markdown. Every factual sentence in response must have a corresponding claims item with valid delivered citation IDs. Decompose every independent requested detail in coverage. For broad, detailed, comprehensive, overview, comparison, or additional-information requests, use all distinct relevant delivered passages and normally produce 3-5 non-duplicate grounded claims when the evidence supports them. Never emit uncited prose or mark the response sufficient while a requested detail is absent.`;
   const streamedClaims = [];
   const rejectedClaims = [];
@@ -409,7 +409,7 @@ async function callValidatedClaimStream({ message, messages, model, apiKey, maxT
     // failure. Preserve the single synthesis call and deterministically expose
     // the already-ranked, citation-bearing recall packet instead of returning
     // a 502 or paying for another LLM pass.
-    const recalled = groundedRecallFallback(evidence, language, message);
+    const recalled = groundedRecallFallback(evidence, language, message, { source });
     if (recalled) {
       onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
       onEvent?.({ type: 'answer_delta', schema_version: 1, delta: recalled.response, validated: true, citation_ids: recalled.claims.flatMap((claim) => claim.citation_ids) });
@@ -1742,7 +1742,7 @@ function hasGroundedPacketEvidence(evidence) {
   );
 }
 
-export function groundedRecallFallback(evidence, language, message = '') {
+export function groundedRecallFallback(evidence, language, message = '', { source = null } = {}) {
   const rows = [];
   const seen = new Set();
   const stop = new Set(['about', 'all', 'and', 'are', 'can', 'could', 'detail', 'detailed', 'does', 'everything', 'file', 'from', 'give', 'have', 'how', 'into', 'more', 'please', 'should', 'tell', 'that', 'the', 'their', 'this', 'what', 'when', 'where', 'which', 'who', 'why', 'with', 'would', 'your']);
@@ -1751,6 +1751,9 @@ export function groundedRecallFallback(evidence, language, message = '') {
     .map((token) => token.replace(/^[._-]+|[._-]+$/g, ''))
     .filter((token) => token.length >= 3 && !stop.has(token)))];
   const relevant = (text, title) => {
+    const requestedTitle = String(source?.title || '').normalize('NFKC').toLocaleLowerCase().trim();
+    const actualTitle = String(title || '').normalize('NFKC').toLocaleLowerCase().trim();
+    if (requestedTitle && (actualTitle === requestedTitle || actualTitle.startsWith(`${requestedTitle} :`))) return true;
     if (!queryTokens.length) return true;
     const haystack = `${title || ''} ${text || ''}`.normalize('NFKC').toLocaleLowerCase();
     const matches = queryTokens.filter((token) => haystack.includes(token)).length;
@@ -2602,7 +2605,7 @@ ${message}`;
       model, apiKey, maxTokens: answerCap, signal,
       promptCacheKey: synthesisPrompt.cache.key,
       recallPackets: evidence.recall_packets || [], evidence, allowGeneralKnowledge, onEvent,
-      language, message,
+      language, message, source: plan.source || null,
     });
   }
 
@@ -2754,7 +2757,7 @@ ${message}`;
     // already-ranked packet. This introduces no new facts and no extra model
     // or retrieval call; the generic absence response remains reserved for an
     // actually empty or uncitable packet.
-    const recalled = groundedRecallFallback(evidence, language, message);
+    const recalled = groundedRecallFallback(evidence, language, message, { source: plan.source || null });
     if (recalled) {
       return {
         response: recalled.response,

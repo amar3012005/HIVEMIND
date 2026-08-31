@@ -96,6 +96,19 @@ test('relation, aggregate and projects have dedicated exact operations', () => {
   assert.equal(projects.native_tool, 'hivemind_list_projects'); assert.deepEqual(projects.tool_groups, ['hivemind-projects']);
 });
 
+test('a leading year in an exact filename cannot create an incomplete snapshot plan', () => {
+  const source = { title: '1981-60th-AnnualTeil2-ocr (1).pdf', document_id: null, kind: 'pdf', selection: null };
+  const mistaken = makePlan({
+    operation: 'snapshot', query: 'Give a detailed overview of 1981-60th-AnnualTeil2-ocr (1).pdf', source,
+    time: { semantics: 'snapshot', axis: null, start: '1981-01-01T00:00:00Z' },
+  });
+  const repaired = validateNativePlanResult(mistaken);
+  assert.equal(repaired.status, 'repairable');
+  assert.equal(repaired.plan.operation, 'source_read');
+  assert.equal(repaired.plan.time.semantics, 'none');
+  assert.ok(repaired.repairs.includes('operation.incomplete_snapshot'));
+});
+
 test('validator repairs legacy and reference-only relation entity shapes', () => {
   const referenceOnly = makePlan({ operation: 'relation_between', query: 'Amar and Kruti relationship', entities: ['Amar', 'Kruti'], relation: [] });
   delete referenceOnly.relation_entities;

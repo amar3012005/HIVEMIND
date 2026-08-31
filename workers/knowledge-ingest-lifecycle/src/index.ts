@@ -16,6 +16,10 @@ type StageResult = {
   receipt_id?: string;
   reused?: boolean;
   terminal?: boolean;
+  status?: string;
+};
+type MaterializationStatus = StageResult & {
+  result?: { documentId?: string; segmentCount?: number; promotedCount?: number };
 };
 type RuntimeEnv = Env & {
   KNOWLEDGE_INGEST_WORKFLOW_SECRET: string;
@@ -104,11 +108,32 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
         { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
         () => core<StageResult>(this.env, params, 'stages/acquire'),
       );
-      const materialized = await step.do(
-        'materialize canonical evidence and memories',
-        { retries: { limit: 5, delay: '30 seconds', backoff: 'exponential' }, timeout: '30 minutes' },
-        () => core<StageResult>(this.env, params, 'stages/materialize'),
+      await step.do(
+        'dispatch canonical materialization',
+        { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
+        () => core<StageResult>(this.env, params, 'stages/materialize/start'),
       );
+      let materialized: MaterializationStatus['result'] | StageResult | null = null;
+      for (let attempt = 0; attempt < 160; attempt += 1) {
+        await step.sleep(`wait for canonical materialization ${attempt + 1}`, '15 seconds');
+        const status = await step.do(
+          `verify canonical materialization ${attempt + 1}`,
+          { retries: { limit: 3, delay: '5 seconds', backoff: 'exponential' }, timeout: '1 minute' },
+          () => core<MaterializationStatus>(this.env, params, 'stages/materialize/status'),
+        );
+        if (status.status === 'succeeded') {
+          materialized = status.result || status;
+          break;
+        }
+        if (status.status === 'failed') {
+          await step.do(
+            `redispatch failed canonical materialization ${attempt + 1}`,
+            { retries: { limit: 3, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
+            () => core<StageResult>(this.env, params, 'stages/materialize/start'),
+          );
+        }
+      }
+      if (!materialized) throw new Error('canonical materialization did not reach a verified checkpoint before timeout');
       await step.do(
         'reconcile coverage and settle',
         { retries: { limit: 8, delay: '30 seconds', backoff: 'exponential' }, timeout: '5 minutes' },

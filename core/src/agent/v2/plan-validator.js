@@ -225,8 +225,8 @@ function reconcileSemanticOperation(plan, repairs) {
   // ordinary workspace question fail with native_plan_missing_* after two
   // identical planner attempts. With no usable boundary, the only safe
   // read-only interpretation is ordinary typed recall of the unchanged query.
-  if (plan.operation === 'snapshot' && !plan.time.valid_at && !plan.time.known_at && !plan.time.start) {
-    plan.operation = 'recall';
+  if (plan.operation === 'snapshot' && !plan.time.valid_at && !plan.time.known_at) {
+    plan.operation = exactSource ? 'source_read' : 'recall';
     plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
     repairs.push('operation.incomplete_snapshot');
   }

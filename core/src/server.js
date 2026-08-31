@@ -4403,25 +4403,32 @@ const server = http.createServer(async (req, res) => {
   const knowledgeWorkflowStage = pathname.match(
     /^\/internal\/knowledge-ingest\/v1\/jobs\/([0-9a-f-]{36})\/stages\/(acquire|materialize|reconcile)$/,
   );
+  const knowledgeWorkflowMaterializeControl = pathname.match(
+    /^\/internal\/knowledge-ingest\/v1\/jobs\/([0-9a-f-]{36})\/stages\/materialize\/(start|status)$/,
+  );
   const knowledgeWorkflowFail = pathname.match(
     /^\/internal\/knowledge-ingest\/v1\/jobs\/([0-9a-f-]{36})\/fail$/,
   );
-  if (knowledgeWorkflowStage || knowledgeWorkflowFail) {
+  if (knowledgeWorkflowStage || knowledgeWorkflowMaterializeControl || knowledgeWorkflowFail) {
     if (req.method !== 'POST') return jsonResponse(res, { error: 'Method not allowed' }, 405);
     if (!knowledgeWorkflowExecutor || !isAuthorizedKnowledgeWorkflowRequest?.(req)) {
       return jsonResponse(res, { error: 'Unauthorized' }, 401);
     }
     const workflowBody = await parseBody(req).catch(() => ({}));
     const common = {
-      jobId: (knowledgeWorkflowStage || knowledgeWorkflowFail)[1],
+      jobId: (knowledgeWorkflowStage || knowledgeWorkflowMaterializeControl || knowledgeWorkflowFail)[1],
       orgId: String(workflowBody.org_id || ''),
       userId: String(workflowBody.user_id || ''),
       processingVersion: Number(workflowBody.processing_version) || 1,
     };
     try {
       const result = await runWithOrg(common.orgId, () => (
-        knowledgeWorkflowStage
-          ? knowledgeWorkflowExecutor.execute({ ...common, stage: knowledgeWorkflowStage[2] })
+        knowledgeWorkflowMaterializeControl
+          ? (knowledgeWorkflowMaterializeControl[2] === 'start'
+            ? knowledgeWorkflowExecutor.startMaterialize(common)
+            : knowledgeWorkflowExecutor.materializeStatus(common))
+          : knowledgeWorkflowStage
+            ? knowledgeWorkflowExecutor.execute({ ...common, stage: knowledgeWorkflowStage[2] })
           : knowledgeWorkflowExecutor.fail({
             ...common,
             errorCode: workflowBody.error_code,

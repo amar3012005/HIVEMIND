@@ -192,6 +192,18 @@ test('empty fast recall is incomplete and escalates once to explain', () => {
   assert.equal(chooseRecallEscalation({ plan, coverage, query: plan.user_message }), null);
 });
 
+test('grounded fallback honors an authorized exact-source boundary despite filename tokens', () => {
+  const title = '1981-60th-AnnualTeil2-ocr (1).pdf';
+  const evidence = { recall_packets: [{
+    facts: [],
+    sourceSections: [{ segment_id: 's1', document_title: title, content: 'Earl Cavanah served as art director and designer for the Mrs. Paul campaign.' }],
+    citations: [{ id: 'C1', segment_id: 's1', title }],
+  }] };
+  const answer = groundedRecallFallback(evidence, 'en', `Give every role from ${title}`, { source: { title } });
+  assert.equal(answer.claims.length, 1);
+  assert.deepEqual(answer.claims[0].citation_ids, ['P1-C1']);
+});
+
 test('a recalled memory is sufficient when no narrower coverage was requested', () => {
   const coverage = assessRecallCoverage({
     plan: {},

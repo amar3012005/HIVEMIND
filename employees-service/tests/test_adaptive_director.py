@@ -6,7 +6,7 @@ from hivemind_employees.hyper.domains.seo.reporting import render_remediation_re
 
 
 def _director(*, message: str, room_kind: str = "general", company_brief: str = "",
-              enabled_connectors=None, execution_profile=None):
+              enabled_connectors=None, execution_profile=None, fast_planner_mode="off"):
     events = []
 
     async def emit(event):
@@ -29,8 +29,45 @@ def _director(*, message: str, room_kind: str = "general", company_brief: str = 
         room_kind=room_kind,
         company_brief=company_brief,
         execution_profile=execution_profile,
+        fast_planner_mode=fast_planner_mode,
     )
     return director, events
+
+
+def test_fast_planner_profile_restores_evidence_query_and_suppresses_plain_copy_artifact(monkeypatch):
+    monkeypatch.setenv("Visual_path_In_Hyperrooms", "true")
+    director, _events = _director(
+        message="Validate and refine our European positioning tagline",
+        room_kind="marketing",
+        fast_planner_mode="glm_no_reasoning",
+        execution_profile={
+            "profile_id": "marketing.copy.v1",
+            "allowed_outputs": ["direct_answer", "report"],
+            "required_artifacts": [],
+            "external_evidence_query": "Singulance GDPR compliance claims",
+            "visual_artifact_required": False,
+        },
+    )
+    payload = {
+        "recall_queries": [], "history_turns_back": 0, "connector_calls": [],
+        "web_query": None, "seo_audit_url": None, "seo_audit_scope": "none",
+        "seo_task": "none", "places_query": None, "needs_debate": False,
+        "method_skills": [], "campaign_method_assignments": [], "work_orders": [],
+        "turn_plan": [], "turn_mode": "task", "execution_engine": "debate",
+        "collaboration_intensity": "standard", "response_depth": "focused",
+        "evidence_mode": "standard", "post_output_actions": [],
+        "outreach_request": None, "campaign_request": None,
+        "artifact_intent": {"kind": "interactive_document", "purpose": "tagline"},
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    assert director.director_model == "@cf/zai-org/glm-5.3-flash"
+    plan = asyncio.run(director._plan_gather())
+    assert director.artifact_intent is None
+    assert plan["web_query"] == "Singulance GDPR compliance claims"
 
 
 def test_run_director_forwards_execution_profile(monkeypatch):

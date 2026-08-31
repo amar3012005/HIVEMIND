@@ -69,3 +69,15 @@ def test_evo_groq_failure_falls_back_cleanly(monkeypatch):
 
     assert entry is not None
     assert "real final answer" in entry["swarm_summary"]
+
+
+def test_fast_planner_journal_is_deterministic_without_model_call(monkeypatch):
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("journal model must not run")
+    monkeypatch.setattr(engine, "_evo_groq", forbidden)
+    entry = asyncio.run(make_journal_entry(
+        "refine the tagline", "A concise evidence-backed positioning recommendation.",
+        transcript=[], participants=[], turn_id="t-fast", fast_planner_mode="glm_no_reasoning",
+    ))
+    assert entry["turn_id"] == "t-fast"
+    assert "evidence-backed" in entry["swarm_summary"]

@@ -3444,6 +3444,7 @@ model HyperTurn {
   verificationVerdict Json @default("{}") @map("verification_verdict") @db.JsonB
   lastProgressAt DateTime @default(now()) @map("last_progress_at") @db.Timestamptz(6)
   terminalReason String? @map("terminal_reason") @db.Text
+  fastPlannerMode String @default("off") @map("fast_planner_mode") @db.VarChar(32)
   room           HyperRoom   @relation(fields: [roomId], references: [id], onDelete: Cascade)
   evals          AgentEval[]
   runtimePlaybookRun RuntimePlaybookRun? @relation(fields: [runtimePlaybookRunId], references: [id], onDelete: SetNull)

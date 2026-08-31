@@ -92,3 +92,39 @@ def sdk_target(url: str, api_key: str) -> tuple[str, str, dict[str, str]]:
         "cf-aig-skip-cache": "true",
     }
     return base, api_key, headers
+
+
+def workers_ai_sdk_target(model: str) -> tuple[str, str, str, dict[str, str]]:
+    normalized = str(model or "").strip()
+    if not enabled() or not normalized.startswith("@cf/"):
+        raise ValueError("Workers AI Gateway is not configured")
+    routed_model = f"workers-ai/{normalized}"
+    base = os.getenv("CLOUDFLARE_AI_GATEWAY_BASE_URL", "https://gateway.ai.cloudflare.com").rstrip("/")
+    base_url = f"{base}/v1/{os.environ['CLOUDFLARE_ACCOUNT_ID']}/{os.environ['CLOUDFLARE_AI_GATEWAY_ID']}/compat"
+    token = os.environ["CLOUDFLARE_AI_GATEWAY_TOKEN"].strip()
+    return routed_model, token, base_url, {
+        "cf-aig-authorization": f"Bearer {token}", "cf-aig-skip-cache": "true",
+    }
+
+
+async def workers_ai_chat(body: Mapping[str, Any], *, timeout: httpx.Timeout) -> dict[str, Any] | None:
+    """Run Workers AI only through the configured Cloudflare AI Gateway."""
+    routed_model, token, base_url, gateway = workers_ai_sdk_target(str(body.get("model") or ""))
+    payload = dict(body)
+    payload["model"] = routed_model
+    template_kwargs = dict(payload.get("chat_template_kwargs") or {})
+    template_kwargs["enable_thinking"] = False
+    payload["chat_template_kwargs"] = template_kwargs
+    payload.pop("reasoning_effort", None)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {token}", **gateway}, json=payload,
+            )
+        if response.status_code != 200:
+            return None
+        value = response.json()
+        return value if isinstance(value, dict) else None
+    except (httpx.TimeoutException, httpx.TransportError, ValueError):
+        return None

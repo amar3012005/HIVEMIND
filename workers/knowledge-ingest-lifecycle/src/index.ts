@@ -109,7 +109,9 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
     const params = event.payload;
     try {
       let acquired = false;
-      for (let attempt = 0; attempt < 1920; attempt += 1) {
+      // 240 waits = one hour and keeps the total Workflow step count bounded
+      // when combined with the materialization polling loop below.
+      for (let attempt = 0; attempt < 240; attempt += 1) {
         const claim = await step.do(
           `acquire processing slot ${attempt + 1}`,
           { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
@@ -118,7 +120,7 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
         if (claim.acquired !== false) { acquired = true; break; }
         await step.sleep(`wait for processing slot ${attempt + 1}`, '15 seconds');
       }
-      if (!acquired) throw new Error('processing slot wait exceeded eight hours');
+      if (!acquired) throw new Error('processing slot wait exceeded one hour');
       await step.do(
         'dispatch canonical materialization',
         { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },

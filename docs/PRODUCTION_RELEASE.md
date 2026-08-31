@@ -1070,6 +1070,20 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   `hivemind/control-plane:sha-afd97867`, and
   `hivemind/employees:sha-afd97867` if code rollback is required.
 
+## 8d35d3c2 — Gemini Unified-Billing planner
+
+- Canonical SHA `8d35d3c26eb3170f35364fbc0e056512486f3522`;
+  frontend unchanged; manifest
+  `/root/releases/manifests/8d35d3c2/20260831T192956Z/RELEASE_MANIFEST.json`.
+- Existing canary planning/profile/verification now uses
+  `google/gemini-2.5-flash-lite` through Cloudflare Unified Billing and the
+  `hivemind-prod` AI Gateway. OpenRouter BYOK is not used for this route.
+- Acceptance: 55 focused tests, two live Unified Billing inference probes,
+  exact-revision health for Core/Control/Employees, public API health, and a
+  clean fresh critical-log scan.
+- Rollback: canary flag `off`; Employees/Control `sha-e2e2c055`; Core
+  `sha-f4107cc8` through the canonical release governor.
+
 ## f4107cc8 — Knowledge ingestion v2 accepted; production flag remains off
 
 - Canonical SHA `f4107cc82490a1ddf57a7b215955be6184d4038b`; Core image

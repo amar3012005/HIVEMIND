@@ -369,6 +369,16 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Rollback is immediate by serving `off` to the exact canary; the additive
   database latch can remain in place.
 
+### feature-20260831T192956Z — Gemini Unified Billing transport
+
+- The same exact production canary now uses
+  `google/gemini-2.5-flash-lite` for profile selection, planning, and
+  verification.
+- Transport is Cloudflare AI Gateway Unified Billing, funded by the Cloudflare
+  credit balance. It deliberately omits the exhausted OpenRouter BYOK alias.
+- Flag targeting, stable non-canary behavior, and Grok-runtime status are
+  unchanged.
+
 ## feature-20260831T191032Z — Durable knowledge ingestion v2
 
 - Accepted production implementation: canonical SHA

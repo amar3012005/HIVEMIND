@@ -1555,6 +1555,28 @@ slides that find no unique anchor get a page instead of `null`.
   previous canonical-projection version. The additive latch column is safe to
   retain.
 
+## 2026-08-31 UTC — HyperRoom canary planner moved to Gemini Unified Billing
+
+- Committed `0389cc80` and merged canonical production SHA
+  `8d35d3c26eb3170f35364fbc0e056512486f3522`.
+- Replaced Workers AI GLM planning with
+  `google/gemini-2.5-flash-lite` through Cloudflare's `/ai/v1/chat/completions`
+  Unified Billing endpoint. Requests carry the configured Gateway ID but no
+  OpenRouter provider key or BYOK alias, so they spend the Cloudflare credit
+  balance and avoid the exhausted OpenRouter key limit.
+- The existing default-off exact canary flag and stable non-canary behavior are
+  unchanged. No Grok runtime feature was enabled.
+- Verification: 55 focused Employees tests passed; pre-release and post-release
+  live Gemini probes returned choices; Core, Control, and Employees are healthy
+  at the exact revision; public health passed; fresh critical logs were empty.
+- Governed manifest:
+  `/root/releases/manifests/8d35d3c2/20260831T192956Z/RELEASE_MANIFEST.json`.
+  Rollback images are Employees/Control `sha-e2e2c055` and Core `sha-f4107cc8`.
+- The first release attempt stopped before build at the 25-GB disk guard. The
+  governed retention script removed three unused old Core tags and recovered
+  6 GB; running images, volumes, and the manifest-selected rollback targets
+  were preserved.
+
 ## 2026-08-31 UTC — Cloudflare ingestion v2 remediation prepared
 
 - Globally disabled `knowledge_ingest_workflow_v1` in production before code

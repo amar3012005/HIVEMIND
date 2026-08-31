@@ -770,6 +770,67 @@ def test_work_room_turn_plan_runs_dependencies_before_dependent_steps(monkeypatc
     assert "COMPLETED PREREQUISITES" in worker_inputs[1]
 
 
+def test_reviewer_rejection_runs_bounded_repair_and_fresh_review(monkeypatch):
+    director, events = _director(message=(
+        "Research three current public competitor pricing pages using the browser, "
+        "capture evidence, compare them, and produce a reviewed artifact."
+    ))
+    director.room_mode = "work"
+    director.is_work_room = True
+    director.grok_runtime_mode = "full"
+    director.grok_runtime_version = "v1"
+    calls = []
+
+    async def create(**kwargs):
+        return {"id": f"00000000-0000-0000-0000-{len(calls) + 1:012d}"}
+
+    async def start(*_args, **_kwargs):
+        return True
+
+    async def complete(**_kwargs):
+        return True
+
+    async def agent_hook(_owner, order, _prompt):
+        calls.append(order["id"])
+        if order["id"] == "independent-review":
+            return {"text": "Google is consent-gated and lacks a captured price.\nVERDICT: REPAIR"}
+        if order["id"] == "independent-review-repair-1":
+            return {"text": "All three pages, prices, URLs, comparison and artifact are supported.\nVERDICT: PASS"}
+        return {
+            "text": "Captured current public pricing with exact URLs and prepared comparison inputs.",
+            "evidence": [{
+                "adapter": "cloudflare_browser", "provider_id": f"receipt-{order['id']}",
+                "url": "https://example.com/pricing", "title": "Rendered pricing",
+                "excerpt": "$999 current rendered price",
+            }],
+            "artifacts": [{"kind": "comparison", "id": f"artifact-{order['id']}"}],
+        }
+
+    monkeypatch.setenv("HYPER_GROK_MAX_REPAIRS", "1")
+    monkeypatch.setattr("hivemind_employees.hyper.engine.create_hyper_work_order", create)
+    monkeypatch.setattr("hivemind_employees.hyper.engine.start_hyper_work_order", start)
+    monkeypatch.setattr("hivemind_employees.hyper.engine.complete_hyper_work_order", complete)
+    director.work_agent_hook = agent_hook
+
+    results = asyncio.run(director._run_work_orders({"turn_plan": [
+        {"id": "execute-1", "depends_on": [], "kind": "research", "owner_lane": "Researcher",
+         "title": "Capture pricing", "objective": "Capture three public pricing pages.",
+         "required_evidence": ["browser receipts"], "acceptance_criteria": ["three prices"]},
+        {"id": "independent-review", "depends_on": ["execute-1"], "kind": "decision",
+         "owner_lane": "Skeptic", "title": "Review evidence", "objective": "Verify completion.",
+         "required_evidence": [], "acceptance_criteria": ["complete artifact"],
+         "verification_assignment": True},
+    ]}))
+
+    assert calls == [
+        "execute-1", "independent-review", "repair-1", "independent-review-repair-1",
+    ]
+    assert all(result["status"] == "completed" for result in results)
+    assert "independent-review" not in [result["step_id"] for result in results]
+    assert "repair-1" in [result["step_id"] for result in results]
+    assert any(event.get("title") == "Repair missing evidence (attempt 1)" for event in events)
+
+
 def test_work_room_waits_without_starting_worker_and_preserves_handoff(monkeypatch):
     director, events = _director(message="Prepare the decision and wait for confirmation")
     director.room_mode = "work"

@@ -52,7 +52,7 @@ services:
       KNOWLEDGE_INGEST_WORKFLOW_SECRET: ${KNOWLEDGE_INGEST_WORKFLOW_SECRET:-}
       HYPER_GROK_RUNTIME_ENABLED: ${HYPER_GROK_RUNTIME_ENABLED:-false}
       HYPER_GROK_RUNTIME_ENVIRONMENT: local
-      HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-http://host.docker.internal:8789}
+      HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-https://hivemind-hyperagents-grok-local.amarsai2005.workers.dev}
       HYPER_GROK_WORKFLOW_SECRET: ${HYPER_GROK_WORKFLOW_SECRET:-}
       # Cloudflare Worker gateway: credentials stay in the local Docker
       # environment and the Worker accepts only the explicit preview allowlist.
@@ -123,7 +123,7 @@ services:
       DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
       REDIS_URL: redis://redis:6379/0
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
-      HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-}
+      HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-https://hivemind-hyperagents-grok-local.amarsai2005.workers.dev}
       HYPER_GROK_WORKFLOW_SECRET: ${HYPER_GROK_WORKFLOW_SECRET:-}
       # Keep local HyperAgent cognition on the same provider/model policy as
       # production while all semantic and lifecycle data remains local. These

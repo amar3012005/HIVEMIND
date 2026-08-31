@@ -2023,3 +2023,36 @@ git diff --check: passed (line-ending warnings only)
 - The reviewer-repair test now uses a real Researcher and independent Skeptic
   roster. A missing capability remains a deliberate `specialist_requested`
   wait and is not bypassed with an invented persona.
+## 2026-08-31 — Unified email-first identity v1 implementation candidate
+
+### Committed
+
+- Backend/Worker parent commit `722a3371` on `codex/preview-email-auth` and
+  frontend commit `5ff8ed2` on `codex/preview-email-auth-ui` are pushed.
+- Added provider-safe `UserIdentity`, encrypted/hash-only email challenges,
+  transactional email outbox, append-only security events, scanner-safe link
+  confirmation, six-digit OTP verification, Turnstile validation, Flagship
+  fail-closed modes, ZITADEL human provisioning, and isolated Queue/DLQ Worker.
+- Created only local Cloudflare resources:
+  `singulance-auth-email-local`, `singulance-auth-email-dlq-local`, and local
+  Flagship `email_identity_v1=email_only`. Production resources and flags were
+  not changed.
+
+### Verification
+
+- `node --test tests/unit/email-identity-service.test.js`: 3 passed, 0 failed.
+- Prisma 5.22 validation with a non-secret validation URL: schema valid.
+- Frontend focused login contract: 1 passed, 0 failed.
+- `npm run build` in `frontend/Da-vinci`: compiled successfully.
+- `npm run typecheck` in `workers/auth-email`: passed.
+- `wrangler deploy --env local --dry-run`: resolved only the local Worker,
+  Queue, Flagship app, environment, and preview control-plane URL.
+
+### Not yet accepted or released
+
+- The permanent local integration worktree contained unrelated active changes,
+  so this branch was not merged, no shared container was rebuilt, and preview
+  was not deployed. Turnstile/ZITADEL/local Worker secrets and migration must be
+  configured through the protected integration environment before browser E2E.
+- This entry is not a local acceptance or production release. Production must
+  remain `off` until the separate governed rollout is completed.

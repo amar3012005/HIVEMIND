@@ -2068,6 +2068,7 @@ model KnowledgeIngestStep {
 model KnowledgeIngestLease {
   leaseKey          String   @id @map("lease_key") @db.VarChar(80)
   jobId             String   @map("job_id") @db.Uuid
+  orgId             String   @map("org_id") @db.Uuid
   processingVersion Int      @map("processing_version")
   leaseToken        String   @map("lease_token") @db.Uuid
   leaseUntil        DateTime @map("lease_until") @db.Timestamptz(6)
@@ -2075,6 +2076,7 @@ model KnowledgeIngestLease {
   updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@index([leaseUntil])
+  @@index([orgId, leaseUntil])
   @@index([jobId, processingVersion])
   @@map("knowledge_ingest_leases")
 }

@@ -222,41 +222,39 @@ test('partial evidence coverage cannot reach settlement', async () => {
   assert.equal(events.some(([kind]) => kind === 'complete'), false);
 });
 
-test('the fenced production lease admits one heavy document and releases for the next', async () => {
+test('the fenced scheduler admits four globally, caps each organization at two, and releases cleanly', async () => {
   const { executor, job } = fixture();
-  let lease = null;
+  const leases = [];
   executor.prisma.knowledgeIngestLease = {
-    findUnique: async () => lease,
-    create: async ({ data }) => { if (lease) throw new Error('unique'); lease = { ...data }; return lease; },
-    update: async ({ data }) => { lease = { ...lease, ...data }; return lease; },
-    updateMany: async ({ data }) => {
-      if (!lease || lease.leaseUntil > new Date()) return { count: 0 };
-      lease = { ...lease, ...data }; return { count: 1 };
+    findMany: async () => leases.map((lease) => ({ ...lease })),
+    create: async ({ data }) => { leases.push({ ...data }); return data; },
+    update: async ({ where, data }) => {
+      const index = leases.findIndex((lease) => lease.leaseKey === where.leaseKey);
+      leases[index] = { ...leases[index], ...data };
+      return leases[index];
     },
     deleteMany: async ({ where }) => {
-      if (lease?.jobId === where.jobId && lease?.processingVersion === where.processingVersion) lease = null;
-      return { count: 1 };
+      const before = leases.length;
+      for (let index = leases.length - 1; index >= 0; index -= 1) {
+        if (leases[index].jobId === where.jobId && leases[index].processingVersion === where.processingVersion) {
+          leases.splice(index, 1);
+        }
+      }
+      return { count: before - leases.length };
     },
   };
-  const secondId = '77777777-7777-4777-8777-777777777777';
-  const originalFind = executor.jobStore.findOwned;
-  executor.jobStore.findOwned = async (id, owner) => id === secondId
-    ? { ...job, id: secondId, userId: ids.user }
-    : originalFind(id, owner);
-  const first = await executor.execute({
-    jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'acquire',
-  });
-  const second = await executor.execute({
-    jobId: secondId, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'acquire',
-  });
-  assert.equal(first.acquired, true);
-  assert.equal(second.acquired, false);
-  await executor.fail({
-    jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3,
-    errorCode: 'TEST_RELEASE', message: 'release', retryable: false,
-  });
-  const afterRelease = await executor.execute({
-    jobId: secondId, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'acquire',
-  });
-  assert.equal(afterRelease.acquired, true);
+  const jobs = [
+    job,
+    { ...job, id: '77777777-7777-4777-8777-777777777777' },
+    { ...job, id: '88888888-8888-4888-8888-888888888888' },
+    { ...job, id: '99999999-9999-4999-8999-999999999999', orgId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+    { ...job, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', orgId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+  ];
+  const claims = [];
+  for (const candidate of jobs) claims.push(await executor._claimProcessingLease(candidate));
+  assert.deepEqual(claims.map((claim) => claim.acquired), [true, true, false, true, true]);
+  assert.equal(leases.length, 4);
+  await executor._releaseProcessingLease(jobs[0]);
+  assert.equal((await executor._claimProcessingLease(jobs[2])).acquired, true);
+  assert.equal(leases.length, 4);
 });

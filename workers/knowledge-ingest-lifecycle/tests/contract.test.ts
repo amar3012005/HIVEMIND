@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { materializationPollDecision, validAdmittedParams, validParams, workflowInstanceId } from '../src/contract';
+import {
+  materializationPollDecision, validAdmittedParams, validParams,
+  workflowFailureDisposition, workflowInstanceId,
+} from '../src/contract';
 
 const params = {
   job_id: '11111111-1111-4111-8111-111111111111',
@@ -31,5 +34,20 @@ describe('knowledge ingest workflow identity', () => {
     expect(materializationPollDecision({ status: 'failed', retryable: true })).toBe('redispatch');
     expect(materializationPollDecision({ status: 'processing' })).toBe('wait');
     expect(materializationPollDecision({ status: 'succeeded' })).toBe('complete');
+  });
+
+  it('preserves credits and schedules recovery for runtime interruptions only', () => {
+    expect(workflowFailureDisposition(false)).toEqual({
+      terminal: false,
+      retryable: true,
+      errorCode: 'WORKFLOW_RETRYABLE_INTERRUPTION',
+      enqueueRecovery: true,
+    });
+    expect(workflowFailureDisposition(true)).toEqual({
+      terminal: true,
+      retryable: false,
+      errorCode: 'WORKFLOW_NON_RETRYABLE',
+      enqueueRecovery: false,
+    });
   });
 });

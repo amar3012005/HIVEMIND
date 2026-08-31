@@ -10,8 +10,13 @@ import { knowledgeWorkflowEnabled } from './cloudflare-ingest-client.js';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STAGES = new Set(['acquire', 'materialize', 'reconcile']);
 const activeMaterializations = new Map();
-const PROCESSING_LEASE_KEY = 'knowledge-ingest-production';
+const PROCESSING_LEASE_PREFIX = 'knowledge-ingest-production';
 const PROCESSING_LEASE_MS = Math.max(60_000, Number(process.env.KNOWLEDGE_INGEST_PROCESSING_LEASE_MS || 20 * 60_000));
+const PROCESSING_GLOBAL_CONCURRENCY = Math.max(1, Number(process.env.KNOWLEDGE_INGEST_GLOBAL_CONCURRENCY || 4));
+const PROCESSING_ORG_CONCURRENCY = Math.max(1, Math.min(
+  PROCESSING_GLOBAL_CONCURRENCY,
+  Number(process.env.KNOWLEDGE_INGEST_ORG_CONCURRENCY || 2),
+));
 
 function safeEqual(left, right) {
   const a = Buffer.from(String(left || ''));
@@ -149,34 +154,79 @@ export class CloudflareKnowledgeIngestExecutor {
 
   async _claimProcessingLease(job) {
     if (!this.prisma?.knowledgeIngestLease) return { acquired: true, legacySchema: true };
-    const now = new Date();
-    const leaseUntil = new Date(now.getTime() + PROCESSING_LEASE_MS);
-    const existing = await this.prisma.knowledgeIngestLease.findUnique({ where: { leaseKey: PROCESSING_LEASE_KEY } });
-    if (existing?.jobId === job.id && Number(existing.processingVersion) === Number(job.processingVersion)) {
-      await this.prisma.knowledgeIngestLease.update({ where: { leaseKey: PROCESSING_LEASE_KEY }, data: { leaseUntil } });
-      return { acquired: true, leaseToken: existing.leaseToken };
-    }
-    if (existing && existing.leaseUntil > now) return { acquired: false };
-    const leaseToken = crypto.randomUUID();
-    if (!existing) {
-      try {
-        await this.prisma.knowledgeIngestLease.create({
-          data: { leaseKey: PROCESSING_LEASE_KEY, jobId: job.id, processingVersion: job.processingVersion, leaseToken, leaseUntil },
+    const transact = this.prisma.$transaction
+      ? (work) => this.prisma.$transaction(work, { isolationLevel: 'Serializable' })
+      : (work) => work(this.prisma);
+    try {
+      return await transact(async (tx) => {
+        const now = new Date();
+        const leaseUntil = new Date(now.getTime() + PROCESSING_LEASE_MS);
+        // Serializes the tiny scheduler decision only. Parsing and embedding never
+        // hold a database lock.
+        await tx.$executeRawUnsafe?.("SELECT pg_advisory_xact_lock(hashtext('hivemind-knowledge-ingest-slots'))");
+        const leases = await tx.knowledgeIngestLease.findMany({
+          where: { leaseKey: { startsWith: `${PROCESSING_LEASE_PREFIX}:` } },
+          orderBy: { leaseKey: 'asc' },
         });
-        return { acquired: true, leaseToken };
-      } catch { return { acquired: false }; }
+        const owned = leases.find((lease) => lease.jobId === job.id
+          && Number(lease.processingVersion) === Number(job.processingVersion));
+        if (owned) {
+          await tx.knowledgeIngestLease.update({ where: { leaseKey: owned.leaseKey }, data: { leaseUntil } });
+          return { acquired: true, leaseToken: owned.leaseToken, slot: owned.leaseKey };
+        }
+        const active = leases.filter((lease) => lease.leaseUntil > now);
+        if (active.length >= PROCESSING_GLOBAL_CONCURRENCY) return { acquired: false };
+        if (active.filter((lease) => lease.orgId === job.orgId).length >= PROCESSING_ORG_CONCURRENCY) {
+          return { acquired: false };
+        }
+
+        // Approximate FIFO becomes deterministic under the scheduler lock. Skip
+        // organizations already at their cap so one tenant cannot block others.
+        if (tx.knowledgeIngestJob?.findMany) {
+          const waiting = await tx.knowledgeIngestJob.findMany({
+            where: {
+              orchestrationMode: 'cloudflare_workflow',
+              status: { in: ['queued', 'processing'] },
+            },
+            select: { id: true, orgId: true, processingVersion: true },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: 200,
+          });
+          const activeIds = new Set(active.map((lease) => `${lease.jobId}:${lease.processingVersion}`));
+          const orgCounts = new Map();
+          for (const lease of active) orgCounts.set(lease.orgId, (orgCounts.get(lease.orgId) || 0) + 1);
+          const next = waiting.find((candidate) => !activeIds.has(`${candidate.id}:${candidate.processingVersion}`)
+            && (orgCounts.get(candidate.orgId) || 0) < PROCESSING_ORG_CONCURRENCY);
+          if (next && next.id !== job.id) return { acquired: false };
+        }
+
+        const used = new Set(active.map((lease) => lease.leaseKey));
+        const slot = Array.from({ length: PROCESSING_GLOBAL_CONCURRENCY }, (_, index) => `${PROCESSING_LEASE_PREFIX}:${index}`)
+          .find((key) => !used.has(key));
+        if (!slot) return { acquired: false };
+        const leaseToken = crypto.randomUUID();
+        const existing = leases.find((lease) => lease.leaseKey === slot);
+        const data = {
+          jobId: job.id, orgId: job.orgId, processingVersion: job.processingVersion,
+          leaseToken, leaseUntil,
+        };
+        if (existing) await tx.knowledgeIngestLease.update({ where: { leaseKey: slot }, data });
+        else await tx.knowledgeIngestLease.create({ data: { leaseKey: slot, ...data } });
+        return { acquired: true, leaseToken, slot };
+      });
+    } catch (error) {
+      this.logger.warn?.(`[knowledge-workflow] slot claim contention for ${job.id}: ${error.message}`);
+      return { acquired: false };
     }
-    const claimed = await this.prisma.knowledgeIngestLease.updateMany({
-      where: { leaseKey: PROCESSING_LEASE_KEY, leaseUntil: { lte: now } },
-      data: { jobId: job.id, processingVersion: job.processingVersion, leaseToken, leaseUntil },
-    });
-    return { acquired: Number(claimed.count || 0) === 1, leaseToken };
   }
 
   async _releaseProcessingLease(job) {
     if (!this.prisma?.knowledgeIngestLease) return;
     await this.prisma.knowledgeIngestLease.deleteMany({
-      where: { leaseKey: PROCESSING_LEASE_KEY, jobId: job.id, processingVersion: job.processingVersion },
+      where: {
+        leaseKey: { startsWith: `${PROCESSING_LEASE_PREFIX}:` },
+        jobId: job.id, processingVersion: job.processingVersion,
+      },
     }).catch(() => null);
   }
 

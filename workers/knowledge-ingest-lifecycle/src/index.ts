@@ -6,6 +6,7 @@ import {
   validOrgId,
   validAdmittedParams,
   validParams,
+  workflowFailureDisposition,
   workflowInstanceId,
 } from './contract';
 
@@ -163,10 +164,11 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
       }));
       return { ok: true, instance_id: event.instanceId, materialized };
     } catch (error) {
+      const failurePlan = workflowFailureDisposition(error instanceof NonRetryableError);
       await core(this.env, params, 'fail', {
-        error_code: error instanceof NonRetryableError ? 'WORKFLOW_NON_RETRYABLE' : 'WORKFLOW_RETRIES_EXHAUSTED',
+        error_code: failurePlan.errorCode,
         message: error instanceof Error ? error.message : 'Workflow failed',
-        retryable: false,
+        retryable: failurePlan.retryable,
       }).catch((failure) => {
         console.error(JSON.stringify({
           event: 'knowledge_ingest_failure_record_failed',
@@ -174,6 +176,18 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
           message: failure instanceof Error ? failure.message : String(failure),
         }));
       });
+      if (failurePlan.enqueueRecovery) {
+        // A Workflow/DO lifecycle interruption must not release the job's credit
+        // reservation or processing lease. Redelivery restarts the deterministic
+        // instance and all completed Core receipts are reused.
+        await this.env.INGEST_QUEUE.send(params, { contentType: 'json', delaySeconds: 30 }).catch((failure) => {
+          console.error(JSON.stringify({
+            event: 'knowledge_ingest_recovery_enqueue_failed',
+            instance_id: event.instanceId,
+            message: failure instanceof Error ? failure.message : String(failure),
+          }));
+        });
+      }
       throw error;
     }
   }

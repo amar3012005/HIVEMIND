@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { modeRank, normalizeMode, validParams, workflowId } from '../src/contract';
+import { assignmentWorkflowId, modeRank, normalizeMode, validAssignmentParams, validParams, workflowId } from '../src/contract';
 
 const params = {
   turn_id: '11111111-1111-4111-8111-111111111111',
@@ -15,4 +15,9 @@ describe('Grok HyperAgents contract', () => {
   it('orders cumulative stages', () => expect(modeRank('real_tools')).toBeGreaterThan(modeRank('persistent_agents')));
   it('accepts identifier-only workflow messages', () => expect(validParams(params)).toBe(true));
   it('uses deterministic workflow identity', () => expect(workflowId(params.turn_id, 1)).toBe(`room-${params.turn_id}-v1`));
+  it('uses a deterministic workflow for every real assignment', () => {
+    const assignment = { ...params, work_order_id: '55555555-5555-4555-8555-555555555555', agent_instance_id: `ha-${'a'.repeat(32)}-v1` };
+    expect(validAssignmentParams(assignment)).toBe(true);
+    expect(assignmentWorkflowId(assignment.work_order_id, 1)).toBe(`agent-${assignment.work_order_id}-v1`);
+  });
 });

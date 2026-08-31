@@ -1283,6 +1283,53 @@ def register_delegate_to_tool(
         log.warning("register_delegate_to_tool failed: %s", exc)
 
 
+def register_cloudflare_browser_tool(
+    tk: Toolkit, org_id: str, user_id: str, runtime_mode: str,
+) -> None:
+    """Expose the feature-gated Cloudflare Browser Run adapter to one Agent.
+
+    The Worker repeats flag evaluation and SSRF validation. No Worker secret is
+    shown to the model, and the returned page body is bounded by the Worker.
+    """
+    runtime_url = str(os.environ.get("HYPER_GROK_WORKFLOW_URL") or "").rstrip("/")
+    runtime_secret = str(os.environ.get("HYPER_GROK_WORKFLOW_SECRET") or "")
+    if not runtime_url or not runtime_secret:
+        return
+
+    async def cloudflare_browser_visit(url: str) -> ToolResponse:
+        """Open one public HTTPS page in an isolated Cloudflare Browser Run
+        session. Returns the rendered title, URL, visible text, and a live-view
+        target when available. Use APIs/connectors first; use this for pages
+        that require a real rendered browser. Private/local URLs are rejected.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(
+                    f"{runtime_url}/browser/execute",
+                    headers={"Authorization": f"Bearer {runtime_secret}"},
+                    json={"org_id": org_id, "user_id": user_id, "mode": runtime_mode, "url": url},
+                )
+            response.raise_for_status()
+            payload = response.json()
+            page = payload.get("page") or {}
+            return _tool_response_text(
+                f"Title: {page.get('title') or ''}\nURL: {page.get('url') or ''}\n\n{page.get('text') or ''}",
+                metadata={
+                    "adapter": "cloudflare_browser", "status": "completed",
+                    "provider_id": payload.get("session_id"),
+                    "session_id": payload.get("session_id"),
+                    "live_view_url": payload.get("live_view_url"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _tool_response_text(f"Cloudflare Browser failed safely: {str(exc)[:240]}")
+
+    try:
+        tk.register_tool_function(cloudflare_browser_visit, group_name="cloudflare_browser")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("register_cloudflare_browser_tool failed: %s", exc)
+
+
 def build_hivemind_toolkit(
     api_key: str,
     enabled_tool_names: List[str],

@@ -19,6 +19,10 @@ export function grokWorkflowId(turnId, version = 1) {
   return `room-${turnId}-v${Math.max(1, Number(version) || 1)}`;
 }
 
+export function grokAssignmentWorkflowId(workOrderId, version = 1) {
+  return `agent-${workOrderId}-v${Math.max(1, Number(version) || 1)}`;
+}
+
 function configuration() {
   if (process.env.HYPER_GROK_RUNTIME_ENABLED !== 'true') return null;
   const local = process.env.HIVEMIND_LOCAL_MODE === 'true';
@@ -90,6 +94,43 @@ export async function provisionGrokRoster({ turnId, roomId, orgId, userId, mode,
   if (!response.ok) throw Object.assign(new Error(body.error || `provision_http_${response.status}`), {
     code: 'GROK_AGENT_PROVISION_FAILED', retryable: response.status >= 500,
   });
+  return body;
+}
+
+export async function controlGrokRoomWorkflow({ workflowInstanceId, action }) {
+  const response = await request(`/workflows/${encodeURIComponent(workflowInstanceId)}/control`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action }),
+  }, 15_000);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `workflow_control_http_${response.status}`);
+  return body;
+}
+
+export async function startGrokAssignmentWorkflow(params) {
+  const response = await request('/assignments/start', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      turn_id: params.turnId, room_id: params.roomId, work_order_id: params.workOrderId,
+      agent_instance_id: params.agentInstanceId, org_id: params.orgId, user_id: params.userId,
+      mode: normalizeGrokRuntimeMode(params.mode), processing_version: Math.max(1, Number(params.version) || 1),
+    }),
+  }, 15_000);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `assignment_workflow_http_${response.status}`);
+  return { workflowInstanceId: body.instance_id || grokAssignmentWorkflowId(params.workOrderId, params.version) };
+}
+
+export async function scheduleGrokRoutine(params) {
+  const response = await request('/routines/schedule', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      org_id: params.orgId, user_id: params.userId, agent_instance_id: params.agentInstanceId,
+      mode: normalizeGrokRuntimeMode(params.mode), routine_id: params.routineId,
+      schedule_type: params.scheduleType, schedule_expression: params.scheduleExpression,
+    }),
+  }, 15_000);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `routine_schedule_http_${response.status}`);
   return body;
 }
 

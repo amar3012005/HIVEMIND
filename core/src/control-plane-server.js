@@ -9729,6 +9729,54 @@ Write the persona now.`;
   {
     const { deriveCsiLane, buildIdempotencyKey, preflightTurn } = await import('./employees/hyper-rooms.js');
 
+    const hyperSkillActivateMatch = pathname.match(/^\/v1\/hyper-agent-skills\/([0-9a-f-]{36})\/activate$/);
+    if (pathname === '/v1/hyper-agent-skills' && ['GET', 'POST'].includes(req.method)) {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      if (req.method === 'GET') {
+        const skills = await prisma.hyperAgentSkillVersion.findMany({
+          where: { orgId: current.session.orgId }, orderBy: [{ skillKey: 'asc' }, { version: 'desc' }],
+        });
+        return jsonResponse(res, { skills });
+      }
+      const { evaluateGrokRuntime, grokModeAtLeast } = await import('./hyperagents/grok-runtime-client.js');
+      const decision = await evaluateGrokRuntime({ orgId: current.session.orgId, userId: current.session.userId });
+      if (!grokModeAtLeast(decision.mode, 'skills')) return jsonResponse(res, { error: 'Agent skills are not enabled' }, 403);
+      const body = await parseBody(req).catch(() => ({}));
+      const skillKey = String(body.skill_key || '').trim().toLowerCase();
+      const version = Number(body.version || 1);
+      const manifest = body.manifest && typeof body.manifest === 'object' && !Array.isArray(body.manifest) ? body.manifest : null;
+      const serialized = JSON.stringify(manifest || {});
+      if (!/^[a-z0-9][a-z0-9._-]{2,119}$/.test(skillKey) || !Number.isInteger(version) || version < 1
+          || !manifest || serialized.length > 30000 || /"(?:secret|token|password|api_key)"\s*:/i.test(serialized)) {
+        return jsonResponse(res, { error: 'invalid or unsafe skill manifest' }, 400);
+      }
+      const skill = await prisma.hyperAgentSkillVersion.create({ data: {
+        orgId: current.session.orgId, skillKey, version, manifest,
+        validationReceipts: Array.isArray(body.validation_receipts) ? body.validation_receipts.slice(0, 10) : [],
+        createdBy: current.session.userId,
+      } }).catch((error) => ({ error }));
+      if (skill.error) return jsonResponse(res, { error: 'Skill version already exists' }, 409);
+      return jsonResponse(res, { skill }, 201);
+    }
+    if (hyperSkillActivateMatch && req.method === 'POST') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const skill = await prisma.hyperAgentSkillVersion.findFirst({
+        where: { id: hyperSkillActivateMatch[1], orgId: current.session.orgId },
+      });
+      if (!skill) return jsonResponse(res, { error: 'Skill not found' }, 404);
+      const receipts = Array.isArray(skill.validationReceipts) ? skill.validationReceipts : [];
+      const distinctTasks = new Set(receipts.map((row) => String(row?.work_order_id || '')).filter(Boolean));
+      if (distinctTasks.size < 2) {
+        return jsonResponse(res, { error: 'Skill requires successful validation on two different work orders' }, 409);
+      }
+      const activated = await prisma.hyperAgentSkillVersion.update({
+        where: { id: skill.id }, data: { status: 'active', activatedAt: new Date() },
+      });
+      return jsonResponse(res, { skill: activated });
+    }
+
     // GET /v1/hyper-rooms — list current user's rooms
     if (pathname === '/v1/hyper-rooms' && req.method === 'GET') {
       const current = await requireSession(req, res);
@@ -11647,7 +11695,135 @@ Write the persona now.`;
     const roomWorkPlanMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan$/);
     const roomWorkPlanResumeMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/resume$/);
     const roomWorkPlanHandoffMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/handoff$/);
+    const roomTurnControlMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns\/([0-9a-f-]{36})\/control$/);
+    const roomRoutinesMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/routines$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
+
+    if (roomRoutinesMatch && ['GET', 'POST'].includes(req.method)) {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomRoutinesMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
+        select: { id: true, participantIds: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      if (req.method === 'GET') {
+        const routines = await prisma.hyperAgentRoutine.findMany({
+          where: { orgId: current.session.orgId, roomId }, orderBy: { createdAt: 'desc' },
+        });
+        return jsonResponse(res, { routines });
+      }
+      const { evaluateGrokRuntime, grokModeAtLeast, scheduleGrokRoutine } = await import('./hyperagents/grok-runtime-client.js');
+      const decision = await evaluateGrokRuntime({ orgId: current.session.orgId, userId: current.session.userId });
+      if (!grokModeAtLeast(decision.mode, 'routines')) {
+        return jsonResponse(res, { error: 'HyperAgent routines are not enabled' }, 403);
+      }
+      const body = await parseBody(req).catch(() => ({}));
+      const employeeId = String(body.employee_id || '');
+      const scheduleType = String(body.schedule_type || '');
+      const scheduleExpression = String(body.schedule_expression || '').trim();
+      const playbookId = String(body.playbook_id || '').trim();
+      const playbookVersion = Number(body.playbook_version || 1);
+      if (!room.participantIds.includes(employeeId) || !playbookId || playbookId.length > 120
+          || !Number.isInteger(playbookVersion) || playbookVersion < 1
+          || !['delay', 'interval', 'cron'].includes(scheduleType)) {
+        return jsonResponse(res, { error: 'invalid routine contract' }, 400);
+      }
+      if ((scheduleType === 'cron' && (scheduleExpression.split(/\s+/).length !== 5 || scheduleExpression.length > 160))
+          || (scheduleType !== 'cron' && (!/^\d+$/.test(scheduleExpression)
+            || Number(scheduleExpression) < 30 || Number(scheduleExpression) > 604800))) {
+        return jsonResponse(res, { error: 'invalid schedule expression' }, 400);
+      }
+      const runtime = await prisma.hyperAgentRuntime.findFirst({
+        where: { orgId: current.session.orgId, employeeId },
+      });
+      if (!runtime) return jsonResponse(res, { error: 'Persistent agent runtime not provisioned' }, 409);
+      const routine = await prisma.hyperAgentRoutine.create({ data: {
+        orgId: current.session.orgId, roomId, agentRuntimeId: runtime.id,
+        playbookId, playbookVersion, scheduleType, scheduleExpression,
+        authorityPolicy: body.authority_policy && typeof body.authority_policy === 'object' ? body.authority_policy : {},
+        createdBy: current.session.userId,
+      } });
+      try {
+        const receipt = await scheduleGrokRoutine({
+          orgId: current.session.orgId, userId: current.session.userId,
+          agentInstanceId: runtime.agentInstanceId, mode: decision.mode,
+          routineId: routine.id, scheduleType, scheduleExpression,
+        });
+        const updated = await prisma.hyperAgentRoutine.update({
+          where: { id: routine.id }, data: { workflowInstanceId: String(receipt.schedule_id || '') || null },
+        });
+        return jsonResponse(res, { routine: updated }, 201);
+      } catch (error) {
+        await prisma.hyperAgentRoutine.delete({ where: { id: routine.id } }).catch(() => {});
+        return jsonResponse(res, { error: error.message }, 503);
+      }
+    }
+
+    if (roomTurnControlMatch && ['GET', 'POST'].includes(req.method)) {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const [, roomId, turnId] = roomTurnControlMatch;
+      const turn = await prisma.hyperTurn.findFirst({
+        where: { id: turnId, roomId, room: { orgId: current.session.orgId, archivedAt: null } },
+        select: { id: true, status: true, grokWorkflowInstanceId: true, controlState: true, steeringMessages: true },
+      });
+      if (!turn) return jsonResponse(res, { error: 'Turn not found' }, 404);
+      if (req.method === 'GET') return jsonResponse(res, {
+        turn_id: turnId, status: turn.status, control: turn.controlState,
+        steering_messages: turn.steeringMessages || [],
+      });
+      if (['complete', 'failed', 'cost_capped'].includes(turn.status)) {
+        return jsonResponse(res, { error: 'Turn is already terminal' }, 409);
+      }
+      const body = await parseBody(req).catch(() => ({}));
+      const action = String(body.action || '').trim().toLowerCase();
+      if (!['pause', 'resume', 'cancel', 'steer'].includes(action)) {
+        return jsonResponse(res, { error: 'action must be pause, resume, cancel, or steer' }, 400);
+      }
+      const message = String(body.message || '').trim();
+      if (action === 'steer' && (!message || message.length > 4000)) {
+        return jsonResponse(res, { error: 'steer requires a message up to 4000 characters' }, 400);
+      }
+      const updated = await prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRawUnsafe(
+          `SELECT control_state, steering_messages FROM "hivemind"."hyper_turns"
+            WHERE id=$1::uuid AND room_id=$2::uuid FOR UPDATE`, turnId, roomId,
+        );
+        const prior = locked?.[0]?.control_state || { action: 'run', revision: 0 };
+        const revision = Number(prior.revision || 0) + 1;
+        const control = {
+          action: action === 'resume' || action === 'steer' ? 'run' : action,
+          revision, requested_by: current.session.userId, requested_at: new Date().toISOString(),
+          ...(action === 'steer' ? { message } : {}),
+        };
+        const messages = Array.isArray(locked?.[0]?.steering_messages) ? locked[0].steering_messages : [];
+        const steering = action === 'steer'
+          ? [...messages, { revision, message, user_id: current.session.userId, created_at: control.requested_at }].slice(-50)
+          : messages;
+        await tx.hyperTurn.update({ where: { id: turnId }, data: {
+          controlState: control, steeringMessages: steering,
+          ...(action === 'cancel' ? {
+            status: 'failed', sealedAt: new Date(), terminalReason: 'cancelled_by_user', executionPhase: 'CANCELLED',
+          } : {}),
+        } });
+        return { control, revision };
+      });
+      const { appendTurnEvent } = await import('./employees/hyper-rooms.js');
+      await appendTurnEvent(prisma, turnId, {
+        t: action === 'steer' ? 'agent_steered' : `agent_${action}d`,
+        control_revision: updated.revision, ...(message ? { message } : {}),
+      });
+      if (turn.grokWorkflowInstanceId) {
+        const { controlGrokRoomWorkflow } = await import('./hyperagents/grok-runtime-client.js');
+        const workflowAction = action === 'cancel' ? 'terminate' : action === 'steer' ? null : action;
+        if (workflowAction) await controlGrokRoomWorkflow({
+          workflowInstanceId: turn.grokWorkflowInstanceId, action: workflowAction,
+        }).catch((error) => console.warn('[grok-hyperagents] workflow control failed:', error.message));
+      }
+      return jsonResponse(res, { ok: true, turn_id: turnId, control: updated.control }, 202);
+    }
 
     // GET /v1/hyper-rooms/:id/work-plan — one continuous, durable projection
     // for a human Work Room. This reads the existing work-order ledger; it never
@@ -11665,6 +11841,7 @@ Write the persona now.`;
       const rows = await prisma.$queryRawUnsafe(
         `SELECT wo.id, wo.turn_id, wo.plan_step_id, wo.depends_on, wo.kind, wo.status,
                 wo.title, wo.objective, wo.owner_slug, wo.owner_lane, wo.error,
+                wo.agent_instance_id, wo.workflow_instance_id, wo.runtime_mode, wo.processing_version,
                 wo.wait_for, wo.handoff,
                 wo.attempt, wo.created_at, wo.started_at, wo.completed_at, wo.updated_at,
                 latest.summary AS latest_summary
@@ -11691,7 +11868,10 @@ Write the persona now.`;
           depends_on: Array.isArray(row.depends_on) ? row.depends_on : [],
           status: projectedStatus,
           title: row.title, objective: row.objective, kind: row.kind,
-          owner: { slug: row.owner_slug || null, lane: row.owner_lane || null },
+           owner: { slug: row.owner_slug || null, lane: row.owner_lane || null },
+           agent_instance_id: row.agent_instance_id || null,
+           workflow_instance_id: row.workflow_instance_id || null,
+           runtime_mode: row.runtime_mode || 'off', processing_version: Number(row.processing_version || 1),
           attempt: Number(row.attempt || 0), blocker: row.error || null,
           waiting: row.wait_for && typeof row.wait_for === 'object' ? row.wait_for : null,
           handoff: row.handoff && typeof row.handoff === 'object' ? row.handoff : null,
@@ -13125,6 +13305,101 @@ Write the persona now.`;
     // ─── Internal hook: sidecar writes turn events back here ───
     // Sidecar POSTs each JSONL event during execution; we append it to
     // the row and let any open SSE subscriber pick it up on next poll.
+    const grokRoutineTriggerMatch = pathname.match(/^\/internal\/hyper-grok\/v1\/routines\/([0-9a-f-]{36})\/trigger$/i);
+    if (grokRoutineTriggerMatch && req.method === 'POST') {
+      const { verifyGrokWorkflowSecret, evaluateGrokRuntime, grokModeAtLeast, grokWorkflowId, startGrokRoomWorkflow } = await import('./hyperagents/grok-runtime-client.js');
+      if (!verifyGrokWorkflowSecret(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT routine.*, runtime.agent_instance_id, room.user_id, room.participant_ids,
+                room.goal, room.project_id, room.room_mode, room.room_tag
+           FROM "hivemind"."hyper_agent_routines" routine
+           JOIN "hivemind"."hyper_agent_runtimes" runtime ON runtime.id=routine.agent_runtime_id
+           JOIN "hivemind"."hyper_rooms" room ON room.id=routine.room_id
+          WHERE routine.id=$1::uuid AND routine.status='active' AND room.archived_at IS NULL`,
+        grokRoutineTriggerMatch[1],
+      );
+      const routine = rows?.[0];
+      if (!routine) return jsonResponse(res, { error: 'Routine not found' }, 404);
+      const decision = await evaluateGrokRuntime({ orgId: String(routine.org_id), userId: String(routine.user_id) });
+      if (!grokModeAtLeast(decision.mode, 'routines')) return jsonResponse(res, { error: 'Routine feature disabled' }, 403);
+      const bucket = Math.floor(Date.now() / 60000);
+      const idempotencyKey = crypto.createHash('sha256').update(`routine:${routine.id}:${bucket}`).digest('hex').slice(0, 64);
+      const turn = await prisma.$transaction(async (tx) => {
+        const existing = await tx.hyperTurn.findUnique({ where: { idempotencyKey } });
+        if (existing) return existing;
+        const last = await tx.hyperTurn.findFirst({ where: { roomId: String(routine.room_id) }, orderBy: { seq: 'desc' }, select: { seq: true } });
+        const created = await tx.hyperTurn.create({ data: {
+          roomId: String(routine.room_id), seq: Number(last?.seq || 0) + 1,
+          userMessage: `Execute playbook ${routine.playbook_id} version ${routine.playbook_version} for scheduled routine ${routine.id}.`,
+          status: 'live', idempotencyKey, lines: [], grokRuntimeMode: decision.mode,
+          grokRuntimeVersion: decision.version,
+        } });
+        const workflowInstanceId = grokWorkflowId(created.id, decision.version);
+        return tx.hyperTurn.update({ where: { id: created.id }, data: { grokWorkflowInstanceId: workflowInstanceId } });
+      });
+      await startGrokRoomWorkflow({
+        turnId: turn.id, roomId: String(routine.room_id), orgId: String(routine.org_id),
+        userId: String(routine.user_id), mode: decision.mode, version: decision.version,
+      });
+      await prisma.hyperAgentRoutine.update({ where: { id: String(routine.id) }, data: { lastRunAt: new Date() } });
+      return jsonResponse(res, { ok: true, turn_id: turn.id }, 202);
+    }
+
+    const grokAssignmentMatch = pathname.match(/^\/internal\/hyper-grok\/v1\/work-orders\/([0-9a-f-]{36})\/(prepare|reconcile)$/i);
+    if (grokAssignmentMatch && req.method === 'POST') {
+      const { verifyGrokWorkflowSecret, normalizeGrokRuntimeMode, grokAssignmentWorkflowId } = await import('./hyperagents/grok-runtime-client.js');
+      if (!verifyGrokWorkflowSecret(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
+      const body = await parseBody(req).catch(() => ({}));
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT wo.*, turn.grok_runtime_mode, turn.grok_runtime_version,
+                room.org_id AS room_org_id, room.user_id AS room_user_id,
+                result.id AS result_id, result.status AS result_status,
+                result.evidence AS result_evidence, result.artifacts AS result_artifacts,
+                (SELECT count(*)::int FROM "hivemind"."hyper_tool_receipts" receipt
+                  WHERE receipt.work_order_id=wo.id AND receipt.status='completed') AS receipt_count
+           FROM "hivemind"."hyper_work_orders" wo
+           JOIN "hivemind"."hyper_turns" turn ON turn.id=wo.turn_id
+           JOIN "hivemind"."hyper_rooms" room ON room.id=wo.room_id
+           LEFT JOIN LATERAL (
+             SELECT id, status, evidence, artifacts FROM "hivemind"."hyper_work_results"
+              WHERE work_order_id=wo.id ORDER BY attempt DESC, created_at DESC LIMIT 1
+           ) result ON true
+          WHERE wo.id=$1::uuid`, grokAssignmentMatch[1],
+      );
+      const order = rows?.[0];
+      const valid = order && String(order.room_org_id) === String(body.org_id)
+        && String(order.room_user_id) === String(body.user_id)
+        && String(order.turn_id) === String(body.turn_id)
+        && String(order.room_id) === String(body.room_id)
+        && String(order.agent_instance_id) === String(body.agent_instance_id)
+        && normalizeGrokRuntimeMode(order.grok_runtime_mode) === normalizeGrokRuntimeMode(body.mode)
+        && Number(order.grok_runtime_version) === Number(body.processing_version);
+      if (!valid) return jsonResponse(res, { error: 'Assignment not found' }, 404);
+      if (grokAssignmentMatch[2] === 'prepare') {
+        const workflowId = grokAssignmentWorkflowId(order.id, order.processing_version);
+        await prisma.$executeRawUnsafe(
+          `UPDATE "hivemind"."hyper_work_orders" SET workflow_instance_id=$1, updated_at=now()
+            WHERE id=$2::uuid AND org_id=$3::uuid`, workflowId, order.id, order.org_id,
+        );
+        return jsonResponse(res, { ok: true, work_order_id: String(order.id), workflow_instance_id: workflowId });
+      }
+      if (!['completed', 'failed', 'rejected'].includes(String(order.status))) {
+        return jsonResponse(res, { error: 'assignment_not_terminal', retryable: true, status: order.status }, 409);
+      }
+      if (order.status !== 'completed' || order.result_status !== 'completed') {
+        return jsonResponse(res, { error: order.error || 'assignment_failed', retryable: false }, 422);
+      }
+      const requiresReceipt = Array.isArray(order.required_evidence)
+        && order.required_evidence.some((value) => /provider[_ -]?receipt|external[_ -]?action/i.test(String(value)));
+      if (requiresReceipt && Number(order.receipt_count || 0) < 1) {
+        return jsonResponse(res, { error: 'required_provider_receipt_missing', retryable: false }, 422);
+      }
+      return jsonResponse(res, {
+        ok: true, work_order_id: String(order.id), result_id: String(order.result_id),
+        evidence: order.result_evidence || [], artifacts: order.result_artifacts || [],
+      });
+    }
+
     const grokWorkflowMatch = pathname.match(/^\/internal\/hyper-grok\/v1\/turns\/([0-9a-f-]{36})\/(prepare|execute|reconcile)$/i);
     if (grokWorkflowMatch && req.method === 'POST') {
       const { verifyGrokWorkflowSecret, normalizeGrokRuntimeMode } = await import('./hyperagents/grok-runtime-client.js');
@@ -13245,6 +13520,52 @@ Write the persona now.`;
       if (routeResult?.statusCode) return routeResult;
       const { body } = routeResult || {};
       try {
+        if (body.event?.t === 'agent_tool_receipt' && body.event.work_order_id
+            && body.event.agent_instance_id) {
+          const scope = await prisma.hyperTurn.findUnique({
+            where: { id: body.turn_id }, select: { roomId: true, room: { select: { orgId: true } } },
+          });
+          const workOrder = scope && await prisma.hyperWorkOrder.findFirst({
+            where: {
+              id: String(body.event.work_order_id), turnId: body.turn_id,
+              roomId: scope.roomId, orgId: scope.room.orgId,
+              agentInstanceId: String(body.event.agent_instance_id),
+            }, select: { id: true },
+          });
+          if (!workOrder) throw new Error('tool_receipt_scope_mismatch');
+          const actionKey = crypto.createHash('sha256')
+            .update(String(body.event.action_key || body.event.event_id || '')).digest('hex');
+          await prisma.hyperToolReceipt.create({ data: {
+            orgId: scope.room.orgId, roomId: scope.roomId, turnId: body.turn_id,
+            workOrderId: workOrder.id, agentInstanceId: String(body.event.agent_instance_id),
+            actionKey, adapter: String(body.event.adapter || 'tool').slice(0, 80),
+            status: String(body.event.status || 'completed').slice(0, 24),
+            providerReceipt: body.event.provider_receipt || {},
+            artifactRefs: Array.isArray(body.event.artifact_refs) ? body.event.artifact_refs : [],
+          } }).catch((error) => {
+            if (error?.code !== 'P2002') throw error;
+          });
+        }
+        if (body.event?.t === 'agent_assignment_started' && body.event.work_order_id
+            && body.event.agent_instance_id) {
+          const runtime = await prisma.hyperTurn.findUnique({
+            where: { id: body.turn_id },
+            select: {
+              roomId: true, grokRuntimeMode: true, grokRuntimeVersion: true,
+              room: { select: { orgId: true, userId: true } },
+            },
+          });
+          const { grokModeAtLeast, startGrokAssignmentWorkflow } = await import('./hyperagents/grok-runtime-client.js');
+          if (runtime && grokModeAtLeast(runtime.grokRuntimeMode, 'durable_assignments')) {
+            await startGrokAssignmentWorkflow({
+              turnId: body.turn_id, roomId: runtime.roomId,
+              workOrderId: body.event.work_order_id,
+              agentInstanceId: body.event.agent_instance_id,
+              orgId: runtime.room.orgId, userId: runtime.room.userId,
+              mode: runtime.grokRuntimeMode, version: runtime.grokRuntimeVersion,
+            });
+          }
+        }
         if (body.event.t === 'growth_plan_contract') {
           try {
             const sourceTurn = await prisma.hyperTurn.findUnique({
@@ -13425,7 +13746,14 @@ Write the persona now.`;
           logger.warn({ err: _artifactErr.message, turn_id: body.turn_id }, '[hyper-rooms] artifact persist failed (best-effort)');
         }
 
-        return jsonResponse(res, routeResult?.response || { ok: true });
+        const controlTurn = await prisma.hyperTurn.findUnique({
+          where: { id: body.turn_id }, select: { controlState: true, steeringMessages: true },
+        }).catch(() => null);
+        return jsonResponse(res, {
+          ...(routeResult?.response || { ok: true }),
+          control: controlTurn?.controlState || { action: 'run', revision: 0 },
+          steering_messages: controlTurn?.steeringMessages || [],
+        });
       } catch (err) {
         console.warn('[hyper-rooms] turn-event append failed:', err.message);
         return jsonResponse(res, { error: err.message }, 500);

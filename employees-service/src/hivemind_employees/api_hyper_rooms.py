@@ -1136,6 +1136,35 @@ def _msg_to_text(reply: Optional[Msg]) -> str:
     return text
 
 
+async def _collect_agent_tool_receipts(agent: ReActAgent) -> List[Dict[str, Any]]:
+    """Return only structured, provider-identifiable tool results."""
+    try:
+        memory = getattr(agent, "memory", None)
+        rows = await memory.get_memory() if memory and hasattr(memory, "get_memory") else []
+    except Exception:  # noqa: BLE001
+        return []
+    found: List[Dict[str, Any]] = []
+    for message in rows[-80:]:
+        raw = message.to_dict() if hasattr(message, "to_dict") else getattr(message, "content", message)
+        stack = [raw]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, list):
+                stack.extend(value)
+            elif isinstance(value, dict):
+                stack.extend(value.values())
+                status = str(value.get("status") or "").lower()
+                provider_id = next((str(value.get(key)) for key in (
+                    "receipt_id", "message_id", "documentId", "spreadsheetId", "id", "url",
+                ) if value.get(key)), "")
+                tool_name = str(value.get("tool_name") or value.get("name") or value.get("tool") or "")
+                if status in {"success", "sent", "created", "completed", "ok"} and provider_id:
+                    receipt = {"adapter": tool_name[:80] or "tool", "status": "completed", "provider_id": provider_id[:500]}
+                    if receipt not in found:
+                        found.append(receipt)
+    return found[:50]
+
+
 def _web_intel_needed(user_message: str, blackboard: Dict[str, Any], room_template: str) -> bool:
     """Decide whether the turn needs external/public evidence.
 
@@ -3819,8 +3848,31 @@ async def _orchestrate_single_agent(
         or os.environ.get("HYPER_ROOM_MODEL", HYPER_FAST_MODEL)
     )
 
+    steering_messages: List[str] = []
+
     async def _emit(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        return await _emit_event(req.callback_url, req.turn_id, ev)
+        response = await _emit_event(req.callback_url, req.turn_id, ev)
+        if not isinstance(response, dict):
+            return response
+        for row in response.get("steering_messages") or []:
+            message = str((row or {}).get("message") or "").strip()
+            if message and message not in steering_messages:
+                steering_messages.append(message[:4000])
+        control = response.get("control") or {}
+        action = str(control.get("action") or "run").lower()
+        if action == "cancel":
+            raise RuntimeError("cancelled_by_user")
+        while action == "pause":
+            await asyncio.sleep(2)
+            response = await _emit_event(req.callback_url, req.turn_id, {
+                "t": "agent_waiting", "reason": "paused_by_user",
+                "control_revision": control.get("revision"),
+            }) or {}
+            control = response.get("control") or {}
+            action = str(control.get("action") or "run").lower()
+            if action == "cancel":
+                raise RuntimeError("cancelled_by_user")
+        return response
 
     async def _work_order_via_real_agent(
         owner: Dict[str, Any], order: Dict[str, Any], bounded_context: str,
@@ -3837,30 +3889,64 @@ async def _orchestrate_single_agent(
             "agent": owner.get("slug"),
             "agent_instance_id": instance_id,
             "work_order_key": order.get("id") or order.get("title"),
+            "work_order_id": order.get("_work_order_id") or None,
         })
         agent = await _build_agent_for_room(
             req.room_id, owner, user_id=req.user_id, org_id=req.org_id,
-            project_id=req.project_id, allow_web_tools=True,
+            project_id=req.project_id,
+            allow_web_tools=mode_at_least(req.grok_runtime_mode, "browser"),
         )
+        if mode_at_least(req.grok_runtime_mode, "skills"):
+            register_load_skill_tool(agent.toolkit, _room_kind)
+        if mode_at_least(req.grok_runtime_mode, "browser"):
+            from .agents.agentscope_tools import register_cloudflare_browser_tool
+            register_cloudflare_browser_tool(
+                agent.toolkit, str(req.org_id or ""), str(req.user_id or ""),
+                str(req.grok_runtime_mode or "off"),
+            )
+        if mode_at_least(req.grok_runtime_mode, "collaboration"):
+            async def _build_selected_sub_agent(target_row: Dict[str, Any]) -> ReActAgent:
+                return await _build_agent_for_room(
+                    req.room_id, target_row, user_id=req.user_id, org_id=req.org_id,
+                    project_id=req.project_id,
+                    allow_web_tools=mode_at_least(req.grok_runtime_mode, "browser"),
+                )
+            register_delegate_to_tool(
+                agent.toolkit, participants, _build_selected_sub_agent,
+                HYPER_AGENTIC_MAX_DELEGATIONS,
+            )
+        steering_context = "\n".join(f"- {message}" for message in steering_messages[-10:])
         instruction = (
             "You are a persistent hired agent working one durable Room assignment. "
             "Use your real tools when the assignment requires evidence or an external system. "
             "Do not pretend another agent acted. Do not claim an external write without its tool receipt. "
             "Return the actual bounded work product plus unresolved gaps.\n\n"
             + bounded_context[:12000]
+            + (f"\n\nUSER STEERING (latest instructions win):\n{steering_context}" if steering_context else "")
         )
         reply = await agent(Msg(name="user", content=instruction, role="user"))
         text = _msg_to_text(reply).strip()
         if not text:
             raise RuntimeError(f"agent {owner.get('slug')} returned no durable result")
+        receipts = await _collect_agent_tool_receipts(agent)
+        for index, receipt in enumerate(receipts):
+            await _emit({
+                "t": "agent_tool_receipt", "agent": owner.get("slug"),
+                "agent_instance_id": instance_id,
+                "work_order_id": order.get("_work_order_id") or None,
+                "action_key": f"{order.get('_work_order_id')}:{index}:{receipt.get('provider_id')}",
+                "adapter": receipt.get("adapter"), "status": receipt.get("status"),
+                "provider_receipt": receipt,
+            })
         await _emit({
             "t": "agent_assignment_completed",
             "agent": owner.get("slug"),
             "agent_instance_id": instance_id,
             "work_order_key": order.get("id") or order.get("title"),
+            "work_order_id": order.get("_work_order_id") or None,
             "status": "submitted",
         })
-        return {"text": text, "evidence": [], "artifacts": [], "usage": {}}
+        return {"text": text, "evidence": [], "artifacts": [], "tool_receipts": receipts, "usage": {}}
 
     # Quality mode → model combo. 'best' = all gpt-oss-120b (max rigor). 'auto' =
     # cheap gather + debate, strong 120b SYNTHESIS (the synth anchors quality; the

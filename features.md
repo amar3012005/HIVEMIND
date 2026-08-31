@@ -266,3 +266,31 @@ verification, and its independent rollback control.
   Python 3.12, 25 affected Core route/recovery tests, 2 Core runtime tests,
   Worker typecheck, 4 Worker contract tests, and a Wrangler local dry run all
   passed. Shared local containers and production were not changed.
+
+## feature-20260831T020000Z — Complete durable HyperAgent control plane (local branch)
+
+- Session status: implemented on `codex/grok-hyperagents-v1`; production,
+  Flagship targeting, and the shared local stack remain unchanged pending
+  governed integration into `singulance-local`.
+- Durability: each selected participant has a deterministic assignment
+  Workflow, persistent Agent assignment state, PostgreSQL receipts, projection
+  reconciliation, duplicate-safe IDs, and fail-closed capability gaps.
+- Human control: pause, resume, cancel, and steering are persisted per turn and
+  honored by the running Employees executor rather than existing only in UI.
+- Collaboration: real participant delegation is available only at
+  `collaboration+`; absent capabilities create a visible specialist request
+  instead of an invented persona.
+- Browser and compute: `browser+` binds Cloudflare Browser Run and an isolated
+  `@cloudflare/sandbox@next` container. Public-HTTPS SSRF checks, bounded output,
+  argv-only execution, an executable allowlist, tenant/work-order isolation,
+  and authority gating apply.
+- Skills and routines: skill versions are immutable and require two independent
+  successful WorkOrder validation receipts before activation. Persistent Agents
+  own cron/interval/delayed schedules; each trigger creates an idempotent,
+  tenant-scoped HyperTurn and re-evaluates the fail-closed flag.
+- Frontend: Da-vinci commit `e674f3e` adds runtime/active-agent visibility and
+  live pause, resume, cancel, and steering controls.
+- Verification: Prisma validation/generation, Core runtime `3/3`, Core HyperRoom
+  routes `4/4`, Worker contract `5/5`, Worker TypeScript, Wrangler local dry-run,
+  Sandbox image build, Python changed-file compilation, and the optimized
+  Da-vinci frontend build passed.

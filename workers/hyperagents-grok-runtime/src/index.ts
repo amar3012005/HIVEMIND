@@ -1,7 +1,9 @@
 import { Agent, getAgentByName, routeAgentRequest } from 'agents';
+import { connectBrowserSession, createBrowserSession, type BrowserBinding } from 'agents/browser';
+import { getSandbox, Sandbox } from '@cloudflare/sandbox';
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { modeRank, normalizeMode, type RuntimeMode, type TurnParams, validParams, workflowId } from './contract';
+import { assignmentWorkflowId, modeRank, normalizeMode, type AssignmentParams, type RuntimeMode, type TurnParams, validAssignmentParams, validParams, workflowId } from './contract';
 
 interface Env {
   ENVIRONMENT: string;
@@ -15,6 +17,25 @@ interface Env {
   };
   HIRED_HYPER_AGENT: DurableObjectNamespace<HiredHyperAgent>;
   ROOM_RUN_WORKFLOW: Workflow<TurnParams>;
+  AGENT_ASSIGNMENT_WORKFLOW: Workflow<AssignmentParams>;
+  BROWSER: BrowserBinding;
+  Sandbox: DurableObjectNamespace<Sandbox>;
+}
+
+export { Sandbox };
+
+function safePublicUrl(value: unknown): URL | null {
+  try {
+    const url = new URL(String(value || ''));
+    if (url.protocol !== 'https:') return null;
+    const host = url.hostname.toLowerCase();
+    if (host === 'localhost' || host.endsWith('.local') || /^(127\.|10\.|192\.168\.|169\.254\.)/.test(host)) return null;
+    return url;
+  } catch { return null; }
+}
+
+function bounded(value: unknown, limit = 100_000): string {
+  return String(value ?? '').slice(0, limit);
 }
 
 type AgentManifest = {
@@ -25,11 +46,26 @@ type AgentState = {
   manifest: AgentManifest | null;
   status: 'idle' | 'active' | 'working' | 'waiting' | 'complete' | 'blocked';
   assignments: string[];
+  routines: string[];
   updated_at: number;
 };
 
 export class HiredHyperAgent extends Agent<Env, AgentState> {
-  initialState: AgentState = { manifest: null, status: 'idle', assignments: [], updated_at: 0 };
+  initialState: AgentState = { manifest: null, status: 'idle', assignments: [], routines: [], updated_at: 0 };
+
+  validateStateChange(next: AgentState) {
+    if (next.assignments.length > 100 || next.routines.length > 100) throw new Error('agent_state_limit');
+    if (next.manifest && this.state.manifest
+        && next.manifest.employee_id !== this.state.manifest.employee_id) throw new Error('agent_identity_immutable');
+  }
+
+  async runRoutine(payload: { routine_id: string }) {
+    const response = await fetch(
+      `${this.env.HIVEMIND_CORE_URL.replace(/\/$/, '')}/internal/hyper-grok/v1/routines/${payload.routine_id}/trigger`,
+      { method: 'POST', headers: { authorization: `Bearer ${this.env.HYPER_GROK_WORKFLOW_SECRET}` } },
+    );
+    if (!response.ok) throw new Error(`routine_trigger_${response.status}`);
+  }
 
   async onRequest(request: Request): Promise<Response> {
     if (!await authorized(request, this.env)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
@@ -43,6 +79,37 @@ export class HiredHyperAgent extends Agent<Env, AgentState> {
       }
       this.setState({ ...this.state, manifest, updated_at: Date.now() });
       return Response.json({ ok: true, agent_instance_id: manifest.agent_instance_id });
+    }
+    if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/assignment')) {
+      const body = await request.json<{ work_order_id?: string; status?: AgentState['status'] }>()
+        .catch(() => ({})) as { work_order_id?: string; status?: AgentState['status'] };
+      const workOrderId = String(body.work_order_id || '');
+      if (!this.state.manifest || !/^[0-9a-f-]{36}$/i.test(workOrderId)) {
+        return Response.json({ error: 'invalid_assignment' }, { status: 400 });
+      }
+      const assignments = body.status === 'complete'
+        ? this.state.assignments.filter((id) => id !== workOrderId)
+        : Array.from(new Set([...this.state.assignments, workOrderId])).slice(-100);
+      this.setState({
+        ...this.state, assignments, status: body.status === 'complete' ? 'idle' : 'working', updated_at: Date.now(),
+      });
+      return Response.json({ ok: true, assignments, status: this.state.status });
+    }
+    if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/routine')) {
+      const body = await request.json<{
+        routine_id?: string; schedule_type?: string; schedule_expression?: string;
+      }>().catch(() => ({})) as { routine_id?: string; schedule_type?: string; schedule_expression?: string };
+      const routineId = String(body.routine_id || '');
+      const expression = String(body.schedule_expression || '');
+      if (!this.state.manifest || !/^[0-9a-f-]{36}$/i.test(routineId) || !expression) {
+        return Response.json({ error: 'invalid_routine' }, { status: 400 });
+      }
+      let schedule;
+      if (body.schedule_type === 'cron') schedule = await this.schedule(expression, 'runRoutine', { routine_id: routineId });
+      else if (body.schedule_type === 'interval') schedule = await this.scheduleEvery(Number(expression), 'runRoutine', { routine_id: routineId });
+      else schedule = await this.schedule(Number(expression), 'runRoutine', { routine_id: routineId });
+      this.setState({ ...this.state, routines: Array.from(new Set([...this.state.routines, routineId])).slice(-100), updated_at: Date.now() });
+      return Response.json({ ok: true, schedule_id: schedule.id });
     }
     if (request.method === 'GET') return Response.json(this.state);
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
@@ -105,6 +172,22 @@ async function core(env: Env, params: TurnParams, action: 'prepare' | 'execute' 
   return JSON.stringify(body);
 }
 
+async function coreAssignment(env: Env, params: AssignmentParams, action: 'prepare' | 'reconcile'): Promise<string> {
+  const response = await fetch(
+    `${env.HIVEMIND_CORE_URL.replace(/\/$/, '')}/internal/hyper-grok/v1/work-orders/${params.work_order_id}/${action}`,
+    { method: 'POST', headers: {
+      authorization: `Bearer ${env.HYPER_GROK_WORKFLOW_SECRET}`, 'content-type': 'application/json',
+    }, body: JSON.stringify(params) },
+  );
+  const body: Record<string, unknown> = await response.json<Record<string, unknown>>().catch(() => ({}));
+  if (!response.ok) {
+    const message = String(body.error || `core_assignment_http_${response.status}`);
+    if (body.retryable === false || [400, 401, 403, 404, 422].includes(response.status)) throw new NonRetryableError(message);
+    throw new Error(message);
+  }
+  return JSON.stringify(body);
+}
+
 async function provisionRoster(env: Env, params: TurnParams): Promise<{ count: number }> {
   const prepared = JSON.parse(await core(env, params, 'prepare')) as { agents?: AgentManifest[] };
   for (const manifest of prepared.agents || []) {
@@ -145,6 +228,27 @@ export class HyperRoomRunWorkflow extends WorkflowEntrypoint<Env, TurnParams> {
   }
 }
 
+export class HyperAgentAssignmentWorkflow extends WorkflowEntrypoint<Env, AssignmentParams> {
+  async run(event: WorkflowEvent<AssignmentParams>, step: WorkflowStep) {
+    const params = event.payload;
+    if (!validAssignmentParams(params) || modeRank(params.mode) < modeRank('durable_assignments')) {
+      throw new NonRetryableError('invalid_assignment_payload');
+    }
+    await step.do('verify assignment authority', { retries: { limit: 5, delay: '10 seconds' } },
+      () => coreAssignment(this.env, params, 'prepare'));
+    const result = await step.do('reconcile persisted work result', {
+      retries: { limit: 60, delay: '30 seconds', backoff: 'constant' }, timeout: '35 minutes',
+    }, () => coreAssignment(this.env, params, 'reconcile'));
+    const agent = await getAgentByName(this.env.HIRED_HYPER_AGENT, params.agent_instance_id);
+    await agent.fetch(new Request('https://agent.internal/assignment', {
+      method: 'POST', headers: {
+        authorization: `Bearer ${this.env.HYPER_GROK_WORKFLOW_SECRET}`, 'content-type': 'application/json',
+      }, body: JSON.stringify({ work_order_id: params.work_order_id, status: 'complete' }),
+    }));
+    return { ok: true, result };
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const routed = await routeAgentRequest(request, env);
@@ -171,6 +275,44 @@ export default {
       }
       return Response.json({ ok: true, instance_id: id }, { status: 202 });
     }
+    if (url.pathname === '/assignments/start' && request.method === 'POST') {
+      const params = await request.json<unknown>().catch(() => null);
+      if (!validAssignmentParams(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
+      const live = await decision(env, params.org_id, params.user_id);
+      if (live.mode !== params.mode || modeRank(live.mode) < modeRank('durable_assignments')) {
+        return Response.json({ error: 'feature_disabled_or_mismatch' }, { status: 403 });
+      }
+      const id = assignmentWorkflowId(params.work_order_id, params.processing_version);
+      const agent = await getAgentByName(env.HIRED_HYPER_AGENT, params.agent_instance_id);
+      const state = await agent.fetch(new Request('https://agent.internal/assignment', {
+        method: 'POST', headers: {
+          authorization: `Bearer ${env.HYPER_GROK_WORKFLOW_SECRET}`, 'content-type': 'application/json',
+        }, body: JSON.stringify({ work_order_id: params.work_order_id, status: 'working' }),
+      }));
+      if (!state.ok) return Response.json({ error: 'agent_assignment_state_failed' }, { status: 409 });
+      try { await env.AGENT_ASSIGNMENT_WORKFLOW.create({ id, params }); }
+      catch { /* deterministic duplicate: the existing Workflow remains authoritative */ }
+      return Response.json({ ok: true, instance_id: id }, { status: 202 });
+    }
+    if (url.pathname === '/routines/schedule' && request.method === 'POST') {
+      const params = await request.json<{
+        org_id?: string; user_id?: string; agent_instance_id?: string; mode?: RuntimeMode;
+        routine_id?: string; schedule_type?: string; schedule_expression?: string;
+      }>().catch(() => ({})) as Record<string, string>;
+      const live = await decision(env, params.org_id || '', params.user_id || '');
+      if (live.mode !== params.mode || modeRank(live.mode) < modeRank('routines')) {
+        return Response.json({ error: 'feature_disabled_or_mismatch' }, { status: 403 });
+      }
+      if (!/^ha-[a-f0-9]{32}-v[1-9][0-9]*$/i.test(params.agent_instance_id || '')) {
+        return Response.json({ error: 'invalid_agent_instance' }, { status: 400 });
+      }
+      const agent = await getAgentByName(env.HIRED_HYPER_AGENT, params.agent_instance_id);
+      return agent.fetch(new Request('https://agent.internal/routine', {
+        method: 'POST', headers: {
+          authorization: `Bearer ${env.HYPER_GROK_WORKFLOW_SECRET}`, 'content-type': 'application/json',
+        }, body: JSON.stringify(params),
+      }));
+    }
     if (url.pathname === '/provision' && request.method === 'POST') {
       const params = await request.json<unknown>().catch(() => null);
       if (!validParams(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
@@ -179,6 +321,66 @@ export default {
         return Response.json({ error: 'feature_disabled_or_mismatch' }, { status: 403 });
       }
       return Response.json({ ok: true, ...(await provisionRoster(env, params)) });
+    }
+    if (url.pathname === '/browser/execute' && request.method === 'POST') {
+      const body = await request.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+      const orgId = String(body.org_id || ''); const userId = String(body.user_id || '');
+      const live = await decision(env, orgId, userId);
+      if (modeRank(live.mode) < modeRank('browser') || live.mode !== body.mode) {
+        return Response.json({ error: 'feature_disabled_or_mismatch' }, { status: 403 });
+      }
+      const destination = safePublicUrl(body.url);
+      if (!destination) return Response.json({ error: 'invalid_public_https_url' }, { status: 400 });
+      const browser = await createBrowserSession(env.BROWSER, { keepAliveMs: 300_000, includeTargets: true, recording: true });
+      const cdp = await connectBrowserSession(env.BROWSER, browser.sessionId, 20_000);
+      try {
+        const target = browser.targets?.find((candidate) => candidate.type === 'page') || browser.targets?.[0];
+        if (!target?.id) throw new Error('browser_target_unavailable');
+        const sessionId = await cdp.attachToTarget(target.id, { timeoutMs: 20_000 });
+        await cdp.send('Page.enable', {}, { sessionId, timeoutMs: 10_000 });
+        await cdp.send('Page.navigate', { url: destination.toString() }, { sessionId, timeoutMs: 20_000 });
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        const evaluated = await cdp.send('Runtime.evaluate', {
+          expression: 'JSON.stringify({title:document.title,url:location.href,text:(document.body?.innerText||"").slice(0,100000)})',
+          returnByValue: true,
+        }, { sessionId, timeoutMs: 20_000 }) as { result?: { value?: string } };
+        const page = JSON.parse(evaluated.result?.value || '{}') as Record<string, unknown>;
+        return Response.json({ ok: true, session_id: browser.sessionId, target_id: target.id,
+          live_view_url: target.devtoolsFrontendUrl || null, page: { title: bounded(page.title, 500), url: bounded(page.url, 4_000), text: bounded(page.text) } });
+      } finally { cdp.disconnect(); }
+    }
+    if (url.pathname === '/sandbox/execute' && request.method === 'POST') {
+      const body = await request.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+      const orgId = String(body.org_id || ''); const userId = String(body.user_id || '');
+      const live = await decision(env, orgId, userId);
+      if (modeRank(live.mode) < modeRank('browser') || live.mode !== body.mode || body.authority_granted !== true) {
+        return Response.json({ error: 'feature_disabled_or_authority_required' }, { status: 403 });
+      }
+      const argv = Array.isArray(body.argv) ? body.argv.map(String) : [];
+      const allowed = new Set(['python3', 'node', 'git', 'npm', 'npx', 'bash']);
+      if (!argv.length || !allowed.has(argv[0]) || argv.length > 64 || argv.some((arg) => arg.length > 8_000)) {
+        return Response.json({ error: 'invalid_sandbox_command' }, { status: 400 });
+      }
+      const opaqueId = `ha-${await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${orgId}:${body.work_order_id || ''}`))
+        .then((digest) => Array.from(new Uint8Array(digest)).slice(0, 16).map((byte) => byte.toString(16).padStart(2, '0')).join(''))}`;
+      const sandbox = getSandbox(env.Sandbox, opaqueId);
+      const process = await sandbox.exec(argv as [string, ...string[]], { timeout: 120_000 });
+      const output = await process.output({ encoding: 'utf8' });
+      return Response.json({ ok: output.exitCode === 0, process_id: process.id, exit_code: output.exitCode,
+        timed_out: output.timedOut, truncated: output.truncated, stdout: bounded(output.stdout), stderr: bounded(output.stderr) });
+    }
+    const workflowControl = url.pathname.match(/^\/workflows\/([^/]+)\/control$/);
+    if (workflowControl && request.method === 'POST') {
+      const body = await request.json<{ action?: string }>().catch(() => ({})) as { action?: string };
+      const action = String(body.action || '');
+      if (!['pause', 'resume', 'terminate'].includes(action)) {
+        return Response.json({ error: 'invalid_control_action' }, { status: 400 });
+      }
+      const instance = await env.ROOM_RUN_WORKFLOW.get(decodeURIComponent(workflowControl[1]));
+      if (action === 'pause') await instance.pause();
+      else if (action === 'resume') await instance.resume();
+      else await instance.terminate();
+      return Response.json({ ok: true, action });
     }
     return Response.json({ error: 'Not found' }, { status: 404 });
   },

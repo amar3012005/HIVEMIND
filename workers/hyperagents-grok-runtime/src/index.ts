@@ -339,15 +339,26 @@ export default {
         const sessionId = await cdp.attachToTarget(target.id, { timeoutMs: 20_000 });
         await cdp.send('Page.enable', {}, { sessionId, timeoutMs: 10_000 });
         await cdp.send('Page.navigate', { url: destination.toString() }, { sessionId, timeoutMs: 20_000 });
-        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        // Commerce pages commonly hydrate prices after the load event and
+        // lazy-render product cards only after a scroll. A one-second snapshot
+        // captured navigation/footer text while omitting the requested prices.
+        await new Promise((resolve) => setTimeout(resolve, 2_500));
+        await cdp.send('Runtime.evaluate', {
+          expression: 'window.scrollTo(0, Math.max(document.body?.scrollHeight||0, document.documentElement?.scrollHeight||0)); true',
+          returnByValue: true,
+        }, { sessionId, timeoutMs: 10_000 });
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
         const evaluated = await cdp.send('Runtime.evaluate', {
-          expression: 'JSON.stringify({title:document.title,url:location.href,text:(document.body?.innerText||"").slice(0,100000),links:Array.from(document.querySelectorAll("a[href]")).slice(0,250).map(a=>({text:(a.innerText||a.getAttribute("aria-label")||"").trim().slice(0,240),url:a.href})).filter(x=>x.text&&x.url)})',
+          expression: String.raw`JSON.stringify((()=>{const text=(document.body?.innerText||"");const html=document.documentElement?.innerHTML||"";const pricePattern=/(?:[$€£]\s?\d[\d,.]*(?:\.\d{2})?|\d[\d,.]*(?:\.\d{2})?\s?(?:USD|EUR|GBP))/gi;const priceEvidence=[];for(const source of [text,html]){for(const match of source.matchAll(pricePattern)){const i=match.index||0;const excerpt=source.slice(Math.max(0,i-100),Math.min(source.length,i+match[0].length+160)).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();if(excerpt&&!priceEvidence.includes(excerpt))priceEvidence.push(excerpt);if(priceEvidence.length>=80)break;}if(priceEvidence.length>=80)break;}const structured=Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s=>(s.textContent||"").trim().slice(0,20000)).filter(Boolean).slice(0,10);const priceMeta=Array.from(document.querySelectorAll('meta[property*="price" i],meta[name*="price" i],meta[itemprop*="price" i]')).map(m=>({key:m.getAttribute("property")||m.getAttribute("name")||m.getAttribute("itemprop")||"price",content:m.getAttribute("content")||""})).filter(x=>x.content).slice(0,50);return{title:document.title,url:location.href,text:text.slice(0,100000),priceEvidence,structured,priceMeta,links:Array.from(document.querySelectorAll("a[href]")).slice(0,500).map(a=>({text:(a.innerText||a.getAttribute("aria-label")||"").trim().slice(0,240),url:a.href})).filter(x=>x.text&&x.url)}})())`,
           returnByValue: true,
         }, { sessionId, timeoutMs: 20_000 }) as { result?: { value?: string } };
         const page = JSON.parse(evaluated.result?.value || '{}') as Record<string, unknown>;
         return Response.json({ ok: true, session_id: browser.sessionId, target_id: target.id,
           live_view_url: target.devtoolsFrontendUrl || null, page: {
             title: bounded(page.title, 500), url: bounded(page.url, 4_000), text: bounded(page.text),
+            price_evidence: Array.isArray(page.priceEvidence) ? page.priceEvidence.slice(0, 80) : [],
+            structured: Array.isArray(page.structured) ? page.structured.slice(0, 20) : [],
+            price_meta: Array.isArray(page.priceMeta) ? page.priceMeta.slice(0, 50) : [],
             links: Array.isArray(page.links) ? page.links.slice(0, 250) : [],
           } });
       } finally { cdp.disconnect(); }

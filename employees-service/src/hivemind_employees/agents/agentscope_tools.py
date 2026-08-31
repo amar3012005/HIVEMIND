@@ -1334,23 +1334,38 @@ def register_cloudflare_browser_tool(
             payload = response.json()
             page = payload.get("page") or {}
             links = [row for row in (page.get("links") or []) if isinstance(row, dict)][:250]
+            price_evidence = [str(row)[:1200] for row in (page.get("price_evidence") or []) if str(row).strip()][:80]
+            price_meta = [row for row in (page.get("price_meta") or []) if isinstance(row, dict)][:50]
+            structured = [str(row)[:6000] for row in (page.get("structured") or []) if str(row).strip()][:10]
             link_text = "\n".join(
                 f"- {str(row.get('text') or '')[:240]}: {str(row.get('url') or '')[:1000]}"
                 for row in links
                 if str(row.get("text") or "").strip() and str(row.get("url") or "").strip()
             )
+            pricing_text = "\n".join(f"- {row}" for row in price_evidence)
+            meta_text = "\n".join(
+                f"- {str(row.get('key') or 'price')[:120]}: {str(row.get('content') or '')[:500]}"
+                for row in price_meta
+            )
+            structured_text = "\n".join(structured)
+            receipt_excerpt = (
+                f"Rendered price evidence:\n{pricing_text}\nPrice metadata:\n{meta_text}\n\n"
+                f"{str(page.get('text') or '')[:4000]}"
+            )[:8000]
             _record_agent_tool_receipt({
                 "adapter": "cloudflare_browser",
                 "status": "completed",
                 "provider_id": str(payload.get("session_id") or ""),
                 "url": str(page.get("url") or url)[:1000],
                 "title": str(page.get("title") or "")[:300],
-                "excerpt": str(page.get("text") or "")[:2000],
+                "excerpt": receipt_excerpt,
                 "live_view_url": str(payload.get("live_view_url") or "")[:1000],
             })
             return _tool_response_text(
                 f"Title: {page.get('title') or ''}\nURL: {page.get('url') or ''}\n\n"
-                f"{page.get('text') or ''}\n\nRendered links:\n{link_text}",
+                f"Rendered price evidence:\n{pricing_text}\n\nPrice metadata:\n{meta_text}\n\n"
+                f"Structured product data:\n{structured_text}\n\nVisible page text:\n{page.get('text') or ''}"
+                f"\n\nRendered links:\n{link_text}",
                 metadata={
                     "adapter": "cloudflare_browser", "status": "completed",
                     "provider_id": payload.get("session_id"),

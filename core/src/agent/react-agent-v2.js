@@ -1211,6 +1211,13 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
 
   const recallExtras = {
     _structured_intent: true,
+    // Planner-extracted names are ranking/coverage anchors, not proof that
+    // every historical row already has the canonical `entity:*` tag. A hard
+    // tag predicate made pre-canonical memories disappear before the existing
+    // text/entity compatibility check could run. `should` keeps the dedicated
+    // entity lane and exact lexical query additive; downstream coverage still
+    // requires every requested entity to occur in the delivered packet.
+    entity_filter_mode: 'should',
     // Latched once by the authenticated chat route. The recall tool receives
     // the same fail-closed rollout decision as the public recall endpoint.
     reliability_v1: ctx.recallReliabilityV1 === true,

@@ -241,6 +241,17 @@ test('validator reconciles exact-source and temporal semantics before tool compi
   assert.equal(history.plan.operation, 'timeline');
   assert.ok(history.repairs.includes('operation.time_semantics'));
   assert.equal(history.plan.steps[0].tool, 'hivemind_timeline');
+
+  const yearTitlePlan = makePlan({
+    operation: 'timeline',
+    query: 'List all creative roles in the source',
+    source: { title: '1981-60th-AnnualTeil2-ocr-canary.pdf', document_id: null, kind: 'pdf', selection: null },
+    time: { semantics: 'timeline', axis: 'valid_time' },
+  });
+  const yearTitle = validateNativePlanResult(yearTitlePlan);
+  assert.equal(yearTitle.plan.operation, 'source_read');
+  assert.equal(yearTitle.plan.time.semantics, 'none');
+  assert.ok(yearTitle.repairs.includes('operation.source_title_not_timeline'));
 });
 
 test('validator derives a missing read query from the required answer objective', () => {

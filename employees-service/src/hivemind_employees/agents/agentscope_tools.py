@@ -1344,17 +1344,24 @@ def register_cloudflare_browser_tool(
             response.raise_for_status()
             payload = response.json()
             page = payload.get("page") or {}
-            links = [row for row in (page.get("links") or []) if isinstance(row, dict)][:250]
-            structured = [str(row)[:6000] for row in (page.get("structured") or []) if str(row).strip()][:10]
+            # Browser Run keeps the complete page/screenshot as durable
+            # evidence. The model receives only a bounded working excerpt;
+            # returning hundreds of links, full DOM text and all structured
+            # blocks caused every later ReAct call to resend tens of thousands
+            # of tokens.
+            links = [row for row in (page.get("links") or []) if isinstance(row, dict)][:30]
+            structured = [str(row)[:1500] for row in (page.get("structured") or []) if str(row).strip()][:6]
             link_text = "\n".join(
                 f"- {str(row.get('text') or '')[:240]}: {str(row.get('url') or '')[:1000]}"
                 for row in links
                 if str(row.get("text") or "").strip() and str(row.get("url") or "").strip()
             )
-            structured_text = "\n".join(structured)
+            structured_text = "\n".join(structured)[:6000]
+            link_text = link_text[:6000]
+            visible_text = str(page.get("text") or "")[:8000]
             screenshot = payload.get("screenshot") if isinstance(payload.get("screenshot"), dict) else {}
             tabs = [row for row in (payload.get("tabs") or []) if isinstance(row, dict)][:24]
-            receipt_excerpt = str(page.get("text") or "")[:8000]
+            receipt_excerpt = visible_text[:4000]
             valid = bool(page.get("page_valid"))
             receipt = {
                 "adapter": "cloudflare_browser",
@@ -1383,7 +1390,7 @@ def register_cloudflare_browser_tool(
                 f"Evidence status: {'valid' if valid else 'invalid'}"
                 f"{(' — ' + str(page.get('invalid_reason'))) if page.get('invalid_reason') else ''}\n"
                 f"Content hash: {page.get('content_hash') or ''}\n"
-                f"Structured page data:\n{structured_text}\n\nVisible page text:\n{page.get('text') or ''}"
+                f"Structured page data:\n{structured_text}\n\nVisible page text:\n{visible_text}"
                 f"\n\nRendered links:\n{link_text}",
                 metadata={
                     "adapter": "cloudflare_browser", "status": "completed" if valid else "invalid",

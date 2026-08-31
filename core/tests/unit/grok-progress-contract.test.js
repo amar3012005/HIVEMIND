@@ -18,5 +18,7 @@ test('Grok assignment progress persists heartbeats and immediate receipts', () =
   assert.match(employees, /HYPER_GROK_HEARTBEAT_SECONDS/);
   assert.match(employees, /receipt_callback=_persist_live_receipt/);
   assert.match(employees, /HYPER_GROK_INLINE_DELEGATION_ENABLED/);
+  assert.match(employees, /reuse_model_context=False/);
   assert.match(browser, /await receipt_callback\(dict\(receipt\)\)/);
+  assert.match(browser, /visible_text = str\(page\.get\("text"\) or ""\)\[:8000\]/);
 });

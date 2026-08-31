@@ -22,9 +22,12 @@ class _Response:
                 "page_valid": True,
                 "url": "https://example.com/pricing",
                 "title": "Current pricing",
-                "text": "Model A starts at $999",
-                "links": [],
-                "structured": [],
+                "text": "Model A starts at $999" + (" x" * 6000) + "UNBOUNDED_TEXT_MARKER",
+                "links": [
+                    {"text": f"link-{index}", "url": f"https://example.com/{index}"}
+                    for index in range(80)
+                ],
+                "structured": [f"row-{index}-" + ("y" * 2500) for index in range(20)],
                 "content_hash": "content-hash-1",
                 "captured_at": "2026-08-31T16:00:00Z",
             },
@@ -74,7 +77,7 @@ def test_browser_receipt_is_streamed_before_agent_loop_finishes(monkeypatch):
         receipt_callback=callback,
     )
 
-    asyncio.run(toolkit.function("https://example.com/pricing"))
+    result = asyncio.run(toolkit.function("https://example.com/pricing"))
 
     ledger = drain_agent_tool_receipts()
     assert len(emitted) == 1
@@ -82,3 +85,5 @@ def test_browser_receipt_is_streamed_before_agent_loop_finishes(monkeypatch):
     assert emitted[0]["content_hash"] == "content-hash-1"
     assert len(ledger) == 1
     assert ledger[0]["url"] == "https://example.com/pricing"
+    assert len(emitted[0]["excerpt"]) <= 4000
+    assert "UNBOUNDED_TEXT_MARKER" not in str(result)

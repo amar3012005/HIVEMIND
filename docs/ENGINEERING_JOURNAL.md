@@ -2274,3 +2274,34 @@ git diff --check: passed (line-ending warnings only)
   this pushed Git journal entry is the durable handoff record pending memory
   service availability.
 - No production deployment or production configuration change occurred.
+
+## 2026-08-31 UTC — HyperAgent GLM context amplification fix
+
+### Root cause and patch
+
+- Live Employees logs showed one GLM ReAct sequence repeatedly submitting
+  through Cloudflare AI Gateway while browser actions and retries accumulated.
+- `_build_agent_for_room` cached one AgentScope `ReActAgent` per Room employee,
+  which retained its raw `InMemoryMemory` across WorkOrders and turns. This
+  conflated durable employee identity with an ever-growing model transcript.
+- The browser tool also returned up to 250 links, 60,000 characters of
+  structured blocks, and the full rendered page text to every later ReAct
+  iteration. Together these paths explain observed inputs near 100k tokens.
+- Grok WorkOrders now build a fresh assignment-scoped model context while
+  identity/preferences remain durable in Cloudflare, PostgreSQL and HIVEMIND.
+  Browser model results are bounded to 30 links, 6,000 structured characters,
+  8,000 visible-text characters, and a 4,000-character persisted excerpt;
+  complete screenshots and content hashes remain durable receipts.
+
+### Verification
+
+- Employee runtime focused suite -> `42 passed`.
+- Core Grok/event contract suite -> `7 passed`, `0 failed`.
+- Python compilation and `git diff --check` exited successfully.
+
+### Release status
+
+- This patch extends the pushed local candidate branch only. The shared local
+  integration worktree remains dirty in an unrelated generated connector file,
+  so no merge, container rebuild, Flagship mutation or production action was
+  performed.

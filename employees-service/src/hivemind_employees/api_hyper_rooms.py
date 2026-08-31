@@ -962,8 +962,9 @@ async def _build_agent_for_room(
     org_id: Optional[str] = None,
     project_id: Optional[str] = None,
     allow_web_tools: bool = False,
+    reuse_model_context: bool = True,
 ) -> ReActAgent:
-    """Cache one agent per (room, employee) so memory carries across turns.
+    """Build an employee agent, optionally reusing legacy conversational context.
 
     Overrides the employee's `tools` list with the full HIVEMIND toolset
     (read paths + save + time-travel; web only for the dedicated intel worker) so swarm agents have the
@@ -978,7 +979,7 @@ async def _build_agent_for_room(
     except Exception:  # noqa: BLE001 — never fail a turn over connectors
         emp_connectors = []
     key = f"{room_id}:{emp['id']}:{','.join(sorted(emp_connectors))}"
-    if key in _ROOM_AGENTS:
+    if reuse_model_context and key in _ROOM_AGENTS:
         return _ROOM_AGENTS[key]
     boot = {b["id"]: b for b in await fetch_bootstrap()}
     boot_emp = boot.get(emp["id"], {}) or {}
@@ -1005,7 +1006,8 @@ async def _build_agent_for_room(
             "active_prompt_version": boot_emp.get("active_prompt_version"),
         }
         agent = build_react_agent(merged, "", user_id=user_id, org_id=org_id, project_id=project_id)
-        _ROOM_AGENTS[key] = agent
+        if reuse_model_context:
+            _ROOM_AGENTS[key] = agent
         return agent
     merged = {
         **emp,
@@ -1018,7 +1020,8 @@ async def _build_agent_for_room(
         "active_prompt_version": boot_emp.get("active_prompt_version"),
     }
     agent = build_react_agent(merged, api_key, user_id=user_id, org_id=org_id, project_id=project_id)
-    _ROOM_AGENTS[key] = agent
+    if reuse_model_context:
+        _ROOM_AGENTS[key] = agent
     return agent
 
 
@@ -3949,6 +3952,12 @@ async def _orchestrate_single_agent(
             req.room_id, bounded_owner, user_id=req.user_id, org_id=req.org_id,
             project_id=req.project_id,
             allow_web_tools=mode_at_least(req.grok_runtime_mode, "browser"),
+            # Durable employee identity lives in Cloudflare/PostgreSQL/HIVEMIND.
+            # A WorkOrder gets a fresh bounded model transcript. Reusing the
+            # legacy room-level AgentScope InMemoryMemory resent every prior
+            # prompt and tool result on each ReAct step (observed near 100k
+            # input tokens after browser retries).
+            reuse_model_context=False,
         )
         if mode_at_least(req.grok_runtime_mode, "skills"):
             register_load_skill_tool(agent.toolkit, _room_kind)
@@ -3974,6 +3983,7 @@ async def _orchestrate_single_agent(
                     req.room_id, target_row, user_id=req.user_id, org_id=req.org_id,
                     project_id=req.project_id,
                     allow_web_tools=mode_at_least(req.grok_runtime_mode, "browser"),
+                    reuse_model_context=False,
                 )
             register_delegate_to_tool(
                 agent.toolkit, participants, _build_selected_sub_agent,

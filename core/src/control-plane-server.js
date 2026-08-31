@@ -1288,6 +1288,9 @@ function dispatchHyperRoomTurn(body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: payload,
+    timeoutMs: grokModeAtLeast(payload?.grok_runtime_mode, 'durable_assignments')
+      ? 30 * 60 * 1000
+      : 90_000,
   });
 }
 
@@ -13490,6 +13493,18 @@ Write the persona now.`;
       if (action === 'reconcile') {
         if (!['complete', 'failed', 'cost_capped'].includes(turn.status)) {
           return jsonResponse(res, { error: 'turn_not_terminal', retryable: true, status: turn.status }, 409);
+        }
+        const unfinishedAssignments = await prisma.hyperWorkOrder.count({
+          where: {
+            turnId: turn.id,
+            status: { notIn: ['completed', 'failed', 'blocked', 'cancelled'] },
+          },
+        });
+        if (unfinishedAssignments > 0) {
+          return jsonResponse(res, {
+            error: 'durable_assignments_not_terminal', retryable: true,
+            unfinished_assignments: unfinishedAssignments,
+          }, 409);
         }
         const failed = turn.status !== 'complete';
         return jsonResponse(res, {

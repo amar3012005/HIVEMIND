@@ -4278,6 +4278,12 @@ class Director:
                 "the EVIDENCE BOARD below. If the evidence board does not contain a real contact, say plainly "
                 "'no verified contact found in gathered evidence' — do not manufacture one, even hedged."
             )
+            if order.get("verification_assignment"):
+                prompt += (
+                    "\n\nThis is an independent completion review. End with exactly one machine-readable "
+                    "line: 'VERDICT: PASS' only when every requested output and evidence criterion is "
+                    "satisfied; otherwise end with 'VERDICT: REPAIR' and name the exact gaps."
+                )
             try:
                 agent_result: Dict[str, Any] = {}
                 if mode_at_least(self.grok_runtime_mode, "real_tools"):
@@ -4319,10 +4325,18 @@ class Director:
                     text = _strip_cot((response or {}).get("content") or "").strip()
                 if not text:
                     raise RuntimeError("worker returned no usable result")
+                if order.get("verification_assignment") and not re.search(
+                    r"(?im)^VERDICT:\s*PASS\s*$", text
+                ):
+                    raise RuntimeError(
+                        "independent reviewer did not pass the completed work: " + text[:420]
+                    )
                 activity = _work_order_activity(order.get("title"), text)
                 result = {"id": work_id or order_key, "step_id": step_id, "depends_on": dependencies, "order_key": order_key, "status": "completed",
                           "kind": order.get("kind"), "title": order.get("title"), "owner": owner_name,
-                          "owner_slug": owner_slug, "text": text, "acceptance_criteria": criteria}
+                          "owner_slug": owner_slug, "text": text, "acceptance_criteria": criteria,
+                          "evidence": list(agent_result.get("evidence") or []),
+                          "artifacts": list(agent_result.get("artifacts") or [])}
                 self.blackboard.append(f"WORK_RESULT[{owner_name} | {order.get('title')}]:\n{text}")
                 await self.emit({"t": "work_order", "id": result["id"], "order_key": order_key,
                                  "status": "completed", "kind": order.get("kind"), "title": order.get("title"),
@@ -4422,6 +4436,29 @@ class Director:
             ready_ids = {id(order) for _, order in ready}
             pending = [(index, order) for index, order in pending if id(order) not in ready_ids]
         return results
+
+    def _verified_work_evidence(self) -> List[Dict[str, Any]]:
+        """Return only persisted receipt observations from completed assignments."""
+        facts: List[Dict[str, Any]] = []
+        seen = set()
+        for result in self.work_results:
+            if not isinstance(result, dict) or result.get("status") != "completed":
+                continue
+            for receipt in result.get("evidence") or []:
+                if not isinstance(receipt, dict):
+                    continue
+                key = str(receipt.get("provider_id") or receipt.get("url") or "")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                facts.append({
+                    "source": str(receipt.get("adapter") or "tool_receipt"),
+                    "title": str(receipt.get("title") or "")[:240],
+                    "url": str(receipt.get("url") or "")[:1000],
+                    "content": str(receipt.get("excerpt") or receipt.get("title") or "")[:2400],
+                    "provider_receipt": key[:240],
+                })
+        return facts[:80]
 
     async def _debate(self, topic: str, rounds: int) -> str:
         rounds = max(1, min(self.debate_max_rounds, rounds))
@@ -5582,6 +5619,7 @@ class Director:
                         "Identify unsupported claims and missing requested outputs",
                         "Return a clear pass or exact repair requirements",
                     ],
+                    "verification_assignment": True,
                     "wait": None,
                     "handoff": None,
                 })
@@ -7154,7 +7192,7 @@ class Director:
             "tool_calls": 0,
             "tok_by": dict(self.tok_by),
             "io": dict(self.io),
-            "gather_facts": self._source_evidence_snapshot(),
+            "gather_facts": [*self._source_evidence_snapshot(), *self._verified_work_evidence()],
             "sim_report": None,
             "evo_playbooks": self.evo_playbooks,
             "skills_used": list(self.skills_used),
@@ -7423,7 +7461,7 @@ class Director:
                 "io": dict(self.io),
                 "model_usage": list(self.model_usage.values()),
                 "gathered_emails": sorted(self.gathered_emails),
-                "gather_facts": self._source_evidence_snapshot(),
+                "gather_facts": [*self._source_evidence_snapshot(), *self._verified_work_evidence()],
                 "room_kind": self.room_kind,
                 "intended_output": self.intended_output,
                 "post_output_actions": [],
@@ -7636,7 +7674,7 @@ class Director:
             # Work results and debate claims are candidates, not evidence. The
             # verifier may ground claims only in retained inputs or actual tool
             # observations from this source-only snapshot.
-            "gather_facts": self._source_evidence_snapshot(),
+            "gather_facts": [*self._source_evidence_snapshot(), *self._verified_work_evidence()],
             "sim_report": self._sim_payload,  # the population-sim dashboard (None unless sim_mode on)
             "evo_playbooks": self.evo_playbooks,  # the playbooks injected this turn (api reflects on these)
             "skills_used": list(self.skills_used),  # METHOD skills applied (reflection + FE chips)

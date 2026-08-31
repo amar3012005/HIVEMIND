@@ -1924,3 +1924,102 @@ git diff --check: passed (line-ending warnings only)
   retained exact images, start times, and zero restart counts. API and homepage
   returned 200; the 20-minute critical log scan returned zero matches. No build,
   migration, restart, container replacement, or Worker deployment occurred.
+
+## 2026-08-31 — HyperAgent Workers AI GLM migration (local)
+
+- Retired legacy `claude-haiku-*` participant settings from the HyperAgent model
+  policy. They now resolve to Cloudflare Workers AI
+  `@cf/zai-org/glm-5.3-flash` instead of OpenRouter.
+- Added an authenticated Cloudflare AI Gateway compatibility target for Workers
+  AI. The SDK sends `workers-ai/@cf/zai-org/glm-5.3-flash` through the configured
+  account/gateway and fails closed when Gateway configuration is absent; it does
+  not fall back to a direct provider or OpenRouter. Commit `141b8ea6`.
+
+### Verification evidence
+
+- `PYTHONPATH=src python -m pytest tests/test_ai_gateway.py -q` — `5 passed`.
+- `python -m py_compile` passed for `ai_gateway.py`, `model_policy.py`, and
+  `agentscope_factory.py`.
+- A standalone model-policy probe confirmed both bare and Anthropic-prefixed
+  Claude Haiku identifiers resolve to Workers AI GLM and do not require
+  OpenRouter.
+- Live inference remains pending because Docker Desktop is stopped and the local
+  parity env file contains no Gateway credential. No secret was copied, printed,
+  or committed, and production was not changed.
+
+## 2026-08-31 — Workers AI GLM live canary
+
+- Docker Desktop recovered with the complete local stack healthy. Using the
+  already configured local Employees environment, the authenticated Cloudflare
+  AI Gateway returned HTTP 200 from
+  `workers-ai/@cf/zai-org/glm-5.3-flash` with the exact canary response.
+- A required function-call probe returned exactly one structured
+  `lookup_order` tool call with the requested `ABC-123` argument. This verifies
+  the selected model's tool-calling surface through the same Gateway.
+- The patched package was loaded under an isolated `/tmp/hm-glm-canary` path in
+  the Employees container. `_resolve_model` converted a stored
+  `claude-haiku-4-5` employee into an `OpenAIChatModel` targeting
+  `workers-ai/@cf/zai-org/glm-5.3-flash`; an actual AgentScope SDK inference
+  returned `AGENTSCOPE_GLM_OK`.
+- The isolated canary did not alter the shared source bind, database, Room state,
+  or production. Full Room Workflow/recovery acceptance still requires safe
+  integration into `singulance-local`; the permanent integration worktree has
+  unrelated uncommitted files and was intentionally not overwritten.
+
+## 2026-08-31 — Grok HyperAgents realtime and bounded cognition (local candidate)
+
+- Added a tenant-scoped Cloudflare `HyperRoomGateway` Agent. Core creates a
+  short-lived HMAC-signed WebSocket ticket only after Room authorization; the
+  frontend reconnects using fresh tickets while retaining SSE and database poll
+  fallbacks.
+- Extended persistent hired-Agent coordination state with bounded scalar
+  preferences and recent completed assignment identifiers. Customer content and
+  artifacts remain outside Cloudflare Agent state.
+- Added a bounded LangGraph execute/self-check/repair loop for real-tool
+  assignments. It deliberately has no checkpointer because Cloudflare Workflow
+  and PostgreSQL remain the durability authorities.
+- Replaced a competitor-pricing-specific repair prompt with a domain-neutral
+  repair built from the original assignment and exact unmet predicates.
+- Frontend commit `61d940ba7442e488948905f5b5429c7a9d115777` was pushed on
+  `codex/grok-room-realtime-v1`.
+
+### Verification evidence
+
+- Worker `npm run check` passed; Vitest `5 passed`; Wrangler local dry-run
+  listed both Agent bindings, both Workflows, Browser, Sandbox, and Flagship.
+- Core runtime client tests: `4 passed`; changed JavaScript syntax checks passed.
+- Employees ephemeral Python 3.12 test: `6 passed` for bounded LangGraph and
+  Grok runtime suites.
+- Da-vinci optimized build passed before the frontend commit.
+- Local Cloudflare Worker deployed as version
+  `3d2eac64-94ab-458c-843f-7e2dd6bb5e6c`.
+- Live canary tenant resolved `full`; Browser capture returned HTTP 200;
+  Sandbox returned 403 without authority and `SANDBOX_OK` with authority; the
+  Room Agent accepted a valid signed ticket and rejected an invalid ticket.
+- Core `npm ci` cannot complete on Windows because Lightpanda's postinstall uses
+  POSIX `|| true`; focused tests still ran against the existing dependency tree.
+- Integration/rebuild remains pending because the permanent `singulance-local`
+  worktree contains unrelated modifications to `core/data/mcp-connectors.json`
+  and `docker-compose.local-stack.yml`. Per the local integration protocol they
+  were not stashed, reset, overwritten, or merged over.
+
+## 2026-08-31 — Grok assignment budgets and complete lifecycle events
+
+- Added explicit bounded assignment execution metadata for input/output size,
+  tool calls, delegations, repairs, parallel assignments, and wall-clock time.
+  LangGraph enforces input, output, receipt and timeout bounds; AgentScope uses
+  the assignment tool-iteration limit.
+- Added durable lifecycle events `agent_tool_started`, `agent_budget_warning`,
+  `agent_handoff`, and `agent_recovered`, closing the event vocabulary required
+  by the Grok HyperAgents architecture.
+- Corrected receipt hydration so URL deduplication no longer replaces the exact
+  provider receipt identifier used for audit and synthesis.
+
+### Verification evidence
+
+- Python 3.12 isolated suite:
+  `pytest tests/test_langgraph_runtime.py tests/test_grok_runtime.py tests/test_adaptive_director.py -q`
+  — `43 passed in 1.55s`.
+- The reviewer-repair test now uses a real Researcher and independent Skeptic
+  roster. A missing capability remains a deliberate `specialist_requested`
+  wait and is not bypassed with an invented persona.

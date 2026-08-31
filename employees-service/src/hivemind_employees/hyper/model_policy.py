@@ -5,13 +5,17 @@ import re
 
 
 HYPER_FAST_MODEL = "openai/gpt-oss-20b:nitro"
+HYPER_WORKER_MODEL = "@cf/zai-org/glm-5.3-flash"
 _LEGACY_FAST_MODELS = {"gpt-oss-20b", "openai/gpt-oss-20b"}
 _LEGACY_GROK_RE = re.compile(r"^(?:x-ai/)?grok(?:[-/:].*)?$", re.IGNORECASE)
+_LEGACY_HAIKU_RE = re.compile(r"^(?:anthropic/)?claude[-_]?haiku(?:[-/:].*)?$", re.IGNORECASE)
 
 
 def canonical_hyper_model(model: str | None) -> str:
     """Collapse retired HyperAgent text models onto the governed fast tier."""
     value = str(model or "").strip()
+    if _LEGACY_HAIKU_RE.match(value):
+        return HYPER_WORKER_MODEL
     if not value or value.lower() in _LEGACY_FAST_MODELS or _LEGACY_GROK_RE.match(value):
         return HYPER_FAST_MODEL
     return value

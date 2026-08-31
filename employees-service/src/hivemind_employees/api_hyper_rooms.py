@@ -3900,8 +3900,16 @@ async def _orchestrate_single_agent(
             "work_order_key": order.get("id") or order.get("title"),
             "work_order_id": order.get("_work_order_id") or None,
         })
+        max_tool_calls = max(1, min(32, int(os.environ.get("HYPER_GROK_MAX_TOOL_CALLS", "8") or "8")))
+        bounded_owner = {**owner, "max_iters": max_tool_calls}
+        await _emit({
+            "t": "agent_tool_started", "agent": owner.get("slug"),
+            "agent_instance_id": instance_id,
+            "work_order_id": order.get("_work_order_id") or None,
+            "tool_budget": max_tool_calls,
+        })
         agent = await _build_agent_for_room(
-            req.room_id, owner, user_id=req.user_id, org_id=req.org_id,
+            req.room_id, bounded_owner, user_id=req.user_id, org_id=req.org_id,
             project_id=req.project_id,
             allow_web_tools=mode_at_least(req.grok_runtime_mode, "browser"),
         )
@@ -3979,6 +3987,14 @@ async def _orchestrate_single_agent(
                 "action_key": f"{order.get('_work_order_id')}:{index}:{receipt.get('provider_id')}",
                 "adapter": receipt.get("adapter"), "status": receipt.get("status"),
                 "provider_receipt": receipt,
+            })
+        tool_calls = int(getattr(agent, "tool_call_count", 0) or 0)
+        if tool_calls >= max(1, int(max_tool_calls * 0.8)):
+            await _emit({
+                "t": "agent_budget_warning", "agent": owner.get("slug"),
+                "agent_instance_id": instance_id,
+                "work_order_id": order.get("_work_order_id") or None,
+                "budget": "tool_calls", "used": tool_calls, "limit": max_tool_calls,
             })
         await _emit({
             "t": "agent_assignment_completed",

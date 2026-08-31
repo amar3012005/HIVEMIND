@@ -37,6 +37,7 @@ loguru = "^0.7.2"
 # ReActAgent for each employee, MsgHub for inter-agent broadcasting,
 # Toolkit for HIVEMIND tool registration.
 agentscope = "^1.0.19"
+langgraph = ">=0.6,<2.0"
 # AgentScope 1.0.x imports the MCP 1.x streamable HTTP symbol. MCP 2.0
 # renamed that API and makes the service fail during module import.
 mcp = ">=1.13,<2.0"

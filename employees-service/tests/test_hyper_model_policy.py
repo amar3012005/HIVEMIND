@@ -5,7 +5,7 @@ from hivemind_employees.hyper.engine import (
     _or_provider_routing,
     _route_direct_openrouter,
 )
-from hivemind_employees.hyper.model_policy import HYPER_FAST_MODEL, canonical_hyper_model, requires_openrouter
+from hivemind_employees.hyper.model_policy import HYPER_FAST_MODEL, HYPER_WORKER_MODEL, canonical_hyper_model, requires_openrouter
 
 
 def test_legacy_hyper_models_normalize_to_nitro():
@@ -41,6 +41,12 @@ def test_hyperagent_gpt_oss_never_routes_to_direct_groq(monkeypatch):
     monkeypatch.setenv("HYPER_OPENROUTER_PRIMARY", "0")
     assert _GROQ_PROVIDER_DISABLED is True
     assert _route_direct_openrouter(HYPER_FAST_MODEL) is True
+
+
+def test_legacy_haiku_is_retired_to_workers_ai_glm():
+    assert canonical_hyper_model("claude-haiku-4-5") == HYPER_WORKER_MODEL
+    assert canonical_hyper_model("anthropic/claude-haiku-4-5") == HYPER_WORKER_MODEL
+    assert requires_openrouter("claude-haiku-4-5") is False
 
 
 def test_openrouter_uses_provider_supported_token_budget_name():

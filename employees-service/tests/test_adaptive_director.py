@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 
 from hivemind_employees.hyper.engine import Director, _work_order_activity, run_director
@@ -831,6 +832,11 @@ def test_reviewer_rejection_runs_bounded_repair_and_fresh_review(monkeypatch):
     director.is_work_room = True
     director.grok_runtime_mode = "full"
     director.grok_runtime_version = "v1"
+    director.participants = [
+        {"id": "00000000-0000-4000-8000-000000000001", "slug": "lead", "name": "Lead", "_lane": "Strategist"},
+        {"id": "00000000-0000-4000-8000-000000000002", "slug": "researcher", "name": "Researcher", "_lane": "Researcher"},
+        {"id": "00000000-0000-4000-8000-000000000003", "slug": "reviewer", "name": "Reviewer", "_lane": "Skeptic"},
+    ]
     calls = []
 
     async def create(**kwargs):
@@ -880,7 +886,7 @@ def test_reviewer_rejection_runs_bounded_repair_and_fresh_review(monkeypatch):
     assert all(result["status"] == "completed" for result in results)
     assert "independent-review" not in [result["step_id"] for result in results]
     assert "repair-1" in [result["step_id"] for result in results]
-    assert any(event.get("title") == "Repair missing evidence (attempt 1)" for event in events)
+    assert any(event.get("title") == "Repair unmet completion checks (attempt 1)" for event in events)
 
 
 def test_work_room_waits_without_starting_worker_and_preserves_handoff(monkeypatch):
@@ -1173,3 +1179,17 @@ def test_remediation_report_does_not_claim_unmeasured_or_applied_fixes():
     assert "Title length" in report
     assert "No website change was claimed" in report
     assert "30%" not in report
+
+
+def test_durable_repair_executor_is_domain_neutral():
+    source = inspect.getsource(Director._run_work_orders).lower()
+    forbidden_playbook_terms = (
+        "competitor pricing",
+        "pricing observations",
+        "company named in room/company context",
+        "credible accessible competitor",
+    )
+
+    assert all(term not in source for term in forbidden_playbook_terms)
+    assert "resolve every exact unmet completion check" in source
+    assert "original work-order acceptance criteria" in source

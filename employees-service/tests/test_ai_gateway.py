@@ -49,3 +49,13 @@ def test_sdk_target_uses_server_owned_byok_alias():
     assert base.endswith("/account/gateway/openrouter")
     assert headers["Authorization"] == ""
     assert headers["cf-aig-byok-alias"] == "first-bundb"
+
+
+def test_workers_ai_sdk_target_uses_gateway_compat_and_not_openrouter():
+    model, key, base, headers = ai_gateway.workers_ai_sdk_target(
+        "@cf/zai-org/glm-5.3-flash"
+    )
+    assert model == "workers-ai/@cf/zai-org/glm-5.3-flash"
+    assert key == "gateway-token"
+    assert base == "https://gateway.ai.cloudflare.com/v1/account/gateway/compat"
+    assert headers["cf-aig-authorization"] == "Bearer gateway-token"

@@ -45,6 +45,27 @@ The Worker does not store prompts, customer content, connector credentials, or
 semantic memory. Workflow payloads contain opaque identifiers and versioned
 runtime metadata only.
 
+## Realtime Room gateway
+
+`persistent_agents` and later modes expose one `HyperRoomGateway` Agent per
+tenant-scoped opaque Room identity. Core issues a 30–300 second HMAC-signed
+WebSocket ticket only after its normal Room authorization. The Agent verifies
+the signature, expiry, Room identity, organization, and user before accepting
+the socket. It broadcasts ephemeral Room events while persisting only revision,
+event type, status, and timestamps. The existing SSE stream and PostgreSQL poll
+remain authoritative compatibility fallbacks, so a socket disconnect cannot
+lose or falsely complete work.
+
+Each `HiredHyperAgent` keeps a bounded persistent coordination profile:
+immutable employee identity, scalar preferences, current assignments, recent
+completed assignment identifiers, and routines. Customer prompts, artifacts,
+tool outputs, and credentials remain in their existing authoritative stores.
+
+The Employees service uses a bounded LangGraph loop only for assignment
+cognition (execute, self-check, repair). It has no LangGraph checkpointer:
+Cloudflare Workflow and PostgreSQL continue to own retries, leases, durable
+checkpoints, approvals, and terminal state.
+
 ## Verification
 
 ```powershell

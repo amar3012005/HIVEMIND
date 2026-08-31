@@ -11741,8 +11741,35 @@ Write the persona now.`;
     const roomWorkPlanResumeMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/resume$/);
     const roomWorkPlanHandoffMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/work-plan\/([0-9a-f-]{36})\/handoff$/);
     const roomTurnControlMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/turns\/([0-9a-f-]{36})\/control$/);
+    const roomRealtimeMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/realtime$/);
     const roomRoutinesMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})\/routines$/);
     const roomMetaMatch = pathname.match(/^\/v1\/hyper-rooms\/([0-9a-f-]{36})$/);
+
+    if (roomRealtimeMatch && req.method === 'GET') {
+      const current = await requireSession(req, res);
+      if (!current) return;
+      const roomId = roomRealtimeMatch[1];
+      const room = await prisma.hyperRoom.findFirst({
+        where: { id: roomId, orgId: current.session.orgId, archivedAt: null },
+        select: { id: true },
+      });
+      if (!room) return jsonResponse(res, { error: 'Room not found' }, 404);
+      const { createGrokRealtimeTicket, evaluateGrokRuntime, grokModeAtLeast } = await import('./hyperagents/grok-runtime-client.js');
+      const decision = await evaluateGrokRuntime({ orgId: current.session.orgId, userId: current.session.userId });
+      if (!grokModeAtLeast(decision.mode, 'persistent_agents')) {
+        return jsonResponse(res, { error: 'Realtime Agent gateway is disabled' }, 409);
+      }
+      const ticket = createGrokRealtimeTicket({
+        orgId: current.session.orgId, userId: current.session.userId, roomId,
+      });
+      return jsonResponse(res, {
+        runtime_mode: decision.mode,
+        room_instance_id: ticket.roomInstanceId,
+        websocket_url: ticket.websocketUrl,
+        expires_in: ticket.expiresIn,
+        fallback_stream: `/v1/hyper-rooms/${roomId}/turns/{turn_id}/stream`,
+      });
+    }
 
     if (roomRoutinesMatch && ['GET', 'POST'].includes(req.method)) {
       const current = await requireSession(req, res);
@@ -13584,6 +13611,21 @@ Write the persona now.`;
       if (routeResult?.statusCode) return routeResult;
       const { body } = routeResult || {};
       try {
+        const realtimeScope = await prisma.hyperTurn.findUnique({
+          where: { id: body.turn_id },
+          select: {
+            roomId: true, grokRuntimeMode: true,
+            room: { select: { orgId: true } },
+          },
+        }).catch(() => null);
+        if (realtimeScope) {
+          const { grokModeAtLeast, publishGrokRoomEvent } = await import('./hyperagents/grok-runtime-client.js');
+          if (grokModeAtLeast(realtimeScope.grokRuntimeMode, 'persistent_agents')) {
+            void publishGrokRoomEvent({
+              orgId: realtimeScope.room.orgId, roomId: realtimeScope.roomId, event: body.event,
+            }).catch((error) => console.warn('[grok-hyperagents] realtime publish failed:', error.message));
+          }
+        }
         if (body.event?.t === 'agent_tool_receipt' && body.event.work_order_id
             && body.event.agent_instance_id) {
           const scope = await prisma.hyperTurn.findUnique({

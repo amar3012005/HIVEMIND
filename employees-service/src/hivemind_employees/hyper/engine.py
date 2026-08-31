@@ -4219,6 +4219,14 @@ class Director:
                     "work_order_key": order_key, "reason": wait_for["reason"],
                 })
             handoff = _normalize_work_step_handoff(order.get("handoff"))
+            assignment_budgets = {
+                "max_input_chars": max(4000, min(64000, int(os.environ.get("HYPER_GROK_MAX_INPUT_CHARS", "24000") or "24000"))),
+                "max_output_chars": max(2000, min(64000, int(os.environ.get("HYPER_GROK_MAX_OUTPUT_CHARS", "32000") or "32000"))),
+                "max_tool_calls": max(1, min(32, int(os.environ.get("HYPER_GROK_MAX_TOOL_CALLS", "8") or "8"))),
+                "max_delegations": max(0, min(8, int(os.environ.get("HYPER_AGENTIC_MAX_DELEGATIONS", "4") or "4"))),
+                "max_repairs": max(0, min(2, int(os.environ.get("HYPER_GROK_AGENT_GRAPH_REPAIRS", "1") or "1"))),
+                "wall_timeout_seconds": max(30, min(900, int(os.environ.get("HYPER_GROK_ASSIGNMENT_TIMEOUT_SECONDS", "240") or "240"))),
+            }
             existing_work_id = str(order.get("_work_order_id") or "").strip()
             persisted = None
             if not existing_work_id:
@@ -4229,7 +4237,8 @@ class Director:
                     owner=owner, selected_skills=list(self.skills_used), required_evidence=evidence,
                     acceptance_criteria=criteria,
                     input_snapshot={"room_kind": self.room_kind, "room_mode": self.room_mode,
-                                    "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps)},
+                                    "user_message": self.user_message[:1000], "turn_plan": bool(plan_steps),
+                                    "budgets": assignment_budgets},
                     plan_step_id=step_id,
                     depends_on=dependencies,
                     wait_for=wait_for,
@@ -4278,6 +4287,11 @@ class Director:
             predecessor_notes = [completed_by_step[dependency].get("text", "")
                                  for dependency in dependencies if dependency in completed_by_step]
             if predecessor_notes:
+                await self.emit({
+                    "t": "agent_handoff", "work_order_id": work_id or None,
+                    "work_order_key": order_key, "agent_instance_id": owner.get("_agent_instance_id"),
+                    "from_work_order_keys": dependencies,
+                })
                 context += "\n\nCOMPLETED PREREQUISITES:\n" + "\n".join(predecessor_notes)
             prompt = (
                 f"WORK ORDER: {order.get('title')}\nOBJECTIVE: {order.get('objective')}\n"
@@ -4307,13 +4321,27 @@ class Director:
                 if mode_at_least(self.grok_runtime_mode, "real_tools"):
                     if self.work_agent_hook is None:
                         raise RuntimeError("real agent runtime selected without a work-agent executor")
+                    from .langgraph_runtime import run_bounded_assignment_graph
                     async with assignment_semaphore:
                         for provider_attempt in range(4):
                             try:
-                                agent_result = await self.work_agent_hook(
-                                    owner, {**order, "_work_order_id": work_id},
+                                agent_result = await run_bounded_assignment_graph(
+                                    self.work_agent_hook,
+                                    owner,
+                                    {**order, "_work_order_id": work_id},
                                     f"{prompt}\n\nEVIDENCE BOARD:\n{context}",
+                                    max_repairs=assignment_budgets["max_repairs"],
+                                    max_input_chars=assignment_budgets["max_input_chars"],
+                                    max_output_chars=assignment_budgets["max_output_chars"],
+                                    max_tool_receipts=assignment_budgets["max_tool_calls"],
+                                    wall_timeout_seconds=assignment_budgets["wall_timeout_seconds"],
                                 )
+                                if provider_attempt:
+                                    await self.emit({
+                                        "t": "agent_recovered", "work_order_id": work_id or None,
+                                        "agent_instance_id": owner.get("_agent_instance_id"),
+                                        "attempt": provider_attempt + 1,
+                                    })
                                 break
                             except Exception as provider_exc:
                                 detail = str(provider_exc).lower()
@@ -4323,6 +4351,12 @@ class Director:
                                 )
                                 if not transient_budget or provider_attempt >= 3:
                                     raise
+                                await self.emit({
+                                    "t": "agent_budget_warning", "work_order_id": work_id or None,
+                                    "agent_instance_id": owner.get("_agent_instance_id"),
+                                    "budget": "provider_in_flight", "attempt": provider_attempt + 1,
+                                    "limit": 4,
+                                })
                                 # OpenRouter rejects concurrent long-running agent
                                 # calls until its in-flight budget settles. This is
                                 # a retryable provider condition, not failed work.
@@ -4500,23 +4534,32 @@ class Director:
                 repair_order = {
                     "id": repair_id,
                     "depends_on": prior_step_ids,
-                    "kind": "research",
-                    "owner_lane": "Researcher",
-                    "title": f"Repair missing evidence (attempt {attempt})",
+                    "kind": "repair",
+                    "owner_lane": str(
+                        rejected.get("owner_lane")
+                        or rejected.get("reviewed_owner_lane")
+                        or "Investigator"
+                    ),
+                    "title": f"Repair unmet completion checks (attempt {attempt})",
                     "objective": (
-                        "Use the browser and other allowed tools to resolve every exact reviewer gap. "
-                        "If a selected public page is blocked or consent-gated, choose a credible accessible "
-                        "competitor page instead. Capture current rendered evidence, exact URLs and comparable "
-                        "price facts. The company named in Room/Company context is the subject, not one of its "
-                        "own competitors, and cannot count toward the requested competitor total. "
-                        "Then prepare the requested artifact inputs. Reviewer gaps:\n"
+                        "Resolve every exact unmet completion check using only the tools, authority, "
+                        "accepted prerequisite artifacts, and evidence available to this assignment. "
+                        "Persist any new evidence or artifact and cite its receipt. Do not change the "
+                        "task's domain, requested deliverable, entities, counts, or acceptance criteria. "
+                        "If a check cannot be satisfied with authorized evidence, return the precise "
+                        "remaining gap instead of inventing a replacement. Reviewer gaps:\n"
                         + str(rejected.get("text") or "")[:3000]
                     ),
-                    "required_evidence": ["Persisted browser receipts for every repaired factual claim"],
+                    "required_evidence": list(dict.fromkeys(
+                        str(item)
+                        for source in orders
+                        for item in (source.get("required_evidence") or [])
+                        if str(item).strip()
+                    )),
                     "acceptance_criteria": [
-                        "Resolve every reviewer gap with current rendered evidence",
-                        "Return three comparable competitor pricing observations and exact source URLs",
-                        "Produce evidence sufficient for the requested reviewed artifact",
+                        "Resolve every explicit reviewer gap",
+                        "Satisfy the original work-order acceptance criteria without changing their meaning",
+                        "Attach persisted evidence or artifact receipts for every completion claim",
                     ],
                 }
                 repair_result = await execute(len(orders) + attempt * 2, repair_order)
@@ -4535,17 +4578,16 @@ class Director:
                     "title": f"Verify repaired work (attempt {attempt})",
                     "objective": (
                         "Independently verify the repaired work against the user's original request and all "
-                        "persisted browser receipts. Reject missing prices, missing competitors, inaccessible "
-                        "sources, or unsupported comparisons. This is the pre-synthesis evidence gate: pass when "
-                        "the persisted evidence and comparison inputs are sufficient for final synthesis; do not "
-                        "reject merely because the final formatted artifact is produced immediately after this gate. "
-                        "Never count the subject company from Room/Company context as its own competitor."
+                        "original work-order acceptance criteria. Inspect persisted evidence, artifacts, and "
+                        "provider receipts rather than relying on agent prose. Reject any unmet check, inaccessible "
+                        "required source, unsupported claim, or missing artifact. This is the pre-synthesis gate: "
+                        "pass only when the persisted inputs are sufficient to produce the requested final result."
                     ),
-                    "required_evidence": [],
+                    "required_evidence": list(repair_order.get("required_evidence") or []),
                     "acceptance_criteria": [
-                        "Three current public competitor pricing pages have persisted browser receipts",
-                        "Comparable pricing facts and exact URLs are source-backed",
-                        "The persisted comparison inputs are sufficient to synthesize the requested artifact",
+                        "Every original acceptance criterion has persisted completion evidence",
+                        "Every factual or external-action claim has an inspectable receipt",
+                        "The persisted inputs are sufficient to synthesize the requested result",
                     ],
                     "verification_assignment": True,
                 }
@@ -4584,7 +4626,7 @@ class Director:
                     "title": str(receipt.get("title") or "")[:240],
                     "url": url[:1000],
                     "content": str(receipt.get("excerpt") or receipt.get("title") or "")[:2400],
-                    "provider_receipt": key[:240],
+                    "provider_receipt": str(receipt.get("provider_id") or key)[:240],
                 })
         return facts[:80]
 

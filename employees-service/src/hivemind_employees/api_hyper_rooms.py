@@ -4379,6 +4379,48 @@ async def _orchestrate_single_agent(
             summary=str(contract.get("report_markdown") or "")[:4000],
         )
 
+    # A durable agent run may only complete from verified WorkResults.  This
+    # gate deliberately precedes the legacy producer/verifier path: a language
+    # model judge cannot turn a failed browser/tool assignment into success by
+    # approving plausible prose.
+    if result.get("durable_assignment_incomplete"):
+        gaps = [str(value) for value in (result.get("durable_assignment_gaps") or []) if str(value).strip()]
+        verdict = {
+            "met": False,
+            "artifact_ok": False,
+            "assignments_ok": False,
+            "grounded_ok": False,
+            "gaps": gaps or ["One or more durable agent assignments did not complete."],
+            "note": "Durable agent execution stopped before synthesis; no prose fallback was accepted.",
+            "intended_output": intended_output,
+            "work_results": result.get("work_results") or [],
+        }
+        _PLAN_BY_TURN[req.turn_id] = {
+            "verification": verdict,
+            "work_orders": result.get("work_orders") or [],
+            "work_results": result.get("work_results") or [],
+            "dead_end": True,
+        }
+        await _emit({"t": "verify", **verdict})
+        await _emit({
+            "t": "seal", "cost_tokens": cost_tokens, "status": "blocked",
+            "duration_ms": int((time.time() - started) * 1000), "engine": "durable-agent-runtime",
+            "tokens_in": int(_io.get("input", 0) or 0), "tokens_out": int(_io.get("output", 0) or 0),
+            "tokens_cached": int(_io.get("cached", 0) or 0),
+        })
+        return RoomTurnResponse(
+            ok=False,
+            cost_tokens=cost_tokens,
+            status="blocked",
+            verification=verdict,
+            result={
+                "runtime_mode": result.get("grok_runtime_mode"),
+                "work_orders": result.get("work_orders") or [],
+                "work_results": result.get("work_results") or [],
+            },
+            summary=str(final_text or "")[:4000],
+        )
+
     # 2. PLAN — build the plan dict the producer + verifier consume. intended_output +
     # the capability gate were already resolved BEFORE the run (so SYNTH wrote the right format).
     done_txt = req.user_message if (req.room_mode or "").strip().lower() == "work" else (req.room_goal or req.user_message)

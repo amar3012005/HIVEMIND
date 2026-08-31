@@ -7378,6 +7378,61 @@ class Director:
         # independently executed work orders. Their compact results are added to
         # the board before any decision debate or final synthesis.
         self.work_results = (await self._run_work_order_subtasks(plan)) if self.work_order else (await self._run_work_orders(plan))
+        # Durable assignments are completion evidence, not optional colour for a
+        # later prose synthesizer.  If an enabled agent did not complete its
+        # assignment (including a reviewer blocked by that failure), stop here.
+        # The previous path continued into legacy synthesis and allowed a quality
+        # judge to mark an invented report complete even though the browser/tool
+        # work had produced no verified receipt.
+        _incomplete_work = [
+            row for row in self.work_results
+            if isinstance(row, dict) and str(row.get("status") or "").lower() != "completed"
+        ]
+        if (mode_at_least(self.grok_runtime_mode, "durable_assignments")
+                and _incomplete_work):
+            _gaps: List[str] = []
+            for row in _incomplete_work:
+                label = str(row.get("title") or row.get("step_id") or row.get("owner") or "Assignment")
+                reason = str(row.get("error") or row.get("text") or row.get("status") or "did not complete")
+                _gaps.append(f"{label}: {reason}"[:700])
+            final_text = (
+                "## The requested work is not complete\n\n"
+                "The Room stopped because required agent work did not produce verified execution receipts. "
+                "It did not substitute recalled context or a generated report for the requested browser work.\n\n"
+                "### Exact blockers\n\n" + "\n".join(f"- {gap}" for gap in _gaps)
+            )
+            await self.emit({
+                "t": "agent_run_blocked",
+                "runtime_mode": self.grok_runtime_mode,
+                "gaps": _gaps,
+                "work_results": list(self.work_results),
+            })
+            await self.emit({
+                "t": "line", "agent": "director", "kind": "dead_end", "content": final_text,
+            })
+            return {
+                "cost_tokens": self.tokens,
+                "final_text": final_text,
+                "transcript": self.transcript,
+                "gather_count": self.gather_count,
+                "tool_calls": tool_calls_made,
+                "tok_by": dict(self.tok_by),
+                "director_iters": list(self.director_iters),
+                "debate_rounds": self._round_seq,
+                "web_calls": self._web_calls,
+                "io": dict(self.io),
+                "model_usage": list(self.model_usage.values()),
+                "gathered_emails": sorted(self.gathered_emails),
+                "gather_facts": self._source_evidence_snapshot(),
+                "room_kind": self.room_kind,
+                "intended_output": self.intended_output,
+                "post_output_actions": [],
+                "work_orders": list(plan.get("work_orders") or plan.get("turn_plan") or []),
+                "work_results": list(self.work_results),
+                "durable_assignment_incomplete": True,
+                "durable_assignment_gaps": _gaps,
+                "grok_runtime_mode": self.grok_runtime_mode,
+            }
         # PHASE 2.5 — POPULATION SIM (ADDITIONAL, opt-in). Runs on the gathered context, emits a
         # report the FE shows as a hideable popup, and feeds that report into the synthesis. Fully
         # wrapped — a failure just skips it; the main turn (debate + synth) is never affected.

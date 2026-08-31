@@ -728,12 +728,21 @@ if (prisma && shouldRunRecurringMaintenanceJobs()) {
     try {
       const live = await prisma.hyperTurn.findMany({
         where: { status: 'live' },
-        select: { id: true, roomId: true, userMessage: true, lines: true },
+        select: {
+          id: true, roomId: true, userMessage: true, lines: true,
+          grokRuntimeMode: true, executionPhase: true,
+        },
         take: 50,
       });
       const liveIds = new Set(live.map((t) => t.id));
       for (const k of [..._sweepSeen.keys()]) if (!liveIds.has(k)) { _sweepSeen.delete(k); _sweepKicked.delete(k); }
       for (const t of live) {
+        // Cloudflare Workflow owns durable turns and performs its own retries.
+        // The legacy sidecar sweeper must never launch a parallel executor.
+        if (grokModeAtLeastGlobal(t.grokRuntimeMode, 'durable_assignments')) {
+          _sweepSeen.delete(t.id);
+          continue;
+        }
         const empty = !Array.isArray(t.lines) || t.lines.length === 0;
         if (!empty) { _sweepSeen.delete(t.id); continue; }
         const ticks = (_sweepSeen.get(t.id) || 0) + 1;
@@ -13119,6 +13128,13 @@ Write the persona now.`;
               grokRuntimeMode: grokDecision.mode,
               grokRuntimeVersion: grokDecision.version,
               grokWorkflowInstanceId,
+              // Durable turns are owned by the Cloudflare Workflow from the
+              // instant they are admitted. Leaving them at ACCEPTED allowed
+              // the legacy stuck-turn sweeper to launch a second Employees
+              // executor before the Workflow claimed GROK_RUNNING.
+              executionPhase: grokModeAtLeast(grokDecision.mode, 'durable_assignments')
+                ? 'GROK_QUEUED'
+                : 'ACCEPTED',
             },
           });
           await tx.hyperRoom.update({

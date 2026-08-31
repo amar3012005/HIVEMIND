@@ -2159,6 +2159,30 @@ git diff --check: passed (line-ending warnings only)
 - Live browser navigation retained the preview hostname for both login and app
   routes after JavaScript execution. Production frontend was not changed.
 
+## 2026-08-31 — Meeting Lifecycle v2 shared local activation
+
+### Integrated and verified
+
+- Merged `origin/codex/meeting-lifecycle-v2` into the latest local line while
+  preserving the preview host-isolation frontend through Da-vinci merge commit
+  `4b9afeb6e1d7933b5365708c0613db5ba2cd6ac0`.
+- Core Meeting v2 tests passed 11/11. The Cloudflare lifecycle Worker passed
+  type checking and 6/6 tests. The merged Prisma schema validated and the
+  optimized preview frontend compiled successfully.
+- Applied the additive idempotent Meeting Lifecycle v2 SQL to the local
+  PostgreSQL schema. Rebuilt and recreated only `hivemind-api`; PostgreSQL,
+  Qdrant, Redis, extraction, Control Plane, and Employees were not recreated.
+- Local Core loaded all three v2 gates: lifecycle enabled, Gateway required,
+  and publication enabled. The authenticated local Worker `/mode` evaluation
+  returned `full`.
+- Deployed preview frontend Worker version
+  `e3c3e23f-d770-451d-a8d1-37e4c2fc8829`. Live authenticated browser checks
+  loaded `/hivemind/app/meeting-notes` and `/hivemind/app/meeting-privacy` on
+  the preview hostname with the v2 controls visible and zero console errors.
+- Scope is managed local testing. Remote BYOD/hybrid v2 continues to fail
+  closed until tenant-agent lifecycle parity is implemented. Production was
+  not changed.
+
 ## 2026-08-31 UTC — Durable GDPR-ready Meeting Notes v2 local candidate committed
 
 - Backend/session branch `codex/meeting-lifecycle-v2` pushed commit

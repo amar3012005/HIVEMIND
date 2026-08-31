@@ -56,7 +56,7 @@
           "properties": {
             "channel_id": {
               "type": "string",
-              "description": "Slack channel id (C\u2026) \u2014 resolve names via slack_list_channels"
+              "description": "Slack channel id (C…) — resolve names via slack_list_channels"
             },
             "limit": {
               "type": "number",
@@ -96,7 +96,7 @@
           "properties": {
             "channel_id": {
               "type": "string",
-              "description": "Slack channel id (C\u2026)"
+              "description": "Slack channel id (C…)"
             },
             "text": {
               "type": "string",
@@ -355,5 +355,246 @@
     "args": [],
     "env": {},
     "updated_at": "2026-05-27T00:00:00.000Z"
+  },
+  {
+    "name": "google-maps",
+    "label": "Google Maps",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "google-maps-mcp-server"
+    ],
+    "nango_provider": "google-maps",
+    "token_inject": {
+      "kind": "env",
+      "var": "GOOGLE_MAPS_API_KEY",
+      "format": "raw"
+    },
+    "mode": "live",
+    "mcp_health": "probe",
+    "supports_ingestion": false,
+    "supports_live_tools": true,
+    "category": "geo",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:24.854Z",
+    "env": {},
+    "headers": {},
+    "url": null,
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "github",
+    "label": "GitHub",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-github"
+    ],
+    "nango_provider": "github",
+    "token_inject": {
+      "kind": "env",
+      "var": "GITHUB_PERSONAL_ACCESS_TOKEN",
+      "format": "raw"
+    },
+    "mcp_health": "probe",
+    "category": "code",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:24.906Z",
+    "env": {},
+    "headers": {},
+    "url": null,
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "notion",
+    "label": "Notion",
+    "transport": "streamable-http",
+    "url": "https://mcp.notion.com/mcp",
+    "nango_provider": "notion",
+    "mcp_health": "probe",
+    "category": "productivity",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:24.951Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "hubspot",
+    "label": "HubSpot",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@hubspot/mcp-server"
+    ],
+    "nango_provider": "hubspot",
+    "token_inject": {
+      "kind": "env",
+      "var": "PRIVATE_APP_ACCESS_TOKEN",
+      "format": "raw"
+    },
+    "mcp_health": "probe",
+    "category": "crm",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.000Z",
+    "env": {},
+    "headers": {},
+    "url": null,
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "slack",
+    "label": "Slack",
+    "mode": "live",
+    "transport": "internal",
+    "auth_strategy": "native",
+    "adapter_type": "slack",
+    "native_provider": "slack",
+    "supports_ingestion": false,
+    "supports_live_tools": true,
+    "mcp_health": "probe",
+    "default_project": "connector-slack",
+    "default_tags": [
+      "slack",
+      "live"
+    ],
+    "category": "comms",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.039Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "url": null,
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "airtable",
+    "label": "Airtable",
+    "transport": "streamable-http",
+    "url": "https://mcp.airtable.com/mcp",
+    "nango_provider": "airtable",
+    "mcp_health": "probe",
+    "category": "data",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.079Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "linear",
+    "label": "Linear",
+    "transport": "sse",
+    "url": "https://mcp.linear.app/sse",
+    "nango_provider": "linear",
+    "mcp_health": "probe",
+    "category": "project",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.117Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "gmail",
+    "label": "Gmail",
+    "transport": "streamable-http",
+    "url": "https://gmail.googleapis.com",
+    "nango_provider": "gmail",
+    "category": "google_workspace",
+    "mode": "connect_only",
+    "mcp_health": "not_applicable",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.151Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "google-drive",
+    "label": "Google Drive",
+    "transport": "streamable-http",
+    "url": "https://www.googleapis.com/drive",
+    "nango_provider": "google-drive",
+    "category": "google_workspace",
+    "mode": "connect_only",
+    "mcp_health": "not_applicable",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.187Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "google-calendar",
+    "label": "Google Calendar",
+    "transport": "streamable-http",
+    "url": "https://www.googleapis.com/calendar",
+    "nango_provider": "google-calendar",
+    "category": "google_workspace",
+    "mode": "connect_only",
+    "mcp_health": "not_applicable",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.223Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "google-docs",
+    "label": "Google Docs",
+    "transport": "streamable-http",
+    "url": "https://docs.googleapis.com",
+    "nango_provider": "google-docs",
+    "category": "google_workspace",
+    "mode": "connect_only",
+    "mcp_health": "not_applicable",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.257Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "google-gemini",
+    "label": "Google Gemini",
+    "transport": "streamable-http",
+    "url": "https://generativelanguage.googleapis.com",
+    "nango_provider": "google-gemini",
+    "category": "google_workspace",
+    "mode": "connect_only",
+    "mcp_health": "not_applicable",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.298Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
+  },
+  {
+    "name": "salesforce",
+    "label": "Salesforce",
+    "transport": "streamable-http",
+    "url": "https://api.salesforce.com",
+    "nango_provider": "salesforce",
+    "category": "crm",
+    "mode": "connect_only",
+    "mcp_health": "not_applicable",
+    "source": "catalog",
+    "updated_at": "2026-08-31T13:14:25.337Z",
+    "args": [],
+    "env": {},
+    "headers": {},
+    "allow_sse_fallback": true
   }
 ]

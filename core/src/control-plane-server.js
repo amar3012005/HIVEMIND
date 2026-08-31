@@ -23,6 +23,7 @@ import { parseOrigins, resolveTierCore } from './control-plane/tier-routing.js';
 import { ZitadelOidcClient } from './control-plane/zitadel.js';
 import { createZitadelEmailIdentity } from './control-plane/zitadel-email-identity.js';
 import { createEmailIdentityService, EMAIL_AUTH_PUBLIC_RESPONSE, normalizeEmail, resolveEmailIdentityMode, safeReturnTo } from './auth/email-identity-service.js';
+import { verifyEmailTurnstile as verifyEmailTurnstileResponse } from './auth/email-turnstile.js';
 import { ConnectorStore } from './connectors/framework/connector-store.js';
 import * as composioService from './connectors/composio/composio-service.js';
 import { CONNECTOR_CATALOG as COMPOSIO_CONNECTOR_CATALOG } from './connectors/catalog.js';
@@ -1642,18 +1643,8 @@ async function workspaceInviteMatchesAuthenticatedEmail(token, email) {
 }
 
 async function verifyEmailTurnstile(token, req) {
-  if (process.env.HIVEMIND_LOCAL_MODE === 'true' && process.env.EMAIL_AUTH_TURNSTILE_BYPASS === 'true') return true;
-  const secret = String(process.env.TURNSTILE_EMAIL_AUTH_SECRET || '');
-  if (!secret || !token) return false;
-  const form = new FormData();
-  form.set('secret', secret); form.set('response', String(token));
   const remoteIp = String(req.headers['cf-connecting-ip'] || req.socket?.remoteAddress || '');
-  if (remoteIp) form.set('remoteip', remoteIp);
-  const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-    method: 'POST', body: form, signal: AbortSignal.timeout(5000),
-  });
-  const result = await response.json().catch(() => ({}));
-  return Boolean(result.success && (!result.action || result.action === 'email_auth'));
+  return verifyEmailTurnstileResponse({ token, remoteIp });
 }
 
 async function dispatchAuthEmailOutbox(outboxId) {

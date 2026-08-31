@@ -13520,7 +13520,7 @@ Write the persona now.`;
       }
       const claim = await prisma.$executeRawUnsafe(
         `UPDATE "hivemind"."hyper_turns"
-            SET execution_phase='GROK_RUNNING', last_progress_at=now()
+            SET execution_phase='GROK_RUNNING', last_progress_at=now(), terminal_reason=NULL
           WHERE id=$1::uuid AND (
             execution_phase IN ('ACCEPTED','GROK_QUEUED')
             OR (execution_phase='GROK_RUNNING' AND last_progress_at < now() - interval '10 minutes')

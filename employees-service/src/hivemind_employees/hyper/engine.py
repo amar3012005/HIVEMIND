@@ -4329,7 +4329,7 @@ class Director:
                     r"(?im)^VERDICT:\s*PASS\s*$", text
                 ):
                     raise RuntimeError(
-                        "independent reviewer did not pass the completed work: " + text[:420]
+                        "independent reviewer did not pass the completed work: " + text[:3500]
                     )
                 activity = _work_order_activity(order.get("title"), text)
                 result = {"id": work_id or order_key, "step_id": step_id, "depends_on": dependencies, "order_key": order_key, "status": "completed",
@@ -4356,7 +4356,11 @@ class Director:
                     )
                 return result
             except Exception as exc:  # a worker failure is a visible, bounded result, never a dead Room
-                message = str(exc)[:500]
+                # A reviewer rejection is machine-readable repair input. Keep
+                # its exact gaps instead of truncating them to the opening of a
+                # markdown report; ordinary provider failures remain bounded.
+                message_limit = 4000 if order.get("verification_assignment") else 500
+                message = str(exc)[:message_limit]
                 result = {"id": work_id or order_key, "step_id": step_id, "depends_on": dependencies, "order_key": order_key, "status": "failed",
                           "kind": order.get("kind"), "title": order.get("title"), "owner": owner_name,
                           "owner_slug": owner_slug, "text": message, "acceptance_criteria": criteria}
@@ -4435,6 +4439,83 @@ class Director:
                 results.append(result)
             ready_ids = {id(order) for _, order in ready}
             pending = [(index, order) for index, order in pending if id(order) not in ready_ids]
+
+        # A reviewer rejection is a repair transition, not a terminal Room
+        # failure. Run one bounded evidence repair and a fresh independent
+        # review. The failed review stays persisted as audit history, while the
+        # returned active result set is replaced only after the new reviewer
+        # passes. This prevents both infinite loops and false "done" states.
+        failed_reviews = [
+            row for row in results
+            if row.get("status") == "failed" and row.get("step_id") == "independent-review"
+        ]
+        max_repairs = max(0, min(2, int(os.environ.get("HYPER_GROK_MAX_REPAIRS", "1") or "1")))
+        if (failed_reviews and max_repairs
+                and mode_at_least(self.grok_runtime_mode, "collaboration")):
+            active_results = list(results)
+            for attempt in range(1, max_repairs + 1):
+                rejected = failed_reviews[-1]
+                prior_step_ids = [
+                    str(row.get("step_id")) for row in active_results
+                    if row.get("status") == "completed" and row.get("step_id")
+                ]
+                repair_id = f"repair-{attempt}"
+                repair_order = {
+                    "id": repair_id,
+                    "depends_on": prior_step_ids,
+                    "kind": "research",
+                    "owner_lane": "Researcher",
+                    "title": f"Repair missing evidence (attempt {attempt})",
+                    "objective": (
+                        "Use the browser and other allowed tools to resolve every exact reviewer gap. "
+                        "If a selected public page is blocked or consent-gated, choose a credible accessible "
+                        "competitor page instead. Capture current rendered evidence, exact URLs and comparable "
+                        "price facts, then prepare the requested artifact inputs. Reviewer gaps:\n"
+                        + str(rejected.get("text") or "")[:3000]
+                    ),
+                    "required_evidence": ["Persisted browser receipts for every repaired factual claim"],
+                    "acceptance_criteria": [
+                        "Resolve every reviewer gap with current rendered evidence",
+                        "Return three comparable competitor pricing observations and exact source URLs",
+                        "Produce evidence sufficient for the requested reviewed artifact",
+                    ],
+                }
+                repair_result = await execute(len(orders) + attempt * 2, repair_order)
+                active_results.append(repair_result)
+                completed_by_step[repair_id] = repair_result
+                if repair_result.get("status") != "completed":
+                    results = active_results
+                    break
+
+                review_id = f"independent-review-repair-{attempt}"
+                review_order = {
+                    "id": review_id,
+                    "depends_on": [*prior_step_ids, repair_id],
+                    "kind": "decision",
+                    "owner_lane": "Skeptic",
+                    "title": f"Verify repaired work (attempt {attempt})",
+                    "objective": (
+                        "Independently verify the repaired work against the user's original request and all "
+                        "persisted browser receipts. Reject missing prices, missing competitors, inaccessible "
+                        "sources, unsupported comparisons, or a missing reviewed artifact."
+                    ),
+                    "required_evidence": [],
+                    "acceptance_criteria": [
+                        "Three current public competitor pricing pages have persisted browser receipts",
+                        "Comparable pricing facts and exact URLs are source-backed",
+                        "The comparison and reviewed artifact fully answer the original request",
+                    ],
+                    "verification_assignment": True,
+                }
+                review_result = await execute(len(orders) + attempt * 2 + 1, review_order)
+                active_results.append(review_result)
+                completed_by_step[review_id] = review_result
+                if review_result.get("status") == "completed":
+                    superseded_ids = {id(row) for row in failed_reviews}
+                    results = [row for row in active_results if id(row) not in superseded_ids]
+                    break
+                failed_reviews.append(review_result)
+                results = active_results
         return results
 
     def _verified_work_evidence(self) -> List[Dict[str, Any]]:

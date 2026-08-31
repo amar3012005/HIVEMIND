@@ -2,6 +2,7 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloud
 import { NonRetryableError } from 'cloudflare:workflows';
 import {
   type IngestParams,
+  materializationPollDecision,
   validOrgId,
   validParams,
   workflowInstanceId,
@@ -20,6 +21,9 @@ type StageResult = {
 };
 type MaterializationStatus = StageResult & {
   result?: { documentId?: string; segmentCount?: number; promotedCount?: number };
+  retryable?: boolean;
+  error_code?: string;
+  message?: string;
 };
 type RuntimeEnv = Env & {
   KNOWLEDGE_INGEST_WORKFLOW_SECRET: string;
@@ -121,11 +125,15 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
           { retries: { limit: 3, delay: '5 seconds', backoff: 'exponential' }, timeout: '1 minute' },
           () => core<MaterializationStatus>(this.env, params, 'stages/materialize/status'),
         );
-        if (status.status === 'succeeded') {
+        const decision = materializationPollDecision(status);
+        if (decision === 'complete') {
           materialized = status.result || status;
           break;
         }
-        if (status.status === 'failed') {
+        if (decision === 'fail') {
+          throw new NonRetryableError(status.message || status.error_code || 'materialization_failed');
+        }
+        if (decision === 'redispatch') {
           await step.do(
             `redispatch failed canonical materialization ${attempt + 1}`,
             { retries: { limit: 3, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },

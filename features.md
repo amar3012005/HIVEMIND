@@ -352,3 +352,19 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Stable non-canary V2, durable completion, exactly-once replay, grounded recall,
   metadata-only edge state, public health, and clean logs were verified. This is
   a canary release, not a global enablement.
+
+## feature-20260831T182301Z — Existing HyperRoom fast planner canary
+
+- Canonical production SHA `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`
+  adds a fail-closed, turn-latched mode to the existing HyperRoom runtime.
+- Flagship `hyperagents_fast_planner_v1` remains `off` by default. Only org
+  `f0cb77ef-e62b-4f8c-a1da-066611fc3b36` and user
+  `b457c254-38a0-4c43-8280-b026f1a78b04` receive `glm_no_reasoning`.
+- Enabled profile selection, Director planning, and verification use
+  `@cf/zai-org/glm-5.3-flash` through Cloudflare AI Gateway with thinking
+  disabled. Plain copy does not require the visual renderer, current-evidence
+  queries survive planning, and journal persistence adds no summarizer call.
+- Non-target users retain the previous production behavior. This feature does
+  not deploy or enable the Grok-style HyperAgents runtime.
+- Rollback is immediate by serving `off` to the exact canary; the additive
+  database latch can remain in place.

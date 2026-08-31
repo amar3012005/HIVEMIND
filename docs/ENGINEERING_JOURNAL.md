@@ -1522,3 +1522,35 @@ slides that find no unique anchor get a page instead of `null`.
   `docs/PRODUCTION_RELEASE.md`. Agent Memory release records:
   `d21c3d7c-d8c7-42b6-adb0-a24a5cae0451` and
   `db045133-a2ae-4c28-a04e-41c0000d33a7`.
+
+## 2026-08-31 UTC — Existing HyperRoom fast-planner production canary accepted
+
+- Committed `4a6b8105` on `codex/prod-fast-planner-canary`, then merged and
+  pushed canonical `singulance-main` SHA
+  `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`. This release does not include
+  or enable the Grok-style HyperAgents runtime.
+- Added the fail-closed Flagship flag `hyperagents_fast_planner_v1`. Production
+  default is `off`; only org `f0cb77ef-e62b-4f8c-a1da-066611fc3b36` plus user
+  `b457c254-38a0-4c43-8280-b026f1a78b04` resolves `glm_no_reasoning`.
+  Wrong-user and wrong-org live Worker probes both resolved `off`.
+- The enabled existing Room path uses `@cf/zai-org/glm-5.3-flash` for profile,
+  planning, and verification through Cloudflare AI Gateway. The transport
+  forces `chat_template_kwargs.enable_thinking=false`; synthesis and worker
+  personas remain on the stable production policy.
+- Plain marketing copy now has a text execution profile. The profile selector
+  preserves a current-evidence query and only requests the visual renderer for
+  an explicitly visual deliverable. Enabled journal persistence uses a
+  deterministic compact entry rather than another model call.
+- Verification: Employees focused suite 54/54; canonical Worker 14/14 plus
+  typecheck and dry-run; Core client 1/1; Prisma schema valid. A live Gateway
+  GLM probe returned choices, and the production flag endpoint returned
+  target=`glm_no_reasoning`, mismatches=`off`.
+- Accepted release: Worker version `9346733c-5ce7-4c6f-8cdf-50a676091f56`;
+  migration `20260831224500_hyper_fast_planner_flag`; governed manifest
+  `/root/releases/manifests/e2e2c055/20260831T182301Z/RELEASE_MANIFEST.json`.
+  Core, Control, and Employees are healthy at the exact canonical revision;
+  public health passed and the fresh critical-log scan was empty.
+- Rollback: set the exact canary rule to `off` first. Container rollback images
+  are `sha-afd97867` for Core, Control, and Employees; Worker rollback uses the
+  previous canonical-projection version. The additive latch column is safe to
+  retain.

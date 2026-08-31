@@ -1045,3 +1045,27 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   onboarding runs were triggered.
 - Rollback: backend `daddc0cb`; frontend Worker version
   `71eb6303-181c-4b49-a090-1a87dbd8e24e`.
+
+## e2e2c055 — Existing HyperRoom fast-planner canary
+
+- Parent `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`; frontend unchanged;
+  migration `20260831224500_hyper_fast_planner_flag`; manifest
+  `/root/releases/manifests/e2e2c055/20260831T182301Z/RELEASE_MANIFEST.json`.
+- Core digest `sha256:524967d1456ae3e46ccb03341ed1d5749e3d7cbf33e4cf68efea2e7b8d6bfb0f`;
+  Control digest `sha256:697db8484c50c508b2d1d875111a6a02fdb112221c4f28178b9b43707438d1c6`;
+  Employees digest `sha256:381de1e338b17173dc53c8f9ca78fbf75a066efa80249f09729cdb8d94ecdced`.
+- Canonical-projection Worker version
+  `9346733c-5ce7-4c6f-8cdf-50a676091f56`. Flag
+  `hyperagents_fast_planner_v1` is default-off and targets exactly org
+  `f0cb77ef-e62b-4f8c-a1da-066611fc3b36` plus user
+  `b457c254-38a0-4c43-8280-b026f1a78b04` with `glm_no_reasoning`.
+- Acceptance: target/mismatch live evaluations passed, GLM Flash returned a
+  valid response through Cloudflare AI Gateway with thinking disabled, all
+  three services were healthy at the exact revision, public health returned
+  200, and fresh critical logs were empty.
+- Scope: existing HyperRoom runtime only. No Grok runtime Worker, durable-agent
+  stage, browser-agent stage, or Grok schema was deployed.
+- Rollback: serve `off` to the exact canary, then use the governed rollback
+  images `hivemind/core-api:sha-afd97867`,
+  `hivemind/control-plane:sha-afd97867`, and
+  `hivemind/employees:sha-afd97867` if code rollback is required.

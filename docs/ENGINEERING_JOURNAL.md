@@ -2305,3 +2305,29 @@ git diff --check: passed (line-ending warnings only)
   integration worktree remains dirty in an unrelated generated connector file,
   so no merge, container rebuild, Flagship mutation or production action was
   performed.
+## 2026-08-31 UTC — HyperAgents fast planner candidate and local Flagship gate
+
+- Committed candidate `6771275b` on
+  `codex/hyperagent-receipts-responsive` in
+  `P:\HIVEMIND-worktrees\hyperagent-receipts-responsive`.
+- Added latched Flagship string flag `hyperagents_fast_planner_v1` in app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`. Default/production is `off`; the
+  `environment=local` rule serves `glm_no_reasoning`.
+- The enabled variant routes bounded planner/profile/verifier inference to
+  `@cf/zai-org/glm-5.3-flash` through Cloudflare AI Gateway and supplies
+  `chat_template_kwargs.enable_thinking=false`. It also uses deterministic
+  journal persistence and the semantic evidence/visual profile controls.
+- The decision is evaluated once and latched on `HyperTurn`; direct dispatch
+  and Cloudflare Workflow resume both receive the same mode. A missing second
+  flag fails only the planner feature closed and cannot disable the independent
+  Grok runtime decision.
+- Verification: focused Employees tests `66 passed`; Gateway/renderer tests
+  `9 passed`; Worker `tsc --noEmit` and `6` Vitest tests passed; Core Grok
+  contract `5` Node tests passed; Prisma schema validation passed; Wrangler
+  local dry-run exposed both Flagship keys and exited without deployment.
+- Runtime release status: not integrated into `singulance-local`, not deployed,
+  and not enabled in production. The permanent local integration worktree has
+  unrelated generated changes, so shared-container rebuild remains intentionally
+  deferred under `docs/LOCAL_INTEGRATION_PROTOCOL.md`.
+- Rollback: set the Flagship default/rule to `off`. Already-admitted turns keep
+  their latched policy; new admissions use the stable model path immediately.

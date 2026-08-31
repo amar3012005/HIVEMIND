@@ -1333,6 +1333,12 @@ def register_cloudflare_browser_tool(
             response.raise_for_status()
             payload = response.json()
             page = payload.get("page") or {}
+            links = [row for row in (page.get("links") or []) if isinstance(row, dict)][:250]
+            link_text = "\n".join(
+                f"- {str(row.get('text') or '')[:240]}: {str(row.get('url') or '')[:1000]}"
+                for row in links
+                if str(row.get("text") or "").strip() and str(row.get("url") or "").strip()
+            )
             _record_agent_tool_receipt({
                 "adapter": "cloudflare_browser",
                 "status": "completed",
@@ -1343,7 +1349,8 @@ def register_cloudflare_browser_tool(
                 "live_view_url": str(payload.get("live_view_url") or "")[:1000],
             })
             return _tool_response_text(
-                f"Title: {page.get('title') or ''}\nURL: {page.get('url') or ''}\n\n{page.get('text') or ''}",
+                f"Title: {page.get('title') or ''}\nURL: {page.get('url') or ''}\n\n"
+                f"{page.get('text') or ''}\n\nRendered links:\n{link_text}",
                 metadata={
                     "adapter": "cloudflare_browser", "status": "completed",
                     "provider_id": payload.get("session_id"),

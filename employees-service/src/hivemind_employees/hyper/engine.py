@@ -5614,7 +5614,10 @@ class Director:
                     "owner_lane": "Skeptic",
                     "title": "Independently verify the completed work",
                     "objective": "Review the completed assignments against their evidence and acceptance criteria.",
-                    "required_evidence": ["Completed assignment artifacts and provider receipts"],
+                    # The reviewer consumes persisted predecessor receipts. It
+                    # must not browse the web again merely to prove it reviewed
+                    # evidence that is already in the durable handoff.
+                    "required_evidence": [],
                     "acceptance_criteria": [
                         "Identify unsupported claims and missing requested outputs",
                         "Return a clear pass or exact repair requirements",

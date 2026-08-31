@@ -341,12 +341,15 @@ export default {
         await cdp.send('Page.navigate', { url: destination.toString() }, { sessionId, timeoutMs: 20_000 });
         await new Promise((resolve) => setTimeout(resolve, 1_000));
         const evaluated = await cdp.send('Runtime.evaluate', {
-          expression: 'JSON.stringify({title:document.title,url:location.href,text:(document.body?.innerText||"").slice(0,100000)})',
+          expression: 'JSON.stringify({title:document.title,url:location.href,text:(document.body?.innerText||"").slice(0,100000),links:Array.from(document.querySelectorAll("a[href]")).slice(0,250).map(a=>({text:(a.innerText||a.getAttribute("aria-label")||"").trim().slice(0,240),url:a.href})).filter(x=>x.text&&x.url)})',
           returnByValue: true,
         }, { sessionId, timeoutMs: 20_000 }) as { result?: { value?: string } };
         const page = JSON.parse(evaluated.result?.value || '{}') as Record<string, unknown>;
         return Response.json({ ok: true, session_id: browser.sessionId, target_id: target.id,
-          live_view_url: target.devtoolsFrontendUrl || null, page: { title: bounded(page.title, 500), url: bounded(page.url, 4_000), text: bounded(page.text) } });
+          live_view_url: target.devtoolsFrontendUrl || null, page: {
+            title: bounded(page.title, 500), url: bounded(page.url, 4_000), text: bounded(page.text),
+            links: Array.isArray(page.links) ? page.links.slice(0, 250) : [],
+          } });
       } finally { cdp.disconnect(); }
     }
     if (url.pathname === '/sandbox/execute' && request.method === 'POST') {

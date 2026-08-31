@@ -82,6 +82,35 @@ export class CloudflareKnowledgeIngestExecutor {
     this.isRemoteOrg = isRemoteOrg;
     this.logger = logger;
     this.steps = stepStore || new KnowledgeIngestStepStore({ prisma, logger });
+    this.schedulerReady = this._recoverStageScheduler();
+  }
+
+  async _recoverStageScheduler() {
+    if (!this.prisma?.knowledgeIngestLease || !this.prisma?.knowledgeIngestStep
+      || typeof this.prisma?.$transaction !== 'function') return;
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe?.("SELECT pg_advisory_xact_lock(hashtext('hivemind-knowledge-ingest-stage-recovery'))");
+        // Production has one Core scheduler. A process restart invalidates every
+        // in-process stage holder, while the durable Workflow and step receipts
+        // remain authoritative and will resume the current processing version.
+        await tx.knowledgeIngestLease.deleteMany({
+          where: { leaseKey: { startsWith: `${PROCESSING_LEASE_PREFIX}:` } },
+        });
+        await tx.$executeRawUnsafe(
+          `UPDATE knowledge_ingest_steps AS s
+              SET status = 'pending', lease_until = NULL, lease_token = NULL,
+                  updated_at = NOW()
+             FROM knowledge_ingest_jobs AS j
+            WHERE j.id = s.job_id
+              AND s.stage_key LIKE 'capacity\\_%' ESCAPE '\\'
+              AND s.status = 'processing'
+              AND j.status IN ('queued', 'processing')`,
+        );
+      });
+    } catch (error) {
+      this.logger.warn?.(`[knowledge-workflow] stage scheduler recovery deferred: ${error.message}`);
+    }
   }
 
   async _job({ jobId, orgId, userId, processingVersion }) {
@@ -206,6 +235,28 @@ export class CloudflareKnowledgeIngestExecutor {
           return { acquired: false };
         }
 
+        // The durable capacity rows are the queue. Only the oldest live row for
+        // this stage may claim next, so a thundering herd cannot let a newer job
+        // jump ahead. This is an indexed, one-row lookup; it never scans/ranks
+        // the KnowledgeIngestJob table inside the scheduler transaction.
+        const queued = await tx.$queryRawUnsafe?.(
+          `SELECT s.job_id AS "jobId", s.processing_version AS "processingVersion"
+             FROM knowledge_ingest_steps s
+             JOIN knowledge_ingest_jobs j ON j.id = s.job_id
+            WHERE s.stage_key = $1
+              AND s.status = 'pending'
+              AND j.status IN ('queued', 'processing')
+              AND j.processing_version = s.processing_version
+            ORDER BY s.created_at ASC, s.id ASC
+            LIMIT 1`,
+          `capacity_${stage}`,
+        );
+        const next = Array.isArray(queued) ? queued[0] : null;
+        if (next && (next.jobId !== job.id
+          || Number(next.processingVersion) !== Number(job.processingVersion))) {
+          return { acquired: false };
+        }
+
         const used = new Set(active.map((lease) => lease.leaseKey));
         const slot = Array.from({ length: capacity.global }, (_, index) => `${prefix}:${index}`)
           .find((key) => !used.has(key));
@@ -218,6 +269,13 @@ export class CloudflareKnowledgeIngestExecutor {
         };
         if (existing) await tx.knowledgeIngestLease.update({ where: { leaseKey: slot }, data });
         else await tx.knowledgeIngestLease.create({ data: { leaseKey: slot, ...data } });
+        await tx.knowledgeIngestStep?.updateMany?.({
+          where: {
+            jobId: job.id, processingVersion: job.processingVersion,
+            stageKey: `capacity_${stage}`, shardKey: 'root', status: 'pending',
+          },
+          data: { status: 'processing', attempt: { increment: 1 }, leaseUntil, leaseToken, startedAt: now },
+        });
         return { acquired: true, leaseToken, slot };
       });
     } catch (error) {
@@ -227,14 +285,38 @@ export class CloudflareKnowledgeIngestExecutor {
   }
 
   async _waitForProcessingLease(job, stage) {
+    await this.schedulerReady;
+    if (this.prisma?.knowledgeIngestStep) {
+      await this.prisma.knowledgeIngestStep.upsert({
+        where: { jobId_processingVersion_stageKey_shardKey: {
+          jobId: job.id, processingVersion: job.processingVersion,
+          stageKey: `capacity_${stage}`, shardKey: 'root',
+        } },
+        create: {
+          jobId: job.id, processingVersion: job.processingVersion,
+          stageKey: `capacity_${stage}`, shardKey: 'root', status: 'pending',
+        },
+        update: {
+          status: 'pending', leaseUntil: null, leaseToken: null,
+          errorCode: null, errorMessage: null, completedAt: null,
+        },
+      });
+    }
     while (true) {
-      const lease = await this._claimProcessingLease(job, stage);
-      if (lease.acquired) return lease;
-      await new Promise((resolve) => {
-        const wake = () => { clearTimeout(timer); stageWaiters.delete(wake); resolve(); };
-        const timer = setTimeout(wake, 2_000); // crash/restart safety fallback
+      let wake;
+      const released = new Promise((resolve) => {
+        wake = () => { stageWaiters.delete(wake); resolve(); };
         stageWaiters.add(wake);
       });
+      const lease = await this._claimProcessingLease(job, stage);
+      if (lease.acquired) {
+        stageWaiters.delete(wake);
+        // Capacity may still have another free slot. Wake the next durable
+        // waiter immediately so the pool fills without a timer.
+        for (const notify of [...stageWaiters]) notify();
+        return lease;
+      }
+      await released;
       const current = await this._job({
         jobId: job.id, orgId: job.orgId, userId: job.userId,
         processingVersion: job.processingVersion,
@@ -252,6 +334,16 @@ export class CloudflareKnowledgeIngestExecutor {
         jobId: job.id, processingVersion: job.processingVersion,
       },
     }).catch(() => null);
+    if (this.prisma?.knowledgeIngestStep) {
+      await this.prisma.knowledgeIngestStep.updateMany({
+        where: {
+          jobId: job.id, processingVersion: job.processingVersion,
+          ...(stage ? { stageKey: `capacity_${stage}` } : { stageKey: { startsWith: 'capacity_' } }),
+          status: 'processing',
+        },
+        data: { status: 'succeeded', leaseUntil: null, leaseToken: null, completedAt: new Date() },
+      }).catch(() => null);
+    }
     for (const wake of [...stageWaiters]) wake();
   }
 

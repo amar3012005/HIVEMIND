@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { withPdfRenderSlot } from '../src/knowledge/enterprise/groq-vision-parser.js';
 
-test('PDF rendering is serialized while downstream work can remain concurrent', async () => {
+test('PDF rendering uses a bounded pool while downstream work remains concurrent', async () => {
   let active = 0;
   let peak = 0;
   const order = [];
@@ -16,8 +16,9 @@ test('PDF rendering is serialized while downstream work can remain concurrent', 
     active -= 1;
   });
   await Promise.all([run(1), run(2), run(3)]);
-  assert.equal(peak, 1);
-  assert.deepEqual(order, ['start-1', 'end-1', 'start-2', 'end-2', 'start-3', 'end-3']);
+  assert.equal(peak, 2);
+  assert.deepEqual(order.slice(0, 2), ['start-1', 'start-2']);
+  assert.equal(order.indexOf('start-3') > Math.min(order.indexOf('end-1'), order.indexOf('end-2')), true);
 });
 
 test('a failed renderer releases the slot for the next document', async () => {

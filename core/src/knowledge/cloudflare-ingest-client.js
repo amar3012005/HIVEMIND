@@ -141,9 +141,14 @@ export class CloudflareKnowledgeIngestClient {
   async getWorkflowStatus(instanceId) {
     if (!instanceId) return null;
     const response = await this._request(`/status?instance_id=${encodeURIComponent(instanceId)}`, { method: 'GET' }, 5000);
-    if (!response.ok) return null;
+    if (response.status === 404) return { status: 'missing' };
+    if (!response.ok) {
+      throw Object.assign(new Error(`Workflow status unavailable with HTTP ${response.status}`), {
+        code: 'WORKFLOW_STATUS_UNAVAILABLE', retryable: response.status >= 500,
+      });
+    }
     const body = await response.json().catch(() => null);
-    return body?.status || null;
+    return body?.status ? { status: body.status } : null;
   }
 
   async getObject(objectKey, { expectedEtag = null } = {}) {

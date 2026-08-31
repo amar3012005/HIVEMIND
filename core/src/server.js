@@ -2684,6 +2684,7 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
         import('./knowledge/cloudflare-ingest-executor.js'),
       ]);
       cloudflareKnowledgeIngestClient = new CloudflareKnowledgeIngestClient({ logger: console });
+      kbIngestQueue.workflowStatusResolver = (instanceId) => cloudflareKnowledgeIngestClient.getWorkflowStatus(instanceId);
       isAuthorizedKnowledgeWorkflowRequest = workflowModule.isAuthorizedKnowledgeWorkflowRequest;
       knowledgeWorkflowExecutor = new workflowModule.CloudflareKnowledgeIngestExecutor({
         prisma,

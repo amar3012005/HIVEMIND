@@ -177,6 +177,7 @@ export class KbIngestQueue {
     this.jobStore = jobStore;
     this.validateJob = validateJob;
     this.processUpload = processUpload;
+    this.workflowStatusResolver = null;
     this.logger = logger;
     this.queue = null;
     this.worker = null;
@@ -384,6 +385,10 @@ export class KbIngestQueue {
           // Anything non-terminal that predates this boot lost its BullMQ job when
           // the previous container went away. Age it out in minutes, not 90.
           bootedAt: BOOTED_AT,
+        });
+        await this.jobStore.reconcileCloudflareStale?.({
+          workflowStatusResolver: this.workflowStatusResolver,
+          staleMin: Number(process.env.KNOWLEDGE_INGEST_WORKFLOW_STALE_MIN || 15),
         });
       } catch (e) {
         if (VERBOSE) this.logger.warn?.(`[kb-queue] reaper sweep failed: ${e.message}`);

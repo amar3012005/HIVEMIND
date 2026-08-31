@@ -353,11 +353,15 @@ export async function captureWebsiteScreenshot(websiteUrl, {
   }
 }
 
-export async function captureWebsiteScreenshotWithPlaywright(websiteUrl) {
+export async function captureWebsiteScreenshotWithPlaywright(websiteUrl, {
+  timeoutMs = Number(process.env.HIVEMIND_ONBOARDING_SCREENSHOT_TIMEOUT_MS || 12_000),
+  settleMs = Number(process.env.HIVEMIND_ONBOARDING_SCREENSHOT_SETTLE_MS || 150),
+  runtime,
+} = {}) {
   if (!websiteUrl) return null;
   try {
-    const runtime = new PlaywrightServiceRuntime({ timeoutMs: 30_000, settleMs: 700 });
-    const result = await runtime.crawl({ urls: [websiteUrl], depth: 0, pageLimit: 1, captureScreenshot: true });
+    const screenshotRuntime = runtime || new PlaywrightServiceRuntime({ timeoutMs, settleMs });
+    const result = await screenshotRuntime.crawl({ urls: [websiteUrl], depth: 0, pageLimit: 1, captureScreenshot: true });
     return compactText(result.pages?.[0]?.screenshot, 7_000_000) || null;
   } catch (error) {
     console.warn('[hyper-onboarding] Playwright screenshot skipped:', error.message);

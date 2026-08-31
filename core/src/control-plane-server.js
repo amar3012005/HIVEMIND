@@ -10404,9 +10404,10 @@ Write the persona now.`;
             searchCompanyMarket(`"${host}" company official LinkedIn Instagram Facebook X YouTube contact competitors`, { limit: 10 }),
           ]);
           markTiming('source_collection');
-          // Avoid a Firecrawl concurrent-scrape race: collect the fast evidence
-          // first, then let the slower visual renderer run independently.
-          const screenshotCapturePromise = captureWebsiteScreenshot(homepageUrl);
+          // The shared Playwright renderer is the fastest path to the exact page
+          // customers recognize. It runs independently from semantic onboarding,
+          // with a short bounded timeout; Firecrawl remains a visual-only fallback.
+          const screenshotCapturePromise = captureWebsiteScreenshotWithPlaywright(homepageUrl);
           const directHomepage = {
             url: homepage.url || homepageUrl,
             content: homepage.text,
@@ -10926,11 +10927,11 @@ Write the persona now.`;
           void (async () => {
             const capturedScreenshot = await screenshotCapturePromise;
             let finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: capturedScreenshot, orgId });
-            let finalSource = finalScreenshot ? 'firecrawl-screenshot' : null;
+            let finalSource = finalScreenshot ? 'playwright-screenshot' : null;
             if (!finalScreenshot) {
-              const playwrightScreenshot = await captureWebsiteScreenshotWithPlaywright(homepage.url || homepageUrl);
-              finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: playwrightScreenshot, orgId });
-              finalSource = finalScreenshot ? 'playwright-screenshot' : null;
+              const firecrawlScreenshot = await captureWebsiteScreenshot(homepage.url || homepageUrl);
+              finalScreenshot = await storeFirecrawlWebsiteVisual({ screenshot: firecrawlScreenshot, orgId });
+              finalSource = finalScreenshot ? 'firecrawl-screenshot' : null;
             }
             if (!finalScreenshot) {
               finalScreenshot = await storeOfficialWebsiteVisual({ html: homepage.html || '', pageUrl: homepage.url || homepageUrl, orgId });

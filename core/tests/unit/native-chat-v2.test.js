@@ -6,6 +6,7 @@ import { createNativePlannerGraph, nativeV2RoutingMode } from '../../src/agent/v
 import { buildTurnContext } from '../../src/agent/v2/turn-context-builder.js';
 import { intentDecisionToPlan } from '../../src/agent/chat-intent-decision.js';
 import { buildNativePlannerPrompt, NATIVE_PLANNER_PROMPT_VERSION } from '../../src/agent/v2/planner-prompt.js';
+import { shouldLoadCompactProfileForDecision } from '../../src/agent/react-agent-v2.js';
 
 function makePlan({ operation = 'recall', query = 'Kruti', entities = ['Kruti'], response = {}, source = null, time = {}, relation = [], aggregate = null, memory = null, direct = null, certified = false, capability } = {}) {
   const family = capability || (['save'].includes(operation) ? 'memory_write' : ['profile', 'update_profile'].includes(operation) ? 'profile' : operation === 'direct' ? 'direct' : 'workspace_read');
@@ -94,6 +95,16 @@ test('relation, aggregate and projects have dedicated exact operations', () => {
   assert.equal(compileNativePlan(validateNativePlan(makePlan({ operation: 'aggregate', query: 'all Solvis products', aggregate: { parent: 'Solvis', kind: 'product' }, response: { scope: 'exhaustive', shape: 'inventory' } })), 'aggregate').native_tool, 'hivemind_aggregate_entities');
   const projects = compileNativePlan(validateNativePlan(makePlan({ operation: 'projects', query: 'authorized projects', entities: [] })), 'projects');
   assert.equal(projects.native_tool, 'hivemind_list_projects'); assert.deepEqual(projects.tool_groups, ['hivemind-projects']);
+});
+
+test('native chat loads profile values only after selecting a profile-dependent action', () => {
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'recall' }), false);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'source_read' }), false);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'profile' }), false);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'direct' }), true);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'save' }), true);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'update_profile' }), true);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'recall', auto_save_intent: { content: 'durable' } }), true);
 });
 
 test('a leading year in an exact filename cannot create an incomplete snapshot plan', () => {

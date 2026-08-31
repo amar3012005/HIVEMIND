@@ -3378,6 +3378,14 @@ COMPLETENESS AND STYLE:
 
 // ── Public entry — same signature as v1 ────────────────────────────────
 
+export function shouldLoadCompactProfileForDecision(decision = {}) {
+  return decision.operation === 'direct'
+    || decision.operation === 'save'
+    || decision.operation === 'update_profile'
+    || Boolean(decision.save_intent)
+    || Boolean(decision.auto_save_intent);
+}
+
 export async function runReactAgentV2({
   message,
   history = [],
@@ -3524,21 +3532,24 @@ export async function runReactAgentV2({
         }).catch(() => [])
       : [];
     _ps = Date.now();
-    // ALWAYS-ON compact profile preload, IN PARALLEL with the planner. This is
-    // the cheap authoritative-context lane (2 indexed Postgres reads via the
-    // shared ProfileStore cache — NOT wide vector recall). It guarantees every
-    // turn — including a `direct` answer or a mis-routed "Who am I?" — has the
-    // user's name/role/company/preferences available, so a routing miss can
-    // never answer blind. Best-effort: a failure yields empty context, never
-    // breaks the turn.
-    const profilePreloadPromise = (async () => {
-      if (!ctx?.prisma) return '';
-      try {
-        const { getSharedProfileStore } = await import('../memory/profile-store.js');
-        const ps = getSharedProfileStore(ctx.prisma);
-        return (await ps.buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null)) || '';
-      } catch { return ''; }
-    })();
+    // Profile discovery is lazy. The semantic planner only needs to know that
+    // a caller-scoped profile capability exists; it does not need the caller's
+    // profile values on every turn. Resolve the bounded persona packet only
+    // after planning selects a direct/personalized or memory-write path. A
+    // dedicated profile read continues through get_user_profile below.
+    let compactProfilePromise = null;
+    const getCompactProfileContext = () => {
+      if (compactProfilePromise) return compactProfilePromise;
+      compactProfilePromise = (async () => {
+        if (!ctx?.prisma) return '';
+        try {
+          const { getSharedProfileStore } = await import('../memory/profile-store.js');
+          const ps = getSharedProfileStore(ctx.prisma);
+          return (await ps.buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null)) || '';
+        } catch { return ''; }
+      })();
+      return compactProfilePromise;
+    };
     // FLAG: CHAT_ROUTER=progressive swaps ONLY the intent-selection stage for
     // the 6-tool Cerebras-direct progressive router. The adapter returns the
     // SAME decision shape, so intentDecisionToPlan + everything downstream is
@@ -3550,7 +3561,10 @@ export async function runReactAgentV2({
       : (nativeV2Module?.nativeV2RoutingMode({ useTools, seed: ctx.userId || trace.traceId }) || 'off');
     const nativeV2Input = async () => ({
       message, history, language, apiKey, signal: abortCtrl.signal,
-      profileContext: await profilePreloadPromise, projectCatalog,
+      // Native V2 discovers profile values through the caller-scoped profile
+      // capability. Supplying values here would turn progressive discovery
+      // back into an always-on prompt preload.
+      profileContext: '', projectCatalog,
       orgId: ctx.orgId, userId: ctx.userId, threadId: ctx.threadId || null,
       timezone: ctx.timezone || ctx.accessContext?.timezone || 'UTC', now: new Date().toISOString(),
     });
@@ -3682,8 +3696,9 @@ export async function runReactAgentV2({
       };
     }
     recordUsage('router', intentParsed.usage);
-    // Resolve the parallel profile preload (kicked off before the planner).
-    const preloadedProfileContext = await profilePreloadPromise;
+    const preloadedProfileContext = shouldLoadCompactProfileForDecision(intentDecision)
+      ? await getCompactProfileContext()
+      : '';
     // Request-scoped identity for deterministic first-person resolution in
     // user-authored relation claims. It is never persisted or sent as a
     // caller-controlled tool argument.

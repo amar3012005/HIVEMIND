@@ -1,5 +1,24 @@
 # Current SINGULANCE Production Release
 
+## 2026-08-31T23:09Z - restart-safe text and image ingestion
+
+- Canonical parent SHA `1765ad96bfd726e1fe358e5bc6aaf589ece99420`;
+  frontend remains `c5a4973c468f39f86f573284180f95afa140145a`.
+- Core image digest
+  `sha256:9bce5a18ee576d596a2b35835e6f6f29e24ace76e0c9257a11311613278a4102`;
+  manifest `/root/releases/manifests/1765ad96/20260831T230417Z/RELEASE_MANIFEST.json`.
+- Knowledge-ingest Worker version `e64dc93f-065a-4512-b5db-5435ecfaee2a`
+  is active at 100% with production bindings preserved. No migration was pending.
+- Acceptance: three interrupted Workflow jobs resumed and reached `ready`; a
+  fresh simultaneous three-PDF burst completed in 11–17 seconds with all
+  receipts on attempt 1 and overlapping stages. PNG canary
+  `f379e597-ab8d-403e-bf0f-a34698753454` completed with one canonical memory;
+  retained JPG/JPEG canaries remain ready. Core health returned 200 with DB,
+  Qdrant, and Docling reachable.
+- Rollback is the governor-captured preceding Core image and Worker version
+  `9225e2b9-e088-4df5-ba44-cbba3d76b3ee`; emergency admission rollback remains
+  Flagship off or the Core environment gate.
+
 ## 2026-08-31T20:38Z - durable ingestion throughput globally accepted
 
 - Canonical parent SHA `e9fca76f6e8d66398d195f87d431645a56b1b058`

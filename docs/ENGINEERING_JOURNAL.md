@@ -1,5 +1,28 @@
 # HIVEMIND Engineering Journal
 
+## 2026-08-31 UTC — short-PDF routing and Workflow restart recovery
+
+- Production recon found a second, independent latency cause: valid short
+  text-layer PDFs were treated as image-heavy because the fast-path threshold
+  required hundreds of characters. They entered whole-document vision and
+  then Docling, even though native text was already usable.
+- Canonical Core release `1765ad96bfd726e1fe358e5bc6aaf589ece99420`
+  recognizes coherent Unicode text layers without a length/density threshold,
+  keeps selective visual-page enrichment independent, and uses the configured
+  Cloudflare Gemini route for vision fallback. A focused 49-test suite passed.
+- Core startup recovery now requeues every current-version in-process Workflow
+  checkpoint, rather than only capacity checkpoints. The Worker treats a
+  pending materialization receipt as an idempotent redispatch. Focused Core and
+  Worker suites passed 31 and 5 tests, and Worker typecheck passed.
+- Worker version `e64dc93f-065a-4512-b5db-5435ecfaee2a` is deployed at 100%
+  with the production R2, Queue, Workflow, Flagship, and secret bindings. Core
+  manifest is `/root/releases/manifests/1765ad96/20260831T230417Z/RELEASE_MANIFEST.json`.
+- Three interrupted jobs automatically resumed to `ready`. A fresh simultaneous
+  three-PDF burst completed in 11–17 seconds with every checkpoint at attempt
+  1, overlapping extract/embed/promote execution, and fast-PDF routing for all
+  files. Live PNG job `f379e597-ab8d-403e-bf0f-a34698753454` also completed on
+  attempt 1 with one canonical memory; retained JPG/JPEG jobs remain ready.
+
 This is the human-readable index of committed work and accepted production
 releases. Git is the source of truth; every entry must cite immutable commit
 SHAs, release IDs, and verification evidence. Do not record plans, guesses,

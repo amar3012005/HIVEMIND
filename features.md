@@ -1,5 +1,20 @@
 # Singulance Feature Registry
 
+## feature-20260831T230928Z — restart-safe text and image ingestion
+
+- Flag `knowledge_ingest_workflow_v1` remains globally enabled. Core release
+  `1765ad96bfd726e1fe358e5bc6aaf589ece99420` and Worker version
+  `e64dc93f-065a-4512-b5db-5435ecfaee2a` are active.
+- Short but coherent native PDF text remains text-first; character density no
+  longer forces whole-document vision or Docling. Visual-page enrichment stays
+  selective and Gemini 2.5 Flash Lite remains behind Cloudflare AI Gateway.
+- Current-version Workflow checkpoints are safely redispatched after a Core
+  restart. Redispatch is version-fenced and idempotent; completed receipts are
+  reused and cannot duplicate evidence, memories, vectors, or billing.
+- Fresh three-file production acceptance completed in 11–17 seconds with
+  attempt-1 receipts and overlapping extract/embed/promote stages. Live PNG,
+  JPG, and JPEG paths all reached canonical ready state with one memory.
+
 This append-only registry is the global record of features accepted on
 `singulance-main`. Add an entry only after the governed production release and
 runtime verification have completed. Use the same feature identifier in

@@ -1081,6 +1081,7 @@ const TOOL_HANDLERS = {
       event_range: args._event_range === true,
       memory_types: recallPlan.memory_types,
       boost_memory_type: requestedAnswerType,
+      reliability_v1: args.reliability_v1 === true,
     }, {
       userId:        ctx.userId,
       orgId:         ctx.orgId,

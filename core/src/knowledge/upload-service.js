@@ -83,10 +83,10 @@ export class KnowledgeUploadService {
         error: 'storage_unavailable', message: 'The selected memory storage is unavailable. No central fallback was used.',
       } };
     }
-    const useCloudflare = await this.cloudflareQueue?.isEnabled?.(orgId);
+    const useCloudflare = await this.cloudflareQueue?.isEnabled?.(orgId, userId);
     const selectedQueue = useCloudflare ? this.cloudflareQueue : this.queue;
     const orchestrationMode = useCloudflare ? 'cloudflare_workflow' : 'bullmq';
-    if (!await selectedQueue?.isAvailable({ orgId })) {
+    if (!await selectedQueue?.isAvailable({ orgId, userId })) {
       return { ok: false, status: 503, body: { error: 'queue_unavailable', message: 'Durable ingestion is temporarily unavailable.' } };
     }
 

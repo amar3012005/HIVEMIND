@@ -98,152 +98,256 @@ verification, and its independent rollback control.
 - Rollback: roll back the Worker and disable/delete only that WAF ruleset; no
   database or customer data changed.
 
-## feature-20260830T150000Z — Durable Dreaming and Subject Profiles v2
+## feature-20260830T012000Z — Enterprise canonical ingestion Workflow v1
 
-- Local status: integrated into `singulance-local` at `2b2510a3`; shared backend
-  runtime acceptance remains pending because the parallel ingestion session owns
-  the current `knowledge-workflow-local` API container.
-- Gate: `DREAM_WORKFLOW_V2_ENABLED` plus fail-closed `dream_workflow_v2`.
-- Cloudflare: isolated Workflow, Queue/DLQ, Cron, R2, Flagship, and existing AI Gateway.
-- Data: additive checkpoints, candidates, typed derivation receipts, and immutable generic subject-profile revisions.
-- Compatibility: existing cognition/profile payloads are unchanged; v2 fields and routes are additive.
-- Promotion: shared-runtime local acceptance is required before production governance.
-
-## feature-20260830T081500Z — Heavy-document ingestion replay hardening
-
-- Local status: accepted on `codex/knowledge-ingest-workflow-v1`; production and
+- Local status: implemented and accepted for `singulance-local`; production and
   `singulance-main` remain unchanged.
-- Source commit: `1ae13c022db72927aebef43ecdaa6230c5fd24a7`.
-- Capability: forced reprocessing keeps the existing document projection live
-  until its replacement memories, citations, entities, and claims are durable;
-  it then retires only memories without support from another document and
-  removes obsolete semantic vectors and citation links.
-- Admission durability: identifier-stable R2 writes retry bounded transient
-  failures with a configurable five-minute attempt window. Platform timeout
-  codes are normalized before durable job failure recording.
-- Production parity: local inference used the production Cloudflare AI Gateway,
-  LLM policy, embedding model and 1024-dimensional embedding contract. Database,
-  Redis, Qdrant, auth, Workflow, Queue, R2, and Flagship resources stayed local.
-- Runtime acceptance: eight OCR PDFs were admitted together through
-  `knowledge_ingest_workflow_v1`. All eight reached `ready`: 691 pages, 1,722
-  segments, 1,722/1,722 evidence vectors, 113 memories, and 113 live citation
-  projections. Every current processing version has ten successful checkpoint
-  receipts and each job retains exactly three idempotent usage settlements.
-- Isolation and recall: a foreign-organization status request returned 404.
-  Filename recall returned eight persisted-hybrid results, one exact filename
-  match, and citations on all eight returned memories.
-- Tests: all 105 `core/tests/knowledge/*.test.js` tests passed; syntax,
-  PowerShell parsing, Compose validation, and `git diff --check` passed. The
-  repository-wide Node test command remains red on its documented unrelated
-  Windows/Vitest/AMR/retired-module baseline.
-- Rollback: disable `knowledge_ingest_workflow_v1` or set
-  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; new admissions return to BullMQ.
-## feature-20260830T025500Z — Dreaming provider-outage recovery guard
+- Capability: Cloudflare Queue + Workflow orchestration, R2 source durability,
+  PostgreSQL lease/checkpoint receipts, replay-safe canonical evidence, memory,
+  entity, and citation materialization, with unchanged browser/API contracts.
+- Controls: `HIVEMIND_LOCAL_MODE=true`,
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true`, and Flagship
+  `knowledge_ingest_workflow_v1=true` for the test organization. Either feature
+  control rolls new admissions back to BullMQ.
+- Cloudflare local resources: Worker `hivemind-knowledge-ingest-local`, Workflow
+  `hivemind-knowledge-ingest-workflow-local`, Queue/DLQ
+  `hivemind-knowledge-ingest[-dlq]-local`, and R2
+  `hivemind-ingest-artifacts-local`. Hosted Worker version:
+  `ad64498c-2489-459c-a664-7de235a7bd38`.
+- AI parity: production Gemini/DeepSeek/Groq policy and BGE-M3 1024-dimensional
+  embeddings use AI Gateway `hivemind-prod`; credentials are not stored in Git.
+- Verification: 133/133 focused backend tests; Worker 2/2 tests, TypeScript
+  check, and Wrangler dry-run; frontend AI-discovery 3/3 and full CRA build;
+  Prisma validation; local and hosted replay canaries.
+- Runtime canary: job `cca99f31-fcfd-4707-b0ba-2d84de3f9d9c` produced one
+  document, two evidence segments with 2/2 vectors, ten candidates, eight
+  memories, nine citations, ten successful receipts, and one canonical Paolo
+  entity. Duplicate hosted starts completed once with unchanged counts.
+- Baseline note: unfiltered root `npm test` is not a valid Windows release gate
+  today because it mixes Vitest with Node's runner, references retired absolute
+  paths/modules, and requires a Linux-only AMR binary. The focused ingestion
+  suite and local Linux container runtime are green.
 
-- Local status: committed as `276d2203` and integrated into the permanent
-  `singulance-local` worktree by merge `76a134fe`; production remains unchanged.
-- Behavior: if every eligible subject fails during candidate generation, the
-  stage raises retryable `candidate_generation_provider_unavailable`. The run
-  cannot reconcile, publish, notify, or finalize as a successful zero-candidate
-  dream during a total AI-provider outage.
-- Verification: the focused lifecycle suite passed 6/6. Local recovery run
-  `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` remained checkpointed at
-  `generate-candidates` with attempt 2 while its isolated Cloudflare Workflow
-  continued bounded retries.
-- Remaining gate: rotate the expired production-parity LiteLLM/OpenRouter
-  credentials, rebuild an immutable local API image, then finish successful
-  grounding, derivation, profile, vector, notification, UI, restart, and DLQ
-  acceptance before any governed production promotion.
+## feature-20260830T150300Z — Durable canonical ingestion Workflow production canary
 
-## feature-20260830T033000Z — Dreaming terminal failure receipts
-
-- Local status: patch `e924850a`, merged to `singulance-local` at `f582bb5d`;
-  isolated Worker version `b6c01ba1-0420-44e4-b36d-26b04cb416e5`.
-- Behavior: exhausted Cloudflare stage retries durably close the authoritative
-  PostgreSQL run as recoverable error. A provider outage cannot leave an active
-  run stuck indefinitely or publish partial cognition.
-- Runtime proof: run `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` is terminal error
-  with `recovery_status=retry_exhausted`; lifecycle tests passed 7/7 and Worker
-  TypeScript validation passed. Production was not modified.
-
-## feature-20260830T042000Z — Immutable terminal Dreaming state
-
-- Local status: patch `718b0117`, merged to `singulance-local` at `c314c713`;
-  isolated Worker version `7c21bf84-11b3-4b66-8126-6e679da944a1`.
-- Behavior: delayed Cloudflare retries cannot convert failed or cancelled runs
-  into completed runs, including through finalize. Tests passed 8/8 and the
-  local provider-outage canary remains terminal error with zero publication.
-
-## feature-20260830T091800Z — Deterministic immutable local API build
-
-- Local status: patch `5bab2ada`, merged at `963dd056`; production unchanged.
-- Build: optional Lightpanda/Puppeteer binary downloads no longer block the API
-  image, while package lifecycle scripts and Prisma generation remain enabled.
-- Runtime proof: immutable image
-  `sha256:cf62435628596297a247387c7dd2ccca46323e215ae49056690fcd70f5918d22`
-  runs healthy from `HIVEMIND-local-main` and contains the merged ingestion and
-  Dreaming terminal-state code.
-
-## feature-20260830T090000Z — Meta-aware PDF quality and preview-read recovery
-
-- Local status: accepted on `codex/knowledge-ingest-workflow-v1`; production and
-  `singulance-main` remain unchanged. The frontend companion commit is
-  `bab779a` on `codex/preview-health-poll-cleanup`.
-- PDF quality: a deterministic text-layer gate measures short-token,
-  single-token, and average-token-length corruption. Text-rich but fragmented
-  OCR now routes to vision OCR instead of being treated as clean fast-PDF text.
-- Chunking: clean fast-PDF pages split at paragraph, sentence, newline, or word
-  boundaries with bounded overlap; document title, heading path, and page remain
-  contextual embedding and citation metadata, never synthetic evidence text.
-- AI parity: vision OCR now supports the production Cloudflare AI Gateway BYOK
-  transport without direct provider keys. A real rendered page returned 906
-  characters of Markdown through the Gateway. The local image declares Poppler,
-  ImageMagick, and Ghostscript, matching the production renderer contract.
-- Canonical memory quality: the extraction prompt now unambiguously separates
-  standalone claim `f` from verbatim `source_quote`; the atomicity guard reads
-  the canonical `f` field and splits only claims containing at least three
-  independent sentences. Entity context, exact quote validation, typed claim
-  structure, Updates/Extends/Derives graph semantics, citations, and tenant
-  scoping remain intact.
-- Eight-file evidence: all supplied OCR PDFs were classified concurrently; all
-  eight correctly failed the clean-text gate (61-90 pages, 74-86% single-letter
-  tokens in their raw text layers). Existing durable data remains unchanged.
-  Recall canaries found the expected fact in seven of eight query sets; the one
-  miss and off-target top ranks are attributable to the already-ingested damaged
-  OCR and are the reason future/reprocessed versions use the new OCR route.
-- Preview recovery: the control plane and Core now share a generated local-only
-  non-placeholder internal key, so documents, billing usage, and health proxy
-  checks return 200. The redundant top-bar 30-second health poll and status pill
-  were removed; required Memories/Knowledge and billing reads remain.
-- Verification: 116/116 focused backend tests, 18/18 quality/context tests,
-  Memories scope 4/4, frontend optimized build, real AI Gateway page canary,
-  and local proxy read canaries passed. Local Core source is read-only mounted so
-  JS-only changes require restart rather than image rebuild; manifest/native/
-  Prisma changes still require a build.
-
-## feature-20260830T120000Z — Production-gated durable ingestion and preview email login
-
-- Local status: tested on `codex/knowledge-ingest-workflow-v1`; production and
-  `singulance-main` remain unchanged until a separately governed canary release.
-- Authentication: `next.preview.singulancelabs.com` uses the existing approved
-  one-time-email link flow. Google is not rendered or invoked in preview. The
-  production login path is not changed by this local-only UI branch.
-- Production safety gate: the hosted ingestion client activates in production
-  only when `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true`,
-  `KNOWLEDGE_INGEST_WORKFLOW_ENVIRONMENT=production`, `NODE_ENV=production`,
-  local mode is false, and
-  `KNOWLEDGE_INGEST_PRODUCTION_ACK=enable-cloudflare-workflow-v1`. Flagship must
-  independently enable `knowledge_ingest_workflow_v1` for the tenant; failures
-  remain fail-closed.
-- Production resource contract: Worker
-  `hivemind-knowledge-ingest-production`, Workflow
+- Production status: deployed and accepted on canonical parent
+  `5a979b736c2e02214cae8e95785446e66748dff7`. The public upload, polling,
+  duplicate, scope, billing, memory, and citation payloads remain unchanged.
+- Cloudflare resources: Worker `hivemind-knowledge-ingest-production`, Workflow
   `hivemind-knowledge-ingest-workflow-production`, Queue/DLQ
   `hivemind-knowledge-ingest[-dlq]-production`, and R2
-  `hivemind-ingest-artifacts-production`. These names are isolated from local
-  resources and are declared but not provisioned or deployed by this entry.
-- Verification: focused ingestion suite `120/120`; frontend preview-login
-  contract `2/2`; Worker types/check and production Wrangler dry-run passed.
-  The dry run used the production API hostname and production bindings without
-  creating resources or changing traffic.
-- Rollback: disable the tenant Flagship decision or set
-  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; new admissions remain on BullMQ.
+  `hivemind-ingest-artifacts-production`. Active Worker secret-change version:
+  `cb297a0d-7025-4440-bd4c-a4f6e9c1ce5f`.
+- Flagship `knowledge_ingest_workflow_v1` remains default-off. It has separate
+  environment-qualified local and production canary rules, so neither tenant ID
+  can accidentally enable the other environment.
+- Production canary job `60828bf4-4578-48c4-948e-a9affebdde0a` completed through
+  `cloudflare_workflow`: one document, one evidence segment/vector, four
+  candidates, five memories, five citations, canonical entity links, four
+  relationships, ten successful receipts, and three exactly-once settlements.
+  Two duplicate starts reused the completed deterministic Workflow instance;
+  counts remained stable. Persisted-hybrid recall returned the synthetic Paolo
+  canary memory.
+- Tests: 141/141 focused Core tests, Worker 2/2 tests, TypeScript, production
+  Wrangler dry-run, Prisma generation/validation, public health, tenant-scoped
+  ingestion/recall, duplicate replay, persisted-count checks, and fresh critical
+  log scan passed.
+- Rollback: disable the Flagship rule or set
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; canonical rollback images are the
+  prior `sha-40e3b3d1` Core, Control Plane, and Employees images.
+
+## feature-20260830T174500Z — BYOD canonical graph parity for flagged ingestion
+
+- Production status: accepted on Core SHA
+  `048fba06cb0437c77ff2c26ddd132509883c57d0`. Control Plane, Employees,
+  frontend, local Docker settings, databases, and Cloudflare resource bindings
+  were not rebuilt or replaced.
+- Fix: the storage backend selected for a BYOD memory is latched onto hydrated
+  rows and every canonical graph projection. Updates, Extends, Derives,
+  Contradicts, entity projection, and citation/relationship writes can no
+  longer fall through to central PostgreSQL when an async boundary loses
+  request-local routing context.
+- Production canary: two tenant-scoped BYOD writes returned 201; the second
+  returned `mutation.operation=updated`; the agent returned one certified
+  Updates edge; the prior memory became non-latest; and deterministic tags for
+  Paolo Meridian, Heidelberg, and Atlas Memory Box were present. Exact canary
+  memories were removed after verification.
+- Flagship: `knowledge_ingest_workflow_v1` evaluates true only for production
+  org `0a1d5b33-a33c-49a6-8185-6d16370670a2` plus user
+  `727af46d-6bdf-4a77-ac7f-1c8c59bde96d`; a different user in the same org
+  evaluated false. Default remains off.
+- Verification: focused graph/deployment tests 20/20, public health green,
+  Core `sha-048fba06` healthy, Control Plane and Employees unchanged on
+  `sha-b3616eb4`, and the post-canary three-minute critical-log scan was empty.
+- Rollback: disable the Flagship rule for new Workflow admissions; for the Core
+  graph fix use the governor-preserved `sha-81239791` rollback image.
+
+## feature-20260830T180000Z — Second production ingestion canary tenant
+
+- Flagship-only rollout; no Worker, container, database, frontend, or local
+  deployment changed.
+- `knowledge_ingest_workflow_v1` now also evaluates true only for production
+  org `bfbdd2bc-e214-44e5-80d4-e3284256d0c0` plus user
+  `e35811aa-4bcd-44bb-b829-a437895a42eb`. A different user in the same org
+  evaluates false; the global default remains off.
+- Day 1 audit: production `day1_first_move_v1` is enabled, default-on, and has
+  no targeting rules. The production `HIVEMIND_D1_WORKFLOW_ENABLED` backend
+  gate is also true, so Day 1 is enabled for every eligible user.
+
+## feature-20260830T181000Z — Exact canonical entities and Cloudflare BGE-M3
+
+- Production Core release `a4b0448cc42b7ea7c98d656efaa9a640798a34f0`
+  makes supported exact subject/entity names a default invariant of canonical
+  knowledge-memory promotion; no feature flag is required for correctness.
+- The generator schema requires `subject` and `entities`. The canonical
+  materializer merges supported declared entities, subject, and relationship
+  endpoints before memory tags, metadata, evidence metadata, vector payloads,
+  and central/embedded/hybrid/BYOD entity projection.
+- Production embedding order is Cloudflare Workers AI
+  `@cf/baai/bge-m3` through `hivemind-prod`, then OpenRouter
+  `baai/bge-m3`. Both emit 1024-dimensional BGE-M3 vectors; timeout failover is
+  enabled without weakening caller cancellation.
+- Verified with 23 focused tests, a live Workers AI preflight, a post-release
+  finite-vector canary, typed exact-name materialization, public checks, and a
+  clean critical-log scan. No frontend, Flagship targeting, Cloudflare
+  Workflow resource, database, or local deployment configuration changed.
+
+## feature-20260830T184000Z — Quiet durable-ingestion connectivity handling
+
+- Production frontend `3fb492ac6e69008f19bc71bbe9fc81878e806b2f`
+  no longer shows a global connection outage for an individual Knowledge Base
+  status-poll miss. Durable polling continues normally.
+- The global health badge requires three consecutive failures before showing
+  Offline and returns Online after the first successful probe. User-action and
+  confirmed service failures remain visible.
+- Accepted as Cloudflare Worker version
+  `288561fd-e001-4132-a82c-7e8f0711d9e3` after focused tests, production build,
+  dry-run, served-bundle inspection, and public login verification.
+
+## feature-20260830T200500Z — Canonical Knowledge Foundation Phase 0 canary
+
+- Production was first accepted for exact user
+  `e35811aa-4bcd-44bb-b829-a437895a42eb` and organization
+  `bfbdd2bc-e214-44e5-80d4-e3284256d0c0`. After Knowledge Base canonical
+  projection acceptance, Flagship was promoted globally to default `full` on
+  2026-08-30; the backend environment kill switch remains available.
+- Canonical source: `singulance-main`
+  `bccbf73fdc1fdb40b1699d1251e7df12e6a15ce0`; frontend
+  `59f3779b8291d5136a72a18867b5b4076ed46172`.
+- `CanonicalClaim` stores factual predicates separately from memory lineage.
+  `/relationships` remains Updates, Extends, Derives, Contradicts, and PartOf.
+- Canary proof: one `Uwe Egly -> teaches -> deep learning` claim, two entities,
+  subject/actor and object/technology roles, valid from 2026-08-31,
+  `user_asserted`, exact source evidence, and zero lineage. Replay stayed 1/2/0.
+- Cloudflare canonical Worker `c8461f69-d815-4ea5-bba3-82fc644a3f3c` and
+  frontend Worker `0ff3c24a-f722-4510-808c-dc50af597602` are live. The
+  multivariate flag now serves `full` by default to every valid tenant/user
+  context. The UI separates Claims from Memory lineage.
+- Rollback: set the canary to `off`, set
+  `CANONICAL_KNOWLEDGE_KILL_SWITCH=true`, or use governor rollback images.
+- Knowledge Base promotion parity was accepted at Core
+  `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`: standard, enterprise,
+  connector, and evidence-upgrade promotion boundaries now await the same
+  feature-flagged canonical projector. A production Cloudflare Workflow upload
+  produced `Professor Uwe Egly (person) -> teaches -> Neuro-Symbolic AI course
+  (technology)` with exact document/segment evidence and typed endpoint roles.
+
+## feature-20260830T205222Z — Durable Cloudflare ingestion enabled globally
+
+- Flagship `knowledge_ingest_workflow_v1` in app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` now serves variation `on` by default.
+  Existing exact canary rules remain for audit continuity, but every valid
+  production organization/user context now selects the durable Cloudflare
+  Workflow, Queue, DLQ, and R2 ingestion lifecycle.
+- The production backend master gate remains
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=true`; setting it to `false` or changing
+  the Flagship default to `off` immediately returns new admissions to the
+  stable BullMQ path without deleting in-flight Workflow state.
+- Runtime verification used an unrelated valid UUID organization/user pair:
+  Wrangler returned `on/DEFAULT`, and the authenticated live production Worker
+  `/enabled` endpoint returned HTTP 200 with `enabled=true`.
+- Embeddings were already configured correctly and were not redeployed:
+  Cloudflare Workers AI `@cf/baai/bge-m3` through AI Gateway `hivemind-prod` is
+  primary; OpenRouter `baai/bge-m3` is the same-model secondary. A fresh live
+  factory probe reported `cloudflare -> openrouter` and returned a finite
+  1024-dimensional vector with neither provider cooling down.
+- No Worker, container, database, frontend, local deployment setting, Queue,
+  Workflow, R2 bucket, or secret was replaced by this rollout.
+
+## feature-20260830T214700Z — Parallel recall reliability production canary
+
+- Canonical Core SHA `319620270b84392d13d3a2c8970c10cb299372ea` adds
+  independently recoverable memory lexical/vector and evidence lexical/vector
+  lanes to both public recall and chat.
+- Flagship `recall_parallel_reliability_v1` defaults `off`. It serves `on` only
+  for production org `bfbdd2bc-e214-44e5-80d4-e3284256d0c0` plus user
+  `e35811aa-4bcd-44bb-b829-a437895a42eb`; all other users retain the stable
+  prior behavior. The Core environment master gate is enabled and fail-closed.
+- Healthy lanes remain usable when another lane fails. Only failure of all four
+  retrieval lanes produces retryable HTTP 503, explicitly without claiming the
+  requested knowledge is absent. Strict temporal inventory failures also remain
+  fail-closed.
+- `latest` and `earliest` final top-K are ordered from the fully filtered mixed
+  memory/evidence pool using the requested known-time or event-time axis, with
+  stable deterministic tie-breaking. Timeline delivery remains chronological.
+- Same-user rollback proof changed only the canary rule `on -> off -> on`:
+  all three runs returned the same ordered IDs, timestamps, and two evidence
+  rows; off reported `legacy`, while on reported all four lanes `complete`.
+- Live chat returned two memories plus one evidence row, three citations, and a
+  grounded answer after the internal-tool allowlist regression was fixed.
+- Cloudflare Worker version `d99c1304-61ff-40c8-a4b5-b0b5c148ce80`; Core image
+  `hivemind/core-api:sha-31962027`, digest
+  `sha256:715f48540ef97dc7d51263e22c34476f35fe68542cac964c02e3afd507f36ad4`.
+- Rollback: serve `off` for the exact canary (fastest), set the Core master gate
+  false, roll the Worker back to version
+  `c8461f69-d815-4ea5-bba3-82fc644a3f3c`, or release exact prior Core SHA
+  `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f` through the canonical runner.
+
+## feature-20260830T230000Z — Durable Chat Agent local acceptance
+
+- Local-only branch `codex/durable-chat-agent-v1`, pushed implementation
+  `7347cfc3f502fc564b75ae6efee5a6086cf6cc0f`, adds the multivariate
+  `durable_chat_agent_v1` envelope around the unchanged Native Chat V2.
+  Production remains disabled at both Flagship and environment gates.
+- PostgreSQL is authoritative for turn admission, request scope, ordered events,
+  checkpoints, final responses, errors, replay, and tenant authorization.
+  Cloudflare Agent version `24cab74d-0e4a-466e-8a12-0b8b0a99aca3` stores only
+  opaque lifecycle metadata; its contract rejects message, prompt, answer,
+  memory, evidence, citation, tool payload, source, and artifact fields.
+- Modes are `off`, `shadow`, `session`, `workflow`, and `full`. Evaluation is
+  latched once per turn and fails closed to the byte-compatible V2 path.
+- Durable modes add one bounded recovery for a zero-result entity-attribute
+  rewrite, and graph-first/source-second recovery for an explicit relationship
+  claim. Existing synthesis still requires source grounding and forbids deriving
+  relationships from co-mention.
+- Local E2E proved fact, ownership, temporal, source, detailed overview,
+  exhaustive synthesis, relationship, idempotent replay, cursor resume,
+  unauthenticated denial, and metadata-only edge mirroring. Standard uses top 5;
+  detailed/comprehensive retain the existing unified top 15 contract.
+- Rollback is immediate: set `DURABLE_CHAT_AGENT_ENABLED=false` or serve `off`.
+  No production Worker, container, database, frontend, or flag was changed.
+
+### Durable continuation and Workflow completion
+
+- Implemented in local feature commit `2d4619d4` on
+  `codex/durable-chat-agent-v1`; production was not changed.
+- PostgreSQL now owns lease-fenced compound-turn continuations. Only token
+  digests are persisted; invalid input is retryable, successful tokens are
+  consumed exactly once, and duplicate idempotency keys replay the stored final
+  response.
+- `workflow` and `full` start a deterministic Cloudflare Workflow per turn and
+  wait durably for opaque terminal metadata. The live local success and failure
+  canaries both completed, and Workflow output contained no customer content.
+- Local Worker version `308c14b7-ca86-4539-8abd-15831474515a`; Workflow resource
+  `hivemind-chat-turn-workflow-local`. Production remains disabled and was not
+  deployed or modified.
+
+### Exact production canary
+
+- Accepted on canonical SHA `a73cdbc82dc5ea637244d38bda7fb8ea7a96a0f3`.
+  Production Worker version `c413ed26-533f-4198-8d6f-be03841e1ae3` and Workflow
+  `hivemind-chat-turn-workflow-production` are live. Flagship remains default
+  `off`; only the existing production operator identity is targeted `full`.
+- Stable non-canary V2, durable completion, exactly-once replay, grounded recall,
+  metadata-only edge state, public health, and clean logs were verified. This is
+  a canary release, not a global enablement.

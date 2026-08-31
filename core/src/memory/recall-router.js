@@ -1089,11 +1089,13 @@ async function hop1Memory({ store, query, options, ctx }) {
     graph_expansion_depth: options.mode === 'fact' ? 0 : 2,
     trace_stages: options.trace_stages === true,
     timing: options.timing || null,
+    reliability_v1: options.reliability_v1 === true,
   };
   // PHASE-B TODO: surface spine from recallPersistedMemories result when TIERED_VIEW lands on router path
   const result = willOverride
     ? { memories: [] }
     : await recallPersistedMemories(store, recallArgs);
+  if (options.timing && result?.lane_states) options.timing.lane_states = result.lane_states;
   if (options.timing && result?.timing_breakdown) {
     options.timing.pipeline = result.timing_breakdown;
   }
@@ -1203,10 +1205,11 @@ async function hop1Memory({ store, query, options, ctx }) {
     } catch (err) {
       console.warn('[recall-router] tag fallback failed:', err.message);
     }
+    if (result?.lane_states) Object.defineProperty(mems, 'lane_states', { value: result.lane_states, enumerable: false });
     return mems;
   }
 
-  return mems.map((m) => ({
+  const shaped = mems.map((m) => ({
     id: m.id,
     title: m.title,
     content: m.content,
@@ -1231,6 +1234,8 @@ async function hop1Memory({ store, query, options, ctx }) {
     ...(Array.isArray(m.synthesisEvidenceIds) && m.synthesisEvidenceIds.length
         ? { synthesis_evidence_ids: m.synthesisEvidenceIds } : {}),
   }));
+  if (result?.lane_states) Object.defineProperty(shaped, 'lane_states', { value: result.lane_states, enumerable: false });
+  return shaped;
 }
 
 // ── Hop 1 inspection — read tags to decide what to do next ─────────────────
@@ -1436,12 +1441,14 @@ export async function hop2Evidence({ evidenceService, query, queryVector = null,
     entityFilterMode: filters.relationships?.requested === true
       ? 'any' : (filters.entity_filter_mode || 'must'),
     temporalInventory: filters.operation === 'timeline',
+    reliabilityV1: filters.reliability_v1 === true,
     depth: EVIDENCE_DEPTH,
     deliver: ['latest', 'earliest'].includes(filters.temporal_selector)
       || filters.operation === 'timeline' ? EVIDENCE_DEPTH : evidenceDeliverFor(),
   });
   return {
     items,
+    ...(items?.lane_states ? { lane_states: items.lane_states } : {}),
     reason: docIds.length > 0 ? reason : (inspection.sparse ? 'sparse' : 'always-on'),
     ...(docIds.length > 0 ? { docIds } : {}),
   };
@@ -1941,8 +1948,13 @@ export class RecallRouter {
     const queryVectorPromise = this.evidence?.qdrantClient?.generateEmbedding
       ? this.evidence.qdrantClient.generateEmbedding(query, {
           workload: 'interactive', tenantId: ctx.orgId,
+        }).catch((error) => {
+          if (options.reliability_v1 === true) return null;
+          throw error;
         })
-      : Promise.reject(new Error('unified recall embedding service unavailable'));
+      : (options.reliability_v1 === true
+        ? Promise.resolve(null)
+        : Promise.reject(new Error('unified recall embedding service unavailable')));
     const [implicitSource, canonicalEntities, queryVector] = await Promise.all([
       allowImplicitSource ? resolveImplicitSource({
         evidence: this.evidence,
@@ -1960,7 +1972,7 @@ export class RecallRouter {
       ),
       queryVectorPromise,
     ]);
-    if (!Array.isArray(queryVector) || queryVector.length === 0) {
+    if ((!Array.isArray(queryVector) || queryVector.length === 0) && options.reliability_v1 !== true) {
       throw new Error('unified recall query embedding unavailable');
     }
     if (stageTiming) stageTiming.entity_resolution_ms = Date.now() - startedAt;
@@ -2225,6 +2237,7 @@ export class RecallRouter {
         trace_stages: options.trace_stages === true,
         timing: stageTiming ? (stageTiming.memory_detail = {}) : null,
       }, ctx });
+    let memoryLaneStates = memories?.lane_states || {};
     let targetedTimelineRows = null;
     // A latest/earliest request is an inventory operation after hard filters,
     // not "the newest item among the semantic top K". Add an authorized,
@@ -2401,6 +2414,7 @@ export class RecallRouter {
         Math.min(HOP1_TIMEOUT_MS, remainingBudget()),
         [],
       );
+      memoryLaneStates = memories?.lane_states || memoryLaneStates;
       projectFallbackFired = memories.length > 0;
       if (projectFallbackFired) {
         console.log(`[recall-router] project-scope empty (${ctx.projectId}) → broad recall found ${memories.length} memories`);
@@ -2486,6 +2500,16 @@ export class RecallRouter {
     ]);
     traceLatency.evidence = Date.now() - t2Start;
     traceLatency.live     = Date.now() - t2Start;
+
+    if (options.reliability_v1 === true) {
+      const retrievalLanes = { ...memoryLaneStates, ...(hop2.lane_states || {}) };
+      const required = ['memory_lexical', 'memory_vector', 'evidence_lexical', 'evidence_vector'];
+      if (required.every((name) => retrievalLanes[name]?.status === 'failed')) {
+        const error = new Error('all memory and evidence retrieval lanes unavailable');
+        error.code = 'MEMORY_RETRIEVAL_UNAVAILABLE';
+        throw error;
+      }
+    }
 
     // ── MERGE ─────────────────────────────────────────────────────────────
     let rankedMemories = reciprocalRankFusionMemories(memories, inspection);
@@ -2803,6 +2827,14 @@ export class RecallRouter {
         live_trigger:     hop3.reason,
         tiers_fired:      tiersFired,
         cutoff_reason:    cutoffReason,
+        ...(options.reliability_v1 === true ? { reliability: {
+          status: [...Object.values(memoryLaneStates), ...Object.values(hop2.lane_states || {})]
+            .some((lane) => ['failed', 'partial'].includes(lane?.status)) ? 'degraded' : 'complete',
+          lanes: {
+            ...memoryLaneStates,
+            ...(hop2.lane_states || {}),
+          },
+        } } : {}),
         latency_ms:       { ...traceLatency, total: Date.now() - startedAt },
         ...(stageTiming ? { stage_breakdown: {
           ...stageTiming,

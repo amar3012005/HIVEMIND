@@ -18,6 +18,39 @@ test('valid_at without tags keeps the normal retrieval lane enabled', () => {
   }), false);
 });
 
+test('reliability mode returns lexical memories and marks a failed vector lane', async () => {
+  const client = getQdrantClient();
+  const originalIsConnected = client.isConnected;
+  const originalHybridSearch = client.hybridSearch;
+  client.isConnected = async () => true;
+  client.hybridSearch = async () => { throw new Error('vector provider unavailable'); };
+  const memory = {
+    id: 'lexical-memory', user_id: 'user-1', org_id: 'org-1', scope: 'personal',
+    title: 'Lexical result', content: 'The exact requested policy is available.',
+    tags: [], memory_type: 'fact', is_latest: true,
+    created_at: '2026-08-30T00:00:00.000Z', importance_score: 0.8,
+  };
+  const store = {
+    async searchMemories() { return [memory]; },
+    async listRelationships() { return []; },
+    async getMemories() { return new Map(); },
+  };
+  try {
+    const result = await recallPersistedMemories(store, {
+      query_context: 'exact requested policy', user_id: 'user-1', org_id: 'org-1',
+      max_memories: 5, reliability_v1: true, entity_filter_mode: 'off',
+      query_expansion: false, tiered_view: false, include_injection_context: false,
+      include_synthesis_evidence: false, graph_expansion_depth: 0,
+    });
+    assert.ok(result.memories.some((row) => row.id === 'lexical-memory'));
+    assert.equal(result.lane_states.memory_lexical.status, 'complete');
+    assert.equal(result.lane_states.memory_vector.status, 'failed');
+  } finally {
+    client.isConnected = originalIsConnected;
+    client.hybridSearch = originalHybridSearch;
+  }
+});
+
 test('valid_at with explicit or inferred tags uses the tag-anchored lane', () => {
   assert.equal(shouldUseTagAnchoredRecall({
     callerTags: true,

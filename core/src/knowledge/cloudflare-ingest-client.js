@@ -60,10 +60,10 @@ export class CloudflareKnowledgeIngestClient {
     return response;
   }
 
-  async isEnabled(orgId) {
-    if (!this.configured() || !orgId) return false;
+  async isEnabled(orgId, userId) {
+    if (!this.configured() || !orgId || !userId) return false;
     try {
-      const response = await this._request(`/enabled?org_id=${encodeURIComponent(orgId)}`, { method: 'GET' }, 5000);
+      const response = await this._request(`/enabled?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`, { method: 'GET' }, 5000);
       if (!response.ok) return false;
       const body = await response.json();
       return body?.enabled === true;
@@ -73,8 +73,8 @@ export class CloudflareKnowledgeIngestClient {
     }
   }
 
-  async isAvailable({ orgId } = {}) {
-    return this.isEnabled(orgId);
+  async isAvailable({ orgId, userId } = {}) {
+    return this.isEnabled(orgId, userId);
   }
 
   async persistFile({ orgId, checksum, filename, fileBuffer }) {
@@ -114,13 +114,14 @@ export class CloudflareKnowledgeIngestClient {
     });
   }
 
-  async enqueue({ orgId, trackerJobId, processingVersion }) {
+  async enqueue({ userId, orgId, trackerJobId, processingVersion }) {
     const response = await this._request('/start', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         job_id: trackerJobId,
         org_id: orgId,
+        user_id: userId,
         processing_version: Number(processingVersion) || 1,
       }),
     });

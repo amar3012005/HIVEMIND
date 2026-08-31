@@ -13,7 +13,10 @@ CANON_REMOTE="${SINGULANCE_CANON_REMOTE:-https://github.com/amar3012005/HIVEMIND
 SHA=$(git ls-remote "$CANON_REMOTE" "refs/heads/$BRANCH" | awk '{print $1}')
 [ -n "$SHA" ] || { echo "FATAL: $BRANCH does not exist on $CANON_REMOTE"; exit 1; }
 
-git -C /root/hivemind-main fetch "$CANON_REMOTE" "$BRANCH" --quiet
+git -C /root/hivemind-main \
+  -c submodule.recurse=false \
+  -c fetch.recurseSubmodules=false \
+  fetch "$CANON_REMOTE" "$BRANCH" --quiet
 git -C /root/hivemind-main cat-file -e "$SHA^{commit}" 2>/dev/null \
   || { echo "FATAL: fetched canonical commit $SHA is unavailable"; exit 1; }
 
@@ -21,7 +24,12 @@ git -C /root/hivemind-main cat-file -e "$SHA^{commit}" 2>/dev/null \
 # accepted only when release-canonical proves it already runs the target SHA.
 if [ $# -eq 0 ]; then
   SERVICES="core,control-plane,employees"
+  RELEASE_SCOPE_ARGS=()
 else
+  # Supplying services is an explicit operator request for a scoped release.
+  # The canonical runner still validates, builds, deploys and verifies those
+  # services; omitted services are neither rebuilt nor recreated.
+  RELEASE_SCOPE_ARGS=(--service-scoped)
   normalized=()
   for service in "$@"; do
     case "$service" in
@@ -43,4 +51,4 @@ trap 'rm -f "$RUNNER"' EXIT
 git -C /root/hivemind-main show "$SHA:scripts/release-canonical.sh" > "$RUNNER"
 chmod 700 "$RUNNER"
 echo "== canonical release $BRANCH @ $SHA services=$SERVICES"
-"$RUNNER" --sha "$SHA" --services "$SERVICES"
+"$RUNNER" --sha "$SHA" --services "$SERVICES" "${RELEASE_SCOPE_ARGS[@]}"

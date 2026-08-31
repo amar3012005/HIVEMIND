@@ -1073,331 +1073,449 @@ slides that find no unique anchor get a page instead of `null`.
   discovery paths on private Worker hostnames. Public marketing traffic remains
   available. The governed canonical service release `40e3b3d1` completed with
   Core, Control Plane, and Employees healthy; no migrations occurred.
+## 2026-08-29 UTC — enterprise canonical ingestion lifecycle started
 
-## 2026-08-30 UTC — durable Dreaming v2 session candidate
+- State: Started
+- Owner: Codex
+- Branch: `codex/knowledge-ingest-workflow-v1`
+- Base / commit: `8b4af294bd24ad738d70cebb3ac715e737895f00` plus
+  `origin/singulance-main` merge `c83de650c896c4f2f8eeacaa0e54361cb8df48cb` -> pending
+- Scope: local-only durable Knowledge Base orchestration using Cloudflare
+  Workflow, Queue, R2, Flagship, PostgreSQL checkpoints, and the existing
+  canonical memory/evidence/entity funnel; public upload payloads remain
+  unchanged.
+- Verification: baseline and implementation tests pending.
+- Production: not deployed; production resources and `singulance-main` are
+  explicitly out of scope.
+- Rollback: disable `knowledge_ingest_workflow_v1` or
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED` to retain the existing BullMQ path.
+- Next: freeze the existing upload/status contract in tests before adding the
+  additive checkpoint schema and local Worker.
 
-- State: implemented and statically verified on `codex/dream-lifecycle-v2` in
-  `P:\HIVEMIND-worktrees\dream-lifecycle-v2`; local integration and runtime
-  acceptance remain pending. Production was not touched.
-- Added an isolated Cloudflare Cron/Queue/DLQ/Workflow/R2 package, fail-closed
-  Flagship evaluation, authenticated internal stage callbacks, PostgreSQL
-  checkpoints/candidates/profiles/revisions, conservative visibility inheritance,
-  deterministic replay healing, review APIs, notifications, and additive UI state.
-- Verification completed before commit: Prisma validate/generate passed; Node
-  syntax checks passed; focused cognition tests passed 16/16; Worker TypeScript
-  passed; Wrangler local dry-run resolved only `-local` resources; the Da-vinci
-  optimized production build compiled successfully.
-- Agent Memory and code-review-graph MCP capabilities were not exposed to this
-  session. Git, current code, tests, and repository documents were used as the
-  authority; no unverified completion or secret was recorded externally.
-- Three broader Windows-only test entrypoints (`dream-retention`,
-  `entity-overdream-guard`, and `recall-dreams-first`) could not load because
-  `singulance-amr` has no `win32-x64` prebuilt binary. The remaining focused
-  suite passed; these three require the Linux local-container acceptance run.
+## 2026-08-30 UTC — enterprise canonical ingestion lifecycle accepted locally
 
-## 2026-08-30 UTC — durable Dreaming v2 integrated into local truth
+- State: local implementation and Cloudflare acceptance complete; production
+  unchanged. Branch `codex/knowledge-ingest-workflow-v1`, worktree
+  `P:\HIVEMIND-worktrees\knowledge-ingest-workflow-v1`.
+- Compatibility: upload/precheck/status routes, multipart fields, response
+  keys, `X-Job-Id`, 50 MB limit, duplicate behavior, scope enforcement, and
+  BullMQ fallback remain unchanged.
+- Durability: jobs latch orchestrator/source references; ten canonical receipts
+  are processing-version, digest, lease, and lease-token fenced. Queue messages
+  contain identifiers only; R2 reads verify ETag plus SHA-256.
+- Canonical convergence: entity and claim projection are awaited. Covered
+  connector/chat adapters cannot persist memories or entities outside the
+  canonical service. Concurrent canonical entity creates converge through a
+  database-unique identity key.
+- AI parity: local Core used the production model policy and Cloudflare AI
+  Gateway. Chat extraction rejects BGE embedding/reranker routes. The BGE-M3
+  canary returned 1024 finite dimensions.
+- Cloudflare: created only the `-local` Queue, DLQ, R2, Workflow, and Worker;
+  deployed Worker version `ad64498c-2489-459c-a664-7de235a7bd38`. Flagship is
+  true only for organization `47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f`.
+- Runtime: evidence-only job `7ae4c69c-8c2c-40a7-b764-e88b156d5c8b`
+  completed with 10/10 vectors and zero memories. Paolo job
+  `cca99f31-fcfd-4707-b0ba-2d84de3f9d9c` completed with one document, two
+  segments, ten candidates, eight memories, nine citations, ten receipts, and
+  one canonical Paolo entity. Duplicate hosted starts completed once with
+  stable counts; recall returned two memories and one exact evidence result.
+- Verification:
+  - Focused backend command covering `tests/knowledge/*.test.js`, the knowledge
+    route, canonical entity/routing, LiteLLM/Gateway, and local proxy contracts:
+    133 passed, 0 failed.
+  - Worker `npm test`: 2 passed; `npm run check`: passed; `npm run dry-run`:
+    passed with only `-local` bindings.
+  - Frontend `npm run test:ai-discovery`: 3 passed; `npm run build`: compiled
+    successfully.
+  - `npx prisma generate`, `npx prisma validate`, and three additive local SQL
+    migrations: passed/applied.
+- Repository baseline: unfiltered `npm test` remains red for unrelated existing
+  runner/environment defects (Vitest collected by Node, retired paths/modules,
+  Windows without native AMR, and legacy unrelated assertions). Feature-scoped
+  gates are green.
+- Rollback: disable Flagship `knowledge_ingest_workflow_v1` or set
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. No production deployment ran.
 
-- State: pushed to `singulance-local` at merge `2b2510a3`; frontend source is
-  `4f0f24bcf02c06fd509e6148f7e76b32170fc167`. Production remains unchanged.
-- Merged-state checks: focused cognition tests passed 16/16 after Prisma client
-  generation; schema validation, Worker TypeScript, Wrangler local dry-run, and
-  the optimized Da-vinci build passed.
-- Cloudflare local resources created: `hivemind-dream-trigger-local`,
-  `hivemind-dream-trigger-dlq-local`, `hivemind-dream-artifacts-local`, and
-  `hivemind-dream-workflow-local`. Worker version
-  `f01a3baa-b481-4ba0-bdaf-ecb36563198f` is deployed. All eight local Flagship
-  flags default off and target only the documented test organization.
-- Runtime blocker: the shared `hivemind-api` container currently runs the
-  parallel ingestion session's unmerged `knowledge-workflow-local` image.
-  Rebuilding it here would overwrite another session's test runtime, so database
-  migration, shared-secret wiring, browser E2E, restart injection, and local
-  container acceptance are intentionally deferred until that session integrates.
+## 2026-08-30 UTC — durable canonical ingestion accepted in production
 
-## 2026-08-30 UTC — heavy-document Workflow production-parity acceptance
+- State: accepted release. Candidate branch `codex/knowledge-ingest-production`
+  was built from the latest `origin/singulance-main` and fast-forwarded only the
+  ingestion commits; unrelated `singulance-local`, preview, Dreaming, and
+  frontend commits were excluded. Canonical SHA:
+  `5a979b736c2e02214cae8e95785446e66748dff7`.
+- Static verification: focused Core command reported `tests 141; pass 141;
+  fail 0`; Worker tests reported 2/2; Worker TypeScript and production Wrangler
+  dry-run passed; Prisma generate/validate and `git diff --check` passed. The
+  first Windows `npm ci` attempt hit the repository's Lightpanda `|| true`
+  portability defect; `npm install --ignore-scripts` plus explicit Prisma
+  generation provided the complete dependency tree used by the passing tests.
+- Release: the mandatory governor claimed session
+  `knowledge-ingest-prod-20260830`, built immutable Core, Control Plane, and
+  Employees images, applied all three additive migrations, recreated only those
+  services, and verified exact revision labels plus health. Manifest:
+  `/root/releases/manifests/5a979b73/20260830T143237Z/RELEASE_MANIFEST.json`.
+- Cloudflare: production-only R2, Queue, DLQ, Workflow, and Worker were created.
+  Worker version `cb297a0d-7025-4440-bd4c-a4f6e9c1ce5f` contains the shared
+  secret binding. Unauthorized `/enabled` returned 401. Flagship remains
+  default-off with environment-qualified local and production canary rules.
+- E2E evidence: job `60828bf4-4578-48c4-948e-a9affebdde0a`, document
+  `ddcf42c9-44a3-4326-818f-4c2c67c72f11`, and deterministic Workflow instance
+  `kb-60828bf4-4578-48c4-948e-a9affebdde0a-v1` reached `ready`. Persisted
+  verification found 10/10 successful receipts, 1/1 evidence vector, five
+  memories, five citation links, canonical Paolo Meridian and Singulance
+  Operations entity links, four related graph edges, and exactly three usage
+  settlements. Two duplicate starts returned the same completed Workflow and
+  left all counts unchanged. Persisted-hybrid recall returned the canary memory.
+- Runtime proof: public API health and login returned 200. Fresh Core, Control
+  Plane, and Employees critical-log scans were empty. Running image labels equal
+  the canonical SHA.
+- Backup: `/root/releases/backups/post-knowledge-ingest-5a979b73-20260830T150239Z.sql.gz`,
+  199 MB compressed / 321,010,151 bytes uncompressed, SHA-256
+  `4f517652dc07696ba43576c51e139f61265a98a6ba539a905149a872754828af`.
+  An initial 20-byte failed pipeline artifact was removed before this verified
+  backup was created.
+- Rollback: Flagship canary removal is immediate. Backend kill switch is
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`. Environment backup:
+  `/root/hivemind/.env.pre-knowledge-ingest-20260830T143208Z`; canonical prior
+  images are `sha-40e3b3d1`.
 
-- State: committed local candidate; production unchanged. Branch
-  `codex/knowledge-ingest-workflow-v1`, worktree
-  `P:\HIVEMIND-worktrees\knowledge-ingest-workflow-v1`, commit
-  `1ae13c022db72927aebef43ecdaa6230c5fd24a7`.
-- Affected files: Cloudflare ingestion client, document-first ingestion,
-  projection replacement, parser provenance, upload job failure recording,
-  local Compose parity, the heavy-file canary runner, and focused tests.
-- Production-parity boundary: inference/model names, embedding policy, parser
-  configuration, and Cloudflare AI Gateway were read from production without
-  printing or committing secrets. All stateful services and Cloudflare
-  ingestion resources remained the isolated local variants.
-- Runtime command: `node scripts/run-local-heavy-ingest-canary.mjs <eight OCR
-  PDFs>` with the local API/user/org variables and `HIVEMIND_CANARY_FORCE=true`.
-  Final database verification output:
+## 2026-08-30 UTC — BYOD graph routing completed for ingestion canary tenant
 
-  ```text
-  jobs=8 ready=8 pages=691 segments=1722 memories=113 vectors=1722
-  citation_links=113 receipt_memories=113 min_successful_receipts=10
-  max_settlements_per_job=3
-  ```
+- Committed: `812397915495bf551d0ddb94b5d3596a6db22d73` latched agent
+  routing on remote hydration; `048fba06cb0437c77ff2c26ddd132509883c57d0`
+  carried the authoritative scoped-org decision through every graph projection.
+- Test command: `node --test tests/unit/relationship-route-persistence.test.js
+  tests/memory/relationship-semantics.test.js
+  tests/unit/quick-deploy-service-scope.test.js` → `tests 20; pass 20; fail 0`.
+- Accepted release: governor session `byod-graph-final`, Core-only manifest
+  `/root/releases/manifests/048fba06/20260830T173838Z/RELEASE_MANIFEST.json`.
+  `hm-core` is healthy on `sha-048fba06`; `hm-control` and `hm-employees`
+  remained healthy on `sha-b3616eb4`.
+- Runtime proof: tenant-scoped BYOD create and explicit Updates requests both
+  returned 201. Relationship hydration returned the Updates edge and a
+  canonical-entity Mentions edge; the old memory was non-latest; entity tags
+  included `paolo-meridian`, `heidelberg`, and `atlas-memory-box`.
+- Flag proof: the production Worker `/enabled` returned true for the designated
+  org/user pair and false for a different user in the same org. All exact
+  production canary memories were deleted afterward (8 tag-selected rows plus
+  the non-latest predecessor); a final critical-log scan was empty.
+- DECISION: preserve Flagship default-off and exact two-dimensional targeting.
+  This is reversible and prevents an untested tenant-wide rollout.
 
-- Incident and repair: six first-pass R2 writes admitted while two concurrent
-  writes exceeded the former fixed 120-second timeout. The two durable jobs
-  were terminally recorded, then replayed from the same job identities after
-  adding bounded idempotent upload retries. Both completed; no substitute job
-  rows were created. The run also proved forced projection replacement and
-  healed parser provenance (`parsed`, `pdf-parse`, structure extracted) for all
-  eight documents.
-- Focused test command: PowerShell expanded
-  `Get-ChildItem tests/knowledge/*.test.js` into `node --test`. Output:
-  `tests 105`, `pass 105`, `fail 0`.
-- Static verification: Node syntax checks passed for every changed module and
-  runner; PowerShell parser returned `powershell_parse=ok`; Compose returned
-  `compose_config=ok`; `git diff --check` returned no errors.
-- Runtime verification: API health reported DB and Qdrant ready with
-  document-first ingestion and evidence retrieval enabled. A cross-tenant job
-  status request returned 404. Filename recall returned `count=8`,
-  `search_method=persisted-hybrid`, one exact filename match, and eight cited
-  results.
-- Baseline note: unfiltered `npm test` remains red for existing unrelated
-  collection/runtime failures including Node collecting Vitest files, missing
-  retired modules and absolute paths, and no Windows AMR native binary. The
-  feature-scoped suite and Linux container runtime are green.
-- Rollback: disable the Flagship flag or local master gate. No production
-  release, production database mutation, or production Cloudflare resource
-  mutation occurred.
-## 2026-08-30 UTC — durable Dreaming v2 local runtime recovery acceptance
+## 2026-08-30 UTC — ingestion canary targeting expanded
 
-- State: the parallel canonical-ingestion branch is fully integrated and the
-  shared API is now owned by the permanent `HIVEMIND-local-main` worktree.
-  Dreaming runtime wiring and the provider-outage guard are committed as
-  `276d2203` and integrated locally by merge `76a134fe`. Production was not
-  modified.
-- Cloudflare evidence: isolated local Worker version
-  `249788ca-2a2f-400c-80d9-d68f1c237860` admitted manual, recovery, and
-  duplicate trigger messages. Trigger `duplicate-acceptance-1` produced one
-  run and one attempt for every completed stage despite duplicate delivery.
-- Runtime evidence: manual run `a4b43088-d7f7-458f-a583-556c52769c14`
-  completed all twelve stages; subject selection found 19 profiles and nine
-  eligible graph bundles. This zero-candidate run exposed that total provider
-  failure was incorrectly treated as successful completion.
-- Recovery patch verification: focused lifecycle tests passed 6/6. Recovery
-  run `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` now remains at
-  `generate-candidates`; PostgreSQL records the retryable structured error
-  `candidate_generation_provider_unavailable` and attempt 2 instead of a false
-  terminal success. Cloudflare Workflow instance
-  `dream-local-47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f-provider-outage-retry-1788058404-v2`
-  is running its bounded exponential retry policy.
-- External blocker: the production-parity LiteLLM credential expired on
-  2026-08-24 and the current OpenRouter credential is rejected. No credential
-  value was logged or committed. Candidate grounding, derivations, profiles,
-  vectors, notifications, UI publication, and success-path restart acceptance
-  remain unverified until those provider credentials are rotated.
-- Build note: the canonical Docker rebuild was cancelled after dependency
-  installation stalled. For the recovery canary only, the committed lifecycle
-  file was copied from the permanent integration worktree into the existing
-  local container and that container restarted healthy. This is runtime test
-  evidence, not an immutable-image acceptance receipt.
+- Added one production-only, exact org-and-user rule to
+  `knowledge_ingest_workflow_v1`: org
+  `bfbdd2bc-e214-44e5-80d4-e3284256d0c0`, user
+  `e35811aa-4bcd-44bb-b829-a437895a42eb`.
+- Runtime verification through the production Worker `/enabled` endpoint:
+  requested pair `true`; same org with a different user `false`.
+- Audited Day 1 without mutation: `day1_first_move_v1` is enabled with
+  `default_variation=on` and zero targeting rules; production backend master
+  gate is true. No deployment was required for either check.
 
-## 2026-08-30 UTC — Dreaming Workflow exhaustion closes PostgreSQL run
+## 2026-08-30 UTC — exact canonical entities and Workers AI BGE-M3 accepted
 
-- State: patch `e924850a`, local merge `f582bb5d`, and isolated Worker version
-  `b6c01ba1-0420-44e4-b36d-26b04cb416e5`; production remains untouched.
-- The Workflow now writes a durable terminal-failure receipt after stage retries
-  are exhausted. The authenticated backend transition is idempotent and never
-  overwrites completed, cancelled, or already failed runs.
-- Verification: lifecycle unit tests passed 7/7, Worker TypeScript passed, and
-  Wrangler local dry-run resolved only local bindings. Provider-outage run
-  `39b8eb5f-fef0-42b7-86b6-9c45ce012b65` transitioned from running to error at
-  `generate-candidates` with `recovery_status=retry_exhausted`, a safe terminal
-  reason, and `finished_at` populated. No candidate was published.
+- Committed and deployed Core SHA `a4b0448cc42b7ea7c98d656efaa9a640798a34f0`.
+  The canonical promotion schema now requires a subject and entity array, and
+  the materializer deterministically merges source-supported generated
+  entities, the claim subject, and relationship endpoints before tags,
+  metadata, vectors, evidence metadata, and canonical projection are written.
+- Root cause: this was a schema/materialization gap, not merely model quality.
+  The prompt requested names, but optional output fields and disconnected
+  projection paths allowed a valid model response to lose a query-worthy name.
+- Embeddings: production now uses Cloudflare Workers AI
+  `@cf/baai/bge-m3` through AI Gateway `hivemind-prod`, with OpenRouter
+  `baai/bge-m3` as the same-model secondary. Provider-local timeouts now fail
+  over; caller cancellation remains fail-fast.
+- Verification commands: `node --test tests/unit/embedding-fallback-contract.test.js
+  tests/claim-structuring-rows.test.js tests/unit/kb-upload-integrity.test.js`
+  reported `tests 20; pass 20; fail 0`; focused materialization tests reported
+  `tests 3; pass 3; fail 0`; all changed files passed `node --check` and
+  `git diff --check`.
+- Production proof: pre-release Workers AI probe returned HTTP 200 and a
+  1024-dimensional vector. Post-release factory acceptance logged
+  `cloudflare -> openrouter`, returned a finite 1024-dimensional vector, and
+  materialized exactly `Apple Vision Pro/product` and `Amira Patel/person`
+  while rejecting an unsupported invented entity. Public login and API health
+  passed; fresh critical-log count was zero.
+- Release: governor session `codex-cf-bge-entity`, Core-only manifest
+  `/root/releases/manifests/a4b0448c/20260830T180454Z/RELEASE_MANIFEST.json`.
+  No frontend, Control Plane, Employees, database, Flagship, Worker, or local
+  deployment setting changed. Environment rollback backup:
+  `/root/hivemind/.env.before-cf-bge-20260830T180445Z`.
 
-## 2026-08-30 UTC — terminal Dreaming runs are immutable
+## 2026-08-30 UTC — transient Knowledge Base connectivity noise fixed
 
-- State: patch `718b0117`, local merge `c314c713`, isolated Worker version
-  `7c21bf84-11b3-4b66-8126-6e679da944a1`; production remains untouched.
-- A delayed retry from an older Workflow version exposed that `finalize` could
-  overwrite an already failed run as completed. Stage execution now returns
-  every terminal receipt unchanged, including finalize, and the Worker aborts
-  when it observes error or cancelled state.
-- Verification: lifecycle tests passed 8/8, Worker TypeScript and local Wrangler
-  dry-run passed, and the local canary was restored to terminal error with zero
-  published candidates. The shared API restarted healthy.
+- Root cause: the durable status loop correctly retried a missed poll, but the
+  shared Axios interceptor first converted that same expected miss into a
+  global `Connection problem` toast. Independently, TopBar declared `Offline`
+  after one failed background health probe.
+- Frontend commit `3fb492ac6e69008f19bc71bbe9fc81878e806b2f` suppresses
+  global outage notifications only for retrying status polls and background
+  health probes. User-initiated upload failures and real 5xx responses remain
+  visible. TopBar now requires three consecutive failed probes and recovers on
+  the first success.
+- Verification: focused Jest suite `2 passed`; optimized production build
+  compiled successfully; Wrangler dry-run passed. Cloudflare Worker
+  `hivemind-web` version `288561fd-e001-4132-a82c-7e8f0711d9e3` was deployed.
+  The served lazy application chunk contains both the status route and
+  `suppressServiceError` marker; public login returned 200.
+- Scope: frontend only. No Core, Control Plane, Employees, database, Workflow,
+  Flagship, or local-preview resource was rebuilt or changed.
 
-## 2026-08-30 UTC — immutable merged local API image accepted
+## 2026-08-30 UTC — Phase 0 Canonical Knowledge Foundation accepted
 
-- State: deterministic-build patch `5bab2ada`, integrated into
-  `singulance-local` at `963dd056`; production remains untouched.
-- Root cause: optional Lightpanda and Puppeteer postinstall browser downloads
-  blocked BuildKit indefinitely. The local API Dockerfile now skips only those
-  optional downloads, retains dependency lifecycle scripts and explicit Prisma
-  generation, and disables npm audit/funding network work during the image build.
-- Verification: the complete image build succeeded and produced
-  `sha256:cf62435628596297a247387c7dd2ccca46323e215ae49056690fcd70f5918d22`.
-  The shared API was recreated from the permanent integration worktree and is
-  healthy. Inspection inside the immutable image confirmed both the Dreaming
-  terminal-state guard and the integrated ingestion provenance module.
+- Committed: parent `singulance-main`
+  `bccbf73fdc1fdb40b1699d1251e7df12e6a15ce0`; frontend `main`
+  `59f3779b8291d5136a72a18867b5b4076ed46172`.
+- Tests: canonical/proxy suites 12/12; Cloudflare Worker 11/11; frontend claim
+  normalizer 2/2; optimized frontend production build compiled successfully.
+- Migration `20260830190000_canonical_knowledge_foundation` applied. Verified
+  backup `/root/backups/hivemind-pre-phase0-20260830T192734Z.dump`, SHA-256
+  `d76a7e0d13425f2beedc3c4f5d2e340f29ba5961e617e633f2a5d6d3241a3ffd`.
+- Accepted runtime: Core `sha-bccbf73f` digest
+  `sha256:8f4c6b3632e637e80ca109d4ae1f2b01cef99cc8cf16b16ab63705a37db62269`;
+  Control `sha-346586be` digest
+  `sha256:285a4fdf44ee625ed0ad3f64807c6931b7623258cec4aa6d2d0b1abcc4061fbe`.
+- Cloudflare: canonical Worker `c8461f69-d815-4ea5-bba3-82fc644a3f3c`,
+  frontend Worker `0ff3c24a-f722-4510-808c-dc50af597602`, Workflow
+  `claim-74fb72fc-08da-41cc-8c56-598eae67bfee-v3` complete.
+- Production proof: one teaches claim, two entities, correct endpoint roles,
+  exact quote, 2026-08-31 validity, `user_asserted`, zero lineage, replay 1/2/0,
+  authenticated claims HTTP 200, public health 200, live UI markers, and zero
+  fresh critical logs. User recall joined Deep Learning and Quantum Computing
+  through Uwe without a false lineage edge.
+- Rollout: `canonical_knowledge_foundation_v1` default `off`; exact canary
+  `full`; non-canary `off`. Rollback is Flagship off, backend kill switch, or
+  governor image rollback. Env backup:
+  `/root/hivemind/.env.pre-phase0-20260830T1933Z`.
 
-## 2026-08-30 UTC — OCR quality gate, Gateway vision, and preview proxy recovery
+## 2026-08-30 UTC — Durable Cloudflare ingestion enabled globally
 
-- State: local-only on `codex/knowledge-ingest-workflow-v1`; production was not
-  modified. Frontend commit `bab779a` is pushed on
-  `codex/preview-health-poll-cleanup`. Parent/backend commit is recorded by the
-  following journal entry after commit and push.
-- Browser incident: `documents`, `billing/usage`, and `health` all returned 503
-  because the preview control plane ran in production mode with the deliberately
-  rejected public development master key. Core and control plane were recreated
-  with the same generated local-only secret; direct service canary output was:
+- Production mutation: Flagship app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`, flag
+  `knowledge_ingest_workflow_v1`, changed from default `off` to default `on` at
+  `2026-08-30T20:52:22.525Z`. Existing targeting rules were preserved. No code,
+  Worker, container, database, frontend, Queue, Workflow, R2, or local setting
+  changed.
+- Preflight command: `wrangler flagship flags evaluate ... --context
+  environment=production --context org_id=rollout-preflight-org --context
+  user_id=rollout-preflight-user --json` returned
+  `value=false, variant=off, reason=DEFAULT` before promotion.
+- Acceptance command with valid unrelated UUID context returned
+  `value=true, variant=on, reason=DEFAULT`; the authenticated production Worker
+  `/enabled` probe returned HTTP 200 and `enabled=true` for the same unrelated
+  valid context. Existing canary evaluation remained `on/TARGETING_MATCH`.
+- Embedding acceptance: the running Core environment reports
+  `EMBEDDING_PROVIDER=cloudflare`, `CLOUDFLARE_EMBED_MODEL=@cf/baai/bge-m3`,
+  `CLOUDFLARE_AI_GATEWAY_ID=hivemind-prod`, and
+  `EMBEDDING_FALLBACK_PROVIDER=openrouter`. A fresh in-container factory probe
+  logged `[embed] chain: cloudflare -> openrouter (dim=1024)` and returned
+  `dimension=1024`, `finite=true`, with both links healthy and no fallback log.
+- Runtime remained healthy: Core `sha-7dcc5f15`, Control Plane `sha-346586be`,
+  and Employees `sha-b3616eb4` were not rebuilt or replaced.
+- Rollback: set the Flagship default variation to `off` for immediate admission
+  rollback, or set `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false` as the backend
+  master stop. Existing in-flight Workflow instances retain deterministic,
+  checkpointed state.
 
-  ```text
-  /health 200
-  /api/documents?limit=1 200
-  /api/billing/usage 200
-  ```
+## 2026-08-30 UTC — Knowledge Base canonical projection parity accepted
 
-- UI decision: document and billing reads are required and remain. The top-bar
-  health request was presentation-only and fired every 30 seconds on every page,
-  so its poll and status pill were removed. Browser extension SES/storage and
-  brightness messages are external to the app.
-- Measured extraction defect: all eight source PDFs had a large text layer but
-  74.2-86.4% single-letter Latin tokens; the old size-based probe called them
-  text-native. The new quality gate classified all eight `corrupt=true` in one
-  concurrent run. Existing rows were not mutated or reprocessed.
-- Runtime proof: one real PDF page was rendered locally and sent from Core using
-  the production Cloudflare AI Gateway ID, account, token, and OpenRouter BYOK
-  alias with no direct provider key. Output:
+- Committed and deployed Core-only commits `85926c08cc8cb4d369d6263f69ae97a9cb4b7803`,
+  `0bd3215e333ee9541b129ffec7fee7acb08d981e`, and final
+  `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f` from `singulance-main`.
+- Focused verification command:
+  `node --test tests/unit/document-canonical-projection.test.js tests/memory/canonical-knowledge.test.js`.
+  Final result: 17 tests, 17 passed, 0 failed. Syntax checks and
+  `git diff --check` also passed.
+- Production E2E: authenticated canary upload job
+  `671712ae-a118-4ba6-ae5c-444ec5da0f84` completed `ready` through
+  `cloudflare_workflow` with one document, one segment, three candidates, and
+  four memories. All four projection states were `full/complete` with no error.
+- Semantic proof: memory `895b16bc-1dbd-4efc-bfa1-ac7b39617d88` produced one
+  exact-evidence claim `Professor Uwe Egly (person) -> teaches ->
+  Neuro-Symbolic AI course (technology)` plus subject/actor and
+  object/technology roles. No factual predicate was written to memory lineage.
+- Recall canaries passed for instructor, subject, start date, Quantum Computing,
+  and Deep Learning queries. Clean-data chat answered both Quantum Computing
+  and Deep Learning with citations. All synthetic canary documents/memories and
+  all disposable API keys were deleted/revoked after verification.
+- Runtime: `hivemind/core-api:sha-7dcc5f15`, digest
+  `sha256:63f8785a4d7216bcb7c70e6f6f84bfd258c3176602f55dc36f6221633ac23929`,
+  healthy with revision label `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`.
+  Public API health passed and fresh critical-log count was zero. No migration,
+  frontend, Control, Employees, parser, database, Redis, or Qdrant replacement.
 
-  ```text
-  {"available":true,"ok":true,"chars":906,"markdown":true,"error":null}
-  ```
+## 2026-08-30 UTC — Canonical Knowledge Foundation enabled globally
 
-- Persisted-quality audit before reprocessing: 1,722/1,722 segments vectorized,
-  1,596 page-addressable, 1,722 carrying heading metadata, 113 cited memories,
-  136 entity links, and 131 relationships (105 PartOf, 11 Derives, 9 Extends,
-  5 Contradicts, 1 Updates). A grounded eight-query recall matrix found the
-  expected answer within the returned set for seven queries; the Revlon query
-  missed and two desired facts were not top-ranked, consistent with corrupted
-  evidence already persisted by the former parser route.
-- Focused backend command:
+- Operator decision: the current small user base makes a global core-feature
+  rollout preferable to a prolonged percentage rollout. Changed only Flagship
+  `canonical_knowledge_foundation_v1` in app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` from default `off` to default `full`.
+- The flag remains enabled with all five variations and the original exact
+  canary rule preserved. No Worker, Core, frontend, container, database, Queue,
+  Workflow, R2 resource, or secret was changed.
+- Wrangler 4.127.1 API evaluation returned `full/DEFAULT` for an unrelated
+  production user and a different organization, and `full/TARGETING_MATCH` for
+  the original canary. The live production Worker `/enabled` endpoint returned
+  HTTP 200 with `mode=full` for both unrelated and canary identities.
+- Rollback remains immediate: set the Flagship default to `off` or activate
+  `CANONICAL_KNOWLEDGE_KILL_SWITCH=true`. Existing stable-path code remains in
+  the runtime; changing the flag does not require a container deployment.
 
-  ```text
-  node --test tests/knowledge/*.test.js tests/unit/kb-upload-integrity.test.js
-  tests 116; pass 116; fail 0
-  ```
+## 2026-08-30 UTC — Parallel recall reliability canary accepted
 
-- Frontend verification:
+- Committed and accepted: `7f07fc39cd84d4826f2b73fae3aa38ce0a57d69d`
+  plus chat integration fix `319620270b84392d13d3a2c8970c10cb299372ea` on
+  `singulance-main`. No frontend commit, migration, or data-service change.
+- Focused Core route/client/evidence checks passed 18/18 on Windows. The clean
+  Linux Node container passed the 79-test recall/temporal/evidence set and the
+  two targeted chat-toolkit flag tests. Worker tests passed 12/12; TypeScript,
+  Wrangler production dry-run, syntax checks, and `git diff --check` passed.
+- Production Worker `d99c1304-61ff-40c8-a4b5-b0b5c148ce80` exposes the
+  authenticated fail-closed flag evaluation route. Unauthenticated access was
+  401; exact canary was true; another user in the same org was false.
+- Same-user production comparison temporarily served the exact rule off, then
+  restored it on after propagation. Both modes returned HTTP 200 with identical
+  ordered memory IDs `74fb72fc`, `0d633927`, `932e4b8b`, descending known times,
+  and two evidence rows. On exposed four complete lanes; off exposed legacy
+  behavior with no lane diagnostics.
+- Live chat acceptance returned `2 memories + 1 evidence`, three citations, and
+  a grounded Uwe Egly answer. The first chat canary caught an omitted trusted
+  internal argument; regression coverage was added before the final release.
+- Accepted Core `hivemind/core-api:sha-31962027`, revision
+  `319620270b84392d13d3a2c8970c10cb299372ea`, digest
+  `sha256:715f48540ef97dc7d51263e22c34476f35fe68542cac964c02e3afd507f36ad4`.
+  Control and Employees retained their prior images. Public API, Core, login,
+  and homepage returned 200; fresh Core critical-log count was zero. Canonical
+  projection sibling check remained `full`.
+- Flag default remains off and exact canary remains on. Environment backup:
+  `/root/hivemind/.env.pre-recall-reliability-20260830T213044Z`.
 
-  ```text
-  memories-visible-scope-contract: tests 4; pass 4; fail 0
-  npm run build: Compiled successfully
-  ```
+## 2026-08-31 UTC — Durable chat session orchestration started
 
-- Build note: two clean local image attempts remained silent in `npm ci` after
-  deprecation notices and were cancelled after bounded waits. Local Compose now
-  read-only mounts `core/src`, so JS-only iteration is restart-fast. The dev
-  image additionally declares the Poppler/ImageMagick/Ghostscript runtime used
-  by the production image; a manifest/native/Prisma release still requires the
-  immutable build to complete before production promotion.
+- State: Started; implementation and local verification in progress.
+- Owner: Codex.
+- Branch: `codex/durable-chat-agent-v1`.
+- Base: `bb359330c3dfd336672433847af2559f2670b1b0` (`origin/singulance-main`).
+- Scope: additive, fail-closed `durable_chat_agent_v1` turn/checkpoint/event
+  ledger; metadata-only Cloudflare Agent session coordination; resumable Core
+  event reads; preservation of the existing Native Chat V2 planner, top-5/
+  top-15 recall windows, tool execution, grounding, and synthesis behavior.
+- Data boundary: customer messages, recall packets, tool results, citations,
+  and final answers remain in HIVEMIND PostgreSQL/Memory Box storage. The
+  Cloudflare session receives opaque identifiers and execution metadata only.
+- Production: not deployed; global default must remain `off` until a separate
+  governed rollout is accepted.
+- Verification: pending.
 
-### Committed
+## 2026-08-31 UTC — Durable chat session orchestration accepted locally
 
-- Backend/parent commit `8b072cd7a3d1d3ff4dee24dd9e5f1fc8b9c49ac6`
-  was pushed to `origin/codex/knowledge-ingest-workflow-v1`.
-- Frontend commit `bab779a29e95d10fee48340103c5c75f86440c91` was
-  pushed to `origin/codex/preview-health-poll-cleanup` before the parent gitlink.
-- Affected paths: `core/Dockerfile.dev`, canonical fact generation, PDF quality
-  and semantic chunking, Gateway vision parsing, upload routing, focused tests,
-  local Compose/startup, the frontend top bar/hooks, `features.md`, and this
-  journal.
-- Accepted release: local `singulance-local` only after the post-commit checks;
-  production remains unchanged.
+- State: Committed and pushed as
+  `7347cfc3f502fc564b75ae6efee5a6086cf6cc0f`; not an accepted production
+  release.
+- Branch/base: `codex/durable-chat-agent-v1` from
+  `bb359330c3dfd336672433847af2559f2670b1b0`.
+- Implemented additive Prisma turn/checkpoint/event state, authenticated cursor
+  replay, idempotent admission/final replay, metadata-only Cloudflare Agent
+  mirroring, fail-closed multivariate evaluation, and V2-compatible top-5/top-15
+  depth behavior. Cloudflare notification is explicitly non-blocking after the
+  local transaction.
+- The local grounded canary exposed two existing two-stage gaps: an embedding-
+  hostile attribute rewrite could miss the correct memory, and a conservative
+  graph lookup could return empty while an explicit source claim was present.
+  Durable mode now performs one bounded source-record recovery. Relationship
+  synthesis remains citation-gated and the prompt still forbids co-mention edges.
+- Commands and results:
+  - `node --test ...durable-chat*.test.js ...chat*.test.js ...native-chat-v2.test.js`:
+    70 passed; three Windows-only loaders failed before tests because
+    `singulance-amr` has no `win32-x64` binary. Re-running those tests in the
+    Linux image reached 18/21; the three failures reproduce pre-existing contract
+    drift/missing isolated embedding configuration and do not touch changed code.
+  - Focused durable suite: 9/9 passed, including a permanently stalled edge
+    notifier proving Core admission and event persistence remain non-blocking.
+  - `npm test --prefix workers/durable-chat-agent`: 12/12 passed.
+  - `npm run check --prefix workers/durable-chat-agent`: Wrangler type generation
+    and `tsc --noEmit` passed.
+  - `prisma validate --schema core/prisma/schema.prisma`: valid.
+  - Live local public API: save HTTP 201; fact, source, temporal, detailed,
+    comprehensive, and relation turns HTTP 200 in `full`; temporal returned both
+    exact dates with two sources; relationship returned the explicit ownership
+    claim as grounded. Temporary scoped key was deleted and canary was tombstoned.
+  - Replay route: unauthenticated HTTP 401; authorized cursor HTTP 200 with a
+    completed turn and ordered next sequence. Cloudflare status endpoint HTTP 200.
+- Local Cloudflare Agent version:
+  `24cab74d-0e4a-466e-8a12-0b8b0a99aca3`. Production remained untouched and off.
+- Rollback: disable `DURABLE_CHAT_AGENT_ENABLED` or serve Flagship `off`; existing
+  Chat V2 remains the stable path.
 
-## 2026-08-30 — Production gate and preview one-time-email correction
+## 2026-08-31 UTC — Durable chat continuation and Workflow accepted locally
 
-### Verified
+- State: verified locally; not a production release. Branch remains
+  `codex/durable-chat-agent-v1`; committed as `2d4619d4` and production
+  master/Flagship gates remain off.
+- Added an additive continuation table and lease-fenced store. Direct E2E proved
+  an invalid choice returns HTTP 400 while releasing the token, a later valid
+  retry completes it once, duplicate idempotency replays the response, and the
+  plaintext continuation token is never persisted.
+- Added `hivemind-chat-turn-workflow-local`. Deterministic instances wait for an
+  opaque `chat-terminal` event for up to seven days. Live completed and failed
+  canaries both reached Workflow `complete`; output was restricted to turn ID,
+  status, phase, sequence, and timestamp.
+- Stable-path proof used a temporary API container from the same image with
+  `DURABLE_CHAT_AGENT_ENABLED=false`: HTTP 200, no additive response field, and
+  zero durable-turn rows. The temporary container was removed.
+- Query matrix: bounded fact, exact-source/stem, detailed, comprehensive,
+  timeline, snapshot, diff, aggregate, relationship, and project operations ran.
+  Timeline and ordinary facts grounded successfully. Snapshot/diff correctly
+  failed closed where the tenant had no qualified temporal material; project
+  listing correctly reported zero authorized projects. Standard used a top-five
+  ceiling and detailed/comprehensive a top-fifteen ceiling.
+- Commands and results:
+  - `node --test tests/unit/durable-chat-agent.test.js tests/unit/durable-chat-continuation-store.test.js tests/unit/native-chat-v2.test.js tests/unit/compound-orchestrator.test.js tests/unit/chat-depth-contract.test.js`: 72/73 passed. The sole unrelated existing connector fixture expects no `instruction` field while runtime now includes it.
+  - `npm test` in `workers/durable-chat-agent`: 15/15 passed.
+  - `npx tsc --noEmit` and `npx wrangler types`: passed.
+  - `docker exec -w /app hivemind-api npx prisma validate`: schema valid.
+  - `node --check` for server, chat executor, continuation store, and durable
+    turn store: passed.
+- Local Worker version `308c14b7-ca86-4539-8abd-15831474515a`; production was not
+  touched. Rollback remains the environment kill switch or Flagship `off`.
 
-- Preview authentication now renders the existing approved one-time-email flow
-  rather than Google. An unapproved synthetic address returned the expected
-  non-enumerating `202` and did not trigger delivery.
-- Frontend command:
+## 2026-08-31 UTC — Durable Chat V2 exact production canary accepted
 
-  ```text
-  npm test -- --runInBand src/components/hivemind/app/auth/__tests__/local-preview-login-contract.test.js src/components/hivemind/app/auth/__tests__/existing-user-routing-contract.test.js
-  Test Suites: 2 passed, 2 total
-  Tests: 2 passed, 2 total
-  ```
-
-- Backend command:
-
-  ```text
-  node --test tests/knowledge/*.test.js tests/unit/kb-upload-integrity.test.js tests/unit/local-workflow-proxy-contract.test.js
-  tests 120; pass 120; fail 0
-  ```
-
-- Worker commands `npm run types`, `npm run check`, and
-  `npx wrangler deploy --env production --dry-run` passed. The dry run resolved
-  only the declared production Workflow, Queue/DLQ, R2, Flagship, and production
-  API bindings; it did not create or deploy resources.
-
-### Decision
-
-- Production capability uses an explicit environment plus acknowledgement gate,
-  in addition to the existing feature flag. This is the safest reversible
-  default: local remains a test environment, production cannot activate from a
-  copied local environment, and a Flagship outage cannot select the new path.
-- Current production was audited read-only and does not yet contain the required
-  Workflow enablement, environment, URL, or shared-secret settings. Therefore
-  production is not described as accepted or live.
-
-### Committed
-
-- Frontend commit `17a964dd2d26ec90ebc9053fb42be8f25e756213` was pushed to
-  `origin/codex/preview-health-poll-cleanup` before updating the parent gitlink.
-- Backend/parent commit: pending this journal entry.
-- Accepted release: pending local branch integration and preview Worker canary;
-  production remains unchanged.
-
-### Acceptance completion
-
-- Parent/backend commit `a6b6a8396556f6ac9db545e38a0820179ffaa718`
-  was pushed to `origin/codex/knowledge-ingest-workflow-v1`.
-- Preview Worker version `3cb75299-5e9d-4457-a1bb-079a3f45450b` was deployed
-  at 100% to isolated Worker `hivemind-web-preview`. Browser DOM verification
-  showed the approved-email textbox and `Email one-time sign-in link` button,
-  with no Google sign-in control. The live asset was
-  `/static/js/main.882089b5.js`.
-- Live checks returned 200 for the preview login page, preview API health, local
-  control-plane health, and local Core health. Production remained unchanged.
-
-### Prompt-contract regression lock
-
-- Added source-level regression checks that preserve exact-quote grounding,
-  qualifiers and negation, metadata-aware entity coverage, typed
-  Updates/Extends/Derives semantics, and the prohibition on promoting ordinary
-  co-mention into a verified relationship.
-- Verification: `node --test tests/unit/kb-upload-integrity.test.js` reported
-  `tests 13; pass 13; fail 0`.
-
-### Preview frontend accepted release
-
-- Source: parent/local commit `0b2417f95027eff093a7b79c2f7a7a0c8650d288`
-  with pushed frontend commit `bab779a29e95d10fee48340103c5c75f86440c91`.
-- Target: isolated Worker `hivemind-web-preview`; production Worker and routes
-  were not modified. Preview API and site host values were explicitly baked
-  into the artifact.
-- The first uploaded version lacked the static-assets binding. Its live 1101
-  canary failed, so it was immediately rolled back to the prior version. A
-  corrected version was uploaded only after the dry run showed `env.ASSETS`.
-- Accepted Worker version:
-  `9e20f246-c3ba-47cb-ba7c-e42f72319deb` at 100% preview traffic.
-- Live verification:
-
-  ```text
-  next.preview.singulancelabs.com/hivemind/login = 200
-  live asset = /static/js/main.a9739072.js
-  preview API URL present = true
-  preview site host present = true
-  removed top-bar health label present = false
-  preview-api.singulancelabs.com/health = 200
-  localhost:3001/health = 200
-  localhost:3000/health = 200
-  ```
-
-- Unauthenticated proxy probes return 401 rather than the former 503, which is
-  the expected authorization boundary. Authenticated UI requests use the same
-  repaired local control-plane/Core credentials.
+- Accepted release `a73cdbc82dc5ea637244d38bda7fb8ea7a96a0f3` through the
+  canonical Core-only governor. The release applied two additive idempotent
+  migrations and replaced only `hm-core`; Control, Employees, frontend, data
+  services, BYOD agents, ingestion workers, and TARA were not restarted.
+- Pre-release PostgreSQL backup and checksum:
+  `/root/releases/backups/pre-durable-chat-a73cdbc8-20260830T233248Z.sql.gz`,
+  `88461757b872cc2d38cec13342697544819a58574a21d34d22d4d731c44c281c`.
+- Core image `hivemind/core-api:sha-a73cdbc8`, digest
+  `sha256:8d826de5f0c7ff669bc198da15e1453c915890cee8a6fa491a80554cff83e5f6`;
+  manifest `/root/releases/manifests/a73cdbc8/20260830T233409Z/RELEASE_MANIFEST.json`
+  reports `ok` and the exact revision.
+- Production Worker active version
+  `c413ed26-533f-4198-8d6f-be03841e1ae3`. The first secret probe failed closed
+  because the secret was initially uploaded under a non-source binding name;
+  no durable row was created. The source-defined `DURABLE_CHAT_AGENT_SECRET`
+  binding was installed, the unused secret was removed, and authenticated mode
+  checks then returned exact-canary `full` and unrelated identity `off`.
+- E2E: stable flag-off arithmetic returned HTTP 200, original V2 keys, and zero
+  durable rows. Exact canary arithmetic returned turn
+  `21fbe4c5-2d54-4d3b-be72-781494b440c9`; duplicate
+  `X-Idempotency-Key` returned the same turn with `replayed=true`. Its Durable
+  Object held only phase/status/sequence/hashed trace metadata; Workflow output
+  held only turn/status/phase/sequence/time and completed successfully. Grounded
+  recall turn `074d6d72-afff-4006-ae4b-b432a72e7c47` returned three sources,
+  two citations, no gaps, and `full/completed`.
+- Checks: focused Core 82/82, Worker 15/15, Prisma valid, TypeScript and Wrangler
+  production dry-run passed. Four durable tables and 14 indexes exist, both
+  migration ledger rows are finished, public homepage/login/API/Core are 200,
+  Core/Control/Employees are healthy, and fresh critical-log count is zero.
+- Event replay authorization passed: the owning tenant received HTTP 200 with
+  six ordered events, a different tenant received HTTP 404 with no events, and
+  the unauthenticated public route returned HTTP 401.
+- Flag default remains `off`; only the existing operator canary is `full`.
+  Rollback is exact rule off, followed if needed by the backed-up Core environment
+  kill switch and canonical service-scoped recreation. No global rollout occurred.

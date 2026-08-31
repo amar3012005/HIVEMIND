@@ -1373,7 +1373,12 @@ async function _recallPersistedMemoriesImpl(store, {
   include_synthesis_evidence = null,
   trace_stages = false,
   timing = null,
+  reliability_v1 = false,
 }) {
+  const laneStates = reliability_v1 ? {
+    memory_lexical: { status: 'pending', candidates: 0 },
+    memory_vector: { status: 'pending', candidates: 0 },
+  } : null;
   const temporalExpansion = expandTemporalQuery(query_context);
   const effectiveDateRange = date_range || temporalExpansion.dateRange || null;
   const temporalComparison = temporalExpansion.hasTemporalFilter || isTemporalComparisonQuery(query_context);
@@ -1664,8 +1669,21 @@ async function _recallPersistedMemoriesImpl(store, {
     .filter((value) => typeof value === 'string' && value.trim())
     .map((value) => value.trim()))].slice(0, 2);
   const lexicalStartedAt = timing ? Date.now() : 0;
-  const lexicalLanes = await Promise.all(lexicalQueries.map((query) =>
-    store.searchMemories({ ...lexicalArgs, query })));
+  let lexicalLanes;
+  if (reliability_v1) {
+    const settled = await Promise.allSettled(lexicalQueries.map((query) =>
+      store.searchMemories({ ...lexicalArgs, query })));
+    lexicalLanes = settled.filter((entry) => entry.status === 'fulfilled').map((entry) => entry.value);
+    const failed = settled.filter((entry) => entry.status === 'rejected');
+    laneStates.memory_lexical = {
+      status: lexicalLanes.length ? (failed.length ? 'partial' : 'complete') : (failed.length ? 'failed' : 'complete'),
+      candidates: lexicalLanes.flat().length,
+      ...(failed.length ? { error_code: 'memory_lexical_unavailable' } : {}),
+    };
+  } else {
+    lexicalLanes = await Promise.all(lexicalQueries.map((query) =>
+      store.searchMemories({ ...lexicalArgs, query })));
+  }
   if (timing) timing.lexical_ms = Date.now() - lexicalStartedAt;
   const lexicalCandidates = [...new Map(
     lexicalLanes.flat().filter((memory) => memory?.id).map((memory) => [memory.id, memory]),
@@ -1714,7 +1732,18 @@ async function _recallPersistedMemoriesImpl(store, {
   // Consume the base vector lane started concurrently with the lexical fetch
   // above (overlapped, not serialized). Any vector-fetch error propagates here
   // exactly as it did when this was a direct `await`.
-  const vectorCandidates = await _vectorCandidatesPromise;
+  let vectorCandidates;
+  if (reliability_v1) {
+    try {
+      vectorCandidates = await _vectorCandidatesPromise;
+      laneStates.memory_vector = { status: 'complete', candidates: vectorCandidates.length };
+    } catch {
+      vectorCandidates = [];
+      laneStates.memory_vector = { status: 'failed', candidates: 0, error_code: 'memory_vector_unavailable' };
+    }
+  } else {
+    vectorCandidates = await _vectorCandidatesPromise;
+  }
 
   // Cross-lingual / sparse rescue: a THIN primary recall is the signature of a
   // cross-lingual query (English question over German docs → every row low-
@@ -2875,6 +2904,7 @@ async function _recallPersistedMemoriesImpl(store, {
       included_count:   top.filter(item => item.graph_expanded).length,
       synthesis_count:  synthesized.length,
     },
+    ...(reliability_v1 ? { lane_states: laneStates } : {}),
     ...(trace_stages ? { timing_breakdown: timingBreakdown } : {}),
     // PHASE-B: tiered "recall spine" view. Additive + dark by default — the key is
     // absent entirely unless RECALL_TIERED_VIEW=true, so legacy clients see the

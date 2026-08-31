@@ -5,9 +5,27 @@ import {
   adaptiveAtomicMemoryBudget,
   normalizeCuratedClaims,
   normalizeUnifiedClaims,
+  materializeClaimEntities,
   resolveEvidenceSegment,
   splitDenseExtractionContent,
 } from '../../src/knowledge/document-first-ingestion.js';
+
+test('canonical entity materialization cannot lose supported subjects or relationship endpoints', () => {
+  const claim = {
+    f: 'Amira Patel approved Apple Vision Pro for the Berlin launch.',
+    source_quote: 'Amira Patel approved Apple Vision Pro for the Berlin launch.',
+    entities: [{ n: 'Apple Vision Pro', k: 'product' }, { n: 'invented entity', k: 'organization' }],
+    subject: { n: 'Amira Patel', k: 'person' },
+    relationships: [{
+      from: { n: 'Amira Patel', k: 'person' }, type: 'approved',
+      to: { n: 'Apple Vision Pro', k: 'product' },
+    }],
+  };
+  assert.deepEqual(materializeClaimEntities(claim), [
+    { name: 'Apple Vision Pro', kind: 'product' },
+    { name: 'Amira Patel', kind: 'person' },
+  ]);
+});
 
 test('atomic memory budget scales by information-bearing source size without page-count explosion', () => {
   assert.equal(adaptiveAtomicMemoryBudget(2_000, 50), 12);
@@ -226,6 +244,10 @@ test('unified ingestion persists the classified type and exact evidence link', a
   assert.match(ingested[0].claim_key, /^[a-f0-9]{64}$/);
   assert.equal(ingested[0].metadata.claim.subject.name, 'Launch');
   assert.equal(ingested[0].metadata.claim.object.value, '15 July');
+  assert.deepEqual(ingested[0].metadata.extracted_entities, [
+    { name: 'Board', kind: null },
+    { name: 'Launch', kind: 'product' },
+  ]);
   assert.deepEqual(links[0], {
     memoryId: 'm1', documentId: 'doc-1', segmentId: 'segment-1',
     linkType: 'supports', confidence: 0.93, excerpt: 'approved the launch on 15 July',

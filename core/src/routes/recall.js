@@ -133,6 +133,7 @@ export async function handleRecallRoute(ctx = {}) {
     amrBumpRecall,
     qdrantClient,
     recallRuntime: injectedRecallRuntime = null,
+    recallReliabilityClient = null,
   } = ctx;
 
   const _recallT0 = Date.now();
@@ -221,6 +222,12 @@ export async function handleRecallRoute(ctx = {}) {
       };
     }
     const recallPlan = recallRuntime.resolvePlan({ ...body, explicit_mode: true });
+    // Evaluate once and latch for the entire request. Flag changes cannot split
+    // one recall between old/new lane semantics; evaluation failure is the exact
+    // rollback path and preserves the existing response behavior.
+    const recallReliabilityV1 = recallReliabilityClient
+      ? await recallReliabilityClient.enabledFor({ orgId, userId })
+      : false;
 
     // Explicit quick/fact/explain/full modes use the bounded, source-grounded
     // parallel service. Unspecified and legacy modes retain the established
@@ -277,6 +284,7 @@ export async function handleRecallRoute(ctx = {}) {
             || Boolean(recallPlan.time?.valid_at)
             || body.include_superseded === true,
           trace_stages: body.debug_timing === true,
+          reliability_v1: recallReliabilityV1,
         }, {
           userId,
           orgId,
@@ -296,6 +304,13 @@ export async function handleRecallRoute(ctx = {}) {
           return jsonResponse(res, {
             error: 'temporal_inventory_unavailable',
             message: 'The complete authorized temporal inventory could not be read. No latest or historical conclusion was made.',
+            retryable: true,
+          }, 503);
+        }
+        if (error?.code === 'MEMORY_RETRIEVAL_UNAVAILABLE') {
+          return jsonResponse(res, {
+            error: 'memory_retrieval_unavailable',
+            message: 'All authorized memory retrieval lanes are unavailable. No absence conclusion was made.',
             retryable: true,
           }, 503);
         }
@@ -363,6 +378,9 @@ export async function handleRecallRoute(ctx = {}) {
           retrieval_passes: Number(bounded.trace?.retrieval_passes) || 0,
           rerank_passes: Number(bounded.trace?.rerank_passes) || 0,
           ranking_mode: bounded.trace?.hybrid_ranking_mode || null,
+          reliability_v1: recallReliabilityV1,
+          status: bounded.trace?.reliability?.status || 'legacy',
+          lane_states: bounded.trace?.reliability?.lanes || null,
         },
         evidence_packet: packet,
         cutoff_reason: cutoffReason,

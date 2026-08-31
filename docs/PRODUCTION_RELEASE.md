@@ -1,5 +1,45 @@
 # Current SINGULANCE Production Release
 
+## a73cdbc8 — durable Chat V2 production canary
+
+- Canonical parent SHA `a73cdbc82dc5ea637244d38bda7fb8ea7a96a0f3` on
+  `singulance-main`; frontend unchanged at
+  `59f3779b8291d5136a72a18867b5b4076ed46172`.
+- Core-only canonical release. Image `hivemind/core-api:sha-a73cdbc8`, digest
+  `sha256:8d826de5f0c7ff669bc198da15e1453c915890cee8a6fa491a80554cff83e5f6`;
+  revision label matches the full parent SHA and Core is healthy. Control Plane
+  and Employees were not rebuilt or recreated.
+- Additive replay-safe migrations
+  `20260831143000_durable_chat_agent_v1` and
+  `20260831150000_durable_chat_continuations` applied successfully. Backup
+  `/root/releases/backups/pre-durable-chat-a73cdbc8-20260830T233248Z.sql.gz`,
+  SHA-256 `88461757b872cc2d38cec13342697544819a58574a21d34d22d4d731c44c281c`.
+- Manifest `/root/releases/manifests/a73cdbc8/20260830T233409Z/RELEASE_MANIFEST.json`
+  reports `ok` for the exact SHA.
+- Cloudflare Worker `hivemind-durable-chat-agent-production`, active version
+  `c413ed26-533f-4198-8d6f-be03841e1ae3`; Workflow
+  `hivemind-chat-turn-workflow-production`; Flagship
+  `durable_chat_agent_v1` remains default `off` with one exact production
+  `full` rule for the existing operator canary. Unrelated production context
+  evaluates `off`.
+- Production acceptance: 82/82 focused Core tests, 15/15 Worker tests, Prisma
+  validation, TypeScript, Wrangler types and production dry-run passed. Stable
+  flag-off Chat V2 returned HTTP 200 with its original shape and zero durable
+  rows. Canary first execution returned `full/completed`; the same
+  `X-Idempotency-Key` replayed the identical turn with `replayed=true`.
+  Grounded recall returned three sources and two citations. Durable Object and
+  Workflow inspection contained lifecycle metadata only and Workflow reached
+  `complete`. Public homepage, login, API and Core health returned 200; fresh
+  Core critical-log count was zero.
+- Environment backup
+  `/root/hivemind/.env.pre-durable-chat-20260830T233350Z`. Immediate behavioral
+  rollback is to remove/set the exact Flagship rule to `off`; then set
+  `DURABLE_CHAT_AGENT_ENABLED=false` and recreate Core through the canonical
+  service-scoped release path. The schema is additive and remains inert. This
+  is the first production Worker release, so leave it deployed and inert rather
+  than deleting Durable Object or Workflow resources during rollback. Exact
+  prior Core is `319620270b84392d13d3a2c8970c10cb299372ea`.
+
 ## sha-a2e8db25 — provenance-only Derives and precise Memory Box edge repair
 
 - Parent SHA: `a2e8db25d55968d9ddd771db9c98738ea4ec027b` on `singulance-main` (PRs #521 and #522). Frontend unchanged and still hosted independently on Cloudflare.
@@ -696,3 +736,155 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Production E2E: one operator-owned verification email containing Strategist, Builder, Skeptic, Researcher, and Communicator avatars was reported `delivered` by Cloudflare. The same send created exactly one unread `email.sent` notification with palette version `2`. Each live public SVG contains its exact direct lane fill and zero `fill=var(--hm-...)` occurrences.
 - Runtime: `hm-core`, `hm-control`, and `hm-employees` healthy on immutable `sha-d843a668`; public API health green; fresh critical/error-projection scan empty. Existing Day 1 deterministic turn remained exactly one and sealed.
 - Isolation and rollback: no frontend, local Docker, preview, or `singulance-local` configuration changed. Canonical per-service rollback images were preserved by the governor.
+
+## 5a979b73 — durable canonical ingestion Workflow production canary
+
+- Canonical SHA: `5a979b736c2e02214cae8e95785446e66748dff7` on
+  `singulance-main`. Frontend gitlink remained the accepted production SHA
+  `93b15206d276c798993d57a63fd5694ff9609685`; no frontend deployment occurred.
+- Manifest: `/root/releases/manifests/5a979b73/20260830T143237Z/RELEASE_MANIFEST.json`
+  (SHA-256 `93484423247cb1874e2d7124198e399ff000ca1332f03c6080564ed199a144d6`).
+- Migrations: `20260829224500_knowledge_ingest_workflow`,
+  `20260830002000_canonical_entity_identity_key`, and
+  `20260830010000_knowledge_ingest_step_lease_fence`; all additive and applied by
+  the guarded Prisma deploy.
+- Runtime images: Core
+  `sha256:a09d59b845ac0f6aba67bd448dd1c0a2b98a7433c180e44e380adb5343f3a487`,
+  Control Plane
+  `sha256:5999853de9a8f17a5d79659492a7b5686ab001b1f0e9531018c8471d8e6ec53d`,
+  Employees
+  `sha256:35706b2ba03f23222a2968e09cb9af8923daa416dc2b1dab559ecb62378b5397`;
+  all healthy with exact revision labels.
+- Cloudflare Worker: `hivemind-knowledge-ingest-production`, active version
+  `cb297a0d-7025-4440-bd4c-a4f6e9c1ce5f`; dedicated production Workflow,
+  Queue/DLQ, and R2 bindings. Flagship is enabled with default variation `off`
+  and one environment-qualified operator canary rule.
+- Tests and canary: 141/141 focused Core tests, Worker 2/2, TypeScript, Wrangler
+  dry-run, Prisma validation, public checks, and clean fresh critical logs.
+  Production job `60828bf4-4578-48c4-948e-a9affebdde0a` completed with 10/10
+  receipts, 1/1 vector, five memories/citations, canonical entities, four graph
+  relationships, and three exactly-once settlements. Duplicate starts reused
+  the completed deterministic instance; persisted-hybrid recall succeeded.
+- Backup: verified post-migration schema/data backup
+  `/root/releases/backups/post-knowledge-ingest-5a979b73-20260830T150239Z.sql.gz`,
+  SHA-256 `4f517652dc07696ba43576c51e139f61265a98a6ba539a905149a872754828af`.
+- Rollback: remove the production canary rule or set
+  `KNOWLEDGE_INGEST_WORKFLOW_ENABLED=false`; environment backup is
+  `/root/hivemind/.env.pre-knowledge-ingest-20260830T143208Z`; prior canonical
+  images are `hivemind/{core-api,control-plane,employees}:sha-40e3b3d1`.
+
+## 048fba06 — BYOD canonical graph routing (Core only)
+
+- Canonical SHA: `048fba06cb0437c77ff2c26ddd132509883c57d0` on
+  `singulance-main`; migration: none; frontend: unchanged.
+- Manifest: `/root/releases/manifests/048fba06/20260830T173838Z/RELEASE_MANIFEST.json`.
+- Scope: governed explicit service-scoped deployment rebuilt and replaced only
+  Core. Running images after acceptance: Core `sha-048fba06`, Control Plane and
+  Employees `sha-b3616eb4`; all healthy.
+- Verification: 20/20 focused tests; exact-user Flagship evaluation true and
+  same-org/different-user evaluation false; BYOD create/update/relationship/list
+  canary passed; canary data cleanup completed; public health green and fresh
+  critical logs empty.
+- Rollback: disable `knowledge_ingest_workflow_v1` to stop new Workflow
+  admissions. Core rollback image `sha-81239791` remains the immediate code
+  rollback without changing Control Plane, Employees, frontend, or tenant data.
+
+## a4b0448c — canonical entity guarantee and Workers AI BGE-M3 (Core only)
+
+- Canonical SHA: `a4b0448cc42b7ea7c98d656efaa9a640798a34f0`; frontend
+  remained `93b15206d276c798993d57a63fd5694ff9609685`; migrations: none.
+- Manifest: `/root/releases/manifests/a4b0448c/20260830T180454Z/RELEASE_MANIFEST.json`.
+  Running Core image: `hivemind/core-api:sha-a4b0448c`, digest
+  `sha256:cbee2ccca811c70e196f04a7258521967430ea8836879206ed701befb71f735e`.
+- Scope: Core only. Exact source-supported entity names are now mandatory at
+  the canonical promotion boundary and survive every downstream projection.
+  Cloudflare Workers AI `@cf/baai/bge-m3` is primary through AI Gateway;
+  OpenRouter `baai/bge-m3` is secondary.
+- Acceptance: 20/20 contract tests plus 3/3 focused entity/provider tests;
+  live Workers AI and post-release factory probes returned finite 1024-dim
+  vectors; live entity canary retained typed person/product names; public API
+  health and login passed; fresh critical-log count was zero.
+- Rollback: governor-preserved Core image
+  `sha256:900a1f55eb1884d5bbb65773d972dc5c4d05ed12c9629c42ff85e07c9eb2b3c1`
+  and env backup `/root/hivemind/.env.before-cf-bge-20260830T180445Z`.
+
+## bccbf73f — Phase 0 Canonical Knowledge Foundation canary
+
+- Parent `bccbf73fdc1fdb40b1699d1251e7df12e6a15ce0`; frontend
+  `59f3779b8291d5136a72a18867b5b4076ed46172`.
+- Core `hivemind/core-api:sha-bccbf73f`, digest
+  `sha256:8f4c6b3632e637e80ca109d4ae1f2b01cef99cc8cf16b16ab63705a37db62269`;
+  Control `hivemind/control-plane:sha-346586be`, digest
+  `sha256:285a4fdf44ee625ed0ad3f64807c6931b7623258cec4aa6d2d0b1abcc4061fbe`.
+  Employees and data/infrastructure containers were not replaced.
+- Migration `20260830190000_canonical_knowledge_foundation`; backup
+  `/root/backups/hivemind-pre-phase0-20260830T192734Z.dump`, SHA-256
+  `d76a7e0d13425f2beedc3c4f5d2e340f29ba5961e617e633f2a5d6d3241a3ffd`.
+- Cloudflare canonical Worker `c8461f69-d815-4ea5-bba3-82fc644a3f3c`, frontend
+  Worker `0ff3c24a-f722-4510-808c-dc50af597602`, Workflow
+  `claim-74fb72fc-08da-41cc-8c56-598eae67bfee-v3` complete.
+- Flagship `canonical_knowledge_foundation_v1`: default `off`, exact canary
+  `full`, non-canary `off`.
+- Acceptance: authenticated claims 200; exactly one Uwe/teaches/Deep Learning
+  claim, two entities, typed roles, exact evidence, valid-from 2026-08-31,
+  user-asserted, zero lineage, stable replay; public health 200, live frontend
+  markers verified, fresh critical logs zero.
+- Rollback: Flagship off or backend kill switch; governor rollback images and
+  `/root/hivemind/.env.pre-phase0-20260830T1933Z` retained. Additive tables are
+  inert on the stable path while disabled.
+
+## 7dcc5f15 — Knowledge Base canonical projection parity
+
+- Parent `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`; frontend unchanged at
+  `59f3779b8291d5136a72a18867b5b4076ed46172`; migrations: none.
+- Core `hivemind/core-api:sha-7dcc5f15`, digest
+  `sha256:63f8785a4d7216bcb7c70e6f6f84bfd258c3176602f55dc36f6221633ac23929`;
+  manifest `/root/releases/manifests/7dcc5f15/20260830T203237Z/RELEASE_MANIFEST.json`.
+- Scope: Core only. The document promotion boundary now invokes the same
+  tenant/user-flagged canonical materializer used by direct memory saves, with
+  one latched rollout mode per document and repairable per-memory degradation.
+- Acceptance: 17/17 focused tests; authenticated Cloudflare Workflow upload
+  completed ready; all promoted memories received full/complete projection;
+  exact typed teaches claim, entity roles, and document/segment evidence were
+  persisted; multiple recall and chat queries passed after synthetic cleanup.
+  Public health passed and fresh critical-log count was zero.
+- Rollback: Flagship `canonical_knowledge_foundation_v1=off`, backend canonical
+  kill switch, or `/root/quick-deploy.sh --rollback core`. Previous preserved
+  Core image was `hivemind/core-api:sha-0bd3215e`.
+
+## Flagship promotion — Canonical Knowledge Foundation global default
+
+- At `2026-08-30T20:43:35.762Z`, Flagship app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` flag
+  `canonical_knowledge_foundation_v1` changed from default `off` to `full`.
+- Runtime code remains Core `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f`,
+  image `hivemind/core-api:sha-7dcc5f15`, digest
+  `sha256:63f8785a4d7216bcb7c70e6f6f84bfd258c3176602f55dc36f6221633ac23929`.
+  No code or infrastructure deployment was required.
+- Acceptance: two unrelated production contexts evaluated `full/DEFAULT`; the
+  original canary evaluated `full/TARGETING_MATCH`; authenticated live Worker
+  checks returned HTTP 200 and `mode=full` for unrelated and canary identities.
+- Rollback: `wrangler flagship flags set 6568ec71-67c6-4b2c-b2f3-98aebe9e81c8
+  canonical_knowledge_foundation_v1 --variation off`, or the backend canonical
+  kill switch for an environment-wide stop.
+
+## 31962027 — Parallel recall reliability canary
+
+- Parent `319620270b84392d13d3a2c8970c10cb299372ea`; frontend unchanged at
+  `59f3779b8291d5136a72a18867b5b4076ed46172`; migrations: none.
+- Core `hivemind/core-api:sha-31962027`, digest
+  `sha256:715f48540ef97dc7d51263e22c34476f35fe68542cac964c02e3afd507f36ad4`;
+  manifest `/root/releases/manifests/31962027/20260830T214532Z/RELEASE_MANIFEST.json`.
+- Cloudflare canonical-projection Worker version
+  `d99c1304-61ff-40c8-a4b5-b0b5c148ce80`. Flag
+  `recall_parallel_reliability_v1` default remains `off`; exact canary rule is
+  `on`. Core master gate is true.
+- Acceptance: Worker 12/12 plus typecheck/dry-run; focused Core 18/18; Linux
+  recall/evidence 79/79; chat-toolkit 2/2. Same-user on/off/on returned stable
+  ordered results, final latest top-K followed descending requested known time,
+  four lane receipts were complete, and chat returned grounded cited evidence.
+  Public API/Core/login/home checks were 200 and fresh critical logs were zero.
+- Rollback: exact canary flag off; Worker immutable version
+  `c8461f69-d815-4ea5-bba3-82fc644a3f3c`; exact prior Core SHA
+  `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f` via the canonical service-scoped
+  release runner. Do not use the retired quick-deploy rollback shortcut.

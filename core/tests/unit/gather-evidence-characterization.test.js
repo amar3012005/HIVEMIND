@@ -104,6 +104,15 @@ test('single-call native plan never starts a second recall when first-pass cover
   assert.deepEqual(toolNames(r), ['hivemind_recall']);
 });
 
+test('chat latches recall reliability mode into every native recall call', async () => {
+  const { ctx, calls } = makeCtx({
+    hivemind_recall: { memories: memRows('A'), evidence: [], evidence_count: 0 },
+  }, { extra: { recallReliabilityV1: true } });
+  await gatherEvidence({ plan: basePlan({ _native_single_call: true }), ctx, deadlineAt: FAR() });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.reliability_v1, true);
+});
+
 test('base recall preserves distinct adapter evidence rows with identical prefixes', async () => {
   const sharedPrefix = 'The same document boilerplate starts every chunk before its distinct product detail.';
   const { ctx } = makeCtx({

@@ -46,7 +46,10 @@ const UNIT_ALIASES = new Map([
   // pressure / flow
   ['bar', 'bar'], ['pa', 'pa'], ['mbar', 'mbar'],
   // time
-  ['h', 'h'], ['min', 'min'], ['s', 's'], ['jahre', 'y'], ['years', 'y'], ['jahr', 'y'], ['year', 'y'],
+  ['h', 'h'], ['hour', 'h'], ['hours', 'h'], ['min', 'min'], ['minute', 'min'], ['minutes', 'min'],
+  ['s', 's'], ['second', 's'], ['seconds', 's'],
+  ['day', 'd'], ['days', 'd'], ['week', 'wk'], ['weeks', 'wk'], ['month', 'mo'], ['months', 'mo'],
+  ['jahr', 'y'], ['jahre', 'y'], ['year', 'y'], ['years', 'y'],
   // percentage handled separately
 ]);
 
@@ -61,7 +64,10 @@ function _num(value) {
 
 /** Extract typed value slots from fact content. Deterministic, language-neutral. */
 export function extractValueSlots(content = '') {
-  const text = String(content || '');
+  // The ingest layer appends `(YYYY-MM-DDTHH:MMZ)` for temporal recall. It is
+  // provenance, not a claim value; comparing it made two different claims
+  // appear equal merely because they were saved in the same minute.
+  const text = String(content || '').replace(/\s*\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\)\s*$/, '');
   const slots = { quantities: new Map(), years: new Set(), dates: new Set(), percents: new Set(), modelIds: new Set() };
 
   for (const m of text.matchAll(DATE_RE)) slots.dates.add(m[1]);

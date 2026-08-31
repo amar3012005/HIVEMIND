@@ -13,8 +13,8 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { allowOrgRequest as rateLimitAllowOrgRequest, getRateLimitStats as getRateLimitStatsImpl } from './middleware/rate-limit.js';
 import { resolveProjectForSave } from './memory/project-classifier.js';
-import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrDelete, amrPurge } from './vector/mneme/driver.js';
-import { remoteList, remoteHydrate } from './vector/mneme/remote-backend.js';
+import { orgIsRemote, isMemoryStorageReady, amrStats, amrGraph, amrBumpRecall, amrMeetingWrite, amrMeetingList, amrMeetingGet, amrMeetingDelete, amrMeetingPatch, amrMeetingSegmentWrite, amrMeetingSegmentList, amrMeetingAudioWrite, amrMeetingSessionWrite, amrMeetingSessionStatus, amrTaraCall, amrKbDocs, amrKbEvidence, amrKbDocDetail, amrMemEdgeCounts, amrMemRelationships, amrMemoryClaims, amrCanonicalProjection, amrDelete, amrPurge } from './vector/mneme/driver.js';
+import { remoteList, remoteHydrate, isRemoteMemoryUnavailableError } from './vector/mneme/remote-backend.js';
 import { getOrgCounts } from './memory/org-counts.js';
 import { exactMemoryListTotal } from './memory/memory-list-contract.js';
 import { createRequire } from 'module';
@@ -52,6 +52,11 @@ import { isOrganizationAdmin } from './workspace/access-policy.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { getEntityLinkQueue } from './memory/entity-link-queue.js';
+import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonicalKnowledge, prepareCanonicalProjection, verifyCanonicalProjectionSignature } from './memory/canonical-knowledge.js';
+import { CloudflareCanonicalProjectionClient } from './memory/cloudflare-canonical-projection-client.js';
+import { CloudflareRecallReliabilityClient } from './memory/cloudflare-recall-reliability-client.js';
+import { CloudflareChatSessionClient } from './agent/v2/cloudflare-chat-session-client.js';
+import { DurableChatTurnStore, createDurableEventSink } from './agent/v2/durable-turn-store.js';
 import { handleXAdsRequest } from './x-ads/routes.js';
 import { handleXAdsOAuthCallback } from './x-ads/oauth.js';
 import { handleCampaignRequest } from './campaigns/routes.js';
@@ -123,6 +128,108 @@ const PROJECT_ROOT = path.join(__dirname, '..');
 const REPO_ROOT = path.join(PROJECT_ROOT, '..');
 const CORE_SCRIPTS_ROOT = path.join(PROJECT_ROOT, 'scripts');
 const require = createRequire(import.meta.url);
+const canonicalProjectionClient = new CloudflareCanonicalProjectionClient();
+const recallReliabilityClient = new CloudflareRecallReliabilityClient();
+const cloudflareChatSessionClient = new CloudflareChatSessionClient();
+const canonicalProjectionNonceFallback = new Map();
+
+async function consumeCanonicalProjectionNonce(nonce) {
+  const expiresAt = new Date(Date.now() + 10 * 60_000);
+  if (prisma?.canonicalProjectionNonce) {
+    try {
+      await prisma.canonicalProjectionNonce.create({ data: { nonce, expiresAt } });
+      prisma.canonicalProjectionNonce.deleteMany({ where: { expiresAt: { lt: new Date() } } }).catch(() => {});
+      return true;
+    } catch (error) { if (error?.code === 'P2002') return false; throw error; }
+  }
+  const now = Date.now();
+  for (const [key, expiry] of canonicalProjectionNonceFallback) if (expiry < now) canonicalProjectionNonceFallback.delete(key);
+  if (canonicalProjectionNonceFallback.has(nonce)) return false;
+  canonicalProjectionNonceFallback.set(nonce, expiresAt.getTime()); return true;
+}
+
+function canonicalProjectionInput({ memoryId, orgId, payload, requestBody, knownAt = new Date() }) {
+  const admittedKnownAt = payload?.created_at || payload?.createdAt || knownAt;
+  const explicit = Array.isArray(requestBody?.entities) ? requestBody.entities : [];
+  const tagged = (payload?.tags || []).filter((tag) => String(tag).startsWith('entity:')).map((tag) => ({
+    name: String(tag).slice(7).replace(/[-_]+/g, ' '), kind: 'concept', role: 'mentioned',
+  }));
+  const suppliedClaims = Array.isArray(requestBody?.claims) ? requestBody.claims : [];
+  const legacyPredicate = payload?.claim_predicate || payload?.claimPredicate;
+  const legacySubject = payload?.claim_subject || payload?.claimSubject;
+  const legacyQualifiers = payload?.claim_qualifiers || payload?.claimQualifiers || {};
+  let reconstructedClaims = suppliedClaims;
+  if (!reconstructedClaims.length && legacyPredicate && legacySubject) {
+    let object = legacyQualifiers.object || legacyQualifiers.value || legacyQualifiers.teacher || legacyQualifiers.actor;
+    if (/^\s*(he|she|they)\s*$/i.test(String(object || ''))) {
+      object = String(payload?.title || '').match(/^(.+?)\s+(?:is\s+)?(?:teaching|teaches|teach)\b/i)?.[1]?.trim();
+    }
+    if (object) {
+      const hintedObjectKind = String(legacyQualifiers.object_type || legacyQualifiers.objectType || '').toLowerCase();
+      const inferEndpointKind = (value, hint = '') => {
+        if (/person|people|professor|teacher|instructor|individual/.test(hint)) return 'person';
+        if (/place|location|city|country|region/.test(hint)) return 'location';
+        if (/organization|company|institution|university/.test(hint)) return 'organization';
+        if (/product/.test(hint)) return 'product';
+        if (/technology|course|subject|field/.test(hint)
+          || /(?:artificial intelligence|machine learning|deep learning|neuro[-‑ ]symbolic|\bAI\b|computing)/i.test(String(value))) return 'technology';
+        return 'concept';
+      };
+      reconstructedClaims = [{
+        subject: { name: String(legacySubject), kind: inferEndpointKind(legacySubject) },
+        predicate: String(legacyPredicate),
+        object: { name: String(object), kind: inferEndpointKind(object, hintedObjectKind) },
+        qualifiers: legacyQualifiers,
+        valid_from: legacyQualifiers.valid_from || legacyQualifiers.validFrom || null,
+        assertion_status: 'user_asserted',
+      }];
+    }
+  }
+  return {
+    memoryId, organizationId: orgId, title: payload?.title, content: payload?.content,
+    entities: explicit.length ? explicit : tagged, claims: reconstructedClaims,
+    exactQuote: payload?.content, knownAt: admittedKnownAt, timeZone: requestBody?.timezone || 'Europe/Berlin',
+    documentId: requestBody?.document_id || null, segmentId: requestBody?.segment_id || null,
+  };
+}
+
+async function projectCanonicalKnowledge({ prisma, mode, input, processingVersion = 1 }) {
+  if (orgIsRemote(input.organizationId)) {
+    const receipt = await amrCanonicalProjection(input.organizationId, { mode, input, prepared: prepareCanonicalProjection(input), processingVersion });
+    if (!receipt) throw new Error('remote canonical projection unavailable');
+    return { mode, status: 'complete', receipt: receipt.receipt };
+  }
+  return materializeCanonicalKnowledge({ prisma, mode, input, processingVersion });
+}
+
+async function handleCanonicalProjectionStageCallback({ req, res, pathname }) {
+  const match = pathname.match(/^\/internal\/canonical-projection\/v1\/memories\/([^/]+)\/stages\/(load|reconstruct|resolve|normalize|persist|reconcile|complete|failed)$/);
+  if (!match || req.method !== 'POST') return false;
+  let rawBody;
+  try { rawBody = (await readBoundedBuffer(req, 1024 * 1024)).toString('utf8'); } catch { jsonResponse(res, { error: 'invalid body' }, 400); return true; }
+  const verified = verifyCanonicalProjectionSignature({ headers: req.headers, pathname, rawBody, secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET });
+  if (!verified.ok) { jsonResponse(res, { error: 'invalid projection signature', reason: verified.reason }, 401); return true; }
+  if (!(await consumeCanonicalProjectionNonce(verified.nonce))) { jsonResponse(res, { error: 'replayed projection nonce' }, 409); return true; }
+  let body; try { body = JSON.parse(rawBody || '{}'); } catch { jsonResponse(res, { error: 'invalid_json_body' }, 400); return true; }
+  const memoryId = match[1]; const stage = match[2]; const orgId = body.org_id; const requiredProjection = body.required_projection;
+  if (!orgId || !['shadow', 'write', 'read', 'full'].includes(requiredProjection)) { jsonResponse(res, { error: 'org_id and valid required_projection required' }, 400); return true; }
+  try {
+    const memory = await persistentMemoryStore.getMemory(memoryId);
+    if (!memory || (memory.org_id || memory.orgId) !== orgId) { jsonResponse(res, { error: 'Not found' }, 404); return true; }
+    const existing = await prisma.memoryProjectionState.findUnique({ where: { memoryId } });
+    const receipts = (existing?.receipt && typeof existing.receipt === 'object') ? { ...existing.receipt } : {};
+    if (receipts.stages?.[stage]) { jsonResponse(res, { ok: true, idempotent: true, receipt: receipts.stages[stage] }); return true; }
+    let receipt = { memory_id: memoryId, stage, processing_version: body.processing_version || 1, required_projection: requiredProjection };
+    if (stage === 'persist') receipt.projection = await projectCanonicalKnowledge({ prisma, mode: requiredProjection, processingVersion: body.processing_version || 1, input: canonicalProjectionInput({ memoryId, orgId, payload: memory, requestBody: body }) });
+    const status = stage === 'failed' ? 'failed' : (stage === 'complete' || stage === 'persist' ? 'complete' : 'repairing');
+    const nextReceipt = { ...receipts, stages: { ...(receipts.stages || {}), [stage]: receipt } };
+    await prisma.memoryProjectionState.upsert({
+      where: { memoryId }, update: { admittedMode: requiredProjection, claimsStatus: status, entitiesStatus: status, receipt: nextReceipt, lastError: stage === 'failed' ? (body.error || 'workflow failed') : null },
+      create: { memoryId, organizationId: orgId, admittedMode: requiredProjection, processingVersion: body.processing_version || 1, claimsStatus: status, entitiesStatus: status, receipt: nextReceipt, lastError: stage === 'failed' ? (body.error || 'workflow failed') : null },
+    });
+    jsonResponse(res, { ok: true, receipt }); return true;
+  } catch (error) { jsonResponse(res, { ok: false, error: error.message }, 503); return true; }
+}
 
 // Cognition is an organization-administration surface. Keep its route gates on
 // the same active-membership and canonical-role interpretation as Workspace
@@ -2377,6 +2484,51 @@ if (process.env.ENABLE_DOCUMENT_FIRST_INGEST === 'true' && prisma && persistentM
       smartIngestRouter,
       memoryGraphEngine: persistentMemoryEngine,
       doclingAdapter, // Pass Docling adapter if DOCLING_URL is set, null otherwise
+      canonicalProjector: async ({ memory, userId, orgId, documentId, admittedMode }) => {
+        // One flag evaluation is latched for the complete document promotion;
+        // an in-flight upload cannot switch implementations between memories.
+        const mode = admittedMode || await canonicalProjectionClient.modeFor({ orgId, userId });
+        if (mode === 'off') return { memoryId: memory.id, mode, status: 'off' };
+        try {
+          // Claim structuring and entity linking run immediately before this
+          // boundary and may update the durable row. Re-read it so canonical
+          // projection consumes those committed fields rather than the stale
+          // promotion object returned by the graph engine.
+          const persistedMemory = orgIsRemote(orgId)
+            ? (await persistentMemoryStore.getMemory(memory.id) || memory)
+            : (await prisma.memory.findFirst({
+              where: { id: memory.id, orgId },
+            }) || memory);
+          const projection = await projectCanonicalKnowledge({
+            prisma,
+            mode,
+            input: canonicalProjectionInput({
+              memoryId: memory.id,
+              orgId,
+              payload: persistedMemory,
+              requestBody: {
+                document_id: documentId,
+                segment_id: memory.support_segment_ids?.[0] || memory.supportSegmentIds?.[0] || null,
+              },
+            }),
+          });
+          const workflow = await canonicalProjectionClient.start({
+            memoryId: memory.id, orgId, userId, requiredProjection: mode,
+          }).catch((error) => ({ status: 'degraded', error: error.message }));
+          return { memoryId: memory.id, mode, status: projection?.status || 'complete', projection, workflow };
+        } catch (error) {
+          await prisma.memoryProjectionState.upsert({
+            where: { memoryId: memory.id },
+            update: { admittedMode: mode, claimsStatus: 'degraded', entitiesStatus: 'degraded', lastError: error.message },
+            create: {
+              memoryId: memory.id, organizationId: orgId, admittedMode: mode,
+              claimsStatus: 'degraded', entitiesStatus: 'degraded', lastError: error.message,
+            },
+          }).catch(() => null);
+          error.canonicalMode = mode;
+          throw error;
+        }
+      },
       embeddingService: {
         embed: async (input, options = {}) => {
           // Use the existing Qdrant client's embedding pipeline
@@ -3035,20 +3187,15 @@ async function ingestRoutedPayload(routedPayload, engine) {
 // ingestSource) so the highest-traffic write path gains provenance tags, canonical
 // entity persistence, async claim structuring and the coverage ledger, while the
 // engine-internal smart routing (same flags) keeps behavior identical. Trees keep
-// the engine path (ingestSource has no tree mode). Fallback to the engine path is
-// LOUD (warn log) — kept during migration for enterprise robustness; the legacy
-// path is deleted in the Phase 11 sweep once telemetry shows zero fallbacks.
+// the engine path (ingestSource has no tree mode). Canonical failures are surfaced:
+// retrying through the legacy writer after a remote Memory Box has acknowledged a
+// partial operation can create duplicate memories and split graph semantics.
 async function ingestRoutedPayloadCanonical(routedPayload, engine) {
   const v5 = (process.env.V5_MEMORIES_CANONICAL || 'true').toLowerCase() !== 'false';
   if (!v5 || routedPayload?.__ingest_tree) return ingestRoutedPayload(routedPayload, engine);
-  try {
-    const r = await ingestCanonicalPayload(routedPayload, { sourceType: 'api', mode: 'atomic' });
-    if (r?.skipped) return { skipped: true, operation: 'skipped_redundant', reason: r.reason || 'redundant', memoryId: r.memoryId || null };
-    return { ...r, operation: r.operation || 'created' };
-  } catch (e) {
-    console.warn('[v5-memories-canonical] envelope path failed, using engine path:', e.message);
-    return ingestRoutedPayload(routedPayload, engine);
-  }
+  const r = await ingestCanonicalPayload(routedPayload, { sourceType: 'api', mode: 'atomic' });
+  if (r?.skipped) return { skipped: true, operation: 'skipped_redundant', reason: r.reason || 'redundant', memoryId: r.memoryId || null };
+  return { ...r, operation: r.operation || 'created' };
 }
 
 // V5 Phase 5C — Tara voice saves via the canonical envelope (evidence mode:
@@ -4268,6 +4415,7 @@ const server = http.createServer(async (req, res) => {
     const common = {
       jobId: (knowledgeWorkflowStage || knowledgeWorkflowFail)[1],
       orgId: String(workflowBody.org_id || ''),
+      userId: String(workflowBody.user_id || ''),
       processingVersion: Number(workflowBody.processing_version) || 1,
     };
     try {
@@ -4284,7 +4432,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, result);
     } catch (error) {
       const retryable = error?.retryable !== false
-        && !['INVALID_WORKFLOW_PAYLOAD', 'JOB_NOT_FOUND', 'ORCHESTRATOR_MISMATCH', 'STALE_WORKFLOW', 'UPLOAD_CANCELLED'].includes(error?.code);
+        && !['INVALID_WORKFLOW_PAYLOAD', 'JOB_NOT_FOUND', 'WORKFLOW_USER_MISMATCH', 'ORCHESTRATOR_MISMATCH', 'STALE_WORKFLOW', 'UPLOAD_CANCELLED'].includes(error?.code);
       return jsonResponse(res, {
         error: error?.code || 'KNOWLEDGE_WORKFLOW_STAGE_FAILED',
         message: String(error?.message || 'Knowledge ingestion stage failed').slice(0, 500),
@@ -6360,6 +6508,12 @@ exit \$RC
     } catch (error) {
       return jsonResponse(res, { error: error.code || 'campaign_connection_callback_failed', message: error.message }, error.status || 400);
     }
+  }
+
+  // HMAC-authenticated Cloudflare workflow callbacks live outside user API auth.
+  if (pathname.startsWith('/internal/canonical-projection/')) {
+    if (await handleCanonicalProjectionStageCallback({ req, res, pathname })) return;
+    return jsonResponse(res, { error: 'not_found' }, 404);
   }
 
   // API Routes
@@ -10302,6 +10456,65 @@ exit \$RC
         }
       }
 
+      const projectionStageMatch = pathname.match(/^\/internal\/canonical-projection\/v1\/memories\/([^/]+)\/stages\/(load|reconstruct|resolve|normalize|persist|reconcile|complete|failed)$/);
+      if (projectionStageMatch && req.method === 'POST') {
+        const rawCanonicalBody = JSON.stringify(body || {});
+        const verified = verifyCanonicalProjectionSignature({ headers: req.headers, pathname, rawBody: rawCanonicalBody, secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET });
+        if (!verified.ok) return jsonResponse(res, { error: 'invalid projection signature', reason: verified.reason }, 401);
+        if (!(await consumeCanonicalProjectionNonce(verified.nonce))) return jsonResponse(res, { error: 'replayed projection nonce' }, 409);
+        const memoryId = projectionStageMatch[1]; const stage = projectionStageMatch[2];
+        const requestedOrg = body?.org_id; const requiredProjection = body?.required_projection;
+        if (!requestedOrg || !requiredProjection) return jsonResponse(res, { error: 'org_id and required_projection required' }, 400);
+        try {
+          const memory = await persistentMemoryStore.getMemory(memoryId);
+          if (!memory || (memory.org_id || memory.orgId) !== requestedOrg) return jsonResponse(res, { error: 'Not found' }, 404);
+          const existing = await prisma?.memoryProjectionState?.findUnique({ where: { memoryId } });
+          const receipts = (existing?.receipt && typeof existing.receipt === 'object') ? { ...existing.receipt } : {};
+          if (receipts.stages?.[stage]) return jsonResponse(res, { ok: true, idempotent: true, receipt: receipts.stages[stage] });
+          let result = { memory_id: memoryId, stage, processing_version: body.processing_version || 1, required_projection: requiredProjection };
+          if (stage === 'persist') {
+            const admittedMode = requiredProjection;
+            const projection = await projectCanonicalKnowledge({ prisma, mode: admittedMode, input: canonicalProjectionInput({
+              memoryId, orgId: requestedOrg, payload: memory,
+              requestBody: { entities: body.entities || [], claims: body.claims || [], timezone: body.timezone },
+            }) });
+            result = { ...result, projection };
+          }
+          const status = stage === 'failed' ? 'failed' : (stage === 'complete' ? 'complete' : (stage === 'persist' ? 'complete' : 'repairing'));
+          const nextReceipt = { ...receipts, stages: { ...(receipts.stages || {}), [stage]: result } };
+          await prisma.memoryProjectionState.upsert({
+            where: { memoryId },
+            update: { claimsStatus: status, entitiesStatus: status, receipt: nextReceipt, lastError: stage === 'failed' ? (body.error || 'workflow failed') : null },
+            create: { memoryId, organizationId: requestedOrg, admittedMode: requiredProjection, processingVersion: body.processing_version || 1, claimsStatus: status, entitiesStatus: status, receipt: nextReceipt, lastError: stage === 'failed' ? (body.error || 'workflow failed') : null },
+          });
+          return jsonResponse(res, { ok: true, receipt: result });
+        } catch (error) { return jsonResponse(res, { ok: false, error: error.message }, 503); }
+      }
+
+      // Cloudflare Workflow repair callback. Queue messages carry identifiers only;
+      // Core reloads the authorized memory and reconstructs the projection here.
+      if (pathname === '/internal/canonical-projection/repair' && req.method === 'POST') {
+        const rawCanonicalBody = JSON.stringify(body || {});
+        const verified = verifyCanonicalProjectionSignature({
+          headers: req.headers, pathname, rawBody: rawCanonicalBody,
+          secret: process.env.CANONICAL_PROJECTION_HMAC_SECRET,
+        });
+        if (!verified.ok) return jsonResponse(res, { error: 'invalid projection signature', reason: verified.reason }, 401);
+        if (!body?.memory_id || !body?.org_id) return jsonResponse(res, { error: 'memory_id and org_id required' }, 400);
+        try {
+          const memory = await persistentMemoryStore.getMemory(body.memory_id);
+          if (!memory || (memory.org_id || memory.orgId) !== body.org_id) return jsonResponse(res, { error: 'Not found' }, 404);
+          const mode = canonicalKnowledgeMode({ evaluatedMode: body.mode || 'write' });
+          const projection = await projectCanonicalKnowledge({ prisma, mode, input: canonicalProjectionInput({
+            memoryId: body.memory_id, orgId: body.org_id, payload: memory,
+            requestBody: { entities: body.entities || [], claims: body.claims || [], timezone: body.timezone },
+          }) });
+          return jsonResponse(res, { ok: true, workflow_id: `claim-${body.memory_id}-v${body.processing_version || 1}`, projection });
+        } catch (error) {
+          return jsonResponse(res, { ok: false, error: error.message }, 503);
+        }
+      }
+
       // GET /api/memories/:id/relationships
       // Returns every edge touching this memory, grouped by direction +
       // type, with target/source memory titles inlined so the FE drawer
@@ -10314,6 +10527,44 @@ exit \$RC
       //     in:  [{ id, type, confidence, source_id, source_title, ... }],
       //     by_type: { Updates: [...], Extends: [...], Mentions: [...], ... },
       //   }
+      const claimsMatch = pathname.match(/^\/api\/memories\/([^/]+)\/claims$/);
+      if (claimsMatch && req.method === 'GET') {
+        if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/claims')) return;
+        const claimsMode = await canonicalProjectionClient.modeFor({ orgId, userId });
+        if (claimsMode !== 'read' && claimsMode !== 'full') {
+          // Flag-off/write-only callers retain the pre-Phase-0 surface: the
+          // additive claims endpoint is intentionally undiscoverable.
+          return jsonResponse(res, { error: 'Not found' }, 404);
+        }
+        const memoryId = claimsMatch[1];
+        try {
+          const claimsAccess = await buildAccessContext(userId, orgId).catch(() => null);
+          const memory = principal.master
+            ? await persistentMemoryStore.getMemory(memoryId)
+            : await persistentMemoryStore.getMemoryScoped(memoryId, { user_id: userId, org_id: orgId, access_context: claimsAccess });
+          if (!memory || memory.deleted_at) return jsonResponse(res, { error: 'Not found' }, 404);
+          if (orgIsRemote(orgId)) {
+            const remoteClaims = await amrMemoryClaims(orgId, memoryId, {
+              subject: url.searchParams.get('subject'), predicate: url.searchParams.get('predicate'),
+              object: url.searchParams.get('object'), validAt: url.searchParams.get('valid_at'),
+            });
+            return jsonResponse(res, remoteClaims || { memory_id: memoryId, claims: [], projection: { status: 'degraded' } });
+          }
+          const claims = await getCanonicalClaimsForMemory({
+            prisma, organizationId: orgId, memoryId,
+            filters: {
+              subject: url.searchParams.get('subject'), predicate: url.searchParams.get('predicate'),
+              object: url.searchParams.get('object'), validAt: url.searchParams.get('valid_at'),
+            },
+          });
+          const projection = await prisma.memoryProjectionState.findUnique({ where: { memoryId } });
+          return jsonResponse(res, { memory_id: memoryId, claims, projection });
+        } catch (error) {
+          console.error('[memory-claims]', error);
+          return jsonResponse(res, { error: error.message }, 500);
+        }
+      }
+
       const relsMatch = pathname.match(/^\/api\/memories\/([^/]+)\/relationships$/);
       if (relsMatch && req.method === 'GET') {
         if (!ensurePersistedMemoryOrFail(res, '/api/memories/:id/relationships')) return;
@@ -20220,6 +20471,10 @@ exit \$RC
                 }
               };
 
+              // Tenant+user Flagship admission is evaluated once and latched for
+              // every memory produced by this request. Any evaluation failure is off.
+              const admittedCanonicalMode = await canonicalProjectionClient.modeFor({ orgId, userId });
+
               // Determine sync vs async mode
               const syncMode = url.searchParams.get('sync') === 'true' || body.sync === true;
               const wantSmartRouting = body.smartIngest !== false && !body.skipProcessing;
@@ -20314,6 +20569,18 @@ exit \$RC
                       }
 
                       results.push(result);
+
+                      const canonicalMode = admittedCanonicalMode;
+                      if (canonicalMode !== 'off' && result.memoryId) {
+                        try {
+                          await projectCanonicalKnowledge({ prisma, mode: canonicalMode, input: canonicalProjectionInput({
+                            memoryId: result.memoryId, orgId, payload: p, requestBody: body,
+                          }) });
+                          await canonicalProjectionClient.start({ memoryId: result.memoryId, orgId, userId, requiredProjection: canonicalMode }).catch(() => null);
+                        } catch (projectionError) {
+                          console.warn('[canonical-knowledge] async projection degraded:', projectionError.message);
+                        }
+                      }
 
                       ingestTracker.updateJob(jobId, { status: 'embedding', progress: 60, memoryId: result.memoryId });
 
@@ -20554,11 +20821,26 @@ exit \$RC
 
               const firstMemory = await persistentMemoryStore.getMemory(firstSuccessResult.memoryId);
 
+              const canonicalMode = admittedCanonicalMode;
+              let projection;
+              if (canonicalMode !== 'off') {
+                try {
+                  projection = await projectCanonicalKnowledge({ prisma, mode: canonicalMode, input: canonicalProjectionInput({
+                    memoryId: firstSuccessResult.memoryId, orgId, payload: ingestPayload, requestBody: body,
+                  }) });
+                  await canonicalProjectionClient.start({ memoryId: firstSuccessResult.memoryId, orgId, userId, requiredProjection: canonicalMode }).catch(() => null);
+                } catch (projectionError) {
+                  console.warn('[canonical-knowledge] sync projection degraded:', projectionError.message);
+                  projection = { mode: canonicalMode, status: 'degraded', error: projectionError.message };
+                }
+              }
+
               return jsonResponse(res, {
                 success: true,
                 memory: firstMemory,
                 relationships: firstSuccessResult.edgesCreated,
                 chunk_count: syncResults.filter(r => !r.skipped).length,
+                ...(projection ? { projection } : {}),
                 mutation: {
                   operation: firstSuccessResult.operation,
                   deprecated_ids: firstSuccessResult.deprecatedIds,
@@ -21686,6 +21968,7 @@ exit \$RC
               amrBumpRecall,
               qdrantClient,
               getMemoryTypeBoost,
+              recallReliabilityClient,
             });
           }
           break;
@@ -23951,6 +24234,26 @@ exit \$RC
         // ==========================================
         // CHAT — Talk to HIVE (memory-augmented LLM)
         // ==========================================
+        case '/api/chat/turn-events':
+          if (req.method === 'GET') {
+            const turnId = url.searchParams.get('turn_id');
+            if (!turnId) return jsonResponse(res, { error: 'turn_id_required' }, 400);
+            try {
+              const store = new DurableChatTurnStore({ prisma, notifier: cloudflareChatSessionClient });
+              const replay = await store.readAuthorized({
+                turnId, orgId, userId,
+                after: url.searchParams.get('after') || 0,
+                limit: url.searchParams.get('limit') || 200,
+              });
+              if (!replay) return jsonResponse(res, { error: 'turn_not_found' }, 404);
+              return jsonResponse(res, replay);
+            } catch (error) {
+              console.warn(`[durable-chat] replay unavailable: ${error.message}`);
+              return jsonResponse(res, { error: 'durable_chat_unavailable' }, 503);
+            }
+          }
+          break;
+
         case '/api/chat':
         case '/v2/chat':
           if (req.method === 'POST') {
@@ -24075,13 +24378,85 @@ exit \$RC
             // connector results in the browser. Completed reads are reused, so
             // choosing an option does not repeat recall or provider executions.
             if (body?.continuation_token) {
-              const { consumeChatContinuation, createChatContinuation } = await import('./agent/chat-continuation-store.js');
-              const stored = await consumeChatContinuation(body.continuation_token, { userId, orgId });
-              if (!stored) { await releaseChatCredit(); return jsonResponse(res, { error: 'continuation_expired_or_invalid' }, 409); }
+              const {
+                consumeChatContinuation, createChatContinuation,
+                claimDurableChatContinuation, settleDurableChatContinuation, releaseDurableChatContinuation,
+              } = await import('./agent/chat-continuation-store.js');
+              const continuationMode = await cloudflareChatSessionClient.modeFor({ orgId, userId }).catch(() => 'off');
+              let continuationStore = null;
+              let continuationTurn = null;
+              let continuationClaim = null;
+              if (continuationMode !== 'off') {
+                try {
+                  continuationStore = new DurableChatTurnStore({ prisma, notifier: cloudflareChatSessionClient });
+                  const admitted = await continuationStore.createOrReuse({
+                    orgId, userId,
+                    threadId: body?.thread_id || body?.conversation_id || null,
+                    idempotencyKey: chatCreditKey,
+                    mode: continuationMode,
+                    requestPayload: {
+                      continuation_token_digest: crypto.createHash('sha256').update(body.continuation_token).digest('hex'),
+                      continuation_response: body?.continuation_response || {},
+                    },
+                    scopeSnapshot: {
+                      project_id: requestProjectId,
+                      scope_filter: requestScopeFilter,
+                      authorized_project_ids: agentAccessCtx.projectIds || [],
+                    },
+                  });
+                  continuationTurn = admitted.turn;
+                  if (!admitted.created && continuationTurn.status === 'completed' && continuationTurn.responsePayload) {
+                    const replayed = {
+                      ...continuationTurn.responsePayload,
+                      durable_turn: {
+                        id: continuationTurn.id, mode: continuationTurn.orchestrationMode,
+                        status: 'completed', replayed: true,
+                        events_url: `/api/chat/turn-events?turn_id=${continuationTurn.id}`,
+                      },
+                    };
+                    await settleChatCredit();
+                    if (wantStream) {
+                      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+                      res.write(`data: ${JSON.stringify({ type: 'done', ...replayed })}\n\n`);
+                      res.end();
+                      return;
+                    }
+                    return jsonResponse(res, replayed);
+                  }
+                  if (!admitted.created && !['failed', 'cancelled'].includes(continuationTurn.status)) {
+                    await releaseChatCredit();
+                    return jsonResponse(res, {
+                      error: 'chat_turn_in_progress',
+                      durable_turn: {
+                        id: continuationTurn.id, mode: continuationTurn.orchestrationMode,
+                        status: continuationTurn.status, phase: continuationTurn.currentPhase,
+                        events_url: `/api/chat/turn-events?turn_id=${continuationTurn.id}`,
+                      },
+                    }, 409);
+                  }
+                  continuationClaim = await claimDurableChatContinuation(body.continuation_token, { prisma, userId, orgId });
+                } catch (error) {
+                  console.warn(`[durable-chat] continuation admission degraded to V2: ${error.message}`);
+                  continuationStore = null; continuationTurn = null; continuationClaim = null;
+                }
+              }
+              // Tokens created before durable mode was enabled remain valid in
+              // the legacy store. New durable tokens never fall back because no
+              // plaintext token or duplicate payload is written to Redis.
+              const stored = continuationClaim?.record
+                || await consumeChatContinuation(body.continuation_token, { userId, orgId });
+              if (!stored) {
+                if (continuationTurn) await continuationStore.fail(continuationTurn.id, new Error('continuation_expired_or_invalid')).catch(() => {});
+                await releaseChatCredit(); return jsonResponse(res, { error: 'continuation_expired_or_invalid' }, 409);
+              }
               const choice = body?.continuation_response || {};
               const stepIndex = Number(choice.step_index);
               const pending = stored.resumeState?.results?.[stepIndex]?.inputRequest;
-              if (!pending) { await releaseChatCredit(); return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400); }
+              if (!pending) {
+                if (continuationClaim) await releaseDurableChatContinuation({ prisma, continuationId: continuationClaim.continuationId, leaseToken: continuationClaim.leaseToken });
+                if (continuationTurn) await continuationStore.fail(continuationTurn.id, new Error('invalid_continuation_choice')).catch(() => {});
+                await releaseChatCredit(); return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
+              }
               const allowed = pending?.options?.find((option) => option.id === choice.option_id || option.value === choice.value);
               const declaredFields = Array.isArray(pending?.fields) ? pending.fields : [];
               const submittedValues = choice?.values && typeof choice.values === 'object' && !Array.isArray(choice.values)
@@ -24093,7 +24468,11 @@ exit \$RC
               const validFields = declaredFields.length > 0 && declaredFields.every((field) => (
                 !field.required || (fieldValues[field.name] != null && String(fieldValues[field.name]).trim() !== '')
               ));
-              if (!allowed && !validFields) { await releaseChatCredit(); return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400); }
+              if (!allowed && !validFields) {
+                if (continuationClaim) await releaseDurableChatContinuation({ prisma, continuationId: continuationClaim.continuationId, leaseToken: continuationClaim.leaseToken });
+                if (continuationTurn) await continuationStore.fail(continuationTurn.id, new Error('invalid_continuation_choice')).catch(() => {});
+                await releaseChatCredit(); return jsonResponse(res, { error: 'invalid_continuation_choice' }, 400);
+              }
 
               const execute = async (emit) => {
                 const { runCompoundOrchestrator } = await import('./agent/compound-orchestrator.js');
@@ -24144,6 +24523,10 @@ exit \$RC
                   const next = await createChatContinuation({
                     userId, orgId, message: stored.message, language: stored.language,
                     resumeState: compound.resumeState,
+                  }, {
+                    prisma,
+                    durable: ['session', 'workflow', 'full'].includes(continuationMode),
+                    parentTurnId: continuationTurn?.id || null,
                   });
                   continuation = { schema_version: 1, token: next.token, expires_at: next.expires_at, requests: compound.inputRequests };
                   emit?.({ type: 'orchestration_input_required', ...continuation });
@@ -24166,18 +24549,52 @@ exit \$RC
               };
               if (wantStream) {
                 res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-                const emit = (evt) => { try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {} };
-                try { emit({ type: 'done', ...(await execute(emit)) }); await settleChatCredit(); }
-                catch (error) { await releaseChatCredit(); emit({ type: 'error', error: error.message }); }
+                const rawEmit = (evt) => { try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {} };
+                const sink = continuationTurn
+                  ? createDurableEventSink({ store: continuationStore, turnId: continuationTurn.id, emit: rawEmit })
+                  : null;
+                const emit = (evt) => sink ? sink.push(evt) : rawEmit(evt);
+                try {
+                  emit({ type: 'orchestration_resumed' });
+                  const continued = await execute(emit);
+                  if (continuationTurn && continuationMode !== 'shadow') continued.durable_turn = {
+                    id: continuationTurn.id, mode: continuationMode, status: 'completed', replayed: false,
+                    events_url: `/api/chat/turn-events?turn_id=${continuationTurn.id}`,
+                  };
+                  emit({ type: 'done', ...continued });
+                  if (sink) { await sink.flush(); await continuationStore.complete(continuationTurn.id, continued, sink.sequence); }
+                  if (continuationClaim) await settleDurableChatContinuation({ prisma, continuationId: continuationClaim.continuationId, leaseToken: continuationClaim.leaseToken });
+                  await settleChatCredit();
+                } catch (error) {
+                  await releaseChatCredit(); emit({ type: 'error', error: error.message });
+                  if (sink) { await sink.flush(); await continuationStore.fail(continuationTurn.id, error, sink.sequence); }
+                  if (continuationClaim) await releaseDurableChatContinuation({ prisma, continuationId: continuationClaim.continuationId, leaseToken: continuationClaim.leaseToken });
+                }
                 try { res.end(); } catch {}
                 return;
               }
               try {
-                const continued = await execute(null);
+                const sink = continuationTurn
+                  ? createDurableEventSink({ store: continuationStore, turnId: continuationTurn.id })
+                  : null;
+                sink?.push({ type: 'orchestration_resumed' });
+                const continued = await execute(sink ? (event) => sink.push(event) : null);
+                if (continuationTurn && continuationMode !== 'shadow') continued.durable_turn = {
+                  id: continuationTurn.id, mode: continuationMode, status: 'completed', replayed: false,
+                  events_url: `/api/chat/turn-events?turn_id=${continuationTurn.id}`,
+                };
+                if (sink) {
+                  sink.push({ type: 'done', result_digest: crypto.createHash('sha256').update(JSON.stringify(continued)).digest('hex') });
+                  await sink.flush();
+                  await continuationStore.complete(continuationTurn.id, continued, sink.sequence);
+                }
+                if (continuationClaim) await settleDurableChatContinuation({ prisma, continuationId: continuationClaim.continuationId, leaseToken: continuationClaim.leaseToken });
                 await settleChatCredit();
                 return jsonResponse(res, continued);
               } catch (error) {
                 await releaseChatCredit();
+                if (continuationTurn) await continuationStore.fail(continuationTurn.id, error).catch(() => {});
+                if (continuationClaim) await releaseDurableChatContinuation({ prisma, continuationId: continuationClaim.continuationId, leaseToken: continuationClaim.leaseToken });
                 throw error;
               }
             }
@@ -24189,7 +24606,79 @@ exit \$RC
             // recall-then-LLM flow on HIVEMIND_AGENT_MODE=off or on error.
             const agentEnabled = true;
             if (agentEnabled) {
+              let failedDurableChatStore = null;
+              let failedDurableChatTurn = null;
               try {
+                // Evaluate once per authenticated turn and latch the result into
+                // every recall issued by this chat. Flagship failure is off.
+                const recallReliabilityV1 = await recallReliabilityClient
+                  .enabledFor({ orgId, userId })
+                  .catch(() => false);
+                // Additive durable execution envelope. The selected mode is
+                // evaluated once and latched on the turn. Flag/Worker/schema
+                // failures fail closed to the unchanged Chat V2 path.
+                let durableChatMode = await cloudflareChatSessionClient
+                  .modeFor({ orgId, userId })
+                  .catch(() => 'off');
+                let durableChatStore = null;
+                let durableChatTurn = null;
+                if (durableChatMode !== 'off') {
+                  try {
+                    durableChatStore = new DurableChatTurnStore({ prisma, notifier: cloudflareChatSessionClient });
+                    const admitted = await durableChatStore.createOrReuse({
+                      orgId, userId,
+                      threadId: body?.thread_id || body?.conversation_id || null,
+                      idempotencyKey: chatCreditKey,
+                      mode: durableChatMode,
+                      requestPayload: {
+                        message, history, language, model, use_tools: useTools,
+                        recall_mode: body?.recall_mode || null,
+                        source: body?.source || null,
+                        time: body?.time || null,
+                      },
+                      scopeSnapshot: {
+                        project_id: requestProjectId,
+                        scope_filter: requestScopeFilter,
+                        authorized_project_ids: agentAccessCtx.projectIds || [],
+                      },
+                    });
+                    durableChatTurn = admitted.turn;
+                    failedDurableChatStore = durableChatStore;
+                    failedDurableChatTurn = durableChatTurn;
+                    if (!admitted.created && durableChatTurn.status === 'completed' && durableChatTurn.responsePayload) {
+                      const replayed = {
+                        ...durableChatTurn.responsePayload,
+                        durable_turn: {
+                          id: durableChatTurn.id, mode: durableChatTurn.orchestrationMode,
+                          status: 'completed', replayed: true,
+                          events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
+                        },
+                      };
+                      await settleChatCredit();
+                      if (wantStream) {
+                        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+                        res.write(`data: ${JSON.stringify({ type: 'done', ...replayed })}\n\n`);
+                        res.end();
+                        return;
+                      }
+                      return jsonResponse(res, replayed);
+                    }
+                    if (!admitted.created && !['failed', 'cancelled'].includes(durableChatTurn.status)) {
+                      await releaseChatCredit();
+                      return jsonResponse(res, {
+                        error: 'chat_turn_in_progress',
+                        durable_turn: {
+                          id: durableChatTurn.id, mode: durableChatTurn.orchestrationMode,
+                          status: durableChatTurn.status, phase: durableChatTurn.currentPhase,
+                          events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
+                        },
+                      }, 409);
+                    }
+                  } catch (error) {
+                    console.warn(`[durable-chat] admission degraded to Chat V2: ${error.message}`);
+                    durableChatMode = 'off'; durableChatStore = null; durableChatTurn = null;
+                  }
+                }
                 // Still honour the onboarding state machine — it cannot be
                 // LLM-picked because it needs to gate the very first turn
                 // before the LLM ever runs.
@@ -24240,9 +24729,13 @@ exit \$RC
                     Connection: 'keep-alive',
                     'X-Accel-Buffering': 'no',
                   });
-                  const emit = (evt) => {
+                  const rawEmit = (evt) => {
                     try { res.write(`data: ${JSON.stringify(evt)}\n\n`); } catch {}
                   };
+                  const durableSink = durableChatTurn
+                    ? createDurableEventSink({ store: durableChatStore, turnId: durableChatTurn.id, emit: rawEmit })
+                    : null;
+                  const emit = (evt) => durableSink ? durableSink.push(evt) : rawEmit(evt);
                   try {
                     const result = await runReactAgent({
                       message, history, model, apiKey: groqKey,
@@ -24264,6 +24757,9 @@ exit \$RC
                       allowGeneralKnowledge: body?.allow_general_knowledge === true,
                       ctx: {
                         userId, orgId,
+                        recallReliabilityV1,
+                        durableChatMode,
+                        durableChatTurnId: durableChatTurn?.id || null,
                         threadId: body?.thread_id || body?.conversation_id || null,
                         projectId: requestProjectId,
                         scopeFilter: requestScopeFilter,
@@ -24287,6 +24783,12 @@ exit \$RC
                     if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
                       result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
                     }
+                    if (durableChatTurn && durableChatMode !== 'shadow') {
+                      result.durable_turn = {
+                        id: durableChatTurn.id, mode: durableChatMode, status: 'completed', replayed: false,
+                        events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
+                      };
+                    }
                     try {
                       planEnforcer?.recordUsage(orgId, 'searches', 1, { source: 'chat', feature: 'brain_chat', metadata: { use_tools: useTools } });
                       const tot = Number(result?.usage?.total_tokens) || 0;
@@ -24300,15 +24802,26 @@ exit \$RC
                       });
                     }
                     emit({ type: 'done', ...result });
+                    if (durableSink) {
+                      await durableSink.flush();
+                      await durableChatStore.complete(durableChatTurn.id, result, durableSink.sequence);
+                    }
                     await settleChatCredit();
                   } catch (agentErr) {
                     await releaseChatCredit();
                     emit({ type: 'error', error: agentErr.message });
+                    if (durableSink) {
+                      await durableSink.flush();
+                      await durableChatStore.fail(durableChatTurn.id, agentErr, durableSink.sequence);
+                    }
                   }
                   try { res.end(); } catch {}
                   return;
                 }
 
+                const durableSink = durableChatTurn
+                  ? createDurableEventSink({ store: durableChatStore, turnId: durableChatTurn.id })
+                  : null;
                 const result = await runReactAgent({
                   message, history, model, apiKey: groqKey,
                   assistantName: agentAssistantName, orgName: agentOrgName,
@@ -24329,6 +24842,9 @@ exit \$RC
                   allowGeneralKnowledge: body?.allow_general_knowledge === true,
                   ctx: {
                     userId, orgId,
+                    recallReliabilityV1,
+                    durableChatMode,
+                    durableChatTurnId: durableChatTurn?.id || null,
                     threadId: body?.thread_id || body?.conversation_id || null,
                     projectId: requestProjectId,
                     scopeFilter: requestScopeFilter,
@@ -24346,6 +24862,7 @@ exit \$RC
                     runWebCrawlJob,
                     runWebSearchJob,
                   },
+                  onEvent: durableSink ? (event) => durableSink.push(event) : null,
                 });
 
                 // Usage metering: one chat = one search query; tokens from the
@@ -24371,6 +24888,12 @@ exit \$RC
                 if (agentOnboardingIntro && result && typeof result === 'object' && !result.onboarding) {
                   result.onboarding = { step: 'greeting', intro: agentOnboardingIntro, org_name: agentOrgName };
                 }
+                if (durableChatTurn && durableChatMode !== 'shadow') {
+                  result.durable_turn = {
+                    id: durableChatTurn.id, mode: durableChatMode, status: 'completed', replayed: false,
+                    events_url: `/api/chat/turn-events?turn_id=${durableChatTurn.id}`,
+                  };
+                }
                 if (!useTools && (body?.thread_id || body?.conversation_id)) {
                   const { recordCompactAssistantTurn } = await import('./agent/v2/compact-context.js');
                   await recordCompactAssistantTurn({
@@ -24378,10 +24901,18 @@ exit \$RC
                     response: result?.response, sources: result?.sources || [],
                   });
                 }
+                if (durableSink) {
+                  durableSink.push({ type: 'done', result_digest: crypto.createHash('sha256').update(JSON.stringify(result)).digest('hex') });
+                  await durableSink.flush();
+                  await durableChatStore.complete(durableChatTurn.id, result, durableSink.sequence);
+                }
                 await settleChatCredit();
                 return jsonResponse(res, result);
               } catch (agentErr) {
                 await releaseChatCredit();
+                if (failedDurableChatStore && failedDurableChatTurn) {
+                  await failedDurableChatStore.fail(failedDurableChatTurn.id, agentErr).catch(() => {});
+                }
                 console.error('[chat:orchestrator] failed:', agentErr.message);
                 return jsonResponse(res, { error: 'chat_orchestration_failed', traceable: true }, 502);
               }
@@ -25451,6 +25982,14 @@ ${injectionText}`;
           res.end(JSON.stringify({ error: 'Not found' }));
       }
     } catch (error) {
+      if (isRemoteMemoryUnavailableError(error)) {
+        console.warn(`[memory-box] temporarily unavailable org=${error.orgId || 'unknown'} operation=${error.operation || 'unknown'}`);
+        return jsonResponse(res, {
+          error: 'memory_storage_unavailable',
+          message: 'The external Memory Box is temporarily unavailable. Please retry shortly.',
+          retry_after_seconds: 5,
+        }, 503, { 'Retry-After': '5' });
+      }
       console.error('API Error:', error);
       res.writeHead(500);
       res.end(JSON.stringify({ error: error.message }));
@@ -25496,8 +26035,9 @@ async function writeAuditLog(prisma, {
   });
 }
 
-function jsonResponse(res, data, status = 200) {
+function jsonResponse(res, data, status = 200, headers = undefined) {
   res.setHeader('Content-Type', 'application/json');
+  for (const [name, value] of Object.entries(headers || {})) res.setHeader(name, value);
   res.writeHead(status);
   // Prisma can return BigInt columns (for example SourceArtifact.sizeBytes).
   // Convert only at the HTTP boundary so document/evidence payloads remain readable.

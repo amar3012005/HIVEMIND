@@ -106,15 +106,29 @@ services:
       KB_UNIFIED_WINDOW_CHARS: ${KB_UNIFIED_WINDOW_CHARS:-}
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
       HIVEMIND_ADMIN_SECRET: ${HIVEMIND_ADMIN_SECRET:-local-admin-secret-change-me}
-      # Local runtime-only signing key. Set this in the launching process or
-      # core/.env; never reuse or commit a production session secret.
       HIVEMIND_OAUTH_SESSION_SECRET: ${HIVEMIND_OAUTH_SESSION_SECRET:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
       # Durable Knowledge Base ingestion is opt-in and local-only. The core
       # still requires a positive Flagship decision for the organization.
       HIVEMIND_LOCAL_MODE: "true"
       KNOWLEDGE_INGEST_WORKFLOW_ENABLED: ${KNOWLEDGE_INGEST_WORKFLOW_ENABLED:-false}
       KNOWLEDGE_INGEST_WORKFLOW_URL: ${KNOWLEDGE_INGEST_WORKFLOW_URL:-http://host.docker.internal:8788}
       KNOWLEDGE_INGEST_WORKFLOW_SECRET: ${KNOWLEDGE_INGEST_WORKFLOW_SECRET:-}
+      # Phase 0 canonical claim projection remains fail-closed unless both the
+      # environment switch and tenant/user Flagship variation allow it.
+      CANONICAL_KNOWLEDGE_ENABLED: ${CANONICAL_KNOWLEDGE_ENABLED:-false}
+      CANONICAL_KNOWLEDGE_KILL_SWITCH: ${CANONICAL_KNOWLEDGE_KILL_SWITCH:-false}
+      CANONICAL_PROJECTION_WORKFLOW_URL: ${CANONICAL_PROJECTION_WORKFLOW_URL:-http://host.docker.internal:8787}
+      CANONICAL_PROJECTION_WORKFLOW_SECRET: ${CANONICAL_PROJECTION_WORKFLOW_SECRET:-}
+      CANONICAL_PROJECTION_HMAC_SECRET: ${CANONICAL_PROJECTION_HMAC_SECRET:-}
+      RECALL_PARALLEL_RELIABILITY_ENABLED: ${RECALL_PARALLEL_RELIABILITY_ENABLED:-false}
+      # Chat V2 remains authoritative. This additive envelope is enabled only
+      # when both the local master switch and Flagship mode are positive.
+      # Cloudflare receives lifecycle metadata only; Core PostgreSQL retains
+      # messages, recall packets, tool results, citations, and responses.
+      DURABLE_CHAT_AGENT_ENABLED: ${DURABLE_CHAT_AGENT_ENABLED:-false}
+      CLOUDFLARE_CHAT_AGENT_URL: ${CLOUDFLARE_CHAT_AGENT_URL:-}
+      CLOUDFLARE_CHAT_AGENT_SECRET: ${CLOUDFLARE_CHAT_AGENT_SECRET:-}
       ENABLE_DOCUMENT_FIRST_INGEST: ${ENABLE_DOCUMENT_FIRST_INGEST:-true}
       ENABLE_EVIDENCE_RECALL: ${ENABLE_EVIDENCE_RECALL:-true}
       ENABLE_ENTITY_EXTRACTION: ${ENABLE_ENTITY_EXTRACTION:-true}
@@ -144,7 +158,7 @@ services:
       # native dependencies, Prisma generation, or the Dockerfile changes.
       - ./core/src:/app/src:ro
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 5

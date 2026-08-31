@@ -722,6 +722,21 @@ export class MemoryGraphEngine {
         sourceMetadata: baseMemory.source_metadata,
       }),
     };
+    // Structured callers and canonical extraction may already know the exact
+    // typed entities. Materialize their deterministic tags before graph
+    // admission so remote and central stores validate the same subject set;
+    // the async linker later enriches rather than being required for safety.
+    const declaredEntities = extractedEntityCandidates(baseMemory);
+    if (declaredEntities.length) {
+      baseMemory.tags = normalizeTagsArray([
+        ...(baseMemory.tags || []),
+        ...declaredEntities.map((entity) => {
+          const name = typeof entity === 'string' ? entity : entity?.name;
+          const slug = normalizeEntity(name || '');
+          return slug ? `entity:${slug}` : null;
+        }).filter(Boolean),
+      ]);
+    }
 
     // Bulk-KB fast path (#6): the per-user advisory lock exists to serialize a
     // user's writes so concurrent supersede/dedup can't race. When the caller
@@ -1290,7 +1305,7 @@ export class MemoryGraphEngine {
             : [];
         const deriveSourceRefs = Array.isArray(input._derives_from) ? input._derives_from.filter(Boolean) : [];
 
-        const semanticRelationship = (classification.relationship || deriveSources.length > 0)
+        let semanticRelationship = (classification.relationship || deriveSources.length > 0)
           ? normalizeRelationshipDescriptor({
             ...(classification.relationship || { type: 'Derives' }),
             sourceIds: classification.relationship?.sourceIds?.length ? classification.relationship.sourceIds : deriveSources,
@@ -1299,7 +1314,50 @@ export class MemoryGraphEngine {
             confidence: classification.relationship?.confidence ?? deriveSourceRefs[0]?.score ?? deriveSourceRefs[0]?.confidence,
           })
           : null;
-        const effectiveRelationshipType = semanticRelationship?.type || classification.relationship?.type || null;
+        let effectiveRelationshipType = semanticRelationship?.type || classification.relationship?.type || null;
+
+        // Remote/BYOD transactions cannot roll back an already acknowledged
+        // Memory Box write. Validate every caller-declared semantic edge before
+        // createMemory so a rejected edge can never leave an orphan memory or
+        // trigger a second persistence path. The same admission policy runs for
+        // managed, hybrid, BYOD and .amr storage modes.
+        if (semanticRelationship) {
+          const confidence = classification.relationship?.confidence ?? semanticRelationship.confidence ?? 1;
+          let verdict;
+          if (effectiveRelationshipType === 'Derives') {
+            const sourceIds = semanticRelationship.sourceIds?.length ? semanticRelationship.sourceIds : deriveSources;
+            const sources = await Promise.all(sourceIds.map((id) => store.getMemory(id)));
+            verdict = validateRelationshipProposal({
+              type: effectiveRelationshipType,
+              sourceMemory: sources[0],
+              sourceMemories: sources,
+              targetMemory: baseMemory,
+              confidence,
+              orgId: baseMemory.org_id,
+              userId: baseMemory.user_id,
+            });
+          } else {
+            const targetId = semanticRelationship.targetId || classification.relationship?.targetId;
+            const target = targetId ? await store.getMemory(targetId) : null;
+            verdict = validateRelationshipProposal({
+              type: effectiveRelationshipType,
+              sourceMemory: baseMemory,
+              targetMemory: target,
+              confidence,
+              orgId: baseMemory.org_id,
+              userId: baseMemory.user_id,
+            });
+          }
+          if (!verdict?.ok) {
+            if (callerAuthorizedRelationship) {
+              throw new Error(`relationship_policy_rejected:${effectiveRelationshipType}:${verdict?.reason || 'invalid-relationship'}`);
+            }
+            console.log(`[graph-engine] inferred ${effectiveRelationshipType} rejected before persistence: ${verdict?.reason || 'invalid-relationship'}`);
+            classification = { operation: 'created', relationship: null };
+            semanticRelationship = null;
+            effectiveRelationshipType = null;
+          }
+        }
 
         baseMemory.metadata = {
           ...(baseMemory.metadata || {}),
@@ -1623,6 +1681,21 @@ export class MemoryGraphEngine {
             });
             result.processingMs = Date.now() - startedAt;
           }
+        } else if (effectiveRelationshipType === 'Contradicts') {
+          const targetId = semanticRelationship?.targetId || classification.relationship?.targetId;
+          const applied = await this.applyValidatedRelationship({
+            from_id: baseMemory.id,
+            to_id: targetId,
+            type: 'Contradicts',
+            confidence: classification.relationship?.confidence ?? semanticRelationship?.confidence ?? 1,
+            reason: semanticRelationship?.reason || 'caller_declared_contradiction',
+          }, {
+            store,
+            user_id: baseMemory.user_id,
+            org_id: baseMemory.org_id,
+            startedAt,
+          });
+          Object.assign(result, applied, { processingMs: Date.now() - startedAt });
         } else {
           await this._recordVersionSnapshot(store, baseMemory, {
             reason: 'created',
@@ -2640,7 +2713,7 @@ OUTPUT JSON only.`;
 
     const prompt = `You are a multilingual memory graph linker. Given a NEW MEMORY and CANDIDATE memories, do FIVE things in ONE pass:
 
-  1. extract ALL materially useful, source-supported entities from the new memory — specific people, organizations / brands, products / models, named projects or initiatives, technologies, standards, and specific components, subsystems, or named features whose identity is needed to retrieve the claim precisely. Read the memory in WHATEVER language it is written, but EMIT every entity in CANONICAL form per the ENTITY NAMING rules below — never two surface forms for the same real-world thing. See EXCLUDE below for what is NOT an entity. Do not stop after the first or most obvious entity: retain crucial secondary entities when they identify what a product contains, uses, affects, enables, improves, or depends on.
+  1. extract ALL materially useful, source-supported entities from the new memory. Return each entity as {"name":"...","kind":"..."}; never return a bare string. Allowed kinds are person, organization, product, place, technology, and standard. Include named people, organizations / brands, products / models, projects (kind=product only when it is a named offering; otherwise omit), cities, countries, regions and facilities (kind=place), technologies, standards, and specific components, subsystems, or named features (kind=product or technology). Read the memory in WHATEVER language it is written, but EMIT every entity in CANONICAL form per the ENTITY NAMING rules below. Do not stop after the first or most obvious entity. Never manufacture people, places, or relationships that the source does not state.
   2. extract TEMPORAL anchors (day-of-week, time-of-day, relative refs like "tomorrow"/"mañana"/"morgen", absolute dates, recurring patterns). Resolve relatives against today=${todayIso}.
   3. classify the new memory's TYPE. Read the memory in ANY language and pick the SINGLE best-fit type by MEANING (not keywords), using these definitions:
        • decision     — a choice made or a commitment to a course of action ("we will ship X", "chose vendor Y", "agreed to Z"). Prefer over 'fact' whenever a resolution/commitment is expressed.
@@ -2673,7 +2746,7 @@ ENTITY NAMING — emit ONE canonical name per real-world thing so the same entit
 
 EXCLUDE — never emit these as entities:
   • job titles, roles, or functions (CTO, Chief Scientist, manager, engineer) — emit the PERSON'S name, not their title.
-  • bare geographies or nationalities (Berlin, Germany, German) UNLESS part of a proper name (e.g. "Bank of America", "Project Berlin").
+  • nationalities or vague regions with no retrieval value. Named cities, countries, regions, offices, stores, campuses, and facilities ARE place entities when the source actually mentions them.
   • generic descriptors (the project, the team, the company, the document, the meeting, data, stuff) and broad attributes with no stable identity. This exclusion does NOT remove a specific source-supported component, subsystem, technology, standard, model, or named feature.
   • standalone dates, times, numbers, or money amounts (captured under TEMPORAL / not entities).
   • placeholder or test tokens (foo, bar, test, smoke, alpha/bravo-style fillers).
@@ -2697,7 +2770,7 @@ ${candidateBlock}
 
 Output JSON only:
 {
-  "entities": ["Rama", "Heidelberg"],
+  "entities": [{"name":"Rama","kind":"person"},{"name":"Heidelberg","kind":"place"}],
   "temporal": {
     "day_of_week": "tuesday",
     "time_of_day": "19:00",
@@ -2892,7 +2965,9 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
     // Persist extracted entities on the parent so the FE chip can render
     // them without another LLM pass + retrieval can filter by them.
     //
-    // Memory model has no metadata JSONB column — we use TAGS instead:
+    // Tags remain the fast retrieval index; typed objects are also persisted
+    // into the canonical registry below so person/place/org identity is not
+    // flattened into an untyped chip.
     //   entity:Rama, entity:Heidelberg, entity:SAP
     // FE EntityChips reads these tags (filters tags starting with 'entity:').
     // Filterable via /api/memories?tags=entity:Rama — first-class graph node.
@@ -2914,9 +2989,12 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
           ...temporalTags,
         ]);
         await store.updateMemory(baseMemory.id, { tags: newTags });
-        // Resync the entity:* tags into the .amr (remote/self-host) so recalled candidates carry their
-        // tags and the co-mention overlap gate finds shared entities on the NEXT ingest.
-        try { amrUpdateTags(baseMemory.org_id, baseMemory.id, newTags); } catch { /* best-effort */ }
+        // Resync entity tags into .amr/Memory Box and require an acknowledgement.
+        // A remote save is not entity-complete until the tenant store confirms it.
+        if (orgIsRemote(baseMemory.org_id)) {
+          const acknowledged = await amrUpdateTags(baseMemory.org_id, baseMemory.id, newTags, { requireAck: true });
+          if (!acknowledged) throw new Error('remote memory entity-tag projection was not acknowledged');
+        }
         baseMemory.tags = newTags;
       } catch (tagErr) {
         console.warn('[entity-co-mention] tag update failed:', tagErr.message);
@@ -2935,13 +3013,16 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
     // This is idempotent and intentionally independent of relationship
     // inference: malformed relationship JSON must never erase entities the
     // save planner or memory processor already extracted.
-    if (entities.length > 0 && !orgIsRemote(baseMemory.org_id) && !store?.inTransaction && entityStatusClient?.canonicalEntity) {
-      await persistCanonicalLinks({
+    if (entities.length > 0 && !store?.inTransaction && entityStatusClient?.canonicalEntity) {
+      const projection = await persistCanonicalLinks({
         prisma: entityStatusClient,
         organizationId: baseMemory.org_id,
         items: [{ memoryId: baseMemory.id, entities }],
         logger: console,
       });
+      if (orgIsRemote(baseMemory.org_id) && projection.projectionFailed > 0) {
+        throw new Error(`remote canonical entity projection incomplete (${projection.projectionFailed} writes)`);
+      }
     }
 
     // Edge cap. Chat-bucket saves with force_entity_linking get a higher
@@ -3373,6 +3454,8 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
         id: uuidv4(),
+        org_id,
+        storage_backend: source._storage_backend || target._storage_backend || (orgIsRemote(org_id) ? 'agent' : undefined),
         from_id: sourceId,
         to_id: targetId,
         type: 'Updates',
@@ -3457,6 +3540,8 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       const nextVersion = (target.version || 1) + 1;
       const edge = await store.createRelationship({
         id: uuidv4(),
+        org_id,
+        storage_backend: source._storage_backend || target._storage_backend || (orgIsRemote(org_id) ? 'agent' : undefined),
         from_id: sourceId,
         to_id: targetId,
         type: 'Extends',
@@ -3537,6 +3622,8 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
       for (const sourceIdValue of uniqueSourceIds) {
         const edge = await store.createRelationship({
           id: uuidv4(),
+          org_id,
+          storage_backend: sources.find((memory) => memory?.id === sourceIdValue)?._storage_backend || target._storage_backend || (orgIsRemote(org_id) ? 'agent' : undefined),
           from_id: sourceIdValue,
           to_id: targetId,
           type: 'Derives',
@@ -3640,6 +3727,7 @@ If no CANDIDATE matches, return "links":[] but STILL extract all supported entit
         to_id: targetId,
         type,
         org_id,
+        storage_backend: sources.find((memory) => memory?._storage_backend)?._storage_backend || target?._storage_backend || edge.storage_backend || (orgIsRemote(org_id) ? 'agent' : undefined),
         confidence: edge.confidence ?? 1,
         created_at: edge.created_at || nowIso(),
         created_by: edge.created_by || 'canonical-relationship-dispatcher',

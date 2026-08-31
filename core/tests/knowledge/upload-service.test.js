@@ -161,7 +161,7 @@ test('enabled local Workflow latches orchestration and never sends file bytes in
   deps.queue.enqueue = async () => { legacyUsed = true; return {}; };
   const calls = [];
   deps.cloudflareQueue = {
-    isEnabled: async (orgId) => orgId === ids.org,
+    isEnabled: async (orgId, userId) => orgId === ids.org && userId === ids.user,
     isAvailable: async () => true,
     persistFile: async (input) => {
       calls.push(['persist', input]);

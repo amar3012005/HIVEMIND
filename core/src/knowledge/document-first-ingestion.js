@@ -187,7 +187,7 @@ const QWEN_UNIFIED_FACTS_RESPONSE_FORMAT = {
             // optional made Qwen's otherwise valid schema response look like
             // a successful extraction while every candidate was discarded.
             // Require the minimal persistence contract at generation time.
-            required: ['t', 'f', 'memory_type', 'claim_kind', 'source_quote'],
+            required: ['t', 'f', 'memory_type', 'claim_kind', 'source_quote', 'subject', 'entities'],
             additionalProperties: true,
           },
         },
@@ -274,6 +274,24 @@ function normalizeClaimStructure(item, fallback = {}) {
     ? Math.max(0, Math.min(1, confidenceValue))
     : null;
   return { subject, predicate, object, qualifiers, relationships, extractionConfidence };
+}
+
+export function materializeClaimEntities(item, claimStructure = normalizeClaimStructure(item)) {
+  const support = `${item?.f || ''}\n${item?.source_quote || ''}`.toLocaleLowerCase();
+  const candidates = [
+    ...(Array.isArray(item?.entities) ? item.entities : []),
+    claimStructure?.subject,
+    ...(claimStructure?.relationships || []).flatMap((relationship) => [relationship.from, relationship.to]),
+  ];
+  const byName = new Map();
+  for (const candidate of candidates) {
+    const normalized = normalizedClaimEntity(candidate);
+    if (!normalized?.name || !support.includes(normalized.name.toLocaleLowerCase())) continue;
+    const key = normalized.name.toLocaleLowerCase();
+    const prior = byName.get(key);
+    if (!prior || (!prior.kind && normalized.kind)) byName.set(key, normalized);
+  }
+  return [...byName.values()].slice(0, 24);
 }
 
 function stableClaimKey({ subject, predicate, object, qualifiers }) {
@@ -1072,7 +1090,7 @@ function safePathSegment(name) {
 }
 
 export class DocumentFirstIngestionService {
-  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, logger = console }) {
+  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, canonicalProjector = null, logger = console }) {
     this.db = db;
     this.smartIngestRouter = smartIngestRouter;
     this.memoryGraphEngine = memoryGraphEngine;
@@ -1080,6 +1098,11 @@ export class DocumentFirstIngestionService {
     this.embeddingService = embeddingService;
     this.entityExtractor = entityExtractor;
     this.topicStateWriter = topicStateWriter;
+    // Server-owned adapter into the feature-flagged canonical claim layer. The
+    // ingestion service deliberately does not evaluate Flagship or know how a
+    // tenant stores its Memory Box; it only provides the durable promotion
+    // boundary shared by BullMQ and Workflow execution.
+    this.canonicalProjector = canonicalProjector;
     this.logger = createIngestDiagnosticLogger(logger);
     // Collapse simultaneous first uploads of the same bytes into one pipeline.
     // Database constraints protect rows across processes; this prevents callers
@@ -1148,6 +1171,30 @@ export class DocumentFirstIngestionService {
         content: memory.content,
       }));
     return this._extractEntitiesAsync({ segments, userId, orgId, documentId, force: true });
+  }
+
+  async _projectPromotedCanonicalKnowledge({ memories, userId, orgId, documentId }) {
+    if (typeof this.canonicalProjector !== 'function') return [];
+    const targets = (Array.isArray(memories) ? memories : []).filter((memory) => memory?.id);
+    if (!targets.length) return [];
+    const receipts = [];
+    let admittedMode = null;
+    // Projection is intentionally awaited at the ingestion reconciliation
+    // boundary. Each target remains isolated: a provider/remote-agent outage
+    // degrades that memory's projection without discarding committed evidence
+    // or the other successfully projected memories.
+    for (const memory of targets) {
+      try {
+        const receipt = await this.canonicalProjector({ memory, userId, orgId, documentId, admittedMode });
+        admittedMode ||= receipt?.mode || null;
+        receipts.push(receipt);
+      } catch (error) {
+        admittedMode ||= error?.canonicalMode || null;
+        this.logger.warn?.(`[canonical-knowledge] promoted memory ${String(memory.id).slice(0, 8)} degraded: ${error.message}`);
+        receipts.push({ memoryId: memory.id, status: 'degraded', error: error.message });
+      }
+    }
+    return receipts;
   }
   /**
    * V5 Phase 3 — claim structuring for committed memories. Callers decide
@@ -2176,6 +2223,9 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
     const derivations = [];
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
+      const claimStructure = normalizeClaimStructure(fact);
+      const materializedEntities = materializeClaimEntities(fact, claimStructure);
+      fact.entities = materializedEntities;
       // Tags key off the NAME regardless of shape (string or typed pair) — these tags are the
       // compatibility fallback for anything not yet reading canonical entities.
       const entityTags = (fact.entities || [])
@@ -2196,7 +2246,6 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
         ...(documentId ? [`doc-id:${documentId}`] : []),
       ]);
       try {
-        const claimStructure = normalizeClaimStructure(fact);
         const claimKey = stableClaimKey(claimStructure);
         const plannedMemoryId = crypto.randomUUID();
         const memoryContentHash = crypto.createHash('sha256').update(fact.f).digest('hex');
@@ -2244,6 +2293,7 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
             source_quote: fact.source_quote,
             support_segment_ids: fact.support_segment_ids || [window.segmentId],
             support_quotes: fact.support_quotes || [fact.source_quote],
+            extracted_entities: materializedEntities,
             claim: {
               key: claimKey,
               subject: claimStructure.subject,
@@ -2296,13 +2346,14 @@ FINAL AND OVERRIDING: write every "t" and "f" in the SECTION's own language, wha
           support_segment_ids: fact.support_segment_ids,
           support_quotes: fact.support_quotes,
           source_metadata: memoryVectorProvenance,
+          extracted_entities: materializedEntities,
         });
         embedPending.push({ id, fact: fact.f, title: provenanceMemoryTitle(docTitle, fact.t),
           memory_type: normalizeKbMemoryType(fact.memory_type),
           ctxInput: `${docTitle}${window.heading ? ` — ${window.heading}` : ''}\n${fact.f}`,
           tags, project_ids: memoryContext.projectIds, primary_team_id: memoryContext.teamId,
           visibility: memoryContext.visibility, source_metadata: memoryVectorProvenance,
-          metadata: memoryVectorProvenance, document_date: memoryContext.documentDate,
+          metadata: { ...memoryVectorProvenance, extracted_entities: materializedEntities }, document_date: memoryContext.documentDate,
           valid_from: validFrom, valid_to: validTo, content_hash: memoryContentHash });
         // Collected for EVERY storage mode now. These used to be gathered only for central orgs
         // because the tables were central-only and hard-FK'd to hivemind.memories; the .amr agents
@@ -3818,6 +3869,9 @@ Every item must include a non-empty content field and one or more valid support_
       this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
       this._structureClaimsAsync({ memories: promoted.memories, orgId }),
     ]);
+    await this._projectPromotedCanonicalKnowledge({
+      memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id,
+    });
     if (previousProjectionMemoryIds.length && !promoted.coverage?.promotion_failed) {
       const currentProjectionMemoryIds = promoted.memories.map((memory) => memory?.id).filter(Boolean);
       if (currentProjectionMemoryIds.length) {
@@ -3979,6 +4033,9 @@ Every item must include a non-empty content field and one or more valid support_
       this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: parentDoc.id }),
       this._structureClaimsAsync({ memories: promoted.memories, orgId }),
     ]);
+    await this._projectPromotedCanonicalKnowledge({
+      memories: promoted.memories, userId, orgId, documentId: parentDoc.id,
+    });
 
     return {
       documentId: parentDoc.id,
@@ -4162,6 +4219,9 @@ Every item must include a non-empty content field and one or more valid support_
       this._extractPromotedEntitiesAsync({ memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id }),
       this._structureClaimsAsync({ memories: promoted.memories, orgId }),
     ]);
+    await this._projectPromotedCanonicalKnowledge({
+      memories: promoted.memories, userId, orgId, documentId: knowledgeDoc.id,
+    });
 
     return {
       documentId: knowledgeDoc.id,
@@ -5307,6 +5367,9 @@ Every item must include a non-empty content field and one or more valid support_
       }),
       this._structureClaimsAsync({ memories, orgId }),
     ]);
+    await this._projectPromotedCanonicalKnowledge({
+      memories, userId: document.userId || userId, orgId, documentId: document.id,
+    });
     onProgress?.({ stage: 'reconciling', progress: 96, memories: memories.length });
     return {
       documentId: document.id,

@@ -1692,3 +1692,44 @@ git diff --check: passed (line-ending warnings only)
   truthful task-level evidence gap, not a runtime fallback or missing tool.
 - Python AST parsing passed for all three changed runtime modules; Employees
   health remained HTTP 200. Production was not changed.
+
+## 2026-08-31 — Local Grok Room browser evidence and synthesis repair
+
+- Fixed a terminal crash where a legacy Boolean `dead_end` marker was treated as
+  an object (`AttributeError: 'bool' object has no attribute 'get'`). New durable
+  failures persist a structured reason/gap payload; the renderer remains backward
+  compatible with old Boolean rows. Commit `3e199550`.
+- Fixed local production-parity model routing. The Employees Compose service now
+  forwards the governed HyperAgent/LLM/LiteLLM policy variables while retaining
+  local PostgreSQL, Redis, Core, Control Plane, and tenant data. Cloudflare AI
+  Gateway activation and model-policy parity were verified without printing or
+  persisting secrets. Commits `4f82c987` and `66b7fd39`.
+- Browser receipts are now deduplicated by canonical URL, newest successful
+  observations supersede older blocked/404 observations for synthesis, and the
+  complete bounded receipt set is protected from mid-source truncation. The
+  subject company cannot count as one of its own competitors in repair, review,
+  or final synthesis. Commit `4004519d`.
+- Durable agent execution now serializes provider-heavy assignments by default,
+  retries only the retryable OpenRouter in-flight-budget condition with bounded
+  backoff, and caps AgentScope completion reservations at 4,096 tokens instead of
+  its 64,000-token default. Commits `6b37efce`, `d2efc8bf`, `d3212cf6`, and
+  `d112a63b`.
+
+### Verification evidence
+
+- `python -m py_compile` passed for the changed Room engine, Room API, and
+  AgentScope factory modules.
+- In-container regression probes passed for Boolean/structured dead-end rendering,
+  newest-per-URL receipt selection, preservation of three bounded receipt sources,
+  Cloudflare AI Gateway activation, and `max_tokens=4096`.
+- Exact-prompt canary `f8a2a24f-6c8b-45d0-89ba-76d2624d72db` completed real
+  Cloudflare Browser assignments plus independent review. Its final verifier
+  correctly blocked unsupported price/performance claims instead of showing a
+  false green result.
+- Exact-prompt canary `acf42bec-1472-4a87-a694-2c74b6eac1f0` proved the reviewer
+  rejects the subject company (Apple) as its own competitor, catches invalid dates,
+  and requests exact SKU evidence.
+- Final canary execution was blocked externally after OpenRouter reported genuine
+  account credit exhaustion (`weight_exceeds_budget` / `openrouter_credits`). Two
+  orphaned local assignments were cancelled and Employees returned healthy. No
+  production deployment or configuration change was performed.

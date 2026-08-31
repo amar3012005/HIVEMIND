@@ -1678,3 +1678,36 @@ slides that find no unique anchor get a page instead of `null`.
   empty.
 - This changes provider routing only. Gemini planner targeting and the
   Grok-style runtime rollout state are unchanged.
+
+## 2026-08-31 UTC - ingestion throughput final acceptance and incident repair
+
+- Canonical `e9fca76f6e8d66398d195f87d431645a56b1b058` released only the
+  affected Core, Da-vinci frontend, and knowledge-ingest Worker. Exact live
+  versions, migration, backups, rollback artifacts, and acceptance evidence are
+  recorded at the top of `docs/PRODUCTION_RELEASE.md`.
+- The first recorded operator target had been deleted; its canary stopped on an
+  API-key foreign-key constraint before admission. The alternate established
+  controlled target was verified present. An eight-document text burst first
+  proved the per-org cap and 360/360 vector completion. The final required
+  four-PDF run then passed every ingestion, receipt, billing, vector, recall,
+  and cleanup gate. One harness-only receipt model typo and one single-file
+  minimum-count assertion were corrected in disposable acceptance tooling;
+  neither failure was in production code and both `finally` cleanup paths ran.
+- Vision route verification read only presence/configuration, never tokens:
+  Cloudflare account and token are present, gateway is `hivemind-prod`, and
+  model is `google/gemini-2.5-flash-lite`. A live multimodal request returned
+  200 with output. The parser converts provider failures to control-plane errors
+  and the canonical boundary rejects historical provider-payment text.
+- The two incident jobs had already completed immutable v1 materialization but
+  their released reservations made old Workflow reconcile retries fail. After
+  a fresh full backup, the exact released reservations were revived, job states
+  were resumed at `reconciling`, and the existing v1 reconcile receipts were
+  completed. Document IDs, segment counts, vector counts, and materialize
+  attempts did not change. One old Workflow observed the receipt and completed;
+  the other stale exponential-backoff instance was terminated after terminal
+  database and billing verification.
+- At `2026-08-31T20:30:08.888Z`, explicit operator authorization promoted the
+  full preserved Flagship definition to default/global `on`. An unrelated
+  context evaluated `on/DEFAULT`, and a post-global PDF smoke passed. Rollback
+  is the captured full definition with only default and production rule outputs
+  restored to `off`; the backend master gate is unchanged.

@@ -1,5 +1,56 @@
 # Current SINGULANCE Production Release
 
+## 2026-08-31T20:38Z - durable ingestion throughput globally accepted
+
+- Canonical parent SHA `e9fca76f6e8d66398d195f87d431645a56b1b058`
+  includes the complete throughput release and the pushed Da-vinci gitlink
+  `c83e6df23bfae8782643386bb13b9a5cb1d3d72c`. Core runs immutable image
+  `hivemind/core-api:sha-8cd4de52` (image ID
+  `sha256:03ecf6887f296aedec703ba9da7db77735fa5b2ad4f96004f2577173660fb137`),
+  manifest `/root/releases/manifests/8cd4de52/20260831T195927Z/RELEASE_MANIFEST.json`.
+  Cloudflare serves knowledge-ingest version
+  `10f80a27-2f76-4a63-b565-ecd07c295590` and hivemind-web version
+  `7d42da41-922c-4360-bc4f-8d0376be1024`, each at 100%.
+- PostgreSQL backup
+  `/root/backups/hivemind-pre-6447b5b7-20260831T195604Z.dump` has SHA-256
+  `4697da88ca0a5b26f1a60b11601944c0a35b02698975f90`; additive migration
+  `20260831214500_add_ingest_lease_org` is applied. The migration enables four
+  global processing slots with a maximum of two active slots per organization.
+- Acceptance submitted four synthetic one-page PDFs concurrently: two
+  evidence-only and two evidence-plus-memory. All four reached `ready`; the
+  observed same-org maximum was two leases, all 4/4 segments had acknowledged
+  vectors, 18 durable stage receipts existed, the two `both` jobs produced
+  three and four memories, and four distinct billing reservations settled once.
+  Each unique marker returned source-backed evidence. A post-global one-PDF
+  smoke also reached `ready`, stored 1/1 vector, settled once, and returned 13
+  evidence items. All synthetic documents, jobs, keys, and source objects were
+  deleted by the harness.
+- Production vision is the direct Cloudflare multimodal endpoint with AI Gateway
+  `hivemind-prod` and model `google/gemini-2.5-flash-lite`. A sanitized live
+  image request returned HTTP 200 and the same response model. Groq/OpenRouter
+  are not vision fallbacks, and provider error bodies are rejected before the
+  persistence boundary.
+- Incident jobs `54233663...` and `3bc81fe9...` were repaired from a second
+  secure backup (222,241,746 bytes; SHA-256
+  `2ae12553216764e7c64dae8221747608d618bed6a8c38884a96bab3f0a9ba956`).
+  Their existing evidence was reconciled without reparsing or duplication:
+  exact documents remained stable, materialize attempts were unchanged, and
+  155/155 plus 108/108 vectors remained acknowledged. Both jobs are `ready`,
+  reservations are settled, and `uploads`/`kbPages` settlement keys are unique.
+  The second Workflow completed normally; the first obsolete retry instance was
+  terminated only after PostgreSQL reconcile and billing were terminal.
+- Flagship `knowledge_ingest_workflow_v1` is enabled with default `on`; both
+  production targeting rules and the local rule also serve `on`. An unrelated
+  production context evaluated `on` with reason `DEFAULT`. The backend master
+  gate remains enabled as the emergency kill switch. API, platform, and homepage
+  health returned 200; fresh critical logs were clean.
+- Immediate behavior rollback is the captured full Flagship definition with
+  default and production priorities 2/3 restored to `off`, preserving all rule
+  conditions, priorities, variations, description, enabled state, and the local
+  rule. Runtime rollback is Core `hivemind/core-api:sha-97afbd87`, knowledge
+  Worker `d8547ac3-6609-4b47-bf87-32cd9d9c185a`, and frontend version
+  `563d1957-cd4f-478f-919f-f6dbe971abc2`.
+
 ## 2026-08-31T08:52:20Z — production AI path defaults globally reconciled
 
 - Cloudflare Flagship app `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` now serves

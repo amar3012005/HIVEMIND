@@ -426,3 +426,22 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   direct Gateway canary and deployed HyperAgent transport canary.
 - This is shared provider policy, not a Grok-runtime enablement. The existing
   Gemini planner canary remains unchanged.
+
+## feature-20260831T203008Z - durable ingestion throughput global release
+
+- Canonical `e9fca76f6e8d66398d195f87d431645a56b1b058` runs Core throughput
+  controls, the structured frontend error contract, and Cloudflare knowledge
+  Worker `10f80a27-2f76-4a63-b565-ecd07c295590`.
+- Admission is globally enabled. Processing allows four global slots but no
+  more than two active jobs per organization; durable receipts, version fences,
+  exactly-once billing, R2 retention/replay, and the backend kill switch remain.
+- Four concurrent synthetic PDFs and a post-global PDF smoke passed ready,
+  vector, billing, recall, and self-cleanup checks. Production vision is Gemini
+  2.5 Flash Lite through Cloudflare AI Gateway `hivemind-prod`; provider errors
+  cannot become stored evidence.
+- The two poisoned Lecture incident jobs are repaired without reparse or
+  duplication. Their stable evidence documents contain 155 and 108 fully
+  embedded segments, respectively; both jobs and billing ledgers are terminal.
+- Flag rollback restores default and production priorities 2/3 to `off` while
+  preserving local-on behavior and the full flag definition. Runtime rollback
+  versions are listed in `docs/PRODUCTION_RELEASE.md`.

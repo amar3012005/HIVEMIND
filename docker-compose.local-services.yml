@@ -111,6 +111,9 @@ services:
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
       HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-}
       HYPER_GROK_WORKFLOW_SECRET: ${HYPER_GROK_WORKFLOW_SECRET:-}
+      # Artifact-only Room profiles (branding, marketing, fundraising, product)
+      # must be able to enter the governed renderer in the shared local preview.
+      VISUAL_PATH_IN_HYPERROOMS: ${VISUAL_PATH_IN_HYPERROOMS:-true}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}

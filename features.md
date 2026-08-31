@@ -394,3 +394,12 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   `d917d0a1-38fe-4933-a4eb-34bcb891c625`; Core
   `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`; exact backups and manifest are
   recorded in `docs/PRODUCTION_RELEASE.md`.
+
+### Global production rollout
+
+- Globally enabled at `2026-08-31T19:19:01.181Z`. Default and every production
+  targeting rule serve `on`; local targeting remains on. Bound Worker and
+  direct Flagship evaluations proved prior targets plus unrelated users are
+  enabled. No runtime service was rebuilt or restarted.
+- Immediate rollback restores default and production priorities 2/3 to `off`
+  using the captured full flag definition; the local rule remains `on`.

@@ -1626,3 +1626,17 @@ slides that find no unique anchor get a page instead of `null`.
   `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`; Worker
   `d917d0a1-38fe-4933-a4eb-34bcb891c625`; verified database backups are in the
   production release ledger.
+
+## 2026-08-31 UTC — Knowledge ingestion v2 enabled globally
+
+- Explicit operator authorization promoted only Flagship
+  `knowledge_ingest_workflow_v1`. A precondition GET captured the entire
+  rollback definition before mutation. Default and the two production rules
+  now serve `on`; conditions, priorities, local behavior, variations,
+  description, and enabled state are unchanged.
+- CLI and bound-Worker evaluations passed for both prior production targets and
+  two unrelated synthetic contexts; local targeting also remained on. Runtime
+  image/version/start-time checks, API/home health, and critical logs passed.
+- This was a flag-only promotion: no build, restart, deployment, upload,
+  customer content, or external delivery occurred. Rollback is the captured
+  full definition with default and production priorities 2/3 restored to off.

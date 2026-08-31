@@ -1106,3 +1106,26 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Rollback: keep the flag off; Core
   `e2e2c055e56ed7d8a18bb7a0b099503f987b9f6a`; Worker
   `d917d0a1-38fe-4933-a4eb-34bcb891c625`; database backups above.
+
+## Flagship promotion — Knowledge ingestion v2 global enable
+
+- At `2026-08-31T19:19:01.181Z`, Flagship app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` promoted
+  `knowledge_ingest_workflow_v1` for all production users. The full-definition
+  update changed only default `off` to `on` and production rules at priorities
+  2 and 3 from `off` to `on`. Enabled state, boolean variations, description,
+  rule conditions/priorities, and the local `on` rule were preserved.
+- Both prior production targets evaluated `true`/`on` with
+  `TARGETING_MATCH`; two unrelated synthetic production contexts evaluated
+  `true`/`on` with `DEFAULT`; the local context remained `true`/`on` with
+  `TARGETING_MATCH`. The bound production Worker's authenticated `/enabled`
+  route independently returned HTTP 200 and `enabled:true` for all four
+  production contexts.
+- No code, image, Worker version, container, migration, or customer content was
+  changed. Core remained healthy at `f4107cc8` with unchanged start time and
+  digest `sha256:77083aab6997bfbda1a9ddbf2d0294396197528ccd399c90b4ccbcef7713c217`;
+  Worker `d8547ac3-6609-4b47-bf87-32cd9d9c185a` remained active at 100%.
+  API/home health passed and the fresh critical Core log scan was empty.
+- Exact rollback payload is the precondition-read definition recorded by the
+  governor: default `off`, local priority 1 `on`, production priorities 2 and 3
+  `off`, with all other fields unchanged.

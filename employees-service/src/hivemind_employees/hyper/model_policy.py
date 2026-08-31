@@ -6,6 +6,7 @@ import re
 
 HYPER_FAST_MODEL = "openai/gpt-oss-20b:nitro"
 HYPER_WORKER_MODEL = "@cf/zai-org/glm-5.3-flash"
+HYPER_PLANNER_MODEL = HYPER_WORKER_MODEL
 _LEGACY_FAST_MODELS = {"gpt-oss-20b", "openai/gpt-oss-20b"}
 _LEGACY_GROK_RE = re.compile(r"^(?:x-ai/)?grok(?:[-/:].*)?$", re.IGNORECASE)
 _LEGACY_HAIKU_RE = re.compile(r"^(?:anthropic/)?claude[-_]?haiku(?:[-/:].*)?$", re.IGNORECASE)

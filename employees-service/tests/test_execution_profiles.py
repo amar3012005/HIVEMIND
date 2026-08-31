@@ -75,13 +75,21 @@ def test_every_profile_declares_a_nonempty_disambiguating_when():
         assert manifest_by_id[profile_id] == profile.when, f"{profile_id}'s when did not survive into the manifest"
 
 
-def test_eleven_profiles_cover_every_requested_domain():
+def test_profiles_cover_every_requested_domain():
     expected_room_kinds = {
         "general", "research", "campaign", "outreach", "marketing", "seo",
         "branding", "fundraising", "product", "design", "legal_finance",
     }
     assert {p.room_kind for p in EXECUTION_PROFILES.values()} == expected_room_kinds
-    assert len(EXECUTION_PROFILES) == 11
+    assert len(EXECUTION_PROFILES) == 12
+
+
+def test_plain_marketing_copy_is_not_a_visual_artifact_profile():
+    copy = EXECUTION_PROFILES["marketing.copy.v1"]
+    visual = EXECUTION_PROFILES["marketing.artifact.v1"]
+    assert copy.allowed_outputs == ("direct_answer",)
+    assert not copy.required_artifacts
+    assert visual.required_artifacts == ("marketing_artifact",)
 
 
 def test_profile_ids_are_unique_and_versioned():

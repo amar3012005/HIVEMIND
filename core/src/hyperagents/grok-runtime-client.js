@@ -86,30 +86,36 @@ async function request(pathname, init = {}, timeoutMs = 10_000) {
 
 export async function evaluateGrokRuntime({ orgId, userId }) {
   const config = configuration();
-  if (!config || !orgId || !userId) return { mode: 'off', version: 1, reason: 'disabled' };
+  if (!config || !orgId || !userId) return {
+    mode: 'off', version: 1, reason: 'disabled', fastPlannerMode: 'off',
+  };
   try {
     const response = await request(`/decision?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`);
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) return { mode: 'off', version: 1, reason: `decision_http_${response.status}` };
+    if (!response.ok) return {
+      mode: 'off', version: 1, reason: `decision_http_${response.status}`, fastPlannerMode: 'off',
+    };
     return {
       mode: normalizeGrokRuntimeMode(body.mode),
       version: Math.max(1, Number(body.processing_version) || 1),
       reason: String(body.reason || 'flagship'),
       variant: body.variant || null,
+      fastPlannerMode: body.fast_planner_mode === 'glm_no_reasoning' ? 'glm_no_reasoning' : 'off',
     };
   } catch (error) {
     console.warn('[grok-hyperagents] Flagship decision failed closed:', error.message);
-    return { mode: 'off', version: 1, reason: 'decision_unavailable' };
+    return { mode: 'off', version: 1, reason: 'decision_unavailable', fastPlannerMode: 'off' };
   }
 }
 
-export async function startGrokRoomWorkflow({ turnId, roomId, orgId, userId, mode, version }) {
+export async function startGrokRoomWorkflow({ turnId, roomId, orgId, userId, mode, version, fastPlannerMode = 'off' }) {
   const workflowInstanceId = grokWorkflowId(turnId, version);
   const response = await request('/start', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       turn_id: turnId, room_id: roomId, org_id: orgId, user_id: userId,
       mode: normalizeGrokRuntimeMode(mode), processing_version: Math.max(1, Number(version) || 1),
+      fast_planner_mode: fastPlannerMode === 'glm_no_reasoning' ? 'glm_no_reasoning' : 'off',
     }),
   }, 15_000);
   const body = await response.json().catch(() => ({}));

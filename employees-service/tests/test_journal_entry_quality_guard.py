@@ -15,6 +15,7 @@ from hivemind_employees.hyper.engine import make_journal_entry
 
 
 def test_degenerate_swarm_summary_falls_back_to_final_text(monkeypatch):
+    monkeypatch.setenv("HYPER_JOURNAL_LLM_ENABLED", "true")
     async def fake_evo_groq(messages, *, model, schema):
         return json.dumps({"asked": "what did we learn", "swarm_summary": "...", "agents": []})
     monkeypatch.setattr(engine, "_evo_groq", fake_evo_groq)
@@ -31,6 +32,7 @@ def test_degenerate_swarm_summary_falls_back_to_final_text(monkeypatch):
 
 
 def test_short_placeholder_like_summaries_are_also_rejected(monkeypatch):
+    monkeypatch.setenv("HYPER_JOURNAL_LLM_ENABLED", "true")
     for placeholder in ("...", "N/A", "None", "-", "ok"):
         async def fake_evo_groq(messages, *, model, schema, _p=placeholder):
             return json.dumps({"asked": "x", "swarm_summary": _p, "agents": []})
@@ -44,6 +46,7 @@ def test_short_placeholder_like_summaries_are_also_rejected(monkeypatch):
 
 
 def test_a_real_substantive_summary_passes_through_unchanged(monkeypatch):
+    monkeypatch.setenv("HYPER_JOURNAL_LLM_ENABLED", "true")
     real_summary = "Confirmed GDPR-native AI demand: 12% CAGR, >65% enterprise interest, competitor gaps flagged."
 
     async def fake_evo_groq(messages, *, model, schema):
@@ -58,6 +61,7 @@ def test_a_real_substantive_summary_passes_through_unchanged(monkeypatch):
 
 
 def test_evo_groq_failure_falls_back_cleanly(monkeypatch):
+    monkeypatch.setenv("HYPER_JOURNAL_LLM_ENABLED", "true")
     async def broken_evo_groq(messages, *, model, schema):
         raise RuntimeError("provider outage")
     monkeypatch.setattr(engine, "_evo_groq", broken_evo_groq)
@@ -69,3 +73,17 @@ def test_evo_groq_failure_falls_back_cleanly(monkeypatch):
 
     assert entry is not None
     assert "real final answer" in entry["swarm_summary"]
+
+
+def test_journal_is_deterministic_by_default(monkeypatch):
+    async def must_not_run(*_args, **_kwargs):
+        raise AssertionError("default journal path must not make a provider call")
+    monkeypatch.delenv("HYPER_JOURNAL_LLM_ENABLED", raising=False)
+    monkeypatch.setattr(engine, "_evo_groq", must_not_run)
+
+    entry = asyncio.run(make_journal_entry(
+        "refine the positioning", "A concise source-backed positioning recommendation.",
+        transcript=[], participants=[], turn_id="t2", fast_planner_mode="glm_no_reasoning",
+    ))
+
+    assert entry["swarm_summary"] == "A concise source-backed positioning recommendation."

@@ -6,6 +6,30 @@ from hivemind_employees.hyper.engine import Director, _work_order_activity, run_
 from hivemind_employees.hyper.domains.seo.reporting import render_remediation_report
 
 
+def test_auto_quality_uses_glm_for_planning_only_by_default(monkeypatch):
+    from hivemind_employees.api_hyper_rooms import _quality_models
+
+    for name in ("HYPER_ROOM_MODEL", "HYPER_PLANNER_MODEL", "HYPER_AUTO_GATHER",
+                 "HYPER_AUTO_DEBATE", "HYPER_AUTO_SYNTH", "HYPER_SYNTH_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    planner, debate, synth = _quality_models("auto", "glm_no_reasoning")
+
+    assert planner == "@cf/zai-org/glm-5.3-flash"
+    assert debate == "openai/gpt-oss-20b:nitro"
+    assert synth == "openai/gpt-oss-20b:nitro"
+
+
+def test_fast_planner_flag_off_preserves_stable_models(monkeypatch):
+    from hivemind_employees.api_hyper_rooms import _quality_models
+
+    for name in ("HYPER_ROOM_MODEL", "HYPER_PLANNER_MODEL", "HYPER_AUTO_GATHER",
+                 "HYPER_AUTO_DEBATE", "HYPER_AUTO_SYNTH", "HYPER_SYNTH_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    assert _quality_models("auto", "off") == (
+        "openai/gpt-oss-20b:nitro", "openai/gpt-oss-20b:nitro", "openai/gpt-oss-20b:nitro",
+    )
+
+
 def _director(*, message: str, room_kind: str = "general", company_brief: str = "",
               enabled_connectors=None, execution_profile=None):
     events = []
@@ -30,6 +54,7 @@ def _director(*, message: str, room_kind: str = "general", company_brief: str = 
         room_kind=room_kind,
         company_brief=company_brief,
         execution_profile=execution_profile,
+        fast_planner_mode="glm_no_reasoning",
     )
     return director, events
 
@@ -82,6 +107,7 @@ def test_artifact_only_profile_cannot_silently_degrade_to_text(monkeypatch):
             "profile_id": "design.artifact.v1",
             "allowed_outputs": ["artifact"],
             "required_artifacts": ["design_artifact"],
+            "visual_artifact_required": True,
         },
     )
     payload = {
@@ -105,6 +131,46 @@ def test_artifact_only_profile_cannot_silently_degrade_to_text(monkeypatch):
     assert director.artifact_intent["kind"] == "interactive_document"
     assert plan["artifact_intent"] == director.artifact_intent
     assert plan["execution_engine"] == "debate"
+
+
+def test_text_profile_suppresses_visual_and_preserves_external_evidence_query(monkeypatch):
+    monkeypatch.setenv("Visual_path_In_Hyperrooms", "true")
+    director, _events = _director(
+        message="Create a concise source-backed positioning statement",
+        room_kind="marketing",
+        execution_profile={
+            "contract": "execution-profile.v1",
+            "profile_id": "marketing.copy.v1",
+            "allowed_outputs": ["direct_answer"],
+            "required_artifacts": [],
+            "visual_artifact_required": False,
+            "external_evidence_query": "European AI workforce GDPR positioning competitor claims",
+        },
+    )
+    payload = {
+        "recall_queries": [], "history_turns_back": 0, "connector_calls": [],
+        "web_query": None, "seo_audit_url": None, "seo_audit_scope": "none",
+        "seo_task": "none", "places_query": None, "needs_debate": False,
+        "method_skills": [], "campaign_method_assignments": [], "work_orders": [],
+        "turn_plan": [], "turn_mode": "task", "execution_engine": "debate",
+        "collaboration_intensity": "light", "response_depth": "direct",
+        "evidence_mode": "standard", "post_output_actions": [],
+        "outreach_request": None, "campaign_request": None,
+        "artifact_intent": {
+            "kind": "interactive_document", "purpose": "positioning copy",
+            "audience": "buyers", "quality_profile": "editorial",
+            "creative_freedom": "high", "requirements": [],
+        },
+    }
+
+    async def plan_call(*_args, **_kwargs):
+        return {"content": json.dumps(payload)}
+
+    monkeypatch.setattr(director, "_groq", plan_call)
+    plan = asyncio.run(director._plan_gather())
+
+    assert director.artifact_intent is None
+    assert plan["web_query"] == "European AI workforce GDPR positioning competitor claims"
 
 
 def test_source_evidence_excludes_skills_and_agent_work_results():

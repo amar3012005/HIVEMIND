@@ -12,6 +12,7 @@ interface Env {
   ENVIRONMENT: string;
   HIVEMIND_CORE_URL: string;
   HYPER_GROK_FLAG?: string;
+  HYPER_FAST_PLANNER_FLAG?: string;
   HYPER_GROK_WORKFLOW_SECRET: string;
   FLAGS: {
     getStringDetails(key: string, fallback: string, context: Record<string, string>): Promise<{
@@ -388,15 +389,22 @@ async function authorized(request: Request, env: Env): Promise<boolean> {
   );
 }
 
-async function decision(env: Env, orgId: string, userId: string): Promise<{ mode: RuntimeMode; processing_version: number; reason: string; variant?: string }> {
-  if (!env.FLAGS || !orgId || !userId) return { mode: 'off', processing_version: 1, reason: 'invalid_context' };
+async function decision(env: Env, orgId: string, userId: string): Promise<{ mode: RuntimeMode; processing_version: number; reason: string; variant?: string; fast_planner_mode: string }> {
+  if (!env.FLAGS || !orgId || !userId) return { mode: 'off', processing_version: 1, reason: 'invalid_context', fast_planner_mode: 'off' };
   const details = await env.FLAGS.getStringDetails(
     env.HYPER_GROK_FLAG || 'hyperagents_grok_agents_v1', 'off',
     { targetingKey: userId, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT },
   );
+  const planner = await env.FLAGS.getStringDetails(
+      env.HYPER_FAST_PLANNER_FLAG || 'hyperagents_fast_planner_v1', 'off',
+      { targetingKey: userId, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT },
+    ).catch(() => ({ value: 'off', reason: 'flag_unavailable' }));
+  const fastPlannerMode = String(planner.value || 'off').trim().toLowerCase() === 'glm_no_reasoning'
+    ? 'glm_no_reasoning' : 'off';
   return {
     mode: normalizeMode(details.value), processing_version: 1,
     reason: String(details.reason || 'flagship'), variant: details.variant,
+    fast_planner_mode: fastPlannerMode,
   };
 }
 
@@ -409,6 +417,7 @@ async function core(env: Env, params: TurnParams, action: 'prepare' | 'execute' 
       body: JSON.stringify({
         org_id: params.org_id, user_id: params.user_id, mode: params.mode,
         processing_version: params.processing_version,
+        fast_planner_mode: params.fast_planner_mode === 'glm_no_reasoning' ? 'glm_no_reasoning' : 'off',
       }),
     },
   );

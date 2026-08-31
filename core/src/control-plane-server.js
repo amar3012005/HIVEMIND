@@ -13295,6 +13295,8 @@ Write the persona now.`;
               lines: [],
               grokRuntimeMode: grokDecision.mode,
               grokRuntimeVersion: grokDecision.version,
+              fastPlannerMode: grokDecision.fastPlannerMode || 'off',
+              fastPlannerVersion: 1,
               grokWorkflowInstanceId,
               // Durable turns are owned by the Cloudflare Workflow from the
               // instant they are admitted. Leaving them at ACCEPTED allowed
@@ -13425,6 +13427,7 @@ Write the persona now.`;
             grok_runtime_mode: grokDecision.mode,
             grok_runtime_version: grokDecision.version,
             grok_workflow_instance_id: grokWorkflowInstanceId,
+            fast_planner_mode: grokDecision.fastPlannerMode || 'off',
             ...(executionContext ? { execution_context: executionContext } : {}),
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,
@@ -13439,6 +13442,7 @@ Write the persona now.`;
             await startGrokRoomWorkflow({
               turnId: turn.id, roomId, orgId: current.session.orgId, userId: current.session.userId,
               mode: grokDecision.mode, version: grokDecision.version,
+              fastPlannerMode: grokDecision.fastPlannerMode || 'off',
             });
           } catch (error) {
             const { appendTurnEvent, sealTurn } = await import('./employees/hyper-rooms.js');
@@ -13725,6 +13729,7 @@ Write the persona now.`;
           room_mode: roomExecutionMode(turn.room), task_tag: roomExecutionTag(turn.room),
           grok_runtime_mode: turn.grokRuntimeMode,
           grok_runtime_version: turn.grokRuntimeVersion,
+          fast_planner_mode: turn.fastPlannerMode || 'off',
           grok_workflow_instance_id: turn.grokWorkflowInstanceId,
           callback_url: `${process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000'}/internal/hyper/turn-event`,
         });

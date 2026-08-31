@@ -8,7 +8,8 @@
   "vars": {
     "ENVIRONMENT": "local",
     "HIVEMIND_CORE_URL": "http://127.0.0.1:3000",
-    "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
+    "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1",
+    "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1"
   },
   "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
   "browser": { "binding": "BROWSER", "remote": true },
@@ -36,7 +37,8 @@
       "vars": {
         "ENVIRONMENT": "local",
         "HIVEMIND_CORE_URL": "https://preview-api.singulancelabs.com",
-        "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
+        "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1",
+        "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "browser": { "binding": "BROWSER", "remote": true },
@@ -57,7 +59,8 @@
       "vars": {
         "ENVIRONMENT": "production",
         "HIVEMIND_CORE_URL": "https://api.singulancelabs.com",
-        "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1"
+        "HYPER_GROK_FLAG": "hyperagents_grok_agents_v1",
+        "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "browser": { "binding": "BROWSER", "remote": true },

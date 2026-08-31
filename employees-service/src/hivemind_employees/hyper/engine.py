@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..ai_gateway import post as gateway_post
+from ..ai_gateway import post as gateway_post, workers_ai_chat
 
 from ..config import get_settings
 from ..db import (
@@ -45,7 +45,7 @@ from ..db import (
 )
 from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog, work_skill_catalog
 from .domains import get_domain_pack
-from .model_policy import HYPER_FAST_MODEL, canonical_hyper_model
+from .model_policy import HYPER_FAST_MODEL, HYPER_PLANNER_MODEL, canonical_hyper_model
 from .visual_artifact_renderer import (
     PRESENTATION_SPEC_SCHEMA,
     normalize_presentation_spec,
@@ -880,7 +880,8 @@ async def make_journal_entry(user_message: str, final_text: str, *,
                              participants: Optional[List[Dict[str, Any]]] = None,
                              turn_id: str = "", status: str = "complete",
                              model: Optional[str] = None,
-                             verdict: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+                             verdict: Optional[Dict[str, Any]] = None,
+                             fast_planner_mode: str = "off") -> Optional[Dict[str, Any]]:
     """Distill one run into structured episodic memory: each agent's contribution and
     the swarm result. It is intentionally separate from reusable operating lessons."""
     if not _JOURNAL_ENABLED:
@@ -915,6 +916,16 @@ async def make_journal_entry(user_message: str, final_text: str, *,
         if _verification:
             entry["verification"] = _verification
         return entry
+    # Episodic continuity is already derivable from persisted turn data. Do
+    # not add a serial provider call after the user-visible result by default
+    # (production measured 22.5s here, followed by a malformed `choices`
+    # response). Operators may re-enable semantic distillation explicitly;
+    # the deterministic entry remains the fail-safe in either mode.
+    if (str(fast_planner_mode or "off").lower() == "glm_no_reasoning"
+            and os.environ.get("HYPER_JOURNAL_LLM_ENABLED", "false").lower() not in {
+        "1", "true", "yes", "on",
+    }):
+        return _fallback()
     try:
         pos = _journal_positions(transcript)
         names = [str(p.get("name") or p.get("slug") or "") for p in (participants or []) if p]
@@ -1384,6 +1395,7 @@ class Director:
         work_agent_hook: Optional[Callable[[Dict[str, Any], Dict[str, Any], str], Awaitable[Dict[str, Any]]]] = None,
         grok_runtime_mode: str = "off",
         grok_runtime_version: int = 1,
+        fast_planner_mode: str = "off",
     ) -> None:
         # Run-wide output language from the FE navbar toggle (locale code/name →
         # language NAME, '' for English). Drives a strict "write in X only" directive.
@@ -1415,6 +1427,7 @@ class Director:
         from .grok_runtime import normalize_runtime_mode
         self.grok_runtime_mode = normalize_runtime_mode(grok_runtime_mode)
         self.grok_runtime_version = max(1, int(grok_runtime_version or 1))
+        self.fast_planner_mode = "glm_no_reasoning" if str(fast_planner_mode).lower() == "glm_no_reasoning" else "off"
         self.participants = participants
         self.roster = {(p.get("slug") or p.get("id")): p for p in participants}
         self.room_template = room_template or "debate"
@@ -1467,7 +1480,8 @@ class Director:
         self.has_google = any(c in self.connectors for c in _GOOGLE_CONNECTORS)
         self.emit = emit
         domain_models = self.domain_pack.models if self.domain_pack else {}
-        self.director_model = domain_models.get("director") or director_model or os.environ.get("HYPER_DIRECTOR_MODEL", "openai/gpt-oss-120b")
+        director_default = HYPER_PLANNER_MODEL if self.fast_planner_mode == "glm_no_reasoning" else "openai/gpt-oss-120b"
+        self.director_model = domain_models.get("director") or director_model or os.environ.get("HYPER_DIRECTOR_MODEL", director_default)
         self.persona_model = domain_models.get("persona") or persona_model or os.environ.get("HYPER_PERSONA_MODEL", "openai/gpt-oss-120b")
         # Dedicated model for the FINAL deliverable. The gather loop + debate can run
         # on a cheap model (orchestration), but the synthesis is the product — so a
@@ -1835,6 +1849,22 @@ class Director:
             _to = float(os.getenv("HYPER_SYNTH_TIMEOUT_S", "90") or 90)
         else:
             _to = 60.0
+        # Workers AI planner/verifier models run through the same Cloudflare AI
+        # Gateway compatibility endpoint as hired agents. Keep this before the
+        # OpenRouter/Groq routing predicates: an @cf model must never be treated
+        # as an arbitrary vendor slug and leaked to OpenRouter.
+        if str(body.get("model") or "").startswith(("@cf/", "workers-ai/@cf/")):
+            j = await workers_ai_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
+            if j is not None:
+                usage = j.get("usage") or {}
+                self._record_model_usage(body.get("model"), usage, bucket)
+                return (j.get("choices") or [{}])[0].get("message") or None
+            fallback = canonical_hyper_model(os.environ.get(
+                "HYPER_PLANNER_FALLBACK_MODEL", HYPER_FAST_MODEL,
+            ))
+            log.warning("[hyper-engine] Workers AI model %s unavailable; governed fallback=%s",
+                        body.get("model"), fallback)
+            body["model"] = fallback
         # Cerebras-direct FIRST (bypasses OpenRouter): the GLM synth writer bills to
         # Cerebras + hits its automatic prompt cache. A stable per-room+bucket cache_key
         # routes a room's repeat turns to the same cache backend (sent only when the
@@ -5432,7 +5462,11 @@ class Director:
             plan = {}
         if not isinstance(plan, dict):
             plan = {}
-        if _visual_artifacts_enabled() and isinstance(plan.get("artifact_intent"), dict):
+        profile_controls_visual = (self.fast_planner_mode == "glm_no_reasoning"
+                                   and bool(self.execution_profile.get("profile_id")))
+        profile_requires_visual = self.execution_profile.get("visual_artifact_required") is True
+        if (_visual_artifacts_enabled() and isinstance(plan.get("artifact_intent"), dict)
+                and (not profile_controls_visual or profile_requires_visual)):
             raw_intent = plan["artifact_intent"]
             artifact_kind = str(raw_intent.get("kind") or "interactive_document").strip()
             if artifact_kind not in {"presentation", "interactive_document", "dashboard"}:
@@ -5464,7 +5498,8 @@ class Director:
             if str(item).strip()
         }
         if (_visual_artifacts_enabled() and self.artifact_intent is None
-                and required_artifacts and allowed_outputs == {"artifact"}):
+                and required_artifacts and allowed_outputs == {"artifact"}
+                and (not profile_controls_visual or profile_requires_visual)):
             self.artifact_intent = {
                 "contract": "artifact-intent.v1",
                 "kind": "interactive_document",
@@ -5569,6 +5604,15 @@ class Director:
         plan["connector_calls"] = ccs[:4]
         wq = plan.get("web_query")
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
+        # The execution-profile classifier makes one semantic, persisted
+        # evidence decision before planning. If the Director omits that query,
+        # preserve the declared evidence requirement instead of silently
+        # producing unsupported public/comparative claims.
+        profile_web_query = (self.execution_profile.get("external_evidence_query")
+                             if self.fast_planner_mode == "glm_no_reasoning" else None)
+        if (plan["web_query"] is None and self._web_budget > 0
+                and isinstance(profile_web_query, str) and profile_web_query.strip()):
+            plan["web_query"] = profile_web_query.strip()[:500]
         if self.room_kind == "campaign" and plan["web_query"]:
             if not self._campaign_recall_query_is_grounded(plan["web_query"]):
                 plan["web_query"] = None
@@ -7917,6 +7961,7 @@ async def run_director(
     work_agent_hook: Optional[Callable[[Dict[str, Any], Dict[str, Any], str], Awaitable[Dict[str, Any]]]] = None,
     grok_runtime_mode: str = "off",
     grok_runtime_version: int = 1,
+    fast_planner_mode: str = "off",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -7942,5 +7987,6 @@ async def run_director(
         work_agent_hook=work_agent_hook,
         grok_runtime_mode=grok_runtime_mode,
         grok_runtime_version=grok_runtime_version,
+        fast_planner_mode=fast_planner_mode,
     )
     return await director.run()

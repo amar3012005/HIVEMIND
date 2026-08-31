@@ -128,3 +128,38 @@ def workers_ai_sdk_target(model: str) -> tuple[str, str, str, dict[str, str]]:
         "cf-aig-authorization": f"Bearer {token}",
         "cf-aig-skip-cache": "true",
     }
+
+
+async def workers_ai_chat(body: Mapping[str, Any], *, timeout: httpx.Timeout) -> dict[str, Any] | None:
+    """Call a Workers AI chat model through the Gateway compatibility API.
+
+    This is the non-SDK counterpart of :func:`workers_ai_sdk_target`, used by
+    the Director/profile selector/verifier. It deliberately has no direct
+    Workers AI or OpenRouter fallback; callers choose an explicit governed
+    fallback when a planning or verification step may degrade safely.
+    """
+    routed_model, token, base_url, gateway = workers_ai_sdk_target(str(body.get("model") or ""))
+    payload = dict(body)
+    payload["model"] = routed_model
+    # Planner and verifier calls need JSON, not hidden chain-of-thought.  GLM's
+    # default thinking can consume the entire bounded completion and return an
+    # empty content field.  This template switch was verified through the same
+    # AI Gateway route and leaves no reasoning_content in the response.
+    template_kwargs = dict(payload.get("chat_template_kwargs") or {})
+    template_kwargs["enable_thinking"] = False
+    payload["chat_template_kwargs"] = template_kwargs
+    payload.pop("reasoning_effort", None)
+    headers = {"Authorization": f"Bearer {token}", **gateway}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+        if response.status_code != 200:
+            return None
+        value = response.json()
+        return value if isinstance(value, dict) else None
+    except (httpx.TimeoutException, httpx.TransportError, ValueError):
+        return None

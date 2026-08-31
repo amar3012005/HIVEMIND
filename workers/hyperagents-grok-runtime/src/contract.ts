@@ -10,6 +10,7 @@ export type TurnParams = {
   user_id: string;
   mode: RuntimeMode;
   processing_version: number;
+  fast_planner_mode?: 'off' | 'glm_no_reasoning';
 };
 export type AssignmentParams = TurnParams & {
   work_order_id: string;

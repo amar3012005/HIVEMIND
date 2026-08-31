@@ -98,13 +98,21 @@ EXECUTION_PROFILES: Dict[str, ExecutionProfile] = {
                  "and outbound message/call drafts, not campaign strategy.",
         ),
         ExecutionProfile(
+            id="marketing.copy.v1", room_kind="marketing",
+            allowed_outputs=("direct_answer",), effect="internal",
+            review_policy="reviewer",
+            when="Asks to write or refine concise marketing or positioning text "
+                 "such as a tagline, value proposition, message, headline, or "
+                 "narrative statement, without asking for a designed visual/file.",
+        ),
+        ExecutionProfile(
             id="marketing.artifact.v1", room_kind="marketing",
             allowed_outputs=("artifact",), effect="prepare_only",
             required_artifacts=("marketing_artifact",),
             review_policy="reviewer",
-            when="Asks to draft marketing/positioning copy or collateral "
-                 "(messaging hierarchy, value prop, ad copy, landing page "
-                 "copy) as a single deliverable, not a multi-step campaign.",
+            when="Explicitly asks to create a designed marketing asset or "
+                 "visual collateral file/page. Plain taglines, headlines, "
+                 "positioning statements, and copy use marketing.copy.v1.",
         ),
         ExecutionProfile(
             id="seo.audit.v1", room_kind="seo",

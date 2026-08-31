@@ -150,8 +150,9 @@ def render_presentation(spec: dict[str, Any]) -> str:
     slides = []
     for index, slide in enumerate(spec["slides"]):
         sources = " · ".join(_esc(ref) for ref in slide["source_refs"]) or "Evidence lanes reflect supplied room context"
+        active_class = " active" if index == 0 else ""
         slides.append(
-            f'<section class="slide composition-{_esc(slide["composition"])}{' active' if index == 0 else ''}" '
+            f'<section class="slide composition-{_esc(slide["composition"])}{active_class}" '
             f'data-slide="{index + 1}" aria-label="Slide {index + 1}: {_esc(slide["headline"])}">'
             f'<header><span>{_esc(slide["eyebrow"])}</span><b>{index + 1:02} / {len(spec["slides"]):02}</b></header>'
             f'<div class="slide-copy"><h{"1" if index == 0 else "2"}>{_esc(slide["headline"])}</h{"1" if index == 0 else "2"}>'

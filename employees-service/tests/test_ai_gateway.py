@@ -59,3 +59,38 @@ def test_workers_ai_sdk_target_uses_gateway_compat_and_not_openrouter():
     assert key == "gateway-token"
     assert base == "https://gateway.ai.cloudflare.com/v1/account/gateway/compat"
     assert headers["cf-aig-authorization"] == "Bearer gateway-token"
+
+
+@pytest.mark.asyncio
+async def test_workers_ai_chat_posts_to_gateway_compat(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured.update(url=url, headers=headers, json=json)
+            return Response()
+
+    monkeypatch.setattr(ai_gateway.httpx, "AsyncClient", lambda **_kwargs: Client())
+    result = await ai_gateway.workers_ai_chat(
+        {"model": "@cf/zai-org/glm-5.3-flash", "messages": []},
+        timeout=ai_gateway.httpx.Timeout(5.0),
+    )
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert captured["url"].endswith("/account/gateway/compat/chat/completions")
+    assert captured["json"]["model"] == "workers-ai/@cf/zai-org/glm-5.3-flash"
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in captured["json"]
+    assert "openrouter" not in captured["url"]

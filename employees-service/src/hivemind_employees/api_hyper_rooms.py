@@ -41,7 +41,7 @@ from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import httpx
-from .ai_gateway import post as gateway_post
+from .ai_gateway import post as gateway_post, workers_ai_chat
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from fastapi import APIRouter, Header, HTTPException
@@ -71,7 +71,9 @@ from .hyper.execution_profiles import (
     DEFAULT_PROFILE_ID, get_execution_profile, default_execution_profile,
     profile_registry_manifest,
 )
-from .hyper.model_policy import HYPER_FAST_MODEL, canonical_hyper_model
+from .hyper.model_policy import (
+    HYPER_FAST_MODEL, HYPER_PLANNER_MODEL, canonical_hyper_model,
+)
 from .db import (
     get_org_approval_rules,
     get_permanent_lead_id,
@@ -2114,6 +2116,9 @@ class RoomTurnRequest(BaseModel):
     grok_runtime_mode: Optional[str] = None
     grok_runtime_version: Optional[int] = Field(default=1, ge=1, le=1000)
     grok_workflow_instance_id: Optional[str] = Field(default=None, max_length=180)
+    # Flagship-latched inference policy. Unknown values fail closed to the
+    # byte-compatible production path.
+    fast_planner_mode: Optional[str] = "off"
 
 
 class RoomTurnResponse(BaseModel):
@@ -2563,7 +2568,8 @@ async def _verify_turn(
                 "unsupported_claims", "gaps", "note",
             ],
         }
-        verifier_model = canonical_hyper_model(model or HYPER_FAST_MODEL)
+        verifier_default = HYPER_PLANNER_MODEL if _fast_planner_enabled(req.fast_planner_mode) else (model or HYPER_FAST_MODEL)
+        verifier_model = canonical_hyper_model(os.environ.get("HYPER_VERIFIER_MODEL", verifier_default))
         body = {
             "model": verifier_model,
             "messages": [
@@ -2578,7 +2584,15 @@ async def _verify_turn(
         }
         if _needs_reasoning_disabled(verifier_model):
             body["reasoning"] = {"enabled": False}
-        data = await _openrouter_chat(body, timeout=httpx.Timeout(25.0, connect=5.0))
+        if verifier_model.startswith(("@cf/", "workers-ai/@cf/")):
+            data = await workers_ai_chat(body, timeout=httpx.Timeout(20.0, connect=5.0))
+            if not isinstance(data, dict):
+                body["model"] = canonical_hyper_model(os.environ.get(
+                    "HYPER_VERIFIER_FALLBACK_MODEL", HYPER_FAST_MODEL,
+                ))
+                data = await _openrouter_chat(body, timeout=httpx.Timeout(25.0, connect=5.0))
+        else:
+            data = await _openrouter_chat(body, timeout=httpx.Timeout(25.0, connect=5.0))
         if not isinstance(data, dict):
             raise RuntimeError("governed verifier model returned no response")
         reply = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
@@ -3341,7 +3355,11 @@ async def _resolve_recipients(req: "RoomTurnRequest", message: str = "") -> List
 
 
 
-def _quality_models(mode: str) -> tuple:
+def _fast_planner_enabled(value: Optional[str]) -> bool:
+    return str(value or "off").strip().lower() == "glm_no_reasoning"
+
+
+def _quality_models(mode: str, fast_planner_mode: str = "off") -> tuple:
     """Return the centrally governed model triple for a Room turn.
 
     HyperAgents uses one approved Gateway model by default for gather, debate,
@@ -3350,11 +3368,13 @@ def _quality_models(mode: str) -> tuple:
     legacy 120B/Haiku path.
     """
     default = canonical_hyper_model(os.environ.get("HYPER_ROOM_MODEL", HYPER_FAST_MODEL))
+    planner_default = HYPER_PLANNER_MODEL if _fast_planner_enabled(fast_planner_mode) else default
+    planner = canonical_hyper_model(os.environ.get("HYPER_PLANNER_MODEL", planner_default))
     best = canonical_hyper_model(os.environ.get("HYPER_MODEL_BEST", default))
     if (mode or "auto").strip().lower() == "best":
         return (best, best, best)
     return (
-        canonical_hyper_model(os.environ.get("HYPER_AUTO_GATHER", default)),
+        canonical_hyper_model(os.environ.get("HYPER_AUTO_GATHER", planner)),
         canonical_hyper_model(os.environ.get("HYPER_AUTO_DEBATE", default)),
         canonical_hyper_model(os.environ.get("HYPER_AUTO_SYNTH") or os.environ.get("HYPER_SYNTH_MODEL", default)),
     )
@@ -3514,8 +3534,10 @@ _PROFILE_SELECTION_SCHEMA: Dict[str, Any] = {
     "properties": {
         "profile_id": {"type": "string", "enum": [p["profile_id"] for p in profile_registry_manifest()]},
         "reason": {"type": "string"},
+        "external_evidence_query": {"type": ["string", "null"]},
+        "visual_artifact_required": {"type": "boolean"},
     },
-    "required": ["profile_id", "reason"],
+    "required": ["profile_id", "reason", "external_evidence_query", "visual_artifact_required"],
 }
 
 _DIRECT_AGENT_ROUTE_SCHEMA: Dict[str, Any] = {
@@ -3634,6 +3656,10 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
         "question, a direct answer, or does not clearly justify a specialist engine. A "
         "message merely containing a word like 'campaign' or 'lead' is NOT sufficient "
         "grounds on its own — judge the actual intent of the request."
+        " Set external_evidence_query to one concise search query when the user asks to inspect, compare, "
+        "validate, or ground the result in public/current sources; otherwise null. Set visual_artifact_required "
+        "true only when the user explicitly asks for a designed visual/file/interface artifact, never merely "
+        "because they request copy, a tagline, a recommendation, a report, or a reviewed answer."
     )
     user = json.dumps({
         "user_message": str(req.user_message or "")[:4000],
@@ -3642,7 +3668,10 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
         "profile_registry": manifest,
     }, ensure_ascii=False)
     body = {
-        "model": os.environ.get("HYPER_PROFILE_SELECTOR_MODEL", "openai/gpt-oss-120b"),
+        "model": canonical_hyper_model(os.environ.get(
+            "HYPER_PROFILE_SELECTOR_MODEL",
+            HYPER_PLANNER_MODEL if _fast_planner_enabled(req.fast_planner_mode) else "openai/gpt-oss-120b",
+        )),
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "temperature": 0.1, "max_tokens": 300,
         "response_format": {"type": "json_schema", "json_schema": {
@@ -3659,11 +3688,20 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
     # order for the selected model.
     data: Optional[Dict[str, Any]] = None
     try:
-        data = await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
+        if str(body["model"]).startswith(("@cf/", "workers-ai/@cf/")):
+            data = await workers_ai_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
+        else:
+            data = await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
     except Exception as exc:  # noqa: BLE001
         log.info("[profile-select] openrouter unavailable turn=%s: %s", req.turn_id, exc)
     if data is None:
-        _fallback = _fallback_model_for(body["model"])
+        _fallback = (
+            canonical_hyper_model(os.environ.get(
+                "HYPER_PROFILE_SELECTOR_FALLBACK_MODEL", "openai/gpt-oss-120b",
+            ))
+            if str(body["model"]).startswith(("@cf/", "workers-ai/@cf/"))
+            else _fallback_model_for(body["model"])
+        )
         if _fallback:
             log.warning("[profile-select] experimental model %s unavailable turn=%s — falling back to %s",
                         body["model"], req.turn_id, _fallback)
@@ -3675,11 +3713,16 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
                 log.info("[profile-select] fallback model also unavailable turn=%s: %s", req.turn_id, exc)
     profile_id = ""
     reason = ""
+    external_evidence_query: Optional[str] = None
+    visual_artifact_required = False
     try:
         text = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         parsed = json.loads(text)
         profile_id = str(parsed.get("profile_id") or "")
         reason = str(parsed.get("reason") or "")[:500]
+        raw_query = parsed.get("external_evidence_query")
+        external_evidence_query = str(raw_query).strip()[:500] if isinstance(raw_query, str) and raw_query.strip() else None
+        visual_artifact_required = parsed.get("visual_artifact_required") is True
     except Exception as exc:  # noqa: BLE001
         log.info("[profile-select] parse failed turn=%s: %s", req.turn_id, exc)
     profile = get_execution_profile(profile_id) or default_execution_profile()
@@ -3691,6 +3734,8 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
         "allowed_outputs": list(profile.allowed_outputs), "effect": profile.effect,
         "required_artifacts": list(profile.required_artifacts),
         "review_policy": profile.review_policy, "reason": reason,
+        "external_evidence_query": external_evidence_query,
+        "visual_artifact_required": visual_artifact_required,
         "selected_at": int(time.time() * 1000),
     }
 
@@ -4109,7 +4154,7 @@ async def _orchestrate_single_agent(
             _qmode = await get_room_quality_mode(req.room_id, org_id=req.org_id)
         except Exception:  # noqa: BLE001
             _qmode = "auto"
-        _dir_m, _per_m, _syn_m = _quality_models(_qmode)
+        _dir_m, _per_m, _syn_m = _quality_models(_qmode, req.fast_planner_mode or "off")
     # Population-sim mode (ADDITIONAL, opt-in) — req.sim_mode (eval override) wins, else the
     # room's stored toggle. Defaults to 'off' so the main flow is untouched. Never raises.
     _sim_mode = str(getattr(req, "sim_mode", "") or "").strip().lower()
@@ -4294,6 +4339,7 @@ async def _orchestrate_single_agent(
             "work_agent_hook": _work_order_via_real_agent,
             "grok_runtime_mode": normalize_runtime_mode(req.grok_runtime_mode),
             "grok_runtime_version": max(1, int(req.grok_runtime_version or 1)),
+            "fast_planner_mode": req.fast_planner_mode or "off",
         }
         if _room_kind == "campaign":
             result = await _build_campaign_director(director_kwargs, req.campaign_brief).run()
@@ -4836,6 +4882,7 @@ async def _orchestrate_single_agent(
                 req.user_message, final_text, transcript=transcript, participants=participants,
                 turn_id=req.turn_id, status=status,
                 verdict=_gv if isinstance(_gv, dict) else None,
+                fast_planner_mode=req.fast_planner_mode or "off",
             )
             if _journal_entry:
                 _journal_ok = await append_room_journal_entry(
@@ -5285,6 +5332,7 @@ async def _run_mention_turn(req: "RoomTurnRequest", emp: Dict[str, Any], started
         _journal_entry = await make_journal_entry(
             req.user_message, content, transcript=[{"agent": name, "text": content}],
             participants=[{"slug": slug, "name": name}], turn_id=req.turn_id, status="complete",
+            fast_planner_mode=req.fast_planner_mode or "off",
         )
         if _journal_entry:
             _journal_ok = await append_room_journal_entry(req.room_id, req.org_id, _journal_entry)

@@ -1519,3 +1519,29 @@ slides that find no unique anchor get a page instead of `null`.
 - Flag default remains `off`; only the existing operator canary is `full`.
   Rollback is exact rule off, followed if needed by the backed-up Core environment
   kill switch and canonical service-scoped recreation. No global rollout occurred.
+
+## 2026-08-31 — Grok HyperAgents production-current local candidate
+
+### Committed candidate
+
+- Merged current `origin/singulance-main` (`c561f75c`) into a fresh branch from
+  `origin/singulance-local`, then applied the complete runtime as candidate
+  `962d57c3` on `codex/grok-hyperagents-integrated`.
+- Integrated and pushed Da-vinci commit `f47d945` on
+  `codex/grok-hyperagents-ui-integrated`; the parent gitlink points only to that
+  pushed commit.
+- The flag remains fail-closed and unenabled. No local shared container,
+  Cloudflare resource, Flagship targeting, or production service was changed.
+
+### Verification
+
+```text
+Prisma validate/generate: passed
+Core syntax + runtime/HyperRoom routes: 7 passed
+Employees changed-file Python compilation: passed
+Worker TypeScript: passed
+Worker contract tests: 5 passed
+Wrangler local dry-run with Browser/Sandbox: passed
+Sandbox next-python image build: passed
+Integrated Da-vinci optimized build: compiled successfully
+```

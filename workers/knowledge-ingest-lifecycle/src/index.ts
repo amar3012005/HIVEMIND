@@ -109,19 +109,11 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
     if (!validAdmittedParams(event.payload)) throw new NonRetryableError('invalid_or_unadmitted_ingest_payload');
     const params = event.payload;
     try {
-      let acquired = false;
-      // 240 waits = one hour and keeps the total Workflow step count bounded
-      // when combined with the materialization polling loop below.
-      for (let attempt = 0; attempt < 240; attempt += 1) {
-        const claim = await step.do(
-          `acquire processing slot ${attempt + 1}`,
-          { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
-          () => core<StageResult>(this.env, params, 'stages/acquire'),
-        );
-        if (claim.acquired !== false) { acquired = true; break; }
-        await step.sleep(`wait for processing slot ${attempt + 1}`, '15 seconds');
-      }
-      if (!acquired) throw new Error('processing slot wait exceeded one hour');
+      await step.do(
+        'validate and acquire admission',
+        { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
+        () => core<StageResult>(this.env, params, 'stages/acquire'),
+      );
       await step.do(
         'dispatch canonical materialization',
         { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
@@ -129,7 +121,7 @@ export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, Inge
       );
       let materialized: MaterializationStatus['result'] | StageResult | null = null;
       for (let attempt = 0; attempt < 160; attempt += 1) {
-        await step.sleep(`wait for canonical materialization ${attempt + 1}`, '15 seconds');
+        await step.sleep(`wait for canonical materialization ${attempt + 1}`, '2 seconds');
         const status = await step.do(
           `verify canonical materialization ${attempt + 1}`,
           { retries: { limit: 3, delay: '5 seconds', backoff: 'exponential' }, timeout: '1 minute' },

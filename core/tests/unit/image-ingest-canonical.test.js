@@ -4,15 +4,25 @@ import { readFile } from 'node:fs/promises';
 
 test('image vision makes one plain-text evidence call without a JSON schema', async (t) => {
   const originalFetch = globalThis.fetch;
-  const originalOpenRouterKey = process.env.OPENROUTER_API_KEY;
-  const originalGroqKey = process.env.GROQ_API_KEY;
-  process.env.OPENROUTER_API_KEY = 'test-key';
-  delete process.env.GROQ_API_KEY;
+  const original = {
+    account: process.env.CLOUDFLARE_ACCOUNT_ID,
+    token: process.env.CLOUDFLARE_AI_GATEWAY_TOKEN,
+    gateway: process.env.CLOUDFLARE_AI_GATEWAY_ID,
+    model: process.env.HIVEMIND_CLOUDFLARE_VISION_MODEL,
+  };
+  process.env.CLOUDFLARE_ACCOUNT_ID = 'account-id';
+  process.env.CLOUDFLARE_AI_GATEWAY_TOKEN = 'gateway-token';
+  process.env.CLOUDFLARE_AI_GATEWAY_ID = 'hivemind-prod';
+  process.env.HIVEMIND_CLOUDFLARE_VISION_MODEL = 'google/gemini-2.5-flash-lite';
 
   let requests = 0;
   let requestBody = null;
-  globalThis.fetch = async (_url, options) => {
+  let requestUrl = null;
+  let requestHeaders = null;
+  globalThis.fetch = async (url, options) => {
     requests += 1;
+    requestUrl = String(url);
+    requestHeaders = options.headers;
     requestBody = JSON.parse(options.body);
     return new Response(JSON.stringify({
       choices: [{ message: { content: 'A detailed visual description with exact visible text and spatial relationships.' } }],
@@ -22,10 +32,14 @@ test('image vision makes one plain-text evidence call without a JSON schema', as
 
   t.after(() => {
     globalThis.fetch = originalFetch;
-    if (originalOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
-    else process.env.OPENROUTER_API_KEY = originalOpenRouterKey;
-    if (originalGroqKey === undefined) delete process.env.GROQ_API_KEY;
-    else process.env.GROQ_API_KEY = originalGroqKey;
+    for (const [key, value] of Object.entries({
+      CLOUDFLARE_ACCOUNT_ID: original.account,
+      CLOUDFLARE_AI_GATEWAY_TOKEN: original.token,
+      CLOUDFLARE_AI_GATEWAY_ID: original.gateway,
+      HIVEMIND_CLOUDFLARE_VISION_MODEL: original.model,
+    })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
   });
 
   const { buildImageMemoryPayload } = await import('../../src/services/image-ingest.js');
@@ -40,27 +54,27 @@ test('image vision makes one plain-text evidence call without a JSON schema', as
   });
 
   assert.equal(requests, 1);
+  assert.match(requestUrl, /api\.cloudflare\.com\/client\/v4\/accounts\/account-id\/ai\/v1\/chat\/completions/);
+  assert.equal(requestHeaders['cf-aig-gateway-id'], 'hivemind-prod');
+  assert.equal(requestBody.model, 'google/gemini-2.5-flash-lite');
   assert.equal(requestBody.response_format, undefined);
   const prompt = requestBody.messages[0].content[0].text;
-  assert.match(prompt, /rich, detailed plain text/i);
+  assert.match(prompt, /rich plain text/i);
   assert.match(prompt, /Do NOT return JSON/i);
-  assert.equal(result.payload.memory_type, 'summary');
+  assert.equal(result.payload.memory_type, 'fact');
   assert.match(result.payload.content, /detailed visual description/i);
   assert.deepEqual(result.payload.project_ids, ['project-1']);
   assert.deepEqual(result.extraction.entities, []);
   assert.equal(result.payload.metadata.evidence_role, 'raw_visual_description');
+  assert.equal(result.classification.provider, 'cloudflare-ai-gateway');
 });
 
-test('image endpoint sends visual prose through canonical document ingestion', async () => {
+test('image endpoint delegates to the durable canonical upload lifecycle', async () => {
   const server = await readFile(new URL('../../src/server.js', import.meta.url), 'utf8');
   const start = server.indexOf("case '/api/ingest/image':");
   const end = server.indexOf("case '/api/ingest':", start);
   const route = server.slice(start, end);
 
-  assert.match(route, /ingestCanonicalPayload\(payload/);
-  assert.match(route, /sourceType:\s*'api'/);
-  assert.match(route, /platform:\s*'image-upload'/);
-  assert.match(route, /mode:\s*'document'/);
-  assert.equal(route.includes('buildRoutedIngestPayloads(payload'), false);
-  assert.equal(route.includes('ingestRoutedPayload(routed'), false);
+  assert.match(route, /handleKnowledgeUploadRoute/);
+  assert.match(route, /rel="successor-version"/);
 });

@@ -60,6 +60,10 @@ test('boot orphan reaping excludes Cloudflare Workflow jobs that survive an API 
   await store.reapStale({ bootedAt: new Date(), bootOrphanMin: 5 });
   const bootOrphan = where.OR.at(-1);
   assert.deepEqual(bootOrphan.orchestrationMode, { not: 'cloudflare_workflow' });
+  assert.deepEqual(where.OR[0].orchestrationMode, { not: 'cloudflare_workflow' });
+  assert.ok(where.OR[0].updatedAt?.lt instanceof Date);
+  assert.equal(where.OR[0].createdAt, undefined);
+  assert.deepEqual(where.OR[1].orchestrationMode, { not: 'cloudflare_workflow' });
 });
 
 test('Workflow progress and failure writes are fenced by processing version', async () => {

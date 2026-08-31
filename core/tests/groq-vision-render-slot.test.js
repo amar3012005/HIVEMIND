@@ -35,3 +35,12 @@ test('vision uses Cloudflare Gemini and provider errors can never become evidenc
   assert.match(canonical, /PARSER_PROVIDER_ERROR_CONTAMINATION/);
   assert.match(canonical, /organization has been restricted because of overdue payment/i);
 });
+
+test('text-layer figure PDFs use selective page vision and preserve partial successes', () => {
+  const server = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+  const vision = readFileSync(new URL('../src/knowledge/enterprise/groq-vision-parser.js', import.meta.url), 'utf8');
+  assert.match(server, /detectVisualPdfPages\(tempPath\)/);
+  assert.match(server, /parsePdfWithGroqVision\(tempPath, \{ pageNumbers: visualPages \}\)/);
+  assert.match(vision, /results\.filter\(Boolean\)\.length/);
+  assert.doesNotMatch(vision, /text: '', markdown: '', pages: 0, totalPages: totalRendered/);
+});

@@ -100,8 +100,11 @@ export class KnowledgeUploadJobStore {
       const { count } = await this._model().updateMany({
         where: {
           OR: [
-            { status: 'queued', createdAt: { lt: cutoff(queuedMaxMin) } },
-            { status: 'processing', updatedAt: { lt: cutoff(processingMaxMin) } },
+            // Cloudflare Workflows survive Core restarts and own their retry
+            // lifecycle. Their original createdAt can be hours old after a
+            // versioned retry, so the BullMQ orphan reaper must never kill them.
+            { status: 'queued', orchestrationMode: { not: 'cloudflare_workflow' }, updatedAt: { lt: cutoff(queuedMaxMin) } },
+            { status: 'processing', orchestrationMode: { not: 'cloudflare_workflow' }, updatedAt: { lt: cutoff(processingMaxMin) } },
             ...orphanClauses,
           ],
         },

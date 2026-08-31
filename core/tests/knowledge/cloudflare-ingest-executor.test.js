@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import {
   CloudflareKnowledgeIngestExecutor,
+  isRetryableMaterializationError,
   isAuthorizedKnowledgeWorkflowRequest,
 } from '../../src/knowledge/cloudflare-ingest-executor.js';
 
@@ -34,15 +35,16 @@ function stepStore() {
   };
 }
 
-function fixture({ remote = false } = {}) {
+function fixture({ remote = false, image = false } = {}) {
   const bytes = Buffer.from('%PDF-1.7\ncanonical');
   const job = {
     id: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3,
     orchestrationMode: 'cloudflare_workflow', status: 'processing', scopeKey: `personal:${ids.user}`,
     storageMode: remote ? 'byod_amr' : 'hybrid', sourceObjectKey: `org/${ids.org}/source`,
     sourceObjectEtag: 'etag-at-admission',
-    checksum: crypto.createHash('sha256').update(bytes).digest('hex'), filename: 'report.pdf',
-    contentType: 'application/pdf', ingestMode: 'both', metadata: { ingest_mode: 'both' },
+    checksum: crypto.createHash('sha256').update(bytes).digest('hex'), filename: image ? 'photo.jpg' : 'report.pdf',
+    contentType: image ? 'image/jpeg' : 'application/pdf', mediaKind: image ? 'image' : 'document',
+    ingestMode: 'both', metadata: { ingest_mode: 'both' },
   };
   const events = [];
   const steps = stepStore();
@@ -51,6 +53,7 @@ function fixture({ remote = false } = {}) {
       knowledgeDocument: {
         findFirst: async () => ({ id: ids.document, _count: { segments: 8, memoryLinks: 2 } }),
       },
+      memory: { findFirst: async () => ({ id: ids.document }) },
     },
     jobStore: {
       findOwned: async () => job,
@@ -74,8 +77,16 @@ function fixture({ remote = false } = {}) {
       },
     },
     validateJob: async () => { events.push(['validate']); },
-    processUpload: async ({ onProgress }) => {
+    processUpload: async ({ onProgress, metadata }) => {
       onProgress({ stage: 'embedding', progress: 65 });
+      if (image) {
+        events.push(['image-metadata', metadata]);
+        return {
+          documentId: ids.document, promotedMemoryIds: [ids.document], pages: 1,
+          segmentCount: 0, candidateCount: 1, promotedCount: 1,
+          coverage: { memory: 1, vector: 1, entities: 2, claims: 1 },
+        };
+      }
       return {
         documentId: ids.document, promotedMemoryIds: ['memory-1', 'memory-2'],
         pages: 4, segmentCount: 8, candidateCount: 3, promotedCount: 2,
@@ -133,6 +144,28 @@ test('remote storage reconciliation does not require a central document row', as
   const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   await assert.doesNotReject(() => executor.execute({ ...input, stage: 'reconcile' }));
+});
+
+test('image jobs use authoritative mediaKind and settle one canonical memory without document evidence', async () => {
+  const { executor, events, steps } = fixture({ image: true });
+  executor.prisma.knowledgeDocument.findFirst = async () => { throw new Error('image must not reconcile as a document'); };
+  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  await executor.execute({ ...input, stage: 'materialize' });
+  await executor.execute({ ...input, stage: 'reconcile' });
+
+  assert.equal(events.filter(([kind]) => kind === 'promote').length, 0);
+  assert.equal(events.filter(([kind]) => kind === 'complete').length, 1);
+  assert.equal(events.find(([kind]) => kind === 'image-metadata')[1].media_kind, 'image');
+  assert.deepEqual(
+    [...steps.rows.keys()].map((key) => key.split(':').at(-2)).sort(),
+    ['materialize', 'materialize_image', 'reconcile'].sort(),
+  );
+});
+
+test('deterministic media and signature errors cannot enter an infinite redispatch loop', () => {
+  assert.equal(isRetryableMaterializationError('IMAGE_NOT_A_DOCUMENT'), false);
+  assert.equal(isRetryableMaterializationError('FILE_SIGNATURE_MISMATCH'), false);
+  assert.equal(isRetryableMaterializationError('PARTIAL_EMBEDDING'), true);
 });
 
 test('materialization dispatch returns immediately and exposes a durable polling receipt', async () => {

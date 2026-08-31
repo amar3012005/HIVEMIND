@@ -12,11 +12,26 @@ const STAGES = new Set(['acquire', 'materialize', 'reconcile']);
 const activeMaterializations = new Map();
 const PROCESSING_LEASE_PREFIX = 'knowledge-ingest-production';
 const PROCESSING_LEASE_MS = Math.max(60_000, Number(process.env.KNOWLEDGE_INGEST_PROCESSING_LEASE_MS || 20 * 60_000));
-const PROCESSING_GLOBAL_CONCURRENCY = Math.max(1, Number(process.env.KNOWLEDGE_INGEST_GLOBAL_CONCURRENCY || 4));
-const PROCESSING_ORG_CONCURRENCY = Math.max(1, Math.min(
-  PROCESSING_GLOBAL_CONCURRENCY,
-  Number(process.env.KNOWLEDGE_INGEST_ORG_CONCURRENCY || 2),
-));
+const stageWaiters = new Set();
+const STAGE_CAPACITY = {
+  extract: {
+    global: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_EXTRACT_CONCURRENCY || 4)),
+    org: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_EXTRACT_ORG_CONCURRENCY || 2)),
+  },
+  promote: {
+    global: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_PROMOTE_CONCURRENCY || 4)),
+    org: Math.max(1, Number(process.env.KNOWLEDGE_INGEST_PROMOTE_ORG_CONCURRENCY || 2)),
+  },
+};
+const TERMINAL_MATERIALIZATION_ERRORS = new Set([
+  'IMAGE_NOT_A_DOCUMENT', 'NO_RECALLABLE_CONTENT', 'SOURCE_OBJECT_INTEGRITY_FAILED',
+  'UNSUPPORTED_FILE_TYPE', 'MIME_EXTENSION_MISMATCH', 'FILE_SIGNATURE_MISMATCH',
+  'INVALID_WORKFLOW_PAYLOAD', 'UPLOAD_NOT_AUTHORIZED', 'UPLOAD_SCOPE_REVOKED',
+]);
+
+export function isRetryableMaterializationError(errorCode) {
+  return !TERMINAL_MATERIALIZATION_ERRORS.has(String(errorCode || '').toUpperCase());
+}
 
 function safeEqual(left, right) {
   const a = Buffer.from(String(left || ''));
@@ -118,22 +133,19 @@ export class CloudflareKnowledgeIngestExecutor {
 
   async materializeStatus({ jobId, orgId, userId, processingVersion }) {
     const job = await this._job({ jobId, orgId, userId, processingVersion });
-    await this._claimProcessingLease(job);
     const receipt = await this.steps.get({
       jobId: job.id, processingVersion: job.processingVersion,
       stageKey: 'materialize', shardKey: 'root',
     });
     return {
       ok: true, stage: 'materialize', status: receipt?.status || 'pending',
-      attempt: Number(receipt?.attempt || 0), retryable: receipt?.errorCode !== 'NO_RECALLABLE_CONTENT',
+      attempt: Number(receipt?.attempt || 0), retryable: isRetryableMaterializationError(receipt?.errorCode),
       ...(receipt?.status === 'succeeded' ? { receipt_id: receipt.id, result: receipt.outputRefs } : {}),
       ...(receipt?.status === 'failed' ? { error_code: receipt.errorCode, message: receipt.errorMessage } : {}),
     };
   }
 
   async _acquire(job) {
-    const lease = await this._claimProcessingLease(job);
-    if (!lease.acquired) return { ok: true, stage: 'acquire', acquired: false, retry_after_seconds: 15 };
     const run = await this.steps.run({
       jobId: job.id, processingVersion: job.processingVersion, stageKey: 'acquire',
       input: { orgId: job.orgId, userId: job.userId, scopeKey: job.scopeKey, storageMode: job.storageMode },
@@ -152,8 +164,10 @@ export class CloudflareKnowledgeIngestExecutor {
     return { ok: true, stage: 'acquire', acquired: true, reused: run.reused, receipt_id: run.receipt.id };
   }
 
-  async _claimProcessingLease(job) {
+  async _claimProcessingLease(job, stage = 'extract') {
     if (!this.prisma?.knowledgeIngestLease) return { acquired: true, legacySchema: true };
+    const capacity = STAGE_CAPACITY[stage] || STAGE_CAPACITY.extract;
+    const prefix = `${PROCESSING_LEASE_PREFIX}:${stage}`;
     const transact = this.prisma.$transaction
       ? (work) => this.prisma.$transaction(work, { isolationLevel: 'Serializable' })
       : (work) => work(this.prisma);
@@ -163,9 +177,9 @@ export class CloudflareKnowledgeIngestExecutor {
         const leaseUntil = new Date(now.getTime() + PROCESSING_LEASE_MS);
         // Serializes the tiny scheduler decision only. Parsing and embedding never
         // hold a database lock.
-        await tx.$executeRawUnsafe?.("SELECT pg_advisory_xact_lock(hashtext('hivemind-knowledge-ingest-slots'))");
+        await tx.$executeRawUnsafe?.(`SELECT pg_advisory_xact_lock(hashtext('hivemind-knowledge-ingest-${stage}-slots'))`);
         const leases = await tx.knowledgeIngestLease.findMany({
-          where: { leaseKey: { startsWith: `${PROCESSING_LEASE_PREFIX}:` } },
+          where: { leaseKey: { startsWith: `${prefix}:` } },
           orderBy: { leaseKey: 'asc' },
         });
         const owned = leases.find((lease) => lease.jobId === job.id
@@ -175,33 +189,13 @@ export class CloudflareKnowledgeIngestExecutor {
           return { acquired: true, leaseToken: owned.leaseToken, slot: owned.leaseKey };
         }
         const active = leases.filter((lease) => lease.leaseUntil > now);
-        if (active.length >= PROCESSING_GLOBAL_CONCURRENCY) return { acquired: false };
-        if (active.filter((lease) => lease.orgId === job.orgId).length >= PROCESSING_ORG_CONCURRENCY) {
+        if (active.length >= capacity.global) return { acquired: false };
+        if (active.filter((lease) => lease.orgId === job.orgId).length >= Math.min(capacity.global, capacity.org)) {
           return { acquired: false };
         }
 
-        // Approximate FIFO becomes deterministic under the scheduler lock. Skip
-        // organizations already at their cap so one tenant cannot block others.
-        if (tx.knowledgeIngestJob?.findMany) {
-          const waiting = await tx.knowledgeIngestJob.findMany({
-            where: {
-              orchestrationMode: 'cloudflare_workflow',
-              status: { in: ['queued', 'processing'] },
-            },
-            select: { id: true, orgId: true, processingVersion: true },
-            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-            take: 200,
-          });
-          const activeIds = new Set(active.map((lease) => `${lease.jobId}:${lease.processingVersion}`));
-          const orgCounts = new Map();
-          for (const lease of active) orgCounts.set(lease.orgId, (orgCounts.get(lease.orgId) || 0) + 1);
-          const next = waiting.find((candidate) => !activeIds.has(`${candidate.id}:${candidate.processingVersion}`)
-            && (orgCounts.get(candidate.orgId) || 0) < PROCESSING_ORG_CONCURRENCY);
-          if (next && next.id !== job.id) return { acquired: false };
-        }
-
         const used = new Set(active.map((lease) => lease.leaseKey));
-        const slot = Array.from({ length: PROCESSING_GLOBAL_CONCURRENCY }, (_, index) => `${PROCESSING_LEASE_PREFIX}:${index}`)
+        const slot = Array.from({ length: capacity.global }, (_, index) => `${prefix}:${index}`)
           .find((key) => !used.has(key));
         if (!slot) return { acquired: false };
         const leaseToken = crypto.randomUUID();
@@ -220,23 +214,49 @@ export class CloudflareKnowledgeIngestExecutor {
     }
   }
 
-  async _releaseProcessingLease(job) {
+  async _waitForProcessingLease(job, stage) {
+    while (true) {
+      const lease = await this._claimProcessingLease(job, stage);
+      if (lease.acquired) return lease;
+      await new Promise((resolve) => {
+        const wake = () => { clearTimeout(timer); stageWaiters.delete(wake); resolve(); };
+        const timer = setTimeout(wake, 2_000); // crash/restart safety fallback
+        stageWaiters.add(wake);
+      });
+      const current = await this._job({
+        jobId: job.id, orgId: job.orgId, userId: job.userId,
+        processingVersion: job.processingVersion,
+      });
+      if (current.status === 'cancelled') throw Object.assign(new Error('Upload was cancelled.'), { code: 'UPLOAD_CANCELLED', retryable: false });
+    }
+  }
+
+  async _releaseProcessingLease(job, stage = null) {
     if (!this.prisma?.knowledgeIngestLease) return;
+    const prefix = stage ? `${PROCESSING_LEASE_PREFIX}:${stage}:` : `${PROCESSING_LEASE_PREFIX}:`;
     await this.prisma.knowledgeIngestLease.deleteMany({
       where: {
-        leaseKey: { startsWith: `${PROCESSING_LEASE_PREFIX}:` },
+        leaseKey: { startsWith: prefix },
         jobId: job.id, processingVersion: job.processingVersion,
       },
     }).catch(() => null);
+    for (const wake of [...stageWaiters]) wake();
   }
 
   async _materialize(job) {
-    const run = await this.steps.run({
+    const isImage = job.mediaKind === 'image' || job.metadata?.media_kind === 'image';
+    const durableMetadata = isImage
+      ? { ...(job.metadata || {}), media_kind: 'image', ingest_mode: 'both' }
+      : (job.metadata || {});
+    let run;
+    try {
+      run = await this.steps.run({
       jobId: job.id, processingVersion: job.processingVersion, stageKey: 'materialize',
       input: { checksum: job.checksum, sourceObjectKey: job.sourceObjectKey, ingestMode: job.ingestMode },
     }, async () => {
+      await this._waitForProcessingLease(job, 'extract');
       await this.validateJob?.({
-        trackerJobId: job.id, userId: job.userId, orgId: job.orgId, metadata: job.metadata || {},
+        trackerJobId: job.id, userId: job.userId, orgId: job.orgId, metadata: durableMetadata,
       });
       const progressWrites = [];
       const onProgress = (frame = {}) => {
@@ -259,9 +279,11 @@ export class CloudflareKnowledgeIngestExecutor {
           return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
         });
         result = promoted.receipt.outputRefs;
+        await this._releaseProcessingLease(job, 'extract');
       } else {
         const evidenceStage = await this.steps.run({
-          jobId: job.id, processingVersion: job.processingVersion, stageKey: 'materialize_evidence',
+          jobId: job.id, processingVersion: job.processingVersion,
+          stageKey: isImage ? 'materialize_image' : 'materialize_evidence',
           input: { checksum: job.checksum, sourceObjectKey: job.sourceObjectKey, sourceObjectEtag: job.sourceObjectEtag },
         }, async () => {
           const fileBuffer = await this.objectClient.getObject(job.sourceObjectKey, {
@@ -278,17 +300,22 @@ export class CloudflareKnowledgeIngestExecutor {
             contentType: job.contentType, fileBuffer,
             // Real checkpoint boundary: document/evidence/vector persistence is
             // completed first. Promotion later reuses those stored segments.
-            metadata: job.metadata?.media_kind === 'image'
-              ? (job.metadata || {})
-              : { ...(job.metadata || {}), ingest_mode: 'evidence' },
+            metadata: isImage
+              ? durableMetadata
+              : { ...durableMetadata, ingest_mode: 'evidence' },
             onProgress,
           });
           requireCompleteEvidenceEmbedding(value);
           return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
         });
         const evidence = evidenceStage.receipt.outputRefs;
+        // Extraction, parsing and embedding capacity is released as soon as
+        // durable evidence exists. The next document starts immediately while
+        // this one proceeds through memory generation on an independent pool.
+        await this._releaseProcessingLease(job, 'extract');
         result = evidence;
-        if (job.ingestMode === 'both' && job.metadata?.media_kind !== 'image') {
+        if (job.ingestMode === 'both' && !isImage) {
+          await this._waitForProcessingLease(job, 'promote');
           const promotionStage = await this.steps.run({
             jobId: job.id, processingVersion: job.processingVersion, stageKey: 'promote_memories',
             input: { documentId: evidence.documentId, evidenceReceipt: evidenceStage.receipt.id },
@@ -306,6 +333,7 @@ export class CloudflareKnowledgeIngestExecutor {
             segmentCount: evidence.segmentCount,
             coverage: { ...evidence.coverage, ...promotionStage.receipt.outputRefs.coverage },
           };
+          await this._releaseProcessingLease(job, 'promote');
         }
       }
       await Promise.allSettled(progressWrites);
@@ -316,7 +344,14 @@ export class CloudflareKnowledgeIngestExecutor {
       }
       requireCompleteEvidenceEmbedding(result);
       return { outputRefs: terminalResult(result), coverage: result.coverage || {} };
-    });
+      });
+    } catch (error) {
+      // A parser/provider failure must never pin either capacity pool until the
+      // lease TTL. Checkpoint replay remains durable; capacity is immediately
+      // returned for another document.
+      await this._releaseProcessingLease(job);
+      throw error;
+    }
     return {
       ok: true, stage: 'materialize', reused: run.reused, receipt_id: run.receipt.id,
       result: run.receipt.outputRefs,
@@ -324,6 +359,7 @@ export class CloudflareKnowledgeIngestExecutor {
   }
 
   async _reconcile(job) {
+    const isImage = job.mediaKind === 'image' || job.metadata?.media_kind === 'image';
     const materialized = await this.steps.get({
       jobId: job.id, processingVersion: job.processingVersion, stageKey: 'materialize', shardKey: 'root',
     });
@@ -335,11 +371,22 @@ export class CloudflareKnowledgeIngestExecutor {
       jobId: job.id, processingVersion: job.processingVersion, stageKey: 'reconcile',
       input: { materializeReceipt: materialized.id, documentId: result.documentId },
     }, async () => {
-      if (!result.documentId || Number(result.segmentCount || 0) <= 0) {
+      if (!result.documentId || (isImage
+        ? Number(result.promotedCount || 0) <= 0
+        : Number(result.segmentCount || 0) <= 0)) {
         throw Object.assign(new Error('Persisted evidence coverage is incomplete.'), { code: 'EVIDENCE_COVERAGE_INCOMPLETE', retryable: true });
       }
       const remoteStorage = await this.isRemoteOrg(job.orgId);
-      if (this.prisma?.knowledgeDocument && !remoteStorage) {
+      if (isImage && this.prisma?.memory && !remoteStorage) {
+        const memory = await this.prisma.memory.findFirst({
+          where: { id: result.documentId, orgId: job.orgId, deletedAt: null }, select: { id: true },
+        }).catch(() => null);
+        if (!memory) {
+          throw Object.assign(new Error('Persisted image memory reconciliation failed.'), {
+            code: 'IMAGE_MEMORY_RECONCILIATION_FAILED', retryable: true,
+          });
+        }
+      } else if (!isImage && this.prisma?.knowledgeDocument && !remoteStorage) {
         const document = await this.prisma.knowledgeDocument.findFirst({
           where: { id: result.documentId, orgId: job.orgId },
           select: { id: true, _count: { select: { segments: true, memoryLinks: true } } },

@@ -2110,23 +2110,23 @@ if (process.env.DOCLING_URL) {
             // are dropped. Vision reads chart and diagram content a text extractor
             // cannot see at any setting, and it is fast and already proven here
             // (3-10s on real branding PDFs). KB_FIGURE_RICH_TO_VISION=false reverts.
-            const _visionWanted = fast.isImageHeavy
-              || fast.isTextLayerCorrupt
-              || (fast.isFigureRich
-                  && String(process.env.KB_FIGURE_RICH_TO_VISION ?? 'true').toLowerCase() !== 'false');
+            // Whole-document vision is reserved for scans/corrupt text layers.
+            // Figure-rich text PDFs keep their fast text layer and selectively
+            // enrich only pages containing substantial images below.
+            const _visionWanted = fast.isImageHeavy || fast.isTextLayerCorrupt;
             if (_visionWanted) {
               if (fast.isTextLayerCorrupt) {
                 console.log(`[docling-adapter] corrupt PDF text layer ${filename} `
                   + `(short=${Math.round(fast.textQuality.shortRatio * 100)}% `
                   + `single=${Math.round(fast.textQuality.singleRatio * 100)}%) → vision OCR`);
-              } else if (fast.isFigureRich && !fast.isImageHeavy) {
-                console.log(`[docling-adapter] figure-rich ${filename} (${Math.round(fast.avgPerPage)} chars/page over `
-                  + `${fast.pages}p) → vision for figure content`);
               }
               const { parsePdfWithGroqVision, visionProviderAvailable } = await import('./knowledge/enterprise/groq-vision-parser.js');
               if (!visionProviderAvailable()) throw new Error('No direct vision key or Cloudflare AI Gateway BYOK alias is configured');
               const vision = await parsePdfWithGroqVision(tempPath);
-              if (!vision.error && vision.text.length > 200) {
+              if (vision.text.length > 200) {
+                if (vision.failedPages?.length) {
+                  console.warn(`[docling-adapter] whole-document vision preserved ${vision.pages} pages; failed_pages=${vision.failedPages.length}`);
+                }
                 if (KB_INGEST_VERBOSE) console.log(`[docling-adapter] tier=groq-vision file=${filename} smart=${smart} pages=${vision.pages} chars=${vision.text.length} ms=${Date.now() - tParse}`);
                 return {
                   text: vision.text, markdown: vision.markdown, json: null,
@@ -2135,6 +2135,20 @@ if (process.env.DOCLING_URL) {
                 };
               }
               console.warn(`[docling-adapter] groq-vision failed: ${vision.error || 'empty'} — falling back to Docling`);
+            }
+            let visualEnrichment = null;
+            if (fast.isFigureRich && !fast.isImageHeavy && !fast.isTextLayerCorrupt
+              && String(process.env.KB_FIGURE_RICH_TO_VISION ?? 'true').toLowerCase() !== 'false') {
+              const { detectVisualPdfPages, parsePdfWithGroqVision, visionProviderAvailable } = await import('./knowledge/enterprise/groq-vision-parser.js');
+              if (visionProviderAvailable()) {
+                const visualPages = await detectVisualPdfPages(tempPath);
+                if (visualPages.length) {
+                  console.log(`[docling-adapter] figure-rich ${filename} → selective vision pages=${visualPages.join(',')}`);
+                  const vision = await parsePdfWithGroqVision(tempPath, { pageNumbers: visualPages });
+                  if (vision.text) visualEnrichment = vision;
+                  if (vision.failedPages?.length) console.warn(`[docling-adapter] selective vision partial failures=${vision.failedPages.length}`);
+                }
+              }
             }
             // ── Tier 1: TEXT-NATIVE PDF → fast pdf-parse, no OCR ──────────────────
             // Was `if (!smart && ...)`. Uploads always pass smart:true (FORMAT_PROFILES
@@ -2191,6 +2205,13 @@ if (process.env.DOCLING_URL) {
                     }
                   }
                 }
+                if (visualEnrichment?.text) {
+                  for (const block of splitFastPdfPageBlocks(visualEnrichment.text.replace(/<!-- page (\d+) -->/g, '-- $1 of ' + fast.pages + ' --'))) {
+                    for (const piece of chunkTextAtSemanticBoundaries(block.text, CHUNK_TARGET, CHUNK_OVERLAP)) {
+                      hybridChunks.push({ text: piece, headings: [`Visual content — page ${block.page}`], page: block.page });
+                    }
+                  }
+                }
               } catch (chkErr) {
                 console.warn(`[fast-pdf] page-chunk failed: ${chkErr.message}`);
               }
@@ -2203,7 +2224,7 @@ if (process.env.DOCLING_URL) {
               // document produced 240 SEGMENTS AND ZERO MEMORIES. Letter-spaced text also
               // defeats both embeddings and lexical matching, so recall could not reach it
               // either. The fix existed; it was simply not wired to this tier.
-              const _ft = collapseLetterSpacing(fast.text || '');
+              const _ft = collapseLetterSpacing(`${fast.text || ''}${visualEnrichment?.text ? `\n\n${visualEnrichment.text}` : ''}`);
               return {
                 // fast-pdf — flat text layer, no structure
                 text: _ft, markdown: null, json: null,

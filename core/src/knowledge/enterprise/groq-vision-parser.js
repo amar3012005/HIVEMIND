@@ -61,30 +61,72 @@ export async function withPdfRenderSlot(task) {
   }
 }
 
-async function renderPdfPages(pdfPath, workDir) {
+async function renderPdfPages(pdfPath, workDir, pageNumbers = null) {
   let rendered = false;
   try {
-    await execFileAsync('pdftoppm', [
-      '-r', String(PAGE_DENSITY), '-png', '-f', '1', '-l', String(MAX_PAGES),
-      pdfPath, path.join(workDir, 'page'),
-    ], { timeout: RENDER_TIMEOUT_MS, maxBuffer: 1 << 20 });
+    if (Array.isArray(pageNumbers) && pageNumbers.length) {
+      for (const page of pageNumbers) {
+        await execFileAsync('pdftoppm', [
+          '-r', String(PAGE_DENSITY), '-png', '-singlefile', '-f', String(page), '-l', String(page),
+          pdfPath, path.join(workDir, `page-${page}`),
+        ], { timeout: RENDER_TIMEOUT_MS, maxBuffer: 1 << 20 });
+      }
+    } else {
+      await execFileAsync('pdftoppm', [
+        '-r', String(PAGE_DENSITY), '-png', '-f', '1', '-l', String(MAX_PAGES),
+        pdfPath, path.join(workDir, 'page'),
+      ], { timeout: RENDER_TIMEOUT_MS, maxBuffer: 1 << 20 });
+    }
     rendered = true;
   } catch (popplerErr) {
     console.warn(`[groq-vision] pdftoppm failed (${popplerErr.message}) — falling back to ImageMagick`);
   }
   if (!rendered) {
     try {
-      await execFileAsync('convert', [
-        '-limit', 'memory', '1GiB', '-limit', 'map', '2GiB', '-limit', 'disk', '8GiB',
-        '-density', PAGE_DENSITY, '-quality', '85', '-trim',
-        pdfPath,
-        path.join(workDir, 'page-%03d.png'),
-      ], { timeout: RENDER_TIMEOUT_MS, maxBuffer: 1 << 20 });
+      if (Array.isArray(pageNumbers) && pageNumbers.length) {
+        for (const page of pageNumbers) {
+          await execFileAsync('convert', [
+            '-limit', 'memory', '1GiB', '-limit', 'map', '2GiB', '-limit', 'disk', '8GiB',
+            '-density', PAGE_DENSITY, '-quality', '85', '-trim',
+            `${pdfPath}[${page - 1}]`, path.join(workDir, `page-${page}.png`),
+          ], { timeout: RENDER_TIMEOUT_MS, maxBuffer: 1 << 20 });
+        }
+      } else {
+        await execFileAsync('convert', [
+          '-limit', 'memory', '1GiB', '-limit', 'map', '2GiB', '-limit', 'disk', '8GiB',
+          '-density', PAGE_DENSITY, '-quality', '85', '-trim',
+          pdfPath,
+          path.join(workDir, 'page-%03d.png'),
+        ], { timeout: RENDER_TIMEOUT_MS, maxBuffer: 1 << 20 });
+      }
     } catch (renderErr) {
       return { error: `Render failed: ${renderErr.message}` };
     }
   }
   return { error: null };
+}
+
+// Use Poppler's object inventory to select only pages that contain a
+// substantial raster image. Tiny logos/icons are ignored. This lets a PDF with
+// a healthy text layer keep its fast lexical extraction while diagrams and
+// scanned inserts receive vision enrichment page-by-page.
+export async function detectVisualPdfPages(pdfPath) {
+  try {
+    const { stdout } = await execFileAsync('pdfimages', ['-list', pdfPath], {
+      timeout: 30_000, maxBuffer: 4 << 20,
+    });
+    const pages = new Set();
+    for (const line of String(stdout || '').split(/\r?\n/)) {
+      const fields = line.trim().split(/\s+/);
+      const page = Number(fields[0]);
+      const width = Number(fields[3]);
+      const height = Number(fields[4]);
+      if (Number.isInteger(page) && page > 0 && width * height >= 250_000) pages.add(page);
+    }
+    return [...pages].sort((a, b) => a - b).slice(0, MAX_PAGES);
+  } catch {
+    return [];
+  }
 }
 
 const SYSTEM_PROMPT = `You are an OCR + layout extractor. Read the entire page image and output clean Markdown:
@@ -111,7 +153,7 @@ TRANSCRIBE, DO NOT AUTHOR. You are converting an image to text, not answering ab
  * @param {string} pdfPath
  * @returns {Promise<{text: string, pages: number, markdown: string, error: string|null}>}
  */
-export async function parsePdfWithGroqVision(pdfPath) {
+export async function parsePdfWithGroqVision(pdfPath, { pageNumbers = null } = {}) {
   if (!visionProviderAvailable()) return { text: '', pages: 0, markdown: '', error: 'No vision provider or AI Gateway BYOK alias set' };
   const workDir = path.join(os.tmpdir(), `vision-${crypto.randomUUID()}`);
   fs.mkdirSync(workDir, { recursive: true });
@@ -134,7 +176,10 @@ export async function parsePdfWithGroqVision(pdfPath) {
     // BullMQ's job-lock renewal. Observed together in one upload batch: the render error above and
     // four `[kb-queue] worker error: could not renew lock for job …`. A lost lock means the job is
     // considered stalled and re-run, so a blocking render does not just delay work, it duplicates it.
-    const render = await withPdfRenderSlot(() => renderPdfPages(pdfPath, workDir));
+    const selectedPages = Array.isArray(pageNumbers) && pageNumbers.length
+      ? [...new Set(pageNumbers.map(Number).filter((page) => page > 0))].sort((a, b) => a - b)
+      : null;
+    const render = await withPdfRenderSlot(() => renderPdfPages(pdfPath, workDir, selectedPages));
     if (render.error) return { text: '', pages: 0, markdown: '', error: render.error };
     const pages = fs.readdirSync(workDir)
       .filter(f => f.endsWith('.png'))
@@ -143,6 +188,7 @@ export async function parsePdfWithGroqVision(pdfPath) {
 
     const totalRendered = pages.length;
     const usePages = pages.slice(0, MAX_PAGES);
+    const actualPageNumbers = selectedPages || usePages.map((_, index) => index + 1);
     const truncated = totalRendered > MAX_PAGES;
     if (truncated) {
       console.warn(`[groq-vision] truncating to ${MAX_PAGES} of ${totalRendered} pages (override via GROQ_VISION_MAX_PAGES)`);
@@ -158,32 +204,30 @@ export async function parsePdfWithGroqVision(pdfPath) {
         if (i >= usePages.length) return;
         const fp = path.join(workDir, usePages[i]);
         try {
-          results[i] = await visionOcrPage(fp, i + 1);
+          results[i] = await visionOcrPage(fp, actualPageNumbers[i] || i + 1);
         } catch (err) {
           // Provider failures are control-plane data, never document content.
           // The old HTML comment was persisted, embedded, and returned by recall.
-          failures.push({ page: i + 1, message: String(err?.message || err).slice(0, 240) });
+          failures.push({ page: actualPageNumbers[i] || i + 1, message: String(err?.message || err).slice(0, 240) });
         }
       }
     });
     await Promise.all(workers);
 
-    if (failures.length) {
-      const first = failures.sort((a, b) => a.page - b.page)[0];
-      return {
-        text: '', markdown: '', pages: 0, totalPages: totalRendered, truncated,
-        error: `Vision OCR failed for ${failures.length}/${usePages.length} pages; first failure on page ${first.page}: ${first.message}`,
-      };
-    }
-
-    const markdown = results.map((r, i) => `\n\n<!-- page ${i + 1} -->\n\n${r || ''}`).join('').trim();
+    const markdown = results
+      .map((r, i) => r ? `\n\n<!-- page ${actualPageNumbers[i] || i + 1} -->\n\n${r}` : '')
+      .join('').trim();
+    const failureMessage = failures.length
+      ? `Vision OCR failed for ${failures.length}/${usePages.length} selected pages; successful pages were preserved.`
+      : null;
     return {
       text: markdown,
       markdown,
-      pages: usePages.length,
+      pages: selectedPages ? results.filter(Boolean).length : totalRendered,
       totalPages: totalRendered,
       truncated,
-      error: truncated ? `Truncated to ${MAX_PAGES} of ${totalRendered} pages — raise GROQ_VISION_MAX_PAGES to ingest more.` : null,
+      failedPages: failures,
+      error: failureMessage || (truncated ? `Truncated to ${MAX_PAGES} of ${totalRendered} pages — raise GROQ_VISION_MAX_PAGES to ingest more.` : null),
     };
   } finally {
     // Cleanup tmp dir

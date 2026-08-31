@@ -1319,6 +1319,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // blocks (relation/aggregate/timeline/profile) with one predicate-routed loop.
   let aggregateResult = null;
   let profileContext = '';
+  let projectsResult = null;
   let temporalCoverage = null;
   for (const cap of OP_STAGE) {
     if (!cap.predicate(plan)) continue;
@@ -1329,6 +1330,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
     else if (cap.scalar === 'aggregateResult') aggregateResult = patch?.aggregateResult ?? aggregateResult;
     else if (cap.scalar === 'profileContext') profileContext = patch?.profileContext || profileContext;
+    else if (cap.scalar === 'projectsResult') projectsResult = patch?.projectsResult ?? projectsResult;
     else if (cap.scalar === 'temporalCoverage') temporalCoverage = patch?.temporalCoverage ?? temporalCoverage;
   }
 
@@ -1453,6 +1455,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     ranked_candidates: rankedCandidates,
     recall_telemetry: recallTelemetry,
     profile_context: profileContext,
+    projects: projectsResult,
     aggregate: aggregateResult,
     relation: relationResult,
     coverage: {
@@ -4695,7 +4698,11 @@ export async function runReactAgentV2({
       rejected_claims: answer.rejected_claims,
       grounded:      answer.grounded,
       confidence:    answer.confidence,
-      gaps:          answer.gaps,
+      // A server-authorized empty project list is a complete negative result,
+      // not a missing-context gap invented by synthesis.
+      gaps:          plan.operation === 'projects' && evidence.projects?.count === 0
+        ? []
+        : answer.gaps,
       usage:         sumUsage(usages),
       trace:         finalizeTrace(trace, usages),
       assistant_name: assistantName || null,

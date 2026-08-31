@@ -1913,3 +1913,26 @@ git diff --check: passed (line-ending warnings only)
   permanent integration worktree was not available for a shared-stack rebuild.
 - No migration, Cloudflare resource mutation, Flagship change, shared-container
   rebuild, `singulance-local` merge, or production action occurred.
+
+## 2026-08-31 UTC — Meeting Notes v2 enabled for every local identity
+
+- Created Flagship string flag `meeting_lifecycle_v2` with variations
+  `off|shadow|consent|workflow|full`, safe default `off`, and exactly one rule:
+  `environment equals local -> full`. Arbitrary local evaluation returned
+  `full / TARGETING_MATCH`; arbitrary production evaluation returned
+  `off / DEFAULT`.
+- Provisioned only isolated local resources:
+  `hivemind-meeting-lifecycle-local`,
+  `hivemind-meeting-finalization-local`, audio/email Queues and DLQs, and
+  `hivemind-meeting-audio-local-eu` with EU jurisdiction. Latest Worker version
+  after secret installation: `6a4eecf6-00b6-44bb-b13b-28dbd3000eee`.
+- Installed generated Worker service and invitation-encryption secrets without
+  printing or committing them. Authenticated live `/mode` returned
+  `local_worker_mode=full`.
+- Updated the session branch's local Compose defaults to enable admission and
+  publication. `docker inspect hivemind-api` returned no Meeting v2 environment
+  gates, proving the already-running shared Core has not loaded them.
+- Did not merge or recreate the shared stack because the permanent integration
+  worktree contained unrelated edits in `core/data/mcp-connectors.json` and a
+  dirty `docker-compose.local-stack.yml` entry. Those files were not cleaned,
+  stashed, overwritten or committed. Production remained unchanged.

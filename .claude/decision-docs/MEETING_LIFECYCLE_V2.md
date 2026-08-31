@@ -113,5 +113,17 @@ must be independently generated and at least 32 characters.
    shared preview there, and record runtime evidence before updating
    `singulance-local`.
 
-Until these gates pass, the correct Flagship value for every environment is
-`off`.
+## Local full-mode activation — 2026-08-31
+
+The operator explicitly enabled the candidate for every local identity. The
+Flagship default remains `off`; one targeting rule serves `full` only when
+`environment=local`. Production and contexts without the local attribute still
+resolve to `off`.
+
+The isolated local Worker, Workflow, audio/email Queues and DLQs, EU R2 bucket,
+and Worker service secret are provisioned. Live Worker `/mode` evaluation
+returned `full`. The shared local Core container was not recreated because the
+permanent integration worktree contained unrelated uncommitted work. Therefore
+this is a Cloudflare-local activation and configured next-start default, not a
+claim that the current shared browser stack has already loaded the new Core
+code or environment.

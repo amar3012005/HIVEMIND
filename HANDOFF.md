@@ -9,7 +9,9 @@
 - Frontend worktree branch: `codex/meeting-lifecycle-v2-ui`
 - Pushed frontend commit: `b3b63e12369cbb52aa4642eceb2c10da9f5a4ee2`
 - Production was not touched.
-- Cloudflare resources and Flagship were not mutated.
+- Subsequent local-only rollout provisioned the `-local` Worker, Workflow,
+  Queues, DLQs, EU R2 bucket and Flagship local targeting rule. Production was
+  not mutated.
 
 ## Completed and verified
 
@@ -71,6 +73,11 @@ schema is already in `core/src/vector/mneme/embedded-agent.mjs`; only functional
 v2 parity is missing. Core's deliberate fail-closed guard is at
 `core/src/server.js` near the meeting session admission block containing
 `remote_meeting_v2_agent_upgrade_required`.
+
+Flagship now returns `full` for every `environment=local` context and `off` for
+production. The deployed local Worker also returns `full` from authenticated
+`/mode`. The running shared Core container has not loaded Meeting v2 code or
+environment variables because the permanent integration worktree remains dirty.
 
 ## Unmet acceptance criteria
 

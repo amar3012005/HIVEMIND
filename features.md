@@ -475,8 +475,9 @@ verification, and its independent rollback control.
 ## feature-20260831T123500Z — Durable GDPR-ready Meeting Notes v2 (local candidate)
 
 - Multivariate Flagship flag `meeting_lifecycle_v2` implements latched
-  `off`, `shadow`, `consent`, `workflow`, and `full` modes and remains default
-  `off` in every environment.
+  `off`, `shadow`, `consent`, `workflow`, and `full` modes. Its safe default is
+  `off`; an environment-scoped rule now serves `full` to every local identity.
+  Production identities continue to receive `off`.
 - Local candidate adds versioned privacy policy/notice data, participant-level
   authorization and purpose receipts, durable PostgreSQL checkpoints/outbox,
   identifier-only Cloudflare Queues and Workflow, explicit EU-jurisdiction R2,
@@ -490,3 +491,17 @@ verification, and its independent rollback control.
   and an optimized frontend build. This is not yet locally accepted because
   tenant-agent v2 parity, the full rights/deletion executor, and shared-stack
   runtime failure injection remain outstanding. Production was untouched.
+
+### Local full-mode infrastructure update — 2026-08-31
+
+- Flagship evaluation returned `full / TARGETING_MATCH` for an arbitrary local
+  org/user and `off / DEFAULT` for an arbitrary production org/user.
+- Deployed local Worker version `6a4eecf6-00b6-44bb-b13b-28dbd3000eee`,
+  Workflow `hivemind-meeting-finalization-local`, audio/email Queues and DLQs,
+  and EU-jurisdiction R2 bucket `hivemind-meeting-audio-local-eu`.
+- The authenticated deployed Worker `/mode` route returned `full`. Generated
+  service and invitation secrets were installed without disclosure.
+- Local Compose defaults now enable v2 admission and publication. The currently
+  running shared Core container was not recreated because the permanent local
+  integration worktree contains unrelated uncommitted changes; those changes
+  were preserved. No production resource or production flag rule changed.

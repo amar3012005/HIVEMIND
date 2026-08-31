@@ -1586,3 +1586,15 @@ slides that find no unique anchor get a page instead of `null`.
   removes the empty public table and creates the lease table and indexes in the
   authoritative `hivemind` schema. The first candidate is not an accepted
   release and must not be described as one.
+
+### Failed second canary and rollback
+
+- The corrected schema canary acquired and renewed its fenced lease. Real
+  `materialize_evidence` and `promote_memories` receipts succeeded, proving
+  restartable stage separation. Reconciliation then hit the existing database
+  enum constraint because stored promotion returned the new internal string
+  `memory_generation_yield_zero`.
+- The flag was restored off and Core/Worker rollback began before acceptance.
+  The fix maps zero-yield promotion to the already documented and permitted
+  `extraction_yield_zero` value, preserving the existing API/status contract
+  instead of widening it with another public enum.

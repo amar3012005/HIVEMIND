@@ -155,6 +155,12 @@ test('canonical generation prompt stays source-grounded and metadata-aware', () 
   }
 });
 
+test('stored promotion preserves the existing evidence-only reason contract', () => {
+  const source = readFileSync(new URL('../../src/knowledge/document-first-ingestion.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /memory_generation_yield_zero/);
+  assert.match(source, /evidenceOnlyReason: memories\.length \? null : 'extraction_yield_zero'/);
+});
+
 test('entity and relationship prompt keeps graph-memory semantic contracts', () => {
   const source = readFileSync(new URL('../../src/memory/graph-engine.js', import.meta.url), 'utf8');
   for (const contract of [

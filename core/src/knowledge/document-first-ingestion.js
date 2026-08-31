@@ -5390,7 +5390,9 @@ Every item must include a non-empty content field and one or more valid support_
       promotedCount: memories.length,
       promotedMemoryIds: memories.map((memory) => memory.id),
       pages: Number(document.pageCount || 1),
-      evidenceOnlyReason: memories.length ? null : 'memory_generation_yield_zero',
+      // Keep the established public/status enum and database constraint. A
+      // zero-yield promotion is an extraction yield of zero, not a new wire value.
+      evidenceOnlyReason: memories.length ? null : 'extraction_yield_zero',
       promotionMode: 'from_existing_evidence',
     };
   }

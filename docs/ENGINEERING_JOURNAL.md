@@ -1500,3 +1500,25 @@ slides that find no unique anchor get a page instead of `null`.
   retained exact images, start times, and zero restart counts. API and homepage
   returned 200; the 20-minute critical log scan returned zero matches. No build,
   migration, restart, container replacement, or Worker deployment occurred.
+
+## 2026-08-31 UTC — Invitation lifecycle and My Company preview accepted
+
+- Accepted invitation release `daddc0cbee911964e9a1adb99d1ec144e87a2958`
+  with frontend `0309ac2f2ad8446e1b4a84d9d142e9d08b129b00`. Draft creation is email-free,
+  delivery requires explicit Send, public invitation URLs are canonical, and
+  first-time workspaces enter My Company. A synthetic draft-only canary was
+  revoked without a provider send.
+- Accepted preview release `afd9786705f87b851482004e3f79e8df748671b6`
+  with frontend `bd777304ecfd1f1f4e61a990c846c887ee225268`. Playwright-first capture,
+  bounded fallback, eager image loading, and awakening-copy spacing passed
+  focused tests and the optimized build.
+- Production proof: authenticated My Company returned an existing
+  Playwright-backed screenshot; the deployed 12-second/150-ms renderer probe
+  produced a valid image; served chunks contained the new loading/layout
+  markers; all affected containers were healthy at exact revisions; public
+  checks were 200 and fresh critical logs clean. No customer side effect was
+  exercised.
+- Release manifests and rollback versions are recorded in
+  `docs/PRODUCTION_RELEASE.md`. Agent Memory release records:
+  `d21c3d7c-d8c7-42b6-adb0-a24a5cae0451` and
+  `db045133-a2ae-4c28-a04e-41c0000d33a7`.

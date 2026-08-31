@@ -1008,3 +1008,40 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   `c8461f69-d815-4ea5-bba3-82fc644a3f3c`; exact prior Core SHA
   `7dcc5f15687a8088fb44d6938d5d4b1a9305a85f` via the canonical service-scoped
   release runner. Do not use the retired quick-deploy rollback shortcut.
+
+## daddc0cb — canonical invitation routing and explicit delivery
+
+- Parent `daddc0cbee911964e9a1adb99d1ec144e87a2958`; frontend
+  `0309ac2f2ad8446e1b4a84d9d142e9d08b129b00`; migrations: none.
+- Core, Control Plane, and Employees were healthy on exact immutable
+  `sha-daddc0cb` images. Cloudflare `hivemind-web` version
+  `71eb6303-181c-4b49-a090-1a87dbd8e24e` served the exact frontend.
+- Acceptance proved draft creation sent nothing, preview links used
+  `next.singulancelabs.com`, credentials were generated only by explicit Send,
+  unsupported dispatch returned 404, and a synthetic `.invalid` draft was
+  revoked without invoking Send. Public routes were 200 and critical logs clean.
+- Rollback: exact prior backend SHA `e5dd66c2`; frontend Worker version
+  `97c462f1-0402-445f-b9b9-b5d77ddc7d52`.
+
+## afd97867 — Playwright-first My Company preview
+
+- Parent `afd9786705f87b851482004e3f79e8df748671b6`; frontend
+  `bd777304ecfd1f1f4e61a990c846c887ee225268`; migrations: none; manifest
+  `/root/releases/manifests/afd97867/20260831T175758Z/RELEASE_MANIFEST.json`.
+- Playwright is the primary asynchronous website-preview renderer with a
+  12-second timeout and 150-ms settle; Firecrawl is fallback only. The visible
+  My Company preview loads eagerly at high priority. Awakening architecture
+  copy is offset below the wordmark embedded in the background artwork.
+- Runtime digests: Core
+  `sha256:9317cd0df9a860cd2af58e0488366d75ace62ed5efd6bc1db84a460c7dcd4109`,
+  Control `sha256:343063c99257dda78385eeb6600a5e9282e9f52f0dffd697001adf787fb0615d`,
+  Employees `sha256:bc8eb2b6d5def2a7f9bb1c12daa1a4bf5fef4fccbed8f104bc00e0103cb19d68`.
+  Cloudflare `hivemind-web` version
+  `a853f74f-207a-4bd1-bb07-f5505c339923` is active at 100%.
+- Acceptance: backend 2/2, frontend 2/2, optimized build, authenticated
+  read-only My Company 200 with `playwright-screenshot`, standalone deployed
+  Playwright capture returned a valid screenshot without Firecrawl, public
+  routes were 200, and fresh critical logs were zero. No customer writes or
+  onboarding runs were triggered.
+- Rollback: backend `daddc0cb`; frontend Worker version
+  `71eb6303-181c-4b49-a090-1a87dbd8e24e`.

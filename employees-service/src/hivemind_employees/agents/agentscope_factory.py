@@ -633,9 +633,21 @@ def build_react_agent(
                                       _make_count_hook(agent))
     except Exception as exc:  # noqa: BLE001
         log.warning("Failed to attach tool_call_counter hook: %s", exc)
+    selected_model = canonical_hyper_model(
+        employee_row.get("model") or "@cf/zai-org/glm-5.3-flash"
+    )
+    transport = (
+        "cloudflare-ai-gateway"
+        if selected_model.startswith(("@cf/", "workers-ai/@cf/"))
+        else "governed-provider-route"
+    )
+    # Log the effective governed model, never the stale model label retained
+    # on an older employee row.  The old diagnostic made GLM requests look as
+    # if they were still invoking Claude Haiku even though _resolve_model had
+    # already rewritten them onto Workers AI through AI Gateway.
     log.info(
-        "Built ReActAgent for employee=%s model=%s tools=%d",
-        name, employee_row.get("model"), len(enabled_tools),
+        "Built ReActAgent for employee=%s model=%s transport=%s tools=%d",
+        name, selected_model, transport, len(enabled_tools),
     )
     try:
         setattr(agent, "hivemind_persona_contract", persona_contract)

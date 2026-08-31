@@ -50,6 +50,7 @@ import { requireAdminSecret, requireSessionSecret } from './security/internal-au
 import { effectiveRoles, canUsePrivilegedAgent } from './auth/permissions.js';
 import { isOrganizationAdmin } from './workspace/access-policy.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
+import { resolvePublicFrontendBaseUrl } from './public-frontend-url.js';
 import { legacyPayloadToEnvelope } from './knowledge/canonical-ingest.js';
 import { getEntityLinkQueue } from './memory/entity-link-queue.js';
 import { canonicalKnowledgeMode, getCanonicalClaimsForMemory, materializeCanonicalKnowledge, prepareCanonicalProjection, verifyCanonicalProjectionSignature } from './memory/canonical-knowledge.js';
@@ -9524,7 +9525,7 @@ exit \$RC
         const callbackCode = url.searchParams.get('code');
         const callbackState = url.searchParams.get('state');
         const callbackError = url.searchParams.get('error');
-        const frontendUrl = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+        const frontendUrl = resolvePublicFrontendBaseUrl();
 
         if (callbackError) {
           res.writeHead(302, { Location: `${frontendUrl}/hivemind/app/connectors?error=${encodeURIComponent(callbackError)}` });
@@ -11984,7 +11985,7 @@ exit \$RC
           //   return jsonResponse(res, { error: 'Web Intelligence requires Pro plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
           // }
           if (pathname.includes('/swarm') && !orgPlan.features.agentSwarm) {
-            return jsonResponse(res, { error: 'Agent Swarm requires Scale plan or higher', upgrade_url: 'https://hivemind.davinciai.eu/hivemind/app/billing' }, 403);
+            return jsonResponse(res, { error: 'Agent Swarm requires Scale plan or higher', upgrade_url: `${resolvePublicFrontendBaseUrl()}/hivemind/app/billing` }, 403);
           }
           // Cognitive layer / dreaming — Scale and Enterprise only (capability
           // gate, not a meter; see features.cognitiveDreaming in plans.js). 402
@@ -12276,7 +12277,7 @@ exit \$RC
             Date.now() + 7 * 24 * 3600 * 1000,
           ));
 
-          const FRONTEND = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+          const FRONTEND = resolvePublicFrontendBaseUrl();
           const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true, name: true } });
           const inviteUrl = `${FRONTEND}/hivemind/join/${org?.slug || orgId}/${invite.token}`;
 
@@ -19019,7 +19020,7 @@ exit \$RC
               });
 
               // Build the public join URL (frontend-facing).
-              const FRONTEND = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+              const FRONTEND = resolvePublicFrontendBaseUrl();
               const joinPath = `/hivemind/join/${org?.slug || orgId}/${token}`;
               const inviteUrl = `${FRONTEND}${joinPath}`;
 
@@ -19151,7 +19152,7 @@ exit \$RC
               const teamById = Object.fromEntries(teamRows.map(t => [t.id, t]));
               const userById = Object.fromEntries(userRows.map(u => [u.id, u]));
 
-              const FRONTEND = process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu';
+              const FRONTEND = resolvePublicFrontendBaseUrl();
               const org = await prisma.organization.findUnique({ where: { id: orgId }, select: { slug: true } });
               const slug = org?.slug || orgId;
 

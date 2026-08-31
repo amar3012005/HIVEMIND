@@ -91,6 +91,7 @@ describe('EnterpriseInvitationService', () => {
       hostingLabel: 'Managed', hostingExplanation: 'Managed EU infrastructure.', invitationUrl: 'https://example.test/activate',
       accessCode: 'HM-EXAMPLE', expiresOn: '22 August 2026', welcomeMessage: 'Welcome aboard.',
       onboardingDays: 14, storageLabel: 'Managed hybrid company brain',
+      onboardingAllowance: '20,000 shared workspace credits per month',
       supportEmail: 'support@singulancelabs.com', privacyUrl: 'https://example.test/privacy', termsUrl: 'https://example.test/terms',
     });
     assert.match(rendered.html, /https:\/\/example\.test\/activate/);
@@ -98,6 +99,8 @@ describe('EnterpriseInvitationService', () => {
     assert.match(rendered.subject, /Example GmbH/);
     assert.match(rendered.html, /AI Operating System/);
     assert.match(rendered.text, /invitation already applied/);
+    assert.match(rendered.text, /20,000 shared workspace credits per month/);
+    assert.doesNotMatch(rendered.text, /unlimited pilot usage/i);
   });
 
   it('redeems only once with a finite onboarding grant and an explicit post-trial fallback', async () => {

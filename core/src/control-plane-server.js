@@ -125,6 +125,7 @@ import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrgani
 import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
 import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
+import { resolveInvitationBaseUrl, resolvePublicAppUrl, resolvePublicFrontendBaseUrl } from './public-frontend-url.js';
 import {
   deliverDayOneFirstMove,
   isAuthorizedDayOneRequest,
@@ -208,9 +209,10 @@ const defaultAllowedOrigins = (process.env.HIVEMIND_CONTROL_PLANE_ALLOWED_ORIGIN
     'http://127.0.0.1:5001'
   ]);
 
-const defaultFrontendBaseUrl = process.env.HIVEMIND_FRONTEND_URL
-  || defaultAllowedOrigins[0]
-  || 'https://hivemind.davinciai.eu';
+// Public navigation is a product decision, not a CORS side effect. Never infer
+// invitation/auth links from the first allowed origin, and retire the legacy
+// davinciai frontend even if an old production environment still supplies it.
+const defaultFrontendBaseUrl = resolvePublicFrontendBaseUrl();
 
 const CONFIG = {
   port: Number(process.env.CONTROL_PLANE_PORT || process.env.PORT || 3010),
@@ -3148,7 +3150,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   async function dispatchEnterpriseInvitation({ invitation, token, code = null }) {
-    const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+    const base = resolveInvitationBaseUrl();
     const activationUrl = `${base}/hivemind/invite?enterprise_invite=${encodeURIComponent(token)}`;
     const selfHosted = invitation.hostingMode === 'self_host';
     const storageLabels = {
@@ -3173,6 +3175,9 @@ const server = http.createServer(async (req, res) => {
         accessCode: code || 'Use the secure activation link above.',
         expiresOn: invitation.invitationExpiresAt.toLocaleDateString('en-GB', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }),
         onboardingDays: invitation.onboardingDays || 14,
+        onboardingAllowance: Number(invitation.onboardingLimits?.monthlyCredits) === -1
+          ? 'unlimited shared workspace credits during onboarding'
+          : `${Number(invitation.onboardingLimits?.monthlyCredits || 0).toLocaleString('en-US')} shared workspace credits per month`,
         storageLabel: storageLabels[invitation.storageMode] || 'Company brain infrastructure',
         welcomeMessage: invitation.welcomeMessage || 'Your HIVEMIND AI Operating System is ready to activate.',
         supportEmail: process.env.SYSTEM_EMAIL_SUPPORT || 'support@singulancelabs.com',
@@ -3210,6 +3215,9 @@ const server = http.createServer(async (req, res) => {
       storageLabel: ({ hybrid: 'Managed hybrid company brain', amr_embedded: 'Embedded .amr company brain', byod_amr: 'Self-hosted BYOD agent company brain' })[invitation.storageMode] || 'Company brain infrastructure',
       accessCode: accessCode || `Code ending ${invitation.accessCodeHint}`,
       onboardingDays: invitation.onboardingDays || 14,
+      onboardingAllowance: Number(invitation.onboardingLimits?.monthlyCredits) === -1
+        ? 'unlimited shared workspace credits during onboarding'
+        : `${Number(invitation.onboardingLimits?.monthlyCredits || 0).toLocaleString('en-US')} shared workspace credits per month`,
       welcomeMessage: invitation.welcomeMessage || 'Your HIVEMIND AI Operating System is ready to activate.',
     };
   }
@@ -3511,7 +3519,7 @@ const server = http.createServer(async (req, res) => {
     if (!getPlatformAdminSession(req)) return jsonResponse(res, { error: 'Unauthorized' }, 401);
     try {
       const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
-        appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
+        appUrl: resolvePublicAppUrl(),
       });
       const templateRendered = message.templateId === 'custom' ? null : renderTemplate(message.templateId, message.vars);
       const rendered = message.templateId === 'custom'
@@ -3527,7 +3535,7 @@ const server = http.createServer(async (req, res) => {
     if (!operator) return jsonResponse(res, { error: 'Unauthorized' }, 401);
     try {
       const message = normalizeAdminEmailMessage(await parseBody(req).catch(() => ({})), {
-        appUrl: `${(process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '')}/hivemind/app`,
+        appUrl: resolvePublicAppUrl(),
       });
       const templateRendered = message.templateId === 'custom' ? null : renderTemplate(message.templateId, message.vars);
       const rendered = message.templateId === 'custom'
@@ -3650,7 +3658,9 @@ const server = http.createServer(async (req, res) => {
       // Creation never sends mail. Operators must inspect the server-rendered
       // preview and explicitly confirm the `send` action. Ignore legacy
       // `send_email` payloads so an old frontend cannot bypass that review.
-      return jsonResponse(res, { invitation: created.invitation, code: created.plaintextCode }, 201);
+      // The first explicit Send rotates both credentials. Do not expose a
+      // draft recovery code that will be invalid by the time mail is sent.
+      return jsonResponse(res, { invitation: created.invitation }, 201);
     } catch (error) {
       return jsonResponse(res, { error: error.message }, 400);
     }
@@ -3670,7 +3680,7 @@ const server = http.createServer(async (req, res) => {
       ttlSeconds: validityDays * 24 * 60 * 60,
     });
     if (!token) return jsonResponse(res, { error: 'Invitation is unavailable', code: 'invitation_unavailable' }, 503);
-    const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+    const base = resolveInvitationBaseUrl();
     const invitationUrl = `${base}/hivemind/invite?personal_invite=${encodeURIComponent(token)}`;
     await audit({ eventType: 'commercial.personal_invitation_link_created', eventCategory: 'billing', action: 'create',
       resourceType: 'personal_invitation_link', metadata: { operator: operator.operator, session_id: operator.sessionId, validity_days: validityDays },
@@ -3732,7 +3742,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (!['approved', 'invited'].includes(application.status)) throw new Error('Application must be approved first');
-      const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+      const base = resolveInvitationBaseUrl();
       if (application.accountType === 'personal') {
         const previewUrl = `${base}/hivemind/invite?personal_invite=generated-when-sent`;
         if (action === 'preview') {
@@ -3755,7 +3765,11 @@ const server = http.createServer(async (req, res) => {
       const invitation = await prisma.enterpriseInvitation.findUnique({ where: { id: application.enterpriseInvitationId } });
       if (!invitation) throw new Error('Invitation is unavailable');
       if (action === 'preview') {
-        const rendered = renderTemplate('enterprise_invitation', invitationTemplateVars({ kind: 'enterprise', application, invitation, invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent` }));
+        const rendered = renderTemplate('enterprise_invitation', invitationTemplateVars({
+          kind: 'enterprise', application, invitation,
+          invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent`,
+          accessCode: 'Generated securely when sent',
+        }));
         return jsonResponse(res, { from: 'welcome@admin.singulancelabs.com', to: application.email, ...rendered });
       }
       const rotated = await rotateEnterpriseInvitationSecrets({ prisma, invitationId: invitation.id, rotateCode: true, rotateLink: true });
@@ -3795,12 +3809,13 @@ const server = http.createServer(async (req, res) => {
       if (action === 'preview') {
         const invitation = await prisma.enterpriseInvitation.findUnique({ where: { id: invitationId } });
         if (!invitation) return jsonResponse(res, { error: 'Not found' }, 404);
-        const base = (process.env.HIVEMIND_INVITATION_BASE_URL || process.env.HIVEMIND_FRONTEND_URL || defaultFrontendBaseUrl).replace(/\/$/, '');
+        const base = resolveInvitationBaseUrl();
         const rendered = renderTemplate('enterprise_invitation', invitationTemplateVars({
           kind: 'enterprise',
           application: null,
           invitation,
           invitationUrl: `${base}/hivemind/invite?enterprise_invite=generated-when-sent`,
+          accessCode: 'Generated securely when sent',
         }));
         await audit({ eventType: 'commercial.enterprise_invitation_previewed', eventCategory: 'billing', action: 'read',
           resourceType: 'enterprise_invitation', resourceId: invitation.id,
@@ -3849,11 +3864,13 @@ const server = http.createServer(async (req, res) => {
           metadata: { operator: operator.operator, session_id: operator.sessionId }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
         return jsonResponse(res, { invitation: rotated.invitation, code: rotated.plaintextCode });
       }
+      if (!['send', 'resend'].includes(action)) throw new Error('Unsupported invitation action');
       const raw = await prisma.enterpriseInvitation.findUnique({ where: { id: invitationId } });
       const sent = await dispatchEnterpriseInvitation({ invitation: raw, token: rotated.plaintextToken, code: action === 'send' ? rotated.plaintextCode : null });
       const sentEvent = action === 'resend' ? 'commercial.enterprise_invitation_resent' : 'commercial.enterprise_invitation_sent';
       await audit({ eventType: sent.delivery.ok ? sentEvent : 'commercial.enterprise_invitation_delivery_failed', eventCategory: 'billing', action: 'update', resourceType: 'enterprise_invitation', resourceId: invitationId,
         metadata: { operator: operator.operator, session_id: operator.sessionId, safe_error: sent.delivery.error || null }, ..._reqMeta(req), sessionId: operator.sessionId, actorType: 'platform_admin' });
+      if (!sent.delivery.ok) return jsonResponse(res, { error: sent.delivery.error || 'Email delivery failed', invitation: sent.invitation }, 502);
       return jsonResponse(res, { invitation: sent.invitation, activation_url: sent.activationUrl, ...(action === 'send' ? { code: rotated.plaintextCode } : {}), email_dispatch: sent.delivery });
     } catch (error) {
       return jsonResponse(res, { error: error.message }, /unavailable|not found/i.test(error.message) ? 404 : 400);
@@ -5531,7 +5548,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { error: error.message }, error.status || 400);
     }
 
-    const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu').replace(/\/$/, '');
+    const FRONTEND_BASE = resolvePublicFrontendBaseUrl();
     const inviter = await prisma.user.findUnique({
       where: { id: current.session.userId },
       select: { email: true, displayName: true },
@@ -5677,7 +5694,7 @@ const server = http.createServer(async (req, res) => {
 
     // Build the FE-facing join URL. Use HIVEMIND_FRONTEND_URL when set so the
     // recipient lands on the React app, not the control-plane API host.
-    const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || 'https://hivemind.davinciai.eu').replace(/\/$/, '');
+    const FRONTEND_BASE = resolvePublicFrontendBaseUrl();
     const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
 
     // Queue Cloudflare delivery after the durable invitation exists. The admin
@@ -5829,7 +5846,7 @@ const server = http.createServer(async (req, res) => {
     const teamById = Object.fromEntries(teamRows.map(t => [t.id, t]));
     const userById = Object.fromEntries(userRows.map(u => [u.id, u]));
 
-    const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || CONFIG.publicBaseUrl).replace(/\/$/, '');
+    const FRONTEND_BASE = resolvePublicFrontendBaseUrl();
 
     return jsonResponse(res, {
       invites: rows.map((invite) => {
@@ -5907,7 +5924,7 @@ const server = http.createServer(async (req, res) => {
       Date.now() + WORKSPACE_INVITATION_TTL_MS,
     ));
 
-    const FRONTEND_BASE = (process.env.HIVEMIND_FRONTEND_URL || CONFIG.publicBaseUrl).replace(/\/$/, '');
+    const FRONTEND_BASE = resolvePublicFrontendBaseUrl();
     const joinUrl = `${FRONTEND_BASE}/hivemind/join/${membership.org.slug}/${invite.token}`;
 
     const inviter = await prisma.user.findUnique({

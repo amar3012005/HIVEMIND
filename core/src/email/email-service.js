@@ -32,6 +32,7 @@ import { dirname, join } from 'node:path';
 import { fetchBearerFromNango } from '../connectors/mcp/nango-service.js';
 import { renderSingulanceTransactionalEmail } from './templates/singulance-transactional.js';
 import { renderHivemindWelcomeEmail } from './templates/hivemind-welcome.js';
+import { resolvePublicAppUrl } from '../public-frontend-url.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -45,7 +46,7 @@ const GMAIL_SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/
 const CLOUDFLARE_SEND_BASE = 'https://api.cloudflare.com/client/v4/accounts';
 const SEND_TIMEOUT_MS = 15_000;
 
-const APP_URL = process.env.HIVEMIND_APP_URL || 'https://hivemind.davinciai.eu/hivemind/app';
+const APP_URL = resolvePublicAppUrl();
 const EMAIL_ASSET_BASE_URL = process.env.HIVEMIND_EMAIL_ASSET_BASE_URL || 'https://next.singulancelabs.com/email/welcome-cartesia/v1';
 
 let _templates = null;

@@ -91,4 +91,11 @@ def sdk_target(url: str, api_key: str) -> tuple[str, str, dict[str, str]]:
         "cf-aig-authorization": f"Bearer {os.environ['CLOUDFLARE_AI_GATEWAY_TOKEN'].strip()}",
         "cf-aig-skip-cache": "true",
     }
+    alias = _alias(name or "")
+    if alias:
+        # OpenAI-compatible SDKs always synthesize an Authorization header.
+        # An empty explicit override prevents a stale provider key from taking
+        # precedence over the server-owned Gateway BYOK alias.
+        headers["Authorization"] = ""
+        headers["cf-aig-byok-alias"] = alias
     return base, api_key, headers

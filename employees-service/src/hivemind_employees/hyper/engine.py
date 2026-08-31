@@ -2636,10 +2636,23 @@ class Director:
     def _work_order_owner(self, lane: str) -> Dict[str, Any]:
         """Resolve a planned lane to an actual Room participant, never an invented agent."""
         wanted = str(lane or "").strip().lower()
-        aliases = {"researcher": "investigator", "investigator": "researcher"}
+        aliases = {
+            "researcher": "investigator", "investigator": "researcher",
+            "reviewer": "skeptic", "skeptic": "reviewer",
+        }
         for participant in self.participants:
-            actual = str(participant.get("_lane") or participant.get("lane") or "").lower()
-            if actual == wanted or aliases.get(actual) == wanted or aliases.get(wanted) == actual:
+            capabilities = {
+                str(participant.get(key) or "").strip().lower()
+                for key in ("_lane", "lane", "role_archetype")
+                if str(participant.get(key) or "").strip()
+            }
+            if any(
+                actual == wanted
+                or aliases.get(actual) == wanted
+                or aliases.get(wanted) == actual
+                or wanted in actual.split()
+                for actual in capabilities
+            ):
                 return participant
         from .grok_runtime import mode_at_least
         if mode_at_least(getattr(self, "grok_runtime_mode", "off"), "shadow_roster"):
@@ -4261,7 +4274,6 @@ class Director:
                 "'no verified contact found in gathered evidence' — do not manufacture one, even hedged."
             )
             try:
-                from .grok_runtime import mode_at_least
                 agent_result: Dict[str, Any] = {}
                 if mode_at_least(self.grok_runtime_mode, "real_tools"):
                     if self.work_agent_hook is None:
@@ -7530,6 +7542,9 @@ async def run_director(
     execution_profile: Optional[Dict[str, Any]] = None,
     direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
     agentic_task_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
+    work_agent_hook: Optional[Callable[[Dict[str, Any], Dict[str, Any], str], Awaitable[Dict[str, Any]]]] = None,
+    grok_runtime_mode: str = "off",
+    grok_runtime_version: int = 1,
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -7552,5 +7567,8 @@ async def run_director(
         execution_profile=execution_profile,
         direct_answer_hook=direct_answer_hook,
         agentic_task_hook=agentic_task_hook,
+        work_agent_hook=work_agent_hook,
+        grok_runtime_mode=grok_runtime_mode,
+        grok_runtime_version=grok_runtime_version,
     )
     return await director.run()

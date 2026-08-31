@@ -25,6 +25,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       HIVEMIND_CORE_API_BASE_URL: http://hivemind-api:3000
       HIVEMIND_API_URL: http://hivemind-api:3000
+      HIVEMIND_EMPLOYEES_URL: http://employees:8060
+      EMPLOYEES_SIDECAR_URL: http://employees:8060
+      CONTROL_PLANE_INTERNAL_URL: http://control-plane:3000
       HIVEMIND_CORE_API_PUBLIC_URL: https://preview.singulancelabs.com
       HIVEMIND_CONTROL_PLANE_PUBLIC_URL: https://preview-api.singulancelabs.com
       HIVEMIND_FRONTEND_URL: https://next.preview.singulancelabs.com
@@ -50,11 +53,17 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:-local-session-secret-change-me}
       API_MASTER_KEY: ${API_MASTER_KEY:-local-api-master-key-change-me}
       # Prevent local employee/config activity from using external provider credentials.
-      GROQ_API_KEY: ""
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
       MISTRAL_API_KEY: ""
-      OPENAI_API_KEY: ""
-      ANTHROPIC_API_KEY: ""
-      OPENROUTER_API_KEY: ""
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
+      CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}
+      CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_AI_GATEWAY_TOKEN:-}
+      CLOUDFLARE_AI_GATEWAY_BASE_URL: ${CLOUDFLARE_AI_GATEWAY_BASE_URL:-https://gateway.ai.cloudflare.com}
+      CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-}
       SLACK_CLIENT_ID: ""
       SLACK_CLIENT_SECRET: ""
     ports:
@@ -100,14 +109,24 @@ services:
       DATABASE_URL: postgresql://hivemind:hivemind_dev_password@postgres:5432/hivemind_app?schema=hivemind
       REDIS_URL: redis://redis:6379/0
       HIVEMIND_MASTER_API_KEY: ${HIVEMIND_MASTER_API_KEY:-hm_master_key_99228811}
-      GROQ_API_KEY: ""
-      OPENAI_API_KEY: ""
-      ANTHROPIC_API_KEY: ""
-      OPENROUTER_API_KEY: ""
+      HYPER_GROK_WORKFLOW_URL: ${HYPER_GROK_WORKFLOW_URL:-}
+      HYPER_GROK_WORKFLOW_SECRET: ${HYPER_GROK_WORKFLOW_SECRET:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+      CLOUDFLARE_AI_GATEWAY_ENABLED: ${CLOUDFLARE_AI_GATEWAY_ENABLED:-false}
+      CLOUDFLARE_AI_GATEWAY_ID: ${CLOUDFLARE_AI_GATEWAY_ID:-}
+      CLOUDFLARE_AI_GATEWAY_TOKEN: ${CLOUDFLARE_AI_GATEWAY_TOKEN:-}
+      CLOUDFLARE_AI_GATEWAY_BASE_URL: ${CLOUDFLARE_AI_GATEWAY_BASE_URL:-https://gateway.ai.cloudflare.com}
+      CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: ${CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS:-}
       SLACK_CLIENT_ID: ""
       SLACK_CLIENT_SECRET: ""
     ports:
       - "8060:8060"
+    volumes:
+      - ./employees-service/src:/app/src:ro
     networks:
       - hivemind-network
     depends_on:

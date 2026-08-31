@@ -71,16 +71,25 @@ def select_active_agents(
 
     lead = next((p for p in participants if str(p.get("id")) == str(lead_id)), participants[0])
     add(lead)
-    aliases = {"researcher": "investigator", "investigator": "researcher"}
+    aliases = {
+        "researcher": "investigator", "investigator": "researcher",
+        "reviewer": "skeptic", "skeptic": "reviewer",
+    }
     for order in planned_orders:
         wanted = str(order.get("owner_lane") or "").strip().lower()
         if not wanted:
             continue
-        owner = next((
-            p for p in participants
-            if (actual := str(p.get("_lane") or p.get("role_archetype") or "").lower()) == wanted
-            or aliases.get(actual) == wanted or aliases.get(wanted) == actual
-        ), None)
+        owner = next((p for p in participants if any(
+            actual == wanted
+            or aliases.get(actual) == wanted
+            or aliases.get(wanted) == actual
+            or wanted in actual.split()
+            for actual in {
+                str(p.get(key) or "").strip().lower()
+                for key in ("_lane", "lane", "role_archetype")
+                if str(p.get(key) or "").strip()
+            }
+        )), None)
         if owner:
             add(owner)
         if len(selected) >= max(1, maximum):

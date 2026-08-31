@@ -40,3 +40,12 @@ def test_embedding_and_voice_providers_are_gateway_native():
     assert ai_gateway.provider("https://api.cohere.com/v2/rerank") == "cohere"
     assert ai_gateway.provider("https://api.deepgram.com/v1/speak") == "deepgram"
     assert ai_gateway.provider("https://api.cartesia.ai/tts/bytes") == "cartesia"
+
+
+def test_sdk_target_uses_server_owned_byok_alias():
+    base, _, headers = ai_gateway.sdk_target(
+        "https://openrouter.ai/api/v1", "stale-provider-key"
+    )
+    assert base.endswith("/account/gateway/openrouter")
+    assert headers["Authorization"] == ""
+    assert headers["cf-aig-byok-alias"] == "first-bundb"

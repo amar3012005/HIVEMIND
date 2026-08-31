@@ -36,3 +36,12 @@ def test_selector_uses_real_roster_lanes_without_task_keyword_routing():
     ], lead_id="1", maximum=3)
     assert [row["id"] for row in selected] == ["1", "2", "3"]
     assert len(build_roster_manifest(roster, "org")) == 4
+
+
+def test_selector_uses_role_capability_when_display_lane_is_generic():
+    roster = [
+        {**_employee("1", "lead", "Strategist"), "role_archetype": "Industry Strategy Lead"},
+        {**_employee("2", "research", "Communicator"), "role_archetype": "Customer & Market Researcher"},
+    ]
+    selected = select_active_agents(roster, [{"owner_lane": "Researcher"}], maximum=2)
+    assert [row["id"] for row in selected] == ["1", "2"]

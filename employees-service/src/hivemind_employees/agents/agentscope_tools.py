@@ -1325,6 +1325,12 @@ def register_cloudflare_browser_tool(
             return _tool_response_text(f"Cloudflare Browser failed safely: {str(exc)[:240]}")
 
     try:
+        tk.create_tool_group(
+            group_name="cloudflare_browser",
+            description="Isolated Cloudflare Browser Run for public HTTPS pages.",
+            active=True,
+            notes="Use only when an API or connector cannot provide the required rendered page evidence.",
+        )
         tk.register_tool_function(cloudflare_browser_visit, group_name="cloudflare_browser")
     except Exception as exc:  # noqa: BLE001
         log.warning("register_cloudflare_browser_tool failed: %s", exc)

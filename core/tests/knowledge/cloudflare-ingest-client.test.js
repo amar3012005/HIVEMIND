@@ -140,3 +140,25 @@ test('R2 source admission retries an idempotent object key after a transient tim
     assert.deepEqual(persisted, { objectKey: 'org/recovered', etag: 'etag-recovered' });
   });
 });
+
+test('Workflow status preserves structured state and distinguishes missing from outage', async () => {
+  await withWorkflowEnv(async () => {
+    const running = new CloudflareKnowledgeIngestClient({
+      fetchImpl: async () => Response.json({ status: 'running' }),
+    });
+    assert.deepEqual(await running.getWorkflowStatus('wf-running'), { status: 'running' });
+
+    const missing = new CloudflareKnowledgeIngestClient({
+      fetchImpl: async () => new Response('', { status: 404 }),
+    });
+    assert.deepEqual(await missing.getWorkflowStatus('wf-missing'), { status: 'missing' });
+
+    const outage = new CloudflareKnowledgeIngestClient({
+      fetchImpl: async () => new Response('', { status: 503 }),
+    });
+    await assert.rejects(
+      () => outage.getWorkflowStatus('wf-unknown'),
+      (error) => error.code === 'WORKFLOW_STATUS_UNAVAILABLE' && error.retryable === true,
+    );
+  });
+});

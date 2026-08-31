@@ -128,6 +128,66 @@ export class KnowledgeUploadJobStore {
     }
   }
 
+  /**
+   * Reconcile stale-looking Cloudflare jobs against their current Workflow and
+   * current-version checkpoint heartbeat. A createdAt age is never evidence of
+   * abandonment: retries intentionally retain the original job row.
+   */
+  async reconcileCloudflareStale({ workflowStatusResolver, staleMin = 15, limit = 25 } = {}) {
+    if (typeof workflowStatusResolver !== 'function' || !this.prisma?.knowledgeIngestStep) return { checked: 0, active: 0, failed: 0 };
+    const cutoff = new Date(Date.now() - Math.max(5, Number(staleMin) || 15) * 60_000);
+    const jobs = await this._model().findMany({
+      where: {
+        orchestrationMode: 'cloudflare_workflow', status: { in: LIVE_UPLOAD_STATUSES },
+        updatedAt: { lt: cutoff }, workflowInstanceId: { not: null },
+      },
+      orderBy: { updatedAt: 'asc' }, take: Math.max(1, Math.min(100, Number(limit) || 25)),
+    });
+    const result = { checked: 0, active: 0, failed: 0 };
+    for (const job of jobs) {
+      const checkpoint = await this.prisma.knowledgeIngestStep.findFirst({
+        where: { jobId: job.id, processingVersion: job.processingVersion },
+        orderBy: { updatedAt: 'desc' },
+        select: { status: true, updatedAt: true, leaseUntil: true, stageKey: true },
+      });
+      // A fresh checkpoint is the authoritative heartbeat even if a UI job
+      // progress frame has not changed recently.
+      if (checkpoint?.updatedAt && checkpoint.updatedAt >= cutoff) continue;
+      result.checked += 1;
+      let workflow;
+      try {
+        workflow = await workflowStatusResolver(job.workflowInstanceId);
+      } catch {
+        // Control-plane reachability is not proof that a Workflow is dead.
+        continue;
+      }
+      const status = String(workflow?.status || '').toLowerCase();
+      if (['queued', 'running', 'waiting', 'paused'].includes(status)) {
+        await this._model().updateMany({
+          where: {
+            id: job.id, orgId: job.orgId, processingVersion: job.processingVersion,
+            status: { in: LIVE_UPLOAD_STATUSES },
+          },
+          // This is a verified external heartbeat, not fabricated progress.
+          data: { updatedAt: new Date() },
+        });
+        result.active += 1;
+        continue;
+      }
+      if (!['errored', 'terminated', 'complete', 'missing'].includes(status)) continue;
+      if (checkpoint?.status === 'processing' && checkpoint?.leaseUntil && checkpoint.leaseUntil > new Date()) continue;
+      const error = Object.assign(new Error(
+        status === 'complete'
+          ? 'Cloudflare Workflow completed without a verified terminal job settlement.'
+          : status === 'missing'
+            ? 'Cloudflare Workflow instance is missing before terminal settlement.'
+          : `Cloudflare Workflow became ${status} before terminal settlement.`,
+      ), { code: status === 'complete' ? 'WORKFLOW_UNSETTLED' : status === 'missing' ? 'WORKFLOW_MISSING' : 'WORKFLOW_TERMINAL_STALE' });
+      if (await this.fail(job.id, job.orgId, error, { processingVersion: job.processingVersion })) result.failed += 1;
+    }
+    return result;
+  }
+
   async findOwned(jobId, { orgId, userId = null }) {
     if (!jobId || !orgId) return null;
     return this._model().findFirst({ where: {

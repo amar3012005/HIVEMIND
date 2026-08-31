@@ -332,3 +332,49 @@ test('stage-slot claims use the advisory mutex without Serializable transaction 
   assert.equal((await executor._claimProcessingLease(job, 'extract')).acquired, true);
   assert.equal(transactionOptions, undefined);
 });
+
+test('capacity waiters resume on release without polling or a retry timer', async () => {
+  const { executor, job } = fixture();
+  let claims = 0;
+  executor.prisma.knowledgeIngestStep = {
+    upsert: async () => ({}),
+    updateMany: async () => ({ count: 1 }),
+  };
+  executor.prisma.knowledgeIngestLease = {
+    deleteMany: async () => ({ count: 1 }),
+  };
+  executor._claimProcessingLease = async () => {
+    claims += 1;
+    return { acquired: claims > 1, leaseToken: 'lease-after-release' };
+  };
+
+  const waiting = executor._waitForProcessingLease(job, 'extract');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(claims, 1);
+  await executor._releaseProcessingLease({ ...job, id: 'another-job' }, 'extract');
+  const lease = await Promise.race([
+    waiting,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('waiter was not dispatched')), 100)),
+  ]);
+  assert.equal(lease.leaseToken, 'lease-after-release');
+  assert.equal(claims, 2);
+});
+
+test('durable FIFO capacity row prevents a newer stage from jumping the queue', async () => {
+  const { executor, job } = fixture();
+  let created = false;
+  executor.prisma.knowledgeIngestLease = {
+    findMany: async () => [],
+    create: async () => { created = true; },
+    update: async () => ({}),
+  };
+  executor.prisma.$executeRawUnsafe = async () => 1;
+  executor.prisma.$queryRawUnsafe = async () => [{
+    jobId: '77777777-7777-4777-8777-777777777777', processingVersion: job.processingVersion,
+  }];
+  executor.prisma.$transaction = async (work) => work(executor.prisma);
+
+  const claim = await executor._claimProcessingLease(job, 'embed');
+  assert.equal(claim.acquired, false);
+  assert.equal(created, false);
+});

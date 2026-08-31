@@ -39,25 +39,26 @@ export function visionProviderAvailable() {
 // PDF rasterisation is CPU, RAM and temporary-disk heavy. Ingestion admits
 // multiple tenant jobs concurrently, so allowing every vision document to run
 // pdftoppm at once makes healthy jobs starve each other and pushes them into the
-// much heavier ImageMagick fallback. Keep one process-wide rasteriser slot. OCR
-// remains concurrent after rendering, so this bounds resources without
-// serialising the expensive provider calls.
-let renderTail = Promise.resolve();
-let renderQueueDepth = 0;
+// much heavier ImageMagick fallback. A small bounded pool keeps useful CPU
+// concurrency without turning rasterisation into a single global convoy.
+const RENDER_CONCURRENCY = Math.max(1, Number(process.env.HIVEMIND_PDF_RENDER_CONCURRENCY || 2));
+let activeRenderers = 0;
+const renderWaiters = [];
 export async function withPdfRenderSlot(task) {
-  let release;
-  const previous = renderTail;
-  renderTail = new Promise((resolve) => { release = resolve; });
-  renderQueueDepth += 1;
   const queuedAt = Date.now();
-  await previous;
-  renderQueueDepth -= 1;
+  if (activeRenderers >= RENDER_CONCURRENCY) {
+    await new Promise((resolve) => renderWaiters.push(resolve));
+  } else {
+    activeRenderers += 1;
+  }
   const waitMs = Date.now() - queuedAt;
-  if (waitMs >= 100) console.log(`[groq-vision] render slot acquired wait_ms=${waitMs} queued=${renderQueueDepth}`);
+  if (waitMs >= 100) console.log(`[groq-vision] render slot acquired wait_ms=${waitMs} queued=${renderWaiters.length}`);
   try {
     return await task();
   } finally {
-    release();
+    const next = renderWaiters.shift();
+    if (next) next(); // transfer the occupied slot directly to the oldest waiter
+    else activeRenderers -= 1;
   }
 }
 

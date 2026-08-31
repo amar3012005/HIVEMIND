@@ -66,6 +66,65 @@ test('boot orphan reaping excludes Cloudflare Workflow jobs that survive an API 
   assert.deepEqual(where.OR[1].orchestrationMode, { not: 'cloudflare_workflow' });
 });
 
+test('Cloudflare stale reconciliation trusts current-version checkpoint and Workflow heartbeats', async () => {
+  const now = Date.now();
+  const jobs = [
+    { id: 'fresh-step', orgId: 'org', processingVersion: 2, workflowInstanceId: 'wf-fresh' },
+    { id: 'active-workflow', orgId: 'org', processingVersion: 3, workflowInstanceId: 'wf-active' },
+  ];
+  const writes = [];
+  const statuses = [];
+  const prisma = {
+    knowledgeIngestJob: {
+      findMany: async () => jobs,
+      findFirst: async ({ where }) => jobs.find((job) => job.id === where.id) || null,
+      updateMany: async (query) => { writes.push(query); return { count: 1 }; },
+    },
+    knowledgeIngestStep: {
+      findFirst: async ({ where }) => where.jobId === 'fresh-step'
+        ? { status: 'processing', updatedAt: new Date(now), leaseUntil: new Date(now + 60_000), stageKey: 'embed' }
+        : { status: 'succeeded', updatedAt: new Date(now - 60 * 60_000), leaseUntil: null, stageKey: 'acquire' },
+    },
+  };
+  const store = new KnowledgeUploadJobStore({ prisma });
+  const result = await store.reconcileCloudflareStale({
+    staleMin: 15,
+    workflowStatusResolver: async (id) => { statuses.push(id); return { status: 'running' }; },
+  });
+
+  assert.deepEqual(statuses, ['wf-active']);
+  assert.deepEqual(result, { checked: 1, active: 1, failed: 0 });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].where.processingVersion, 3);
+  assert.ok(writes[0].data.updatedAt instanceof Date);
+});
+
+test('Cloudflare stale reconciliation fails only a confirmed terminal current version', async () => {
+  const job = { id: 'dead-wf', orgId: 'org', processingVersion: 4, workflowInstanceId: 'wf-dead' };
+  const writes = [];
+  const prisma = {
+    knowledgeIngestJob: {
+      findMany: async () => [job],
+      findFirst: async () => job,
+      updateMany: async (query) => { writes.push(query); return { count: 1 }; },
+    },
+    knowledgeIngestStep: {
+      findFirst: async () => ({
+        status: 'failed', updatedAt: new Date(Date.now() - 60 * 60_000), leaseUntil: null, stageKey: 'materialize',
+      }),
+    },
+  };
+  const store = new KnowledgeUploadJobStore({ prisma });
+  const result = await store.reconcileCloudflareStale({
+    workflowStatusResolver: async () => ({ status: 'terminated' }),
+  });
+
+  assert.deepEqual(result, { checked: 1, active: 0, failed: 1 });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].where.processingVersion, 4);
+  assert.equal(writes[0].data.errorCode, 'WORKFLOW_TERMINAL_STALE');
+});
+
 test('Workflow progress and failure writes are fenced by processing version', async () => {
   const writes = [];
   const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {

@@ -2062,6 +2062,7 @@ model KnowledgeIngestStep {
   @@unique([jobId, processingVersion, stageKey, shardKey])
   @@index([jobId, processingVersion, status])
   @@index([status, leaseUntil])
+  @@index([stageKey, status, createdAt])
   @@map("knowledge_ingest_steps")
 }
 

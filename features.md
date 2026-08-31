@@ -514,3 +514,6 @@ verification, and its independent rollback control.
   Browser Run canary: persistent Agent provision, assignment, two-tab rendered
   navigation, evidence validation, SHA-256 receipt, R2 screenshot, Live View and
   explicit session cleanup. Production remains unchanged.
+- Shared local integration is active from `singulance-local` merge `8a966f53`.
+  Control and Employees use the local Cloudflare Worker by default and retain
+  the existing production-equivalent Cloudflare AI Gateway configuration.

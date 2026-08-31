@@ -4449,7 +4449,7 @@ class Director:
             row for row in results
             if row.get("status") == "failed" and row.get("step_id") == "independent-review"
         ]
-        max_repairs = max(0, min(2, int(os.environ.get("HYPER_GROK_MAX_REPAIRS", "1") or "1")))
+        max_repairs = max(0, min(2, int(os.environ.get("HYPER_GROK_MAX_REPAIRS", "2") or "2")))
         if (failed_reviews and max_repairs
                 and mode_at_least(self.grok_runtime_mode, "collaboration")):
             active_results = list(results)
@@ -4497,13 +4497,15 @@ class Director:
                     "objective": (
                         "Independently verify the repaired work against the user's original request and all "
                         "persisted browser receipts. Reject missing prices, missing competitors, inaccessible "
-                        "sources, unsupported comparisons, or a missing reviewed artifact."
+                        "sources, or unsupported comparisons. This is the pre-synthesis evidence gate: pass when "
+                        "the persisted evidence and comparison inputs are sufficient for final synthesis; do not "
+                        "reject merely because the final formatted artifact is produced immediately after this gate."
                     ),
                     "required_evidence": [],
                     "acceptance_criteria": [
                         "Three current public competitor pricing pages have persisted browser receipts",
                         "Comparable pricing facts and exact URLs are source-backed",
-                        "The comparison and reviewed artifact fully answer the original request",
+                        "The persisted comparison inputs are sufficient to synthesize the requested artifact",
                     ],
                     "verification_assignment": True,
                 }
@@ -5694,7 +5696,12 @@ class Director:
                     "kind": "decision",
                     "owner_lane": "Skeptic",
                     "title": "Independently verify the completed work",
-                    "objective": "Review the completed assignments against their evidence and acceptance criteria.",
+                    "objective": (
+                        "Review the completed assignments against their evidence and acceptance criteria. "
+                        "This is the pre-synthesis evidence gate: verify that the persisted inputs are sufficient "
+                        "for the requested final artifact, but do not reject solely because final formatting and "
+                        "synthesis happen after this gate."
+                    ),
                     # The reviewer consumes persisted predecessor receipts. It
                     # must not browse the web again merely to prove it reviewed
                     # evidence that is already in the durable handoff.

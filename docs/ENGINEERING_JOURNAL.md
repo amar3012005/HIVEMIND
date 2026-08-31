@@ -1463,3 +1463,40 @@ slides that find no unique anchor get a page instead of `null`.
   Employees retained exact images and start times. No build, migration, restart,
   or deployment occurred for this flag-only rollout. Release presence closed
   cleanly.
+
+## 2026-08-31 UTC — Ingestion, recall, chat, and canonical knowledge globally reconciled
+
+- Release session `best-path-global-flags` claimed the shared production
+  presence channel and completed without a conflicting release.
+- Verified Flagship app `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`. Final global
+  defaults: `knowledge_ingest_workflow_v1=on`,
+  `recall_parallel_reliability_v1=on`, `durable_chat_agent_v1=full`, and
+  `canonical_knowledge_foundation_v1=full`.
+- Governed recall mutation used GET, precondition verification, and a complete
+  PUT at `2026-08-31T08:52:20.083Z`. The changelog showed only
+  `default_variation: off -> on`; both rules, boolean variations, description,
+  type, and enabled state were preserved. The rollback payload is the same full
+  definition with only the default restored to `off`.
+- Live bound-Worker evaluations returned all four enabled values for the
+  operator context and two unrelated synthetic contexts. The operator recall
+  result was `TARGETING_MATCH`; both unrelated results were `DEFAULT`.
+- Production resources were inspected in place. Canonical projection Worker v7
+  is `d99c1304-61ff-40c8-a4b5-b0b5c148ce80`; ingestion Worker v4 is
+  `d917d0a1-38fe-4933-a4eb-34bcb891c625`; durable chat Worker v4 is
+  `c413ed26-533f-4198-8d6f-be03841e1ae3`. Their configured Workflow, Queue,
+  R2, and Durable Object bindings match the current production definitions.
+- Read-only E2E evidence: eight ingestion jobs were `ready`; the latest two
+  PDFs were terminal at progress 100 and replayable; duplicate checksum groups
+  were zero. Recall completed memory lexical (31 candidates), memory vector
+  (67 candidates), evidence lexical, and evidence vector lanes with one
+  embedding, retrieval, and rerank pass. Result: 3 memories, 12 evidence items,
+  15 citations, 17 graph edges, and no degraded state.
+- Authenticated direct, profile, exact-source, relationship, and entity chat
+  requests returned HTTP 200. Profile/exact-source/relationship were grounded;
+  the broad entity result was not grounded, and relationship/entity each
+  retained one gap. These remain semantic-quality follow-ups rather than
+  orchestration failures.
+- Core `sha-9091c1e0`, Control `sha-953f3a71`, and Employees `sha-b3616eb4`
+  retained exact images, start times, and zero restart counts. API and homepage
+  returned 200; the 20-minute critical log scan returned zero matches. No build,
+  migration, restart, container replacement, or Worker deployment occurred.

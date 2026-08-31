@@ -5,6 +5,37 @@ This append-only registry is the global record of features accepted on
 runtime verification have completed. Use the same feature identifier in
 Cloudflare Agent Memory and in the `singulance-local` registry.
 
+## feature-20260831T085220Z — Best ingestion, recall, and chat matrix globally enabled
+
+- Production status: globally enabled and runtime-verified for all users.
+- Cloudflare Flagship app: `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`.
+  Final defaults are `knowledge_ingest_workflow_v1=on`,
+  `recall_parallel_reliability_v1=on`, `durable_chat_agent_v1=full`, and
+  `canonical_knowledge_foundation_v1=full`. Existing variations and targeting
+  rules remain intact.
+- Recall promotion: the governed full-definition PUT at
+  `2026-08-31T08:52:20.083Z` changed only
+  `recall_parallel_reliability_v1.default_variation` from `off` to `on`.
+  Two unrelated contexts evaluated `on` by `DEFAULT`; the operator canary
+  remained `on` by `TARGETING_MATCH`.
+- Runtime: Core `9091c1e01d63270a14d668cf60c6634d27469e95`, Control
+  `953f3a719aab66aed5b1f479ed6e45f232613761`, and Employees `b3616eb4`.
+  Their immutable images, start times, and restart counts were unchanged.
+- Acceptance: eight Cloudflare Workflow ingestion jobs are terminal-ready with
+  zero duplicate checksum groups. Parallel recall completed memory lexical,
+  memory vector, evidence lexical, and evidence vector lanes without
+  degradation, returning 3 memories, 12 evidence items, 15 citations, and 17
+  graph edges. Five authenticated chat classes returned HTTP 200.
+- Known semantic limits: the broad entity chat canary returned
+  `grounded=false`; relationship and entity canaries each retained one evidence
+  gap. These are tracked quality limitations, not orchestration or availability
+  failures, and this release does not claim perfect semantic coverage.
+- Health: API and homepage returned 200, the critical production log scan was
+  clean, and no container or Worker was rebuilt or restarted.
+- Rollback: full-replace the preserved recall flag definition with only
+  `default_variation=off`. Ingestion, chat, and canonical knowledge each retain
+  their independent prior default variation for an isolated behavioral rollback.
+
 ## feature-20260831T082806Z — Durable chat orchestration globally enabled
 
 - Production status: deployed, globally enabled, and verified for all users.

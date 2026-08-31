@@ -1,5 +1,34 @@
 # Current SINGULANCE Production Release
 
+## 2026-08-31T08:52:20Z — production AI path defaults globally reconciled
+
+- Cloudflare Flagship app `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` now serves
+  the accepted production matrix globally:
+  `knowledge_ingest_workflow_v1=on`,
+  `recall_parallel_reliability_v1=on`, `durable_chat_agent_v1=full`, and
+  `canonical_knowledge_foundation_v1=full`.
+- The only mutation in this release was a governed full-definition update of
+  `recall_parallel_reliability_v1`, changing its default from `off` to `on`.
+  All flag variations, two targeting rules, type, description, and enabled
+  state were preserved. Two unrelated contexts resolved `on` by `DEFAULT`;
+  the existing operator resolved `on` by `TARGETING_MATCH`.
+- Backend master gates and production Workflow, Queue, R2, Durable Object, and
+  Worker bindings were verified. Eight accepted Workflow ingestion jobs were
+  ready with zero duplicate checksum groups. The four-lane recall run completed
+  without degradation and returned 3 memories, 12 evidence items, 15 citations,
+  and 17 graph edges.
+- Direct, profile, exact-source, relationship, and entity chat canaries all
+  returned HTTP 200. The entity canary was not grounded, and the relationship
+  and entity canaries each retained one gap; those semantic-quality limits are
+  explicitly not represented as full semantic acceptance.
+- Core `sha-9091c1e0`, Control `sha-953f3a71`, and Employees `sha-b3616eb4`
+  retained their images, start times, and zero restart counts. API and homepage
+  returned 200 and the critical log scan was clean. No build, migration,
+  restart, container deployment, or Worker deployment occurred.
+- Immediate recall rollback is the captured full flag definition with only
+  `default_variation=off`; the remaining three capabilities have independent
+  Flagship defaults and can be rolled back without changing runtime images.
+
 ## 9091c1e0 — lazy profile discovery and complete chat-route acceptance
 
 - Canonical Core SHA `9091c1e01d63270a14d668cf60c6634d27469e95` on

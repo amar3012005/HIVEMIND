@@ -12,6 +12,7 @@
   },
   "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
   "browser": { "binding": "BROWSER", "remote": true },
+  "r2_buckets": [{ "binding": "BROWSER_ARTIFACTS", "bucket_name": "hivemind-hyperagent-browser-local" }],
   "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "max_instances": 5 }],
   "durable_objects": {
     "bindings": [
@@ -39,6 +40,7 @@
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "browser": { "binding": "BROWSER", "remote": true },
+      "r2_buckets": [{ "binding": "BROWSER_ARTIFACTS", "bucket_name": "hivemind-hyperagent-browser-local" }],
       "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "max_instances": 5 }],
       "durable_objects": { "bindings": [
         { "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" },
@@ -59,6 +61,7 @@
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "browser": { "binding": "BROWSER", "remote": true },
+      "r2_buckets": [{ "binding": "BROWSER_ARTIFACTS", "bucket_name": "hivemind-hyperagent-browser-production" }],
       "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "max_instances": 20 }],
       "durable_objects": { "bindings": [
         { "name": "HIRED_HYPER_AGENT", "class_name": "HiredHyperAgent" },

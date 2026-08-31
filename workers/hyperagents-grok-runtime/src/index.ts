@@ -1,9 +1,12 @@
 import { Agent, getAgentByName, routeAgentRequest, type Connection, type ConnectionContext, type WSMessage } from 'agents';
-import { connectBrowserSession, createBrowserSession, type BrowserBinding } from 'agents/browser';
+import {
+  connectBrowserSession, createBrowserSession, deleteBrowserSession, listBrowserTargets,
+  type BrowserBinding, type BrowserTargetInfo,
+} from 'agents/browser';
 import { getSandbox, Sandbox } from '@cloudflare/sandbox';
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
 import { NonRetryableError } from 'cloudflare:workflows';
-import { assignmentWorkflowId, modeRank, normalizeMode, type AssignmentParams, type RuntimeMode, type TurnParams, validAssignmentParams, validParams, workflowId } from './contract';
+import { assignmentWorkflowId, modeRank, normalizeMode, publicHttpsUrl, type AssignmentParams, type RuntimeMode, type TurnParams, validAssignmentParams, validParams, workflowId } from './contract';
 
 interface Env {
   ENVIRONMENT: string;
@@ -20,19 +23,14 @@ interface Env {
   ROOM_RUN_WORKFLOW: Workflow<TurnParams>;
   AGENT_ASSIGNMENT_WORKFLOW: Workflow<AssignmentParams>;
   BROWSER: BrowserBinding;
+  BROWSER_ARTIFACTS: R2Bucket;
   Sandbox: DurableObjectNamespace<Sandbox>;
 }
 
 export { Sandbox };
 
 function safePublicUrl(value: unknown): URL | null {
-  try {
-    const url = new URL(String(value || ''));
-    if (url.protocol !== 'https:') return null;
-    const host = url.hostname.toLowerCase();
-    if (host === 'localhost' || host.endsWith('.local') || /^(127\.|10\.|192\.168\.|169\.254\.)/.test(host)) return null;
-    return url;
-  } catch { return null; }
+  return publicHttpsUrl(value);
 }
 
 function bounded(value: unknown, limit = 100_000): string {
@@ -50,6 +48,9 @@ type AgentState = {
   routines: string[];
   preferences: Record<string, string | number | boolean>;
   task_history: Array<{ work_order_id: string; status: string; completed_at: number }>;
+  browser_workspaces: Record<string, {
+    session_id: string; created_at: number; updated_at: number; recording: boolean;
+  }>;
   updated_at: number;
 };
 
@@ -138,12 +139,14 @@ export class HyperRoomGateway extends Agent<Env, RoomGatewayState> {
 
 export class HiredHyperAgent extends Agent<Env, AgentState> {
   initialState: AgentState = {
-    manifest: null, status: 'idle', assignments: [], routines: [], preferences: {}, task_history: [], updated_at: 0,
+    manifest: null, status: 'idle', assignments: [], routines: [], preferences: {}, task_history: [],
+    browser_workspaces: {}, updated_at: 0,
   };
 
   validateStateChange(next: AgentState) {
     if ((next.assignments || []).length > 100 || (next.routines || []).length > 100
         || (next.task_history || []).length > 100
+        || Object.keys(next.browser_workspaces || {}).length > 12
         || Object.keys(next.preferences || {}).length > 50) throw new Error('agent_state_limit');
     if (next.manifest && this.state.manifest
         && next.manifest.employee_id !== this.state.manifest.employee_id) throw new Error('agent_identity_immutable');
@@ -189,6 +192,114 @@ export class HiredHyperAgent extends Agent<Env, AgentState> {
         status: body.status === 'complete' ? 'idle' : 'working', updated_at: Date.now() });
       return Response.json({ ok: true, assignments, status: this.state.status });
     }
+    if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/browser')) {
+      const body = await request.json<Record<string, unknown>>().catch(
+        () => ({} as Record<string, unknown>),
+      );
+      const workOrderId = String(body.work_order_id || '');
+      const action = String(body.action || 'open').toLowerCase();
+      if (!this.state.manifest || !/^[0-9a-f-]{36}$/i.test(workOrderId)
+          || !this.state.assignments.includes(workOrderId)) {
+        return Response.json({ error: 'browser_assignment_not_authorized' }, { status: 403 });
+      }
+      if (!['open', 'inspect', 'tabs', 'screenshot', 'click', 'close'].includes(action)) {
+        return Response.json({ error: 'unsupported_browser_action' }, { status: 400 });
+      }
+      const workspaces = { ...(this.state.browser_workspaces || {}) };
+      if (action === 'close') {
+        const existing = workspaces[workOrderId];
+        if (existing?.session_id) await deleteBrowserSession(this.env.BROWSER, existing.session_id).catch(() => undefined);
+        delete workspaces[workOrderId];
+        this.setState({ ...this.state, browser_workspaces: workspaces, updated_at: Date.now() });
+        return Response.json({ ok: true, action, closed: Boolean(existing) });
+      }
+      let workspace = workspaces[workOrderId];
+      if (!workspace) {
+        const oldest = Object.entries(workspaces).sort((a, b) => a[1].updated_at - b[1].updated_at);
+        while (oldest.length >= 12) {
+          const [expiredWorkOrder, expired] = oldest.shift()!;
+          await deleteBrowserSession(this.env.BROWSER, expired.session_id).catch(() => undefined);
+          delete workspaces[expiredWorkOrder];
+        }
+        const created = await createBrowserSession(this.env.BROWSER, {
+          keepAliveMs: 600_000, includeTargets: true, recording: true,
+        });
+        workspace = {
+          session_id: created.sessionId, created_at: Date.now(), updated_at: Date.now(), recording: true,
+        };
+        workspaces[workOrderId] = workspace;
+        this.setState({ ...this.state, browser_workspaces: workspaces, updated_at: Date.now() });
+      }
+      let targets: BrowserTargetInfo[];
+      try {
+        targets = await listBrowserTargets(this.env.BROWSER, workspace.session_id);
+      } catch {
+        return Response.json({ error: 'browser_session_expired', retryable: false }, { status: 410 });
+      }
+      if (action === 'tabs') {
+        return Response.json({ ok: true, action, session_id: workspace.session_id, tabs: targets.map(publicTarget) });
+      }
+      const cdp = await connectBrowserSession(this.env.BROWSER, workspace.session_id, 20_000);
+      try {
+        let target = targets.find((row) => row.id === String(body.target_id || ''))
+          || targets.find((row) => row.type === 'page') || targets[0];
+        if (action === 'open') {
+          const destination = safePublicUrl(body.url);
+          if (!destination) return Response.json({ error: 'invalid_public_https_url' }, { status: 400 });
+          if (body.new_tab === true || !target?.id) {
+            const created = await cdp.send('Target.createTarget', { url: 'about:blank' }) as { targetId?: string };
+            target = { id: String(created.targetId || ''), type: 'page', url: 'about:blank' };
+          }
+          if (!target?.id) throw new Error('browser_target_unavailable');
+          const attached = await cdp.attachToTarget(target.id, { timeoutMs: 20_000 });
+          await cdp.send('Page.enable', {}, { sessionId: attached, timeoutMs: 10_000 });
+          await cdp.send('Page.navigate', { url: destination.toString() }, { sessionId: attached, timeoutMs: 20_000 });
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+        }
+        if (!target?.id) throw new Error('browser_target_unavailable');
+        const sessionId = await cdp.attachToTarget(target.id, { timeoutMs: 20_000 });
+        if (action === 'click') {
+          if (body.authority_granted !== true) {
+            return Response.json({ error: 'browser_action_requires_approval' }, { status: 403 });
+          }
+          const selector = String(body.selector || '').slice(0, 500);
+          if (!selector) return Response.json({ error: 'selector_required' }, { status: 400 });
+          const expression = `(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)return false;e.click();return true})()`;
+          const clicked = await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, { sessionId, timeoutMs: 10_000 }) as { result?: { value?: boolean } };
+          if (!clicked.result?.value) return Response.json({ error: 'browser_target_not_found' }, { status: 404 });
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+        const observation = await inspectTarget(cdp, sessionId);
+        if (!safePublicUrl(observation.url)) {
+          return Response.json({ error: 'unsafe_browser_redirect' }, { status: 403 });
+        }
+        let screenshot: Record<string, unknown> | null = null;
+        if (action === 'screenshot' || body.capture_screenshot === true) {
+          const capture = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, { sessionId, timeoutMs: 20_000 }) as { data?: string };
+          if (capture.data) {
+            const bytes = Uint8Array.from(atob(capture.data), (character) => character.charCodeAt(0));
+            const digest = await sha256Hex(bytes);
+            const key = `browser/${this.state.manifest.employee_id}/${workOrderId}/${digest}.png`;
+            await this.env.BROWSER_ARTIFACTS.put(key, bytes, {
+              httpMetadata: { contentType: 'image/png' },
+              customMetadata: { work_order_id: workOrderId, agent_instance_id: this.name },
+            });
+            screenshot = { artifact_id: digest, sha256: digest, content_type: 'image/png', size: bytes.byteLength };
+          }
+        }
+        targets = await listBrowserTargets(this.env.BROWSER, workspace.session_id);
+        target = targets.find((row) => row.id === target?.id) || target;
+        workspaces[workOrderId] = { ...workspace, updated_at: Date.now() };
+        this.setState({ ...this.state, browser_workspaces: workspaces, updated_at: Date.now() });
+        return Response.json({
+          ok: true, action, session_id: workspace.session_id, target_id: target.id,
+          live_view_url: target.devtoolsFrontendUrl || null, page: observation,
+          screenshot, tabs: targets.map(publicTarget),
+        });
+      } finally {
+        cdp.disconnect();
+      }
+    }
     if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/preferences')) {
       const body = await request.json<{ preferences?: Record<string, unknown> }>()
         .catch(() => ({} as { preferences?: Record<string, unknown> }));
@@ -224,6 +335,37 @@ export class HiredHyperAgent extends Agent<Env, AgentState> {
     if (request.method === 'GET') return Response.json(this.state);
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
+}
+
+function publicTarget(target: BrowserTargetInfo) {
+  return {
+    id: target.id, type: target.type || 'page', title: bounded(target.title, 300),
+    url: bounded(target.url, 4_000), live_view_url: bounded(target.devtoolsFrontendUrl, 4_000) || null,
+  };
+}
+
+async function sha256Hex(value: string | Uint8Array): Promise<string> {
+  const data = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+  const bytes = new Uint8Array(data.byteLength);
+  bytes.set(data);
+  const digest = await crypto.subtle.digest('SHA-256', bytes.buffer);
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function inspectTarget(cdp: Awaited<ReturnType<typeof connectBrowserSession>>, sessionId: string) {
+  const evaluated = await cdp.send('Runtime.evaluate', {
+    expression: String.raw`JSON.stringify((()=>{const text=(document.body?.innerText||"").replace(/\s+/g," ").trim();const title=document.title||"";const url=location.href;const links=Array.from(document.querySelectorAll("a[href]")).slice(0,300).map(a=>({text:(a.innerText||a.getAttribute("aria-label")||"").replace(/\s+/g," ").trim().slice(0,240),url:a.href})).filter(x=>x.text&&x.url);const structured=Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s=>(s.textContent||"").trim().slice(0,20000)).filter(Boolean).slice(0,10);const errorLike=/\b(?:404|not found|access denied|forbidden|page unavailable|something went wrong)\b/i.test(title+" "+text.slice(0,500));return{title,url,text:text.slice(0,60000),links,structured,pageValid:Boolean(text.length>=40&&!errorLike),invalidReason:errorLike?"error_page_detected":(text.length<40?"insufficient_rendered_content":null)}})())`,
+    returnByValue: true,
+  }, { sessionId, timeoutMs: 20_000 }) as { result?: { value?: string } };
+  const page = JSON.parse(evaluated.result?.value || '{}') as Record<string, unknown>;
+  const contentHash = await sha256Hex(String(page.text || ''));
+  return {
+    title: bounded(page.title, 500), url: bounded(page.url, 4_000), text: bounded(page.text, 60_000),
+    links: Array.isArray(page.links) ? page.links.slice(0, 250) : [],
+    structured: Array.isArray(page.structured) ? page.structured.slice(0, 10) : [],
+    page_valid: page.pageValid === true, invalid_reason: page.invalidReason || null,
+    content_hash: contentHash, captured_at: new Date().toISOString(),
+  };
 }
 
 async function equalSecret(actual: string, expected: string): Promise<boolean> {
@@ -453,39 +595,17 @@ export default {
       if (modeRank(live.mode) < modeRank('browser') || live.mode !== body.mode) {
         return Response.json({ error: 'feature_disabled_or_mismatch' }, { status: 403 });
       }
-      const destination = safePublicUrl(body.url);
-      if (!destination) return Response.json({ error: 'invalid_public_https_url' }, { status: 400 });
-      const browser = await createBrowserSession(env.BROWSER, { keepAliveMs: 300_000, includeTargets: true, recording: true });
-      const cdp = await connectBrowserSession(env.BROWSER, browser.sessionId, 20_000);
-      try {
-        const target = browser.targets?.find((candidate) => candidate.type === 'page') || browser.targets?.[0];
-        if (!target?.id) throw new Error('browser_target_unavailable');
-        const sessionId = await cdp.attachToTarget(target.id, { timeoutMs: 20_000 });
-        await cdp.send('Page.enable', {}, { sessionId, timeoutMs: 10_000 });
-        await cdp.send('Page.navigate', { url: destination.toString() }, { sessionId, timeoutMs: 20_000 });
-        // Commerce pages commonly hydrate prices after the load event and
-        // lazy-render product cards only after a scroll. A one-second snapshot
-        // captured navigation/footer text while omitting the requested prices.
-        await new Promise((resolve) => setTimeout(resolve, 2_500));
-        await cdp.send('Runtime.evaluate', {
-          expression: 'window.scrollTo(0, Math.max(document.body?.scrollHeight||0, document.documentElement?.scrollHeight||0)); true',
-          returnByValue: true,
-        }, { sessionId, timeoutMs: 10_000 });
-        await new Promise((resolve) => setTimeout(resolve, 2_000));
-        const evaluated = await cdp.send('Runtime.evaluate', {
-          expression: String.raw`JSON.stringify((()=>{const text=(document.body?.innerText||"");const html=document.documentElement?.innerHTML||"";const pricePattern=/(?:[$€£]\s?\d[\d,.]*(?:\.\d{2})?|\d[\d,.]*(?:\.\d{2})?\s?(?:USD|EUR|GBP))/gi;const priceEvidence=[];for(const source of [text,html]){for(const match of source.matchAll(pricePattern)){const i=match.index||0;const excerpt=source.slice(Math.max(0,i-100),Math.min(source.length,i+match[0].length+160)).replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();if(excerpt&&!priceEvidence.includes(excerpt))priceEvidence.push(excerpt);if(priceEvidence.length>=80)break;}if(priceEvidence.length>=80)break;}const structured=Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s=>(s.textContent||"").trim().slice(0,20000)).filter(Boolean).slice(0,10);const priceMeta=Array.from(document.querySelectorAll('meta[property*="price" i],meta[name*="price" i],meta[itemprop*="price" i]')).map(m=>({key:m.getAttribute("property")||m.getAttribute("name")||m.getAttribute("itemprop")||"price",content:m.getAttribute("content")||""})).filter(x=>x.content).slice(0,50);return{title:document.title,url:location.href,text:text.slice(0,100000),priceEvidence,structured,priceMeta,links:Array.from(document.querySelectorAll("a[href]")).slice(0,500).map(a=>({text:(a.innerText||a.getAttribute("aria-label")||"").trim().slice(0,240),url:a.href})).filter(x=>x.text&&x.url)}})())`,
-          returnByValue: true,
-        }, { sessionId, timeoutMs: 20_000 }) as { result?: { value?: string } };
-        const page = JSON.parse(evaluated.result?.value || '{}') as Record<string, unknown>;
-        return Response.json({ ok: true, session_id: browser.sessionId, target_id: target.id,
-          live_view_url: target.devtoolsFrontendUrl || null, page: {
-            title: bounded(page.title, 500), url: bounded(page.url, 4_000), text: bounded(page.text),
-            price_evidence: Array.isArray(page.priceEvidence) ? page.priceEvidence.slice(0, 80) : [],
-            structured: Array.isArray(page.structured) ? page.structured.slice(0, 20) : [],
-            price_meta: Array.isArray(page.priceMeta) ? page.priceMeta.slice(0, 50) : [],
-            links: Array.isArray(page.links) ? page.links.slice(0, 250) : [],
-          } });
-      } finally { cdp.disconnect(); }
+      const agentInstanceId = String(body.agent_instance_id || '');
+      if (!/^ha-[a-f0-9]{32}-v[1-9][0-9]*$/i.test(agentInstanceId)
+          || !/^[0-9a-f-]{36}$/i.test(String(body.work_order_id || ''))) {
+        return Response.json({ error: 'invalid_browser_assignment' }, { status: 400 });
+      }
+      const agent = await getAgentByName(env.HIRED_HYPER_AGENT, agentInstanceId);
+      return agent.fetch(new Request('https://agent.internal/browser', {
+        method: 'POST', headers: {
+          authorization: `Bearer ${env.HYPER_GROK_WORKFLOW_SECRET}`, 'content-type': 'application/json',
+        }, body: JSON.stringify(body),
+      }));
     }
     if (url.pathname === '/sandbox/execute' && request.method === 'POST') {
       const body = await request.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));

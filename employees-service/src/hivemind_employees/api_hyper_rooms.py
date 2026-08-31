@@ -3928,6 +3928,8 @@ async def _orchestrate_single_agent(
             register_cloudflare_browser_tool(
                 agent.toolkit, str(req.org_id or ""), str(req.user_id or ""),
                 str(req.grok_runtime_mode or "off"),
+                agent_instance_id=instance_id,
+                work_order_id=str(order.get("_work_order_id") or ""),
             )
         if mode_at_least(req.grok_runtime_mode, "collaboration"):
             async def _build_selected_sub_agent(target_row: Dict[str, Any]) -> ReActAgent:
@@ -3963,8 +3965,12 @@ async def _orchestrate_single_agent(
         for receipt in await _collect_agent_tool_receipts(agent):
             if receipt not in receipts:
                 receipts.append(receipt)
+        valid_receipts = [
+            row for row in receipts
+            if str(row.get("status") or "").lower() == "completed"
+        ]
         if (mode_at_least(req.grok_runtime_mode, "real_tools")
-                and order.get("required_evidence") and not receipts):
+                and order.get("required_evidence") and not valid_receipts):
             repair = await agent(Msg(
                 name="user",
                 role="user",
@@ -3983,7 +3989,11 @@ async def _orchestrate_single_agent(
             for receipt in await _collect_agent_tool_receipts(agent):
                 if receipt not in receipts:
                     receipts.append(receipt)
-        if mode_at_least(req.grok_runtime_mode, "real_tools") and order.get("required_evidence") and not receipts:
+            valid_receipts = [
+                row for row in receipts
+                if str(row.get("status") or "").lower() == "completed"
+            ]
+        if mode_at_least(req.grok_runtime_mode, "real_tools") and order.get("required_evidence") and not valid_receipts:
             raise RuntimeError(
                 f"agent {owner.get('slug')} produced no verified tool receipt for an evidence-required assignment"
             )
@@ -4014,7 +4024,7 @@ async def _orchestrate_single_agent(
         })
         return {
             "text": text,
-            "evidence": receipts,
+            "evidence": valid_receipts,
             "artifacts": [],
             "tool_receipts": receipts,
             "usage": {},

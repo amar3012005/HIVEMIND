@@ -20,6 +20,26 @@ export const normalizeMode = (value: unknown): RuntimeMode => MODES.includes(val
 export const modeRank = (value: unknown): number => MODES.indexOf(normalizeMode(value));
 export const workflowId = (turnId: string, version: number): string => `room-${turnId}-v${Math.max(1, Number(version) || 1)}`;
 export const assignmentWorkflowId = (workOrderId: string, version: number): string => `agent-${workOrderId}-v${Math.max(1, Number(version) || 1)}`;
+export function publicHttpsUrl(value: unknown): URL | null {
+  try {
+    const url = new URL(String(value || ''));
+    if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) return null;
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')
+        || host.endsWith('.internal') || host.endsWith('.home') || host.endsWith('.lan')) return null;
+    if (host.includes(':') || /^\d+$/.test(host)) return null;
+    const match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (match) {
+      const octets = match.slice(1).map(Number);
+      if (octets.some((part) => part > 255)) return null;
+      const [a, b] = octets;
+      if (a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127)
+          || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+          || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19))) return null;
+    }
+    return url;
+  } catch { return null; }
+}
 export function validParams(value: unknown): value is TurnParams {
   const p = value as Partial<TurnParams>;
   return !!p && UUID.test(String(p.turn_id || '')) && UUID.test(String(p.room_id || ''))

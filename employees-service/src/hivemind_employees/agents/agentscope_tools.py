@@ -1306,6 +1306,7 @@ def register_delegate_to_tool(
 
 def register_cloudflare_browser_tool(
     tk: Toolkit, org_id: str, user_id: str, runtime_mode: str,
+    *, agent_instance_id: str, work_order_id: str,
 ) -> None:
     """Expose the feature-gated Cloudflare Browser Run adapter to one Agent.
 
@@ -1317,60 +1318,71 @@ def register_cloudflare_browser_tool(
     if not runtime_url or not runtime_secret:
         return
 
-    async def cloudflare_browser_visit(url: str) -> ToolResponse:
-        """Open one public HTTPS page in an isolated Cloudflare Browser Run
-        session. Returns the rendered title, URL, visible text, and a live-view
-        target when available. Use APIs/connectors first; use this for pages
-        that require a real rendered browser. Private/local URLs are rejected.
+    async def cloudflare_browser_visit(
+        url: str, new_tab: bool = True, capture_screenshot: bool = True,
+    ) -> ToolResponse:
+        """Open and inspect a public HTTPS page in this employee's durable
+        Cloudflare Browser workspace. The same work order reuses its tabs and
+        browser session across calls and retries. Returns rendered text,
+        structured page data, links, current tabs, a Live View target, and a
+        screenshot receipt. Use APIs/connectors first; use this when the real
+        rendered page is required. Private/local URLs are rejected.
         """
         try:
             async with httpx.AsyncClient(timeout=45.0) as client:
                 response = await client.post(
                     f"{runtime_url}/browser/execute",
                     headers={"Authorization": f"Bearer {runtime_secret}"},
-                    json={"org_id": org_id, "user_id": user_id, "mode": runtime_mode, "url": url},
+                    json={
+                        "org_id": org_id, "user_id": user_id, "mode": runtime_mode,
+                        "agent_instance_id": agent_instance_id, "work_order_id": work_order_id,
+                        "action": "open", "url": url, "new_tab": bool(new_tab),
+                        "capture_screenshot": bool(capture_screenshot),
+                    },
                 )
             response.raise_for_status()
             payload = response.json()
             page = payload.get("page") or {}
             links = [row for row in (page.get("links") or []) if isinstance(row, dict)][:250]
-            price_evidence = [str(row)[:1200] for row in (page.get("price_evidence") or []) if str(row).strip()][:80]
-            price_meta = [row for row in (page.get("price_meta") or []) if isinstance(row, dict)][:50]
             structured = [str(row)[:6000] for row in (page.get("structured") or []) if str(row).strip()][:10]
             link_text = "\n".join(
                 f"- {str(row.get('text') or '')[:240]}: {str(row.get('url') or '')[:1000]}"
                 for row in links
                 if str(row.get("text") or "").strip() and str(row.get("url") or "").strip()
             )
-            pricing_text = "\n".join(f"- {row}" for row in price_evidence)
-            meta_text = "\n".join(
-                f"- {str(row.get('key') or 'price')[:120]}: {str(row.get('content') or '')[:500]}"
-                for row in price_meta
-            )
             structured_text = "\n".join(structured)
-            receipt_excerpt = (
-                f"Rendered price evidence:\n{pricing_text}\nPrice metadata:\n{meta_text}\n\n"
-                f"{str(page.get('text') or '')[:4000]}"
-            )[:8000]
+            screenshot = payload.get("screenshot") if isinstance(payload.get("screenshot"), dict) else {}
+            tabs = [row for row in (payload.get("tabs") or []) if isinstance(row, dict)][:24]
+            receipt_excerpt = str(page.get("text") or "")[:8000]
+            valid = bool(page.get("page_valid"))
             _record_agent_tool_receipt({
                 "adapter": "cloudflare_browser",
-                "status": "completed",
+                "status": "completed" if valid else "invalid",
                 "provider_id": str(payload.get("session_id") or ""),
                 "url": str(page.get("url") or url)[:1000],
                 "title": str(page.get("title") or "")[:300],
                 "excerpt": receipt_excerpt,
                 "live_view_url": str(payload.get("live_view_url") or "")[:1000],
+                "target_id": str(payload.get("target_id") or "")[:200],
+                "content_hash": str(page.get("content_hash") or "")[:128],
+                "captured_at": str(page.get("captured_at") or "")[:80],
+                "invalid_reason": str(page.get("invalid_reason") or "")[:300] or None,
+                "screenshot": screenshot,
+                "tabs": tabs,
             })
             return _tool_response_text(
                 f"Title: {page.get('title') or ''}\nURL: {page.get('url') or ''}\n\n"
-                f"Rendered price evidence:\n{pricing_text}\n\nPrice metadata:\n{meta_text}\n\n"
-                f"Structured product data:\n{structured_text}\n\nVisible page text:\n{page.get('text') or ''}"
+                f"Evidence status: {'valid' if valid else 'invalid'}"
+                f"{(' — ' + str(page.get('invalid_reason'))) if page.get('invalid_reason') else ''}\n"
+                f"Content hash: {page.get('content_hash') or ''}\n"
+                f"Structured page data:\n{structured_text}\n\nVisible page text:\n{page.get('text') or ''}"
                 f"\n\nRendered links:\n{link_text}",
                 metadata={
-                    "adapter": "cloudflare_browser", "status": "completed",
+                    "adapter": "cloudflare_browser", "status": "completed" if valid else "invalid",
                     "provider_id": payload.get("session_id"),
                     "session_id": payload.get("session_id"),
                     "live_view_url": payload.get("live_view_url"),
+                    "target_id": payload.get("target_id"), "screenshot": screenshot,
                 },
             )
         except Exception as exc:  # noqa: BLE001

@@ -41,7 +41,7 @@ from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import httpx
-from .ai_gateway import post as gateway_post, workers_ai_chat
+from .ai_gateway import post as gateway_post, planner_ai_chat
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from fastapi import APIRouter, Header, HTTPException
@@ -2529,8 +2529,8 @@ async def _verify_turn(
         }
         if _needs_reasoning_disabled(verifier_model):
             body["reasoning"] = {"enabled": False}
-        if verifier_model.startswith("@cf/"):
-            data = await workers_ai_chat(body, timeout=httpx.Timeout(20.0, connect=5.0))
+        if verifier_model == HYPER_PLANNER_MODEL:
+            data = await planner_ai_chat(body, timeout=httpx.Timeout(20.0, connect=5.0))
             if not isinstance(data, dict):
                 body["model"] = HYPER_FAST_MODEL
                 data = await _openrouter_chat(body, timeout=httpx.Timeout(25.0, connect=5.0))
@@ -3614,13 +3614,13 @@ async def _select_execution_profile(req: "RoomTurnRequest", conns: List[str]) ->
     # order for the selected model.
     data: Optional[Dict[str, Any]] = None
     try:
-        data = (await workers_ai_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
-                if str(body["model"]).startswith("@cf/")
+        data = (await planner_ai_chat(body, timeout=httpx.Timeout(15.0, connect=5.0))
+                if str(body["model"]) == HYPER_PLANNER_MODEL
                 else await _openrouter_chat(body, timeout=httpx.Timeout(15.0, connect=5.0)))
     except Exception as exc:  # noqa: BLE001
         log.info("[profile-select] openrouter unavailable turn=%s: %s", req.turn_id, exc)
     if data is None:
-        _fallback = (HYPER_FAST_MODEL if str(body["model"]).startswith("@cf/")
+        _fallback = (HYPER_FAST_MODEL if str(body["model"]) == HYPER_PLANNER_MODEL
                      else _fallback_model_for(body["model"]))
         if _fallback:
             log.warning("[profile-select] experimental model %s unavailable turn=%s — falling back to %s",

@@ -64,7 +64,7 @@ def test_fast_planner_profile_restores_evidence_query_and_suppresses_plain_copy_
         return {"content": json.dumps(payload)}
 
     monkeypatch.setattr(director, "_groq", plan_call)
-    assert director.director_model == "@cf/zai-org/glm-5.3-flash"
+    assert director.director_model == "google/gemini-2.5-flash-lite"
     plan = asyncio.run(director._plan_gather())
     assert director.artifact_intent is None
     assert plan["web_query"] == "Singulance GDPR compliance claims"

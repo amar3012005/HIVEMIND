@@ -5,7 +5,7 @@ import re
 
 
 HYPER_FAST_MODEL = "openai/gpt-oss-20b:nitro"
-HYPER_PLANNER_MODEL = "@cf/zai-org/glm-5.3-flash"
+HYPER_PLANNER_MODEL = "google/gemini-2.5-flash-lite"
 _LEGACY_FAST_MODELS = {"gpt-oss-20b", "openai/gpt-oss-20b"}
 _LEGACY_GROK_RE = re.compile(r"^(?:x-ai/)?grok(?:[-/:].*)?$", re.IGNORECASE)
 

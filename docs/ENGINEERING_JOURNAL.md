@@ -1733,3 +1733,25 @@ git diff --check: passed (line-ending warnings only)
   account credit exhaustion (`weight_exceeds_budget` / `openrouter_credits`). Two
   orphaned local assignments were cancelled and Employees returned healthy. No
   production deployment or configuration change was performed.
+
+## 2026-08-31 — HyperAgent Workers AI GLM migration (local)
+
+- Retired legacy `claude-haiku-*` participant settings from the HyperAgent model
+  policy. They now resolve to Cloudflare Workers AI
+  `@cf/zai-org/glm-5.3-flash` instead of OpenRouter.
+- Added an authenticated Cloudflare AI Gateway compatibility target for Workers
+  AI. The SDK sends `workers-ai/@cf/zai-org/glm-5.3-flash` through the configured
+  account/gateway and fails closed when Gateway configuration is absent; it does
+  not fall back to a direct provider or OpenRouter. Commit `141b8ea6`.
+
+### Verification evidence
+
+- `PYTHONPATH=src python -m pytest tests/test_ai_gateway.py -q` — `5 passed`.
+- `python -m py_compile` passed for `ai_gateway.py`, `model_policy.py`, and
+  `agentscope_factory.py`.
+- A standalone model-policy probe confirmed both bare and Anthropic-prefixed
+  Claude Haiku identifiers resolve to Workers AI GLM and do not require
+  OpenRouter.
+- Live inference remains pending because Docker Desktop is stopped and the local
+  parity env file contains no Gateway credential. No secret was copied, printed,
+  or committed, and production was not changed.

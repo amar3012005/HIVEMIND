@@ -1545,3 +1545,61 @@ Wrangler local dry-run with Browser/Sandbox: passed
 Sandbox next-python image build: passed
 Integrated Da-vinci optimized build: compiled successfully
 ```
+
+## 2026-08-31 — Grok HyperAgents accepted in local full-mode canary
+
+### Committed
+
+- Runtime integration and local wiring were committed on `singulance-local` as
+  `e4c1983f4cc8cdf6eeb47b3be0eab38b6180f626`.
+- The change fixes Director propagation of the latched runtime mode and real-agent
+  hook, roster matching across lanes and role archetypes, Cloudflare AI Gateway
+  BYOK headers for AgentScope, isolated Browser tool registration, and local
+  service-to-service Employees routing.
+- The checked-in additive Grok runtime migrations were applied to the existing
+  local database. `prisma migrate deploy` could not baseline that pre-existing
+  schema (`P3005`), so only the two reviewed migration SQL files were applied;
+  production was not touched.
+
+### Local Cloudflare acceptance
+
+- Flagship flag `hyperagents_grok_agents_v1` has all cumulative modes from `off`
+  through `full`. Its default is `off`; only local canary org
+  `47e2ba84-1b9f-4e1b-804b-7bd77d4eea0f` and user
+  `3b56a01a-7caf-4348-964a-566f52d8c437` resolve to `full` when
+  `environment=local`. An unknown identity resolved to `off`.
+- Local Worker resources are `hivemind-hyperagents-grok-local`, Room Workflow
+  `hivemind-hyper-room-run-local`, assignment Workflow
+  `hivemind-hyper-agent-assignment-local`, and sandbox container
+  `hivemind-hyperagents-grok-local-sandbox-local`.
+- Final turn `4bc77624-17da-444b-9619-a6cd2fb467b1`, Workflow
+  `room-4bc77624-17da-444b-9619-a6cd2fb467b1-v1`, reached PostgreSQL status
+  `complete` and phase `SEALED`. Two WorkOrders and two WorkResults completed.
+  Assignment Workflows `agent-b2d214dc-2db5-4e6e-a07d-ee44c0182f25-v1` and
+  `agent-78d747d3-90af-44e9-b9a7-174bf05ab861-v1` completed. A transient Room
+  execute timeout retried and reused the terminal state without duplicate work.
+- The direct Cloudflare Browser canary returned HTTP success, an isolated session,
+  title `Example Domain`, the expected URL, and rendered text. Local model and
+  embedding requests used production-equivalent Cloudflare Gateway/provider
+  routing, but credentials were not written to Git or this journal.
+
+### Verification
+
+```text
+workers/hyperagents-grok-local: 1 test file, 5 tests passed
+Employees focused suite: 39 passed in 2.90s
+API health: http://localhost:3000/health 200
+Control health: http://localhost:3001/health 200
+Employees health: http://localhost:8060/health 200
+Authenticated recall: 1 memory + 2 evidence
+git diff --check: passed (line-ending warnings only)
+```
+
+### Release boundary and rollback
+
+- This is a local acceptance only. No production service, production flag target,
+  production database, or `singulance-main` branch was changed.
+- Rollback is to remove the local targeting rule or resolve the flag to `off`;
+  flag-off turns remain byte-compatible with the existing runtime.
+- Cloudflare Agent Memory was unavailable in this session, so this evidence is
+  recorded in Git and must be mirrored to Agent Memory after service recovery.

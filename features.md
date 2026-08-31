@@ -372,3 +372,27 @@ verification, and its independent rollback control.
   Wrangler local dry-run including Browser/Sandbox, Sandbox image build, and an
   optimized Da-vinci build. No Cloudflare resource or production service was
   deployed or enabled.
+
+## Local — Grok-style HyperAgents runtime (2026-08-31)
+
+- Status: accepted locally; production untouched.
+- Backend commit: `e4c1983f4cc8cdf6eeb47b3be0eab38b6180f626` on `singulance-local`.
+- Flag: `hyperagents_grok_agents_v1` defaults to `off` and resolves to `full`
+  only for the local canary organization/user with `environment=local`.
+- Cloudflare local resources: `hivemind-hyperagents-grok-local`,
+  `hivemind-hyper-room-run-local`,
+  `hivemind-hyper-agent-assignment-local`, and
+  `hivemind-hyperagents-grok-local-sandbox-local`.
+- Accepted behavior: roster-first selection, persistent agent identities, durable
+  Room and assignment Workflows, PostgreSQL WorkOrder/Result authority, bounded
+  real-tool AgentScope execution through the production-equivalent Cloudflare AI
+  Gateway path, reviewer participation, workflow retry/recovery, and Cloudflare
+  Browser execution with isolated receipts.
+- Final canary: turn `4bc77624-17da-444b-9619-a6cd2fb467b1` reached `complete`
+  and `SEALED`; both durable assignments completed and the Room Workflow reused
+  terminal state after a transient execute timeout without duplicate work.
+- Verification: Worker 5/5; Employees focused suite 39/39; API, Control and
+  Employees health HTTP 200; authenticated recall returned one memory and two
+  evidence results; direct Cloudflare Browser canary returned Example Domain.
+- Rollback: remove the local targeting rule or set the flag to `off`. Flag-off
+  turns remain on the existing runtime. No production targeting was added.

@@ -1436,3 +1436,38 @@ Wrangler deploy --dry-run --env local: passed
   reconciliation and the session merge must be serialized in the permanent
   `HIVEMIND-local-main` worktree before any shared-stack rebuild or local flag
   canary. No accepted local or production release is claimed here.
+
+## 2026-08-31 — Grok-style HyperAgents complete runtime increment
+
+### Committed
+
+- Pushed backend/parent commit `6f8e650d` on
+  `origin/codex/grok-hyperagents-v1` from isolated worktree
+  `P:\\HIVEMIND-worktrees\\grok-hyperagents-v1`.
+- Pushed Da-vinci commit `e674f3e` on
+  `origin/codex/grok-hyperagents-ui-v1` before updating the parent gitlink.
+- Added deterministic assignment Workflows, durable user control and steering,
+  structured provider receipts, capability-gap events, versioned skills,
+  persistent routines, Cloudflare Browser Run, authority-gated Sandbox, and
+  frontend runtime controls. Production was not deployed.
+
+### Verification
+
+```text
+Prisma validate/generate: passed
+Core node syntax + runtime/HyperRoom routes: 7 passed
+Employees changed-file Python compilation: passed
+Worker TypeScript: passed
+Worker contract tests: 5 passed
+Wrangler --env local dry-run: passed
+Sandbox next-python image build: passed
+Da-vinci optimized production build: compiled successfully
+```
+
+### Integration boundary
+
+- The feature remains fail-closed and unenabled. It must be merged through the
+  clean permanent local integration worktree only after the current
+  `singulance-main` to `singulance-local` conflict is reconciled serially.
+- No shared local container, Cloudflare resource, Flagship rule, database, or
+  production service was changed by this commit.

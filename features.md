@@ -413,3 +413,16 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
   enabled. No runtime service was rebuilt or restarted.
 - Immediate rollback restores default and production priorities 2/3 to `off`
   using the captured full flag definition; the local rule remains `on`.
+
+## feature-20260831T194741Z — HyperAgent GPT-OSS 20B provider routing
+
+- Production HyperAgent fast-tier calls normalize to
+  `openai/gpt-oss-20b:nitro` and travel through Cloudflare AI Gateway to
+  OpenRouter.
+- Provider priority is Amazon Bedrock, Amazon Bedrock EU, Groq, then Together,
+  with OpenRouter fallback enabled.
+- Verified live on canonical SHA
+  `97afbd87760771789b5a8adab651027dd18d51a1`; Amazon Bedrock served both the
+  direct Gateway canary and deployed HyperAgent transport canary.
+- This is shared provider policy, not a Grok-runtime enablement. The existing
+  Gemini planner canary remains unchanged.

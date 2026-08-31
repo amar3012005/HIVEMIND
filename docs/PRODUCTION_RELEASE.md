@@ -1143,3 +1143,19 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 - Exact rollback payload is the precondition-read definition recorded by the
   governor: default `off`, local priority 1 `on`, production priorities 2 and 3
   `off`, with all other fields unchanged.
+
+## 97afbd87 — HyperAgent GPT-OSS 20B Bedrock-first routing
+
+- Canonical SHA `97afbd87760771789b5a8adab651027dd18d51a1`; frontend unchanged;
+  manifest
+  `/root/releases/manifests/97afbd87/20260831T194741Z/RELEASE_MANIFEST.json`.
+- Core digest `sha256:c490054e844fdd5ef86586802b551b266af2a70ad8729b954fc5bda2ba0a6ccd`;
+  Control digest `sha256:256dbd0bc9880bbe44c3f50693e8181f6f4b021ac5b79eef5d53a38bf5dc32ba`;
+  Employees digest `sha256:5892ec0556f0b0e9fec8f0f203a1d67e0adec59dca0c47018e56b2f2876eddcd`.
+- The fast tier remains `openai/gpt-oss-20b:nitro` through Cloudflare AI
+  Gateway and OpenRouter, preferring Amazon Bedrock, Amazon Bedrock EU, Groq,
+  then Together. OpenRouter fallback remains enabled.
+- Acceptance: 11 focused tests, live pre-release and deployed-path inference
+  served by Amazon Bedrock, exact-revision service health, public API health,
+  and an empty fresh critical-log scan. No migration was applied.
+- Rollback: governor rollback to the preceding `8d35d3c2` service images.

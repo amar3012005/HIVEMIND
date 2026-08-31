@@ -1662,3 +1662,19 @@ slides that find no unique anchor get a page instead of `null`.
 - This was a flag-only promotion: no build, restart, deployment, upload,
   customer content, or external delivery occurred. Rollback is the captured
   full definition with default and production priorities 2/3 restored to off.
+
+## 2026-08-31 UTC — HyperAgent GPT-OSS 20B Bedrock-first routing
+
+- Session branch `codex/prod-hyper-gptoss-routing` replaced the obsolete
+  Novita-only pin for `openai/gpt-oss-20b:nitro` with OpenRouter endpoint order
+  `amazon-bedrock`, `amazon-bedrock/eu-west-1`, `groq`, then `together`.
+  Calls remain behind Cloudflare AI Gateway with cross-provider fallback.
+- Focused Python 3.12 tests passed 11/11. A pre-release live Gateway probe
+  returned HTTP 200 from Amazon Bedrock.
+- Canonical SHA `97afbd87760771789b5a8adab651027dd18d51a1` was released through
+  the governor. Core, Control, and Employees are healthy at that revision; no
+  migrations were pending. The deployed HyperAgent transport returned choices
+  from Amazon Bedrock, public API health passed, and fresh critical logs were
+  empty.
+- This changes provider routing only. Gemini planner targeting and the
+  Grok-style runtime rollout state are unchanged.

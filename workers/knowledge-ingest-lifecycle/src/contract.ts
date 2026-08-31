@@ -34,6 +34,10 @@ export function materializationPollDecision(value: { status?: string; retryable?
   if (value.status === 'succeeded') return 'complete';
   if (value.status === 'failed' && value.retryable === false) return 'fail';
   if (value.status === 'failed') return 'redispatch';
+  // Core resets in-process checkpoints to pending on restart because their
+  // execution context no longer exists. Re-dispatch is idempotent and resumes
+  // the same processing version; merely polling pending would strand the job.
+  if (value.status === 'pending') return 'redispatch';
   return 'wait';
 }
 

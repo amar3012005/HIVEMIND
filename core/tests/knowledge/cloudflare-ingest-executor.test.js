@@ -378,3 +378,30 @@ test('durable FIFO capacity row prevents a newer stage from jumping the queue', 
   assert.equal(claim.acquired, false);
   assert.equal(created, false);
 });
+
+test('Core restart requeues every current Workflow in-process checkpoint', async () => {
+  const sql = [];
+  let leasesCleared = false;
+  const prisma = {
+    knowledgeIngestLease: {
+      deleteMany: async () => { leasesCleared = true; return { count: 2 }; },
+    },
+    knowledgeIngestStep: {},
+    $executeRawUnsafe: async (statement) => { sql.push(statement); return 1; },
+  };
+  prisma.$transaction = async (work) => work(prisma);
+  const executor = new CloudflareKnowledgeIngestExecutor({
+    prisma,
+    jobStore: {},
+    objectClient: {},
+    documentFirstIngestion: {},
+    stepStore: stepStore(),
+    logger: { warn() {} },
+  });
+
+  await executor.schedulerReady;
+  assert.equal(leasesCleared, true);
+  assert.match(sql.at(-1), /s\.status = 'processing'/);
+  assert.match(sql.at(-1), /j\.processing_version = s\.processing_version/);
+  assert.doesNotMatch(sql.at(-1), /stage_key LIKE 'capacity/);
+});

@@ -103,9 +103,10 @@ export class CloudflareKnowledgeIngestExecutor {
                   updated_at = NOW()
              FROM knowledge_ingest_jobs AS j
             WHERE j.id = s.job_id
-              AND s.stage_key LIKE 'capacity\\_%' ESCAPE '\\'
               AND s.status = 'processing'
-              AND j.status IN ('queued', 'processing')`,
+              AND j.orchestration_mode = 'cloudflare_workflow'
+              AND j.status IN ('queued', 'processing')
+              AND j.processing_version = s.processing_version`,
         );
       });
     } catch (error) {

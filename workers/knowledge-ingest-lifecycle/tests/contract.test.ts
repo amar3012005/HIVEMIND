@@ -32,6 +32,7 @@ describe('knowledge ingest workflow identity', () => {
   it('never redispatches a terminal materialization failure', () => {
     expect(materializationPollDecision({ status: 'failed', retryable: false })).toBe('fail');
     expect(materializationPollDecision({ status: 'failed', retryable: true })).toBe('redispatch');
+    expect(materializationPollDecision({ status: 'pending' })).toBe('redispatch');
     expect(materializationPollDecision({ status: 'processing' })).toBe('wait');
     expect(materializationPollDecision({ status: 'succeeded' })).toBe('complete');
   });

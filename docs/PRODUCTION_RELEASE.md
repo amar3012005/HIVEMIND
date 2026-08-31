@@ -1235,3 +1235,23 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   unrelated production context plus both historical canary tenants. Emergency
   rollback is Flagship default/rules to `off`, or the existing Core master
   environment gate; Core image rollback uses the governor's saved stable tag.
+
+## da923a8c — immediate durable ingestion dispatch
+
+- Canonical parent SHA `da923a8c9bae63b72d7d5fc70b707c91c011f548`;
+  frontend unchanged at `c5a4973c468f39f86f573284180f95afa140145a`.
+- Core image digest
+  `sha256:3008d4cd853c2e84129fb8fe49cc6008fc52b438f6221837bc19d453db6828b7`;
+  manifest
+  `/root/releases/manifests/da923a8c/20260831T224635Z/RELEASE_MANIFEST.json`.
+- Additive migration `20260831224000_ingest_stage_wait_queue` created the
+  indexed durable stage queue. No data service was restarted; only Core was
+  rebuilt and recreated through the canonical governor.
+- Canary job `42fea1d8-c269-41d1-8bd9-36dcfaf4bc71` completed through the
+  globally enabled Cloudflare Workflow path with all receipts at attempt 1,
+  one evidence segment, three canonical memories, and millisecond stage
+  handoffs. Core health returned 200 and the fresh critical-log scan was empty.
+- Flag and Worker versions were unchanged from the accepted `22f549a3` release.
+  Rollback is the governor-captured prior Core image
+  `sha256:012ee1498ea4d1e55fe623f41a15b29944db66823640d1979d0e5567d85d2eec`;
+  emergency admission rollback remains the backend gate or Flagship off.

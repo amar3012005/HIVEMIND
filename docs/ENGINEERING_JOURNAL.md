@@ -1708,6 +1708,31 @@ slides that find no unique anchor get a page instead of `null`.
   sources as processing version 2. Both reached `ready` with exactly one
   canonical memory and no source re-upload.
 
+## 2026-08-31 UTC — immediate durable ingestion dispatch
+
+- Production inspection confirmed Cloudflare admission was healthy, but Core
+  still serialized work at two internal boundaries: stage capacity waiters
+  retried by time, and all PDF rasterization shared one process-wide slot.
+- Canonical release `da923a8c9bae63b72d7d5fc70b707c91c011f548`
+  replaces capacity polling with indexed durable FIFO checkpoint rows plus
+  immediate release notifications. Extract, embed, promote, and project pools
+  remain independently tenant-bounded. Scheduler transactions contain only an
+  advisory lock, bounded lease rows, and one indexed queue-head lookup.
+- The stale reconciler now uses current processing-version checkpoints,
+  `updated_at`, unexpired leases, and authoritative Cloudflare Workflow state.
+  A status-service outage is never interpreted as a dead Workflow.
+- Text-native PDFs continue to skip vision. Visual-page rendering uses a
+  bounded pool of two and Gemini 2.5 Flash Lite through AI Gateway
+  `hivemind-prod`; successful pages survive isolated provider failures.
+- Verification: 54 focused Core tests, 44 final scheduler/client/stale/vision
+  tests, valid Prisma schema, one Da-vinci image-upload regression, and a full
+  Da-vinci production build. Migration
+  `20260831224000_ingest_stage_wait_queue` applied successfully.
+- Production canary `42fea1d8-c269-41d1-8bd9-36dcfaf4bc71` used
+  `cloudflare_workflow`, reached `ready` with one segment and three canonical
+  memories, and every checkpoint succeeded at attempt 1. Extract→embed handoff
+  was 4 ms and embed→promote handoff was 3 ms. Fresh critical logs were empty.
+
 ## 2026-08-31 UTC - ingestion throughput final acceptance and incident repair
 
 - Canonical `e9fca76f6e8d66398d195f87d431645a56b1b058` released only the

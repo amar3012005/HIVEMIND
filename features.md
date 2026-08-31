@@ -458,3 +458,18 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Cloudflare BGE-M3 remains the primary embedding route with the configured
   secondary fallback. Image uploads use the same durable admission and
   canonical single-memory materializer.
+
+## feature-20260831T225017Z — immediate durable ingestion dispatch
+
+- Flag remains `knowledge_ingest_workflow_v1`, enabled globally. Public
+  upload/status payloads and the existing flag-off rollback path are unchanged.
+- Core release `da923a8c9bae63b72d7d5fc70b707c91c011f548`
+  uses durable FIFO stage checkpoints and immediate capacity release events;
+  there is no timer-based stage-slot polling.
+- Extraction, embedding, promotion, and projection have independent bounded
+  pools. PDF rendering is bounded at two concurrent processes by default;
+  healthy text layers bypass rendering and only visual pages use Gemini 2.5
+  Flash Lite through Cloudflare AI Gateway.
+- Production canary `42fea1d8-c269-41d1-8bd9-36dcfaf4bc71` completed every
+  checkpoint once, with extract→embed and embed→promote handoffs measured in
+  single-digit milliseconds.

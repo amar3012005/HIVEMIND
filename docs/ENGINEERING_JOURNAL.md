@@ -2131,3 +2131,7 @@ git diff --check: passed (line-ending warnings only)
   printed or committed.
 - Post-integration Browser Run canary again returned valid rendered evidence,
   content and screenshot hashes, Live View, two tabs, and successful cleanup.
+- Accepted `singulance-local` was pushed at
+  `212312a0a6cf0c54e60029d73e046f3fa0e00136`. Preview frontend Worker version
+  `c55a2365-a649-456f-aa7a-9a0f3019a265` returned HTTP 200 from
+  `next.preview.singulancelabs.com`; production was not deployed.

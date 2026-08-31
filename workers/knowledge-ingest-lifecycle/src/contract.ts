@@ -36,3 +36,14 @@ export function materializationPollDecision(value: { status?: string; retryable?
   if (value.status === 'failed') return 'redispatch';
   return 'wait';
 }
+
+export function workflowFailureDisposition(nonRetryable: boolean): {
+  terminal: boolean;
+  retryable: boolean;
+  errorCode: string;
+  enqueueRecovery: boolean;
+} {
+  return nonRetryable
+    ? { terminal: true, retryable: false, errorCode: 'WORKFLOW_NON_RETRYABLE', enqueueRecovery: false }
+    : { terminal: false, retryable: true, errorCode: 'WORKFLOW_RETRYABLE_INTERRUPTION', enqueueRecovery: true };
+}

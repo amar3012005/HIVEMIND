@@ -180,6 +180,14 @@ BLACKBOARD_MIN_SCORE = float(os.environ.get("HYPER_ROOM_BLACKBOARD_MIN_SCORE", "
 # truly stuck, and turns it into a real, user-visible terminal state instead
 # of infinite silence.
 HYPER_ROOM_ROUND_DEADLINE_SECONDS = float(os.environ.get("HYPER_ROOM_ROUND_DEADLINE_SECONDS", "240"))
+HYPER_GROK_ROOM_ROUND_DEADLINE_SECONDS = float(
+    os.environ.get("HYPER_GROK_ROOM_ROUND_DEADLINE_SECONDS", "1200")
+)
+
+
+def _work_room_execution_phase(runtime_mode: str | None) -> str:
+    """Preserve Cloudflare Workflow ownership in persisted turn state."""
+    return "GROK_RUNNING" if mode_at_least(runtime_mode, "durable_assignments") else "ACCEPTED"
 
 # Agentic task engine (dual-engine, 2026-08-13): default-off. When on, the
 # planner may route a turn to a real multi-step ReAct loop (lead agent +
@@ -5402,8 +5410,14 @@ async def post_room_turn(
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             _EXECUTION_IDENTITY_BY_TURN[req.turn_id] = dict(identity)
+            # The Cloudflare Workflow owns durable turns before Employees is
+            # invoked.  Never move that lease backwards to ACCEPTED: doing so
+            # makes the persisted state look legacy-owned while a real Agent
+            # assignment is already running and confuses recovery operators.
             await persist_work_room_progress(
-                turn_id=req.turn_id, phase="ACCEPTED", identity=identity,
+                turn_id=req.turn_id,
+                phase=_work_room_execution_phase(req.grok_runtime_mode),
+                identity=identity,
             )
     # P2 Governor — master kill switch (all orgs, no DB write). Refuse instantly: no LLM
     # spend, no debate, no outbound. Emit a seal so the FE stream closes cleanly.
@@ -5453,10 +5467,20 @@ async def post_room_turn(
     try:
         for rnd in range(1, max_rounds + 1):
             try:
-                resp = await asyncio.wait_for(_orchestrate(req), timeout=HYPER_ROOM_ROUND_DEADLINE_SECONDS)
+                # Browser sessions, independent review, and approval-capable
+                # agent work legitimately outlive the legacy four-minute
+                # single-call budget.  The outer Workflow still imposes its
+                # own bounded 30-minute lifecycle, so this is finite without
+                # cutting off a verified assignment halfway through review.
+                round_deadline = (
+                    HYPER_GROK_ROOM_ROUND_DEADLINE_SECONDS
+                    if mode_at_least(req.grok_runtime_mode, "durable_assignments")
+                    else HYPER_ROOM_ROUND_DEADLINE_SECONDS
+                )
+                resp = await asyncio.wait_for(_orchestrate(req), timeout=round_deadline)
             except asyncio.TimeoutError:
                 log.error("[goalkeeper] round=%d exceeded %.0fs deadline (turn=%s) — sealing deadline_exceeded instead of hanging",
-                          rnd, HYPER_ROOM_ROUND_DEADLINE_SECONDS, req.turn_id)
+                          rnd, round_deadline, req.turn_id)
                 # `_orchestrate` never finished, so it never stashed a seal onto
                 # `_SEAL_BY_TURN` — without emitting one here directly, the FE
                 # (which only stops polling/rendering on a genuine status change)

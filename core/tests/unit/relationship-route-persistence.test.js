@@ -34,10 +34,20 @@ test('BYOD relationship writes route before every central relationship query', (
   const end = storeSource.indexOf('async createMemoryVersion', start);
   const method = storeSource.slice(start, end);
   const remoteBranch = method.indexOf('if (remoteLatched || orgIsRemote(_remoteOrg))');
-  const centralLookup = method.indexOf('this.client.relationship.findUnique');
+  const centralLookup = method.indexOf('this.client.relationship.findFirst');
   assert.ok(remoteBranch > -1 && centralLookup > -1 && remoteBranch < centralLookup);
   assert.match(method.slice(remoteBranch, centralLookup), /await amrAddEdge/);
   assert.match(method.slice(remoteBranch, centralLookup), /remote relationship write was not acknowledged/);
+});
+
+test('central semantic edge lookup and budget are tenant-scoped through memory endpoints', () => {
+  const start = storeSource.indexOf('async createRelationship(edge)');
+  const end = storeSource.indexOf('async createMemoryVersion', start);
+  const method = storeSource.slice(start, end);
+  assert.doesNotMatch(method, /relationship\.findUnique/);
+  assert.match(method, /fromMemory:\s*\{ orgId: _remoteOrg \}/);
+  assert.match(method, /toMemory:\s*\{ orgId: _remoteOrg \}/);
+  assert.match(method, /relationship\.count\([\s\S]*?fromMemory:\s*\{ orgId: _remoteOrg \}/);
 });
 
 test('semantic edge constructors carry explicit tenant scope into storage adapters', () => {

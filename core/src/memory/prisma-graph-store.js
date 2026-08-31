@@ -1653,11 +1653,25 @@ export class PrismaGraphStore {
       return mapRelationshipRecord({ id: _edgeId, fromId: edge.from_id, toId: edge.to_id, type, confidence: edge.confidence ?? 1.0, metadata: edge.metadata || {} });
     }
     if (['Updates', 'Extends', 'Derives', 'Contradicts'].includes(type)) {
-      const uniqueWhere = { fromId_toId_type: { fromId: edge.from_id, toId: edge.to_id, type } };
-      const existing = await this.client.relationship.findUnique({ where: uniqueWhere, select: { id: true } });
+      // Relationship has no orgId column, so tenant scope must be proven
+      // transitively through BOTH memory endpoints. A compound findUnique hides
+      // those keys inside fromId_toId_type and is correctly rejected by the
+      // Prisma tenant-isolation middleware during canonical projection.
+      const existing = await this.client.relationship.findFirst({
+        where: {
+          fromId: edge.from_id, toId: edge.to_id, type,
+          fromMemory: { orgId: _remoteOrg },
+          toMemory: { orgId: _remoteOrg },
+        },
+        select: { id: true },
+      });
       if (!existing) {
         const semanticOut = await this.client.relationship.count({
-          where: { fromId: edge.from_id, type: { in: ['Updates', 'Extends', 'Derives', 'Contradicts'] } },
+          where: {
+            fromId: edge.from_id,
+            type: { in: ['Updates', 'Extends', 'Derives', 'Contradicts'] },
+            fromMemory: { orgId: _remoteOrg },
+          },
         });
         if (semanticOut >= 10) throw new Error('relationship_policy_rejected:semantic-edge-budget-exhausted');
       }

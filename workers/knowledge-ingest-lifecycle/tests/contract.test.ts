@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validParams, workflowInstanceId } from '../src/contract';
+import { materializationPollDecision, validParams, workflowInstanceId } from '../src/contract';
 
 const params = {
   job_id: '11111111-1111-4111-8111-111111111111',
@@ -19,5 +19,12 @@ describe('knowledge ingest workflow identity', () => {
 
   it('uses one deterministic workflow instance per job version', () => {
     expect(workflowInstanceId(params)).toBe('kb-11111111-1111-4111-8111-111111111111-v3');
+  });
+
+  it('never redispatches a terminal materialization failure', () => {
+    expect(materializationPollDecision({ status: 'failed', retryable: false })).toBe('fail');
+    expect(materializationPollDecision({ status: 'failed', retryable: true })).toBe('redispatch');
+    expect(materializationPollDecision({ status: 'processing' })).toBe('wait');
+    expect(materializationPollDecision({ status: 'succeeded' })).toBe('complete');
   });
 });

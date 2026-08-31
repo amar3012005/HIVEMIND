@@ -1,5 +1,125 @@
 # Current SINGULANCE Production Release
 
+## 2026-08-31T08:52:20Z — production AI path defaults globally reconciled
+
+- Cloudflare Flagship app `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8` now serves
+  the accepted production matrix globally:
+  `knowledge_ingest_workflow_v1=on`,
+  `recall_parallel_reliability_v1=on`, `durable_chat_agent_v1=full`, and
+  `canonical_knowledge_foundation_v1=full`.
+- The only mutation in this release was a governed full-definition update of
+  `recall_parallel_reliability_v1`, changing its default from `off` to `on`.
+  All flag variations, two targeting rules, type, description, and enabled
+  state were preserved. Two unrelated contexts resolved `on` by `DEFAULT`;
+  the existing operator resolved `on` by `TARGETING_MATCH`.
+- Backend master gates and production Workflow, Queue, R2, Durable Object, and
+  Worker bindings were verified. Eight accepted Workflow ingestion jobs were
+  ready with zero duplicate checksum groups. The four-lane recall run completed
+  without degradation and returned 3 memories, 12 evidence items, 15 citations,
+  and 17 graph edges.
+- Direct, profile, exact-source, relationship, and entity chat canaries all
+  returned HTTP 200. The entity canary was not grounded, and the relationship
+  and entity canaries each retained one gap; those semantic-quality limits are
+  explicitly not represented as full semantic acceptance.
+- Core `sha-9091c1e0`, Control `sha-953f3a71`, and Employees `sha-b3616eb4`
+  retained their images, start times, and zero restart counts. API and homepage
+  returned 200 and the critical log scan was clean. No build, migration,
+  restart, container deployment, or Worker deployment occurred.
+- Immediate recall rollback is the captured full flag definition with only
+  `default_variation=off`; the remaining three capabilities have independent
+  Flagship defaults and can be rolled back without changing runtime images.
+
+## 9091c1e0 — lazy profile discovery and complete chat-route acceptance
+
+- Canonical Core SHA `9091c1e01d63270a14d668cf60c6634d27469e95` on
+  `singulance-main`; image `hivemind/core-api:sha-9091c1e0`, digest
+  `sha256:258e140bc90f0bd2478371d7d12caf247e88648aa4f8e6eb5e318e8d5a6bb261`.
+  Manifest `/root/releases/manifests/9091c1e0/20260831T081213Z/RELEASE_MANIFEST.json`
+  reports `ok` for Core only. No migration was required; 174 migrations are
+  applied with none pending.
+- Native V2 no longer receives caller profile values on every planner call.
+  The authenticated, bounded profile packet is loaded lazily only after a
+  direct personalized response, save/auto-save, or profile update is selected.
+  Explicit profile reads use the server-scoped `hivemind_profile` capability,
+  including `use_tools:true`; the model receives no user/org identifier input.
+- Production acceptance passed direct arithmetic, native profile, tool-enabled
+  profile, exact-source document recall, unconstrained recall, graph
+  relationship, broad source synthesis, projects, temporal no-coverage, exact
+  aggregate no-coverage, and a disposable declarative auto-save. Grounded
+  routes returned citations and zero gaps. Empty authorized projects now return
+  a grounded explicit empty result rather than a generic retrieval failure.
+  Temporal and aggregate requests without complete evidence fail closed.
+- The disposable personal-memory assertion selected `save`, preserved exact
+  entities and `user_assertion` provenance, traversed `ingestCanonicalPayload`,
+  and created tenant-scoped entity links. The exact canary memory was hard
+  deleted after verification.
+- Linux release suites progressed from 39/39 on the lazy-profile commit to
+  83/84 on the final candidate. The sole failure is identical on the deployed
+  parent baseline: a stale exact-source test expects no additive `kind:null`.
+  Every changed regression passed. Core/API/homepage return 200 and fresh
+  critical logs are empty. Control and Employees retained their exact images
+  and start times.
+- Rollback is Core `hivemind/core-api:sha-62553bc2`, digest
+  `sha256:9f7240205861dc4d3073743b7ccefe398319c573d57e1bbf781e02be6a3d6256`.
+- Global rollout accepted at `2026-08-31T08:28:06.413Z`: Cloudflare Flagship
+  app `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`, flag
+  `durable_chat_agent_v1`, changed only `default_variation: off -> full`.
+  Variations, both targeting rules, description, and `enabled:true` were
+  preserved. Two unrelated contexts evaluated `full` by `DEFAULT`; the operator
+  remained `full` by `TARGETING_MATCH`. No container was rebuilt or restarted.
+  Immediate behavior rollback is the captured full flag definition with only
+  `default_variation` restored to `off`.
+
+## 4371984d / 953f3a71 — durable ingestion and grounded-chat hardening
+
+- Canonical runtime commits on `singulance-main`: Core
+  `4371984dccca1ee2666555fcbfee0606618ba3ad` and Control Plane
+  `953f3a719aab66aed5b1f479ed6e45f232613761`; frontend and Employees were
+  unchanged. The preceding chat fix is
+  `d4a45da449301377ed8de465b21f900772ed023d`.
+- Core image `hivemind/core-api:sha-4371984d`, digest
+  `sha256:2e954b4e4149b9cb7658327ab3231aea57eb5edadf526844dac2fe8649cf7fb0`;
+  manifest `/root/releases/manifests/4371984d/20260831T005717Z/RELEASE_MANIFEST.json`.
+  Control image `hivemind/control-plane:sha-953f3a71`, digest
+  `sha256:83ea81bfcb59de74e3955416cb10ddd6a0bafcb7211be582f62a1cab5b0de2a9`;
+  manifest `/root/releases/manifests/953f3a71/20260831T004847Z/RELEASE_MANIFEST.json`.
+- Chat fixes: year-leading exact filenames no longer enter temporal planning;
+  structured retrieval retains authorized legacy text candidates before entity
+  coverage validation; source conflicts resolve to the relevant evidence;
+  duplicate relationship prose is eliminated; detailed answers retain valid
+  citations. Full-mode production canaries returned Jim Adair for HASTY CAKE,
+  the complete Teil2 creative-role list, and one Pantene/P&G relationship
+  sentence. The stable flag-off HASTY CAKE path also returned Jim Adair and
+  created no durable row.
+- Heavy-ingestion fixes: Control admits only the two internal asynchronous
+  materialization routes; Cloudflare BGE-M3 requests are bounded to 48 items
+  and 45,000 characters; a Workflow retry idempotently heals its missing
+  versioned credit reservation before settlement. Source bytes and large
+  artifacts remain outside Workflow state.
+- Fresh production acceptance uploaded the 12,053,389-byte, 90-page
+  `1981-60th-AnnualTeil3-ocr-canary.pdf` as job
+  `85bf1f37-ff77-4865-819a-a4c3bebbf141`. Workflow instance
+  `kb-85bf1f37-ff77-4865-819a-a4c3bebbf141-v2` completed at `reconcile coverage
+  and settle-1`. Document `483831cf-c694-41bf-b5f5-e51937224801` contains 221
+  segments, 221/221 embeddings, 17 candidates, 15 promoted memories, zero
+  failed embeddings, and one terminal usage settlement. Exact-source Issue 361
+  and unconstrained CITY CYCLES chat canaries both returned HTTP 200, grounded
+  answers, two sources, and two citations.
+- Live primary embedding probe split 50 synthetic 1,000-character inputs into
+  batches `[45,5]` and returned 50 finite 1024-dimensional Cloudflare BGE-M3
+  vectors. Focused tests passed 22/22 for batching/fallback/settlement and 2/2
+  for the Control proxy contract; all changed chat tests passed in the 72/75
+  candidate/baseline suite (the same three unrelated stale assertions failed
+  in both revisions).
+- Runtime acceptance: Core, Control, and Employees are running their expected
+  immutable images; public homepage, login, and API health return 200; the
+  fresh critical Core log scan is empty. `durable_chat_agent_v1` remains global
+  default `off` and exact operator canary `full`.
+- Rollback: Core `hivemind/core-api:sha-d4a45da4`, digest
+  `sha256:2462bdf8f2cde361ca8b9db1e799cb83f1f6b6689ce519d0a32940cc8978062e`;
+  Control revision `346586be`, digest
+  `sha256:285a4fdf44ee625ed0ad3f64807c6931b7623258cec4aa6d2d0b1abcc4061fbe`.
+
 ## a73cdbc8 — durable Chat V2 production canary
 
 - Canonical parent SHA `a73cdbc82dc5ea637244d38bda7fb8ea7a96a0f3` on

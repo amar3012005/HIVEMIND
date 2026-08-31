@@ -9,6 +9,7 @@ import { knowledgeWorkflowEnabled } from './cloudflare-ingest-client.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STAGES = new Set(['acquire', 'materialize', 'reconcile']);
+const activeMaterializations = new Map();
 
 function safeEqual(left, right) {
   const a = Buffer.from(String(left || ''));
@@ -82,6 +83,44 @@ export class CloudflareKnowledgeIngestExecutor {
     if (stage === 'acquire') return this._acquire(job);
     if (stage === 'materialize') return this._materialize(job);
     return this._reconcile(job);
+  }
+
+  async startMaterialize({ jobId, orgId, userId, processingVersion }) {
+    const job = await this._job({ jobId, orgId, userId, processingVersion });
+    const identity = {
+      jobId: job.id, processingVersion: job.processingVersion,
+      stageKey: 'materialize', shardKey: 'root',
+    };
+    const existing = await this.steps.get(identity);
+    if (existing?.status === 'succeeded') {
+      return { ok: true, stage: 'materialize', accepted: false, reused: true, status: 'succeeded', result: existing.outputRefs };
+    }
+    const key = `${job.id}:${job.processingVersion}`;
+    if (!activeMaterializations.has(key)) {
+      const task = this._materialize(job)
+        .catch((error) => {
+          if (error?.code !== 'INGEST_STAGE_BUSY') {
+            this.logger.error?.(`[knowledge-workflow] background materialization failed for ${job.id}: ${error.message}`);
+          }
+        })
+        .finally(() => activeMaterializations.delete(key));
+      activeMaterializations.set(key, task);
+    }
+    return { ok: true, stage: 'materialize', accepted: true, reused: false, status: existing?.status || 'pending' };
+  }
+
+  async materializeStatus({ jobId, orgId, userId, processingVersion }) {
+    const job = await this._job({ jobId, orgId, userId, processingVersion });
+    const receipt = await this.steps.get({
+      jobId: job.id, processingVersion: job.processingVersion,
+      stageKey: 'materialize', shardKey: 'root',
+    });
+    return {
+      ok: true, stage: 'materialize', status: receipt?.status || 'pending',
+      attempt: Number(receipt?.attempt || 0), retryable: receipt?.errorCode !== 'NO_RECALLABLE_CONTENT',
+      ...(receipt?.status === 'succeeded' ? { receipt_id: receipt.id, result: receipt.outputRefs } : {}),
+      ...(receipt?.status === 'failed' ? { error_code: receipt.errorCode, message: receipt.errorMessage } : {}),
+    };
   }
 
   async _acquire(job) {

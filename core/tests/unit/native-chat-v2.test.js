@@ -6,6 +6,7 @@ import { createNativePlannerGraph, nativeV2RoutingMode } from '../../src/agent/v
 import { buildTurnContext } from '../../src/agent/v2/turn-context-builder.js';
 import { intentDecisionToPlan } from '../../src/agent/chat-intent-decision.js';
 import { buildNativePlannerPrompt, NATIVE_PLANNER_PROMPT_VERSION } from '../../src/agent/v2/planner-prompt.js';
+import { authorizedProjectsCitation, shouldLoadCompactProfileForDecision } from '../../src/agent/react-agent-v2.js';
 
 function makePlan({ operation = 'recall', query = 'Kruti', entities = ['Kruti'], response = {}, source = null, time = {}, relation = [], aggregate = null, memory = null, direct = null, certified = false, capability } = {}) {
   const family = capability || (['save'].includes(operation) ? 'memory_write' : ['profile', 'update_profile'].includes(operation) ? 'profile' : operation === 'direct' ? 'direct' : 'workspace_read');
@@ -94,6 +95,37 @@ test('relation, aggregate and projects have dedicated exact operations', () => {
   assert.equal(compileNativePlan(validateNativePlan(makePlan({ operation: 'aggregate', query: 'all Solvis products', aggregate: { parent: 'Solvis', kind: 'product' }, response: { scope: 'exhaustive', shape: 'inventory' } })), 'aggregate').native_tool, 'hivemind_aggregate_entities');
   const projects = compileNativePlan(validateNativePlan(makePlan({ operation: 'projects', query: 'authorized projects', entities: [] })), 'projects');
   assert.equal(projects.native_tool, 'hivemind_list_projects'); assert.deepEqual(projects.tool_groups, ['hivemind-projects']);
+});
+
+test('native chat loads profile values only after selecting a profile-dependent action', () => {
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'recall' }), false);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'source_read' }), false);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'profile' }), false);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'direct' }), true);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'save' }), true);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'update_profile' }), true);
+  assert.equal(shouldLoadCompactProfileForDecision({ operation: 'recall', auto_save_intent: { content: 'durable' } }), true);
+});
+
+test('an empty authorized-project result remains citeable completion evidence', () => {
+  const empty = authorizedProjectsCitation([]);
+  assert.equal(empty.source_type, 'authorized_projects');
+  assert.match(empty.snippet, /No active projects are authorized/i);
+  const populated = authorizedProjectsCitation([{ id: 'p1', name: 'Aurora', slug: 'aurora' }]);
+  assert.equal(populated.snippet, 'Aurora (aurora)');
+});
+
+test('a leading year in an exact filename cannot create an incomplete snapshot plan', () => {
+  const source = { title: '1981-60th-AnnualTeil2-ocr (1).pdf', document_id: null, kind: 'pdf', selection: null };
+  const mistaken = makePlan({
+    operation: 'snapshot', query: 'Give a detailed overview of 1981-60th-AnnualTeil2-ocr (1).pdf', source,
+    time: { semantics: 'snapshot', axis: null, start: '1981-01-01T00:00:00Z' },
+  });
+  const repaired = validateNativePlanResult(mistaken);
+  assert.equal(repaired.status, 'repairable');
+  assert.equal(repaired.plan.operation, 'source_read');
+  assert.equal(repaired.plan.time.semantics, 'none');
+  assert.ok(repaired.repairs.includes('operation.incomplete_snapshot'));
 });
 
 test('validator repairs legacy and reference-only relation entity shapes', () => {
@@ -228,6 +260,17 @@ test('validator reconciles exact-source and temporal semantics before tool compi
   assert.equal(history.plan.operation, 'timeline');
   assert.ok(history.repairs.includes('operation.time_semantics'));
   assert.equal(history.plan.steps[0].tool, 'hivemind_timeline');
+
+  const yearTitlePlan = makePlan({
+    operation: 'timeline',
+    query: 'List all creative roles in the source',
+    source: { title: '1981-60th-AnnualTeil2-ocr-canary.pdf', document_id: null, kind: 'pdf', selection: null },
+    time: { semantics: 'timeline', axis: 'valid_time' },
+  });
+  const yearTitle = validateNativePlanResult(yearTitlePlan);
+  assert.equal(yearTitle.plan.operation, 'source_read');
+  assert.equal(yearTitle.plan.time.semantics, 'none');
+  assert.ok(yearTitle.repairs.includes('operation.source_title_not_timeline'));
 });
 
 test('validator derives a missing read query from the required answer objective', () => {

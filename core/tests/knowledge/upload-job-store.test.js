@@ -106,6 +106,34 @@ test('a winning Workflow failure releases only its own versioned reservation', a
   assert.deepEqual(released, [{ orgId: 'org', idempotencyKey: 'knowledge-credit:job:5' }]);
 });
 
+test('Workflow retry settlement recreates a missing versioned credit reservation idempotently', async () => {
+  const calls = [];
+  const job = { id: 'job', orgId: 'org', userId: 'user', status: 'processing', processingVersion: 2, ingestMode: 'both' };
+  const store = new KnowledgeUploadJobStore({
+    prisma: { knowledgeIngestJob: {
+      findFirst: async () => job,
+      updateMany: async () => ({ count: 1 }),
+    } },
+    creditService: {
+      adjustReservation: async () => { throw new Error('credit reservation not found'); },
+      reserve: async (input) => { calls.push(['reserve', input]); return { admitted: true }; },
+      settle: async (input) => { calls.push(['settle', input]); return { settled: true }; },
+      release: async () => {},
+    },
+  });
+
+  const completed = await store.complete('job', 'org', 'user', {
+    documentId: 'doc', pages: 90, segmentCount: 221, candidateCount: 17,
+    promotedCount: 15, promotedMemoryIds: [],
+  }, { processingVersion: 2 });
+
+  assert.equal(completed, true);
+  assert.equal(calls[0][0], 'reserve');
+  assert.equal(calls[0][1].idempotencyKey, 'knowledge-credit:job:2');
+  assert.equal(calls[0][1].units, 90);
+  assert.deepEqual(calls.at(-1), ['settle', { orgId: 'org', idempotencyKey: 'knowledge-credit:job:2' }]);
+});
+
 test('failure recording normalizes numeric platform error codes to the string contract', async () => {
   let written;
   const store = new KnowledgeUploadJobStore({ prisma: { knowledgeIngestJob: {

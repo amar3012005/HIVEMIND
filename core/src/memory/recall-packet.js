@@ -91,6 +91,7 @@ export function validateGroundedClaims(payload, packet, { allowGeneralKnowledge 
   const validIds = new Set((packet?.citations || []).map((citation) => citation.id));
   const inputClaims = Array.isArray(payload?.claims) ? payload.claims : [];
   const claims = [];
+  const claimIndex = new Map();
   const rejected = [];
 
   for (const claim of inputClaims) {
@@ -107,6 +108,16 @@ export function validateGroundedClaims(payload, packet, { allowGeneralKnowledge 
       rejected.push({ text, reason: 'general_knowledge_disabled' });
       continue;
     }
+    const fingerprint = text.normalize('NFKC').toLocaleLowerCase()
+      .replace(/[\p{P}\p{S}\s]+/gu, ' ').trim();
+    const duplicateAt = claimIndex.get(fingerprint);
+    if (duplicateAt !== undefined) {
+      const existing = claims[duplicateAt];
+      existing.citation_ids = [...new Set([...existing.citation_ids, ...citation_ids])];
+      existing.grounded = existing.grounded && grounded;
+      continue;
+    }
+    claimIndex.set(fingerprint, claims.length);
     claims.push({ text, grounded, citation_ids });
   }
 

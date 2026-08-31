@@ -203,12 +203,17 @@ export function getProgressiveTools({ useTools = false, connectedProviders = nul
     ...HIGH_TOOLS.filter((tool) => !EXTERNAL_TOOL_NAMES.has(tool.function?.name)
       && tool.function?.name !== 'hivemind_context'),
   ];
-  if (!Array.isArray(connectedProviders)) return HIGH_TOOLS;
+  // Connected-tool turns still need the same caller-scoped profile READ lane.
+  // Without it, a question such as "what is my organization name?" can only
+  // choose the memory-write schema and may be misclassified as update_profile.
+  // The tool accepts no identity, so exposing it does not widen authority.
+  const connectedTools = [NATIVE_PROFILE_TOOL, ...HIGH_TOOLS];
+  if (!Array.isArray(connectedProviders)) return connectedTools;
 
   const allowed = [...new Set(connectedProviders
     .map((provider) => String(provider || '').trim().toLowerCase())
     .filter(Boolean))];
-  return HIGH_TOOLS.flatMap((tool) => {
+  return connectedTools.flatMap((tool) => {
     if (tool.function?.name !== 'use_connector') return [tool];
     if (allowed.length === 0) return [];
     return [{
@@ -245,6 +250,7 @@ function getWorkflowPlannerTool() {
 const SYSTEM = `You are HIVE, an enterprise assistant. You MUST call exactly one supplied high-level tool for every turn.
 Use respond_directly only for greetings, arithmetic, clarification, or safety refusal. Set context_free=true only when the reply is fully answerable from the message/history and general knowledge. If a request could be answered by authorized workspace context — including any named or unnamed person, organization, product, file, project, event, decision, record, or prior work — it is NOT context-free: use hivemind_context. Never answer that you lack internal records without first using hivemind_context.
 Use hivemind_context for all internal knowledge: facts, named files, exact counts, relationships in every language, timelines and temporal questions.
+Use hivemind_profile to READ the authenticated caller's maintained user or organization profile. A question about the caller's name, role, company, preferences, goals, language, location, or maintained organization profile is a read, never update_profile. The tool is server-scoped and takes no caller-supplied identity.
 Any explicit filename or file extension such as .pdf, .docx, .pptx, .xlsx, .md or .html is HIVEMIND source context, never a connector request. Only use a connector when the user explicitly names the connected application or asks to act in it.
 Use hivemind_memory for remember/save/update/delete/rename requests in every language, AND for any durable fact the user simply ASSERTS - no request needed. A statement of fact about the user, their organisation, its products, people, naming or history is a save: \"Singulance was first known as Davinci AI\", \"X is our new pricing\", \"Y replaced Z\". The user is the authority on their own company, so a third-person claim still counts. Never acknowledge a write without this tool, and never reply \"would you like me to save this?\" - a new fact is additive, so store it and say you did. Deletion is the only write needing approval, and that is enforced in code by a one-time server token, not by asking. Questions, opinions and chit-chat are NOT saves. Distinguish the two "name" operations: "change MY name / my role / my company / I prefer X" => operation=update_profile (the USER's own profile). "Call yourself X / rename the assistant" => operation=rename_assistant (the ASSISTANT). Ambiguous "change it" with no clear target => ask ONE clarification via respond_directly(reason=clarification), never guess.
 Use hivemind_projects for project listing/resolution. Use web_research only for the public internet.

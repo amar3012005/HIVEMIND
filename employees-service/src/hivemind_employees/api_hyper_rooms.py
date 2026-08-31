@@ -3093,7 +3093,12 @@ def _derive_artifact_steps(plan: Dict[str, Any], user_msg: str) -> List[Dict[str
 def _dead_end_message(plan: Dict[str, Any]) -> str:
     """Truthful, human stop message: what was created (if anything), what's not
     possible with the connected tools, and what was searched — never a fabrication."""
-    de = plan.get("dead_end") or {}
+    raw_dead_end = plan.get("dead_end")
+    # Older verifier paths used ``dead_end: true`` as a status marker.  Treat
+    # that shape as a generic structured dead end instead of crashing while
+    # rendering the terminal event.  New writers should always persist the
+    # dictionary shape so the exact gaps survive retries and UI refreshes.
+    de = raw_dead_end if isinstance(raw_dead_end, dict) else {}
     parts: List[str] = [f"I couldn't fully finish this: {de.get('reason') or 'the task could not be completed'}."]
     partial = [a for a in (de.get("partial") or []) if a.get("url")]
     if partial:
@@ -4399,7 +4404,11 @@ async def _orchestrate_single_agent(
             "verification": verdict,
             "work_orders": result.get("work_orders") or [],
             "work_results": result.get("work_results") or [],
-            "dead_end": True,
+            "dead_end": {
+                "reason": verdict["note"],
+                "gaps": verdict["gaps"],
+                "partial": [],
+            },
         }
         await _emit({"t": "verify", **verdict})
         await _emit({
@@ -5569,13 +5578,15 @@ async def post_room_turn(
     # available data. Surface WHY (so the user sees a truthful stop, not a looping
     # spinner or a placeholder draft) and mark the turn blocked.
     if isinstance(_vplan, dict) and _vplan.get("dead_end"):
+        _dead_end = _vplan.get("dead_end")
         await _emit_event(req.callback_url, req.turn_id, {
             "t": "line", "agent": "system", "kind": "dead_end",
             "content": _dead_end_message(_vplan),
         })
         resp.status = "blocked"
         log.info("[dead-end] room=%s blocked honestly: %s",
-                 req.room_id, (_vplan.get("dead_end") or {}).get("reason"))
+                 req.room_id,
+                 _dead_end.get("reason") if isinstance(_dead_end, dict) else "the task could not be completed")
     # LAST event, always: the goalkeeper-held seal (total cost, true duration across
     # all rounds). Everything the FE must render live — approval cards, artifact
     # buttons, the dead-end line — has been emitted above. _emit_event is non-fatal.

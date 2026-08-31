@@ -1572,3 +1572,17 @@ slides that find no unique anchor get a page instead of `null`.
   Worker 4/4, Worker TypeScript, production Wrangler dry-run, Prisma schema
   validation, and direct production transport probes. The feature remains off;
   this is committed implementation evidence, not an accepted release.
+
+### Failed first production canary and rollback
+
+- Candidate `ff80d612` deployed Core and Worker with the flag off, then enabled
+  only the authorized canary. The Workflow stopped at acquisition because the
+  unqualified lease migration created `public.knowledge_ingest_leases` while
+  production Prisma queries `hivemind.knowledge_ingest_leases`.
+- No parser, evidence, memory, entity, relationship, citation, or billing stage
+  ran. The canary flag was restored off; Worker and Core were rolled back to
+  their exact prior versions. Control and Employees were untouched.
+- Follow-up migration `20260901000500_fix_knowledge_ingest_lease_schema`
+  removes the empty public table and creates the lease table and indexes in the
+  authoritative `hivemind` schema. The first candidate is not an accepted
+  release and must not be described as one.

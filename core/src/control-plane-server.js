@@ -4368,6 +4368,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // ─── Direct Google OAuth (bypasses Zitadel) ──────────────────
   if (pathname === '/auth/google' && req.method === 'GET') {
     const returnTo = url.searchParams.get('return_to') || CONFIG.postLoginRedirect;
     console.log(`[google-auth] Login initiated, returnTo: ${returnTo}`);

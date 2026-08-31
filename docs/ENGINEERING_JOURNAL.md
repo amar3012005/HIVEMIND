@@ -1603,3 +1603,17 @@ git diff --check: passed (line-ending warnings only)
   flag-off turns remain byte-compatible with the existing runtime.
 - Cloudflare Agent Memory was unavailable in this session, so this evidence is
   recorded in Git and must be mirrored to Agent Memory after service recovery.
+
+## 2026-08-31 — Grok HyperAgents enabled for every local user
+
+- Updated Flagship rule priority 1 for `hyperagents_grok_agents_v1` from the
+  original canary org/user conjunction to the single condition
+  `environment equals "local"`, serving variation `full`.
+- The flag's default variation remains `off`; no unconditional or production
+  targeting rule exists.
+- Independent evaluation using arbitrary org/user context returned `full` with
+  reason `TARGETING_MATCH` for `environment=local`, and returned `off` with
+  reason `DEFAULT` for `environment=production`.
+- Rollback remains deleting priority rule 1 or changing its served variation to
+  `off`. This was a Flagship targeting change only; no service was rebuilt and
+  no production deployment occurred.

@@ -378,7 +378,8 @@ verification, and its independent rollback control.
 - Status: accepted locally; production untouched.
 - Backend commit: `e4c1983f4cc8cdf6eeb47b3be0eab38b6180f626` on `singulance-local`.
 - Flag: `hyperagents_grok_agents_v1` defaults to `off` and resolves to `full`
-  only for the local canary organization/user with `environment=local`.
+  for every user only when `environment=local`. Non-local evaluations remain
+  `off`, so this rule cannot enable the runtime in production.
 - Cloudflare local resources: `hivemind-hyperagents-grok-local`,
   `hivemind-hyper-room-run-local`,
   `hivemind-hyper-agent-assignment-local`, and
@@ -396,3 +397,10 @@ verification, and its independent rollback control.
   evidence results; direct Cloudflare Browser canary returned Example Domain.
 - Rollback: remove the local targeting rule or set the flag to `off`. Flag-off
   turns remain on the existing runtime. No production targeting was added.
+
+### Local rollout update — 2026-08-31
+
+- The canary-specific rule was promoted to `environment equals "local"` after
+  the accepted full-mode canary. Evaluation with arbitrary local org/user values
+  returned `full` via `TARGETING_MATCH`; the same arbitrary identity with
+  `environment=production` returned the default `off`.

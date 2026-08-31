@@ -1755,3 +1755,22 @@ git diff --check: passed (line-ending warnings only)
 - Live inference remains pending because Docker Desktop is stopped and the local
   parity env file contains no Gateway credential. No secret was copied, printed,
   or committed, and production was not changed.
+
+## 2026-08-31 — Workers AI GLM live canary
+
+- Docker Desktop recovered with the complete local stack healthy. Using the
+  already configured local Employees environment, the authenticated Cloudflare
+  AI Gateway returned HTTP 200 from
+  `workers-ai/@cf/zai-org/glm-5.3-flash` with the exact canary response.
+- A required function-call probe returned exactly one structured
+  `lookup_order` tool call with the requested `ABC-123` argument. This verifies
+  the selected model's tool-calling surface through the same Gateway.
+- The patched package was loaded under an isolated `/tmp/hm-glm-canary` path in
+  the Employees container. `_resolve_model` converted a stored
+  `claude-haiku-4-5` employee into an `OpenAIChatModel` targeting
+  `workers-ai/@cf/zai-org/glm-5.3-flash`; an actual AgentScope SDK inference
+  returned `AGENTSCOPE_GLM_OK`.
+- The isolated canary did not alter the shared source bind, database, Room state,
+  or production. Full Room Workflow/recovery acceptance still requires safe
+  integration into `singulance-local`; the permanent integration worktree has
+  unrelated uncommitted files and was intentionally not overwritten.

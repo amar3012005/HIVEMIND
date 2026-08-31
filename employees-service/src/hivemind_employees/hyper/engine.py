@@ -4154,11 +4154,16 @@ class Director:
         for synthesis and verification; the existing producer remains the sole
         path for sending, publishing, or other external writes.
         """
-        plan_steps = [row for row in (plan.get("turn_plan") or []) if isinstance(row, dict)] if self.is_work_room else []
+        from .grok_runtime import mode_at_least, select_active_agents
+        durable_plan = self.is_work_room or mode_at_least(
+            self.grok_runtime_mode, "durable_assignments"
+        )
+        plan_steps = [
+            row for row in (plan.get("turn_plan") or []) if isinstance(row, dict)
+        ] if durable_plan else []
         orders = plan_steps or [row for row in (plan.get("work_orders") or []) if isinstance(row, dict)]
         if not orders or not self.participants:
             return []
-        from .grok_runtime import mode_at_least, select_active_agents
         if mode_at_least(self.grok_runtime_mode, "shadow_roster"):
             active = select_active_agents(
                 self.participants, orders,
@@ -4283,6 +4288,25 @@ class Director:
                         f"{prompt}\n\nEVIDENCE BOARD:\n{context}",
                     )
                     text = _strip_cot(str(agent_result.get("text") or "")).strip()
+                    receipts = [
+                        receipt for receipt in (agent_result.get("tool_receipts") or [])
+                        if isinstance(receipt, dict)
+                    ]
+                    if receipts:
+                        receipt_lines = []
+                        for receipt in receipts[:12]:
+                            receipt_lines.append(
+                                "- {adapter}: {title} | {url} | receipt={provider}".format(
+                                    adapter=str(receipt.get("adapter") or "tool")[:80],
+                                    title=str(receipt.get("title") or "untitled")[:180],
+                                    url=str(receipt.get("url") or "")[:500],
+                                    provider=str(receipt.get("provider_id") or "")[:180],
+                                )
+                            )
+                            excerpt = str(receipt.get("excerpt") or "").strip()
+                            if excerpt:
+                                receipt_lines.append(f"  Evidence: {excerpt[:1200]}")
+                        text += "\n\nVERIFIED TOOL RECEIPTS:\n" + "\n".join(receipt_lines)
                 else:
                     response = await self._groq([
                         {"role": "system", "content": (
@@ -5429,6 +5453,12 @@ class Director:
                     {"role": "Final Synthesizer", "task": "Define measurement and the operating report", "query": "campaign measurement report"},
                 ]
         plan["campaign_method_assignments"] = assignments
+        turn_mode = str(plan.get("turn_mode") or "task").strip().lower()
+        plan["turn_mode"] = turn_mode if turn_mode in {"chat", "task"} else "task"
+        execution_engine = str(plan.get("execution_engine") or "debate").strip().lower()
+        plan["execution_engine"] = (
+            execution_engine if execution_engine in {"debate", "agentic"} else "debate"
+        )
         work_orders: List[Dict[str, Any]] = []
         limit = 5 if intensity == "deep" else 3 if intensity == "standard" else 1
         valid_lanes = {"Strategist", "Researcher", "Skeptic", "Builder", "Communicator"}
@@ -5452,7 +5482,11 @@ class Director:
             })
         plan["work_orders"] = work_orders
         turn_plan: List[Dict[str, Any]] = []
-        if self.is_work_room:
+        from .grok_runtime import mode_at_least
+        durable_agent_turn = mode_at_least(
+            self.grok_runtime_mode, "durable_assignments"
+        )
+        if self.is_work_room or durable_agent_turn:
             seen_step_ids = set()
             for index, row in enumerate(plan.get("turn_plan") or []):
                 if not isinstance(row, dict):
@@ -5493,6 +5527,71 @@ class Director:
         plan["needs_debate"] = bool(plan.get("needs_debate"))
         if intensity == "deep":
             plan["needs_debate"] = True
+        if durable_agent_turn and plan.get("turn_mode") == "task":
+            # Full-mode Rooms may never fall back to the simulated discussion
+            # path merely because the planning model omitted work_orders. Convert
+            # its bounded assignments into a durable dependency graph, or create
+            # one reversible, domain-neutral execution assignment from the user's
+            # exact objective. A separate reviewer assignment replaces legacy
+            # persona debate whenever independent challenge was requested.
+            if not plan["turn_plan"]:
+                source_orders = list(plan.get("work_orders") or [])
+                if not source_orders:
+                    source_orders = [{
+                        "kind": "analysis",
+                        "owner_lane": "Strategist",
+                        "title": "Execute the requested work",
+                        "objective": self.user_message[:600],
+                        "required_evidence": [
+                            "Use persisted evidence and tool receipts appropriate to the request"
+                        ],
+                        "acceptance_criteria": [
+                            "Produce the requested outcome, not advice about how to produce it",
+                            "Ground factual claims in persisted evidence or tool receipts",
+                        ],
+                    }]
+                plan["turn_plan"] = [
+                    {
+                        "id": f"execute-{index + 1}",
+                        "depends_on": [],
+                        **order,
+                        "wait": None,
+                        "handoff": None,
+                    }
+                    for index, order in enumerate(source_orders[:4])
+                ]
+                plan["work_orders"] = []
+            review_required = (
+                plan["needs_debate"]
+                or str(self.execution_profile.get("review_policy") or "none") == "reviewer"
+                or bool(self.execution_profile.get("required_artifacts"))
+            )
+            if (mode_at_least(self.grok_runtime_mode, "collaboration")
+                    and review_required
+                    and len(plan["turn_plan"]) < 5):
+                prerequisite_ids = [step["id"] for step in plan["turn_plan"]]
+                plan["turn_plan"].append({
+                    "id": "independent-review",
+                    "depends_on": prerequisite_ids,
+                    "kind": "decision",
+                    "owner_lane": "Skeptic",
+                    "title": "Independently verify the completed work",
+                    "objective": "Review the completed assignments against their evidence and acceptance criteria.",
+                    "required_evidence": ["Completed assignment artifacts and provider receipts"],
+                    "acceptance_criteria": [
+                        "Identify unsupported claims and missing requested outputs",
+                        "Return a clear pass or exact repair requirements",
+                    ],
+                    "wait": None,
+                    "handoff": None,
+                })
+            plan["needs_debate"] = False
+            log.info(
+                "[hyper-engine] durable agent plan mode=%s steps=%s review_required=%s",
+                self.grok_runtime_mode,
+                [step.get("id") for step in plan["turn_plan"]],
+                review_required,
+            )
         if intensity == "light":
             # Direct is a product contract, not a suggestion to the model. One
             # bounded question never convenes a committee or fans out a broad
@@ -7193,7 +7292,9 @@ class Director:
         # governance (_synthesize_campaign_bundle) has no analogue here, and
         # skipping it silently would be a real governance gap, not a safe
         # fallthrough.
-        if (str(plan.get("execution_engine") or "debate").lower() == "agentic"
+        from .grok_runtime import mode_at_least
+        if (not mode_at_least(self.grok_runtime_mode, "durable_assignments")
+                and str(plan.get("execution_engine") or "debate").lower() == "agentic"
                 and self.agentic_task_hook is not None and self.room_kind != "campaign"):
             agentic_result = await self._run_agentic_task(plan, t0)
             if agentic_result is not None:

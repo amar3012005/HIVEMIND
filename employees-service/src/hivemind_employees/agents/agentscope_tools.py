@@ -79,6 +79,9 @@ _OUTPUT_UNLOCKED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
 _TURN_ARTIFACTS: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
     "hyper_turn_artifacts", default=None
 )
+_AGENT_TOOL_RECEIPTS: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
+    "hyper_agent_tool_receipts", default=None
+)
 # P0 provenance: armed per turn by the orchestrator so every fact an agent saves to
 # the company brain carries WHERE it came from (turn/room/org) — the audit trail that
 # makes the closed-loop OS traceable. Default None → provenance fields are simply omitted.
@@ -217,6 +220,24 @@ def drain_artifacts() -> List[Dict[str, Any]]:
     """Return (a copy of) the artifacts (docs/sheets/...) produced this turn."""
     arts = _TURN_ARTIFACTS.get()
     return list(arts) if isinstance(arts, list) else []
+
+
+def begin_agent_tool_receipts() -> None:
+    """Start an assignment-scoped receipt ledger in the current async context."""
+    _AGENT_TOOL_RECEIPTS.set([])
+
+
+def drain_agent_tool_receipts() -> List[Dict[str, Any]]:
+    receipts = _AGENT_TOOL_RECEIPTS.get()
+    return list(receipts) if isinstance(receipts, list) else []
+
+
+def _record_agent_tool_receipt(receipt: Dict[str, Any]) -> None:
+    receipts = _AGENT_TOOL_RECEIPTS.get()
+    if receipts is None:
+        receipts = []
+        _AGENT_TOOL_RECEIPTS.set(receipts)
+    receipts.append(dict(receipt))
 
 
 def queue_email_approval(to: str, subject: str, draft_id: str, url: str = "",
@@ -1312,6 +1333,15 @@ def register_cloudflare_browser_tool(
             response.raise_for_status()
             payload = response.json()
             page = payload.get("page") or {}
+            _record_agent_tool_receipt({
+                "adapter": "cloudflare_browser",
+                "status": "completed",
+                "provider_id": str(payload.get("session_id") or ""),
+                "url": str(page.get("url") or url)[:1000],
+                "title": str(page.get("title") or "")[:300],
+                "excerpt": str(page.get("text") or "")[:2000],
+                "live_view_url": str(payload.get("live_view_url") or "")[:1000],
+            })
             return _tool_response_text(
                 f"Title: {page.get('title') or ''}\nURL: {page.get('url') or ''}\n\n{page.get('text') or ''}",
                 metadata={
@@ -1331,9 +1361,14 @@ def register_cloudflare_browser_tool(
             active=True,
             notes="Use only when an API or connector cannot provide the required rendered page evidence.",
         )
+    except Exception as exc:  # the per-employee toolkit is intentionally cached
+        if "already registered" not in str(exc).lower():
+            log.warning("register_cloudflare_browser_tool group failed: %s", exc)
+    try:
         tk.register_tool_function(cloudflare_browser_visit, group_name="cloudflare_browser")
     except Exception as exc:  # noqa: BLE001
-        log.warning("register_cloudflare_browser_tool failed: %s", exc)
+        if "already registered" not in str(exc).lower():
+            log.warning("register_cloudflare_browser_tool failed: %s", exc)
 
 
 def build_hivemind_toolkit(

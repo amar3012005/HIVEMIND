@@ -49,8 +49,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .agents.agentscope_factory import build_react_agent
 from .agents.agentscope_tools import (
+    begin_agent_tool_receipts,
     begin_turn_write_gate,
     drain_artifacts,
+    drain_agent_tool_receipts,
     drain_pending_writes,
     execute_pending_write,
     queue_email_approval,
@@ -3921,16 +3923,49 @@ async def _orchestrate_single_agent(
         instruction = (
             "You are a persistent hired agent working one durable Room assignment. "
             "Use your real tools when the assignment requires evidence or an external system. "
+            "The ORIGINAL ROOM REQUEST below is authoritative. If it explicitly requests an enabled "
+            "tool capability, attempt that capability and return its receipt before reporting a gap. "
+            "Resolve bounded, non-sensitive ambiguities with evidence and professional judgment when "
+            "the requested tools can discover the answer; do not ask the user to do research you can do. "
             "Do not pretend another agent acted. Do not claim an external write without its tool receipt. "
             "Return the actual bounded work product plus unresolved gaps.\n\n"
+            + f"ORIGINAL ROOM REQUEST:\n{req.user_message[:4000]}\n\n"
             + bounded_context[:12000]
             + (f"\n\nUSER STEERING (latest instructions win):\n{steering_context}" if steering_context else "")
         )
+        begin_agent_tool_receipts()
         reply = await agent(Msg(name="user", content=instruction, role="user"))
         text = _msg_to_text(reply).strip()
         if not text:
             raise RuntimeError(f"agent {owner.get('slug')} returned no durable result")
-        receipts = await _collect_agent_tool_receipts(agent)
+        receipts = drain_agent_tool_receipts()
+        for receipt in await _collect_agent_tool_receipts(agent):
+            if receipt not in receipts:
+                receipts.append(receipt)
+        if (mode_at_least(req.grok_runtime_mode, "real_tools")
+                and order.get("required_evidence") and not receipts):
+            repair = await agent(Msg(
+                name="user",
+                role="user",
+                content=(
+                    "Your first submission produced no persisted tool receipt, so it cannot satisfy "
+                    "this evidence-required assignment. Continue the same assignment now: use the "
+                    "available scoped tools to resolve bounded ambiguities, collect the required "
+                    "evidence, and return the completed work with exact source URLs or provider receipts. "
+                    "Do not ask the user to perform research that your enabled tools can perform."
+                ),
+            ))
+            repaired_text = _msg_to_text(repair).strip()
+            if repaired_text:
+                text = repaired_text
+            receipts = drain_agent_tool_receipts()
+            for receipt in await _collect_agent_tool_receipts(agent):
+                if receipt not in receipts:
+                    receipts.append(receipt)
+        if mode_at_least(req.grok_runtime_mode, "real_tools") and order.get("required_evidence") and not receipts:
+            raise RuntimeError(
+                f"agent {owner.get('slug')} produced no verified tool receipt for an evidence-required assignment"
+            )
         for index, receipt in enumerate(receipts):
             await _emit({
                 "t": "agent_tool_receipt", "agent": owner.get("slug"),
@@ -3948,7 +3983,13 @@ async def _orchestrate_single_agent(
             "work_order_id": order.get("_work_order_id") or None,
             "status": "submitted",
         })
-        return {"text": text, "evidence": [], "artifacts": [], "tool_receipts": receipts, "usage": {}}
+        return {
+            "text": text,
+            "evidence": receipts,
+            "artifacts": [],
+            "tool_receipts": receipts,
+            "usage": {},
+        }
 
     # Quality mode → model combo. 'best' = all gpt-oss-120b (max rigor). 'auto' =
     # cheap gather + debate, strong 120b SYNTHESIS (the synth anchors quality; the

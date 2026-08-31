@@ -3,6 +3,7 @@ export type IngestParams = {
   org_id: string;
   user_id: string;
   processing_version: number;
+  admitted?: true;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -15,6 +16,10 @@ export function validParams(value: unknown): value is IngestParams {
     && UUID.test(String(input.user_id || ''))
     && Number.isInteger(Number(input.processing_version))
     && Number(input.processing_version) > 0;
+}
+
+export function validAdmittedParams(value: unknown): value is IngestParams & { admitted: true } {
+  return validParams(value) && (value as IngestParams).admitted === true;
 }
 
 export function workflowInstanceId(params: IngestParams): string {

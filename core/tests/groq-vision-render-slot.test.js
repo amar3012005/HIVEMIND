@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { withPdfRenderSlot } from '../src/knowledge/enterprise/groq-vision-parser.js';
 
 test('PDF rendering is serialized while downstream work can remain concurrent', async () => {
@@ -23,4 +24,14 @@ test('a failed renderer releases the slot for the next document', async () => {
   await assert.rejects(() => withPdfRenderSlot(async () => { throw new Error('render failed'); }));
   const value = await withPdfRenderSlot(async () => 'next-ran');
   assert.equal(value, 'next-ran');
+});
+
+test('vision uses Cloudflare Gemini and provider errors can never become evidence text', () => {
+  const vision = readFileSync(new URL('../src/knowledge/enterprise/groq-vision-parser.js', import.meta.url), 'utf8');
+  const canonical = readFileSync(new URL('../src/knowledge/document-first-ingestion.js', import.meta.url), 'utf8');
+  assert.match(vision, /google\/gemini-2\.5-flash-lite/);
+  assert.match(vision, /cf-aig-gateway-id/);
+  assert.doesNotMatch(vision, /results\[i\]\s*=\s*`<!-- page/);
+  assert.match(canonical, /PARSER_PROVIDER_ERROR_CONTAMINATION/);
+  assert.match(canonical, /organization has been restricted because of overdue payment/i);
 });

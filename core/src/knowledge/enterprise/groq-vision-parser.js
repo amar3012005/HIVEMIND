@@ -1,10 +1,10 @@
 /**
- * Groq Vision PDF parser — Tier 3.
+ * Cloudflare Gemini Vision PDF parser — Tier 3.
  *
  * Renders each PDF page to a PNG via ImageMagick (`convert`), then sends
- * each page in parallel to the configured vision model for OCR + structure
- * extraction. Production prefers the low-latency OpenRouter model and keeps
- * Groq Scout as an independent fallback.
+ * each page in parallel to Cloudflare's Gemini 2.5 Flash-Lite model for OCR +
+ * structure extraction. The `hivemind-prod` AI Gateway remains the telemetry,
+ * policy and cost-control boundary; OpenRouter and Groq are not OCR fallbacks.
  *
  * Outputs markdown stitched in page order.
  *
@@ -18,45 +18,12 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import crypto from 'crypto';
-import {
-  cloudflareGatewayEnabled,
-  gatewayByokAlias,
-  gatewayFirstFetch,
-} from '../../llm/cloudflare-gateway.js';
-
-const GROQ_KEY = process.env.GROQ_API_KEY || '';
-const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
-const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct';
-// VISION MODEL ON THE OPENROUTER LEG — decided on PIPELINE evidence, not API probes.
-//
-// Llama-4-Scout is the tempting choice: same model as the Groq path, and 2-3x
-// faster (direct probes with the real OCR prompt: 927ms vs 2248ms). It is not the
-// default because of how much of the page each model actually READS, measured
-// in-pipeline on the same scanned PDF:
-//
-//   google/gemini-2.5-flash-lite     605 chars   (repeatable)
-//   meta-llama/llama-4-scout     231, 237 chars  (two runs)
-//
-// Gemini transcribes ~2.6x more of the page, and OCR text is the ONLY input the
-// rest of ingestion has — everything downstream is bounded by it.
-//
-// Deliberately NOT decided on memory counts, though it is tempting: the same 605
-// chars produced 4 memories on one run and 0 on another, so promoted-memory count
-// is too noisy to compare models with. Extracted characters are stable and
-// reproducible; that is the metric this choice rests on.
-//
-// A second finding worth keeping: OpenRouter's upstream for Scout VARIES per call
-// (observed Groq on one probe, DeepInfra on the next), so Scout's output quality is
-// not stable run to run. That alone makes it the wrong default for extraction.
-//
-// Scout on the DIRECT Groq path is a separate, still-open question — measured 120ms
-// there — but that account is restricted for overdue payment, which is why
-// VISION_OPENROUTER_PRIMARY=true is set in production. Re-measure end-to-end (memories,
-// not characters) before switching, using HIVEMIND_VISION_OR_MODEL to A/B without a deploy.
-//
-// No `reasoning` field is sent on this path and neither model here is a reasoning
-// model, so there is nothing to disable.
-const OPENROUTER_VISION_MODEL = process.env.HIVEMIND_VISION_OR_MODEL || process.env.GROQ_VISION_OR_MODEL || 'google/gemini-2.5-flash-lite';
+const cloudflareVisionConfig = () => ({
+  accountId: process.env.CLOUDFLARE_ACCOUNT_ID || '',
+  token: process.env.CLOUDFLARE_WORKERS_AI_TOKEN || process.env.CLOUDFLARE_AI_GATEWAY_TOKEN || '',
+  gatewayId: process.env.CLOUDFLARE_AI_GATEWAY_ID || 'hivemind-prod',
+  model: process.env.HIVEMIND_CLOUDFLARE_VISION_MODEL || 'google/gemini-2.5-flash-lite',
+});
 const CONCURRENCY = Number(process.env.GROQ_VISION_CONCURRENCY || 8);
 const MAX_PAGES = Number(process.env.GROQ_VISION_MAX_PAGES || 200);
 const PAGE_DENSITY = process.env.GROQ_VISION_DENSITY || '150'; // DPI for the rasteriser
@@ -65,9 +32,8 @@ const OCR_MAX_TOKENS = Number(process.env.HIVEMIND_VISION_OCR_MAX_TOKENS || 2600
 const RENDER_TIMEOUT_MS = Number(process.env.GROQ_VISION_RENDER_TIMEOUT_MS || 300_000);
 
 export function visionProviderAvailable() {
-  return Boolean(GROQ_KEY || OPENROUTER_KEY
-    || (cloudflareGatewayEnabled()
-      && (gatewayByokAlias('groq') || gatewayByokAlias('openrouter'))));
+  const { accountId, token } = cloudflareVisionConfig();
+  return Boolean(accountId && token);
 }
 
 // PDF rasterisation is CPU, RAM and temporary-disk heavy. Ingestion admits
@@ -184,6 +150,7 @@ export async function parsePdfWithGroqVision(pdfPath) {
 
     // Step 2: parallel vision OCR with concurrency limit
     const results = new Array(usePages.length);
+    const failures = [];
     let nextIdx = 0;
     const workers = Array.from({ length: Math.min(CONCURRENCY, usePages.length) }, async () => {
       while (true) {
@@ -193,11 +160,21 @@ export async function parsePdfWithGroqVision(pdfPath) {
         try {
           results[i] = await visionOcrPage(fp, i + 1);
         } catch (err) {
-          results[i] = `<!-- page ${i + 1} failed: ${err.message} -->`;
+          // Provider failures are control-plane data, never document content.
+          // The old HTML comment was persisted, embedded, and returned by recall.
+          failures.push({ page: i + 1, message: String(err?.message || err).slice(0, 240) });
         }
       }
     });
     await Promise.all(workers);
+
+    if (failures.length) {
+      const first = failures.sort((a, b) => a.page - b.page)[0];
+      return {
+        text: '', markdown: '', pages: 0, totalPages: totalRendered, truncated,
+        error: `Vision OCR failed for ${failures.length}/${usePages.length} pages; first failure on page ${first.page}: ${first.message}`,
+      };
+    }
 
     const markdown = results.map((r, i) => `\n\n<!-- page ${i + 1} -->\n\n${r || ''}`).join('').trim();
     return {
@@ -236,12 +213,13 @@ export async function ocrSingleImage(imagePath) {
 }
 
 async function visionOcrPage(imagePath, pageNum) {
+  const { accountId, token, gatewayId, model } = cloudflareVisionConfig();
   const imageBuf = fs.readFileSync(imagePath);
   const b64 = imageBuf.toString('base64');
   const dataUrl = `data:image/png;base64,${b64}`;
 
   const body = {
-    model: VISION_MODEL,
+    model,
     temperature: 0.0,
     max_tokens: OCR_MAX_TOKENS,
     messages: [
@@ -255,77 +233,33 @@ async function visionOcrPage(imagePath, pageNum) {
     ],
   };
 
-  const gatewayGroq = cloudflareGatewayEnabled() && gatewayByokAlias('groq');
-  const gatewayOpenRouter = cloudflareGatewayEnabled() && gatewayByokAlias('openrouter');
-  const groqAvailable = Boolean(GROQ_KEY || gatewayGroq);
-  const openRouterAvailable = Boolean(OPENROUTER_KEY || gatewayOpenRouter);
-  // Provider order. When Groq is billing-blocked/delinquent org-wide (every call
-  // 400s "restricted because of overdue payment"), preferring OpenRouter skips the
-  // always-failing Groq attempt + its noisy error + 60s timeout risk. Flag-gated
-  // (VISION_OPENROUTER_PRIMARY or the global HYPER_OPENROUTER_PRIMARY); default
-  // Groq-first for healthy accounts, OR as fallback either way.
-  const orFirst = openRouterAvailable && (
-    String(process.env.VISION_OPENROUTER_PRIMARY ?? '').toLowerCase() === 'true'
-    || String(process.env.HYPER_OPENROUTER_PRIMARY ?? '').toLowerCase() === 'true');
-
-  // Retry up to 3× on 429/5xx with exponential backoff.
-  const tryGroq = async () => {
-    let err = null;
-    for (let attempt = 0; attempt <= 3; attempt++) {
-      if (!groqAvailable) throw new Error('Groq vision provider not configured');
-      const res = await gatewayFirstFetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(60_000),
-      });
-      if (res.ok) { const json = await res.json(); return json.choices?.[0]?.message?.content || ''; }
-      const txt = await res.text().catch(() => '');
-      err = new Error(`Groq vision ${res.status}: ${txt.slice(0, 200)}`);
-      const transient = res.status === 429 || res.status >= 500;
-      if (!transient || attempt === 3) break;
-      const retryAfter = Number(res.headers.get('retry-after')) || 0;
-      await new Promise(r => setTimeout(r, retryAfter > 0 ? retryAfter * 1000 : Math.min(8000, 500 * Math.pow(2, attempt))));
-    }
-    throw err || new Error('Groq vision failed');
-  };
-  const tryOR = async () => {
-    if (!openRouterAvailable) throw new Error('OpenRouter vision provider not configured');
-    const orModel = OPENROUTER_VISION_MODEL;
-    const orRes = await gatewayFirstFetch('https://openrouter.ai/api/v1/chat/completions', {
+  if (!visionProviderAvailable()) throw new Error('Cloudflare Gemini vision is not configured');
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/v1/chat/completions`;
+  let lastError = null;
+  for (let attempt = 0; attempt <= 3; attempt += 1) {
+    const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${OPENROUTER_KEY}`, 'Content-Type': 'application/json', 'HTTP-Referer': 'https://hivemind.davinciai.eu', 'X-Title': 'HIVEMIND' },
-      body: JSON.stringify({ ...body, model: orModel }),
-      signal: AbortSignal.timeout(60_000),
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'cf-aig-gateway-id': gatewayId,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(90_000),
     });
-    if (orRes.ok) { const json = await orRes.json(); const msg = json.choices?.[0]?.message || {}; return msg.content || msg.reasoning || ''; }
-    throw new Error(`OpenRouter vision ${orRes.status}: ${(await orRes.text().catch(() => '')).slice(0, 200)}`);
-  };
-
-  // AN EMPTY PAGE IS A FAILURE, NOT A RESULT.
-  // Both providers return `content || ''` on HTTP 200, so a model answering with
-  // nothing was a SUCCESSFUL return — the loop below returns on the first
-  // non-throwing call, so the second provider never got its turn. Measured on a
-  // text-less PDF: Groq/llama-4-scout replied 200 with empty content, that ''
-  // propagated out as the OCR result, the caller logged "groq-vision failed:
-  // empty" and fell through to Docling, which then burned the parse budget. The
-  // configured OpenRouter fallback (gemini-2.5-flash-lite) was never called for
-  // the one case it exists to cover.
-  //
-  // Treating empty as a throw makes the ladder mean what it says: try the next
-  // provider, and only give up when BOTH have actually produced nothing.
-  const nonEmpty = async (fn, label) => {
-    const out = await fn();
-    if (!String(out || '').trim()) throw new Error(`${label} vision returned empty content`);
-    return out;
-  };
-  const order = (orFirst
-    ? [[openRouterAvailable, () => nonEmpty(tryOR, 'OpenRouter')], [groqAvailable, () => nonEmpty(tryGroq, 'Groq')]]
-    : [[groqAvailable, () => nonEmpty(tryGroq, 'Groq')], [openRouterAvailable, () => nonEmpty(tryOR, 'OpenRouter')]])
-    .filter(([available]) => available).map(([, fn]) => fn);
-  let lastErr = null;
-  for (const fn of order) {
-    try { return await fn(); } catch (e) { lastErr = e; }
+    if (response.ok) {
+      const json = await response.json();
+      const content = String(json?.choices?.[0]?.message?.content || '').trim();
+      if (!content) throw new Error('Cloudflare Gemini vision returned empty content');
+      return content;
+    }
+    const details = await response.text().catch(() => '');
+    lastError = new Error(`Cloudflare Gemini vision ${response.status}: ${details.slice(0, 200)}`);
+    const transient = response.status === 429 || response.status >= 500;
+    if (!transient || attempt === 3) break;
+    const retryAfter = Number(response.headers.get('retry-after')) || 0;
+    await new Promise((resolve) => setTimeout(resolve,
+      retryAfter > 0 ? retryAfter * 1000 : Math.min(8000, 500 * (2 ** attempt))));
   }
-  throw lastErr || new Error('vision OCR exhausted (Groq + OpenRouter)');
+  throw lastError || new Error('Cloudflare Gemini vision failed');
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { materializationPollDecision, validParams, workflowInstanceId } from '../src/contract';
+import { materializationPollDecision, validAdmittedParams, validParams, workflowInstanceId } from '../src/contract';
 
 const params = {
   job_id: '11111111-1111-4111-8111-111111111111',
@@ -19,6 +19,11 @@ describe('knowledge ingest workflow identity', () => {
 
   it('uses one deterministic workflow instance per job version', () => {
     expect(workflowInstanceId(params)).toBe('kb-11111111-1111-4111-8111-111111111111-v3');
+  });
+
+  it('requires one latched Flagship admission before queue or Workflow execution', () => {
+    expect(validAdmittedParams(params)).toBe(false);
+    expect(validAdmittedParams({ ...params, admitted: true })).toBe(true);
   });
 
   it('never redispatches a terminal materialization failure', () => {

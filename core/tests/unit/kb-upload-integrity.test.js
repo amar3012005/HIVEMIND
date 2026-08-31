@@ -96,17 +96,14 @@ test('PDF quality gate rejects the measured fragmented OCR text shape', () => {
   assert.ok(bad.singleRatio > good.singleRatio);
 });
 
-test('vision OCR accepts the production-style Cloudflare AI Gateway BYOK transport', () => {
+test('vision OCR accepts direct Cloudflare Gemini transport without OpenRouter', () => {
   const names = ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_AI_GATEWAY_ID',
-    'CLOUDFLARE_AI_GATEWAY_TOKEN', 'CLOUDFLARE_AI_GATEWAY_ENABLED',
-    'CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS'];
+    'CLOUDFLARE_AI_GATEWAY_TOKEN'];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   Object.assign(process.env, {
     CLOUDFLARE_ACCOUNT_ID: 'test-account',
     CLOUDFLARE_AI_GATEWAY_ID: 'test-gateway',
     CLOUDFLARE_AI_GATEWAY_TOKEN: 'test-token',
-    CLOUDFLARE_AI_GATEWAY_ENABLED: 'true',
-    CLOUDFLARE_AI_GATEWAY_OPENROUTER_BYOK_ALIAS: 'test-openrouter-alias',
   });
   try { assert.equal(visionProviderAvailable(), true); }
   finally {

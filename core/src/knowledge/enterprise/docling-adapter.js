@@ -252,14 +252,19 @@ export async function parseWithDocling(filePath, filename, opts = {}) {
     if (wantPicClass) formData.append('do_picture_classification', 'true');
     if (wantCode)     formData.append('do_code_enrichment', 'true');
     if (wantFormulas) formData.append('do_formula_enrichment', 'true');
-    if (wantPictureDesc && process.env.GROQ_API_KEY) {
+    const cfVisionToken = process.env.CLOUDFLARE_WORKERS_AI_TOKEN || process.env.CLOUDFLARE_AI_GATEWAY_TOKEN;
+    if (wantPictureDesc && process.env.CLOUDFLARE_ACCOUNT_ID && cfVisionToken) {
+      const cfVisionUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(process.env.CLOUDFLARE_ACCOUNT_ID)}/ai/v1/chat/completions`;
       formData.append('do_picture_description', 'true');
       formData.append('enable_remote_services', 'true');
       formData.append('picture_description_custom_config', JSON.stringify({
         kind: 'api',
-        url: 'https://api.groq.com/openai/v1/chat/completions',
-        params: { model: process.env.GROQ_VISION_MODEL || 'meta-llama/llama-4-scout-17b-16e-instruct' },
-        headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+        url: cfVisionUrl,
+        params: { model: process.env.HIVEMIND_CLOUDFLARE_VISION_MODEL || 'google/gemini-2.5-flash-lite' },
+        headers: {
+          Authorization: `Bearer ${cfVisionToken}`,
+          'cf-aig-gateway-id': process.env.CLOUDFLARE_AI_GATEWAY_ID || 'hivemind-prod',
+        },
         prompt: 'Describe this figure in 1 short sentence (max 25 words). Focus on what is depicted, not styling.',
         timeout: 30,
       }));

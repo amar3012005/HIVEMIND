@@ -198,3 +198,30 @@ citation, entity, relationship, and recall canaries. Only that evidence permits
 a gradual tenant rollout. Existing production resources and settings are not
 silently inferred, copied, or overwritten.
 
+## Production hardening v2 (2026-08-31)
+
+The production flag was globally disabled before remediation. The v2 path keeps
+browser/API payloads unchanged and changes internal execution as follows:
+
+- Flagship is evaluated once at admission. Queue delivery and Workflow replay
+  consume the latched admission and never re-evaluate or drop a job because a
+  later flag request failed.
+- An explicit flag value of `off` selects the stable BullMQ path. An admission
+  transport failure returns 503 and creates no fallback job.
+- R2 uploads and durable job creation remain parallel. A PostgreSQL-fenced,
+  expiring processing lease admits exactly one heavy production document into
+  parser/LLM materialization at a time; waiting Workflows sleep durably.
+- `both` mode has real `materialize_evidence` and `promote_memories`
+  checkpoints. Promotion reads persisted evidence, so a promotion retry does
+  not render, parse, or embed the source again.
+- PDF vision OCR and Docling picture descriptions use Cloudflare's direct
+  `google/gemini-2.5-flash-lite` REST route with AI Gateway `hivemind-prod`.
+  Groq and OpenRouter are not vision fallbacks.
+- A failed vision page fails the extraction checkpoint. Provider errors are
+  forbidden at the canonical parser boundary and can never become retained
+  source text, segments, vectors, memories, or citations.
+
+Rollout order is migration, Core, Worker, flag-off regression, then an explicit
+canary. Previously corrupted documents must be reprocessed from original bytes;
+the code change intentionally does not mutate old evidence automatically.
+

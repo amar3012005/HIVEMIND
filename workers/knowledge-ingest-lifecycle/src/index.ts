@@ -4,6 +4,7 @@ import {
   type IngestParams,
   materializationPollDecision,
   validOrgId,
+  validAdmittedParams,
   validParams,
   workflowInstanceId,
 } from './contract';
@@ -18,6 +19,7 @@ type StageResult = {
   reused?: boolean;
   terminal?: boolean;
   status?: string;
+  acquired?: boolean;
 };
 type MaterializationStatus = StageResult & {
   result?: { documentId?: string; segmentCount?: number; promotedCount?: number };
@@ -103,15 +105,20 @@ async function core<T>(
 
 export class KnowledgeIngestWorkflow extends WorkflowEntrypoint<RuntimeEnv, IngestParams> {
   async run(event: WorkflowEvent<IngestParams>, step: WorkflowStep) {
-    if (!validParams(event.payload)) throw new NonRetryableError('invalid_ingest_payload');
+    if (!validAdmittedParams(event.payload)) throw new NonRetryableError('invalid_or_unadmitted_ingest_payload');
     const params = event.payload;
-    if (!await flagEnabled(this.env, params.org_id, params.user_id)) throw new NonRetryableError('knowledge_ingest_feature_disabled');
     try {
-      await step.do(
-        'acquire authorized ingest job',
-        { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
-        () => core<StageResult>(this.env, params, 'stages/acquire'),
-      );
+      let acquired = false;
+      for (let attempt = 0; attempt < 1920; attempt += 1) {
+        const claim = await step.do(
+          `acquire processing slot ${attempt + 1}`,
+          { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
+          () => core<StageResult>(this.env, params, 'stages/acquire'),
+        );
+        if (claim.acquired !== false) { acquired = true; break; }
+        await step.sleep(`wait for processing slot ${attempt + 1}`, '15 seconds');
+      }
+      if (!acquired) throw new Error('processing slot wait exceeded eight hours');
       await step.do(
         'dispatch canonical materialization',
         { retries: { limit: 5, delay: '10 seconds', backoff: 'exponential' }, timeout: '2 minutes' },
@@ -222,8 +229,7 @@ export default {
     }
     if (url.pathname === '/start' && request.method === 'POST') {
       const params = await request.json<unknown>().catch(() => null);
-      if (!validParams(params)) return Response.json({ error: 'invalid_payload' }, { status: 400 });
-      if (!await flagEnabled(env, params.org_id, params.user_id)) return Response.json({ error: 'feature_disabled' }, { status: 403 });
+      if (!validAdmittedParams(params)) return Response.json({ error: 'invalid_or_unadmitted_payload' }, { status: 400 });
       const instanceId = workflowInstanceId(params);
       await env.INGEST_QUEUE.send(params, { contentType: 'json' });
       return Response.json({ ok: true, queued: true, instance_id: instanceId }, { status: 202 });
@@ -239,7 +245,7 @@ export default {
 
   async queue(batch: MessageBatch<IngestParams>, env: RuntimeEnv): Promise<void> {
     for (const message of batch.messages) {
-      if (!validParams(message.body) || !await flagEnabled(env, message.body.org_id, message.body.user_id)) {
+      if (!validAdmittedParams(message.body)) {
         message.ack();
         continue;
       }

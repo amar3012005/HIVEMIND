@@ -62,7 +62,17 @@ function fixture({ remote = false } = {}) {
       getObject: async (key, options) => { events.push(['get', key, options]); return bytes; },
       deleteObject: async (key) => { events.push(['delete', key]); },
     },
-    documentFirstIngestion: {},
+    documentFirstIngestion: {
+      promoteStoredEvidence: async ({ documentId, onProgress }) => {
+        events.push(['promote', documentId]);
+        onProgress({ stage: 'promoting', progress: 80 });
+        return {
+          documentId, promotedMemoryIds: ['memory-1', 'memory-2'], pages: 4,
+          segmentCount: 8, candidateCount: 3, promotedCount: 2,
+          coverage: { candidates: 3, promoted: 2 },
+        };
+      },
+    },
     validateJob: async () => { events.push(['validate']); },
     processUpload: async ({ onProgress }) => {
       onProgress({ stage: 'embedding', progress: 65 });
@@ -92,17 +102,16 @@ test('the Workflow executor verifies bytes, evidence coverage, persistence and t
   assert.deepEqual(events.find(([kind]) => kind === 'delete').slice(1), [`org/${ids.org}/source`]);
 });
 
-test('materialization records every canonical lifecycle milestone as a durable receipt', async () => {
-  const { executor, steps } = fixture();
+test('materialization records real evidence and promotion checkpoints', async () => {
+  const { executor, steps, events } = fixture();
   const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
   await executor.execute({ ...input, stage: 'materialize' });
   assert.deepEqual(
     [...steps.rows.keys()].map((key) => key.split(':').at(-2)).sort(),
-    [
-      'embed_evidence', 'evidence_gate', 'extract', 'generate_memories', 'materialize',
-      'persist_evidence', 'persist_relationships_citations', 'project_entities_claims',
-    ].sort(),
+    ['materialize', 'materialize_evidence', 'promote_memories'].sort(),
   );
+  assert.equal(events.filter(([kind]) => kind === 'get').length, 1);
+  assert.equal(events.filter(([kind]) => kind === 'promote').length, 1);
 });
 
 test('duplicate Workflow stage delivery reuses its durable receipt and settles only once', async () => {
@@ -135,7 +144,7 @@ test('materialization dispatch returns immediately and exposes a durable polling
     const status = await executor.materializeStatus(input);
     if (status.status === 'succeeded') {
       assert.equal(status.result.documentId, ids.document);
-      assert.equal([...steps.rows.values()].filter((row) => row.status === 'succeeded').length >= 8, true);
+      assert.equal([...steps.rows.values()].filter((row) => row.status === 'succeeded').length >= 3, true);
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -211,4 +220,43 @@ test('partial evidence coverage cannot reach settlement', async () => {
     (error) => error.code === 'PARTIAL_EMBEDDING' && error.retryable === true,
   );
   assert.equal(events.some(([kind]) => kind === 'complete'), false);
+});
+
+test('the fenced production lease admits one heavy document and releases for the next', async () => {
+  const { executor, job } = fixture();
+  let lease = null;
+  executor.prisma.knowledgeIngestLease = {
+    findUnique: async () => lease,
+    create: async ({ data }) => { if (lease) throw new Error('unique'); lease = { ...data }; return lease; },
+    update: async ({ data }) => { lease = { ...lease, ...data }; return lease; },
+    updateMany: async ({ data }) => {
+      if (!lease || lease.leaseUntil > new Date()) return { count: 0 };
+      lease = { ...lease, ...data }; return { count: 1 };
+    },
+    deleteMany: async ({ where }) => {
+      if (lease?.jobId === where.jobId && lease?.processingVersion === where.processingVersion) lease = null;
+      return { count: 1 };
+    },
+  };
+  const secondId = '77777777-7777-4777-8777-777777777777';
+  const originalFind = executor.jobStore.findOwned;
+  executor.jobStore.findOwned = async (id, owner) => id === secondId
+    ? { ...job, id: secondId, userId: ids.user }
+    : originalFind(id, owner);
+  const first = await executor.execute({
+    jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'acquire',
+  });
+  const second = await executor.execute({
+    jobId: secondId, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'acquire',
+  });
+  assert.equal(first.acquired, true);
+  assert.equal(second.acquired, false);
+  await executor.fail({
+    jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3,
+    errorCode: 'TEST_RELEASE', message: 'release', retryable: false,
+  });
+  const afterRelease = await executor.execute({
+    jobId: secondId, orgId: ids.org, userId: ids.user, processingVersion: 3, stage: 'acquire',
+  });
+  assert.equal(afterRelease.acquired, true);
 });

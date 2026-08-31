@@ -10,6 +10,8 @@ import { knowledgeWorkflowEnabled } from './cloudflare-ingest-client.js';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STAGES = new Set(['acquire', 'materialize', 'reconcile']);
 const activeMaterializations = new Map();
+const PROCESSING_LEASE_KEY = 'knowledge-ingest-production';
+const PROCESSING_LEASE_MS = Math.max(60_000, Number(process.env.KNOWLEDGE_INGEST_PROCESSING_LEASE_MS || 20 * 60_000));
 
 function safeEqual(left, right) {
   const a = Buffer.from(String(left || ''));
@@ -111,6 +113,7 @@ export class CloudflareKnowledgeIngestExecutor {
 
   async materializeStatus({ jobId, orgId, userId, processingVersion }) {
     const job = await this._job({ jobId, orgId, userId, processingVersion });
+    await this._claimProcessingLease(job);
     const receipt = await this.steps.get({
       jobId: job.id, processingVersion: job.processingVersion,
       stageKey: 'materialize', shardKey: 'root',
@@ -124,6 +127,8 @@ export class CloudflareKnowledgeIngestExecutor {
   }
 
   async _acquire(job) {
+    const lease = await this._claimProcessingLease(job);
+    if (!lease.acquired) return { ok: true, stage: 'acquire', acquired: false, retry_after_seconds: 15 };
     const run = await this.steps.run({
       jobId: job.id, processingVersion: job.processingVersion, stageKey: 'acquire',
       input: { orgId: job.orgId, userId: job.userId, scopeKey: job.scopeKey, storageMode: job.storageMode },
@@ -139,7 +144,40 @@ export class CloudflareKnowledgeIngestExecutor {
       }, { processingVersion: job.processingVersion });
       return { outputRefs: { authorized: true, source_object_key: job.sourceObjectKey || null } };
     });
-    return { ok: true, stage: 'acquire', reused: run.reused, receipt_id: run.receipt.id };
+    return { ok: true, stage: 'acquire', acquired: true, reused: run.reused, receipt_id: run.receipt.id };
+  }
+
+  async _claimProcessingLease(job) {
+    if (!this.prisma?.knowledgeIngestLease) return { acquired: true, legacySchema: true };
+    const now = new Date();
+    const leaseUntil = new Date(now.getTime() + PROCESSING_LEASE_MS);
+    const existing = await this.prisma.knowledgeIngestLease.findUnique({ where: { leaseKey: PROCESSING_LEASE_KEY } });
+    if (existing?.jobId === job.id && Number(existing.processingVersion) === Number(job.processingVersion)) {
+      await this.prisma.knowledgeIngestLease.update({ where: { leaseKey: PROCESSING_LEASE_KEY }, data: { leaseUntil } });
+      return { acquired: true, leaseToken: existing.leaseToken };
+    }
+    if (existing && existing.leaseUntil > now) return { acquired: false };
+    const leaseToken = crypto.randomUUID();
+    if (!existing) {
+      try {
+        await this.prisma.knowledgeIngestLease.create({
+          data: { leaseKey: PROCESSING_LEASE_KEY, jobId: job.id, processingVersion: job.processingVersion, leaseToken, leaseUntil },
+        });
+        return { acquired: true, leaseToken };
+      } catch { return { acquired: false }; }
+    }
+    const claimed = await this.prisma.knowledgeIngestLease.updateMany({
+      where: { leaseKey: PROCESSING_LEASE_KEY, leaseUntil: { lte: now } },
+      data: { jobId: job.id, processingVersion: job.processingVersion, leaseToken, leaseUntil },
+    });
+    return { acquired: Number(claimed.count || 0) === 1, leaseToken };
+  }
+
+  async _releaseProcessingLease(job) {
+    if (!this.prisma?.knowledgeIngestLease) return;
+    await this.prisma.knowledgeIngestLease.deleteMany({
+      where: { leaseKey: PROCESSING_LEASE_KEY, jobId: job.id, processingVersion: job.processingVersion },
+    }).catch(() => null);
   }
 
   async _materialize(job) {
@@ -160,28 +198,65 @@ export class CloudflareKnowledgeIngestExecutor {
       };
       let result;
       if (isStoredEvidencePromotion(job.metadata)) {
-        result = await this.dfi.promoteStoredEvidence({
-          documentId: job.metadata.promotion_document_id,
-          userId: job.userId,
-          orgId: job.orgId,
-          metadata: job.metadata || {},
-          onProgress,
-          promotionStrategy: 'upgrade_evidence_to_both',
-        });
-      } else {
-        const fileBuffer = await this.objectClient.getObject(job.sourceObjectKey, {
-          expectedEtag: job.sourceObjectEtag || null,
-        });
-        const actualChecksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-        if (actualChecksum !== job.checksum) {
-          throw Object.assign(new Error('Durable source object checksum does not match admission.'), {
-            code: 'SOURCE_OBJECT_INTEGRITY_FAILED', retryable: false,
+        const promoted = await this.steps.run({
+          jobId: job.id, processingVersion: job.processingVersion, stageKey: 'promote_memories',
+          input: { documentId: job.metadata.promotion_document_id, strategy: 'upgrade_evidence_to_both' },
+        }, async () => {
+          const value = await this.dfi.promoteStoredEvidence({
+            documentId: job.metadata.promotion_document_id, userId: job.userId, orgId: job.orgId,
+            metadata: job.metadata || {}, onProgress, promotionStrategy: 'upgrade_evidence_to_both',
           });
-        }
-        result = await this.processUpload({
-          userId: job.userId, orgId: job.orgId, filename: job.filename,
-          contentType: job.contentType, fileBuffer, metadata: job.metadata || {}, onProgress,
+          return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
         });
+        result = promoted.receipt.outputRefs;
+      } else {
+        const evidenceStage = await this.steps.run({
+          jobId: job.id, processingVersion: job.processingVersion, stageKey: 'materialize_evidence',
+          input: { checksum: job.checksum, sourceObjectKey: job.sourceObjectKey, sourceObjectEtag: job.sourceObjectEtag },
+        }, async () => {
+          const fileBuffer = await this.objectClient.getObject(job.sourceObjectKey, {
+            expectedEtag: job.sourceObjectEtag || null,
+          });
+          const actualChecksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+          if (actualChecksum !== job.checksum) {
+            throw Object.assign(new Error('Durable source object checksum does not match admission.'), {
+              code: 'SOURCE_OBJECT_INTEGRITY_FAILED', retryable: false,
+            });
+          }
+          const value = await this.processUpload({
+            userId: job.userId, orgId: job.orgId, filename: job.filename,
+            contentType: job.contentType, fileBuffer,
+            // Real checkpoint boundary: document/evidence/vector persistence is
+            // completed first. Promotion later reuses those stored segments.
+            metadata: job.metadata?.media_kind === 'image'
+              ? (job.metadata || {})
+              : { ...(job.metadata || {}), ingest_mode: 'evidence' },
+            onProgress,
+          });
+          requireCompleteEvidenceEmbedding(value);
+          return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
+        });
+        const evidence = evidenceStage.receipt.outputRefs;
+        result = evidence;
+        if (job.ingestMode === 'both' && job.metadata?.media_kind !== 'image') {
+          const promotionStage = await this.steps.run({
+            jobId: job.id, processingVersion: job.processingVersion, stageKey: 'promote_memories',
+            input: { documentId: evidence.documentId, evidenceReceipt: evidenceStage.receipt.id },
+          }, async () => {
+            const value = await this.dfi.promoteStoredEvidence({
+              documentId: evidence.documentId, userId: job.userId, orgId: job.orgId,
+              metadata: { ...(job.metadata || {}), ingest_mode: 'both' }, onProgress,
+              promotionStrategy: 'workflow_evidence_checkpoint',
+            });
+            return { outputRefs: terminalResult(value), coverage: value.coverage || {} };
+          });
+          result = {
+            ...promotionStage.receipt.outputRefs,
+            pages: evidence.pages,
+            segmentCount: evidence.segmentCount,
+            coverage: { ...evidence.coverage, ...promotionStage.receipt.outputRefs.coverage },
+          };
+        }
       }
       await Promise.allSettled(progressWrites);
       if (!result?.documentId || (Number(result.promotedCount || 0) === 0 && Number(result.segmentCount || 0) === 0)) {
@@ -190,74 +265,12 @@ export class CloudflareKnowledgeIngestExecutor {
         });
       }
       requireCompleteEvidenceEmbedding(result);
-      await this._recordCanonicalStageReceipts(job, result);
       return { outputRefs: terminalResult(result), coverage: result.coverage || {} };
     });
     return {
       ok: true, stage: 'materialize', reused: run.reused, receipt_id: run.receipt.id,
       result: run.receipt.outputRefs,
     };
-  }
-
-  async _recordCanonicalStageReceipts(job, result) {
-    const output = terminalResult(result);
-    const evidence = output.coverage?.evidence_embed || {};
-    const stages = [
-      {
-        stageKey: 'extract',
-        input: { checksum: job.checksum, sourceObjectEtag: job.sourceObjectEtag },
-        outputRefs: { source_object_key: job.sourceObjectKey || null, pages: output.pages },
-        coverage: { pages: output.pages },
-      },
-      {
-        stageKey: 'persist_evidence',
-        input: { documentId: output.documentId },
-        outputRefs: { document_id: output.documentId, segments: output.segmentCount },
-        coverage: { total: output.segmentCount, succeeded: output.segmentCount, failed: 0 },
-      },
-      {
-        stageKey: 'embed_evidence',
-        input: { documentId: output.documentId, pipelineVersion: job.pipelineVersion || 1 },
-        outputRefs: { document_id: output.documentId },
-        coverage: evidence,
-      },
-      {
-        stageKey: 'evidence_gate',
-        input: { documentId: output.documentId, ingestMode: job.ingestMode },
-        outputRefs: { passed: true, evidence_only: job.ingestMode === 'evidence' },
-        coverage: evidence,
-      },
-      {
-        stageKey: 'generate_memories',
-        input: { documentId: output.documentId, ingestMode: job.ingestMode },
-        outputRefs: {
-          skipped: job.ingestMode === 'evidence',
-          memory_ids: output.promotedMemoryIds,
-          evidence_only_reason: output.evidenceOnlyReason,
-        },
-        coverage: { candidates: output.candidateCount, succeeded: output.promotedCount },
-      },
-      {
-        stageKey: 'project_entities_claims',
-        input: { documentId: output.documentId, memoryIds: output.promotedMemoryIds },
-        outputRefs: { awaited: true, memory_ids: output.promotedMemoryIds },
-        coverage: { memories: output.promotedCount },
-      },
-      {
-        stageKey: 'persist_relationships_citations',
-        input: { documentId: output.documentId, memoryIds: output.promotedMemoryIds },
-        outputRefs: { awaited: true, document_id: output.documentId },
-        coverage: { memories: output.promotedCount },
-      },
-    ];
-    for (const stage of stages) {
-      await this.steps.run({
-        jobId: job.id,
-        processingVersion: job.processingVersion,
-        stageKey: stage.stageKey,
-        input: stage.input,
-      }, async () => ({ outputRefs: stage.outputRefs, coverage: stage.coverage }));
-    }
   }
 
   async _reconcile(job) {
@@ -296,6 +309,7 @@ export class CloudflareKnowledgeIngestExecutor {
         });
       }
       await this.objectClient.deleteObject(job.sourceObjectKey);
+      await this._releaseProcessingLease(job);
       return {
         outputRefs: {
           document_id: result.documentId,
@@ -316,6 +330,7 @@ export class CloudflareKnowledgeIngestExecutor {
       code: String(errorCode || 'WORKFLOW_FAILED').slice(0, 80),
     });
     await this.jobStore.fail(job.id, job.orgId, error, { processingVersion: job.processingVersion });
+    await this._releaseProcessingLease(job);
     return { ok: true, failed: true };
   }
 }

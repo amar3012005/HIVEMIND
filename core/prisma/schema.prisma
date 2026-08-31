@@ -2065,6 +2065,20 @@ model KnowledgeIngestStep {
   @@map("knowledge_ingest_steps")
 }
 
+model KnowledgeIngestLease {
+  leaseKey          String   @id @map("lease_key") @db.VarChar(80)
+  jobId             String   @map("job_id") @db.Uuid
+  processingVersion Int      @map("processing_version")
+  leaseToken        String   @map("lease_token") @db.Uuid
+  leaseUntil        DateTime @map("lease_until") @db.Timestamptz(6)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([leaseUntil])
+  @@index([jobId, processingVersion])
+  @@map("knowledge_ingest_leases")
+}
+
 /// Exactly-once settlement markers for billable Knowledge Base metrics.
 model KnowledgeUsageSettlement {
   id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid

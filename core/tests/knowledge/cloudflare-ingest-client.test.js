@@ -47,20 +47,20 @@ test('local Flagship decision gates durable source storage and identifier-only a
     await client.enqueue({ userId: USER_ID, orgId: ORG_ID, trackerJobId: JOB_ID, processingVersion: 7 });
 
     const admission = JSON.parse(calls.at(-1).init.body);
-    assert.deepEqual(admission, { job_id: JOB_ID, org_id: ORG_ID, user_id: USER_ID, processing_version: 7 });
+    assert.deepEqual(admission, { job_id: JOB_ID, org_id: ORG_ID, user_id: USER_ID, processing_version: 7, admitted: true });
     assert.equal(Object.hasOwn(admission, 'file'), false);
     assert.equal(Object.hasOwn(admission, 'metadata'), false);
     assert.equal(calls.every((call) => call.init.headers.authorization === 'Bearer local-test-secret'), true);
   });
 });
 
-test('Flagship errors fail closed and never select the Workflow path', async () => {
+test('Flagship transport errors fail closed without silently selecting BullMQ', async () => {
   await withWorkflowEnv(async () => {
     const client = new CloudflareKnowledgeIngestClient({
       fetchImpl: async () => { throw new Error('flag service unavailable'); },
       logger: { warn() {} },
     });
-    assert.equal(await client.isEnabled(ORG_ID, USER_ID), false);
+    await assert.rejects(client.isEnabled(ORG_ID, USER_ID), /flag service unavailable/);
   });
 });
 

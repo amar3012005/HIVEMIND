@@ -83,7 +83,15 @@ export class KnowledgeUploadService {
         error: 'storage_unavailable', message: 'The selected memory storage is unavailable. No central fallback was used.',
       } };
     }
-    const useCloudflare = await this.cloudflareQueue?.isEnabled?.(orgId, userId);
+    let useCloudflare = false;
+    try {
+      useCloudflare = await this.cloudflareQueue?.isEnabled?.(orgId, userId);
+    } catch {
+      return { ok: false, status: 503, body: {
+        error: 'workflow_admission_unavailable',
+        message: 'Durable ingestion admission is temporarily unavailable. No fallback job was created.',
+      } };
+    }
     const selectedQueue = useCloudflare ? this.cloudflareQueue : this.queue;
     const orchestrationMode = useCloudflare ? 'cloudflare_workflow' : 'bullmq';
     if (!await selectedQueue?.isAvailable({ orgId, userId })) {

@@ -3284,6 +3284,18 @@ Every item must include a non-empty content field and one or more valid support_
     // result before it can reach JSONB, segment metadata, embeddings, or a
     // remote agent. This applies identically to evidence-only and both mode.
     const parseResult = redactParsedDocument(sanitizeKnowledgeJson(rawParseResult));
+    const parsedBody = String(parseResult.markdown || parseResult.text || '');
+    // Provider/API errors are execution failures, never evidence. A legacy vision
+    // catch block emitted HTML comments containing Groq billing responses; those
+    // comments were then chunked and embedded. Keep this provider-neutral guard at
+    // the canonical boundary so no parser adapter can repeat that corruption.
+    if (/<!--\s*page\s+\d+\s+failed:/i.test(parsedBody)
+      || /organization has been restricted because of overdue payment/i.test(parsedBody)
+      || /please update the payment method at https?:\/\//i.test(parsedBody)) {
+      throw Object.assign(new Error('Parser output contained an upstream provider error; no evidence was persisted.'), {
+        code: 'PARSER_PROVIDER_ERROR_CONTAMINATION', retryable: true,
+      });
+    }
     const documentClassification = metadata.document_type
       ? { type: safeDocumentType(metadata.document_type), confidence: 1 }
       : await classifyKnowledgeDocument(parseResult.text || parseResult.markdown, filename);

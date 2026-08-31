@@ -1554,3 +1554,21 @@ slides that find no unique anchor get a page instead of `null`.
   are `sha-afd97867` for Core, Control, and Employees; Worker rollback uses the
   previous canonical-projection version. The additive latch column is safe to
   retain.
+
+## 2026-08-31 UTC — Cloudflare ingestion v2 remediation prepared
+
+- Globally disabled `knowledge_ingest_workflow_v1` in production before code
+  work. Default and both production rules serve `off`; local-only targeting was
+  preserved. No Worker/container restart occurred during rollback.
+- Root cause: Groq HTTP 400 billing responses were inserted into per-page HTML
+  comments and persisted as evidence. Production direct Cloudflare REST probes
+  proved `google/gemini-2.5-flash-lite` accepts text and image input through
+  gateway `hivemind-prod`; the unrelated OpenRouter quota is not on this route.
+- Session branch `codex/knowledge-ingest-production-v2` adds one-time admission,
+  no silent BullMQ fallback on admission outage, a fenced global processing
+  lease, real evidence/promotion checkpoints, direct Cloudflare Gemini vision,
+  and parser-error contamination rejection.
+- Pre-release verification: focused Core 24/24, evidence/chunking 28/28,
+  Worker 4/4, Worker TypeScript, production Wrangler dry-run, Prisma schema
+  validation, and direct production transport probes. The feature remains off;
+  this is committed implementation evidence, not an accepted release.

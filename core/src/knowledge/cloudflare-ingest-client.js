@@ -62,15 +62,13 @@ export class CloudflareKnowledgeIngestClient {
 
   async isEnabled(orgId, userId) {
     if (!this.configured() || !orgId || !userId) return false;
-    try {
-      const response = await this._request(`/enabled?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`, { method: 'GET' }, 5000);
-      if (!response.ok) return false;
-      const body = await response.json();
-      return body?.enabled === true;
-    } catch (error) {
-      this.logger.warn?.(`[knowledge-workflow] Flagship availability check failed closed: ${error.message}`);
-      return false;
-    }
+    const response = await this._request(`/enabled?org_id=${encodeURIComponent(orgId)}&user_id=${encodeURIComponent(userId)}`, { method: 'GET' }, 5000);
+    if (!response.ok) throw Object.assign(
+      new Error(`Cloudflare ingestion admission failed with HTTP ${response.status}`),
+      { code: 'WORKFLOW_ADMISSION_UNAVAILABLE', retryable: true },
+    );
+    const body = await response.json();
+    return body?.enabled === true;
   }
 
   async isAvailable({ orgId, userId } = {}) {
@@ -123,6 +121,7 @@ export class CloudflareKnowledgeIngestClient {
         org_id: orgId,
         user_id: userId,
         processing_version: Number(processingVersion) || 1,
+        admitted: true,
       }),
     });
     const body = await response.json().catch(() => ({}));

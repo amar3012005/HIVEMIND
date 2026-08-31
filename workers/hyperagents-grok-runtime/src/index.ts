@@ -1,4 +1,4 @@
-import { Agent, getAgentByName, routeAgentRequest } from 'agents';
+import { Agent, getAgentByName, routeAgentRequest, type Connection, type ConnectionContext, type WSMessage } from 'agents';
 import { connectBrowserSession, createBrowserSession, type BrowserBinding } from 'agents/browser';
 import { getSandbox, Sandbox } from '@cloudflare/sandbox';
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers';
@@ -16,6 +16,7 @@ interface Env {
     }>;
   };
   HIRED_HYPER_AGENT: DurableObjectNamespace<HiredHyperAgent>;
+  HYPER_ROOM_GATEWAY: DurableObjectNamespace<HyperRoomGateway>;
   ROOM_RUN_WORKFLOW: Workflow<TurnParams>;
   AGENT_ASSIGNMENT_WORKFLOW: Workflow<AssignmentParams>;
   BROWSER: BrowserBinding;
@@ -47,14 +48,103 @@ type AgentState = {
   status: 'idle' | 'active' | 'working' | 'waiting' | 'complete' | 'blocked';
   assignments: string[];
   routines: string[];
+  preferences: Record<string, string | number | boolean>;
+  task_history: Array<{ work_order_id: string; status: string; completed_at: number }>;
   updated_at: number;
 };
 
+type RoomGatewayState = {
+  room_instance_id: string | null;
+  revision: number;
+  last_event_type: string | null;
+  last_status: string | null;
+  updated_at: number;
+};
+
+type RoomTicket = {
+  room_instance_id: string;
+  org_id: string;
+  user_id: string;
+  exp: number;
+};
+
+function base64UrlBytes(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function verifyRoomTicket(token: string, expectedInstance: string, secret: string): Promise<RoomTicket | null> {
+  const [payloadPart, signaturePart, extra] = String(token || '').split('.');
+  if (!payloadPart || !signaturePart || extra) return null;
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'],
+    );
+    const verified = await crypto.subtle.verify(
+      'HMAC', key, base64UrlBytes(signaturePart).buffer as ArrayBuffer, new TextEncoder().encode(payloadPart),
+    );
+    if (!verified) return null;
+    const payload = JSON.parse(new TextDecoder().decode(base64UrlBytes(payloadPart))) as RoomTicket;
+    if (payload.room_instance_id !== expectedInstance || !payload.org_id || !payload.user_id
+        || !Number.isFinite(payload.exp) || payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch { return null; }
+}
+
+export class HyperRoomGateway extends Agent<Env, RoomGatewayState> {
+  initialState: RoomGatewayState = {
+    room_instance_id: null, revision: 0, last_event_type: null, last_status: null, updated_at: 0,
+  };
+
+  async onConnect(connection: Connection, context: ConnectionContext) {
+    const token = new URL(context.request.url).searchParams.get('token') || '';
+    const ticket = await verifyRoomTicket(token, this.name, this.env.HYPER_GROK_WORKFLOW_SECRET);
+    if (!ticket) {
+      connection.close(4001, 'Unauthorized');
+      return;
+    }
+    connection.setState({ org_id: ticket.org_id, user_id: ticket.user_id });
+    connection.send(JSON.stringify({ type: 'ready', room_instance_id: this.name, state: this.state }));
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== 'string') return;
+    let parsed: { type?: string } = {};
+    try { parsed = JSON.parse(message) as { type?: string }; } catch { return; }
+    if (parsed.type === 'ping') connection.send(JSON.stringify({ type: 'pong', at: Date.now() }));
+  }
+
+  async onRequest(request: Request): Promise<Response> {
+    if (!await authorized(request, this.env)) return Response.json({ error: 'Unauthorized' }, { status: 401 });
+    if (request.method !== 'POST' || !new URL(request.url).pathname.endsWith('/publish')) {
+      return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+    }
+    const body = await request.json<{ room_instance_id?: string; event?: Record<string, unknown> }>()
+      .catch(() => ({})) as { room_instance_id?: string; event?: Record<string, unknown> };
+    if (body.room_instance_id !== this.name || !body.event || typeof body.event !== 'object') {
+      return Response.json({ error: 'invalid_room_event' }, { status: 400 });
+    }
+    const eventType = String(body.event.t || body.event.type || 'event').slice(0, 80);
+    const status = String(body.event.status || '').slice(0, 32) || null;
+    this.setState({
+      room_instance_id: this.name, revision: this.state.revision + 1,
+      last_event_type: eventType, last_status: status, updated_at: Date.now(),
+    });
+    this.broadcast(JSON.stringify({ type: 'event', revision: this.state.revision, event: body.event }));
+    return Response.json({ ok: true, revision: this.state.revision, connections: Array.from(this.getConnections()).length });
+  }
+}
+
 export class HiredHyperAgent extends Agent<Env, AgentState> {
-  initialState: AgentState = { manifest: null, status: 'idle', assignments: [], routines: [], updated_at: 0 };
+  initialState: AgentState = {
+    manifest: null, status: 'idle', assignments: [], routines: [], preferences: {}, task_history: [], updated_at: 0,
+  };
 
   validateStateChange(next: AgentState) {
-    if (next.assignments.length > 100 || next.routines.length > 100) throw new Error('agent_state_limit');
+    if ((next.assignments || []).length > 100 || (next.routines || []).length > 100
+        || (next.task_history || []).length > 100
+        || Object.keys(next.preferences || {}).length > 50) throw new Error('agent_state_limit');
     if (next.manifest && this.state.manifest
         && next.manifest.employee_id !== this.state.manifest.employee_id) throw new Error('agent_identity_immutable');
   }
@@ -77,7 +167,7 @@ export class HiredHyperAgent extends Agent<Env, AgentState> {
       if (this.state.manifest && this.state.manifest.employee_id !== manifest.employee_id) {
         return Response.json({ error: 'agent_identity_mismatch' }, { status: 409 });
       }
-      this.setState({ ...this.state, manifest, updated_at: Date.now() });
+      this.setState({ ...this.initialState, ...this.state, manifest, updated_at: Date.now() });
       return Response.json({ ok: true, agent_instance_id: manifest.agent_instance_id });
     }
     if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/assignment')) {
@@ -90,10 +180,30 @@ export class HiredHyperAgent extends Agent<Env, AgentState> {
       const assignments = body.status === 'complete'
         ? this.state.assignments.filter((id) => id !== workOrderId)
         : Array.from(new Set([...this.state.assignments, workOrderId])).slice(-100);
-      this.setState({
-        ...this.state, assignments, status: body.status === 'complete' ? 'idle' : 'working', updated_at: Date.now(),
-      });
+      const taskHistory = body.status === 'complete'
+        ? [...(this.state.task_history || []).filter((row) => row.work_order_id !== workOrderId), {
+            work_order_id: workOrderId, status: 'complete', completed_at: Date.now(),
+          }].slice(-100)
+        : (this.state.task_history || []);
+      this.setState({ ...this.state, assignments, task_history: taskHistory,
+        status: body.status === 'complete' ? 'idle' : 'working', updated_at: Date.now() });
       return Response.json({ ok: true, assignments, status: this.state.status });
+    }
+    if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/preferences')) {
+      const body = await request.json<{ preferences?: Record<string, unknown> }>()
+        .catch(() => ({} as { preferences?: Record<string, unknown> }));
+      if (!this.state.manifest || !body.preferences || typeof body.preferences !== 'object') {
+        return Response.json({ error: 'invalid_preferences' }, { status: 400 });
+      }
+      const preferences: Record<string, string | number | boolean> = {};
+      for (const [key, value] of Object.entries(body.preferences).slice(0, 50)) {
+        if (!/^[a-z][a-z0-9_.-]{0,63}$/i.test(key)) continue;
+        if (['string', 'number', 'boolean'].includes(typeof value)) {
+          preferences[key] = typeof value === 'string' ? value.slice(0, 500) : value as number | boolean;
+        }
+      }
+      this.setState({ ...this.state, preferences, updated_at: Date.now() });
+      return Response.json({ ok: true, preferences: this.state.preferences });
     }
     if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/routine')) {
       const body = await request.json<{
@@ -257,6 +367,20 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/decision' && request.method === 'GET') {
       return Response.json(await decision(env, url.searchParams.get('org_id') || '', url.searchParams.get('user_id') || ''));
+    }
+    if (url.pathname === '/rooms/publish' && request.method === 'POST') {
+      const body = await request.json<{ room_instance_id?: string; event?: Record<string, unknown> }>()
+        .catch(() => ({})) as { room_instance_id?: string; event?: Record<string, unknown> };
+      const instanceId = String(body.room_instance_id || '');
+      if (!/^hr-[a-f0-9]{32}$/i.test(instanceId)) {
+        return Response.json({ error: 'invalid_room_instance' }, { status: 400 });
+      }
+      const room = await getAgentByName(env.HYPER_ROOM_GATEWAY, instanceId);
+      return room.fetch(new Request('https://room.internal/publish', {
+        method: 'POST', headers: {
+          authorization: `Bearer ${env.HYPER_GROK_WORKFLOW_SECRET}`, 'content-type': 'application/json',
+        }, body: JSON.stringify(body),
+      }));
     }
     if (url.pathname === '/start' && request.method === 'POST') {
       const params = await request.json<unknown>().catch(() => null);

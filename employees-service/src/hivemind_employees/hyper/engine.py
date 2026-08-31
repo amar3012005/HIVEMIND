@@ -4307,12 +4307,18 @@ class Director:
                 if mode_at_least(self.grok_runtime_mode, "real_tools"):
                     if self.work_agent_hook is None:
                         raise RuntimeError("real agent runtime selected without a work-agent executor")
+                    from .langgraph_runtime import run_bounded_assignment_graph
                     async with assignment_semaphore:
                         for provider_attempt in range(4):
                             try:
-                                agent_result = await self.work_agent_hook(
-                                    owner, {**order, "_work_order_id": work_id},
+                                agent_result = await run_bounded_assignment_graph(
+                                    self.work_agent_hook,
+                                    owner,
+                                    {**order, "_work_order_id": work_id},
                                     f"{prompt}\n\nEVIDENCE BOARD:\n{context}",
+                                    max_repairs=max(0, min(2, int(os.environ.get(
+                                        "HYPER_GROK_AGENT_GRAPH_REPAIRS", "1"
+                                    ) or "1"))),
                                 )
                                 break
                             except Exception as provider_exc:
@@ -4500,23 +4506,32 @@ class Director:
                 repair_order = {
                     "id": repair_id,
                     "depends_on": prior_step_ids,
-                    "kind": "research",
-                    "owner_lane": "Researcher",
-                    "title": f"Repair missing evidence (attempt {attempt})",
+                    "kind": "repair",
+                    "owner_lane": str(
+                        rejected.get("owner_lane")
+                        or rejected.get("reviewed_owner_lane")
+                        or "Investigator"
+                    ),
+                    "title": f"Repair unmet completion checks (attempt {attempt})",
                     "objective": (
-                        "Use the browser and other allowed tools to resolve every exact reviewer gap. "
-                        "If a selected public page is blocked or consent-gated, choose a credible accessible "
-                        "competitor page instead. Capture current rendered evidence, exact URLs and comparable "
-                        "price facts. The company named in Room/Company context is the subject, not one of its "
-                        "own competitors, and cannot count toward the requested competitor total. "
-                        "Then prepare the requested artifact inputs. Reviewer gaps:\n"
+                        "Resolve every exact unmet completion check using only the tools, authority, "
+                        "accepted prerequisite artifacts, and evidence available to this assignment. "
+                        "Persist any new evidence or artifact and cite its receipt. Do not change the "
+                        "task's domain, requested deliverable, entities, counts, or acceptance criteria. "
+                        "If a check cannot be satisfied with authorized evidence, return the precise "
+                        "remaining gap instead of inventing a replacement. Reviewer gaps:\n"
                         + str(rejected.get("text") or "")[:3000]
                     ),
-                    "required_evidence": ["Persisted browser receipts for every repaired factual claim"],
+                    "required_evidence": list(dict.fromkeys(
+                        str(item)
+                        for source in orders
+                        for item in (source.get("required_evidence") or [])
+                        if str(item).strip()
+                    )),
                     "acceptance_criteria": [
-                        "Resolve every reviewer gap with current rendered evidence",
-                        "Return three comparable competitor pricing observations and exact source URLs",
-                        "Produce evidence sufficient for the requested reviewed artifact",
+                        "Resolve every explicit reviewer gap",
+                        "Satisfy the original work-order acceptance criteria without changing their meaning",
+                        "Attach persisted evidence or artifact receipts for every completion claim",
                     ],
                 }
                 repair_result = await execute(len(orders) + attempt * 2, repair_order)
@@ -4535,17 +4550,16 @@ class Director:
                     "title": f"Verify repaired work (attempt {attempt})",
                     "objective": (
                         "Independently verify the repaired work against the user's original request and all "
-                        "persisted browser receipts. Reject missing prices, missing competitors, inaccessible "
-                        "sources, or unsupported comparisons. This is the pre-synthesis evidence gate: pass when "
-                        "the persisted evidence and comparison inputs are sufficient for final synthesis; do not "
-                        "reject merely because the final formatted artifact is produced immediately after this gate. "
-                        "Never count the subject company from Room/Company context as its own competitor."
+                        "original work-order acceptance criteria. Inspect persisted evidence, artifacts, and "
+                        "provider receipts rather than relying on agent prose. Reject any unmet check, inaccessible "
+                        "required source, unsupported claim, or missing artifact. This is the pre-synthesis gate: "
+                        "pass only when the persisted inputs are sufficient to produce the requested final result."
                     ),
-                    "required_evidence": [],
+                    "required_evidence": list(repair_order.get("required_evidence") or []),
                     "acceptance_criteria": [
-                        "Three current public competitor pricing pages have persisted browser receipts",
-                        "Comparable pricing facts and exact URLs are source-backed",
-                        "The persisted comparison inputs are sufficient to synthesize the requested artifact",
+                        "Every original acceptance criterion has persisted completion evidence",
+                        "Every factual or external-action claim has an inspectable receipt",
+                        "The persisted inputs are sufficient to synthesize the requested result",
                     ],
                     "verification_assignment": True,
                 }

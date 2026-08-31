@@ -23,6 +23,43 @@ export function grokAssignmentWorkflowId(workOrderId, version = 1) {
   return `agent-${workOrderId}-v${Math.max(1, Number(version) || 1)}`;
 }
 
+export function grokRoomInstanceId(orgId, roomId) {
+  const digest = crypto.createHash('sha256').update(`${orgId}:${roomId}`).digest('hex').slice(0, 32);
+  return `hr-${digest}`;
+}
+
+function base64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+export function createGrokRealtimeTicket({ orgId, userId, roomId, ttlSeconds = 120 }) {
+  const config = configuration();
+  if (!config) throw Object.assign(new Error('Grok HyperAgents runtime is disabled'), { code: 'GROK_RUNTIME_DISABLED' });
+  const roomInstanceId = grokRoomInstanceId(orgId, roomId);
+  const payload = base64UrlJson({
+    room_instance_id: roomInstanceId, org_id: orgId, user_id: userId,
+    exp: Math.floor(Date.now() / 1000) + Math.max(30, Math.min(300, Number(ttlSeconds) || 120)),
+  });
+  const signature = crypto.createHmac('sha256', config.secret).update(payload).digest('base64url');
+  const workerUrl = new URL(config.baseUrl);
+  workerUrl.protocol = workerUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  workerUrl.pathname = `/agents/hyper-room-gateway/${roomInstanceId}`;
+  workerUrl.search = new URLSearchParams({ token: `${payload}.${signature}` }).toString();
+  return { roomInstanceId, websocketUrl: workerUrl.toString(), expiresIn: Math.max(30, Math.min(300, Number(ttlSeconds) || 120)) };
+}
+
+export async function publishGrokRoomEvent({ orgId, roomId, event }) {
+  const response = await request('/rooms/publish', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ room_instance_id: grokRoomInstanceId(orgId, roomId), event }),
+  }, 5_000);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `room_gateway_http_${response.status}`);
+  }
+  return response.json();
+}
+
 function configuration() {
   if (process.env.HYPER_GROK_RUNTIME_ENABLED !== 'true') return null;
   const local = process.env.HIVEMIND_LOCAL_MODE === 'true';

@@ -1774,3 +1774,40 @@ git diff --check: passed (line-ending warnings only)
   or production. Full Room Workflow/recovery acceptance still requires safe
   integration into `singulance-local`; the permanent integration worktree has
   unrelated uncommitted files and was intentionally not overwritten.
+
+## 2026-08-31 — Grok HyperAgents realtime and bounded cognition (local candidate)
+
+- Added a tenant-scoped Cloudflare `HyperRoomGateway` Agent. Core creates a
+  short-lived HMAC-signed WebSocket ticket only after Room authorization; the
+  frontend reconnects using fresh tickets while retaining SSE and database poll
+  fallbacks.
+- Extended persistent hired-Agent coordination state with bounded scalar
+  preferences and recent completed assignment identifiers. Customer content and
+  artifacts remain outside Cloudflare Agent state.
+- Added a bounded LangGraph execute/self-check/repair loop for real-tool
+  assignments. It deliberately has no checkpointer because Cloudflare Workflow
+  and PostgreSQL remain the durability authorities.
+- Replaced a competitor-pricing-specific repair prompt with a domain-neutral
+  repair built from the original assignment and exact unmet predicates.
+- Frontend commit `61d940ba7442e488948905f5b5429c7a9d115777` was pushed on
+  `codex/grok-room-realtime-v1`.
+
+### Verification evidence
+
+- Worker `npm run check` passed; Vitest `5 passed`; Wrangler local dry-run
+  listed both Agent bindings, both Workflows, Browser, Sandbox, and Flagship.
+- Core runtime client tests: `4 passed`; changed JavaScript syntax checks passed.
+- Employees ephemeral Python 3.12 test: `6 passed` for bounded LangGraph and
+  Grok runtime suites.
+- Da-vinci optimized build passed before the frontend commit.
+- Local Cloudflare Worker deployed as version
+  `3d2eac64-94ab-458c-843f-7e2dd6bb5e6c`.
+- Live canary tenant resolved `full`; Browser capture returned HTTP 200;
+  Sandbox returned 403 without authority and `SANDBOX_OK` with authority; the
+  Room Agent accepted a valid signed ticket and rejected an invalid ticket.
+- Core `npm ci` cannot complete on Windows because Lightpanda's postinstall uses
+  POSIX `|| true`; focused tests still ran against the existing dependency tree.
+- Integration/rebuild remains pending because the permanent `singulance-local`
+  worktree contains unrelated modifications to `core/data/mcp-connectors.json`
+  and `docker-compose.local-stack.yml`. Per the local integration protocol they
+  were not stashed, reset, overwritten, or merged over.

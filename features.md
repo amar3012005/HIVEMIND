@@ -415,3 +415,20 @@ verification, and its independent rollback control.
 - Evidence-required assignments cannot complete on prose alone. Cloudflare
   Browser sessions now write bounded receipts containing session identity, URL,
   title, rendered-text evidence, and Live View reference into the WorkResult.
+
+### Local realtime and bounded-cognition update — 2026-08-31
+
+- Added a tenant-scoped Cloudflare Room Agent with short-lived signed WebSocket
+  tickets. The frontend reconnects with fresh tickets and retains SSE plus
+  PostgreSQL polling as compatibility fallbacks.
+- Persistent hired Agents now keep bounded preferences and completed assignment
+  identifiers in addition to immutable identity, assignments, and routines.
+- Real-tool Employees assignments now use a bounded LangGraph execute/self-check/
+  repair loop. Workflow and PostgreSQL remain the only durability authorities.
+- Removed competitor-pricing-specific repair behavior from the executor; repairs
+  now target the exact unmet generic predicates and preserve the original task.
+- Live local Cloudflare verification: flag decision `full`; Browser capture HTTP
+  200; Sandbox denied without authority (403) and executed successfully after an
+  explicit grant; Room gateway accepted a valid signed ticket and rejected an
+  invalid one. Local Worker version:
+  `3d2eac64-94ab-458c-843f-7e2dd6bb5e6c`.

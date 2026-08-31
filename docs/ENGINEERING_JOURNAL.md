@@ -2135,3 +2135,26 @@ git diff --check: passed (line-ending warnings only)
   `212312a0a6cf0c54e60029d73e046f3fa0e00136`. Preview frontend Worker version
   `c55a2365-a649-456f-aa7a-9a0f3019a265` returned HTTP 200 from
   `next.preview.singulancelabs.com`; production was not deployed.
+
+## 2026-08-31 — Preview frontend host isolation
+
+### Committed
+
+- Frontend commit `6fb95b23f5cb231247d9c8c3bfdbe74ec4843866` on
+  `codex/preview-host-isolation-ui` makes
+  `next.preview.singulancelabs.com` an explicit HIVEMIND application host.
+- Parent commit `ad8ff8986fdcc0cada4e7b5cd5e61e9fe2401b92` on
+  `codex/preview-host-isolation` advances the pushed frontend gitlink.
+- Integrated through the permanent local worktree at merge commit `8b2f5b1c`.
+
+### Verification and local release
+
+- `npm run test:preview-host`: 1/1 contract test passed.
+- `npm run build:cloudflare` with the preview host, Control Plane, and Core API
+  variables: compiled successfully.
+- Emitted bundle inspection found both `next.preview.singulancelabs.com` and
+  `preview-api.singulancelabs.com`.
+- Deployed only `hivemind-web-preview`, version
+  `0caffe3c-ff87-43c8-992a-51a05deea123`.
+- Live browser navigation retained the preview hostname for both login and app
+  routes after JavaScript execution. Production frontend was not changed.

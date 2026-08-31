@@ -4308,7 +4308,7 @@ class Director:
                     if self.work_agent_hook is None:
                         raise RuntimeError("real agent runtime selected without a work-agent executor")
                     async with assignment_semaphore:
-                        for provider_attempt in range(3):
+                        for provider_attempt in range(4):
                             try:
                                 agent_result = await self.work_agent_hook(
                                     owner, {**order, "_work_order_id": work_id},
@@ -4321,7 +4321,7 @@ class Director:
                                     "in_flight_budget_exhausted" in detail
                                     or ("error code: 402" in detail and "in-flight" in detail)
                                 )
-                                if not transient_budget or provider_attempt >= 2:
+                                if not transient_budget or provider_attempt >= 3:
                                     raise
                                 # OpenRouter rejects concurrent long-running agent
                                 # calls until its in-flight budget settles. This is
@@ -4329,7 +4329,7 @@ class Director:
                                 # Keep the same WorkOrder/idempotency key and retry
                                 # with bounded backoff instead of consuming a Room
                                 # evidence-repair attempt.
-                                await asyncio.sleep(10 * (provider_attempt + 1))
+                                await asyncio.sleep(20 * (provider_attempt + 1))
                     text = _strip_cot(str(agent_result.get("text") or "")).strip()
                     receipts = [
                         receipt for receipt in (agent_result.get("tool_receipts") or [])

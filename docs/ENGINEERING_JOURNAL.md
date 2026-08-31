@@ -1308,3 +1308,42 @@ slides that find no unique anchor get a page instead of `null`.
 - Flag default remains `off`; only the existing operator canary is `full`.
   Rollback is exact rule off, followed if needed by the backed-up Core environment
   kill switch and canonical service-scoped recreation. No global rollout occurred.
+
+## 2026-08-31 UTC — Production OCR ingestion and durable-chat A/B canary
+
+- Uploaded `1981-60th-AnnualTeil2-ocr (1).pdf` (90 pages, 11,886,521 bytes;
+  SHA-256 `ef8db3e19feadc0dc7a0bb426b438e324c8e2f8b68be02eba928c9edb2a87c6a`)
+  through the production asynchronous Knowledge API for the existing operator
+  canary. Job `45f17bf4-b7c1-4b58-84ca-a74005bd5fb6` used the Cloudflare
+  Workflow orchestrator and completed `ready` with document
+  `380ba44c-60a5-4973-a992-a2e6525d63f4`, 216 segments, 216/216 embeddings,
+  30 candidates, 15 promoted memories, verified citation/relationship stages,
+  and zero failed embeddings.
+- The corrupt text-layer detector selected vision OCR. The initial long Core
+  materialization request exceeded the Worker request window; Workflow retries
+  were lease-fenced and the original attempt completed. Reconciliation reused
+  the persisted receipt and the Workflow completed in five minutes without
+  duplicate materialization. This validates recovery but identifies the next
+  durability improvement: split heavy materialization into smaller Workflow
+  checkpoints rather than one long Core request.
+- Ran the same five-query production chat matrix with exact-canary Flagship mode
+  `full`, then `off`, then restored `full`. Full mode created durable turns,
+  recovered the Pantene/Procter & Gamble relation, and produced broader
+  comprehensive coverage (10 sources/14 citations versus 6/6 when off). Off
+  mode retained the stable V2 path and answered grounded source facts without
+  creating durable turns.
+- Source-constrained full-mode canaries returned Jim Adair for HASTY CAKE (1
+  source/1 citation), the Mrs Paul's creative roles (1/1), and four grounded
+  product/advertisement answers (4/4), with explicit gaps for Kaukauna and
+  Westinghouse. Arithmetic remained correct and durable.
+- Open defects discovered by the A/B test: a filename beginning with `1981` can
+  be misclassified as a temporal snapshot and fail with
+  `native_plan_missing_snapshot_time`; an unconstrained director query selected
+  a conflicting authorized source (`Karen Brown`) instead of the newly ingested
+  source (`Jim Adair`); one relation answer duplicated its sentence; and some
+  detailed/role responses found passages but failed citation validation. These
+  are shared V2 retrieval/planning/synthesis issues, not failures introduced by
+  the durable wrapper.
+- Production code and containers were not changed by this test. The global flag
+  default remains `off`; exact operator targeting was restored to `full` after
+  the comparison.

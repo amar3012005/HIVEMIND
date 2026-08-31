@@ -408,3 +408,10 @@ verification, and its independent rollback control.
   `VISUAL_PATH_IN_HYPERROOMS=true` as of commit `83f57630`. Branding, marketing,
   fundraising, and product tasks can therefore enter the governed renderer
   instead of terminating before agent execution.
+- Commit `7fd1fc86` closes the legacy-execution escape hatch for full-mode turns.
+  Every non-chat full-mode task now produces a durable assignment graph even
+  when the planning model omits work orders; legacy persona debate is replaced
+  by persisted agent assignments and an execution-profile-driven reviewer.
+- Evidence-required assignments cannot complete on prose alone. Cloudflare
+  Browser sessions now write bounded receipts containing session identity, URL,
+  title, rendered-text evidence, and Live View reference into the WorkResult.

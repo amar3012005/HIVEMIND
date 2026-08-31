@@ -1655,3 +1655,40 @@ git diff --check: passed (line-ending warnings only)
 - The verifier now turns an absent provider response into the explicit error
   `governed verifier model returned no response` rather than leaking an internal
   `NoneType.get` exception into the Room result.
+
+## 2026-08-31 — Full-mode Rooms no longer escape into legacy debate
+
+- Root cause: the admitted turns correctly latched `grok_runtime_mode=full` and
+  started the Room Workflow, but a planner response with no work orders could
+  still enter the historical lead-agent/debate path. The visible discussion was
+  therefore legacy behavior despite a correct Flagship decision.
+- Commit `7fd1fc86e94dcb17304a8894c2a5fee3b2038e4e` normalizes missing planner
+  modes, creates a domain-neutral durable assignment when a task omits work
+  orders, converts planner assignments to dependency-aware steps, and replaces
+  requested/profile-mandated debate with an independent reviewer assignment.
+- Every real agent receives the original Room request plus its bounded WorkOrder.
+  Evidence-required assignments receive one bounded repair attempt and fail
+  explicitly when no verified tool receipt exists; prose can no longer masquerade
+  as execution evidence.
+- Cloudflare Browser registration is idempotent for cached employee toolkits.
+  Browser calls now write assignment-scoped receipts containing adapter, session,
+  URL, title, rendered-text excerpt, and Live View reference. Receipts are
+  persisted in `HyperWorkResult.evidence` and included in downstream review and
+  synthesis context.
+
+### Live local evidence
+
+- Reproduced the user's exact browser-pricing task under full mode. Canary turn
+  `3777124a-6237-4b82-b56f-77cdecfdb48b` produced four persisted WorkOrders
+  (three bounded execution steps plus an independent reviewer), each with stable
+  agent/workflow identities. This proved the legacy debate escape was closed.
+- Final receipt-enforcement canary `60918052-947c-40f7-8f4f-5db661b6e662`
+  executed Cloudflare Browser successfully against three public pages and stored
+  three Browser evidence receipts on the execution result. A dependent Priya
+  reviewer assignment also completed with persisted evidence.
+- The final canary correctly remained `blocked`: Browser supplied rendered-text
+  evidence, not screenshots, and two selected pages did not yield comparable
+  official pricing. The verifier also rejected unsupported numbers. This is a
+  truthful task-level evidence gap, not a runtime fallback or missing tool.
+- Python AST parsing passed for all three changed runtime modules; Employees
+  health remained HTTP 200. Production was not changed.

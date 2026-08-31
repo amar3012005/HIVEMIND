@@ -34,6 +34,21 @@ services:
       HIVEMIND_CONTROL_PLANE_POST_LOGIN_REDIRECT: https://next.preview.singulancelabs.com/hivemind/app/overview
       HIVEMIND_LOCAL_MODE: "true"
       HIVEMIND_LOCAL_AUTH_BYPASS: "true"
+      EMAIL_IDENTITY_V1_ENABLED: "true"
+      EMAIL_IDENTITY_V1_MODE: email_only
+      EMAIL_AUTH_ALLOWED_ORIGINS: https://next.preview.singulancelabs.com
+      EMAIL_AUTH_ENCRYPTION_KEY: ${HIVEMIND_OAUTH_SESSION_SECRET:-local-oauth-session}-email-auth-encryption-v1
+      EMAIL_AUTH_TOKEN_SECRET: ${SESSION_SECRET:-local-session}-email-auth-token-v1
+      # Official Cloudflare always-pass test widget; local/preview only.
+      TURNSTILE_EMAIL_AUTH_SITE_KEY: 1x00000000000000000000AA
+      TURNSTILE_EMAIL_AUTH_SECRET: 1x0000000000000000000000000000000AA
+      EMAIL_AUTH_TURNSTILE_BYPASS: "true"
+      AUTH_EMAIL_FLAG_URL: ${AUTH_EMAIL_FLAG_URL:-https://singulance-auth-email-local.amarsai2005.workers.dev}
+      AUTH_EMAIL_QUEUE_URL: ${AUTH_EMAIL_QUEUE_URL:-https://singulance-auth-email-local.amarsai2005.workers.dev}
+      AUTH_EMAIL_QUEUE_SECRET: ${HIVEMIND_PREVIEW_EMAIL_GATEWAY_TOKEN:-}
+      ZITADEL_API_URL: ${ZITADEL_PREVIEW_API_URL:-}
+      ZITADEL_SERVICE_PAT: ${ZITADEL_PREVIEW_SERVICE_PAT:-}
+      ZITADEL_EMAIL_ORG_ID: ${ZITADEL_PREVIEW_EMAIL_ORG_ID:-}
       KNOWLEDGE_INGEST_WORKFLOW_ENABLED: ${KNOWLEDGE_INGEST_WORKFLOW_ENABLED:-false}
       KNOWLEDGE_INGEST_WORKFLOW_SECRET: ${KNOWLEDGE_INGEST_WORKFLOW_SECRET:-}
       HYPER_GROK_RUNTIME_ENABLED: ${HYPER_GROK_RUNTIME_ENABLED:-false}

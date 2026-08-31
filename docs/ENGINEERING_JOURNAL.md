@@ -2235,3 +2235,42 @@ git diff --check: passed (line-ending warnings only)
   worktree contained unrelated edits in `core/data/mcp-connectors.json` and a
   dirty `docker-compose.local-stack.yml` entry. Those files were not cleaned,
   stashed, overwritten or committed. Production remained unchanged.
+
+## 2026-08-31 UTC — HyperAgent live progress and durable browser receipts candidate
+
+### Committed
+
+- Frontend branch `codex/hyperagent-receipts-responsive` pushed commit
+  `ccb465a61eed0100790448970818d7fe9210bd4c`.
+- Parent branch `codex/hyperagent-receipts-responsive` pushed commit
+  `71d619dad64841db3e7d0ce2489f0ac148fd9b6d` from
+  `P:\HIVEMIND-worktrees\hyperagent-receipts-responsive`.
+- Browser receipts now persist and stream after each successful page action,
+  assignment heartbeats update durable WorkOrder and Turn progress, and the
+  frontend presents live agent activity instead of a frozen running card.
+- The Director's durable WorkOrder graph now owns participant collaboration by
+  default; the superseded uncheckpointed inline delegation path is retained
+  only behind the disabled `HYPER_GROK_INLINE_DELEGATION_ENABLED` escape hatch.
+
+### Verification
+
+- Employee runtime: `pytest tests/test_cloudflare_browser_receipts.py
+  tests/test_grok_runtime.py tests/test_adaptive_director.py -q` -> `42 passed`.
+- Core: `node --test tests/unit/grok-progress-contract.test.js
+  tests/unit/hyper-turn-event-resilience.test.js
+  tests/unit/grok-runtime-client.test.js` -> `7 passed`, `0 failed`.
+- Cloudflare Grok runtime: `npm run check` -> exit 0; `npm test` -> `6 passed`;
+  `npm run dry-run` resolved the isolated local Agent, Workflow, Browser, R2,
+  Flagship, Durable Object and Sandbox bindings and exited successfully.
+- Da-vinci: `npm run build` -> optimized production build completed.
+
+### Release status
+
+- This is a pushed local candidate, not an accepted shared local release.
+- The permanent integration worktree still contains unrelated generated edits
+  in `core/data/mcp-connectors.json`; per the local integration protocol they
+  were preserved and the merge/container rebuild was not started.
+- The `hivemind-agent-memory` MCP tools were not exposed to this session, so
+  this pushed Git journal entry is the durable handoff record pending memory
+  service availability.
+- No production deployment or production configuration change occurred.

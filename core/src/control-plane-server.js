@@ -14959,7 +14959,7 @@ Write the persona now.`;
   // mode and authenticates with the same dedicated Workflow secret at both
   // boundaries. It never creates a browser session and never maps arbitrary
   // paths into Core.
-  if (/^\/internal\/knowledge-ingest\/v1\/jobs\/[0-9a-f-]{36}\/(?:stages\/(?:acquire|materialize|reconcile)|fail)$/.test(pathname)) {
+  if (/^\/internal\/knowledge-ingest\/v1\/jobs\/[0-9a-f-]{36}\/(?:stages\/(?:acquire|materialize(?:\/(?:start|status))?|reconcile)|fail)$/.test(pathname)) {
     return proxyKnowledgeWorkflowToCore(req, res, pathname);
   }
 

@@ -47,6 +47,13 @@ test('answer objective and semantic depth shape one synthesis without encouragin
   assert.match(prompt, /telemetry, not a request for another retrieval or synthesis pass/);
 });
 
+test('synthesis contract reports conflicting source values and forbids duplicate claims', () => {
+  const prompt = buildSynthesisSystemPrompt({ language: 'en', operation: 'recall', recallMode: 'fact' });
+  assert.match(prompt, /Never repeat the same factual sentence/i);
+  assert.match(prompt, /incompatible values/i);
+  assert.match(prompt, /cite both claims/i);
+});
+
 test('comprehensive synthesis asks for every distinct delivered finding without claiming corpus-wide completeness', () => {
   const prompt = buildSynthesisSystemPrompt({
     language: 'en', operation: 'recall', recallMode: 'explain', responseDepth: 'comprehensive',

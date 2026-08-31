@@ -88,12 +88,27 @@ test('use_tools true discloses connected and compound capabilities', () => {
   assert.ok(names.includes('use_connector'));
   assert.ok(names.includes('use_campaign'));
   assert.ok(names.includes('compound_plan'));
-  assert.equal(names.includes('hivemind_profile'), false);
+  assert.equal(names.includes('hivemind_profile'), true);
   const context = tools.find((tool) => tool.function.name === 'hivemind_context');
   assert.equal('native_tool' in context.function.parameters.properties, false);
   const connector = tools.find((tool) => tool.function.name === 'use_connector');
   assert.ok(connector.function.parameters.properties.provider.enum.includes('google-calendar'));
   assert.ok(connector.function.parameters.properties.provider.enum.includes('google-tasks'));
+});
+
+test('tool-enabled profile questions retain the caller-scoped read capability', () => {
+  const tools = getProgressiveTools({ useTools: true, connectedProviders: ['gmail'] });
+  const profile = tools.find((tool) => tool.function.name === 'hivemind_profile');
+  assert.ok(profile);
+  assert.equal('user_id' in profile.function.parameters.properties, false);
+  assert.equal('org_id' in profile.function.parameters.properties, false);
+  const { decision } = adaptToDecision('hivemind_profile', {
+    target: 'organization', query_original: 'What is my maintained organization name?',
+    response_language: 'en', answer_objective: 'State the maintained organization name.',
+  }, 'What is my maintained organization name?', 'en', { useTools: true });
+  assert.equal(decision.operation, 'profile');
+  assert.equal(decision.profile_target, 'organization');
+  assert.deepEqual(decision.tool_groups, ['hivemind-recall']);
 });
 
 test('native profile is an explicit language-independent capability', () => {

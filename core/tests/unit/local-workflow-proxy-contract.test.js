@@ -14,6 +14,8 @@ test('the hosted Workflow bridge is environment-gated, secret-authenticated, and
   assert.match(helper, /KNOWLEDGE_INGEST_WORKFLOW_SECRET/);
   assert.match(source, /import \{ knowledgeWorkflowEnabled \}/);
   assert.match(source, /internal\\\/knowledge-ingest\\\/v1\\\/jobs/);
+  assert.match(source, /materialize\(\?:\\\/\(\?:start\|status\)\)\?/,
+    'the bounded bridge must admit the durable dispatch and polling endpoints');
   assert.doesNotMatch(source, /proxyKnowledgeWorkflowToCore\(req, res, ['"]\/['"]\)/);
 });
 

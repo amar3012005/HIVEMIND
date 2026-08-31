@@ -126,6 +126,23 @@ test('remote storage reconciliation does not require a central document row', as
   await assert.doesNotReject(() => executor.execute({ ...input, stage: 'reconcile' }));
 });
 
+test('materialization dispatch returns immediately and exposes a durable polling receipt', async () => {
+  const { executor, steps } = fixture();
+  const input = { jobId: ids.job, orgId: ids.org, userId: ids.user, processingVersion: 3 };
+  const dispatched = await executor.startMaterialize(input);
+  assert.equal(dispatched.accepted, true);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const status = await executor.materializeStatus(input);
+    if (status.status === 'succeeded') {
+      assert.equal(status.result.documentId, ids.document);
+      assert.equal([...steps.rows.values()].filter((row) => row.status === 'succeeded').length >= 8, true);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail('background materialization did not complete');
+});
+
 test('internal Workflow authorization requires an explicit environment gate and exact secret', () => {
   const previous = {
     local: process.env.HIVEMIND_LOCAL_MODE,

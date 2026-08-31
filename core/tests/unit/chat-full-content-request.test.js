@@ -36,4 +36,5 @@ test('chat recall requests full authorized rows for answer evidence projection',
 
   assert.equal(calls[0].args._include_full_memory_content, true);
   assert.equal(calls[0].args.semantic_recovery, true);
+  assert.equal(calls[0].args.entity_filter_mode, 'should');
 });

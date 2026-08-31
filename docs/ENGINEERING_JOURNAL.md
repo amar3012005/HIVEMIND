@@ -1692,3 +1692,194 @@ git diff --check: passed (line-ending warnings only)
   truthful task-level evidence gap, not a runtime fallback or missing tool.
 - Python AST parsing passed for all three changed runtime modules; Employees
   health remained HTTP 200. Production was not changed.
+## 2026-08-31 UTC — Production OCR ingestion and durable-chat A/B canary
+
+- Uploaded `1981-60th-AnnualTeil2-ocr (1).pdf` (90 pages, 11,886,521 bytes;
+  SHA-256 `ef8db3e19feadc0dc7a0bb426b438e324c8e2f8b68be02eba928c9edb2a87c6a`)
+  through the production asynchronous Knowledge API for the existing operator
+  canary. Job `45f17bf4-b7c1-4b58-84ca-a74005bd5fb6` used the Cloudflare
+  Workflow orchestrator and completed `ready` with document
+  `380ba44c-60a5-4973-a992-a2e6525d63f4`, 216 segments, 216/216 embeddings,
+  30 candidates, 15 promoted memories, verified citation/relationship stages,
+  and zero failed embeddings.
+- The corrupt text-layer detector selected vision OCR. The initial long Core
+  materialization request exceeded the Worker request window; Workflow retries
+  were lease-fenced and the original attempt completed. Reconciliation reused
+  the persisted receipt and the Workflow completed in five minutes without
+  duplicate materialization. This validates recovery but identifies the next
+  durability improvement: split heavy materialization into smaller Workflow
+  checkpoints rather than one long Core request.
+- Ran the same five-query production chat matrix with exact-canary Flagship mode
+  `full`, then `off`, then restored `full`. Full mode created durable turns,
+  recovered the Pantene/Procter & Gamble relation, and produced broader
+  comprehensive coverage (10 sources/14 citations versus 6/6 when off). Off
+  mode retained the stable V2 path and answered grounded source facts without
+  creating durable turns.
+- Source-constrained full-mode canaries returned Jim Adair for HASTY CAKE (1
+  source/1 citation), the Mrs Paul's creative roles (1/1), and four grounded
+  product/advertisement answers (4/4), with explicit gaps for Kaukauna and
+  Westinghouse. Arithmetic remained correct and durable.
+- Open defects discovered by the A/B test: a filename beginning with `1981` can
+  be misclassified as a temporal snapshot and fail with
+  `native_plan_missing_snapshot_time`; an unconstrained director query selected
+  a conflicting authorized source (`Karen Brown`) instead of the newly ingested
+  source (`Jim Adair`); one relation answer duplicated its sentence; and some
+  detailed/role responses found passages but failed citation validation. These
+  are shared V2 retrieval/planning/synthesis issues, not failures introduced by
+  the durable wrapper.
+- Production code and containers were not changed by this test. The global flag
+  default remains `off`; exact operator targeting was restored to `full` after
+  the comparison.
+
+## 2026-08-31 UTC — Durable chat defects fixed and fresh heavy OCR E2E accepted
+
+- Committed and pushed `d4a45da449301377ed8de465b21f900772ed023d`
+  (chat planning/retrieval), `953f3a719aab66aed5b1f479ed6e45f232613761`
+  (narrow async materialization proxy), and
+  `4371984dccca1ee2666555fcbfee0606618ba3ad` (Cloudflare embedding batch bounds
+  and retry-credit settlement healing) to the session branch and
+  `singulance-main`.
+- Accepted releases through the deployment governor only. Core manifest:
+  `/root/releases/manifests/4371984d/20260831T005717Z/RELEASE_MANIFEST.json`;
+  Control manifest:
+  `/root/releases/manifests/953f3a71/20260831T004847Z/RELEASE_MANIFEST.json`.
+  Exact running images are Core `sha-4371984d` / digest
+  `2e954b4e4149b9cb7658327ab3231aea57eb5edadf526844dac2fe8649cf7fb0`,
+  Control `sha-953f3a71` / digest
+  `83ea81bfcb59de74e3955416cb10ddd6a0bafcb7211be582f62a1cab5b0de2a9`,
+  and unchanged Employees `sha-b3616eb4`.
+- Verification commands and outputs:
+  - Focused Core batching/fallback/job-store tests: `22 passed, 0 failed`.
+  - Control materialization proxy contract: `2 passed, 0 failed`.
+  - Candidate/baseline chat suite: `72 passed, 3 failed` on both revisions;
+    every changed/new test passed and the same three unrelated stale assertions
+    remained.
+  - `wrangler workflows instances describe ...v2`: `Status: Completed`,
+    `Duration: 11 minutes`, `Last Successful Step: reconcile coverage and
+    settle-1`.
+  - Live Cloudflare embedding probe: `{"batches":[45,5],"rows":50,
+    "dimension":1024,"finite":true}`.
+  - Public checks: `singulancelabs.com 200`, production login `200`, API health
+    `200`; fresh Core fatal/panic/unhandled/transport-queue/citation-failure scan
+    returned no lines.
+- Fresh OCR acceptance: job `85bf1f37-ff77-4865-819a-a4c3bebbf141`, workflow
+  `kb-85bf1f37-ff77-4865-819a-a4c3bebbf141-v2`, document
+  `483831cf-c694-41bf-b5f5-e51937224801`; terminal `ready`, 90 pages, 221
+  segments, 221/221 embeddings, 17 candidates, 15 memories, zero vector
+  failures, and settlement timestamp `2026-08-31T01:00:49.027Z`. Temporary host
+  and container upload copies were removed after verified terminal settlement.
+- Post-ingest chat acceptance:
+  - Exact filename + Issue 361 returned Will Hopkins, Ira Friedlander, Robin
+    McDonald, David Schaff, Barnaby Conrad III, Gray D. Boone, and Horizon;
+    grounded with 2 sources / 2 citations.
+  - Unconstrained CITY CYCLES returned David Barry and the correct subject;
+    grounded with 2 sources / 2 citations.
+- Production A/B retained the safety boundary: exact operator mode was restored
+  to `full`; global default remains `off`; flag-off users continue on stable V2
+  and do not create durable turns. Rollback images and digests are recorded in
+  `docs/PRODUCTION_RELEASE.md`.
+
+## 2026-08-31 UTC — Progressive profile discovery deployed and chat matrix accepted
+
+- Committed and pushed `102b551d2d7ca454b3858b8736decdb86e41dbac`
+  (lazy profile discovery), `b284a77ef581e01231f5c8b860e0b105f999a947`
+  (tool-enabled profile read/write boundary),
+  `62553bc2e566d72920d5480553534138f385cdca` (citeable authoritative empty
+  project result), and `9091c1e01d63270a14d668cf60c6634d27469e95`
+  (empty-project gap reconciliation) to the session branch and
+  `singulance-main`.
+- Each production replacement used the deployment governor's Core-only fast
+  path. Final image `hivemind/core-api:sha-9091c1e0`, digest
+  `258e140bc90f0bd2478371d7d12caf247e88648aa4f8e6eb5e318e8d5a6bb261`;
+  manifest `/root/releases/manifests/9091c1e0/20260831T081213Z/RELEASE_MANIFEST.json`.
+  Control `sha-953f3a71` and Employees `sha-b3616eb4` retained exact prior
+  digests and start times throughout.
+- Linux verification: initial lazy-profile release 39/39; final focused matrix
+  83/84 with the parent baseline carrying the identical sole stale
+  exact-source expected-shape assertion (`kind:null`). All new regressions
+  passed; syntax and diff checks passed; no schema diff and no pending
+  migration.
+- Final authenticated production matrix for user `e35811aa-…` / organization
+  `bfbdd2bc-…`:
+  - direct arithmetic: `102`, HTTP 200, operation `direct`, no gaps;
+  - tool-enabled organization profile: `Singulance Labs`, grounded 1/1,
+    operation `profile`, no gaps;
+  - exact Teil3 Issue 361 source: Barnaby Conrad III / Gray D. Boone, grounded
+    2/2, operation `source_read`, no gaps;
+  - Pantene / Procter & Gamble: one grounded relationship sentence, 2/2,
+    operation `relation_between`, no gaps;
+  - authorized projects: explicit grounded empty result, 1/1, operation
+    `projects`, no gaps.
+- Additional acceptance before the final sweep covered unconstrained CITY
+  CYCLES recall, a detailed Teil2 creative-role synthesis, profile read,
+  temporal no-coverage, and exact aggregate no-coverage. Missing complete
+  temporal/registry evidence failed closed rather than fabricating an answer.
+- Declarative auto-save canary selected `save` without a remember verb, used
+  explicit personal scope, preserved three exact entities and
+  `provenance:user-assertion`, and wrote through `ingestCanonicalPayload`.
+  Tenant-scoped memory/entity rows were inspected, then memory
+  `4f9ebe65-c99b-4b30-9736-fb28eac7bc7f` was hard-deleted through the API.
+- Final Core/API/homepage health is 200; fresh fatal/panic/unhandled/transport
+  queue/citation-failure log scan returned no lines. Release presence is clear.
+
+## 2026-08-31 UTC — Durable chat Flagship default promoted globally
+
+- Production governor updated Cloudflare Flagship app
+  `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`, flag
+  `durable_chat_agent_v1`, through GET, precondition verification, and a complete
+  PUT. Changelog timestamp `2026-08-31T08:28:06.413Z`; the only diff is
+  `default_variation: off -> full`. Cloudflare reported the API operator as
+  `updated_by: unknown`.
+- Preserved exactly: string variations `off`, `shadow`, `session`, `workflow`,
+  and `full`; two targeting rules; description; `enabled:true`. Rollback payload
+  is the identical full definition with only `default_variation: off`.
+- Production binding verification: existing operator resolved `full` through
+  its preserved targeting rule. Two unrelated synthetic production contexts
+  matched neither rule and resolved `full` with reason `DEFAULT`, proving the
+  global rollout rather than accidental rule matching.
+- Authenticated read-only canaries returned HTTP 200: direct response nonempty;
+  profile grounded with one source; exact source grounded with one source and
+  no gaps; relationship grounded with five sources and no gaps. No unrelated
+  real identity had safe profile, parsed-source, and relationship coverage
+  together, so no customer data was fabricated for acceptance.
+- Core/API/homepage returned 200; critical logs were empty. Core, Control, and
+  Employees retained exact images and start times. No build, migration, restart,
+  or deployment occurred for this flag-only rollout. Release presence closed
+  cleanly.
+
+## 2026-08-31 UTC — Ingestion, recall, chat, and canonical knowledge globally reconciled
+
+- Release session `best-path-global-flags` claimed the shared production
+  presence channel and completed without a conflicting release.
+- Verified Flagship app `6568ec71-67c6-4b2c-b2f3-98aebe9e81c8`. Final global
+  defaults: `knowledge_ingest_workflow_v1=on`,
+  `recall_parallel_reliability_v1=on`, `durable_chat_agent_v1=full`, and
+  `canonical_knowledge_foundation_v1=full`.
+- Governed recall mutation used GET, precondition verification, and a complete
+  PUT at `2026-08-31T08:52:20.083Z`. The changelog showed only
+  `default_variation: off -> on`; both rules, boolean variations, description,
+  type, and enabled state were preserved. The rollback payload is the same full
+  definition with only the default restored to `off`.
+- Live bound-Worker evaluations returned all four enabled values for the
+  operator context and two unrelated synthetic contexts. The operator recall
+  result was `TARGETING_MATCH`; both unrelated results were `DEFAULT`.
+- Production resources were inspected in place. Canonical projection Worker v7
+  is `d99c1304-61ff-40c8-a4b5-b0b5c148ce80`; ingestion Worker v4 is
+  `d917d0a1-38fe-4933-a4eb-34bcb891c625`; durable chat Worker v4 is
+  `c413ed26-533f-4198-8d6f-be03841e1ae3`. Their configured Workflow, Queue,
+  R2, and Durable Object bindings match the current production definitions.
+- Read-only E2E evidence: eight ingestion jobs were `ready`; the latest two
+  PDFs were terminal at progress 100 and replayable; duplicate checksum groups
+  were zero. Recall completed memory lexical (31 candidates), memory vector
+  (67 candidates), evidence lexical, and evidence vector lanes with one
+  embedding, retrieval, and rerank pass. Result: 3 memories, 12 evidence items,
+  15 citations, 17 graph edges, and no degraded state.
+- Authenticated direct, profile, exact-source, relationship, and entity chat
+  requests returned HTTP 200. Profile/exact-source/relationship were grounded;
+  the broad entity result was not grounded, and relationship/entity each
+  retained one gap. These remain semantic-quality follow-ups rather than
+  orchestration failures.
+- Core `sha-9091c1e0`, Control `sha-953f3a71`, and Employees `sha-b3616eb4`
+  retained exact images, start times, and zero restart counts. API and homepage
+  returned 200; the 20-minute critical log scan returned zero matches. No build,
+  migration, restart, container replacement, or Worker deployment occurred.

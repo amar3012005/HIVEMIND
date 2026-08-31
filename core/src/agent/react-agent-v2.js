@@ -265,7 +265,7 @@ async function callJsonLLM({ messages, model, apiKey, maxTokens, temperature = 0
   return { parsed: parseJsonObjectContent(raw), usage: data.usage };
 }
 
-async function callValidatedClaimStream({ message, messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, evidence, allowGeneralKnowledge, onEvent, language = 'en' }) {
+async function callValidatedClaimStream({ message, messages, model, apiKey, maxTokens, signal, promptCacheKey, recallPackets, evidence, allowGeneralKnowledge, onEvent, language = 'en', source = null }) {
   const streamInstruction = `STREAMING OUTPUT CONTRACT: Return exactly one JSON object matching the supplied strict response schema and no markdown. Every factual sentence in response must have a corresponding claims item with valid delivered citation IDs. Decompose every independent requested detail in coverage. For broad, detailed, comprehensive, overview, comparison, or additional-information requests, use all distinct relevant delivered passages and normally produce 3-5 non-duplicate grounded claims when the evidence supports them. Never emit uncited prose or mark the response sufficient while a requested detail is absent.`;
   const streamedClaims = [];
   const rejectedClaims = [];
@@ -409,7 +409,7 @@ async function callValidatedClaimStream({ message, messages, model, apiKey, maxT
     // failure. Preserve the single synthesis call and deterministically expose
     // the already-ranked, citation-bearing recall packet instead of returning
     // a 502 or paying for another LLM pass.
-    const recalled = groundedRecallFallback(evidence, language, message);
+    const recalled = groundedRecallFallback(evidence, language, message, { source });
     if (recalled) {
       onEvent?.({ type: 'answer_started', schema_version: 1, validated: true });
       onEvent?.({ type: 'answer_delta', schema_version: 1, delta: recalled.response, validated: true, citation_ids: recalled.claims.flatMap((claim) => claim.citation_ids) });
@@ -897,6 +897,17 @@ async function execProfile(bus, plan, ctx, { beforeDeadline, remaining, startToo
   }
 }
 
+export function authorizedProjectsCitation(projects = []) {
+  const rows = Array.isArray(projects) ? projects : [];
+  return {
+    id: 'PROJECTS1', source_type: 'authorized_projects', source_label: 'Authorized projects',
+    title: 'Authorized projects',
+    snippet: rows.length
+      ? rows.map((project) => `${project.name} (${project.slug || project.id})`).join('\n').slice(0, 2000)
+      : 'No active projects are authorized for this user in the current organization.',
+  };
+}
+
 async function execProjects(bus, plan, ctx, { beforeDeadline, remaining, startTool, recordTool }) {
   if (!(plan.operation === 'projects' && remaining() > 0)) return;
   const args = { query: plan.project_prompt || plan.query_canonical_en || '' };
@@ -904,12 +915,10 @@ async function execProjects(bus, plan, ctx, { beforeDeadline, remaining, startTo
     startTool('hivemind_list_projects', args);
     const result = await beforeDeadline(() => dispatchTool('hivemind_list_projects', args, ctx));
     const projects = Array.isArray(result?.projects) ? result.projects : [];
-    if (projects.length) {
-      bus.addPacket({ citations: [{
-        id: 'PROJECTS1', source_type: 'authorized_projects', source_label: 'Authorized projects',
-        title: 'Authorized projects', snippet: projects.map((project) => `${project.name} (${project.slug || project.id})`).join('\n').slice(0, 2000),
-      }] });
-    }
+    // An authorized empty result is completion evidence too. Without a
+    // citation packet, synthesis treats "zero projects" as a retrieval outage
+    // and emits an unrelated generic recall failure.
+    bus.addPacket({ citations: [authorizedProjectsCitation(projects)] });
     recordTool('hivemind_list_projects', args, `${projects.length} authorized projects`, result);
     return { projectsResult: result };
   } catch (error) {
@@ -1211,6 +1220,13 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
 
   const recallExtras = {
     _structured_intent: true,
+    // Planner-extracted names are ranking/coverage anchors, not proof that
+    // every historical row already has the canonical `entity:*` tag. A hard
+    // tag predicate made pre-canonical memories disappear before the existing
+    // text/entity compatibility check could run. `should` keeps the dedicated
+    // entity lane and exact lexical query additive; downstream coverage still
+    // requires every requested entity to occur in the delivered packet.
+    entity_filter_mode: 'should',
     // Latched once by the authenticated chat route. The recall tool receives
     // the same fail-closed rollout decision as the public recall endpoint.
     reliability_v1: ctx.recallReliabilityV1 === true,
@@ -1303,6 +1319,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
   // blocks (relation/aggregate/timeline/profile) with one predicate-routed loop.
   let aggregateResult = null;
   let profileContext = '';
+  let projectsResult = null;
   let temporalCoverage = null;
   for (const cap of OP_STAGE) {
     if (!cap.predicate(plan)) continue;
@@ -1313,6 +1330,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     }
     else if (cap.scalar === 'aggregateResult') aggregateResult = patch?.aggregateResult ?? aggregateResult;
     else if (cap.scalar === 'profileContext') profileContext = patch?.profileContext || profileContext;
+    else if (cap.scalar === 'projectsResult') projectsResult = patch?.projectsResult ?? projectsResult;
     else if (cap.scalar === 'temporalCoverage') temporalCoverage = patch?.temporalCoverage ?? temporalCoverage;
   }
 
@@ -1437,6 +1455,7 @@ export async function gatherEvidence({ plan, ctx, onEvent, deadlineAt }) {
     ranked_candidates: rankedCandidates,
     recall_telemetry: recallTelemetry,
     profile_context: profileContext,
+    projects: projectsResult,
     aggregate: aggregateResult,
     relation: relationResult,
     coverage: {
@@ -1742,7 +1761,7 @@ function hasGroundedPacketEvidence(evidence) {
   );
 }
 
-export function groundedRecallFallback(evidence, language, message = '') {
+export function groundedRecallFallback(evidence, language, message = '', { source = null } = {}) {
   const rows = [];
   const seen = new Set();
   const stop = new Set(['about', 'all', 'and', 'are', 'can', 'could', 'detail', 'detailed', 'does', 'everything', 'file', 'from', 'give', 'have', 'how', 'into', 'more', 'please', 'should', 'tell', 'that', 'the', 'their', 'this', 'what', 'when', 'where', 'which', 'who', 'why', 'with', 'would', 'your']);
@@ -1751,6 +1770,9 @@ export function groundedRecallFallback(evidence, language, message = '') {
     .map((token) => token.replace(/^[._-]+|[._-]+$/g, ''))
     .filter((token) => token.length >= 3 && !stop.has(token)))];
   const relevant = (text, title) => {
+    const requestedTitle = String(source?.title || '').normalize('NFKC').toLocaleLowerCase().trim();
+    const actualTitle = String(title || '').normalize('NFKC').toLocaleLowerCase().trim();
+    if (requestedTitle && (actualTitle === requestedTitle || actualTitle.startsWith(`${requestedTitle} :`))) return true;
     if (!queryTokens.length) return true;
     const haystack = `${title || ''} ${text || ''}`.normalize('NFKC').toLocaleLowerCase();
     const matches = queryTokens.filter((token) => haystack.includes(token)).length;
@@ -2602,7 +2624,7 @@ ${message}`;
       model, apiKey, maxTokens: answerCap, signal,
       promptCacheKey: synthesisPrompt.cache.key,
       recallPackets: evidence.recall_packets || [], evidence, allowGeneralKnowledge, onEvent,
-      language, message,
+      language, message, source: plan.source || null,
     });
   }
 
@@ -2754,7 +2776,7 @@ ${message}`;
     // already-ranked packet. This introduces no new facts and no extra model
     // or retrieval call; the generic absence response remains reserved for an
     // actually empty or uncitable packet.
-    const recalled = groundedRecallFallback(evidence, language, message);
+    const recalled = groundedRecallFallback(evidence, language, message, { source: plan.source || null });
     if (recalled) {
       return {
         response: recalled.response,
@@ -3368,6 +3390,14 @@ COMPLETENESS AND STYLE:
 
 // ── Public entry — same signature as v1 ────────────────────────────────
 
+export function shouldLoadCompactProfileForDecision(decision = {}) {
+  return decision.operation === 'direct'
+    || decision.operation === 'save'
+    || decision.operation === 'update_profile'
+    || Boolean(decision.save_intent)
+    || Boolean(decision.auto_save_intent);
+}
+
 export async function runReactAgentV2({
   message,
   history = [],
@@ -3514,21 +3544,24 @@ export async function runReactAgentV2({
         }).catch(() => [])
       : [];
     _ps = Date.now();
-    // ALWAYS-ON compact profile preload, IN PARALLEL with the planner. This is
-    // the cheap authoritative-context lane (2 indexed Postgres reads via the
-    // shared ProfileStore cache — NOT wide vector recall). It guarantees every
-    // turn — including a `direct` answer or a mis-routed "Who am I?" — has the
-    // user's name/role/company/preferences available, so a routing miss can
-    // never answer blind. Best-effort: a failure yields empty context, never
-    // breaks the turn.
-    const profilePreloadPromise = (async () => {
-      if (!ctx?.prisma) return '';
-      try {
-        const { getSharedProfileStore } = await import('../memory/profile-store.js');
-        const ps = getSharedProfileStore(ctx.prisma);
-        return (await ps.buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null)) || '';
-      } catch { return ''; }
-    })();
+    // Profile discovery is lazy. The semantic planner only needs to know that
+    // a caller-scoped profile capability exists; it does not need the caller's
+    // profile values on every turn. Resolve the bounded persona packet only
+    // after planning selects a direct/personalized or memory-write path. A
+    // dedicated profile read continues through get_user_profile below.
+    let compactProfilePromise = null;
+    const getCompactProfileContext = () => {
+      if (compactProfilePromise) return compactProfilePromise;
+      compactProfilePromise = (async () => {
+        if (!ctx?.prisma) return '';
+        try {
+          const { getSharedProfileStore } = await import('../memory/profile-store.js');
+          const ps = getSharedProfileStore(ctx.prisma);
+          return (await ps.buildCompactProfileContext(ctx.userId, ctx.orgId, ctx.projectId || null)) || '';
+        } catch { return ''; }
+      })();
+      return compactProfilePromise;
+    };
     // FLAG: CHAT_ROUTER=progressive swaps ONLY the intent-selection stage for
     // the 6-tool Cerebras-direct progressive router. The adapter returns the
     // SAME decision shape, so intentDecisionToPlan + everything downstream is
@@ -3540,7 +3573,10 @@ export async function runReactAgentV2({
       : (nativeV2Module?.nativeV2RoutingMode({ useTools, seed: ctx.userId || trace.traceId }) || 'off');
     const nativeV2Input = async () => ({
       message, history, language, apiKey, signal: abortCtrl.signal,
-      profileContext: await profilePreloadPromise, projectCatalog,
+      // Native V2 discovers profile values through the caller-scoped profile
+      // capability. Supplying values here would turn progressive discovery
+      // back into an always-on prompt preload.
+      profileContext: '', projectCatalog,
       orgId: ctx.orgId, userId: ctx.userId, threadId: ctx.threadId || null,
       timezone: ctx.timezone || ctx.accessContext?.timezone || 'UTC', now: new Date().toISOString(),
     });
@@ -3672,8 +3708,9 @@ export async function runReactAgentV2({
       };
     }
     recordUsage('router', intentParsed.usage);
-    // Resolve the parallel profile preload (kicked off before the planner).
-    const preloadedProfileContext = await profilePreloadPromise;
+    const preloadedProfileContext = shouldLoadCompactProfileForDecision(intentDecision)
+      ? await getCompactProfileContext()
+      : '';
     // Request-scoped identity for deterministic first-person resolution in
     // user-authored relation claims. It is never persisted or sent as a
     // caller-controlled tool argument.
@@ -4661,7 +4698,11 @@ export async function runReactAgentV2({
       rejected_claims: answer.rejected_claims,
       grounded:      answer.grounded,
       confidence:    answer.confidence,
-      gaps:          answer.gaps,
+      // A server-authorized empty project list is a complete negative result,
+      // not a missing-context gap invented by synthesis.
+      gaps:          plan.operation === 'projects' && evidence.projects?.count === 0
+        ? []
+        : answer.gaps,
       usage:         sumUsage(usages),
       trace:         finalizeTrace(trace, usages),
       assistant_name: assistantName || null,

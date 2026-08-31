@@ -1,7 +1,32 @@
 import { currentOrg } from '../db/prisma.js';
 import { getEmbeddingAdmissionController } from './admission.js';
 
-const BATCH_SIZE = 100;
+const BATCH_SIZE = 48;
+const DEFAULT_BATCH_CHAR_BUDGET = 45_000;
+
+export function cloudflareEmbeddingBatches(texts, {
+  maxItems = BATCH_SIZE,
+  maxChars = Number(process.env.CLOUDFLARE_EMBED_BATCH_MAX_CHARS || DEFAULT_BATCH_CHAR_BUDGET),
+} = {}) {
+  const itemLimit = Math.max(1, Number(maxItems) || BATCH_SIZE);
+  const charLimit = Math.max(1, Number(maxChars) || DEFAULT_BATCH_CHAR_BUDGET);
+  const batches = [];
+  let batch = [];
+  let chars = 0;
+  for (const text of texts) {
+    const next = String(text);
+    const nextChars = next.length;
+    if (batch.length && (batch.length >= itemLimit || chars + nextChars > charLimit)) {
+      batches.push(batch);
+      batch = [];
+      chars = 0;
+    }
+    batch.push(next);
+    chars += nextChars;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
 
 export class CloudflareWorkersAIEmbedService {
   constructor({
@@ -94,8 +119,8 @@ export class CloudflareWorkersAIEmbedService {
     if (this.inFlight.has(inFlightKey)) return this.inFlight.get(inFlightKey);
     const pending = (async () => {
       const output = [];
-      for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-        output.push(...await this._post(texts.slice(i, i + BATCH_SIZE), options));
+      for (const batch of cloudflareEmbeddingBatches(texts)) {
+        output.push(...await this._post(batch, options));
       }
       this.cache.set(cacheKey, output);
       return output;

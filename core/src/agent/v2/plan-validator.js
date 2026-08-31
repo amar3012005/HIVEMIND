@@ -225,8 +225,8 @@ function reconcileSemanticOperation(plan, repairs) {
   // ordinary workspace question fail with native_plan_missing_* after two
   // identical planner attempts. With no usable boundary, the only safe
   // read-only interpretation is ordinary typed recall of the unchanged query.
-  if (plan.operation === 'snapshot' && !plan.time.valid_at && !plan.time.known_at && !plan.time.start) {
-    plan.operation = 'recall';
+  if (plan.operation === 'snapshot' && !plan.time.valid_at && !plan.time.known_at) {
+    plan.operation = exactSource ? 'source_read' : 'recall';
     plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
     repairs.push('operation.incomplete_snapshot');
   }
@@ -234,6 +234,17 @@ function reconcileSemanticOperation(plan, repairs) {
     plan.operation = 'recall';
     plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
     repairs.push('operation.incomplete_diff');
+  }
+  // A year-like token in an exact filename is source identity, not a request
+  // for version history. Providers can still emit a schema-valid `timeline`
+  // with no temporal boundary for titles such as `1981-Annual-Report.pdf`.
+  // Preserve genuine as-of/range requests, but make an unbounded exact-source
+  // read use the source hydrator instead of the temporal inventory executor.
+  if (exactSource && plan.operation === 'timeline'
+      && !plan.time.valid_at && !plan.time.known_at && !plan.time.start && !plan.time.end) {
+    plan.operation = 'source_read';
+    plan.time = { semantics: 'none', axis: null, start: null, end: null, valid_at: null, known_at: null };
+    repairs.push('operation.source_title_not_timeline');
   }
   if (plan.operation === 'event_range' && (!plan.time.start || !plan.time.end)) {
     plan.operation = 'recall';

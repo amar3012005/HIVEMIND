@@ -24,3 +24,10 @@ export function workflowInstanceId(params: IngestParams): string {
 export function validOrgId(value: string): boolean {
   return UUID.test(value);
 }
+
+export function materializationPollDecision(value: { status?: string; retryable?: boolean }): 'complete' | 'redispatch' | 'fail' | 'wait' {
+  if (value.status === 'succeeded') return 'complete';
+  if (value.status === 'failed' && value.retryable === false) return 'fail';
+  if (value.status === 'failed') return 'redispatch';
+  return 'wait';
+}

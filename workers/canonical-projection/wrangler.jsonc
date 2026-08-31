@@ -11,7 +11,8 @@
     "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
     "CANONICAL_KNOWLEDGE_ENABLED": "false",
     "RECALL_RELIABILITY_FLAG": "recall_parallel_reliability_v1",
-    "RECALL_PARALLEL_RELIABILITY_ENABLED": "false"
+    "RECALL_PARALLEL_RELIABILITY_ENABLED": "false",
+    "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1"
   },
   "flagship": [{
     "binding": "FLAGS",
@@ -44,7 +45,8 @@
         "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
         "CANONICAL_KNOWLEDGE_ENABLED": "false",
         "RECALL_RELIABILITY_FLAG": "recall_parallel_reliability_v1",
-        "RECALL_PARALLEL_RELIABILITY_ENABLED": "true"
+        "RECALL_PARALLEL_RELIABILITY_ENABLED": "true",
+        "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {
@@ -61,7 +63,8 @@
         "CANONICAL_KNOWLEDGE_FLAG": "canonical_knowledge_foundation_v1",
         "CANONICAL_KNOWLEDGE_ENABLED": "true",
         "RECALL_RELIABILITY_FLAG": "recall_parallel_reliability_v1",
-        "RECALL_PARALLEL_RELIABILITY_ENABLED": "true"
+        "RECALL_PARALLEL_RELIABILITY_ENABLED": "true",
+        "HYPER_FAST_PLANNER_FLAG": "hyperagents_fast_planner_v1"
       },
       "flagship": [{ "binding": "FLAGS", "app_id": "6568ec71-67c6-4b2c-b2f3-98aebe9e81c8", "remote": true }],
       "queues": {

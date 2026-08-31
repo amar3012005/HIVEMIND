@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { evaluateProjectionMode, evaluateRecallReliability } from '../src/flags';
+import { evaluateHyperPlannerMode, evaluateProjectionMode, evaluateRecallReliability } from '../src/flags';
 
 const org = '22222222-2222-4222-8222-222222222222';
 const user = '33333333-3333-4333-8333-333333333333';
@@ -34,5 +34,33 @@ describe('recall reliability gate', () => {
     expect(await evaluateRecallReliability(enabled, org, user)).toBe(true);
     expect(await evaluateRecallReliability({ ...enabled, RECALL_PARALLEL_RELIABILITY_ENABLED: 'false' }, org, user)).toBe(false);
     expect(await evaluateRecallReliability(enabled, org, 'invalid')).toBe(false);
+  });
+});
+
+describe('hyper planner gate', () => {
+  it('returns only the supported variation and sends tenant/user targeting context', async () => {
+    const getStringDetails = vi.fn(async () => ({
+      value: 'glm_no_reasoning', variant: 'canary', reason: 'TARGETING_MATCH',
+    }));
+    const env = {
+      ENVIRONMENT: 'production', HYPER_FAST_PLANNER_FLAG: 'hyperagents_fast_planner_v1',
+      FLAGS: { getStringDetails },
+    } as unknown as Parameters<typeof evaluateHyperPlannerMode>[0];
+    expect(await evaluateHyperPlannerMode(env, org, user)).toBe('glm_no_reasoning');
+    expect(getStringDetails).toHaveBeenCalledWith(
+      'hyperagents_fast_planner_v1', 'off',
+      { targetingKey: `${org}:${user}`, org_id: org, user_id: user, environment: 'production' },
+    );
+  });
+
+  it('fails closed for invalid values, identity, and provider errors', async () => {
+    const env = {
+      ENVIRONMENT: 'production',
+      FLAGS: { getStringDetails: vi.fn(async () => ({ value: 'unexpected' })) },
+    } as unknown as Parameters<typeof evaluateHyperPlannerMode>[0];
+    expect(await evaluateHyperPlannerMode(env, org, user)).toBe('off');
+    expect(await evaluateHyperPlannerMode(env, 'invalid', user)).toBe('off');
+    env.FLAGS.getStringDetails = vi.fn(async () => { throw new Error('unavailable'); });
+    expect(await evaluateHyperPlannerMode(env, org, user)).toBe('off');
   });
 });

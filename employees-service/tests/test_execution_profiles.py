@@ -81,7 +81,7 @@ def test_eleven_profiles_cover_every_requested_domain():
         "branding", "fundraising", "product", "design", "legal_finance",
     }
     assert {p.room_kind for p in EXECUTION_PROFILES.values()} == expected_room_kinds
-    assert len(EXECUTION_PROFILES) == 11
+    assert len(EXECUTION_PROFILES) == 12
 
 
 def test_profile_ids_are_unique_and_versioned():

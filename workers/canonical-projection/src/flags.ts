@@ -7,6 +7,29 @@ type RecallFlagEnv = FlagEnv & {
   RECALL_PARALLEL_RELIABILITY_ENABLED?: string;
 };
 
+type HyperPlannerFlagEnv = FlagEnv & { HYPER_FAST_PLANNER_FLAG?: string };
+
+export async function evaluateHyperPlannerMode(
+  env: HyperPlannerFlagEnv, orgId: string, userId: string,
+): Promise<'off' | 'glm_no_reasoning'> {
+  if (!validUuid(orgId) || !validUuid(userId)) return 'off';
+  if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return 'off';
+  try {
+    const details = await env.FLAGS.getStringDetails(
+      env.HYPER_FAST_PLANNER_FLAG || 'hyperagents_fast_planner_v1', 'off',
+      { targetingKey: `${orgId}:${userId}`, org_id: orgId, user_id: userId, environment: env.ENVIRONMENT },
+    );
+    const mode = details.value === 'glm_no_reasoning' ? 'glm_no_reasoning' : 'off';
+    console.log(JSON.stringify({ event: 'hyper_planner_flag_evaluation', org_id: orgId, user_id: userId,
+      mode, variant: details.variant, reason: details.reason, error_code: details.errorCode }));
+    return mode;
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'hyper_planner_flag_error', org_id: orgId, user_id: userId,
+      message: error instanceof Error ? error.message : String(error) }));
+    return 'off';
+  }
+}
+
 export async function evaluateRecallReliability(env: RecallFlagEnv, orgId: string, userId: string): Promise<boolean> {
   if (String(env.RECALL_PARALLEL_RELIABILITY_ENABLED) !== 'true' || !validUuid(orgId) || !validUuid(userId)) return false;
   if (env.ENVIRONMENT !== 'local' && env.ENVIRONMENT !== 'production') return false;

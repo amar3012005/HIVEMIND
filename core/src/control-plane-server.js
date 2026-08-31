@@ -13021,6 +13021,13 @@ Write the persona now.`;
         return jsonResponse(res, planLimitBody(runLimit, 'hyperAgentRuns'), runLimit.status || 429);
       }
 
+      // Evaluate once and latch on the turn. Flagship/network failure is the
+      // byte-compatible stable path; no user can drift models mid-turn.
+      const { hyperPlannerModeFor } = await import('./employees/cloudflare-hyper-planner-client.js');
+      const fastPlannerMode = await hyperPlannerModeFor({
+        orgId: current.session.orgId, userId: current.session.userId,
+      });
+
       // Sequence is monotonic per room. Atomic via SELECT max + insert
       // wrapped in serializable transaction.
       try {
@@ -13051,6 +13058,7 @@ Write the persona now.`;
               status: 'live',
               idempotencyKey: key,
               lines: [],
+              fastPlannerMode,
             },
           });
           await tx.hyperRoom.update({
@@ -13170,6 +13178,7 @@ Write the persona now.`;
             room_goal: room.goal || '',
             room_mode: roomExecutionMode(room),
             task_tag: isHq ? 'HQ' : roomExecutionTag(room),
+            fast_planner_mode: turn.fastPlannerMode || 'off',
             ...(executionContext ? { execution_context: executionContext } : {}),
             ...(typeof body.language === 'string' && body.language.trim() ? { language: body.language.trim() } : {}),
             callback_url: `${(process.env.CONTROL_PLANE_INTERNAL_URL || 'http://hm-control:3000')}/internal/hyper/turn-event`,

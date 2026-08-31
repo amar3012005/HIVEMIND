@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..ai_gateway import post as gateway_post
+from ..ai_gateway import post as gateway_post, workers_ai_chat
 
 from ..config import get_settings
 from ..db import (
@@ -45,7 +45,7 @@ from ..db import (
 )
 from .skills import default_skill_for, load_method_skill, resolve_room_kind, skill_catalog, work_skill_catalog
 from .domains import get_domain_pack
-from .model_policy import HYPER_FAST_MODEL, canonical_hyper_model
+from .model_policy import HYPER_FAST_MODEL, HYPER_PLANNER_MODEL, canonical_hyper_model
 from .visual_artifact_renderer import (
     PRESENTATION_SPEC_SCHEMA,
     normalize_presentation_spec,
@@ -880,7 +880,8 @@ async def make_journal_entry(user_message: str, final_text: str, *,
                              participants: Optional[List[Dict[str, Any]]] = None,
                              turn_id: str = "", status: str = "complete",
                              model: Optional[str] = None,
-                             verdict: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+                             verdict: Optional[Dict[str, Any]] = None,
+                             fast_planner_mode: str = "off") -> Optional[Dict[str, Any]]:
     """Distill one run into structured episodic memory: each agent's contribution and
     the swarm result. It is intentionally separate from reusable operating lessons."""
     if not _JOURNAL_ENABLED:
@@ -915,6 +916,8 @@ async def make_journal_entry(user_message: str, final_text: str, *,
         if _verification:
             entry["verification"] = _verification
         return entry
+    if str(fast_planner_mode or "off").lower() == "glm_no_reasoning":
+        return _fallback()
     try:
         pos = _journal_positions(transcript)
         names = [str(p.get("name") or p.get("slug") or "") for p in (participants or []) if p]
@@ -1381,6 +1384,7 @@ class Director:
         execution_profile: Optional[Dict[str, Any]] = None,
         direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
         agentic_task_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
+        fast_planner_mode: str = "off",
     ) -> None:
         # Run-wide output language from the FE navbar toggle (locale code/name →
         # language NAME, '' for English). Drives a strict "write in X only" directive.
@@ -1392,6 +1396,7 @@ class Director:
         self.room_id = str(room_id or "")
         self.turn_id = str(turn_id or "")
         self.execution_profile = dict(execution_profile) if isinstance(execution_profile, dict) else {}
+        self.fast_planner_mode = "glm_no_reasoning" if str(fast_planner_mode).lower() == "glm_no_reasoning" else "off"
         # Direct-answer via a real tool-using agent, instead of this Director's own
         # tool-less _synthesize() — only exercised for response_depth=="direct" +
         # a plain-answer turn (see run()). None (default) preserves today's
@@ -1460,7 +1465,10 @@ class Director:
         self.has_google = any(c in self.connectors for c in _GOOGLE_CONNECTORS)
         self.emit = emit
         domain_models = self.domain_pack.models if self.domain_pack else {}
-        self.director_model = domain_models.get("director") or director_model or os.environ.get("HYPER_DIRECTOR_MODEL", "openai/gpt-oss-120b")
+        if self.fast_planner_mode == "glm_no_reasoning":
+            self.director_model = HYPER_PLANNER_MODEL
+        else:
+            self.director_model = domain_models.get("director") or director_model or os.environ.get("HYPER_DIRECTOR_MODEL", "openai/gpt-oss-120b")
         self.persona_model = domain_models.get("persona") or persona_model or os.environ.get("HYPER_PERSONA_MODEL", "openai/gpt-oss-120b")
         # Dedicated model for the FINAL deliverable. The gather loop + debate can run
         # on a cheap model (orchestration), but the synthesis is the product — so a
@@ -1813,6 +1821,13 @@ class Director:
             _to = float(os.getenv("HYPER_SYNTH_TIMEOUT_S", "90") or 90)
         else:
             _to = 60.0
+        if str(body.get("model") or "").startswith("@cf/"):
+            result = await workers_ai_chat(body, timeout=httpx.Timeout(_to, connect=5.0))
+            if isinstance(result, dict):
+                usage = result.get("usage") or {}
+                self._record_model_usage(body.get("model"), usage, bucket)
+                return (result.get("choices") or [{}])[0].get("message") or None
+            body["model"] = HYPER_FAST_MODEL
         # Cerebras-direct FIRST (bypasses OpenRouter): the GLM synth writer bills to
         # Cerebras + hits its automatic prompt cache. A stable per-room+bucket cache_key
         # routes a room's repeat turns to the same cache backend (sent only when the
@@ -5137,7 +5152,11 @@ class Director:
             plan = {}
         if not isinstance(plan, dict):
             plan = {}
-        if _visual_artifacts_enabled() and isinstance(plan.get("artifact_intent"), dict):
+        profile_controls_visual = (self.fast_planner_mode == "glm_no_reasoning"
+                                   and bool(self.execution_profile.get("profile_id")))
+        profile_requires_visual = self.execution_profile.get("visual_artifact_required") is True
+        if (_visual_artifacts_enabled() and isinstance(plan.get("artifact_intent"), dict)
+                and (not profile_controls_visual or profile_requires_visual)):
             raw_intent = plan["artifact_intent"]
             artifact_kind = str(raw_intent.get("kind") or "interactive_document").strip()
             if artifact_kind not in {"presentation", "interactive_document", "dashboard"}:
@@ -5169,7 +5188,8 @@ class Director:
             if str(item).strip()
         }
         if (_visual_artifacts_enabled() and self.artifact_intent is None
-                and required_artifacts and allowed_outputs == {"artifact"}):
+                and required_artifacts and allowed_outputs == {"artifact"}
+                and (not profile_controls_visual or profile_requires_visual)):
             self.artifact_intent = {
                 "contract": "artifact-intent.v1",
                 "kind": "interactive_document",
@@ -5274,6 +5294,11 @@ class Director:
         plan["connector_calls"] = ccs[:4]
         wq = plan.get("web_query")
         plan["web_query"] = wq if (isinstance(wq, str) and wq.strip() and self._web_budget > 0) else None
+        profile_web_query = (self.execution_profile.get("external_evidence_query")
+                             if self.fast_planner_mode == "glm_no_reasoning" else None)
+        if (plan["web_query"] is None and self._web_budget > 0
+                and isinstance(profile_web_query, str) and profile_web_query.strip()):
+            plan["web_query"] = profile_web_query.strip()[:500]
         if self.room_kind == "campaign" and plan["web_query"]:
             if not self._campaign_recall_query_is_grounded(plan["web_query"]):
                 plan["web_query"] = None
@@ -7472,6 +7497,7 @@ async def run_director(
     execution_profile: Optional[Dict[str, Any]] = None,
     direct_answer_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
     agentic_task_hook: Optional[Callable[[str, str], Awaitable[Optional[str]]]] = None,
+    fast_planner_mode: str = "off",
 ) -> Dict[str, Any]:
     """Run one room turn through the single-director engine. Returns
     {cost_tokens, final_text, transcript, gather_count, tool_calls, sim_report}."""
@@ -7494,5 +7520,6 @@ async def run_director(
         execution_profile=execution_profile,
         direct_answer_hook=direct_answer_hook,
         agentic_task_hook=agentic_task_hook,
+        fast_planner_mode=fast_planner_mode,
     )
     return await director.run()

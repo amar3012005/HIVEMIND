@@ -98,6 +98,15 @@ EXECUTION_PROFILES: Dict[str, ExecutionProfile] = {
                  "and outbound message/call drafts, not campaign strategy.",
         ),
         ExecutionProfile(
+            id="marketing.copy.v1", room_kind="marketing",
+            allowed_outputs=("direct_answer", "report"), effect="internal",
+            review_policy="reviewer",
+            when="Asks to write or refine plain marketing language such as a "
+                 "tagline, positioning statement, message hierarchy, proof "
+                 "points, or prohibited claims. Use this when the requested "
+                 "deliverable is text, not a designed visual or interactive file.",
+        ),
+        ExecutionProfile(
             id="marketing.artifact.v1", room_kind="marketing",
             allowed_outputs=("artifact",), effect="prepare_only",
             required_artifacts=("marketing_artifact",),

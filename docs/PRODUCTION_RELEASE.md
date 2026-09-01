@@ -1,5 +1,29 @@
 # Current SINGULANCE Production Release
 
+## 2026-09-01T07:35Z - global runtime and organic campaign capability
+
+- Parent/runtime SHA `b42ea7a610e64b5bdb6faece6fabf77cc8b453ed`;
+  frontend unchanged at `c5a4973c468f39f86f573284180f95afa140145a`.
+- Core image digest
+  `sha256:dcbb3195563fdde259b812816502e980bd7c9f39e32e49da8d6f6bd3e6d86341`;
+  manifest `/root/releases/manifests/b42ea7a6/20260901T073247Z/RELEASE_MANIFEST.json`.
+  No migration was pending or applied; only Core was recreated.
+- Runtime config: Connector Runtime remains enabled for Chat, HyperAgents,
+  TARA, and MCP; durable sync is now enabled. Campaign execution is available
+  to all organizations for X organic, LinkedIn, Instagram, Facebook, TikTok,
+  YouTube, Pinterest, Reddit, Threads, Bluesky, and Google Business.
+- Acceptance: campaign capabilities and HyperAgents connector capabilities
+  returned 200 for two tenant contexts; global/campaign gates evaluated true;
+  API health and the production campaign page returned 200; Core was healthy;
+  fresh critical logs were empty. No provider write was executed.
+- Safety: publication still requires a connected provider, readiness, explicit
+  approval, and worker execution gates. Paid X Ads remains unavailable because
+  `X_ADS_API_APPROVED=false`.
+- Rollback environment backup:
+  `/root/hivemind/.env.pre-runtime-social-global-20260901T072048Z`, SHA-256
+  `ccf27e35bb085b07d0228be925095b54341ac18511b2d48fa9e4d26dfe2062fb`.
+  Runtime image rollback is the governor-preserved preceding Core image.
+
 ## 2026-08-31T23:09Z - restart-safe text and image ingestion
 
 - Canonical parent SHA `1765ad96bfd726e1fe358e5bc6aaf589ece99420`;

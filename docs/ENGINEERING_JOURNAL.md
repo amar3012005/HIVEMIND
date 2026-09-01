@@ -1,5 +1,30 @@
 # HIVEMIND Engineering Journal
 
+## 2026-09-01 UTC — connector runtime and organic campaigns globally enabled
+
+- Production inspection established that Connector Runtime V1 was already
+  enabled for Chat, HyperAgents, TARA, and MCP with no connector allowlist.
+  The remaining runtime surface, durable connector sync, was enabled with
+  `CONNECTOR_RUNTIME_SYNC=true`.
+- AI Campaigns now permits governed execution for every organization via
+  `CAMPAIGNS_V2_ORG_IDS=*`. The enabled execution channels are the supported
+  organic surfaces: X organic, LinkedIn, Instagram, Facebook, TikTok, YouTube,
+  Pinterest, Reddit, Threads, Bluesky, and Google Business.
+- This grants capability, not automatic publication. Provider connection,
+  execution readiness, campaign approval, channel worker gates, and audit
+  receipts remain mandatory. Paid X advertising remains blocked by
+  `X_ADS_API_APPROVED=false`; the provider-approval safety gate was not bypassed.
+- Governed Core-only release `b42ea7a610e64b5bdb6faece6fabf77cc8b453ed`
+  runs image digest
+  `sha256:dcbb3195563fdde259b812816502e980bd7c9f39e32e49da8d6f6bd3e6d86341`.
+  Manifest: `/root/releases/manifests/b42ea7a6/20260901T073247Z/RELEASE_MANIFEST.json`.
+- Two tenant contexts returned campaign capability HTTP 200 with
+  `enabled=true`, `execution_enabled=true`, and every organic channel planning
+  ready. Both also received authenticated HyperAgents capability tokens with
+  the complete registered connector set. Core/API/campaign-page health passed,
+  durable sync mounted, and the fresh critical-log scan was empty. No external
+  campaign was published during acceptance.
+
 ## 2026-08-31 UTC — short-PDF routing and Workflow restart recovery
 
 - Production recon found a second, independent latency cause: valid short

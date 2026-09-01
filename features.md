@@ -1,5 +1,22 @@
 # Singulance Feature Registry
 
+## feature-20260901T073500Z — global runtime and organic social campaigns
+
+- Production Connector Runtime is enabled for Chat, HyperAgents, TARA, MCP,
+  and durable connector sync, with all registered connectors available subject
+  to tenant connection and authorization.
+- AI Campaigns is enabled for every organization. Governed execution supports
+  X organic, LinkedIn, Instagram, Facebook, TikTok, YouTube, Pinterest, Reddit,
+  Threads, Bluesky, and Google Business.
+- Availability does not grant silent publishing: provider connection,
+  execution readiness, explicit campaign approval, worker/channel gates, and
+  audit receipts remain enforced. Paid X advertising remains provider-gated
+  and disabled because API approval is not present.
+- Runtime acceptance used Core SHA
+  `b42ea7a610e64b5bdb6faece6fabf77cc8b453ed` and verified two tenant contexts,
+  public campaign-page/API health, connector capability issuance, durable-sync
+  startup, and clean critical logs without publishing customer content.
+
 ## feature-20260831T230928Z — restart-safe text and image ingestion
 
 - Flag `knowledge_ingest_workflow_v1` remains globally enabled. Core release

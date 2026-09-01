@@ -1813,3 +1813,22 @@ slides that find no unique anchor get a page instead of `null`.
   context evaluated `on/DEFAULT`, and a post-global PDF smoke passed. Rollback
   is the captured full definition with only default and production rule outputs
   restored to `off`; the backend master gate is unchanged.
+## 2026-09-01 UTC — Runtime and Social frontend access enabled globally
+
+- Production inspection found that backend Runtime and organic campaign
+  capabilities were globally enabled, but Da-vinci still intercepted Runtime
+  navigation with `RuntimeWaitlistModal`, rewrote direct Runtime URLs to the
+  company dashboard, and sent Social navigation to a coming-soon modal.
+- Da-vinci commit `b231ec8350e97edba162358f2c7d5c273124a672` removes those
+  presentation-only gates. Runtime now opens `/employees/runtime`, while Run
+  your Social Media opens `/employees/campaigns`, for every authenticated
+  workspace. Parent release declaration
+  `2ea1d984a45d03d2c2a58cdcf741e0ed4c3674cf` advances the frontend gitlink.
+- Focused contract tests passed 2/2 and the Cloudflare production build
+  completed successfully. Cloudflare Worker version
+  `d5c1c0f8-034b-4966-a9a1-35aadc9f2300` is deployed on
+  `next.singulancelabs.com`.
+- Live verification returned HTTP 200 for the Runtime deep link and loaded
+  `main.ee8121ef.js` plus `8810.e05cca62.chunk.js`; the deployed HyperAgents
+  chunk contains neither the early-access CTA nor either coming-soon string.
+  No backend container, database, migration, or tenant data changed.

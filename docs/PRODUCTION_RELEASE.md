@@ -1298,3 +1298,18 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   Rollback is the governor-captured prior Core image
   `sha256:012ee1498ea4d1e55fe623f41a15b29944db66823640d1979d0e5567d85d2eec`;
   emergency admission rollback remains the backend gate or Flagship off.
+## 2ea1d984 — global Runtime and Social frontend access
+
+- Canonical parent SHA `2ea1d984a45d03d2c2a58cdcf741e0ed4c3674cf`;
+  Da-vinci SHA `b231ec8350e97edba162358f2c7d5c273124a672`.
+- Cloudflare Worker `hivemind-web` version
+  `d5c1c0f8-034b-4966-a9a1-35aadc9f2300` serves the release on
+  `next.singulancelabs.com`.
+- Runtime and Social now route directly to their live workspaces for all
+  authenticated users. The legacy Runtime waitlist and Social preview gates
+  are not present in the deployed HyperAgents asset.
+- Acceptance: 2 focused route-contract tests, successful production bundle,
+  Runtime deep-link HTTP 200, and live-asset inspection. No migration or
+  backend service restart occurred.
+- Rollback: Cloudflare Worker version
+  `8d0621d6-4cf4-4e8f-9358-e8b4e8f76b1e` and parent SHA `f66b7daa`.

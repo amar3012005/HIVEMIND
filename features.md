@@ -505,3 +505,13 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Production canary `42fea1d8-c269-41d1-8bd9-36dcfaf4bc71` completed every
   checkpoint once, with extract→embed and embed→promote handoffs measured in
   single-digit milliseconds.
+## feature-20260901T082450Z — Runtime and Social globally available
+
+- Runtime and Run your Social Media are available to every authenticated
+  production workspace; there is no frontend early-access or coming-soon gate.
+- Runtime opens `/hivemind/app/employees/runtime`. Social opens
+  `/hivemind/app/employees/campaigns` and uses the already-enabled governed
+  organic campaign runtime.
+- Released as Da-vinci `b231ec8350e97edba162358f2c7d5c273124a672`, parent
+  `2ea1d984a45d03d2c2a58cdcf741e0ed4c3674cf`, and Cloudflare Worker
+  `d5c1c0f8-034b-4966-a9a1-35aadc9f2300`.

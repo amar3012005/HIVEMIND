@@ -1832,3 +1832,18 @@ slides that find no unique anchor get a page instead of `null`.
   `main.ee8121ef.js` plus `8810.e05cca62.chunk.js`; the deployed HyperAgents
   chunk contains neither the early-access CTA nor either coming-soon string.
   No backend container, database, migration, or tenant data changed.
+## 2026-09-01 UTC — targeted post-onboarding Runtime introduction
+
+- The live post-onboarding Runtime introduction in `CompanyDashboard` remained
+  disabled at its `HyperAgents` call site after Runtime itself became globally
+  routable. Da-vinci `40c77479f7b164be08119691ea34f3d4fe85d71f`
+  enables the introduction only when both requested viewer identifiers match:
+  user `b457c254-38a0-4c43-8280-b026f1a78b04` and organization
+  `f0cb77ef-e62b-4f8c-a1da-066611fc3b36`.
+- The introduction uses a versioned one-time browser receipt and its successful
+  action opens the live Runtime route. It does not restore the waitlist or
+  restrict Runtime access for any other user.
+- Four focused access/targeting tests passed and the production bundle built.
+  Cloudflare Worker `e85c67ef-0f25-4a92-9bb3-a7f091894835` is live; its served
+  HyperAgents asset contains the exact target, introduction, and version marker,
+  contains no early-access CTA, and the company route returned HTTP 200.

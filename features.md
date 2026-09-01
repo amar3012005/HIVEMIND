@@ -515,3 +515,14 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - Released as Da-vinci `b231ec8350e97edba162358f2c7d5c273124a672`, parent
   `2ea1d984a45d03d2c2a58cdcf741e0ed4c3674cf`, and Cloudflare Worker
   `d5c1c0f8-034b-4966-a9a1-35aadc9f2300`.
+## feature-20260901T154353Z — Runtime introduction canary
+
+- The post-onboarding Runtime introduction is active for user
+  `b457c254-38a0-4c43-8280-b026f1a78b04` in organization
+  `f0cb77ef-e62b-4f8c-a1da-066611fc3b36`.
+- It appears once after the persisted company dashboard loads, collects the
+  initial operating focuses, and opens the globally available live Runtime.
+  Other users retain direct Runtime access without this targeted popup.
+- Release: Da-vinci `40c77479f7b164be08119691ea34f3d4fe85d71f`,
+  parent `db4b06e32bb50efa80818f3928709671a1e69745`, Worker
+  `e85c67ef-0f25-4a92-9bb3-a7f091894835`.

@@ -1313,3 +1313,16 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
   backend service restart occurred.
 - Rollback: Cloudflare Worker version
   `8d0621d6-4cf4-4e8f-9358-e8b4e8f76b1e` and parent SHA `f66b7daa`.
+## db4b06e3 — targeted Runtime onboarding introduction
+
+- Parent SHA `db4b06e32bb50efa80818f3928709671a1e69745`; Da-vinci SHA
+  `40c77479f7b164be08119691ea34f3d4fe85d71f`; Cloudflare Worker
+  `e85c67ef-0f25-4a92-9bb3-a7f091894835`.
+- The post-onboarding `Try Runtime` introduction is enabled only for the
+  explicitly requested user/organization pair. It is one-time per browser for
+  rollout version `canary-20260901` and opens live Runtime.
+- Acceptance: 4/4 focused tests, successful Cloudflare production build,
+  company deep-link HTTP 200, and exact live-asset marker verification. No
+  backend service, database, migration, or tenant data changed.
+- Rollback: Cloudflare Worker
+  `d5c1c0f8-034b-4966-a9a1-35aadc9f2300` and parent `8d0d5004`.

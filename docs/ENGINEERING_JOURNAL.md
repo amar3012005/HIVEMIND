@@ -1836,7 +1836,7 @@ slides that find no unique anchor get a page instead of `null`.
 
 - The live post-onboarding Runtime introduction in `CompanyDashboard` remained
   disabled at its `HyperAgents` call site after Runtime itself became globally
-  routable. Da-vinci `40c77479f7b164be08119691ea34f3d4fe85d71f`
+  routable. Da-vinci `40c7747bfb3db5106609ab1a4d5a961e1d9378ef`
   enables the introduction only when both requested viewer identifiers match:
   user `b457c254-38a0-4c43-8280-b026f1a78b04` and organization
   `f0cb77ef-e62b-4f8c-a1da-066611fc3b36`.

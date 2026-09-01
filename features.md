@@ -523,6 +523,6 @@ Cloudflare Agent Memory and in the `singulance-local` registry.
 - It appears once after the persisted company dashboard loads, collects the
   initial operating focuses, and opens the globally available live Runtime.
   Other users retain direct Runtime access without this targeted popup.
-- Release: Da-vinci `40c77479f7b164be08119691ea34f3d4fe85d71f`,
+- Release: Da-vinci `40c7747bfb3db5106609ab1a4d5a961e1d9378ef`,
   parent `db4b06e32bb50efa80818f3928709671a1e69745`, Worker
   `e85c67ef-0f25-4a92-9bb3-a7f091894835`.

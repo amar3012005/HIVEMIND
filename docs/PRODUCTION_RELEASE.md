@@ -1316,7 +1316,7 @@ Every earlier control-plane-only deploy this session (`prod-20260814...` through
 ## db4b06e3 — targeted Runtime onboarding introduction
 
 - Parent SHA `db4b06e32bb50efa80818f3928709671a1e69745`; Da-vinci SHA
-  `40c77479f7b164be08119691ea34f3d4fe85d71f`; Cloudflare Worker
+  `40c7747bfb3db5106609ab1a4d5a961e1d9378ef`; Cloudflare Worker
   `e85c67ef-0f25-4a92-9bb3-a7f091894835`.
 - The post-onboarding `Try Runtime` introduction is enabled only for the
   explicitly requested user/organization pair. It is one-time per browser for

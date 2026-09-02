@@ -186,14 +186,28 @@ export function renderLifecycleCompletionEmail({ companyName, taskTitle, output,
 
 export function renderDayOneEmail(input) { return renderLifecycleCompletionEmail(input); }
 
-/** Day 2 deliberately reuses the proven lifecycle email shell and Humation
- * character strip; only the episode copy and sealed artifact change. */
-export function renderDayTwoBrandDnaEmail({ companyName, output, roomUrl, characters = [], publicApiUrl = '' } = {}) {
-  return renderLifecycleCompletionEmail({
-    companyName, taskTitle: 'Your Company Brand DNA', output, roomUrl, characters, publicApiUrl,
-    dayLabel: 'DAY 2', episodeLabel: 'YOUR AGENTS LEARNED YOUR BRAND',
-    headline: 'Your HyperAgents<br>mapped your visual language.',
-  });
+/** Day 2 keeps the Day-1 shell and Humation header, then uses the same compact
+ * editorial system as the protected Brand-DNA report. Email clients cannot
+ * safely carry a full screenshot mosaic, so the complete visual report stays
+ * in its PDF attachment and room artifact. */
+export function renderDayTwoBrandDnaEmail({ companyName, output, roomUrl, characters = [], publicApiUrl = '', artifact = {} } = {}) {
+  const analysis = artifact?.analysis || {};
+  const palette = analysis.palette || {};
+  const typography = analysis.typography || {};
+  const voice = analysis.voice || {};
+  const imagery = analysis.imagery || {};
+  const brief = artifact?.visual_generation_brief || {};
+  const evidence = Array.isArray(artifact?.evidence) ? artifact.evidence.slice(0, 6) : [];
+  const colors = [palette.primary, palette.secondary, palette.accent, palette.background, ...(Array.isArray(palette.accents) ? palette.accents : [])]
+    .filter((value) => typeof value === 'string' && value).slice(0, 6);
+  const swatches = colors.map((color) => `<td style="width:16.66%;padding:0 3px 0 0"><div style="height:34px;background:${escapeHtml(color)};border:1px solid #deddd8"></div><div style="font:700 8px/12px Arial,sans-serif;color:#64635f;margin-top:4px">${escapeHtml(color)}</div></td>`).join('');
+  const evidenceRows = evidence.map((item, index) => `<tr><td style="width:26px;padding:7px 0;color:${CARTESIA.blue};font:700 9px/13px monospace">${String(index + 1).padStart(2, '0')}</td><td style="padding:7px 0;border-top:1px solid #deddd8"><strong style="font:700 12px/16px Arial,sans-serif">${escapeHtml(item?.page?.title || item?.page_url || 'Captured page')}</strong><br><span style="font:10px/14px Arial,sans-serif;color:#64635f">${escapeHtml(item?.page_url || item?.page?.url || '')}</span></td></tr>`).join('');
+  const card = (title, content) => `<td style="width:50%;vertical-align:top;border:1px solid #deddd8;padding:16px;background:#fff"><div style="font:700 8px/12px monospace;letter-spacing:1px;color:${CARTESIA.blue};text-transform:uppercase">${escapeHtml(title)}</div>${content}</td>`;
+  const visualSystem = `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:18px"><tr>${card('Color palette', `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:10px"><tr>${swatches || '<td style="font:12px Arial,sans-serif;color:#64635f">No reliable palette was inferred.</td>'}</tr></table>`)}<td style="width:12px"></td>${card('Typography & interface', `<p style="margin:10px 0 0;font:12px/18px Arial,sans-serif"><strong>Heading</strong> ${escapeHtml(typography.headings || 'Captured public-site hierarchy')}<br><strong>Body</strong> ${escapeHtml(typography.body || 'Sans-serif interface')}<br><strong>Voice</strong> ${escapeHtml(voice.tone || 'Evidence-led')}</p>`)}</tr></table><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:12px"><tr>${card('Photography & composition', `<p style="margin:10px 0 0;font:12px/18px Arial,sans-serif">${escapeHtml(imagery.style || 'Use the retained report screenshots as the creative reference.')}</p>`)}<td style="width:12px"></td>${card('Brand voice', `<p style="margin:10px 0 0;font:12px/18px Arial,sans-serif">${escapeHtml(voice.style || 'Apply only the style demonstrated on captured first-party pages.')}</p>`)}</tr></table>`;
+  const briefItems = Array.isArray(brief.elements) ? brief.elements.slice(0, 5).map((item) => `<li style="margin:4px 0">${escapeHtml(typeof item === 'string' ? item : item?.content || '')}</li>`).join('') : '';
+  const body = `<tr><td class="section" style="background:${CARTESIA.paper}"><div class="eyebrow">DAY 2 · YOUR AGENTS LEARNED YOUR BRAND</div><h1 class="h1">Your HyperAgents<br>mapped your visual language.</h1><p class="copy">Your source-backed Brand DNA is ready for ${escapeHtml(companyName)}.</p>${characterStrip(characters, { email: true, publicApiUrl })}${visualSystem}<div style="margin-top:18px;background:#101010;color:#fff;padding:18px"><div style="font:700 8px/12px monospace;letter-spacing:1px;color:#83b6ed;text-transform:uppercase">Reusable visual-artifact brief</div><div style="font:700 18px/23px Arial,sans-serif;margin-top:8px">${escapeHtml(brief.style || 'Evidence-first creative direction assembled from rendered first-party pages.')}</div>${briefItems ? `<ul style="margin:10px 0 0;padding-left:18px;font:12px/18px Arial,sans-serif;color:#e7e7e7">${briefItems}</ul>` : ''}</div><div style="margin-top:20px;font:700 8px/12px monospace;letter-spacing:1px;color:${CARTESIA.blue};text-transform:uppercase">Evidence ledger</div><h2 style="margin:6px 0 8px;font:700 20px/25px Arial,sans-serif">What the agents captured</h2><table role="presentation" width="100%" cellspacing="0" cellpadding="0">${evidenceRows || `<tr><td style="font:12px Arial,sans-serif">${escapeHtml(output)}</td></tr>`}</table><a class="action" href="${escapeHtml(roomUrl)}">OPEN THE FULL BRAND DNA REPORT →</a></td></tr>`;
+  const html = lifecycleEmailShell({ title: 'Day 2 - Your Company Brand DNA', preheader: `Your HyperAgents mapped ${companyName}'s visual language.`, body }).replace('</style>', `${readmeStyles()}</style>`);
+  return { subject: lifecycleSubject(companyName, 2, 'Your Brand DNA is ready'), text: `Your Brand DNA is ready.\n\n${output}\n\nOpen the full report: ${roomUrl}`, html };
 }
 
 /** Reusable portrait-report renderer paired with the lifecycle email renderer. */
@@ -262,8 +276,23 @@ export async function deliverDayTwoBrandDna({ prisma, runId, renderPdf = renderD
     const roomUrl = `${appBase}/employees/rooms/${run.roomId}`;
     const characters = Array.isArray(company.team) ? company.team : [];
     const output = dayTwoBrandDnaSummary(run.artifact);
-    const rendered = renderDayTwoBrandDnaEmail({ companyName, output, roomUrl, characters });
-    const pdf = await renderPdf(renderDayTwoBrandDnaPortraitReport({ companyName, output, roomUrl, completedAt: run.finishedAt || new Date(), characters }));
+    const rendered = renderDayTwoBrandDnaEmail({ companyName, output, roomUrl, characters, artifact: run.artifact });
+    const legacyPortrait = renderDayTwoBrandDnaPortraitReport({ companyName, output, roomUrl, completedAt: run.finishedAt || new Date(), characters });
+    const artifactBase = String(process.env.HIVEMIND_VISUAL_ARTIFACT_URL || '').replace(/\/$/, '');
+    const artifactSecret = String(process.env.HIVEMIND_VISUAL_WORKFLOW_SECRET || '');
+    const reportKey = String(run.artifact?.rendered_report?.r2_key || '');
+    let portrait = legacyPortrait;
+    if (artifactBase && artifactSecret && reportKey.startsWith(`org/${run.orgId}/runs/${run.id}/reports/`)) {
+      try {
+        const response = await fetch(`${artifactBase}/artifact?key=${encodeURIComponent(reportKey)}`, { headers: { authorization: `Bearer ${artifactSecret}` } });
+        const length = Number(response.headers.get('content-length') || 0);
+        if (response.ok && (!length || length <= 2_000_000)) {
+          const candidate = await response.text();
+          if (candidate.includes('Day 2') && candidate.includes('Evidence ledger')) portrait = candidate;
+        }
+      } catch { /* retain the proven lifecycle portrait if artifact delivery is temporarily unavailable */ }
+    }
+    const pdf = await renderPdf(portrait);
     const slug = companyName.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 60) || 'company';
     const delivery = await sendEmail({
       templateId: 'day2_brand_dna', to: owner.email, rendered,

@@ -73,6 +73,8 @@ model EmailAuthChallenge {
   otpHash           String    @map("otp_hash") @db.VarChar(128)
   linkTokenHash     String    @map("link_token_hash") @db.VarChar(128)
   intent            String    @default("auto") @db.VarChar(16)
+  signupTicketCiphertext String? @map("signup_ticket_ciphertext") @db.Text
+  requestFingerprintHash String? @map("request_fingerprint_hash") @db.VarChar(64)
   returnTo          String    @map("return_to") @db.Text
   environment       String    @db.VarChar(16)
   flagMode          String    @map("flag_mode") @db.VarChar(16)
@@ -88,6 +90,7 @@ model EmailAuthChallenge {
   events            AuthIdentityEvent[]
 
   @@index([emailLookupHash, createdAt(sort: Desc)])
+  @@index([requestFingerprintHash, createdAt(sort: Desc)])
   @@index([expiresAt])
   @@map("email_auth_challenges")
 }

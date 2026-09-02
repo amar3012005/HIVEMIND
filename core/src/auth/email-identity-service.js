@@ -1,9 +1,12 @@
 import crypto from 'node:crypto';
 
 const MODES = new Set(['off', 'shadow', 'primary', 'email_only']);
-const INTENTS = new Set(['auto', 'login', 'register']);
+const INTENTS = new Set(['login', 'register']);
 const EXPIRY_MS = 10 * 60 * 1000;
 const RESEND_MS = 30 * 1000;
+const START_WINDOW_MS = 10 * 60 * 1000;
+const MAX_STARTS_PER_EMAIL = 5;
+const MAX_STARTS_PER_REQUEST_FINGERPRINT = 12;
 
 function requiredSecret(name) {
   const value = String(process.env[name] || '');
@@ -75,18 +78,29 @@ export function createEmailIdentityService({ prisma, publicBaseUrl }) {
     } });
   }
 
-  async function start({ email: rawEmail, intent = 'auto', returnTo, mode, environment }) {
+  async function start({ email: rawEmail, intent = 'login', returnTo, mode, environment, signupTicket = null, requestFingerprint = null }) {
     const email = normalizeEmail(rawEmail);
     if (!email) return { accepted: false };
-    const selectedIntent = INTENTS.has(intent) ? intent : 'auto';
+    const selectedIntent = INTENTS.has(intent) ? intent : 'login';
+    const emailLookupHash = digest(email, 'email');
+    const requestFingerprintHash = requestFingerprint ? digest(String(requestFingerprint), 'request') : null;
     const otp = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
     const linkToken = crypto.randomBytes(32).toString('base64url');
     const now = new Date();
+    const windowStart = new Date(now.getTime() - START_WINDOW_MS);
+    const [emailStarts, fingerprintStarts] = await Promise.all([
+      prisma.emailAuthChallenge.count({ where: { emailLookupHash, createdAt: { gte: windowStart } } }),
+      requestFingerprintHash
+        ? prisma.emailAuthChallenge.count({ where: { requestFingerprintHash, createdAt: { gte: windowStart } } })
+        : Promise.resolve(0),
+    ]);
+    if (emailStarts >= MAX_STARTS_PER_EMAIL || fingerprintStarts >= MAX_STARTS_PER_REQUEST_FINGERPRINT) return { accepted: false };
     const created = await prisma.$transaction(async (tx) => {
       const row = await tx.emailAuthChallenge.create({ data: {
-        emailCiphertext: seal(email), emailLookupHash: digest(email, 'email'),
+        emailCiphertext: seal(email), emailLookupHash,
         otpHash: digest(otp, 'otp'), linkTokenHash: digest(linkToken, 'link'),
-        intent: selectedIntent, returnTo, environment, flagMode: mode,
+        intent: selectedIntent, signupTicketCiphertext: signupTicket ? seal(signupTicket) : null,
+        requestFingerprintHash, returnTo, environment, flagMode: mode,
         expiresAt: new Date(now.getTime() + EXPIRY_MS),
         resendAvailableAt: new Date(now.getTime() + RESEND_MS),
       } });
@@ -95,6 +109,11 @@ export function createEmailIdentityService({ prisma, publicBaseUrl }) {
       return { challenge: row, outbox };
     });
     return { accepted: true, challengeId: created.challenge.id, outboxId: created.outbox.id };
+  }
+
+  function signupTicket(challenge) {
+    if (!challenge?.signupTicketCiphertext) return null;
+    try { return open(challenge.signupTicketCiphertext); } catch { return null; }
   }
 
   async function verify({ challengeId, code, linkToken }) {
@@ -163,7 +182,7 @@ export function createEmailIdentityService({ prisma, publicBaseUrl }) {
     });
   }
 
-  return { start, verify, resend, claimOutbox, settleOutbox, consume };
+  return { start, verify, resend, claimOutbox, settleOutbox, consume, signupTicket };
 }
 
 export const EMAIL_AUTH_PUBLIC_RESPONSE = Object.freeze({

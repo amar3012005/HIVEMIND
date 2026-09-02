@@ -1615,6 +1615,21 @@ function signupAdmissionFromRequest(url) {
   return verify('personal') || verify('enterprise');
 }
 
+function emailSignupAdmission(ticket) {
+  if (!ticket) return null;
+  const verify = (accountType) => verifySignupAdmission({ ticket, accountType, secret: SIGNUP_ADMISSION_SECRET });
+  return verify('personal') || verify('enterprise');
+}
+
+function emailRequestFingerprint(req) {
+  return String(req.headers['cf-connecting-ip'] || req.socket?.remoteAddress || '').trim().slice(0, 128) || null;
+}
+
+function emailDeliveryConfigured() {
+  if (process.env.HIVEMIND_LOCAL_MODE === 'true') return true;
+  return Boolean(String(process.env.AUTH_EMAIL_QUEUE_URL || '').trim() && String(process.env.AUTH_EMAIL_QUEUE_SECRET || '').trim());
+}
+
 // A workspace invite is also an account-provisioning admission for its named
 // recipient.  It is intentionally verified twice: once before we put its
 // opaque token in the short-lived OAuth state, and again after OAuth returns
@@ -1663,7 +1678,10 @@ async function dispatchAuthEmailOutbox(outboxId) {
 async function enqueueAuthEmailOutbox(outboxId) {
   const queueUrl = String(process.env.AUTH_EMAIL_QUEUE_URL || '');
   const secret = String(process.env.AUTH_EMAIL_QUEUE_SECRET || '');
-  if (!queueUrl || !secret) return dispatchAuthEmailOutbox(outboxId);
+  if (!queueUrl || !secret) {
+    if (process.env.HIVEMIND_LOCAL_MODE === 'true') return dispatchAuthEmailOutbox(outboxId);
+    throw new Error('Auth email queue is not configured');
+  }
   const response = await fetch(`${queueUrl.replace(/\/$/, '')}/enqueue`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-auth-email-secret': secret },
     body: JSON.stringify({ outbox_id: outboxId, environment: process.env.HIVEMIND_LOCAL_MODE === 'true' ? 'local' : 'production', processing_version: 1 }),
@@ -4267,9 +4285,20 @@ const server = http.createServer(async (req, res) => {
       const body = await parseBody(req);
       const turnstileOk = await verifyEmailTurnstile(body?.turnstile_token, req);
       const returnTo = safeReturnTo(body?.return_to, emailPostLoginRedirect, emailAllowedOrigins);
+      const intent = body?.intent === 'register' ? 'register' : 'login';
+      const email = normalizeEmail(body?.email);
+      const signupTicket = intent === 'register' ? String(body?.signup_ticket || '').trim() : null;
+      const admission = intent === 'register' ? emailSignupAdmission(signupTicket) : null;
+      const existingUser = email ? await prisma.user.findUnique({ where: { email }, select: { id: true, deletedAt: true } }) : null;
       let started = { accepted: false };
-      if (turnstileOk) started = await emailIdentity.start({
-        email: body?.email, intent: body?.intent, returnTo, mode,
+      // Never send a code that can create an account without the same signed
+      // admission Google uses. Generic responses preserve account privacy.
+      const admitted = intent === 'login'
+        ? Boolean(existingUser && !existingUser.deletedAt)
+        : Boolean(admission);
+      if (turnstileOk && admitted && emailDeliveryConfigured()) started = await emailIdentity.start({
+        email, intent, returnTo, mode, signupTicket: admission ? signupTicket : null,
+        requestFingerprint: emailRequestFingerprint(req),
         environment: process.env.HIVEMIND_LOCAL_MODE === 'true' ? 'local' : 'production',
       });
       if (started.outboxId) setImmediate(() => enqueueAuthEmailOutbox(started.outboxId).catch((error) => console.error('[email-auth] delivery dispatch failed', { outboxId: started.outboxId, error: error.message })));
@@ -4304,6 +4333,10 @@ const server = http.createServer(async (req, res) => {
       let user = await prisma.user.findUnique({ where: { email: verified.email } });
       if (user?.deletedAt) return jsonResponse(res, { ok: false, error: 'This account is unavailable.' }, 403);
       if (!user) {
+        const admission = verified.challenge.intent === 'register'
+          ? emailSignupAdmission(emailIdentity.signupTicket(verified.challenge))
+          : null;
+        if (!admission) return jsonResponse(res, { ok: false, error: 'This code cannot create an account. Start again from your invitation.' }, 403);
         const provisioned = await createZitadelEmailIdentity(verified.email);
         user = await upsertUserFromZitadel({ sub: provisioned.userId, email: verified.email, email_verified: true, name: provisioned.displayName, locale: 'en' });
       } else {

@@ -35,3 +35,11 @@ test('return destinations require an exact origin and hivemind path', () => {
   );
   if (previous === undefined) delete process.env.EMAIL_AUTH_ALLOWED_ORIGINS; else process.env.EMAIL_AUTH_ALLOWED_ORIGINS = previous;
 });
+
+test('email login defaults fail closed instead of silently selecting account creation', async () => {
+  const source = await import('node:fs/promises').then((fs) => fs.readFile(new URL('../../src/auth/email-identity-service.js', import.meta.url), 'utf8'));
+  assert.match(source, /intent\s*=\s*'login'/);
+  assert.match(source, /const INTENTS = new Set\(\['login', 'register'\]\)/);
+  assert.match(source, /MAX_STARTS_PER_EMAIL/);
+  assert.match(source, /requestFingerprintHash/);
+});

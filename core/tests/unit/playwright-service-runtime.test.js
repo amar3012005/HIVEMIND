@@ -26,7 +26,7 @@ test('Playwright service crawler sends one bounded authenticated crawl request',
   assert.equal(request.url, 'http://renderer.internal/v1/crawl');
   assert.equal(request.options.headers.authorization, 'Bearer scoped-token');
   assert.deepEqual(JSON.parse(request.options.body), {
-    urls: ['https://example.com/'], depth: 2, page_limit: 12, settle_ms: 125, capture_screenshot: false,
+    urls: ['https://example.com/'], depth: 2, page_limit: 12, settle_ms: 125, capture_screenshot: false, allow_subdomains: false,
   });
   assert.equal(result.pages[0].rendered, true);
 });

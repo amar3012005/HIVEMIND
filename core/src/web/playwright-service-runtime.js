@@ -43,7 +43,7 @@ export class PlaywrightServiceRuntime {
     this.fetch = fetchImpl || globalThis.fetch;
   }
 
-  async crawl({ urls, depth = 2, pageLimit = 25, captureScreenshot = false, session = null, orgId = null } = {}) {
+  async crawl({ urls, depth = 2, pageLimit = 25, captureScreenshot = false, allowSubdomains = false, session = null, orgId = null } = {}) {
     const seeds = (Array.isArray(urls) ? urls : []).map(normalizeUrl).filter(Boolean);
     if (!seeds.length) throw new Error('No valid URLs provided');
     const allowedOrigin = new URL(seeds[0]).origin;
@@ -64,6 +64,7 @@ export class PlaywrightServiceRuntime {
           page_limit: Math.max(1, Math.min(Number(pageLimit) || 25, 100)),
           settle_ms: this.settleMs,
           capture_screenshot: Boolean(captureScreenshot),
+          allow_subdomains: Boolean(allowSubdomains),
           // Named, pre-captured session (LinkedIn/X/Instagram) — see
           // services/hm-playwright/sessions/README.md. hm-playwright validates
           // the name against its own allowlist before touching its filesystem;

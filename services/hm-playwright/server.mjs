@@ -452,7 +452,21 @@ async function crawl(input) {
   }
   if (!seeds.length) throw Object.assign(new Error('urls_required'), { status: 400 });
   const origin = new URL(seeds[0]).origin;
-  if (seeds.some((url) => new URL(url).origin !== origin)) throw Object.assign(new Error('same_origin_required'), { status: 400 });
+  const rootHost = new URL(seeds[0]).hostname.toLowerCase();
+  // A Visual Intelligence crawl may inspect the customer's explicitly related
+  // subdomains (for example app, docs, or pricing). It never crosses into an
+  // unrelated registrable domain, and ordinary crawls retain same-origin-only
+  // behavior.
+  const allowSubdomains = input.allow_subdomains === true;
+  const allowedTarget = (candidate) => {
+    try {
+      const url = new URL(candidate);
+      return allowSubdomains
+        ? (url.hostname.toLowerCase() === rootHost || url.hostname.toLowerCase().endsWith(`.${rootHost}`))
+        : url.origin === origin;
+    } catch { return false; }
+  };
+  if (seeds.some((url) => !allowedTarget(url))) throw Object.assign(new Error(allowSubdomains ? 'subdomain_policy_required' : 'same_origin_required'), { status: 400 });
   const depth = Math.max(0, Math.min(Number(input.depth || 0), 4));
   const pageLimit = Math.max(1, Math.min(Number(input.page_limit || 25), 100));
   const settleMs = Math.max(0, Math.min(Number(input.settle_ms ?? 350), 3000));
@@ -511,20 +525,23 @@ async function crawl(input) {
         const response = await page.goto(current.url, { waitUntil: 'domcontentloaded' });
         if (settleMs) await page.waitForTimeout(settleMs);
         const finalUrl = await publicUrl(page.url());
-        if (!finalUrl || finalUrl.origin !== origin) throw new Error('cross_origin_redirect_blocked');
+        if (!finalUrl || !allowedTarget(finalUrl.href)) throw new Error('cross_origin_redirect_blocked');
         const evidence = await extractPage(page, response, { source: current.source, depth: current.depth, discovered_from: current.from });
         if (current.depth === 0 && !pages.length) evidence.brand_logo = await captureBrandMark(page);
         // Visual Intelligence requests a screenshot per captured page. The
         // existing limits bound both page count and individual image size.
         if (captureScreenshot) {
-          const screenshot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false, timeout: NAVIGATION_TIMEOUT_MS });
-          if (screenshot.length <= 5 * 1024 * 1024) evidence.screenshot = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
+          const screenshot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: false, timeout: NAVIGATION_TIMEOUT_MS }).catch((error) => {
+            evidence.visual_capture_error = String(error?.message || error).slice(0, 240); return null;
+          });
+          if (screenshot?.length && screenshot.length <= 5 * 1024 * 1024) evidence.screenshot = `data:image/jpeg;base64,${screenshot.toString('base64')}`;
+          else if (!evidence.visual_capture_error) evidence.visual_capture_error = 'screenshot_missing_or_too_large';
         }
         pages.push(evidence);
         if (current.depth >= depth) continue;
         for (const link of evidence.links.slice().reverse()) {
           const next = await publicUrl(link.href);
-          if (!next || next.origin !== origin || visited.has(next.href)) continue;
+          if (!next || !allowedTarget(next.href) || visited.has(next.href)) continue;
           const existing = queue.findIndex((item) => item.url === next.href);
           if (existing >= 0) queue.splice(existing, 1);
           if (queue.length + pages.length < pageLimit * 4) queue.unshift({ url: next.href, depth: current.depth + 1, source: 'rendered_link', from: evidence.url });

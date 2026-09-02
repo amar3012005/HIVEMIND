@@ -208,10 +208,12 @@ export class DurableVisualIntelligenceLifecycle {
     const browser = this.browserFactory(); const captures = [];
     const depth = Math.max(0, Math.min(4, Number(process.env.VISUAL_INTELLIGENCE_CRAWL_DEPTH || 2)));
     const pageLimit = Math.max(1, Math.min(40, Number(process.env.VISUAL_INTELLIGENCE_CRAWL_PAGE_LIMIT || 16)));
-    const result = await browser.crawl({ urls, depth, pageLimit, captureScreenshot: true, session: run.mode === 'user_takeover' ? run.browserSession : null, orgId: run.orgId });
+    const result = await browser.crawl({ urls, depth, pageLimit, captureScreenshot: true, allowSubdomains: true, session: run.mode === 'user_takeover' ? run.browserSession : null, orgId: run.orgId });
     for (const page of result.pages || []) captures.push({ page: compactPage(page), screenshot: screenshotData(page.screenshot) });
     if (!captures.length) throw Object.assign(new Error('visual_capture_empty'), { retryable: true });
-    return { run_id: run.id, counts: { captured_pages: captures.length }, capture_payload: captures };
+    const visualPages = captures.filter((entry) => entry.screenshot).length;
+    if (!visualPages) throw Object.assign(new Error('visual_capture_no_screenshot_receipts'), { retryable: true });
+    return { run_id: run.id, counts: { captured_pages: captures.length, visual_pages: visualPages, crawl_errors: (result.errors || []).length }, capture_payload: captures };
   }
   async _store(run, input) {
     const artifacts = Array.isArray(input?.artifacts) ? input.artifacts.filter((x) => x && safeUrl(x.page_url) && clean(x.r2_key, 500) && x.page && typeof x.page === 'object') : [];
@@ -231,7 +233,15 @@ export class DurableVisualIntelligenceLifecycle {
     const prompt = { company_name: 'Unknown organization', evidence: modelPages.map((page, index) => ({ source_index: index, url: page.url, title: page.title, description: page.description, text: page.text.slice(0, 5000), seo: page.seo })), required: ['identity', 'voice', 'palette', 'typography', 'layout', 'imagery', 'accessibility', 'visual_generation_brief', 'company_intelligence'], company_intelligence_contract: { offers: 'array of source-backed products/services', audiences: 'array of source-backed customer segments', pricing: 'public prices only; state not_publicly_listed when absent', proof_points: 'array with source_indexes', calls_to_action: 'array', positioning: 'concise source-backed statement' } };
     const response = await gatewayFirstFetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.OPENROUTER_API_KEY ? { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` } : {}) }, body: JSON.stringify({ model: process.env.HIVEMIND_VISION_MODEL || 'google/gemini-2.5-flash-lite', temperature: 0, max_tokens: 1800, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Extract a cautious Brand DNA from supplied first-party rendered pages. Return JSON only. Every non-obvious claim must cite source_indexes. Never invent colors, compliance claims, logos, prices, or brand history.' }, { role: 'user', content: [{ type: 'text', text: JSON.stringify(prompt) }, ...images.filter(Boolean).map((url) => ({ type: 'image_url', image_url: { url } }))] }] }) }, { fetchImpl: this.fetch });
     if (!response.ok) throw Object.assign(new Error(`visual_extractor_http_${response.status}`), { retryable: true });
-    const body = await response.json(); const extraction = enrichBrandDnaFromRenderedSignals(normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content)) || evidenceOnlyBrandDna(pages), pages);
+    const body = await response.json();
+    const extraction = normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content));
+    // A generic evidence-only shell is useful for an operator preview, but it
+    // is not a Day-2 deliverable. Publishing it would turn a model contract
+    // failure into a customer email with inventedly thin visual intelligence.
+    if (!extraction?.visual_generation_brief || typeof extraction.visual_generation_brief !== 'object') {
+      throw Object.assign(new Error('visual_extraction_contract_invalid'), { retryable: true });
+    }
+    enrichBrandDnaFromRenderedSignals(extraction, pages);
     // Title is browser-captured, first-party evidence. It is a safe fallback
     // when a model returns a usable brief but omits the brand name.
     if (!clean(extraction?.identity?.name, 240) && clean(pages[0]?.title, 240)) extraction.identity = { ...(extraction.identity || {}), name: clean(pages[0].title, 240) };
@@ -246,7 +256,10 @@ export class DurableVisualIntelligenceLifecycle {
   }
   async _publish(run) {
     const extracted = await this._stageOutput(run.id, 'extract'); const sourceRefs = (await this._stageOutput(run.id, 'store'))?.source_refs || [];
-    const artifact = { artifact_type: 'brand_dna', version: `visual-intelligence-v${run.processingVersion}`, generated_at: new Date().toISOString(), evidence: sourceRefs, analysis: extracted?.extraction || {}, visual_generation_brief: extracted?.extraction?.visual_generation_brief || {} };
+    const room = run.roomId ? await this.prisma.hyperRoom.findFirst({ where: { id: run.roomId, orgId: run.orgId, userId: run.userId }, select: { agentConnectors: true } }).catch(() => null) : null;
+    const company = room?.agentConnectors?._company || {};
+    const agent_roster = (Array.isArray(company.team) ? company.team : []).slice(0, 6).map((agent) => ({ name: clean(agent?.name, 72), role: clean(agent?.jobTitle || agent?.title || agent?.role, 96) })).filter((agent) => agent.name);
+    const artifact = { artifact_type: 'brand_dna', version: `visual-intelligence-v${run.processingVersion}`, generated_at: new Date().toISOString(), evidence: sourceRefs, analysis: extracted?.extraction || {}, visual_generation_brief: extracted?.extraction?.visual_generation_brief || {}, agent_roster };
     if (!artifact.evidence.length || !Object.keys(artifact.visual_generation_brief).length) throw Object.assign(new Error('invalid_brand_dna_artifact'), { retryable: false });
     await this.prisma.visualIntelligenceRun.update({ where: { id: run.id }, data: { artifact } }); return { ...this._receipt({ ...run, artifact }), artifact, counts: { evidence: artifact.evidence.length } };
   }

@@ -72,6 +72,11 @@ services:
       ENGINE_BOX_STATE_DIR: /var/lib/hivemind-engine/state
       ENGINE_BOX_STATE_KEY_FILE: /run/secrets/state_key
     secrets: [state_key]
+    healthcheck:
+      test: [CMD-SHELL, "node -e \"fetch('http://127.0.0.1:8090/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   hm-core:
     <<: *engine-service
@@ -95,8 +100,8 @@ services:
       postgres: { condition: service_healthy }
       qdrant: { condition: service_healthy }
       redis: { condition: service_healthy }
-      hm-extract: { condition: service_started }
-      hm-model-router: { condition: service_started }
+      hm-extract: { condition: service_healthy }
+      hm-model-router: { condition: service_healthy }
     secrets: [postgres_password, redis_password]
     command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/lean-server.mjs"]
 
@@ -157,6 +162,9 @@ services:
       - edge_data:/data
     depends_on:
       hm-core: { condition: service_started }
+      redis: { condition: service_healthy }
+      hm-extract: { condition: service_healthy }
+      hm-model-router: { condition: service_healthy }
     ports: ["127.0.0.1:${ENGINE_BOX_CORE_PORT:-8787}:8787"]
 
   hm-ingestion:

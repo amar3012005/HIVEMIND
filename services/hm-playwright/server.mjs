@@ -296,6 +296,16 @@ async function extractPage(page, response, discovery) {
   };
 }
 
+async function captureBrandMark(page) {
+  for (const selector of ['header img', 'header svg', '[role="banner"] img', '[role="banner"] svg']) {
+    const node = page.locator(selector).first(); const box = await node.boundingBox().catch(() => null);
+    if (!box || box.width < 12 || box.height < 12 || box.width > 360 || box.height > 180) continue;
+    const image = await node.screenshot({ type: 'png', timeout: NAVIGATION_TIMEOUT_MS }).catch(() => null);
+    if (image?.length && image.length <= 500 * 1024) return `data:image/png;base64,${image.toString('base64')}`;
+  }
+  return null;
+}
+
 // Reads whatever text/label/role identifies a click target BEFORE clicking
 // it, so the safety check that follows this function runs on real page
 // content, not on whatever selector/coordinates the caller supplied.
@@ -478,6 +488,7 @@ async function crawl(input) {
         const finalUrl = await publicUrl(page.url());
         if (!finalUrl || finalUrl.origin !== origin) throw new Error('cross_origin_redirect_blocked');
         const evidence = await extractPage(page, response, { source: current.source, depth: current.depth, discovered_from: current.from });
+        if (current.depth === 0 && !pages.length) evidence.brand_logo = await captureBrandMark(page);
         // Visual Intelligence requests a screenshot per captured page. The
         // existing limits bound both page count and individual image size.
         if (captureScreenshot) {

@@ -70,7 +70,10 @@ function adminCampaign(row, baseUrl) {
     visit_count: row.visitCount,
     accepted_count: row.acceptedCount,
     created_at: row.createdAt,
-    invitation_url: `${baseUrl}/hivemind/app/invite?referral_token=${encodeURIComponent(createPartnerReferralToken(row.id, row.shareTokenVersion))}`,
+    // Keep partner referrals on the same unauthenticated invitation surface
+    // used by enterprise and personal invitation emails. `/hivemind/app/*`
+    // is the protected product shell and otherwise falls through to login.
+    invitation_url: `${baseUrl}/hivemind/invite?referral_token=${encodeURIComponent(createPartnerReferralToken(row.id, row.shareTokenVersion))}`,
   };
 }
 

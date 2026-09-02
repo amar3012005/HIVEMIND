@@ -85,6 +85,8 @@ test('Wolfgang URL creates a reusable card-free trial and atomically grants the 
     monthly_credits: 10000, discount_kind: 'percentage', discount_percent: 100, fallback_action: 'free', max_redemptions: 25,
   } });
   const token = new URL(created.campaign.invitation_url).searchParams.get('referral_token');
+  assert.match(created.campaign.invitation_url, /\/hivemind\/invite\?referral_token=/);
+  assert.doesNotMatch(created.campaign.invitation_url, /\/hivemind\/app\/invite/);
   const preview = await resolvePartnerReferral({ prisma, token, recordVisit: true });
   assert.equal(preview.preview.referrer.display_name, 'Wolfgang');
   assert.equal(preview.preview.offer.monthly_credits, 10000);

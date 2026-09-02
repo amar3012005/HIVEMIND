@@ -24,10 +24,11 @@ export async function probeEngineBoxServices({ prisma, qdrantUrl, modelRouterUrl
     (probes.redis || (async () => 'ready'))(), // Redis queue boot validates its own connection before work.
     (probes.extract || (() => probeHttp(`${process.env.KB_EXTRACT_URL}/health`)))(),
     (probes.modelRouter || (() => probeHttp(`${modelRouterUrl}/health`)))(),
+    (probes.controlPlane || (() => probeHttp(`${process.env.CONTROL_PLANE_URL}/ready`)))(),
   ]);
   return {
     postgres: checks[0], qdrant: checks[1], redis: checks[2], hm_extract: checks[3], model_router: checks[4],
-    core: 'ready', ingestion: 'ready', mcp: 'ready', edge: 'ready',
+    control_plane: checks[5], core: 'ready', ingestion: 'ready', mcp: 'ready', edge: 'ready',
   };
 }
 

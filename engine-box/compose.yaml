@@ -83,6 +83,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       KB_EXTRACT_URL: http://hm-extract:8088
       MODEL_ROUTER_URL: http://hm-model-router:8090
+      CONTROL_PLANE_URL: http://hm-control-plane:3001
     depends_on:
       postgres: { condition: service_healthy }
       qdrant: { condition: service_healthy }

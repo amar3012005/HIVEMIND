@@ -134,7 +134,8 @@ import { validateDomain } from './web/web-policy.js';
 import { getActiveOrganizationMembership, isOrganizationAdmin, requireSameOrganizationMember } from './workspace/access-policy.js';
 import { resolveTenantAccess } from './auth/tenant-access.js';
 import { createWorkspaceNotification } from './workspace/notifications.js';
-import { startPlatformRegistryOutboxDispatcher } from './control-plane/platform-registry-outbox.js';
+import { enqueuePlatformRegistryEvent, startPlatformRegistryOutboxDispatcher } from './control-plane/platform-registry-outbox.js';
+import { hashInviteToken } from './control-plane/platform-registry-client.js';
 import { createEmailNotificationSink } from './workspace/email-notification-projection.js';
 import { resolveInvitationBaseUrl, resolvePublicAppUrl, resolvePublicFrontendBaseUrl } from './public-frontend-url.js';
 import {
@@ -459,6 +460,40 @@ async function findOrCreateKindRoom(session, hqRoom, kind, message) {
   return { id: room.id, participantIds, created: true };
 }
 
+function registryCompositeId(...parts) {
+  const hex = crypto.createHash('sha256').update(parts.join(':')).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${(Number.parseInt(hex[16], 16) & 0x3 | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function registryMembershipPayload(membership) {
+  return {
+    user_id: membership.userId,
+    org_id: membership.orgId,
+    role: membership.role,
+    roles: membership.roles || [],
+    is_active: membership.isActive !== false,
+    invited_at: membership.invitedAt?.toISOString?.() || null,
+    joined_at: membership.joinedAt?.toISOString?.() || null,
+    deactivated_at: membership.deactivatedAt?.toISOString?.() || null,
+  };
+}
+
+function registryInvitePayload(invite) {
+  return {
+    org_id: invite.orgId,
+    email: invite.email || null,
+    role: invite.role,
+    roles: invite.roles || [],
+    // D1 never receives a usable invitation bearer token.
+    token_hash: hashInviteToken(invite.token),
+    expires_at: invite.expiresAt?.toISOString?.() || null,
+    used_at: invite.usedAt?.toISOString?.() || null,
+    revoked_at: invite.revokedAt?.toISOString?.() || null,
+    created_by: invite.createdBy,
+    idempotency_key: invite.idempotencyKey || null,
+  };
+}
+
 async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles, invitedAt }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `plan:seats:${orgId}`);
@@ -482,7 +517,14 @@ async function claimInviteSeatWithinPlan({ inviteId, orgId, userId, role, roles,
       update: { role, roles, joinedAt: new Date(), isActive: true, deactivatedAt: null },
       create: { userId, orgId, role, roles, invitedAt, joinedAt: new Date(), isActive: true },
     });
-    await tx.orgInvite.update({ where: { id: inviteId }, data: { usedAt: new Date(), usedBy: userId } });
+    const acceptedInvite = await tx.orgInvite.update({ where: { id: inviteId }, data: { usedAt: new Date(), usedBy: userId } });
+    await enqueuePlatformRegistryEvent(tx, {
+      entityType: 'membership', entityId: registryCompositeId('membership', membership.userId, membership.orgId),
+      payload: registryMembershipPayload(membership),
+    });
+    await enqueuePlatformRegistryEvent(tx, {
+      entityType: 'invite', entityId: acceptedInvite.id, payload: registryInvitePayload(acceptedInvite),
+    });
     return membership;
   });
 }
@@ -498,11 +540,16 @@ async function createMembershipWithinPlan(data) {
       const current = await tx.userOrganization.count({ where: { orgId: data.orgId, isActive: true } });
       if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
     }
-    return tx.userOrganization.upsert({
+    const membership = await tx.userOrganization.upsert({
       where: { userId_orgId: { userId: data.userId, orgId: data.orgId } },
       update: { ...data, isActive: true, deactivatedAt: null },
       create: { ...data, isActive: true },
     });
+    await enqueuePlatformRegistryEvent(tx, {
+      entityType: 'membership', entityId: registryCompositeId('membership', membership.userId, membership.orgId),
+      payload: registryMembershipPayload(membership),
+    });
+    return membership;
   });
 }
 
@@ -539,7 +586,11 @@ async function createOrgInviteWithinPlan(data, now = new Date()) {
       const current = activeMembers + pendingInvites;
       if (current >= limit) throw teamSeatCapacityError(plan, limit, current);
     }
-    return tx.orgInvite.create({ data });
+    const invite = await tx.orgInvite.create({ data });
+    await enqueuePlatformRegistryEvent(tx, {
+      entityType: 'invite', entityId: invite.id, payload: registryInvitePayload(invite),
+    });
+    return invite;
   });
 }
 

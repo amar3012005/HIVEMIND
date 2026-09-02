@@ -1971,3 +1971,17 @@ slides that find no unique anchor get a page instead of `null`.
   **24 passed, 0 failed**; JavaScript syntax and `git diff --check` passed.
   The governed Core-only release completed healthy, and a fresh fatal/panic/
   uncaught/OOM/migration scan returned no findings.
+
+## 2026-09-03 UTC — Day 2 reusable lifecycle contract
+
+- Committed and released `3368591bef6c37514a70f458fc302b5afb520a38` and
+  `fbe770a059beb80b7738a4e15352d6708694673e` from `singulance-main`; Core is
+  healthy on immutable `hivemind/core-api:sha-fbe770a0`.
+- Day 2 is formally an independent durable Brand-DNA workflow: it does not
+  create a Room task or prompt. When admitted as lifecycle Day 2 it requires a
+  same-tenant Room reference only for company, recipient, and Humation context;
+  the reference is ownership-validated. The completed artifact is explicitly
+  reusable as `company_brand_dna` for visual artifacts, brand intelligence, and
+  HyperAgent context.
+- Verification: focused Day-1/visual suite — **22 passed, 0 failed**; a B&B
+  no-email canary completed every durable stage with 16 visual receipts.

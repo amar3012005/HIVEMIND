@@ -49,15 +49,24 @@ The desired user-facing idea is:
 The lifecycle:
 
 1. Wait until 24 hours after `company.onboarded_at`.
-2. Select the first `todo` starter task whose room tag is `research`.
-3. Create or reuse one deterministic task work room and one deterministic kickoff turn.
-4. Dispatch that turn through the existing Employees room execution seam.
-5. Let the normal HyperAgent room execute, use tools, debate, and synthesize.
-6. Wait for the normal canonical `seal` event and a persisted `complete` turn.
-7. Read the final sealed room output without asking another model to summarize or rewrite it.
-8. Render the room's existing README-style Markdown into the email and A4 portrait report.
-9. Send the message through the existing Cloudflare Email Service provider.
-10. Persist the delivery receipt and make retries return the already-sent result.
+2. For website onboarding, select the deterministic `day1_first_move` task:
+   **Map competitors and the local market**. It is always present in the
+   starter task list, requires source-backed competitor evidence, and uses the
+   company HQ / operating location as its geographic anchor. For companies
+   created before that rule, select the existing research task instead.
+3. If that task already ran during Day 0/first-life, adopt its persisted room
+   and latest sealed turn. Day 1 delivers that exact report; it never creates a
+   duplicate research room or turn.
+4. Otherwise create or reuse one deterministic task work room and kickoff turn,
+   with the company HQ location in the room goal and user message.
+5. Dispatch that turn through the existing Employees room execution seam.
+6. Let the normal HyperAgent room execute, use tools, debate, and synthesize.
+7. Wait for the normal canonical `seal` event and a persisted deliverable
+   (`complete` or evidence-gap `blocked`) turn.
+8. Read the final sealed room output without asking another model to summarize or rewrite it.
+9. Render the room's existing README-style Markdown into the email and A4 portrait report.
+10. Send the message through the existing Cloudflare Email Service provider.
+11. Persist the delivery receipt and make retries return the already-sent result.
 
 The room remains available in the product. The email links back to:
 

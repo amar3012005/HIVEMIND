@@ -10962,6 +10962,26 @@ Write the persona now.`;
               room_id: null,
             }));
           }
+          // Website onboarding has one non-negotiable first research move. It
+          // is deterministic rather than LLM-optional so every company gets a
+          // source-backed competitor and local-market brief in its task list.
+          // Day 1 selects this marked task; all other generated tasks retain
+          // their current titles, order, and wire shape.
+          if (siteUrl) {
+            const localMarket = profile.location || profile.location_city || profile.location_country || 'the company operating market';
+            const competitorTask = tasks.find((task) => task.room_tag === 'research');
+            if (competitorTask) {
+              Object.assign(competitorTask, {
+                title: 'Map competitors and the local market',
+                detail: `Build a source-backed competitor and market research brief for ${companyName} in ${localMarket}. Start from ${siteUrl}; identify direct and adjacent alternatives, buyer segments, positioning, local demand signals, and material constraints. Treat the company HQ / operating location (${localMarket}) as the required geographic anchor. Cite every competitor and market claim, distinguish evidence from assumptions, and record contradictions or gaps.`,
+                deliverable: 'Competitor and local-market research brief',
+                tag: 'RESEARCH',
+                status: 'todo',
+                room_id: null,
+                day1_first_move: true,
+              });
+            }
+          }
           say('Saving your tasks');
 
           say('Provisioning your workspace');

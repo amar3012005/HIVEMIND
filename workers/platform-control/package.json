@@ -1,0 +1,15 @@
+{
+  "name": "hivemind-platform-control",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "wrangler types && tsc --noEmit",
+    "test": "vitest run",
+    "dry-run": "wrangler deploy --env production --dry-run"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.1",
+    "wrangler": "^4.32.0"
+  }
+}

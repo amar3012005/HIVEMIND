@@ -1907,3 +1907,21 @@ slides that find no unique anchor get a page instead of `null`.
   absent from the live chunk.
 - Rollback: Cloudflare Worker version
   `6fd6b92c-90fd-408e-8844-498f4ed7b371`.
+
+## 2026-09-02 UTC — Platform Registry D1 foundation committed, not released
+
+- Branch: `codex/platform-registry-d1-v1` (based on `0eb9e625`).
+- Added `workers/platform-control`: an EU-D1-ready Worker with an append-only,
+  idempotent registry-event contract and tables only for users, organizations,
+  memberships, hashed invitations, API-key hashes/metadata, entitlements, and
+  Memory Box connection metadata. Memory/evidence/vector data and raw secrets
+  are explicitly outside the schema.
+- Added an opt-in Core `PlatformRegistryClient`; default mode is `off`, making
+  no Worker calls. API-key creation/revocation now mirrors only hash/metadata
+  if a later governed rollout enables the registry. `authoritative` mode fails
+  closed on a failed mirror.
+- Verification: Core client tests 4/4, Worker contract tests 3/3, generated
+  Wrangler runtime type check, local D1 migration (14 statements) and schema
+  inventory, plus production Wrangler dry-run all passed.
+- Production: not provisioned or deployed. The D1 id and Access service-token
+  secret remain intentionally unset; production authority remains PostgreSQL.

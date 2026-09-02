@@ -1,4 +1,4 @@
-CREATE TABLE "memory_projection_attempts" (
+CREATE TABLE "hivemind"."memory_projection_attempts" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
   "memory_id" UUID NOT NULL,
   "organization_id" UUID NOT NULL,
@@ -16,9 +16,9 @@ CREATE TABLE "memory_projection_attempts" (
   "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updated_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "memory_projection_attempts_pkey" PRIMARY KEY ("id"),
-  CONSTRAINT "memory_projection_attempts_memory_id_fkey" FOREIGN KEY ("memory_id") REFERENCES "memories"("id") ON DELETE CASCADE ON UPDATE CASCADE
+  CONSTRAINT "memory_projection_attempts_memory_id_fkey" FOREIGN KEY ("memory_id") REFERENCES "hivemind"."memories"("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-CREATE UNIQUE INDEX "memory_projection_attempt_memory_version_key" ON "memory_projection_attempts"("memory_id", "processing_version");
-CREATE UNIQUE INDEX "memory_projection_attempt_workflow_key" ON "memory_projection_attempts"("workflow_instance_id") WHERE "workflow_instance_id" IS NOT NULL;
-CREATE INDEX "memory_projection_attempt_org_status_idx" ON "memory_projection_attempts"("organization_id", "status", "updated_at");
+CREATE UNIQUE INDEX "memory_projection_attempt_memory_version_key" ON "hivemind"."memory_projection_attempts"("memory_id", "processing_version");
+CREATE UNIQUE INDEX "memory_projection_attempt_workflow_key" ON "hivemind"."memory_projection_attempts"("workflow_instance_id") WHERE "workflow_instance_id" IS NOT NULL;
+CREATE INDEX "memory_projection_attempt_org_status_idx" ON "hivemind"."memory_projection_attempts"("organization_id", "status", "updated_at");

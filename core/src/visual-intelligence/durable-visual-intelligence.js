@@ -62,6 +62,17 @@ function evidenceOnlyBrandDna(pages) {
     extraction_status: 'evidence_only_fallback',
   };
 }
+function enrichBrandDnaFromRenderedSignals(extraction, pages) {
+  const root = pages[0] || {}; const visual = root.visual || {};
+  const colors = Array.isArray(visual.colors) ? visual.colors.filter((value) => /^rgb/.test(String(value))).slice(0, 6) : [];
+  const [primary, secondary, accent, background] = colors;
+  extraction.palette = { ...(extraction.palette || {}), ...(!clean(extraction?.palette?.primary) && primary ? { primary } : {}), ...(!clean(extraction?.palette?.secondary) && secondary ? { secondary } : {}), ...(!clean(extraction?.palette?.accent) && accent ? { accent } : {}), ...(!clean(extraction?.palette?.background) && background ? { background } : {}) };
+  const font = Array.isArray(visual.fonts) ? visual.fonts[0] : '';
+  extraction.typography = { ...(extraction.typography || {}), ...(!clean(extraction?.typography?.headings) && font ? { headings: font } : {}), ...(!clean(extraction?.typography?.body) && font ? { body: font } : {}) };
+  extraction.layout = { ...(extraction.layout || {}), ...(!clean(extraction?.layout?.structure) ? { structure: 'Captured public-site hierarchy' } : {}) };
+  extraction.imagery = { ...(extraction.imagery || {}), ...(!clean(extraction?.imagery?.content) && Array.isArray(visual.image_alts) && visual.image_alts.length ? { content: visual.image_alts.join(' · ') } : {}) };
+  return extraction;
+}
 
 /**
  * The single admission path used by Rooms, lifecycle episodes, and future
@@ -192,7 +203,7 @@ export class DurableVisualIntelligenceLifecycle {
     const prompt = { company_name: 'Unknown organization', evidence: modelPages.map((page, index) => ({ source_index: index, url: page.url, title: page.title, description: page.description, text: page.text.slice(0, 5000), seo: page.seo })), required: ['identity', 'voice', 'palette', 'typography', 'layout', 'imagery', 'accessibility', 'visual_generation_brief'] };
     const response = await gatewayFirstFetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.OPENROUTER_API_KEY ? { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` } : {}) }, body: JSON.stringify({ model: process.env.HIVEMIND_VISION_MODEL || 'google/gemini-2.5-flash-lite', temperature: 0, max_tokens: 1800, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Extract a cautious Brand DNA from supplied first-party rendered pages. Return JSON only. Every non-obvious claim must cite source_indexes. Never invent colors, compliance claims, logos, prices, or brand history.' }, { role: 'user', content: [{ type: 'text', text: JSON.stringify(prompt) }, ...images.filter(Boolean).map((url) => ({ type: 'image_url', image_url: { url } }))] }] }) }, { fetchImpl: this.fetch });
     if (!response.ok) throw Object.assign(new Error(`visual_extractor_http_${response.status}`), { retryable: true });
-    const body = await response.json(); const extraction = normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content)) || evidenceOnlyBrandDna(pages);
+    const body = await response.json(); const extraction = enrichBrandDnaFromRenderedSignals(normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content)) || evidenceOnlyBrandDna(pages), pages);
     // Title is browser-captured, first-party evidence. It is a safe fallback
     // when a model returns a usable brief but omits the brand name.
     if (!clean(extraction?.identity?.name, 240) && clean(pages[0]?.title, 240)) extraction.identity = { ...(extraction.identity || {}), name: clean(pages[0].title, 240) };

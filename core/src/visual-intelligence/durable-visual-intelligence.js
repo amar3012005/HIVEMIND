@@ -172,6 +172,9 @@ export class DurableVisualIntelligenceLifecycle {
     if (!response.ok) throw Object.assign(new Error(`visual_extractor_http_${response.status}`), { retryable: true });
     const body = await response.json(); const extraction = normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content));
     if (!extraction || typeof extraction !== 'object') throw Object.assign(new Error('visual_extractor_invalid_response'), { retryable: true });
+    // Title is browser-captured, first-party evidence. It is a safe fallback
+    // when a model returns a usable brief but omits the brand name.
+    if (!clean(extraction?.identity?.name, 240) && clean(pages[0]?.title, 240)) extraction.identity = { ...(extraction.identity || {}), name: clean(pages[0].title, 240) };
     return { run_id: run.id, extraction, model: process.env.HIVEMIND_VISION_MODEL || 'google/gemini-2.5-flash-lite', counts: { extracted_pages: pages.length } };
   }
   async _verify(run) {

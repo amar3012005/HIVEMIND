@@ -266,12 +266,16 @@ async function extractPage(page, response, discovery) {
       catch { return null; }
     }).filter(Boolean).slice(0, 30);
     const text = clean(root.innerText || root.textContent).slice(0, 120000);
-    const visualNodes = [...document.querySelectorAll('body, h1, h2, h3, p, a, button, [role="button"]')].slice(0, 140);
+    const visualNodes = [...document.querySelectorAll('body, h1, h2, h3, p, a, button, [role="button"], *')].slice(0, 900);
     const tally = (values) => [...values.reduce((counts, value) => {
       if (value && value !== 'rgba(0, 0, 0, 0)' && value !== 'transparent') counts.set(value, (counts.get(value) || 0) + 1);
       return counts;
     }, new Map()).entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([value]) => value);
     const styles = visualNodes.map((node) => getComputedStyle(node));
+    const rgb = (value) => { const match = String(value || '').match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/); return match ? match.slice(1, 4).map(Number) : null; };
+    const saturation = (value) => { const channels = rgb(value); if (!channels) return 0; const max = Math.max(...channels); const min = Math.min(...channels); return max ? (max - min) / max : 0; };
+    const candidates = styles.flatMap((style) => [style.color, style.backgroundColor, style.borderTopColor]).filter((value) => saturation(value) >= 0.18);
+    const accents = tally(candidates).sort((left, right) => saturation(right) - saturation(left)).slice(0, 6);
     const fonts = [...new Set(styles.map((style) => style.fontFamily).filter(Boolean))].slice(0, 8);
     const fontSizes = [...new Set(styles.map((style) => style.fontSize).filter(Boolean))].slice(0, 8);
     return {
@@ -290,6 +294,7 @@ async function extractPage(page, response, discovery) {
       jsonLd: [...document.querySelectorAll('script[type="application/ld+json"]')].map((node) => clean(node.textContent)).filter(Boolean).slice(0, 5),
       visual: {
         colors: tally(styles.flatMap((style) => [style.color, style.backgroundColor, style.borderTopColor])),
+        accent_colors: accents,
         fonts, fontSizes,
         image_count: images.length,
         image_alts: images.map((image) => image.alt).filter(Boolean).slice(0, 12),

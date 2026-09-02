@@ -14,13 +14,25 @@
       "healthPath": "/health"
     },
     {
-      "routeId": "customer-reranker",
+      "routeId": "local-reranker",
       "capability": "rerank",
-      "execution": "customer_gateway",
+      "execution": "local",
       "provider": "customer",
+      "model": "bge-reranker-v2-m3",
       "protocol": "openai-compatible",
-      "dataEgress": "customer-controlled",
+      "dataEgress": "none",
       "fallbackGroup": "rerank",
+      "healthPath": "/health"
+    },
+    {
+      "routeId": "local-chat",
+      "capability": "chat",
+      "execution": "local",
+      "provider": "customer",
+      "model": "local-chat-model",
+      "protocol": "openai-compatible",
+      "dataEgress": "none",
+      "fallbackGroup": "chat",
       "healthPath": "/health"
     },
     {

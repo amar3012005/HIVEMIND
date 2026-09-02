@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { canonicalize } from '../lib/model-catalog.mjs';
 import { writeSetupRecord } from '../lib/local-state.mjs';
-import { inferModel } from '../model-router/server.mjs';
+import { inferModel, probeConfiguredRoutes } from '../model-router/server.mjs';
 
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'engine-box-router-'));
@@ -43,5 +43,18 @@ test('model router only forwards to encrypted configured local routes and valida
     assert.equal(request.auth, 'Bearer not-exposed');
     assert.equal(result.route.api_key, undefined);
     assert.deepEqual(result.vectors[0], [1, 2, 3]);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('model router readiness probes every configured local capability', async () => {
+  const { root, env } = await fixture();
+  try {
+    const calls = [];
+    const routes = await probeConfiguredRoutes({ env, fetchImpl: async (url) => {
+      calls.push(url);
+      return new Response('', { status: 200 });
+    } });
+    assert.equal(routes.length, 3);
+    assert.deepEqual(calls, ['https://models.local/health', 'https://models.local/health', 'https://models.local/health']);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

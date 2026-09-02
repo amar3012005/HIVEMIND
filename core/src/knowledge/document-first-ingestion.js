@@ -1090,12 +1090,15 @@ function safePathSegment(name) {
 }
 
 export class DocumentFirstIngestionService {
-  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, entityExtractor = null, topicStateWriter = null, canonicalProjector = null, logger = console }) {
+  constructor({ db, smartIngestRouter, memoryGraphEngine, doclingAdapter, embeddingService, collectionResolver = null, entityExtractor = null, topicStateWriter = null, canonicalProjector = null, logger = console }) {
     this.db = db;
     this.smartIngestRouter = smartIngestRouter;
     this.memoryGraphEngine = memoryGraphEngine;
     this.doclingAdapter = doclingAdapter;
     this.embeddingService = embeddingService;
+    // Self-hosted Engine Box injects an authoritative local collection mapper.
+    // Hosted deployments retain the existing tenant container router.
+    this.collectionResolver = collectionResolver;
     this.entityExtractor = entityExtractor;
     this.topicStateWriter = topicStateWriter;
     // Server-owned adapter into the feature-flagged canonical claim layer. The
@@ -4505,7 +4508,9 @@ Every item must include a non-empty content field and one or more valid support_
    */
   async _parseDocument(fileBuffer, contentType, filename, opts = {}) {
     try {
-      if (this.doclingAdapter && process.env.DOCLING_URL) {
+      // Engine Box supplies the same parser-shaped adapter backed by hm-extract.
+      // Do not gate that local parser behind the hosted Docling environment flag.
+      if (this.doclingAdapter && (process.env.DOCLING_URL || process.env.KB_EXTRACT_URL)) {
         const doclingResult = await this.doclingAdapter.parseBuffer(fileBuffer, {
           filename,
           contentType,
@@ -4581,8 +4586,8 @@ Every item must include a non-empty content field and one or more valid support_
           wordCount: 0,
           error: `no parser produced text for ${filename || 'this file'} and the raw bytes are `
             + `${_pct}% non-text (binary container). Nothing was indexed. Likely causes: the format `
-            + `needs docling (docx/pptx/xlsx/odt/rtf/epub) and DOCLING_URL is unset or docling `
-            + `failed, or a PDF needed the vision tier and it errored. Check the tier logs for this `
+            + `needs a configured local parser (hm-extract or an explicitly enabled specialized parser) and it `
+            + `failed or is unavailable, or a PDF needed the vision tier and it errored. Check the tier logs for this `
             + `upload rather than re-uploading.`,
           metadata: { binary_ratio: binaryRatio(_asText) },
         };
@@ -5241,7 +5246,9 @@ Every item must include a non-empty content field and one or more valid support_
       // ONE upsert per collection instead of one per segment.
       const byCollection = new Map();
       for (const row of _vectorRows) {
-        const collectionName = PER_TENANT ? await resolveCollectionForOrg(row.orgId) : legacyEvidence;
+        const collectionName = this.collectionResolver
+          ? await this.collectionResolver(row.orgId)
+          : (PER_TENANT ? await resolveCollectionForOrg(row.orgId) : legacyEvidence);
         if (!byCollection.has(collectionName)) byCollection.set(collectionName, []);
         byCollection.get(collectionName).push(row);
       }

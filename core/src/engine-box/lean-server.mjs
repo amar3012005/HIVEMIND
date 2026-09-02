@@ -46,7 +46,7 @@ export async function probeEngineBoxServices({ prisma, qdrantUrl, modelRouterUrl
     (probes.qdrant || (() => probeHttp(`${qdrantUrl}/healthz`)))(),
     (probes.redis || (() => probeRedis()))(),
     (probes.extract || (() => probeHttp(`${process.env.KB_EXTRACT_URL}/health`)))(),
-    (probes.modelRouter || (() => probeHttp(`${modelRouterUrl}/health`)))(),
+    (probes.modelRouter || (() => probeHttp(`${modelRouterUrl}/ready`)))(),
     (probes.controlPlane || (() => probeHttp(`${process.env.CONTROL_PLANE_URL}/ready`)))(),
   ]);
   return {

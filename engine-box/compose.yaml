@@ -87,6 +87,7 @@ services:
       DATABASE_NAME: hivemind
       QDRANT_URL: http://qdrant:6333
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      KB_QUEUE_MODE: all
       KB_EXTRACT_URL: http://hm-extract:8088
       MODEL_ROUTER_URL: http://hm-model-router:8090
       CONTROL_PLANE_URL: http://hm-control-plane:3001
@@ -169,6 +170,7 @@ services:
       DATABASE_NAME: hivemind
       QDRANT_URL: http://qdrant:6333
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      KB_QUEUE_MODE: all
       KB_EXTRACT_URL: http://hm-extract:8088
       MODEL_ROUTER_URL: http://hm-model-router:8090
     depends_on:

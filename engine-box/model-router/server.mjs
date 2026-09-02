@@ -33,6 +33,11 @@ function endpoint(baseUrl, suffix) { return `${String(baseUrl).replace(/\/$/, ''
 function headers(route) { return { 'content-type': 'application/json', ...(route.api_key ? { authorization: `Bearer ${route.api_key}` } : {}) }; }
 function publicRoute(route) { const { api_key, ...safe } = route; return safe; }
 
+function healthEndpoint(route) {
+  const url = new URL(route.base_url);
+  return new URL(route.health_url || route.healthPath || '/health', url.origin).toString();
+}
+
 async function configuredRoute(capability, request = {}, env = process.env) {
   const selected = selectModelRoute(catalogState(env), capability, { routeId: request.route_id, consent: remoteInferenceAllowed });
   const setup = await readSetupRecord(env);
@@ -66,12 +71,30 @@ export async function inferModel(request, { env = process.env, fetchImpl = fetch
   return { route: publicRoute(route), result: await result.json() };
 }
 
+/** Probe configured customer-local routes; container liveness alone is never readiness. */
+export async function probeConfiguredRoutes({ env = process.env, fetchImpl = fetch } = {}) {
+  return Promise.all(['embedding', 'rerank', 'chat'].map(async (capability) => {
+    const route = await configuredRoute(capability, {}, env);
+    const result = await fetchImpl(healthEndpoint(route), {
+      method: 'GET',
+      headers: route.api_key ? { authorization: `Bearer ${route.api_key}` } : {},
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!result.ok) throw new Error(`${capability} model health returned ${result.status}`);
+    return { capability, route: publicRoute(route) };
+  }));
+}
+
 export function createModelRouterServer({ env = process.env, fetchImpl = fetch } = {}) {
   return http.createServer(async (req, res) => {
     try {
       if (req.method === 'GET' && req.url === '/health') {
         const catalog = catalogState(env); const setup = await readSetupRecord(env).catch(() => null);
         return response(res, 200, { ok: true, catalog_version: catalog.catalogVersion, configured: !!setup?.model_routes, routes: catalog.routes.map(({ routeId, capability, execution }) => ({ routeId, capability, execution })) });
+      }
+      if (req.method === 'GET' && req.url === '/ready') {
+        const routes = await probeConfiguredRoutes({ env, fetchImpl });
+        return response(res, 200, { ok: true, state: 'READY', routes });
       }
       if (req.method === 'POST' && req.url === '/v1/select') {
         const request = await readJson(req);

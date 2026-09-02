@@ -174,6 +174,16 @@ export function renderLifecycleCompletionEmail({ companyName, taskTitle, output,
 
 export function renderDayOneEmail(input) { return renderLifecycleCompletionEmail(input); }
 
+/** Day 2 deliberately reuses the proven lifecycle email shell and Humation
+ * character strip; only the episode copy and sealed artifact change. */
+export function renderDayTwoBrandDnaEmail({ companyName, output, roomUrl, characters = [], publicApiUrl = '' } = {}) {
+  return renderLifecycleCompletionEmail({
+    companyName, taskTitle: 'Your Company Brand DNA', output, roomUrl, characters, publicApiUrl,
+    dayLabel: 'DAY 2', episodeLabel: 'YOUR AGENTS LEARNED YOUR BRAND',
+    headline: 'Your HyperAgents<br>mapped your visual language.',
+  });
+}
+
 /** Reusable portrait-report renderer paired with the lifecycle email renderer. */
 export function renderLifecycleCompletionPortraitReport({ companyName, taskTitle, output, roomUrl, completedAt, characters = [], dayLabel = 'DAY-1 / RESEARCH' }) {
   const readme = renderRoomReadme(output);
@@ -184,6 +194,9 @@ export function renderLifecycleCompletionPortraitReport({ companyName, taskTitle
 }
 
 export function renderDayOnePortraitReport(input) { return renderLifecycleCompletionPortraitReport(input); }
+export function renderDayTwoBrandDnaPortraitReport({ companyName, output, roomUrl, completedAt, characters = [] } = {}) {
+  return renderLifecycleCompletionPortraitReport({ companyName, taskTitle: 'Your Company Brand DNA', output, roomUrl, completedAt, characters, dayLabel: 'DAY-2 / BRAND DNA' });
+}
 
 function workflowUrl(pathname = '') {
   const base = String(process.env.HIVEMIND_D1_WORKFLOW_URL || '').replace(/\/$/, '');

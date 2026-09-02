@@ -76,6 +76,12 @@ function enrichBrandDnaFromRenderedSignals(extraction, pages) {
   extraction.imagery = { ...(extraction.imagery || {}), ...(!clean(extraction?.imagery?.content) && Array.isArray(visual.image_alts) && visual.image_alts.length ? { content: visual.image_alts.join(' · ') } : {}) };
   return extraction;
 }
+function commercialSignals(pages) {
+  const text = pages.map((page) => String(page?.text || '')).join(' ').replace(/\s+/g, ' ');
+  const priceMatches = [...text.matchAll(/(?:€|\$|£)\s?\d{1,5}(?:[.,]\d{2})?(?:\s*(?:\/|per)\s*(?:month|mo|year|yr))?/gi)].map((match) => match[0]).filter((value, index, values) => values.indexOf(value) === index).slice(0, 20);
+  const ctas = [...text.matchAll(/\b(?:book(?: an?)?|request|start|contact|buy|shop|discover|learn more|download|demo|trial|subscribe)\b[^.]{0,90}/gi)].map((match) => clean(match[0], 120)).filter((value, index, values) => values.indexOf(value) === index).slice(0, 16);
+  return { public_prices: priceMatches, calls_to_action: ctas, pricing_status: priceMatches.length ? 'public_prices_found' : 'not_publicly_listed_in_captured_pages' };
+}
 
 /**
  * The single admission path used by Rooms, lifecycle episodes, and future
@@ -203,13 +209,14 @@ export class DurableVisualIntelligenceLifecycle {
     // from turning one extraction turn into an unreliable mega-prompt.
     const modelSources = sourceRefs.slice(0, 4); const modelPages = pages.slice(0, 4);
     const images = await Promise.all(modelSources.slice(0, 3).map((source) => this._loadArtifactImage(source.r2_key)));
-    const prompt = { company_name: 'Unknown organization', evidence: modelPages.map((page, index) => ({ source_index: index, url: page.url, title: page.title, description: page.description, text: page.text.slice(0, 5000), seo: page.seo })), required: ['identity', 'voice', 'palette', 'typography', 'layout', 'imagery', 'accessibility', 'visual_generation_brief'] };
+    const prompt = { company_name: 'Unknown organization', evidence: modelPages.map((page, index) => ({ source_index: index, url: page.url, title: page.title, description: page.description, text: page.text.slice(0, 5000), seo: page.seo })), required: ['identity', 'voice', 'palette', 'typography', 'layout', 'imagery', 'accessibility', 'visual_generation_brief', 'company_intelligence'], company_intelligence_contract: { offers: 'array of source-backed products/services', audiences: 'array of source-backed customer segments', pricing: 'public prices only; state not_publicly_listed when absent', proof_points: 'array with source_indexes', calls_to_action: 'array', positioning: 'concise source-backed statement' } };
     const response = await gatewayFirstFetch('https://openrouter.ai/api/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', ...(process.env.OPENROUTER_API_KEY ? { authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` } : {}) }, body: JSON.stringify({ model: process.env.HIVEMIND_VISION_MODEL || 'google/gemini-2.5-flash-lite', temperature: 0, max_tokens: 1800, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Extract a cautious Brand DNA from supplied first-party rendered pages. Return JSON only. Every non-obvious claim must cite source_indexes. Never invent colors, compliance claims, logos, prices, or brand history.' }, { role: 'user', content: [{ type: 'text', text: JSON.stringify(prompt) }, ...images.filter(Boolean).map((url) => ({ type: 'image_url', image_url: { url } }))] }] }) }, { fetchImpl: this.fetch });
     if (!response.ok) throw Object.assign(new Error(`visual_extractor_http_${response.status}`), { retryable: true });
     const body = await response.json(); const extraction = enrichBrandDnaFromRenderedSignals(normalizeBrandDnaExtraction(parserJson(body?.choices?.[0]?.message?.content)) || evidenceOnlyBrandDna(pages), pages);
     // Title is browser-captured, first-party evidence. It is a safe fallback
     // when a model returns a usable brief but omits the brand name.
     if (!clean(extraction?.identity?.name, 240) && clean(pages[0]?.title, 240)) extraction.identity = { ...(extraction.identity || {}), name: clean(pages[0].title, 240) };
+    extraction.company_intelligence = { ...(extraction.company_intelligence || {}), ...commercialSignals(pages) };
     return { run_id: run.id, extraction, model: extraction.extraction_status ? 'evidence-only-fallback' : (process.env.HIVEMIND_VISION_MODEL || 'google/gemini-2.5-flash-lite'), counts: { extracted_pages: pages.length, model_sample_pages: modelPages.length } };
   }
   async _verify(run) {

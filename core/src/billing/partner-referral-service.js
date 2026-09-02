@@ -70,7 +70,33 @@ function adminCampaign(row, baseUrl) {
   };
 }
 
-const includeOffer = { promotion: { include: { versions: { orderBy: { version: 'desc' }, take: 1 } } } };
+// PromotionVersion deliberately has no Prisma relation on Promotion. Keep the
+// canonical version lookup explicit so this works with the deployed schema.
+const includePromotion = { promotion: true };
+
+async function attachCurrentOffer(prisma, row) {
+  if (!row) return row;
+  const versions = await prisma.promotionVersion.findMany({
+    where: { promotionId: row.promotionId },
+    orderBy: { version: 'desc' },
+    take: 1,
+  });
+  return { ...row, promotion: { ...row.promotion, versions } };
+}
+
+async function attachCurrentOffers(prisma, rows) {
+  if (!rows.length) return rows;
+  const promotionIds = rows.map((row) => row.promotionId);
+  const versions = await prisma.promotionVersion.findMany({
+    where: { promotionId: { in: promotionIds } },
+    orderBy: { version: 'desc' },
+  });
+  const versionsByPromotion = new Map();
+  for (const version of versions) {
+    if (!versionsByPromotion.has(version.promotionId)) versionsByPromotion.set(version.promotionId, version);
+  }
+  return rows.map((row) => ({ ...row, promotion: { ...row.promotion, versions: versionsByPromotion.has(row.promotionId) ? [versionsByPromotion.get(row.promotionId)] : [] } }));
+}
 
 export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) {
   const referrerDisplayName = String(input.referrer_display_name || '').trim().slice(0, 120);
@@ -126,24 +152,27 @@ export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) 
     } });
     return promotion;
   });
-  const row = await prisma.partnerReferralCampaign.findUnique({ where: { promotionId: created.promotion.id }, include: includeOffer });
+  const createdRow = await prisma.partnerReferralCampaign.findUnique({ where: { promotionId: created.promotion.id }, include: includePromotion });
+  const row = await attachCurrentOffer(prisma, createdRow);
   return { campaign: adminCampaign(row, baseUrl), plaintextCode: created.plaintextCode };
 }
 
 export async function listPartnerReferralCampaigns({ prisma, baseUrl }) {
-  const rows = await prisma.partnerReferralCampaign.findMany({ include: includeOffer, orderBy: { createdAt: 'desc' } });
-  return rows.map((row) => adminCampaign(row, baseUrl));
+  const rows = await prisma.partnerReferralCampaign.findMany({ include: includePromotion, orderBy: { createdAt: 'desc' } });
+  return (await attachCurrentOffers(prisma, rows)).map((row) => adminCampaign(row, baseUrl));
 }
 
 export async function getPartnerReferralCampaign({ prisma, campaignId, baseUrl }) {
-  const row = await prisma.partnerReferralCampaign.findUnique({ where: { id: campaignId }, include: includeOffer });
+  const found = await prisma.partnerReferralCampaign.findUnique({ where: { id: campaignId }, include: includePromotion });
+  const row = await attachCurrentOffer(prisma, found);
   return row ? { row, campaign: adminCampaign(row, baseUrl) } : null;
 }
 
 export async function resolvePartnerReferral({ prisma, token, email = '', orgId = null, recordVisit = false, now = new Date() }) {
   const parsed = parsePartnerReferralToken(token);
   if (!parsed) return null;
-  const row = await prisma.partnerReferralCampaign.findUnique({ where: { id: parsed.id }, include: includeOffer });
+  const found = await prisma.partnerReferralCampaign.findUnique({ where: { id: parsed.id }, include: includePromotion });
+  const row = await attachCurrentOffer(prisma, found);
   if (!row || row.shareTokenVersion !== parsed.version || !safeEqual(row.shareTokenHash, digestPromotionValue(token))) return null;
   const promotion = await findPromotionById({ prisma, promotionId: row.promotionId, email, orgId, now });
   if (!promotion) return null;

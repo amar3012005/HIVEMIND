@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createPartnerReferralCampaign, createPartnerReferralToken, markPartnerReferralDelivery, redeemPartnerReferral, resolvePartnerReferral } from '../../src/billing/partner-referral-service.js';
+import { createPartnerReferralCampaign, createPartnerReferralToken, listPartnerReferralCampaigns, markPartnerReferralDelivery, redeemPartnerReferral, resolvePartnerReferral } from '../../src/billing/partner-referral-service.js';
 import { normalizePromotionInput } from '../../src/billing/promotion-service.js';
 import { createSignupAdmission, verifySignupAdmission } from '../../src/control-plane/signup-admission.js';
 import { renderPartnerReferralInvitation } from '../../src/email/templates/partner-referral-invitation.js';
@@ -51,7 +51,10 @@ function inMemoryPrisma() {
     },
     promotionVersion: {
       create: async ({ data }) => { const row = { id: id(), createdAt: new Date(), ...data }; db.versions.push(row); return row; },
-      findMany: async ({ where }) => db.versions.filter((row) => row.promotionId === where.promotionId).sort((a, b) => b.version - a.version).slice(0, 1),
+      findMany: async ({ where, take }) => db.versions.filter((row) => {
+        if (where.promotionId?.in) return where.promotionId.in.includes(row.promotionId);
+        return row.promotionId === where.promotionId;
+      }).sort((a, b) => b.version - a.version).slice(0, take || undefined),
     },
     promotionEligibility: {
       createMany: async ({ data }) => { db.eligibilities.push(...data.map((row) => ({ id: id(), ...row }))); },
@@ -60,6 +63,7 @@ function inMemoryPrisma() {
     partnerReferralCampaign: {
       create: async ({ data }) => { const row = { createdAt: new Date(), updatedAt: new Date(), visitCount: 0, acceptedCount: 0, deliveryStatus: 'not_sent', ...data }; db.campaigns.push(row); return row; },
       findUnique: async ({ where }) => { const row = db.campaigns.find((c) => c.id === where.id || c.promotionId === where.promotionId); return row ? withOffer(row) : null; },
+      findMany: async () => db.campaigns.map(withOffer),
       update: async ({ where, data }) => { const row = db.campaigns.find((c) => c.id === where.id); if (data.acceptedCount?.increment) row.acceptedCount += data.acceptedCount.increment; if (data.visitCount?.increment) row.visitCount += data.visitCount.increment; Object.assign(row, Object.fromEntries(Object.entries(data).filter(([, value]) => !value || typeof value !== 'object' || value instanceof Date))); return row; },
     },
     promotionRedemption: { count: async ({ where }) => db.redemptions.filter((row) => row.promotionId === where.promotionId && row.emailHash === where.emailHash).length, create: async ({ data }) => { const row = { id: id(), ...data }; db.redemptions.push(row); return row; } },
@@ -93,6 +97,18 @@ test('Wolfgang URL resolves and atomically grants the exact offer once', async (
     redeemPartnerReferral({ prisma, tx: prisma, token, orgId: db.organizations[0].id, userId: '33333333-3333-4333-8333-333333333333', email: 'invitee@example.com' }),
     /promotion unavailable|active promotion/,
   );
+});
+
+test('partner referral administration lists campaigns without a nonexistent Promotion relation', async () => {
+  const { prisma } = inMemoryPrisma();
+  await createPartnerReferralCampaign({ prisma, baseUrl: 'https://next.singulancelabs.com', input: {
+    referrer_display_name: 'Wolfgang', referrer_email: 'wolfgang@example.com', code: 'WOLFX-LIST', account_type: 'personal', base_plan: 'plus', trial_days: 14,
+    monthly_credits: 2000, discount_kind: 'none', fallback_action: 'free', max_redemptions: 5,
+  } });
+  const campaigns = await listPartnerReferralCampaigns({ prisma, baseUrl: 'https://next.singulancelabs.com' });
+  assert.equal(campaigns.length, 1);
+  assert.equal(campaigns[0].offer.monthly_credits, 2000);
+  assert.equal(campaigns[0].internal_name, 'Wolfgang partner invitation');
 });
 
 test('expired and exhausted partner links fail closed', async () => {

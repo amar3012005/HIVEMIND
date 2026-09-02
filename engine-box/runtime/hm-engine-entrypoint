@@ -19,4 +19,12 @@ if [ -n "${DATABASE_PASSWORD_FILE:-}" ]; then
   unset database_password database_password_encoded
 fi
 
+if [ -n "${REDIS_PASSWORD_FILE:-}" ]; then
+  [ -r "$REDIS_PASSWORD_FILE" ] || { echo "REDIS_PASSWORD_FILE is not readable" >&2; exit 78; }
+  redis_password="$(cat "$REDIS_PASSWORD_FILE")"
+  redis_password_encoded="$(node -p 'encodeURIComponent(process.argv[1])' "$redis_password")"
+  export REDIS_URL="redis://:${redis_password_encoded}@${REDIS_HOST:-redis}:${REDIS_PORT:-6379}/${REDIS_DB:-0}"
+  unset redis_password redis_password_encoded
+fi
+
 exec "$@"

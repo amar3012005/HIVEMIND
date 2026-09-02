@@ -6,5 +6,12 @@
 
 :8787 {
   tls internal
+
+  handle /setup {
+    reverse_proxy hm-control-plane:3001
+  }
+  handle /v1/setup/* {
+    reverse_proxy hm-control-plane:3001
+  }
   reverse_proxy hm-core:3000
 }

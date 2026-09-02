@@ -176,12 +176,16 @@ cp "$tmp_dir/bundle/model-catalog.sig" "$INSTALL_ROOT/model-catalog.sig"
 # while still providing 256 bits of entropy. Existing installations preserve
 # their secret and are handled safely by hm-engine-entrypoint's URL encoding.
 if [ ! -f "$INSTALL_ROOT/secrets/postgres_password" ]; then openssl rand -hex 32 > "$INSTALL_ROOT/secrets/postgres_password"; fi
+if [ ! -f "$INSTALL_ROOT/secrets/redis_password" ]; then openssl rand -hex 32 > "$INSTALL_ROOT/secrets/redis_password"; fi
+if [ ! -f "$INSTALL_ROOT/secrets/state_key" ]; then openssl rand -base64 32 > "$INSTALL_ROOT/secrets/state_key"; fi
+if [ ! -f "$INSTALL_ROOT/secrets/setup_token" ]; then openssl rand -hex 32 > "$INSTALL_ROOT/secrets/setup_token"; fi
 if [ ! -f "$INSTALL_ROOT/secrets/oidc_cookie_secret" ]; then openssl rand -base64 32 > "$INSTALL_ROOT/secrets/oidc_cookie_secret"; fi
 if [ ! -f "$INSTALL_ROOT/secrets/cloudflare_tunnel_token" ]; then : > "$INSTALL_ROOT/secrets/cloudflare_tunnel_token"; fi
 if [ ! -f "$INSTALL_ROOT/secrets/oidc_client_secret" ]; then : > "$INSTALL_ROOT/secrets/oidc_client_secret"; fi
-chmod 0600 "$INSTALL_ROOT/secrets/postgres_password" "$INSTALL_ROOT/secrets/oidc_cookie_secret" "$INSTALL_ROOT/secrets/cloudflare_tunnel_token" "$INSTALL_ROOT/secrets/oidc_client_secret"
+chmod 0600 "$INSTALL_ROOT/secrets/postgres_password" "$INSTALL_ROOT/secrets/redis_password" "$INSTALL_ROOT/secrets/state_key" "$INSTALL_ROOT/secrets/setup_token" "$INSTALL_ROOT/secrets/oidc_cookie_secret" "$INSTALL_ROOT/secrets/cloudflare_tunnel_token" "$INSTALL_ROOT/secrets/oidc_client_secret"
 log 'verified bootstrap installed; supervisor now owns image pulls and local service liveness'
 "$INSTALL_ROOT/hm-supervisor" install --root "$INSTALL_ROOT"
 setup_url="https://127.0.0.1:${ENGINE_BOX_CORE_PORT:-8787}/setup"
 log "local services are running; finish secure configuration at ${setup_url}"
+log "one-time local setup token: $(cat "$INSTALL_ROOT/secrets/setup_token")"
 log 'Engine Box is not READY until the local setup wizard completes its authenticated canary'

@@ -1,6 +1,9 @@
 import http from 'node:http';
+import net from 'node:net';
+import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { engineBoxReadiness, loadEngineBoxRuntime } from './runtime.js';
+import { getLocalPrismaClient } from './local-prisma.mjs';
 
 function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -14,6 +17,26 @@ async function probeHttp(url) {
   } catch { return 'unavailable'; }
 }
 
+async function probeRedis({ url = process.env.REDIS_URL, passwordFile = process.env.REDIS_PASSWORD_FILE } = {}) {
+  try {
+    const target = new URL(url || 'redis://redis:6379/0');
+    const password = passwordFile ? (await fs.readFile(passwordFile, 'utf8')).trim() : decodeURIComponent(target.password || '');
+    if (!password) return 'unavailable';
+    return await new Promise((resolve) => {
+      const socket = net.createConnection({ host: target.hostname, port: Number(target.port || 6379) });
+      let data = '';
+      const timer = setTimeout(() => { socket.destroy(); resolve('unavailable'); }, 1500);
+      socket.on('connect', () => socket.write(`*2\r\n$4\r\nAUTH\r\n$${Buffer.byteLength(password)}\r\n${password}\r\n*1\r\n$4\r\nPING\r\n`));
+      socket.on('data', (chunk) => {
+        data += chunk.toString('utf8');
+        if (data.includes('+PONG')) { clearTimeout(timer); socket.end(); resolve('ready'); }
+        else if (data.includes('-')) { clearTimeout(timer); socket.destroy(); resolve('unavailable'); }
+      });
+      socket.on('error', () => { clearTimeout(timer); resolve('unavailable'); });
+    });
+  } catch { return 'unavailable'; }
+}
+
 export async function probeEngineBoxServices({ prisma, qdrantUrl, modelRouterUrl, probes = {} } = {}) {
   const database = probes.postgres || (async () => {
     try { await prisma?.$queryRawUnsafe('SELECT 1'); return prisma ? 'ready' : 'unavailable'; } catch { return 'unavailable'; }
@@ -21,7 +44,7 @@ export async function probeEngineBoxServices({ prisma, qdrantUrl, modelRouterUrl
   const checks = await Promise.all([
     database(),
     (probes.qdrant || (() => probeHttp(`${qdrantUrl}/healthz`)))(),
-    (probes.redis || (async () => 'ready'))(), // Redis queue boot validates its own connection before work.
+    (probes.redis || (() => probeRedis()))(),
     (probes.extract || (() => probeHttp(`${process.env.KB_EXTRACT_URL}/health`)))(),
     (probes.modelRouter || (() => probeHttp(`${modelRouterUrl}/health`)))(),
     (probes.controlPlane || (() => probeHttp(`${process.env.CONTROL_PLANE_URL}/ready`)))(),
@@ -47,8 +70,7 @@ export function createEngineBoxServer({ runtime, serviceProbe, lease = { expires
 export async function startEngineBoxServer(env = process.env) {
   const runtime = loadEngineBoxRuntime(env);
   if (!runtime.enabled) throw new Error('ENGINE_BOX_MODE=true is required for the Engine Box server entrypoint');
-  const { getPrismaClient } = await import('../db/prisma.js');
-  const prisma = getPrismaClient();
+  const prisma = getLocalPrismaClient(env);
   const server = createEngineBoxServer({
     runtime,
     serviceProbe: () => probeEngineBoxServices({

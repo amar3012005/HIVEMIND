@@ -8,6 +8,15 @@
 :8787 {
   tls internal
 
+  # Setup remains locally reachable until activation; the local Control Plane
+  # rejects it once its one-time bootstrap token has been consumed.
+  handle /setup {
+    reverse_proxy hm-control-plane:3001
+  }
+  handle /v1/setup/* {
+    reverse_proxy hm-control-plane:3001
+  }
+
   handle_path /oauth2/* {
     reverse_proxy hm-auth:4180
   }

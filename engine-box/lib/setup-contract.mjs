@@ -23,6 +23,9 @@ export function validateSetupInput(input = {}) {
   if (!Number.isInteger(routes.embedding.dimension) || routes.embedding.dimension < 1) throw new Error('embedding route requires a positive dimension');
   const backup = input.backup;
   if (!backup || !nonEmpty(backup.destination) || !nonEmpty(backup.encryption_key_reference)) throw new Error('encrypted backup destination and key reference are required');
+  const access = input.access || { mode: 'loopback' };
+  if (!['loopback', 'lan_https'].includes(access.mode)) throw new Error('access mode must be loopback or lan_https');
+  if (access.mode === 'lan_https' && !nonEmpty(access.hostname)) throw new Error('LAN HTTPS requires a local hostname');
   return true;
 }
 
@@ -32,6 +35,7 @@ export function createSetupRecord(input, { now = new Date().toISOString() } = {}
     version: 1,
     state: 'configured',
     configured_at: now,
+    access: { mode: input.access?.mode || 'loopback', hostname: input.access?.hostname || null },
     oidc: {
       issuer: input.oidc.issuer,
       client_id: input.oidc.client_id,

@@ -36,10 +36,11 @@ services:
   redis:
     <<: *engine-service
     image: ${REDIS_IMAGE:?manifest must pin REDIS_IMAGE}
-    command: [redis-server, --appendonly, 'yes', --save, '60', '1000']
+    command: [sh, -ec, 'exec redis-server --requirepass "$(cat /run/secrets/redis_password)" --appendonly yes --save "60 1000"']
     volumes: [redis_data:/data]
+    secrets: [redis_password]
     healthcheck:
-      test: [CMD, redis-cli, ping]
+      test: [CMD-SHELL, 'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" ping']
       interval: 10s
       timeout: 5s
       retries: 12
@@ -66,6 +67,11 @@ services:
       - ./model-catalog.json:/etc/hivemind/model-catalog.json:ro
       - ./model-catalog.sig:/etc/hivemind/model-catalog.sig:ro
       - ./release.pub:/etc/hivemind/release.pub:ro
+      - engine_state:/var/lib/hivemind-engine:ro
+    environment:
+      ENGINE_BOX_STATE_DIR: /var/lib/hivemind-engine/state
+      ENGINE_BOX_STATE_KEY_FILE: /run/secrets/state_key
+    secrets: [state_key]
 
   hm-core:
     <<: *engine-service
@@ -80,7 +86,7 @@ services:
       DATABASE_PORT: '5432'
       DATABASE_NAME: hivemind
       QDRANT_URL: http://qdrant:6333
-      REDIS_URL: redis://redis:6379/0
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       KB_EXTRACT_URL: http://hm-extract:8088
       MODEL_ROUTER_URL: http://hm-model-router:8090
       CONTROL_PLANE_URL: http://hm-control-plane:3001
@@ -90,7 +96,7 @@ services:
       redis: { condition: service_healthy }
       hm-extract: { condition: service_started }
       hm-model-router: { condition: service_started }
-    secrets: [postgres_password]
+    secrets: [postgres_password, redis_password]
     command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/lean-server.mjs"]
 
   # This is deliberately a local Control Plane. It owns appliance identity,
@@ -109,10 +115,14 @@ services:
       DATABASE_PORT: '5432'
       DATABASE_NAME: hivemind
       CORE_LOCAL_URL: http://hm-core:3000
+      ENGINE_BOX_STATE_DIR: /var/lib/hivemind-engine/state
+      ENGINE_BOX_SETUP_TOKEN_FILE: /run/secrets/setup_token
+      ENGINE_BOX_STATE_KEY_FILE: /run/secrets/state_key
     depends_on:
       postgres: { condition: service_healthy }
       hm-core: { condition: service_started }
-    secrets: [postgres_password]
+    volumes: [engine_state:/var/lib/hivemind-engine]
+    secrets: [postgres_password, setup_token, state_key]
     command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/engine-box/control-plane-server.mjs"]
 
   hm-auth:
@@ -158,12 +168,12 @@ services:
       DATABASE_PORT: '5432'
       DATABASE_NAME: hivemind
       QDRANT_URL: http://qdrant:6333
-      REDIS_URL: redis://redis:6379/0
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       KB_EXTRACT_URL: http://hm-extract:8088
       MODEL_ROUTER_URL: http://hm-model-router:8090
     depends_on:
       hm-core: { condition: service_started }
-    secrets: [postgres_password]
+    secrets: [postgres_password, redis_password]
     command: ["/usr/local/bin/hm-engine-entrypoint", "node", "src/workers/engine-box-ingestion-worker.mjs"]
 
   cloudflared:
@@ -180,6 +190,7 @@ volumes:
   qdrant_data: {}
   redis_data: {}
   edge_data: {}
+  engine_state: {}
 
 networks:
   engine_internal:
@@ -194,3 +205,9 @@ secrets:
     file: ./secrets/oidc_client_secret
   oidc_cookie_secret:
     file: ./secrets/oidc_cookie_secret
+  redis_password:
+    file: ./secrets/redis_password
+  setup_token:
+    file: ./secrets/setup_token
+  state_key:
+    file: ./secrets/state_key

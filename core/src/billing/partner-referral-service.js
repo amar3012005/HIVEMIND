@@ -30,6 +30,15 @@ function emailHint(value) {
   return String(value).replace(/^(.{1,2}).*(@.*)$/, '$1***$2').slice(0, 160);
 }
 
+function referralLanguage(row) {
+  try {
+    const language = JSON.parse(row?.promotion?.notes || '{}')?.partner_referral?.language;
+    return language === 'de' ? 'de' : 'en';
+  } catch {
+    return 'en';
+  }
+}
+
 function publicOffer(row) {
   const version = row.promotion?.versions?.[0];
   const terms = version?.commercialTerms || {};
@@ -37,6 +46,7 @@ function publicOffer(row) {
     campaign_id: row.id,
     referrer: { display_name: row.referrerDisplayName },
     welcome_message: row.welcomeMessage,
+    language: referralLanguage(row),
     offer: {
       plan: version?.basePlan,
       account_type: version?.accountType,
@@ -117,6 +127,7 @@ export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) 
   // A partner invitation is a reusable trial grant. It intentionally never
   // creates a coupon, Checkout session, or payment-method requirement.
   const terms = { kind: 'trial', trial_days: trialDays };
+  const language = String(input.language || 'en').toLowerCase() === 'de' ? 'de' : 'en';
   const created = await prisma.$transaction(async (tx) => {
     const promotion = await createPromotion({ prisma, tx, input: {
       internal_name: input.internal_name || `${referrerDisplayName} partner invitation`,
@@ -133,7 +144,10 @@ export async function createPartnerReferralCampaign({ prisma, input, baseUrl }) 
       starts_at: input.starts_at,
       ends_at: input.ends_at,
       eligibilities: [{ type: 'invite_only' }],
-      notes: input.notes,
+      // Promotion has no referral-specific metadata column. Keeping this
+      // compact locale marker in its operator notes avoids a schema migration
+      // while retaining the exact language used when the campaign was made.
+      notes: JSON.stringify({ partner_referral: { language } }),
     } });
     const id = crypto.randomUUID();
     const version = 1;

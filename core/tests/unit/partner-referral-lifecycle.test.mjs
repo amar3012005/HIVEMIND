@@ -28,14 +28,15 @@ test('discount terms preserve trial and Stripe duration', () => {
   assert.equal(normalized.version.limits.monthlyCredits, 5000);
 });
 
-test('Day-0 referral email uses Singulance shell and a card-free Wolfgang trial', () => {
+test('partner referral delivery gives Wolfgang a share-ready card-free invitation', () => {
   const rendered = renderPartnerReferralInvitation({ referrerName: 'Wolfgang', invitationUrl: 'https://next.singulancelabs.com/hivemind/app/invite?referral_token=safe', offer: { trial_days: 21, monthly_credits: 5000, plan: 'pro' } });
-  assert.match(rendered.subject, /Wolfgang invited you/);
+  assert.match(rendered.subject, /ready to share/);
   assert.match(rendered.html, /SINGULANCE/);
   assert.match(rendered.html, /21 days/);
   assert.match(rendered.html, /5,000/);
   assert.match(rendered.html, /TRIAL PLAN/);
   assert.match(rendered.html, /No payment method is required/);
+  assert.match(rendered.html, /share=1/);
   assert.doesNotMatch(rendered.html, /off after trial/i);
   assert.match(rendered.text, /referral_token=safe/);
 });

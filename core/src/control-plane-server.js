@@ -3679,7 +3679,7 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, { ok: true });
     }
     const rendered = renderPartnerReferralInvitation({ referrerName: found.row.referrerDisplayName, invitationUrl: found.campaign.invitation_url,
-      offer: found.campaign.offer, welcomeMessage: found.row.welcomeMessage });
+      offer: found.campaign.offer, welcomeMessage: found.row.welcomeMessage, language: found.campaign.language });
     if (action === 'preview') return jsonResponse(res, { rendered, campaign: found.campaign });
     if (found.campaign.status !== 'active') return jsonResponse(res, { error: 'Invitation is not active' }, 409);
     const delivery = await sendRenderedSystemEmail({ to: found.row.referrerEmail,
